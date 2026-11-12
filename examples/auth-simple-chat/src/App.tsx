@@ -17,7 +17,7 @@ function ChatShell({
   onSignOut: () => Promise<void>;
 }) {
   const { authMode, claims, user } = useAuthState();
-  const userId = user?.account ?? null;
+  const userId = user;
   const role = typeof claims.role === "string" ? claims.role : null;
   return (
     <main className="app-shell">

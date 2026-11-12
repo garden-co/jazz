@@ -11,7 +11,7 @@ describe.each(["native", "wasm"])("%s schema validation binding", (runtime) => {
       runtime === "native" ? await import("jazz-napi") : await loadWasmModuleForTest();
     const app = s.defineApp({ notes: s.table({ owner: s.string() }, {}) }, { migrations: "none" });
     const permissions = s.definePermissions(app, ({ policy, session }) => {
-      policy.notes.allowRead.where({ owner: session.user.identity.subject });
+      policy.notes.allowRead.where({ owner: session.identity.subject });
     });
     expect(() =>
       binding.validateSchema(
@@ -26,7 +26,24 @@ describe.each(["native", "wasm"])("%s schema validation binding", (runtime) => {
       binding.validateSchema(
         encodeSchema(mergePermissionsIntoWasmSchema(app.wasmSchema, wrongType)),
       ),
-    ).toThrow("ClaimTypeMismatch");
+    ).toThrow(
+      "session.user has type uuid, but column owner has type string: session.user is the account's id, so store it in an s.uuid() column",
+    );
+
+    const linked = s.defineApp(
+      { boards: s.table({}, {}), members: s.table({ boardId: s.uuid() }, {}) },
+      { migrations: "none" },
+    );
+    const withoutRelation = s.definePermissions(linked, ({ policy }) => {
+      policy.members.allowInsert.where((m) => policy.boards.exists.where({ id: m.boardId }));
+    });
+    expect(() =>
+      binding.validateSchema(
+        encodeSchema(mergePermissionsIntoWasmSchema(linked.wasmSchema, withoutRelation)),
+      ),
+    ).toThrow(
+      'column members.boardId is matched against the ids of boards, but it is not declared as a reference: declare it on members, for example `<relation>: s.rel("boards", "boardId")`',
+    );
 
     const changed = s.defineApp(
       { notes: s.table({ title: s.string() }, {}) },
@@ -84,7 +101,7 @@ describe.each(["native", "wasm"])("%s schema validation binding", (runtime) => {
       });
 
     for (const permissions of [
-      seededFrom("user_id", (session) => session.user.account),
+      seededFrom("user_id", (session) => session.user),
       seededFrom("user_sub", (session) => session.claims["sub"]),
     ]) {
       expect(() =>

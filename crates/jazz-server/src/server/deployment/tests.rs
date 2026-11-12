@@ -638,6 +638,60 @@ async fn compatible_connections_preserve_branch_and_convergence_validation() {
     server.shutdown().await;
 }
 
+/// Switching `notes` to latest-only over HTTP is refused with
+/// `drops_history` naming the table, and nothing changes; the same request
+/// with `allowDroppingHistory` deploys it.
+#[tokio::test]
+async fn switching_a_table_to_latest_only_needs_allow_dropping_history() {
+    let server = builder(None).build().await.unwrap();
+    let router = create_router(server.state.clone());
+    let full = schema(&[]);
+    let mut latest = full.clone();
+    latest.get_mut(&TableName::new("notes")).unwrap().history =
+        jazz::tools::HistoryRetention::Latest;
+    deploy_ok(&router, request(&full, &[&full], vec![])).await;
+    let before = graph(&router).await;
+
+    let switch = request(&latest, &[&latest], vec![]);
+    let (status, error) = http(&router, "POST", "/bundles", switch.clone()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "drops_history", "{error}");
+    assert_eq!(error["details"]["tables"], json!(["notes"]));
+    assert_eq!(graph(&router).await, before);
+
+    let mut confirmed = switch;
+    confirmed["allowDroppingHistory"] = json!(true);
+    assert_eq!(deploy_ok(&router, confirmed).await["changed"], true);
+    server.shutdown().await;
+}
+
+/// A server started with a schema keeps the data written under it: the
+/// first deploy that makes one of its tables latest-only needs the flag
+/// too, though nothing was deployed before.
+#[tokio::test]
+async fn the_initial_schema_counts_for_the_latest_only_guard() {
+    let full = schema(&[]);
+    let mut latest = full.clone();
+    latest.get_mut(&TableName::new("notes")).unwrap().history =
+        jazz::tools::HistoryRetention::Latest;
+    let server = builder(None)
+        .with_schema(full.clone())
+        .build()
+        .await
+        .unwrap();
+    let router = create_router(server.state.clone());
+
+    let switch = request(&latest, &[&latest], vec![]);
+    let (status, error) = http(&router, "POST", "/bundles", switch.clone()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "drops_history", "{error}");
+
+    let mut confirmed = switch;
+    confirmed["allowDroppingHistory"] = json!(true);
+    deploy_ok(&router, confirmed).await;
+    server.shutdown().await;
+}
+
 /// A deployment published to `/bundles` publishes its permissions as a
 /// bundle, by content: the same bundle again (a rollback) changes nothing,
 /// and the current permissions stay as they were.

@@ -91,6 +91,15 @@ pub fn validate_schema(schema: Uint8Array) -> js::Result<()> {
     Ok(())
 }
 
+/// Check an app's shipped migrations (the `ClientMigrations` JSON) leading
+/// to the schema hash `target` as a deployment to a new authority would,
+/// without opening a database. `jazz-tools validate` runs it.
+#[napi(js_name = "checkClientMigrations")]
+pub fn check_client_migrations(migrations: String, target: String) -> napi::Result<()> {
+    jazz::tools::deployment::published::check_client_migrations(migrations.as_bytes(), &target)
+        .map_err(napi::Error::from_reason)
+}
+
 /// Exact build/ABI fingerprint for the generated native artifact.
 #[napi]
 pub fn native_artifact_fingerprint() -> String {
@@ -864,11 +873,13 @@ impl Write {
         };
         let fate = inner
             .binding
-            .wait_for_write(&self.write, &tier)
+            .wait_for_write(
+                &self.write,
+                &tier,
+                (!observe_only.unwrap_or(false)).then(|| Rc::clone(&self.claimed)),
+            )
             .map_err(host_error)?;
-        if !observe_only.unwrap_or(false) {
-            self.claimed.set(true);
-        }
+
         Ok(host_promise(&env, fate)?)
     }
 
@@ -1904,10 +1915,13 @@ impl NapiDb {
         Ok(evicted as u32)
     }
 
-    /// How many local commits still wait for the server's verdict.
-    #[napi(js_name = "pendingUploadCount")]
-    pub fn pending_upload_count(&self) -> js::Result<u32> {
-        Ok(self.binding()?.pending_upload_count() as u32)
+    /// This store's uploads: how many still wait for the server's verdict
+    /// and since when, and what the server refused since it opened
+    /// (`{ pending, oldestPendingAt, rejected, lastRejection }`).
+    #[napi(js_name = "uploadStatus")]
+    pub fn upload_status(&self) -> js::Result<JsonValue> {
+        serde_json::to_value(self.binding()?.upload_status())
+            .map_err(|error| napi::Error::from_reason(error.to_string()).into())
     }
 
     /// The optimistic in-memory side of a client/worker pair: its

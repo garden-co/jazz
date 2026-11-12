@@ -20,7 +20,7 @@ for (const entry of receipt) {
   });
   if (existing.status === 0) console.log(`${entry.name}@${entry.version} already published`);
   else
-    execFileSync("npm", ["publish", entry.tarball, "--tag", "alpha", "--access", "public"], {
+    execFileSync("npm", ["publish", entry.tarball, "--tag", "latest", "--access", "public"], {
       stdio: "inherit",
     });
 }

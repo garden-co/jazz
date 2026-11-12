@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle, type AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
-import { watchBackendUser } from "./backend-watch.js";
+import { watchBackendUser, type BackendUser } from "./backend-watch.js";
 import { followUser } from "./follow-user.js";
 import { createJazzSessionOwner } from "./state.js";
 
@@ -62,7 +62,7 @@ async function setup(
   let focus: (() => void) | undefined;
   const posts = vi.fn();
   let otherTab: (() => void) | undefined;
-  const probe = vi.fn(async (): Promise<AccountIdentity | null> => {
+  const probe = vi.fn(async (): Promise<BackendUser | null> => {
     if (options.noBackend) throw new AccountAuthError("not_found", 404);
     return backendUser?.identity ?? null;
   });
@@ -425,6 +425,53 @@ it("a refused check leaves a remembered user's claims refresh to the next check"
   await t.session.close();
 });
 
+it("signs a remembered user in again, once, when the core lost their account", async () => {
+  // Reopened from this device's memory, but the core no longer holds the
+  // account (a reset dev store, a new core): sync admission refuses it.
+  const t = await setup(user("alice"));
+  t.signIn(user("alice"));
+  t.probe.mockResolvedValue({ ...user("alice").identity, hasAccount: false });
+  t.watch.authRefused();
+  await settle();
+  // Signing in again gives her a new account; reconnecting would only be refused.
+  expect(t.loginWithBackend).toHaveBeenCalledOnce();
+  expect(t.reconnect).not.toHaveBeenCalled();
+  // A backend that keeps saying no account doesn't make it sign in again and again.
+  t.watch.authRefused();
+  await settle();
+  expect(t.loginWithBackend).toHaveBeenCalledOnce();
+  // Once the backend says she has one, a later loss signs her in again.
+  t.watch.connected();
+  t.probe.mockResolvedValue({ ...user("alice").identity, hasAccount: true });
+  t.focus();
+  await settle();
+  t.probe.mockResolvedValue({ ...user("alice").identity, hasAccount: false });
+  t.watch.authRefused();
+  await settle();
+  expect(t.loginWithBackend).toHaveBeenCalledTimes(2);
+  expect(t.session.getSnapshot().status).toBe("ready");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("tries the sign-in for a lost account again when it failed", async () => {
+  const t = await setup(user("alice"));
+  t.signIn(user("alice"));
+  t.probe.mockResolvedValue({ ...user("alice").identity, hasAccount: false });
+  // The first sign-in can't reach the backend.
+  t.loginWithBackend.mockRejectedValueOnce(new AccountAuthError("account_request_failed", 503));
+  t.watch.authRefused();
+  await settle();
+  // A later check signs in again, and that one works.
+  t.watch.authRefused();
+  await settle();
+  expect(t.loginWithBackend).toHaveBeenCalledTimes(2);
+  await expect(t.loginWithBackend.mock.results[0]!.value).rejects.toThrow();
+  expect(t.session.getSnapshot().status).toBe("ready");
+  t.watch.stop();
+  await t.session.close();
+});
+
 it("stops only once the backend keeps answering 404, asking again with backoff", async () => {
   const t = await setup(undefined, { noBackend: true });
   await settle();
@@ -623,6 +670,69 @@ it("signs a guest in as a user who already has an account, without linking", asy
   await settle();
   expect(loginWithBackend).toHaveBeenCalledOnce();
   expect(linkWithBackend).not.toHaveBeenCalled();
+  watch.stop();
+  await session.close();
+});
+
+// A network blip as the watch signs a user in (a guest's first visit after
+// sign-in): the watch tries again once it passes, with no focus needed.
+it("tries a sign-in that failed on the network again, without waiting for focus", async () => {
+  let blip = true;
+  const loginWithBackend = vi.fn(async () => {
+    if (blip) throw new TypeError("Failed to fetch");
+    return user("alice");
+  });
+  const session = await createJazzSessionOwner({
+    accounts: new AccountManager(
+      { createLocalFirst: () => guest, loginWithBackend, logout() {} },
+      guest,
+    ),
+    openClient: async () => ({ shutdown: async () => {} }),
+  });
+  let probeFails = true;
+  const watch = watchBackendUser(
+    session,
+    async () => {
+      if (probeFails) throw new TypeError("Failed to fetch");
+      return { ...user("alice").identity, hasAccount: true };
+    },
+    { onFocus: () => () => {} },
+    { retryMs: 10 },
+  );
+  // The backend can't be asked at first, then the sign-in itself fails.
+  await settle(5);
+  probeFails = false;
+  await expect.poll(() => loginWithBackend.mock.calls.length).toBeGreaterThan(0);
+  expect(session.getSnapshot().account).toBe(guest);
+  blip = false;
+  await expect.poll(() => session.getSnapshot().account?.identity.subject).toBe("alice");
+  // Once it followed, nothing more is scheduled.
+  const calls = loginWithBackend.mock.calls.length;
+  await settle(100);
+  expect(loginWithBackend).toHaveBeenCalledTimes(calls);
+  watch.stop();
+  await session.close();
+});
+
+it("doesn't retry a sign-in the backend refused", async () => {
+  const loginWithBackend = vi.fn(async () => {
+    throw new AccountAuthError("account_registry_refused", 403);
+  });
+  const session = await createJazzSessionOwner({
+    accounts: new AccountManager(
+      { createLocalFirst: () => guest, loginWithBackend, logout() {} },
+      guest,
+    ),
+    openClient: async () => ({ shutdown: async () => {} }),
+  });
+  const watch = watchBackendUser(
+    session,
+    async () => ({ ...user("alice").identity, hasAccount: true }),
+    { onFocus: () => () => {} },
+    { retryMs: 10 },
+  );
+  await settle(100);
+  expect(loginWithBackend).toHaveBeenCalledOnce();
   watch.stop();
   await session.close();
 });

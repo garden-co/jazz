@@ -1,6 +1,14 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { decodeThinResponse, encodeThinRequest, type ThinBody, type ThinOp } from "./wire.js";
+import {
+  decodeThinResponse,
+  encodeThinRequest,
+  MAX_THIN_MESSAGE_BYTES,
+  ThinAssembler,
+  thinWireFrames,
+  type ThinBody,
+  type ThinOp,
+} from "./wire.js";
 
 // The thin wire corpus pinned by `crates/jazz/layers/protocol/src/thin.rs`:
 // one frame of every request op and response body, built from the same
@@ -84,6 +92,16 @@ const RESPONSES: Record<string, ThinBody> = {
   error: { type: "error", code: "Argument", message: "no" },
 };
 
+function leb128(value: number): Uint8Array {
+  const out: number[] = [];
+  do {
+    const low = value % 128;
+    value = Math.floor(value / 128);
+    out.push(value > 0 ? low | 0x80 : low);
+  } while (value > 0);
+  return new Uint8Array(out);
+}
+
 function hex(frame: Uint8Array): string {
   return Array.from(frame, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -110,5 +128,64 @@ describe("thin wire corpus", () => {
     corpus.responses.map((entry, index) => [entry.name, entry.frame_hex, index + 1] as const),
   )("decodes the %s response as the server writes it", (name, frameHex, id) => {
     expect(decodeThinResponse(unhex(frameHex))).toEqual({ id, body: RESPONSES[name] });
+  });
+});
+
+describe("thin frames over a wire frame", () => {
+  it("travel as parts in the layout thin.rs pins, and join back", () => {
+    const frame = new Uint8Array(5 * 1024 * 1024).map((_, index) => index % 251);
+    const parts = thinWireFrames(frame)!;
+    expect(parts).toHaveLength(3);
+    const assembler = new ThinAssembler();
+    const joined = parts.map((part) => {
+      expect(ThinAssembler.isPart(part)).toBe(true);
+      expect(part.byteLength).toBeLessThanOrEqual(2 * 1024 * 1024 - 16);
+      return assembler.push(part);
+    });
+    expect(joined.slice(0, 2)).toEqual([undefined, undefined]);
+    expect(Buffer.compare(joined[2]!, frame)).toBe(0);
+    // Tag 6, the frame's length (5 MiB), then the part's, as thin.rs pins.
+    expect([...parts[0]!.subarray(0, 5)]).toEqual([6, 0x80, 0x80, 0xc0, 0x02]);
+    expect(thinWireFrames(new Uint8Array(10))).toHaveLength(1);
+    expect(thinWireFrames(new Uint8Array(MAX_THIN_MESSAGE_BYTES + 1))).toBeNull();
+  });
+
+  it("split at their bounds", () => {
+    const whole = 2 * 1024 * 1024 - 16;
+    expect(thinWireFrames(new Uint8Array(whole))).toHaveLength(1);
+    expect(thinWireFrames(new Uint8Array(whole + 1))).toHaveLength(2);
+    const parts = thinWireFrames(new Uint8Array(MAX_THIN_MESSAGE_BYTES))!;
+    const assembler = new ThinAssembler();
+    const joined = parts.map((part) => assembler.push(part));
+    expect(joined.at(-1)?.byteLength).toBe(MAX_THIN_MESSAGE_BYTES);
+    expect(joined.slice(0, -1).every((piece) => piece === undefined)).toBe(true);
+  });
+
+  it("refuse parts that do not make their frame, and start over", () => {
+    const [first, second] = thinWireFrames(new Uint8Array(3 * 1024 * 1024))!;
+    const [other] = thinWireFrames(new Uint8Array(4 * 1024 * 1024))!;
+    const assembler = new ThinAssembler();
+    expect(assembler.push(first!)).toBeUndefined();
+    expect(() => assembler.push(other!)).toThrow("another thin frame");
+    expect(assembler.joining).toBe(false);
+    // Trailing bytes after a part.
+    const trailing = new Uint8Array(first!.byteLength + 1);
+    trailing.set(first!);
+    expect(() => assembler.push(trailing)).toThrow("bytes after it");
+    expect(assembler.joining).toBe(false);
+    // A frame small enough to go whole, or past the most a frame takes.
+    expect(() => assembler.push(new Uint8Array([6, 3, 3, 1, 2, 3]))).toThrow("out of bounds");
+    // A part short of a full one that does not end its frame. A full
+    // part's length takes three LEB128 bytes.
+    const total = leb128(3 * 1024 * 1024);
+    const fullBytes = first!.byteLength - 1 - total.byteLength - 3;
+    const header = [6, ...total, ...leb128(fullBytes - 1)];
+    const shortPart = new Uint8Array(header.length + fullBytes - 1);
+    shortPart.set(header);
+    expect(() => assembler.push(shortPart)).toThrow("does not fit its frame");
+    expect(assembler.joining).toBe(false);
+    // Starting over, the frame joins.
+    expect(assembler.push(first!)).toBeUndefined();
+    expect(assembler.push(second!)?.byteLength).toBe(3 * 1024 * 1024);
   });
 });

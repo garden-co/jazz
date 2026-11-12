@@ -39,6 +39,9 @@ function makeHarness(appId: string, options?: { throwOnSubscribe?: Error }) {
     getSyncStatus: () => ({
       link: { state: "local-only" as const },
       pendingUploads: 0,
+      oldestPendingAt: null,
+      rejected: 0,
+      lastError: null,
       synced: true,
     }),
     onSyncStatusChange: () => () => {},

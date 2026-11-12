@@ -93,7 +93,7 @@ describe("account context early worker lease", () => {
   it("boots the worker while the account credential resolves and hands it to the Db", async () => {
     const { source, raw, lease, events } = fakeRuntimeSource();
     const create = vi.spyOn(Db, "createWithBrowserWorker").mockResolvedValue({
-      onAuthChanged: () => () => undefined,
+      onOwnAuthChanged: () => () => undefined,
       onShutdown: () => undefined,
     } as unknown as Db);
     const credential = deferred<void>();

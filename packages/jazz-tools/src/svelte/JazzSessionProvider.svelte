@@ -10,9 +10,8 @@
   type Props = {
     children: Snippet;
     fallback?: Snippet;
-    autoAttachDevTools?: boolean;
   } & ({ session: JazzSession<JazzClient>; config?: never } | { config: JazzClientConfig; session?: never });
-  let { session, config, children, fallback, autoAttachDevTools = true }: Props = $props();
+  let { session, config, children, fallback }: Props = $props();
   let owned = $state.raw<JazzSession<JazzClient>>();
   let cancelled = false;
   let attempt: Promise<void> | undefined;
@@ -61,7 +60,7 @@
 {#if session ?? owned}
   {@const owner = (session ?? owned)!}
   {#key owner}
-    <JazzSessionClientProvider session={owner} {children} {fallback} {autoAttachDevTools} />
+    <JazzSessionClientProvider session={owner} {children} {fallback} />
   {/key}
 {:else}
   {@render fallback?.()}

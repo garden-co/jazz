@@ -124,8 +124,8 @@ declare module "jazz-wasm" {
     ): WasmDb;
     /**
      * Host-only relay open; `database` is the physical database name admitted by broker
-     * ownership admission. `pageStore` may carry `{ backend?: "indexeddb" | "opfs", path?: string }`
-     * to pick the SQLite VFS (IndexedDB, with the file named after `database`, by default).
+     * ownership admission. `pageStore` may carry `{ backend?: "indexeddb", path?: string }`
+     * to name the IndexedDB-backed SQLite file (named after `database` by default).
      */
     static openBrowser(
       pageStore: unknown,
@@ -261,10 +261,11 @@ declare module "jazz-wasm" {
       callback: (urgency: "immediate" | "deferred" | `after:${number}`) => void,
     ): void;
     onMutationError(callback: (event: any) => void): void;
+    onStorageFailure(callback: (message: string | null) => void): void;
     tick(): Promise<void>;
     setNonDurableClient(): void;
-    /** How many local commits still wait for the server's verdict. */
-    pendingUploadCount(): number;
+    /** This store's uploads; see `UploadStatus` in runtime/sync-status.ts. */
+    uploadStatus(): import("../runtime/sync-status.js").UploadStatus;
     /** @internal Foreground node-lease handoff only. */
     foregroundTxTimeHighWater(): Promise<bigint>;
     /** @internal Foreground node-lease bootstrap only. */

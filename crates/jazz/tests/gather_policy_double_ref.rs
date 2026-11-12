@@ -81,7 +81,7 @@ fn project_id(input: RelationExpr, column: RelationColumnRef) -> RelationExpr {
 /// `doubleRefReproApp`'s dropdown read policy to:
 ///
 /// ```text
-/// directTeams = team_entry.where({ user_id: session.user.account }).hopTo("target")
+/// directTeams = team_entry.where({ user_id: session.user }).hopTo("target")
 /// reachable   = teams.gather({ start: directTeams,
 ///                              step: team_entry.where({ team_id: current,
 ///                                                       administrator: false })
@@ -112,7 +112,7 @@ fn dropdown_read_policy(bound: RecursionBound) -> PolicyExpr {
             }),
             predicate: eq(
                 col("team_entry", "user_id"),
-                RelationValueRef::SessionRef(vec!["user".to_owned(), "account".to_owned()]),
+                RelationValueRef::SessionRef(vec!["user".to_owned()]),
             ),
         },
         col("__hop_0", "id"),

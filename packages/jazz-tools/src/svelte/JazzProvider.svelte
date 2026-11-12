@@ -4,15 +4,16 @@
   import { createJazzApp, type JazzAppConfig } from "../session/create-jazz-app.js";
   import JazzSvelteClientProvider from "./JazzSvelteClientProvider.svelte";
   import { setJazzAuth } from "./auth-state.js";
+  import { refuseAutoAttachDevTools, type NoAutoAttachDevTools } from "../runtime/removed-provider-props.js";
 
-  type Props = JazzAppConfig & {
+  type Props = JazzAppConfig & NoAutoAttachDevTools & {
     children: Snippet;
     signedOut?: Snippet;
     loading?: Snippet;
     error?: Snippet<[Error, () => Promise<void>]>;
-    autoAttachDevTools?: boolean;
   };
-  let { children, signedOut, loading, error, autoAttachDevTools = true, ...config }: Props = $props();
+  let { children, signedOut, loading, error, ...config }: Props = $props();
+  refuseAutoAttachDevTools("JazzProvider", config);
   // Configuration belongs to one mounted provider. Key the provider to replace it.
   const app = untrack(() => createJazzApp({ ...config }, { start: false }));
   const snapshotStore = writable(app.getSnapshot());
@@ -52,7 +53,7 @@
 {/snippet}
 {#if $snapshotStore.client}
   {#key $snapshotStore.client}
-    <JazzSvelteClientProvider client={$snapshotStore.client} {autoAttachDevTools}>
+    <JazzSvelteClientProvider client={$snapshotStore.client}>
       {#snippet children()}{@render children()}{/snippet}
       {#snippet fallback()}{@render pending()}{/snippet}
     </JazzSvelteClientProvider>

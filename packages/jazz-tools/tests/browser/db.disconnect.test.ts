@@ -137,10 +137,10 @@ describe("Db disconnect/reconnect", () => {
     const label = uniqueDbName("local-worker-live-delete");
     const core = await getJazzServerInfo(label);
     const permissions = s.definePermissions(app, ({ policy, session }) => {
-      policy.todos.allowRead.where({ "$createdBy.account": session.user.account });
+      policy.todos.allowRead.where({ "$createdBy.account": session.user });
       policy.todos.allowInsert.always();
-      policy.todos.allowUpdate.where({ "$createdBy.account": session.user.account });
-      policy.todos.allowDelete.where({ "$createdBy.account": session.user.account });
+      policy.todos.allowUpdate.where({ "$createdBy.account": session.user });
+      policy.todos.allowDelete.where({ "$createdBy.account": session.user });
     });
     await deploy({ ...core, schema: app, permissions });
     const server = await startJazzApp(core, { schema: app, permissions });

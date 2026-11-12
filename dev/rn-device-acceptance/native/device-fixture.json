@@ -18,7 +18,7 @@
               "op": "Eq",
               "type": "Cmp",
               "value": {
-                "path": ["user", "account"],
+                "path": ["user"],
                 "type": "SessionRef"
               }
             },
@@ -31,7 +31,7 @@
               "op": "Eq",
               "type": "Cmp",
               "value": {
-                "path": ["user", "account"],
+                "path": ["user"],
                 "type": "SessionRef"
               }
             }
@@ -42,7 +42,7 @@
               "op": "Eq",
               "type": "Cmp",
               "value": {
-                "path": ["user", "account"],
+                "path": ["user"],
                 "type": "SessionRef"
               }
             },
@@ -54,7 +54,7 @@
               "op": "Eq",
               "type": "Cmp",
               "value": {
-                "path": ["user", "account"],
+                "path": ["user"],
                 "type": "SessionRef"
               }
             },
@@ -63,7 +63,7 @@
               "op": "Eq",
               "type": "Cmp",
               "value": {
-                "path": ["user", "account"],
+                "path": ["user"],
                 "type": "SessionRef"
               }
             }

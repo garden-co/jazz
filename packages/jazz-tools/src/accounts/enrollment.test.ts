@@ -197,7 +197,9 @@ it("keeps backend authority opaque, scoped, and revocable", async () => {
   await expect(accountToken(backend, registry)).rejects.toThrow(
     /backend_account_requires_backend_host/,
   );
-  await expect(manager.linkWithBackend()).rejects.toThrow(/local_first_account_required/);
+  await expect(manager.linkWithBackend()).rejects.toThrow(
+    /local_first_account_required: .*isn't a guest.*loginWithBackend\(\)/,
+  );
   const invalidated = vi.fn();
   onAccountInvalidated(backend, invalidated);
   manager.createLocalFirst();
@@ -275,4 +277,27 @@ it("links a local-first guest by signing the backend's challenge, never with its
   await expect(manager.loginWithBackend()).rejects.toThrow("signed_out");
   expect(manager.getLoggedIn()).toBe(linked);
   expect(fetcher.mock.calls[2]?.[0]).toBe(`${registry}/backend-sign-in`);
+});
+
+it("says what to do when the backend refuses to link a guest, and keeps the guest", async () => {
+  const secret = generateSecret();
+  const guest = { issuer: "urn:jazz:local-first", subject: identityOf(secret).subject };
+  const guestToken = `e30.${btoa(JSON.stringify({ iss: guest.issuer, sub: guest.subject }))}.signature`;
+  const fetcher = vi.fn(async (input: unknown) =>
+    String(input).endsWith("/backend-link/challenge")
+      ? new Response(JSON.stringify({ challenge: "issued-for-alice.mac", expiresAt: 0 }))
+      : // The signed-in user already has an account of their own.
+        new Response("link_refused", { status: 409 }),
+  );
+  const manager = createAccountManagerWithRuntime({
+    registry,
+    fetch: fetcher as typeof fetch,
+    localFirst: { create: () => ({ accountId: id, identity: guest, auth: guestToken, secret }) },
+  });
+  const signedIn = manager.createLocalFirst();
+  const refusal = await manager.linkWithBackend().catch((error: unknown) => error);
+  // Apps still branch on the code; the message says what to do instead.
+  expect(refusal).toMatchObject({ name: "AccountAuthError", code: "link_refused", status: 409 });
+  expect((refusal as Error).message).toMatch(/already have an account.*loginWithBackend\(\)/);
+  expect(manager.getLoggedIn()).toBe(signedIn);
 });

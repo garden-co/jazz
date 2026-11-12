@@ -20,10 +20,7 @@ use jazz_testkit::{enroll_test_context, wait_for_global_txs, wait_for_subscripti
 use tempfile::TempDir;
 
 fn schema() -> jazz::tools::Schema {
-    let owner = PolicyExpr::eq_session(
-        "owner",
-        vec!["user".into(), "identity".into(), "subject".into()],
-    );
+    let owner = PolicyExpr::eq_session("owner", vec!["identity".into(), "subject".into()]);
     let policies = TablePolicies::new()
         .with_insert(owner.clone())
         .with_select(owner);

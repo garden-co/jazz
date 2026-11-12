@@ -18,8 +18,8 @@ const app = s.defineApp(
   { migrations: "none" },
 );
 const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user.account });
-  policy.todos.allowInsert.where({ owner: session.user.account });
+  policy.todos.allowRead.where({ owner: session.user });
+  policy.todos.allowInsert.where({ owner: session.user });
   policy.todos.allowUpdate.never();
   policy.todos.allowDelete.never();
 });
@@ -118,6 +118,7 @@ describe("createJazz, opened on first use", () => {
       "ensureReady",
       "allInternal",
       "runShutdown",
+      "waitForOwnSync",
     ]);
     const asyncOnes = names.filter(
       (name) =>
@@ -138,7 +139,8 @@ describe("createJazz, opened on first use", () => {
       authenticate: as("alice"),
     });
     cleanups.push(() => first.close());
-    const alice = await first.accountFor(request);
+    const alice = await first.createAccountFor("alice");
+    await expect(first.accountFor(request)).resolves.toBe(alice);
     const appId = first.appId;
 
     // A hot reload evaluates the module again: the same store, new options.
@@ -151,7 +153,8 @@ describe("createJazz, opened on first use", () => {
     });
     expect(reloaded).toBe(first);
     expect(reloaded.basePath).toBe("/api/jazz");
-    const bob = await reloaded.accountFor(request);
+    const bob = await reloaded.createAccountFor("bob");
+    await expect(reloaded.accountFor(request)).resolves.toBe(bob);
     expect(bob).not.toBe(alice);
     expect(reloaded.appId).toBe(appId);
     // The backend's own db moved to the new session and still works.
@@ -161,7 +164,7 @@ describe("createJazz, opened on first use", () => {
 
     // New permissions apply to the next use: the user may no longer insert.
     const noInserts = s.definePermissions(app, ({ policy, session }) => {
-      policy.todos.allowRead.where({ owner: session.user.account });
+      policy.todos.allowRead.where({ owner: session.user });
       policy.todos.allowInsert.never();
       policy.todos.allowUpdate.never();
       policy.todos.allowDelete.never();
@@ -221,7 +224,7 @@ describe("createJazz, opened on first use", () => {
     const [ready, rows, account, other] = await Promise.all([
       jazz.ready(),
       jazz.db.all(app.todos.where({ owner })),
-      jazz.accountFor(request),
+      jazz.createAccountFor("a"),
       createJazz({ app, permissions, store: sqlite({ path }), authenticate: as("a") }).ready(),
     ]);
     expect(other).toBe(ready);
@@ -241,8 +244,8 @@ describe("createJazz, opened on first use", () => {
     const request = new Request("http://app.test/api");
     const rules = () =>
       s.definePermissions(app, ({ policy, session }) => {
-        policy.todos.allowRead.where({ owner: session.user.account });
-        policy.todos.allowInsert.where({ owner: session.user.account });
+        policy.todos.allowRead.where({ owner: session.user });
+        policy.todos.allowInsert.where({ owner: session.user });
       });
     const jazz = createJazz({
       app,
@@ -252,8 +255,8 @@ describe("createJazz, opened on first use", () => {
     });
     cleanups.push(() => jazz.close());
     const owner = randomUUID();
+    const user = await jazz.createAccountFor("a");
     const userDb = await jazz.forReqUser(request);
-    const user = (await jazz.accountFor(request))!;
     const inFlight = jazz.db.insert(app.todos, { title: "in flight", owner });
 
     // A hot reload rebuilds equal permissions: the same bundle, the same session.
@@ -266,9 +269,9 @@ describe("createJazz, opened on first use", () => {
     // in flight, and a db a request still holds, still finish.
     const pending = jazz.db.insert(app.todos, { title: "across bundles", owner });
     const changed = s.definePermissions(app, ({ policy, session }) => {
-      policy.todos.allowRead.where({ owner: session.user.account });
-      policy.todos.allowInsert.where({ owner: session.user.account });
-      policy.todos.allowUpdate.where({ owner: session.user.account });
+      policy.todos.allowRead.where({ owner: session.user });
+      policy.todos.allowInsert.where({ owner: session.user });
+      policy.todos.allowUpdate.where({ owner: session.user });
     });
     createJazz({ app, permissions: changed, store: sqlite({ path }), authenticate: as("a") });
     await jazz.ready();

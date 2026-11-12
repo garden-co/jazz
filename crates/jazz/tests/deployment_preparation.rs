@@ -4,8 +4,8 @@ use jazz::tools::deployment::{
     DeploymentCatalogue, DeploymentError, DeploymentRequest, prepare_deployment,
 };
 use jazz::tools::{
-    ColumnType, Lens, LensOp, LensTransform, PolicyExpr, Schema, SchemaBuilder, SchemaHash,
-    TableName, TablePolicies, TableSchema, Value,
+    ColumnType, HistoryRetention, Lens, LensOp, LensTransform, PolicyExpr, Schema, SchemaBuilder,
+    SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 
 fn schema(columns: &[&str]) -> Schema {
@@ -50,6 +50,7 @@ fn request(target: &Schema, schemas: &[Schema], migrations: Vec<Lens>) -> Deploy
             .collect(),
         migrations,
         permissions: HashMap::new(),
+        allow_dropping_history: false,
     }
 }
 
@@ -92,6 +93,149 @@ fn initial_and_permission_only_deployments_replace_embedded_permissions() {
 }
 
 #[test]
+fn retention_only_changes_deploy_without_a_migration_in_both_directions() {
+    let full = schema(&[]);
+    let mut latest = full.clone();
+    latest.get_mut(&TableName::from("notes")).unwrap().history = HistoryRetention::Latest;
+    assert_ne!(SchemaHash::compute(&full), SchemaHash::compute(&latest));
+
+    for (from, to) in [(&full, &latest), (&latest, &full)] {
+        let stored = DeploymentCatalogue {
+            schemas: vec![from.clone()],
+            admitted_schema_hashes: vec![SchemaHash::compute(from)],
+            ..Default::default()
+        };
+        let prepared = prepare_deployment(
+            &stored,
+            DeploymentRequest {
+                allow_dropping_history: true,
+                ..request(to, std::slice::from_ref(to), vec![])
+            },
+        )
+        .expect("a retention change needs no migration");
+        assert_eq!(
+            prepared.active_schema().tables()[0].history,
+            to[&TableName::from("notes")].history
+        );
+        assert!(
+            prepared
+                .migrations()
+                .iter()
+                .all(|lens| lens.forward.ops.is_empty()),
+            "schemas differing only in retention are joined by an empty lens"
+        );
+    }
+}
+
+/// Indexes change how a node finds rows, not the rows: adding or dropping a
+/// composite index or narrowing the indexed columns deploys without a
+/// migration, in both directions, as `migrations create` promises.
+#[test]
+fn index_only_changes_deploy_without_a_migration_in_both_directions() {
+    let plain = schema(&["state", "priority"]);
+    let mut composite = plain.clone();
+    composite
+        .get_mut(&TableName::from("notes"))
+        .unwrap()
+        .composite_indexes = vec![vec!["state".into(), "priority".into()]];
+    let mut index_only = plain.clone();
+    index_only
+        .get_mut(&TableName::from("notes"))
+        .unwrap()
+        .indexed_columns = Some(vec!["state".into()]);
+    for changed in [&composite, &index_only] {
+        assert_ne!(SchemaHash::compute(&plain), SchemaHash::compute(changed));
+        for (from, to) in [(&plain, changed), (changed, &plain)] {
+            let stored = DeploymentCatalogue {
+                schemas: vec![from.clone()],
+                admitted_schema_hashes: vec![SchemaHash::compute(from)],
+                ..Default::default()
+            };
+            let prepared =
+                prepare_deployment(&stored, request(to, std::slice::from_ref(to), vec![]))
+                    .expect("an index change needs no migration");
+            assert!(
+                prepared
+                    .migrations()
+                    .iter()
+                    .all(|lens| lens.forward.ops.is_empty()),
+                "schemas differing only in indexes are joined by an empty lens"
+            );
+        }
+    }
+}
+
+/// Switching a table the store keeps in full to latest-only drops its past
+/// versions for good, so the deploy is refused until it says so; a new
+/// latest-only table, or switching back to full history, needs no flag.
+#[test]
+fn switching_a_kept_table_to_latest_only_needs_an_explicit_flag() {
+    let full = schema(&[]);
+    let mut latest = full.clone();
+    latest.get_mut(&TableName::from("notes")).unwrap().history = HistoryRetention::Latest;
+    let deployed = |schema: &Schema| DeploymentCatalogue {
+        schemas: vec![schema.clone()],
+        admitted_schema_hashes: vec![SchemaHash::compute(schema)],
+        ..Default::default()
+    };
+
+    let error = prepare_deployment(
+        &deployed(&full),
+        request(&latest, std::slice::from_ref(&latest), vec![]),
+    )
+    .expect_err("an unconfirmed switch drops history");
+    assert_eq!(
+        error,
+        DeploymentError::DropsHistory {
+            target: SchemaHash::compute(&latest),
+            tables: vec![TableName::from("notes")],
+        }
+    );
+    assert!(
+        error.to_string().contains(
+            "switches table `notes` to latest-only history, which drops each row's past versions"
+        ),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("allowDroppingHistory: true"),
+        "{error}"
+    );
+
+    prepare_deployment(
+        &deployed(&full),
+        DeploymentRequest {
+            allow_dropping_history: true,
+            ..request(&latest, std::slice::from_ref(&latest), vec![])
+        },
+    )
+    .expect("a confirmed switch deploys");
+    prepare_deployment(
+        &DeploymentCatalogue::default(),
+        request(&latest, std::slice::from_ref(&latest), vec![]),
+    )
+    .expect("a first deploy has no history to drop");
+    prepare_deployment(
+        &deployed(&latest),
+        request(&full, std::slice::from_ref(&full), vec![]),
+    )
+    .expect("switching back to full history drops nothing");
+
+    // Only the first version to make the table latest-only needs the
+    // flag: once one is admitted, republishing it or rolling back and
+    // forth does not.
+    let published = |admitted: [&Schema; 2]| DeploymentCatalogue {
+        schemas: vec![full.clone(), latest.clone()],
+        admitted_schema_hashes: admitted.iter().map(|s| SchemaHash::compute(s)).collect(),
+        ..Default::default()
+    };
+    prepare_deployment(&published([&full, &latest]), request(&latest, &[], vec![]))
+        .expect("a latest-only version is already admitted");
+    prepare_deployment(&published([&latest, &full]), request(&latest, &[], vec![]))
+        .expect("returning to latest-only after a rollback is no first switch");
+}
+
+#[test]
 fn equivalent_diamond_combines_stored_and_submitted_history_in_any_order() {
     let base = schema(&[]);
     let left = schema(&["a"]);
@@ -101,6 +245,7 @@ fn equivalent_diamond_combines_stored_and_submitted_history_in_any_order() {
     let stored = DeploymentCatalogue {
         schemas: vec![base.clone(), left.clone()],
         migrations: vec![first.clone()],
+        ..Default::default()
     };
     let mut update = request(
         &merged,
@@ -180,7 +325,7 @@ fn parallel_paths_must_preserve_column_identity_and_defaults() {
             request(&merged, &schemas, edges(conflicting)),
         )
         .unwrap_err();
-        let DeploymentError::ConflictingPaths { first, second } = error else {
+        let DeploymentError::ConflictingPaths { first, second, .. } = error else {
             panic!("{error}")
         };
         assert_eq!(first.first(), Some(&SchemaHash::compute(&base)));
@@ -212,10 +357,26 @@ fn parallel_paths_must_preserve_column_identity_and_defaults() {
             ],
         ),
     );
-    assert!(matches!(
-        result,
-        Err(DeploymentError::ConflictingPaths { .. })
-    ));
+    let error = result.unwrap_err();
+    assert!(matches!(error, DeploymentError::ConflictingPaths { .. }));
+    // The refusal names the column and how the paths differ, and the
+    // versions as their snapshots are named.
+    let message = error.to_string();
+    for part in [
+        "for `notes.a`, one path adds it with default",
+        r#""default-a""#,
+        r#""different""#,
+    ] {
+        assert!(message.contains(part), "{message}");
+    }
+    assert!(
+        message.contains(&SchemaHash::compute(&base).to_hex()[..12]),
+        "{message}"
+    );
+    assert!(
+        !message.contains(&SchemaHash::compute(&base).to_hex()),
+        "{message}"
+    );
 }
 
 #[test]
@@ -226,6 +387,7 @@ fn allows_backward_activation_but_rejects_cycles_and_disconnected_stored_schemas
     let stored = DeploymentCatalogue {
         schemas: vec![base.clone(), next.clone()],
         migrations: vec![edge.clone()],
+        ..Default::default()
     };
     prepare_deployment(&stored, request(&base, &[], vec![])).unwrap();
     let reverse = Lens::new(edge.target_hash, edge.source_hash, edge.backward.clone());
@@ -255,6 +417,7 @@ fn rejects_missing_artifacts_bad_hashes_and_conflicting_migrations() {
     let stored = DeploymentCatalogue {
         schemas: vec![base.clone(), next.clone()],
         migrations: vec![edge.clone()],
+        ..Default::default()
     };
     assert!(matches!(
         prepare_deployment(
@@ -398,4 +561,115 @@ fn parallel_paths_must_preserve_table_identity() {
     .unwrap_err();
     assert!(matches!(error, DeploymentError::ConflictingPaths { .. }));
     assert!(error.to_string().contains(" -> "));
+}
+
+mod client_bundle {
+    use super::*;
+    use jazz::tools::deployment::published::{
+        ClientMigrations, PublishLensOp, PublishMigrationRequest, PublishTableLens,
+        PublishedSchema, check_client_migrations,
+    };
+
+    fn published(schema: &Schema) -> PublishedSchema {
+        PublishedSchema {
+            hash: SchemaHash::compute(schema).to_hex(),
+            schema: schema.clone(),
+        }
+    }
+
+    fn adds(from: &Schema, to: &Schema, column: &str, default: &str) -> PublishMigrationRequest {
+        PublishMigrationRequest {
+            from_hash: SchemaHash::compute(from).to_hex(),
+            to_hash: SchemaHash::compute(to).to_hex(),
+            forward: vec![PublishTableLens {
+                table: "notes".into(),
+                added: false,
+                removed: false,
+                renamed_from: None,
+                operations: vec![PublishLensOp::Introduce {
+                    column: column.into(),
+                    column_type: ColumnType::Text,
+                    value: Value::Text(default.into()),
+                }],
+            }],
+        }
+    }
+
+    fn check(
+        target: &Schema,
+        schemas: &[&Schema],
+        migrations: Vec<PublishMigrationRequest>,
+    ) -> Result<(), String> {
+        let bundle = ClientMigrations {
+            schemas: schemas.iter().map(|schema| published(schema)).collect(),
+            migrations,
+        };
+        check_client_migrations(
+            &serde_json::to_vec(&bundle).unwrap(),
+            &SchemaHash::compute(target).to_hex(),
+        )
+    }
+
+    /// Validate checks what a deploy checks of the migrations alone: each
+    /// lens, the paths between two versions, and the bundle's own hashes.
+    /// Whether the history joins into one is left to the deploy.
+    #[test]
+    fn checks_the_migrations_as_a_deploy_does_apart_from_the_history_shape() {
+        let (base, left, right, merged) = (
+            schema(&[]),
+            schema(&["a"]),
+            schema(&["b"]),
+            schema(&["a", "b"]),
+        );
+        let all = [&base, &left, &right, &merged];
+        let diamond = |default: &str| {
+            vec![
+                adds(&base, &left, "a", "x"),
+                adds(&base, &right, "b", "y"),
+                adds(&left, &merged, "b", "y"),
+                adds(&right, &merged, "a", default),
+            ]
+        };
+        check(&merged, &all, diamond("x")).expect("both paths agree");
+        let refused = check(&merged, &all, diamond("other")).unwrap_err();
+        for part in [
+            "for `notes.a`, one path adds it with default",
+            r#""x""#,
+            r#""other""#,
+        ] {
+            assert!(refused.contains(part), "{refused}");
+        }
+
+        // A snapshot no migration reaches is no refusal here: the store may
+        // already run it.
+        let unrelated = schema(&["z"]);
+        check(
+            &left,
+            &[&base, &left, &unrelated],
+            vec![adds(&base, &left, "a", "x")],
+        )
+        .expect("history shape is the deploy's");
+
+        // Two different migrations between the same versions are refused.
+        let refused = check(
+            &left,
+            &[&base, &left],
+            vec![adds(&base, &left, "a", "x"), adds(&base, &left, "a", "y")],
+        )
+        .unwrap_err();
+        assert!(refused.contains("conflicting migrations"), "{refused}");
+
+        // A schema that isn't the one its hash names is refused.
+        let mut bundle = ClientMigrations {
+            schemas: vec![published(&base), published(&left)],
+            migrations: vec![adds(&base, &left, "a", "x")],
+        };
+        bundle.schemas[1].schema = right.clone();
+        let refused = check_client_migrations(
+            &serde_json::to_vec(&bundle).unwrap(),
+            &SchemaHash::compute(&left).to_hex(),
+        )
+        .unwrap_err();
+        assert!(refused.contains("hash"), "{refused}");
+    }
 }

@@ -172,6 +172,42 @@ fn predecessor(commit: Option<Option<Pos>>) -> Result<Pos, Error> {
 pub(super) type RowOps = HashMap<(String, RowUuid), Vec<usize>>;
 
 impl Inner {
+    /// Where the predecessor commit `tx` of `node` landed; refused if the
+    /// authority rejected it (naming why) or never received it.
+    fn predecessor_at(&self, node: [u8; 16], tx: u64) -> Result<Pos, Error> {
+        match self.settled(node, tx)? {
+            Some(None) => Err(self.rejected_predecessor(node, tx)?),
+            commit => predecessor(commit),
+        }
+    }
+
+    /// The refusal of a write built on `node`'s commit `tx`, which the
+    /// authority rejected: it names why that commit was rejected, so a
+    /// writer told only of the later write still learns the cause (a
+    /// permission refusal, say).
+    fn rejected_predecessor(&self, node: [u8; 16], tx: u64) -> Result<Error, Error> {
+        let cause = match self.applied_fate(node, tx)? {
+            Some(Err(cause)) => super::from_wire_error(cause),
+            _ => return Ok(predecessor_rejected()),
+        };
+        // A chain of writes on a refused one names the first refusal once.
+        if cause.reason == Some(Reason::PredecessorRejected) {
+            return Ok(cause);
+        }
+        let cause = if cause.is_authorization_denied() {
+            // The wire message leads with its code; name it in words once.
+            let message = cause.message.trim_start_matches("authorization_denied: ");
+            format!("permission denied: {message}")
+        } else {
+            cause.message
+        };
+        Ok(Error::with_reason(
+            ErrorCode::WriteRejected,
+            Reason::PredecessorRejected,
+            format!("the write was built on a write the authority rejected ({cause})"),
+        ))
+    }
+
     /// Which of `ops` write each row, indexed once per commit; a base
     /// names its row by the first.
     pub(super) fn row_ops(&self, ops: &[StagedOp]) -> RowOps {
@@ -290,18 +326,18 @@ impl Inner {
                 // A version this relay shipped the session: one of the
                 // commits it carries, by the writer's id, is its own here.
                 let on = match base.on {
-                    BuiltOn::Commit { node, tx } if node != sender.0 && node != me => match pending
-                        .commits
-                        .iter()
-                        .find(|p| p.id == super::tx_id(node, tx))
-                    {
-                        Some(p) => BuiltOn::Commit { node: me, tx: p.tx },
-                        None => match self.settled(node, tx)? {
-                            Some(Some(at)) if at.accepted() => BuiltOn::Seq(at.seq),
-                            Some(None) => return Err(predecessor_rejected()),
-                            _ => return Err(unknown_base("another node's commit")),
-                        },
-                    },
+                    BuiltOn::Commit { node, tx } if node != sender.0 && node != me => {
+                        match pending.iter().find(|p| p.id == super::tx_id(node, tx)) {
+                            Some(p) => BuiltOn::Commit { node: me, tx: p.tx },
+                            None => match self.settled(node, tx)? {
+                                Some(Some(at)) if at.accepted() => BuiltOn::Seq(at.seq),
+                                // Another session's refusal: why it was refused
+                                // is not this session's to learn.
+                                Some(None) => return Err(predecessor_rejected()),
+                                _ => return Err(unknown_base("another node's commit")),
+                            },
+                        }
+                    }
                     on => on,
                 };
                 let on = match on {
@@ -323,6 +359,8 @@ impl Inner {
                             }
                             (false, Some(Some(at))) if at.accepted() => BuiltOn::Seq(at.seq),
                             (false, Some(Some(_))) => BuiltOn::Commit { node: me, tx },
+                            // This relay's commit may carry another
+                            // session's write: name no cause.
                             (false, Some(None)) => return Err(predecessor_rejected()),
                             (false, None) => BuiltOn::Seq(
                                 self.newest_accepted(table, row, &base.key)?.unwrap_or(0),
@@ -334,11 +372,11 @@ impl Inner {
                             .1
                             .checked_sub(back)
                             .ok_or_else(|| unknown_base("a commit"))?;
-                        predecessor(self.settled(sender.0, tx)?)?;
+                        self.predecessor_at(sender.0, tx)?;
                         BuiltOn::Own { back }
                     }
                     BuiltOn::Commit { node, tx } if node == sender.0 => {
-                        predecessor(self.settled(node, tx)?)?;
+                        self.predecessor_at(node, tx)?;
                         BuiltOn::Commit { node, tx }
                     }
                     BuiltOn::Commit { .. } => return Err(unknown_base("another node's commit")),
@@ -412,6 +450,22 @@ impl Inner {
         let mut built = HashMap::new();
         for (op, base) in bases {
             let (table, row) = self.based_row(ops, *op)?;
+            if self.latest_only(table) {
+                // A latest-only write is blind (SPEC 4 §4.9), and the
+                // dedupe entry of the commit it names may be gone: only a
+                // base on the sender's own rejected commit rejects it.
+                let own = match base.on {
+                    BuiltOn::Own { back } => sender.1.checked_sub(back),
+                    BuiltOn::Commit { node, tx } if node == sender.0 => Some(tx),
+                    _ => None,
+                };
+                if let Some(tx) = own
+                    && self.settled(sender.0, tx)? == Some(None)
+                {
+                    return Err(self.rejected_predecessor(sender.0, tx)?);
+                }
+                continue;
+            }
             let on = match base.on {
                 BuiltOn::Seq(seq) => Built::Seq(seq),
                 BuiltOn::Own { back } => {
@@ -419,18 +473,21 @@ impl Inner {
                         .1
                         .checked_sub(back)
                         .ok_or_else(|| unknown_base("a commit"))?;
-                    Built::On(predecessor(self.settled(sender.0, tx)?)?.seq)
+                    Built::On(self.predecessor_at(sender.0, tx)?.seq)
                 }
                 BuiltOn::Commit { node, tx } if node == sender.0 => {
-                    Built::On(predecessor(self.settled(node, tx)?)?.seq)
+                    Built::On(self.predecessor_at(node, tx)?.seq)
                 }
                 BuiltOn::Commit { node, tx } => match identity {
                     Some(identity) if !self.writes_as(node, identity)? => {
                         return Err(predecessor_rejected());
                     }
-                    Some(_) => Built::On(predecessor(self.settled(node, tx)?)?.seq),
+                    Some(_) => Built::On(self.predecessor_at(node, tx)?.seq),
                     None => match self.settled(node, tx)? {
                         None => return Err(unknown_base("another node's commit")),
+                        // A peer link may carry several sessions: another
+                        // node's refusal names no cause.
+                        Some(None) => return Err(predecessor_rejected()),
                         landed => Built::On(predecessor(landed)?.seq),
                     },
                 },
@@ -457,7 +514,6 @@ impl Inner {
             self.client.as_ref().and_then(|client| {
                 client
                     .pending
-                    .commits
                     .iter()
                     .find(|p| p.id == super::tx_id(node, tx))
                     .map(|p| p.tx)
@@ -477,10 +533,10 @@ impl Inner {
                         .1
                         .checked_sub(back)
                         .ok_or_else(|| unknown_base("a commit"))?;
-                    predecessor(self.settled(sender.0, tx)?)?
+                    self.predecessor_at(sender.0, tx)?
                 }
                 BuiltOn::Commit { node, tx } if node == sender.0 => {
-                    predecessor(self.settled(node, tx)?)?
+                    self.predecessor_at(node, tx)?
                 }
                 BuiltOn::Commit { .. } => return Err(unknown_base("another node's commit")),
             };
@@ -586,12 +642,16 @@ impl Inner {
             .map(|(at, node, tx)| (at.seq, (node, tx)))
             .collect();
         let writer = |seq: u64| writers.get(&seq).copied().unwrap_or(([0; 16], seq));
+        // A latest-only table dropped the versions a writer may have
+        // missed, so each of its writes reads as blind (SPEC 4 §4.9).
+        let blind = self.latest_only(table);
         let mut conflicts = Vec::with_capacity(history.len());
         for (index, version) in history.iter().enumerate() {
             let earlier = &history[..index];
             let previous = earlier.last().map(|v| v.seq);
-            let Some(built) = version.built else {
-                // An insert, a blind write, or the authority's own.
+            let Some(built) = version.built.filter(|_| !blind) else {
+                // An insert, a blind write, the authority's own, or any
+                // write to a latest-only table.
                 conflicts.push(WriteConflict {
                     seq: version.seq,
                     writer: writer(version.seq),

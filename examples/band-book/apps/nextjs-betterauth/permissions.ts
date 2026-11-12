@@ -10,7 +10,7 @@ const WORKSPACE_EDITORS: WorkspaceRole[] = ["owner", "member"];
 const bandBookPermissions = definePermissions(
   app,
   ({ policy, session, allOf, anyOf, allowedTo }) => {
-    const me = session.user.account;
+    const me = session.user;
     const depth = { maxDepth: PAGE_TREE_MAX_DEPTH };
 
     const hasRole = (workspaceId: RowContext<Page>["workspaceId"], roles: WorkspaceRole[]) =>

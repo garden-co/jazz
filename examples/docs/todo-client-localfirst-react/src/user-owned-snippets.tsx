@@ -18,10 +18,10 @@ export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" })
 
 // #region owned-permissions
 s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ "$createdBy.account": session.user.account });
+  policy.todos.allowRead.where({ $createdBy: session.user });
   policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.where({ "$createdBy.account": session.user.account });
-  policy.todos.allowDelete.where({ "$createdBy.account": session.user.account });
+  policy.todos.allowUpdate.where({ $createdBy: session.user });
+  policy.todos.allowDelete.where({ $createdBy: session.user });
 });
 // #endregion owned-permissions
 
@@ -74,9 +74,9 @@ export const explicitApp: s.App<ExplicitAppSchema> = s.defineApp(schemaExplicit,
 
 // #region owned-permissions-explicit
 s.definePermissions(explicitApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user.account });
+  policy.todos.allowRead.where({ owner_id: session.user });
   policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.whereOld({ owner_id: session.user.account });
-  policy.todos.allowDelete.where({ owner_id: session.user.account });
+  policy.todos.allowUpdate.whereOld({ owner_id: session.user });
+  policy.todos.allowDelete.where({ owner_id: session.user });
 });
 // #endregion owned-permissions-explicit

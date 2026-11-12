@@ -731,6 +731,52 @@ describe("browser SharedWorker realm identity", () => {
     expect(port.closed).toBe(true);
   });
 
+  it("names its page lock to the worker only once it holds it", async () => {
+    // The worker waits on the lock to notice a page that went away. Asked for
+    // before the tab holds it, the worker would be granted it and drop a live
+    // tab, so the tab names it only after its own grant.
+    let grant!: () => void;
+    const requests: Array<{ name: string; release?: Promise<unknown> }> = [];
+    vi.stubGlobal("navigator", {
+      locks: {
+        request: (name: string, callback: () => Promise<unknown>) => {
+          const request: { name: string; release?: Promise<unknown> } = { name };
+          requests.push(request);
+          return new Promise((resolve) => {
+            grant = () => {
+              request.release = callback();
+              void request.release.then(resolve);
+            };
+          });
+        },
+      },
+    });
+    try {
+      const { connection, port, sent } = runtimeBootstrapFixture();
+      // The tab asks for its lock as it connects, without waiting for it.
+      expect(requests).toHaveLength(1);
+      expect(sent.some((message) => message.type === "connect-runtime")).toBe(true);
+      port.emit({ type: "runtime-ready" });
+      await expect(connection.ready()).resolves.toBeUndefined();
+      const announced = () =>
+        sent.filter((message) => message.type === "liveness-lock") as Array<{ name?: string }>;
+      await Promise.resolve();
+      expect(announced()).toEqual([]);
+      grant();
+      await vi.waitFor(() =>
+        expect(announced()).toEqual([expect.objectContaining({ name: requests[0]!.name })]),
+      );
+      const shutdown = connection.shutdown();
+      await Promise.resolve();
+      port.emit({ type: "result", id: sent.find((message) => message.type === "close")?.id });
+      await shutdown;
+      // Shutting down lets go of the lock.
+      await expect(requests[0]!.release).resolves.toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("keeps runtime admission in the same realm when its alive reply is delayed", async () => {
     vi.useFakeTimers();
     const { connection, port, sent } = runtimeBootstrapFixture(1_100);

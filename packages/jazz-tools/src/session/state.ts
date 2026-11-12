@@ -8,6 +8,8 @@ import {
 import { createListeners, toError } from "../runtime/util.js";
 import type { Db } from "../runtime/db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
+import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
+import type { DbReplacedReason } from "../runtime/db-replaced-error.js";
 
 export interface SessionClient {
   shutdown(options?: { waitForSync?: boolean }): Promise<void>;
@@ -15,8 +17,10 @@ export interface SessionClient {
 /** A client whose database can wipe its local storage (`clearOnSignOut`). */
 type WipeableClient = {
   db?: {
+    markReplaced?(reason: DbReplacedReason): void;
     waitForSync?(options?: { timeoutMs?: number }): Promise<void>;
     deleteClientStorage?(): Promise<void>;
+    getSyncStatus?(): { pendingUploads: number };
   };
 };
 export type JazzSessionOperation =
@@ -65,6 +69,7 @@ export interface JazzSessionConsumer<Client> {
 const consumers = new WeakMap<object, () => JazzSessionConsumer<unknown>>();
 type ClientReplacer = (
   open: (current: unknown, account: AccountHandle) => Promise<unknown>,
+  adopt?: (current: unknown, next: unknown) => void,
 ) => Promise<void>;
 const replacers = new WeakMap<object, ClientReplacer>();
 const switchers = new WeakMap<object, (from: AccountHandle) => Promise<boolean>>();
@@ -100,10 +105,19 @@ export function switchJazzSessionUser<Client>(
 export function replaceJazzSessionClient<Client>(
   session: JazzSession<Client>,
   open: (current: Client, account: AccountHandle) => Promise<Client>,
+  /**
+   * Hand the current client's work to `next` in place, instead of publishing
+   * `next`: the session keeps its client, so the app keeps its handles,
+   * queries and component state.
+   */
+  adopt?: (current: Client, next: Client) => void,
 ): Promise<void> {
   const replace = replacers.get(session);
   if (!replace) return Promise.reject(new Error("Unknown Jazz session"));
-  return replace(open as (current: unknown, account: AccountHandle) => Promise<unknown>);
+  return replace(
+    open as (current: unknown, account: AccountHandle) => Promise<unknown>,
+    adopt as ((current: unknown, next: unknown) => void) | undefined,
+  );
 }
 /** @internal Framework commit acknowledgement; never required by imperative callers. */
 export function attachJazzSessionConsumer<Client>(
@@ -202,11 +216,22 @@ export async function createJazzSessionOwner<
           const db = (client as WipeableClient).db;
           // Upload what the server still accepts before wiping the rest.
           await db?.waitForSync?.({ timeoutMs: 5_000 }).catch(() => {});
+          // Say what the wipe took, as a sign-out past refused writes does.
+          const writes = db?.getSyncStatus?.().pendingUploads ?? 0;
           await db?.deleteClientStorage?.();
+          if (writes > 0)
+            console.warn(
+              `Jazz signed out and wiped ${writes} write(s) the server hadn't confirmed, as clearOnSignOut asks. They are gone from this device; any the server did receive stay there.`,
+            );
           await client.shutdown();
+        } else if (signsOut) {
+          await signOutOf(client);
         } else {
           await client.shutdown({ waitForSync: true });
         }
+        // Code that kept this client's Db learns it is gone, instead of
+        // its queries going quiet.
+        (client as WipeableClient).db?.markReplaced?.("signed-out");
         client = undefined;
       }
     } catch (cause) {
@@ -298,8 +323,16 @@ export async function createJazzSessionOwner<
     getSnapshot: () => snapshot,
     subscribe: listeners.subscribe,
     createLocalFirst: () => run("createLocalFirst", () => accounts.createLocalFirst()),
-    restoreLocalFirst: (secret) =>
-      run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret)),
+    restoreLocalFirst: (secret) => {
+      // A malformed secret is the caller's mistake: refuse it before the
+      // current client is shut down, so the session goes on as it was.
+      try {
+        parseAuthSecret(secret);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret));
+    },
     loginWithBackend: () => run("loginWithBackend", () => accounts.loginWithBackend()),
     linkWithBackend: () => run("linkWithBackend", () => accounts.linkWithBackend()),
     retry: () => run("retry", () => selected),
@@ -365,7 +398,7 @@ export async function createJazzSessionOwner<
     );
     return true;
   });
-  replacers.set(session, async (open) => {
+  replacers.set(session, async (open, adopt) => {
     if (closed) throw new Error("Jazz session is closed");
     await busy?.catch(() => {});
     await loggingOut?.catch(() => {});
@@ -379,8 +412,15 @@ export async function createJazzSessionOwner<
       await next.shutdown().catch(() => {});
       throw superseded();
     }
+    if (adopt) {
+      adopt(current, next);
+      return;
+    }
     client = next;
     publish({ status: "ready", account: selected, client: next });
+    // Code that kept the old Db learns it is gone, instead of its queries
+    // going quiet. Framework providers follow the session, not the old Db.
+    (current as WipeableClient).db?.markReplaced?.("replaced");
     // Children re-render onto the new client first; the old one finishes
     // uploading its writes before it stops. The swap is done either way: a
     // slow or failing shutdown of the old client neither holds nor fails it.
@@ -407,4 +447,45 @@ export async function createJazzSessionOwner<
   });
   if (options.decorate) Object.assign(session, options.decorate(session));
   return Object.freeze(session) as JazzSession<Client> & Extra;
+}
+
+type SigningOutClient = {
+  shutdown(options?: { waitForSync?: boolean }): Promise<void>;
+  db?: {
+    getAuthState?(): { error?: unknown };
+    getSyncStatus?(): { pendingUploads: number };
+    getConfig?(): { driver?: { type?: string } };
+  };
+};
+
+/**
+ * Sign out of `client`: upload what the server still accepts, then stop it.
+ * When the server refuses this user's sign-in (their session at the backend
+ * ended), no retry uploads the rest while they are signed out, and refusing
+ * the sign-out would leave them no way out, through reloads too: it signs
+ * out and says what became of those writes. A persistent client keeps them
+ * on this device, under that account, and uploads them when it next opens;
+ * one that keeps nothing (in memory, or thin) loses them. Any refusal counts,
+ * an `expired` credential too: the user is leaving, and no one renews it once
+ * they have. Any other failure (an outage) may pass, so it still fails the
+ * sign-out for the app to retry.
+ */
+async function signOutOf(client: SigningOutClient) {
+  try {
+    await client.shutdown({ waitForSync: true });
+  } catch (cause) {
+    const db = client.db;
+    if (!(cause instanceof GracefulShutdownSyncError) || !db?.getAuthState?.().error) throw cause;
+    const writes = db.getSyncStatus?.().pendingUploads ?? 0;
+    const kept = !isThinDb(db as Db) && db.getConfig?.().driver?.type !== "memory";
+    // Warn only about writes left behind: with none, nothing was lost.
+    if (writes > 0)
+      console.warn(
+        kept
+          ? `Jazz signed out with ${writes} write(s) the server refused, as it no longer accepts this user's sign-in. They stay on this device and upload when this account signs in again.`
+          : `Jazz signed out and dropped ${writes} write(s) the server refused, as it no longer accepts this user's sign-in. This client keeps nothing on the device.`,
+        cause.cause,
+      );
+    await client.shutdown();
+  }
 }

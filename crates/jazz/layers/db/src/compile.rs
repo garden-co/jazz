@@ -84,9 +84,11 @@ impl Session {
         self.used.set(true);
         let parts: Vec<&str> = path.iter().map(String::as_str).collect();
         Some(match parts.as_slice() {
-            ["user", "identity", "subject"] => Value::String(self.subject.clone()?),
-            ["user", "identity", "issuer"] => Value::String(self.issuer.clone()?),
-            ["user", "account"] => Value::Uuid(self.account?),
+            // `session.user` is the account; `session.identity` the exact
+            // login, shared by no other identity linked to the account.
+            ["user"] => Value::Uuid(self.account?),
+            ["identity", "subject"] => Value::String(self.subject.clone()?),
+            ["identity", "issuer"] => Value::String(self.issuer.clone()?),
             // How the identity signed in, from its issuer (as Jazz derives
             // `session.authMode`).
             ["authMode"] => Value::String(
@@ -105,12 +107,31 @@ impl Session {
     }
 
     /// `session.<path> IS NULL`: an explicit null. A missing claim path is
-    /// not null (it is absent); a missing user part is.
+    /// not null (it is absent); a missing user part is. `session.identity`
+    /// is null exactly when the session has no login.
     pub fn is_null(&self, path: &[String]) -> bool {
+        if let [identity] = path
+            && identity == "identity"
+        {
+            self.used.set(true);
+            return self.subject.is_none();
+        }
         match self.resolve_raw(path) {
             Some(value) => unwrap_nullable(value).is_none(),
             None => path.first().map(String::as_str) != Some("claims"),
         }
+    }
+
+    /// `session.<path> IS NOT NULL`: present and not null. `session.identity`
+    /// is set exactly when the session has a login.
+    pub fn is_not_null(&self, path: &[String]) -> bool {
+        if let [identity] = path
+            && identity == "identity"
+        {
+            self.used.set(true);
+            return self.subject.is_some();
+        }
+        self.resolve(path).is_some()
     }
 
     pub fn claim(&self, key: &str) -> Option<Value> {
@@ -431,11 +452,18 @@ impl<'a> Ctx<'a> {
                     None => ("0".to_owned(), "0".to_owned()),
                     Some(ids) => {
                         self.overlaid_rows += ids.len();
-                        let ids = ids
-                            .iter()
-                            .map(|id| self.bind(Sql::Blob(id.to_vec())))
-                            .collect::<Vec<_>>()
-                            .join(", ");
+                        // A long chain grounds many rows: past a few, the
+                        // ids bind as one JSON array (Durable Object SQLite
+                        // caps a statement at 100 parameters).
+                        let ids = if ids.len() > BOUND_LIST_MAX {
+                            let array = self.bind(json_ids(ids.iter().map(|id| id.as_slice())));
+                            format!("SELECT unhex(value) FROM json_each({array})")
+                        } else {
+                            ids.iter()
+                                .map(|id| self.bind(Sql::Blob(id.to_vec())))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
                         (
                             format!("({own} AND (_state & {STATE_DELETED}) = 0 AND id IN ({ids}))"),
                             format!(
@@ -1955,7 +1983,7 @@ impl<'a> Ctx<'a> {
                 op,
                 value: PolicyValue::SessionRef(path),
             } if crate::values::author_record(column).is_some()
-                && path.first().map(String::as_str) == Some("user") =>
+                && matches!(path.first().map(String::as_str), Some("user" | "identity")) =>
             {
                 self.author_cmp(table, alias, column, op, path, session)?
             }
@@ -1994,7 +2022,7 @@ impl<'a> Ctx<'a> {
                 format!("({} IS NOT NULL)", column_sql(table, alias, column)?)
             }
             PolicyExpr::SessionIsNull { path } => bool_sql(session.is_null(path)),
-            PolicyExpr::SessionIsNotNull { path } => bool_sql(session.resolve(path).is_some()),
+            PolicyExpr::SessionIsNotNull { path } => bool_sql(session.is_not_null(path)),
             PolicyExpr::Contains { column, value } => {
                 let left = self.column_term(table, alias, column)?;
                 let right = self.policy_value(value, outer, session)?;
@@ -2499,6 +2527,36 @@ impl<'a> Ctx<'a> {
                 let key = scope.key.expect("key");
                 *key.borrow_mut() = Some(self.resolve(rel, left)?);
                 "1".to_owned()
+            }
+            RelationPredicate::Cmp {
+                left,
+                op,
+                right: RelationValueRef::SessionRef(path),
+            } if crate::values::author_record(&left.column).is_some()
+                && matches!(path.first().map(String::as_str), Some("user" | "identity")) =>
+            {
+                // An author record inside a relation compares as it does in a
+                // plain policy.
+                let schema = self.schema;
+                let src = rel
+                    .from
+                    .iter()
+                    .filter(|src| src.table.is_some())
+                    .find(|src| left.scope.as_ref().is_none_or(|scope| &src.scope == scope))
+                    .ok_or_else(|| {
+                        query_error(format!("relation column {left:?} does not resolve"))
+                    })?;
+                let table = &schema.tables[src.table.as_ref().expect("a table source")];
+                let alias = src.alias.clone();
+                let op = match op {
+                    RelationCmpOp::Eq => CmpOp::Eq,
+                    RelationCmpOp::Ne => CmpOp::Ne,
+                    RelationCmpOp::Lt => CmpOp::Lt,
+                    RelationCmpOp::Le => CmpOp::Le,
+                    RelationCmpOp::Gt => CmpOp::Gt,
+                    RelationCmpOp::Ge => CmpOp::Ge,
+                };
+                self.author_cmp(table, &alias, &left.column, &op, path, scope.session)?
             }
             RelationPredicate::Cmp { left, op, right } => {
                 let left = self.resolve_term(rel, left)?;
@@ -3275,9 +3333,10 @@ impl Ctx<'_> {
     }
 
     /// An author record (`$createdBy`, `$updatedBy.identity`, ...) against
-    /// the session's user (or its identity): equal when every part is, with
-    /// an accountless session standing for the system account as
-    /// [`crate::values::author_key`] stores it.
+    /// `session.user` (compared by account) or `session.identity` (compared
+    /// by issuer and subject). An accountless session matches no whole
+    /// author record, so it is never mistaken for the system account
+    /// [`crate::values::author_key`] stores it under.
     fn author_cmp(
         &mut self,
         table: &Table,
@@ -3289,13 +3348,18 @@ impl Ctx<'_> {
     ) -> Result<String, Error> {
         let (_, whole) = crate::values::author_record(column).expect("author record");
         let path: Vec<&str> = path.iter().map(String::as_str).collect();
+        // An author record matches `session.user` by account alone, so
+        // every identity linked to the account matches; its identity matches
+        // `session.identity`, the exact login.
         let parts: &[&str] = match (whole, path.as_slice()) {
-            (true, ["user"]) => &["account", "identity.issuer", "identity.subject"],
-            (false, ["user", "identity"]) => &["issuer", "subject"],
+            (true, ["user"]) => &["account"],
+            (false, ["identity"]) => &["issuer", "subject"],
             _ => {
+                let record = column.trim_end_matches(".identity");
                 return Err(query_error(format!(
-                    "comparing `{column}` with `session.{}`: compare an author record \
-                     with `session.user` and its identity with `session.user.identity`",
+                    "comparing `{column}` with `session.{}`: compare `{record}` with \
+                     `session.user` (the account) or `{record}.identity` with \
+                     `session.identity` (the exact login)",
                     path.join(".")
                 )));
             }
@@ -3309,7 +3373,10 @@ impl Ctx<'_> {
                 )));
             }
         };
-        if session.system || session.subject.is_none() {
+        // An accountless session authored no row, and matching it as the
+        // system account would hand it every system-written row once only
+        // accounts are compared: it matches no author record.
+        if session.system || session.subject.is_none() || (whole && session.account.is_none()) {
             return Ok(bool_sql(negate));
         }
         let record = if whole {
@@ -3319,19 +3386,14 @@ impl Ctx<'_> {
         };
         let mut clauses = Vec::new();
         for part in parts {
-            let part = part.trim_start_matches("identity.");
-            let field = match part {
+            let field = match *part {
                 "account" => format!("{record}.account"),
                 part => format!("{record}.identity.{part}"),
             };
             let left = self.column_term(table, alias, &field)?;
-            let value = match part {
-                "account" => {
-                    Some(Value::Uuid(session.account.unwrap_or(
-                        jazz_types::account_registry::SYSTEM_ACCOUNT_ID.0,
-                    )))
-                }
-                part => session.resolve(&["user".into(), "identity".into(), part.into()]),
+            let value = match *part {
+                "account" => session.account.map(Value::Uuid),
+                part => session.resolve(&["identity".into(), part.into()]),
             };
             let right = self.present(value)?;
             clauses.push(self.cmp(CmpOp::Eq, left, right)?);

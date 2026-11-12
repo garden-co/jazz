@@ -11,7 +11,7 @@ import { DurabilityTier } from "jazz-tools";
 export const ChatList = () => {
   const db = useDb();
   const session = useSession();
-  const userId = session?.user.account ?? null;
+  const userId = session?.user ?? null;
   const sharedWriteOptions: { tier: DurabilityTier } = {
     tier: db.getConfig().serverUrl ? "global" : "local",
   };

@@ -5,6 +5,7 @@ import {
   type AccountHandle,
   type AccountSelectionDurability,
 } from "./state.js";
+import { AccountAuthError } from "./registry-client.js";
 
 // Enrollment is deliberately a controlled boundary here: these tests exercise
 // UI scheduling, not credential verification or registry acceptance.
@@ -239,4 +240,14 @@ it("does not start remote linking when a pending-state subscriber logs out", asy
   await expect(manager.linkWithBackend()).rejects.toBeInstanceOf(AccountOperationSuperseded);
   expect(calls).toBe(0);
   expect(manager.getLoggedIn()).toBeUndefined();
+});
+
+it("says how to sign in when linkWithBackend has no guest to link", async () => {
+  const { manager } = setup();
+  const error = await manager.linkWithBackend().catch((cause: unknown) => cause);
+  expect(error).toBeInstanceOf(AccountAuthError);
+  expect(error).toMatchObject({ code: "local_first_account_required" });
+  expect((error as Error).message).toMatch(/no guest to link/);
+  expect((error as Error).message).toMatch(/loginWithBackend\(\)/);
+  expect(manager.getSnapshot()).toMatchObject({ pending: undefined, error });
 });

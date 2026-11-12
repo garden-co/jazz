@@ -2,6 +2,8 @@ import { signChallenge } from "../local-first-auth/index.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import {
   AccountAuthError,
+  LINK_GUEST_KEY_MISSING_MESSAGE,
+  LINK_NEEDS_GUEST_MESSAGE,
   requestBackendLinkChallenge,
   requestBackendSignIn,
   readAccountAssignment,
@@ -15,6 +17,14 @@ import {
   type AccountIdentity,
   type AccountSelectionDurability,
 } from "./state.js";
+
+/**
+ * The backend refuses a link for good when the signed-in user already has an
+ * account of their own (most often: they signed up on another device), or
+ * when this guest's key was retired or is another app's.
+ */
+const LINK_REFUSED_MESSAGE =
+  "link_refused: the backend won't link this guest to the signed-in user, most likely because they already have an account (from another device). Call loginWithBackend() to open their account instead. The guest stays signed in on this device until then, and linking never moves its data into an existing account.";
 
 /** @internal A local-first account's self-minted token, or its refresh callback. */
 export type JWTAuth = string | { getToken(): Promise<string> };
@@ -329,10 +339,18 @@ export function createAccountManagerWithRuntime(options: {
         // for the signed-in user, never with its sync token: a proof links
         // once, and only to that user.
         if (account.identity.issuer !== "urn:jazz:local-first")
-          throw new AccountAuthError("local_first_account_required");
+          throw new AccountAuthError(
+            "local_first_account_required",
+            undefined,
+            LINK_NEEDS_GUEST_MESSAGE,
+          );
         const material = credentials.get(account);
         if (!material || material.registry !== registry || !material.localFirstSecret)
-          throw new AccountAuthError("local_first_account_required");
+          throw new AccountAuthError(
+            "local_first_account_required",
+            undefined,
+            LINK_GUEST_KEY_MISSING_MESSAGE,
+          );
         const secret = material.localFirstSecret;
         // The namespace the guest's account was founded in (its token's
         // audience: the app id, or the endpoint for an app-less client), so
@@ -350,6 +368,10 @@ export function createAccountManagerWithRuntime(options: {
               proof: signChallenge(secret, challenge),
               ...(typeof audience === "string" ? { audience } : {}),
             },
+          }).catch((error: unknown) => {
+            if (error instanceof AccountAuthError && error.code === "link_refused")
+              throw new AccountAuthError(error.code, error.status, LINK_REFUSED_MESSAGE);
+            throw error;
           });
         });
         if (linked.id !== account.id) throw new AccountAuthError("linked_account_mismatch");

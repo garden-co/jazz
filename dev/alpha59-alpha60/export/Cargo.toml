@@ -16,3 +16,4 @@ jazz-server = { path = "../../../crates/jazz-server" }
 jazz-storage-rocksdb.workspace = true
 jazz-alpha59-alpha60-dump = { path = "../../../crates/jazz-alpha59-alpha60-dump" }
 serde_json = "1.0"
+libc = "0.2"

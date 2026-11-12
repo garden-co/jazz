@@ -4,9 +4,9 @@ pub use crate::model::public_api::policy::{CmpOp, Operation, PolicyExpr, PolicyV
 pub use crate::model::public_api::session::{AuthMode, Session, WriteContext};
 pub use crate::model::public_api::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, EnumCaseDescriptor,
-    OperationPolicy, OrderedRowDelta, QueryResult, QueryResultField, Row, RowDelta, RowDescriptor,
-    Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema, TableSchemaBuilder,
-    Value, permissions, policy_expr,
+    HistoryRetention, OperationPolicy, OrderedRowDelta, QueryResult, QueryResultField, Row,
+    RowDelta, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies,
+    TableSchema, TableSchemaBuilder, Value, permissions, policy_expr,
 };
 pub use crate::model::transaction::{OpenTransactionId, TransactionId};
 /// Relation-backed policies (`PolicyExpr::ExistsRel`) use the query relation IR.

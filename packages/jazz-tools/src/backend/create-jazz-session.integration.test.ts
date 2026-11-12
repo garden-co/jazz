@@ -99,6 +99,31 @@ describe("Node shared backend session", () => {
     }
   });
 
+  it("the main backend's own client acts for a user through jazz.forReqUser, not forUser", async () => {
+    const appId = randomUUID();
+    const backendSecret = "for-user-service-secret";
+    const server = await startLocalJazzServer({ appId, backendSecret });
+    try {
+      const owner = await openJazzSession({
+        appId,
+        serverUrl: server.url,
+        app,
+        permissions,
+        driver: { type: "memory" },
+        initial: { backendSecret },
+      });
+      try {
+        await expect(owner.getSnapshot().client!.forUser("alice")).rejects.toThrow(
+          /only on a trusted backend client.*jazz\.forReqUser/,
+        );
+      } finally {
+        await owner.close();
+      }
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("retains the memory node clock when retry reopens the backend's client", async () => {
     const appId = randomUUID();
     const backendSecret = "clock-service-secret";
@@ -163,16 +188,16 @@ describe("Node shared backend session", () => {
       expect(first.account?.identity.issuer).toBe("urn:jazz:system");
       expect(JSON.stringify(first.account)).not.toContain(backendSecret);
       const backend = first.client!;
-      expect(backend.session?.user).toEqual({
-        account: first.account!.id,
-        identity: first.account!.identity,
-      });
+      expect(backend.session?.user).toBe(first.account!.id);
+      expect(backend.session?.identity).toEqual(first.account!.identity);
       const initial = await backend.db
         .insert(app.notes, { text: "service" })
         .wait({ tier: "global" });
       expect(
         await backend.db.one(app.notes.select("$createdBy").where({ id: initial.id })),
-      ).toMatchObject({ $createdBy: backend.session?.user });
+      ).toMatchObject({
+        $createdBy: { account: backend.session?.user, identity: backend.session?.identity },
+      });
 
       // Its core admits no guests: becoming one is refused, and the backend stays.
       await expect(session.createLocalFirst()).rejects.toThrow("not supported");

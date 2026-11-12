@@ -104,17 +104,16 @@ describe("BigLabel deployed tenant authority", () => {
         role: "owner",
       }),
     );
-    // Foreign targets cannot even be resolved for a partial update (the local
-    // read gate), while the admission/forgery checks above exercise the edge
-    // authority receipt explicitly.
-    expect(() => outsider.update(app.artists, seeded.artist.id, { status: "stolen" })).toThrow(
-      /read policy denied/,
+    // An update of a row the outsider can't read is refused by the server:
+    // an update needs read permission on the existing row.
+    await outsider.expectDenied((db) =>
+      db.update(app.artists, seeded.artist.id, { status: "stolen" }),
     );
-    expect(() => outsider.update(app.releases, seeded.release.id, { status: "stolen" })).toThrow(
-      /read policy denied/,
+    await outsider.expectDenied((db) =>
+      db.update(app.releases, seeded.release.id, { status: "stolen" }),
     );
-    expect(() => outsider.update(app.teams, seeded.team.id, { name: "Stolen team" })).toThrow(
-      /read policy denied/,
+    await outsider.expectDenied((db) =>
+      db.update(app.teams, seeded.team.id, { name: "Stolen team" }),
     );
 
     await expect(

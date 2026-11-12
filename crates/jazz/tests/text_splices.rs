@@ -9,8 +9,8 @@ use std::path::Path;
 use std::rc::Rc;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, LargeValueUpdateSplice, ReadOpts,
-    ReadTier, SubscriptionStream, UpdateOptions, WireTransportAdapter, block_on,
+    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, LargeValueUpdate, LargeValueUpdateSplice,
+    ReadOpts, ReadTier, SubscriptionStream, UpdateOptions, WireTransportAdapter, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::large_values::{INLINE_VALUE_MAX_BYTES, TEXT_MERGE_INLINE_MAX_BYTES};
@@ -38,6 +38,7 @@ fn schema() -> JazzSchema {
             composite_indexes: Vec::new(),
             policies: allow_all_policies(),
             branch_by: Vec::new(),
+            history: Default::default(),
         },
     )]))
 }
@@ -625,4 +626,292 @@ fn a_merge_inserting_more_than_an_epoch_edit_is_written_whole() {
         per_key < 1024.0,
         "{per_key} bytes per keystroke after the merge"
     );
+}
+
+/// An editor over the column, as markdownSync and a controlled textarea
+/// keep one: its own text and cursor, brought to the column's value only
+/// when its subscription delivers it (`refresh`, the next render), and the
+/// value it last wrote or showed, which each write says it was made from.
+struct Editor {
+    text: String,
+    cursor: usize,
+    seen: String,
+}
+
+impl Editor {
+    fn new(text: &str, cursor: usize) -> Self {
+        Self {
+            text: text.to_owned(),
+            cursor,
+            seen: text.to_owned(),
+        }
+    }
+
+    /// Show `value`, the cursor mapped through the change: kept before
+    /// it, moved with the text after it.
+    fn refresh(&mut self, value: String) {
+        let old = &self.text;
+        let prefix = old
+            .bytes()
+            .zip(value.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let room = old.len().min(value.len()) - prefix;
+        let suffix = old
+            .bytes()
+            .rev()
+            .zip(value.bytes().rev())
+            .take(room)
+            .take_while(|(a, b)| a == b)
+            .count();
+        if self.cursor > prefix {
+            self.cursor = if self.cursor >= old.len() - suffix {
+                self.cursor + value.len() - old.len()
+            } else {
+                value.len() - suffix
+            };
+        }
+        self.seen = value.clone();
+        self.text = value;
+    }
+
+    fn type_char(&mut self, db: &Db, c: char) {
+        self.text.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+        block_on(db.update_with_large_value_mutations(
+            "docs",
+            row(),
+            BTreeMap::new(),
+            vec![LargeValueUpdate::TextEdit {
+                column: "body".to_owned(),
+                text: self.text.clone(),
+                edited_from: self.seen.clone(),
+            }],
+            UpdateOptions::default(),
+        ))
+        .unwrap();
+        self.seen = self.text.clone();
+    }
+}
+
+/// Two editors typing at once, a keystroke each per round; with `lag`,
+/// each shows the column's merged value only every other round, so it
+/// types over text it has not shown yet (its store has).
+fn type_together(start: &str, a: (usize, &str), b: (usize, &str), lag: bool) -> String {
+    let server = block_on(Db::open(config(0x60))).unwrap();
+    let mut da = connect(block_on(Db::open(config(0x91))).unwrap(), &server);
+    let mut db = connect(block_on(Db::open(config(0x92))).unwrap(), &server);
+    insert(&da.db, start);
+    settle(&server, &mut [&mut da, &mut db]);
+    let mut ea = Editor::new(start, a.0);
+    let mut eb = Editor::new(start, b.0);
+    let (ac, bc): (Vec<char>, Vec<char>) = (a.1.chars().collect(), b.1.chars().collect());
+    for i in 0..ac.len().max(bc.len()) {
+        if let Some(&c) = ac.get(i) {
+            ea.type_char(&da.db, c);
+        }
+        if let Some(&c) = bc.get(i) {
+            eb.type_char(&db.db, c);
+        }
+        settle(&server, &mut [&mut da, &mut db]);
+        if !lag || i % 2 == 1 {
+            ea.refresh(body(&da.db));
+            eb.refresh(body(&db.db));
+        }
+    }
+    settle(&server, &mut [&mut da, &mut db]);
+    ea.refresh(body(&da.db));
+    eb.refresh(body(&db.db));
+    let merged = body(&server);
+    assert_eq!(ea.text, merged);
+    assert_eq!(eb.text, merged);
+    merged
+}
+
+/// Alice types at the end of one paragraph while Bob types at the start of
+/// the next, both a keystroke at a time; whether their editors show each
+/// other's text before the next keystroke or after it, both sentences
+/// stay whole.
+#[test]
+fn two_people_typing_next_to_each_other_keep_every_character() {
+    // Short (inline) and over the 4 KiB threshold (chunked).
+    for intro in [String::new(), format!("{}\n\n", text(6 * 1024, 29))] {
+        let start = format!("{intro}Start here.\n\nSecond paragraph.");
+        let (a, b) = (intro.len() + 11, intro.len() + 13);
+        for lag in [false, true] {
+            assert_eq!(
+                type_together(&start, (a, " Alice was here."), (b, "Bob says hi. "), lag),
+                format!("{intro}Start here. Alice was here.\n\nBob says hi. Second paragraph."),
+                "lag: {lag}, {} bytes",
+                start.len()
+            );
+        }
+    }
+}
+
+/// Two people typing at the very same spot both keep every character.
+/// When each sees the other's keystrokes before typing the next, each word
+/// stays whole; typing over keystrokes not yet shown, the letters
+/// interleave in the order the authority sequenced them.
+#[test]
+fn two_people_typing_at_one_spot_keep_every_character() {
+    let start = "Start here.\n\nSecond paragraph.";
+    for (lag, expected) in [
+        (false, "Start here.AAAA BBBB \n\nSecond paragraph."),
+        (true, "Start here.ABABABAB \n\nSecond paragraph."),
+    ] {
+        assert_eq!(
+            type_together(start, (11, "AAAA "), (11, "BBBB "), lag),
+            expected,
+            "lag: {lag}"
+        );
+    }
+}
+
+/// Someone deletes what this editor just typed and goes on typing; the
+/// editor, showing the value from before its keystroke again, types into
+/// it. Its edit names that value, which it did show, and keeps the other
+/// person's text.
+#[test]
+fn an_edit_from_a_value_that_came_back_keeps_the_other_writer() {
+    for (start, typed, back, then, edit, merged) in [
+        (
+            "Hello",
+            "Hello!",
+            "Hello",
+            "Hello there, friend",
+            "Why Hello",
+            "Why Hello there, friend",
+        ),
+        ("", "hi", "", "Bob", "Z", "BobZ"),
+    ] {
+        let server = block_on(Db::open(config(0x64))).unwrap();
+        let mut da = connect(block_on(Db::open(config(0x95))).unwrap(), &server);
+        let mut db = connect(block_on(Db::open(config(0x96))).unwrap(), &server);
+        insert(&da.db, start);
+        settle(&server, &mut [&mut da, &mut db]);
+        let mut alice = Editor::new(start, start.len());
+        for c in typed[start.len()..].chars() {
+            alice.type_char(&da.db, c);
+        }
+        settle(&server, &mut [&mut da, &mut db]);
+        write_whole(&db.db, back);
+        settle(&server, &mut [&mut da, &mut db]);
+        alice.refresh(body(&da.db));
+        assert_eq!(alice.text, back);
+        write_whole(&db.db, then);
+        settle(&server, &mut [&mut da, &mut db]);
+        // Alice's store holds Bob's text; her editor still shows `back`.
+        alice.cursor = 0;
+        for c in edit[..edit.len() - back.len()].chars() {
+            alice.type_char(&da.db, c);
+        }
+        settle(&server, &mut [&mut da, &mut db]);
+        assert_eq!(body(&server), merged, "from {start:?}");
+    }
+}
+
+/// Two editors over one column through one store each name the value they
+/// showed, and both keep their text.
+#[test]
+fn two_editors_through_one_store_keep_both_edits() {
+    let db = block_on(Db::open(config(0x65))).unwrap();
+    insert(&db, "abc");
+    let (mut one, mut two) = (Editor::new("abc", 3), Editor::new("abc", 3));
+    one.type_char(&db, 'X');
+    two.type_char(&db, 'Y');
+    assert_eq!(body(&db), "abcXY");
+}
+
+/// An edit from the value the store holds is written as it is, even when
+/// that value equals one of the store's own earlier writes (someone undid
+/// its last edit, and the editor shows that).
+#[test]
+fn an_edit_from_the_held_value_is_written_as_is() {
+    let db = block_on(Db::open(config(0x63))).unwrap();
+    insert(&db, "Bring the ");
+    let mut editor = Editor::new("Bring the ", 10);
+    for c in "van".chars() {
+        editor.type_char(&db, c);
+    }
+    write_whole(&db, "Bring the ");
+    editor.refresh(body(&db));
+    editor.cursor = editor.text.len();
+    for c in "keys".chars() {
+        editor.type_char(&db, c);
+    }
+    assert_eq!(body(&db), "Bring the keys");
+}
+
+/// Two or three people typing at the same spot, with keystrokes, sync
+/// steps and renders in a random order (as in a browser: several
+/// keystrokes before a round trip, renders whenever a value arrives):
+/// every character typed is kept, in the order each person typed it, and
+/// everyone ends with the same text.
+#[test]
+fn same_spot_typing_in_any_order_keeps_every_character() {
+    // Letters, letters with spaces, and digits (a number anchors no diff).
+    let typed = ["abcdefghijklmnopqrst", "ABCD EFGH IJKL MNOP", "0123456789"];
+    // Short (inline), and over the 4 KiB threshold (chunked).
+    let long = format!("{}\n\n", text(6 * 1024, 31));
+    for (intro, people, seeds) in [("", 2usize, 30u64), ("", 3, 30), (long.as_str(), 2, 8)] {
+        let start = format!("{intro}-- --");
+        let at = intro.len() + 3;
+        for seed in 1..=seeds {
+            let server = block_on(Db::open(config(0x70))).unwrap();
+            let mut devices: Vec<Device> = (0..people)
+                .map(|n| connect(block_on(Db::open(config(0x97 + n as u8))).unwrap(), &server))
+                .collect();
+            insert(&devices[0].db, &start);
+            settle(&server, &mut devices.iter_mut().collect::<Vec<_>>());
+            let mut editors: Vec<Editor> = (0..people).map(|_| Editor::new(&start, at)).collect();
+            let mut next = vec![0usize; people];
+            let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+            let mut roll = |n: u64| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state % n
+            };
+            while (0..people).any(|who| next[who] < typed[who].chars().count()) {
+                let who = roll(people as u64) as usize;
+                let device = &devices[who];
+                match roll(4) {
+                    0 | 1 if next[who] < typed[who].chars().count() => {
+                        let c = typed[who].chars().nth(next[who]).unwrap();
+                        editors[who].type_char(&device.db, c);
+                        next[who] += 1;
+                    }
+                    2 => block_on(device.db.tick()).unwrap(),
+                    _ => {
+                        block_on(server.tick()).unwrap();
+                        editors[who].refresh(body(&device.db));
+                    }
+                }
+            }
+            settle(&server, &mut devices.iter_mut().collect::<Vec<_>>());
+            let merged = body(&server);
+            for (editor, device) in editors.iter_mut().zip(&devices) {
+                editor.refresh(body(&device.db));
+                assert_eq!(
+                    editor.text,
+                    merged,
+                    "{people} people, {} bytes, seed {seed}",
+                    start.len()
+                );
+            }
+            for word in &typed[..people] {
+                let mine: String = merged[intro.len()..]
+                    .chars()
+                    .filter(|c| *c != ' ' && word.contains(*c))
+                    .collect();
+                assert_eq!(
+                    mine,
+                    word.replace(' ', ""),
+                    "{people} people, {} bytes, seed {seed}: {merged:?}",
+                    start.len()
+                );
+            }
+        }
+    }
 }

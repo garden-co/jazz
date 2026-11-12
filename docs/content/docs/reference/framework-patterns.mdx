@@ -1,59 +1,127 @@
 ---
 title: Framework Patterns
-description: Side-by-side reference for React/Expo, Vue, Svelte, and Solid Jazz APIs.
+description: "Look up the matching Jazz API in React and Expo, Vue, Svelte and Solid."
 reviewedAt: "b29b48d1a"
 ---
 
 Jazz provides framework-specific bindings for React/Expo, Vue, Svelte, and Solid. This page
 is a side-by-side reference&hairsp;—&hairsp;see [Reading Data](/docs/reading/queries),
-[Writing Data](/docs/writing/writing-data), and [Sessions](/docs/setup/auth/sessions) for
+[Writing Data](/docs/writing/writing-data), and [How Auth Works](/docs/setup/auth/backend#the-session) for
 full details.
 
 ## API equivalents
 
-| Concept            | React / Expo                     | Vue                               | Svelte                            | Solid                         |
-| ------------------ | -------------------------------- | --------------------------------- | --------------------------------- | ----------------------------- |
-| Provider           | `<JazzProvider config={config}>` | `<JazzProvider :config="config">` | `<JazzSvelteProvider {config}>`   | `<JazzProvider config={...}>` |
-| Query subscription | `useAll(query)`                  | `useAll(query)`                   | `new QuerySubscription(query)`    | `useAll(() => ({ query }))`   |
-| Single-row query   | `useOne(query)`                  | `useOne(query)`                   | `new QuerySubscriptionOne(query)` | `useOne(() => ({ query }))`   |
-| DB access          | `useDb()`                        | `useDb()`                         | `getDb()`                         | `useDb()`                     |
-| Session            | `useSession()`                   | `useSession()`                    | `getSession()`                    | `useSession()`                |
-| Client creation    | `createJazzClient(config)`       | `createJazzClient(config)`        | `createJazzClient(config)`        | `createSolidJazzClient(...)`  |
+| Concept            | React / Expo                | Vue                         | Svelte                            | Solid                       |
+| ------------------ | --------------------------- | --------------------------- | --------------------------------- | --------------------------- |
+| Provider           | `<JazzProvider>`            | `<JazzProvider>`            | `<JazzProvider>`                  | `<JazzProvider>`            |
+| Auth actions       | `useJazzAuth()`             | `useJazzAuth()`             | `useJazzAuth()`                   | `useJazzAuth()`             |
+| Query subscription | `useAll(query)`             | `useAll(query)`             | `new QuerySubscription(query)`    | `useAll(() => ({ query }))` |
+| Single-row query   | `useOne(query)`             | `useOne(query)`             | `new QuerySubscriptionOne(query)` | `useOne(() => ({ query }))` |
+| DB access          | `useAll(query).db`          | `useAll(query).db`          | `subscription.db`                 | `useAll(...).db`            |
+| Write-only DB      | `useDb()`                   | `useDb()`                   | `getDb()`                         | `useDb()`                   |
+| Session            | `useSession()`              | `useSession()`              | `getSession().current`            | `useSession()`              |
+| Client without UI  | `createJazzClient(options)` | `createJazzClient(options)` | `createJazzClient(options)`       | `createJazzClient(options)` |
 
 ## Provider setup
 
-Wrap your app in a provider to make the database available to every component.
-Svelte callers that create their own client can use `JazzSvelteClientProvider`
-instead; it accepts a client or client promise and leaves shutdown to the caller.
-
-In Solid, use `JazzClientProvider` instead when you already own a client created with
-`createSolidJazzClient`. `JazzClientProvider` does not shut down caller-owned clients.
+Wrap your app in `<JazzProvider>`. It takes the same options as `createJazzClient` (`serverUrl`,
+`client`, `initial` and the rest; see [Thin Client](/docs/setup/web-client/thin-client)) and shows
+what you give it while the user is signed out, while Jazz starts and when it fails.
 
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
   <Tab value="React">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-react/src/framework-pattern-snippets.tsx#provider-react
-    </include>
+    ```tsx title="App.tsx"
+    import { JazzProvider } from "jazz-tools/react";
+
+    export function Root() {
+      return (
+        <JazzProvider
+          client={() => import("jazz-tools/local-first")}
+          signedOut={<SignIn />}
+          loading={<p>Loading…</p>}
+          error={(state) => <button onClick={state.retry}>{state.error?.message}: retry</button>}
+        >
+          <App />
+        </JazzProvider>
+      );
+    }
+    ```
+
   </Tab>
   <Tab value="Vue">
-    <include cwd lang="vue" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/ProviderExample.vue
-    </include>
+    ```vue title="App.vue"
+    <script setup lang="ts">
+    import { JazzProvider } from "jazz-tools/vue";
+    const client = () => import("jazz-tools/local-first");
+    </script>
+
+    <template>
+      <JazzProvider :client="client">
+        <TodoApp />
+        <template #signedOut><SignIn /></template>
+        <template #loading><p>Loading…</p></template>
+        <template #error="{ error, retry }">
+          <button @click="retry">{{ error.message }}: retry</button>
+        </template>
+      </JazzProvider>
+    </template>
+    ```
+
+    `client` and the other `createJazzClient` options pass through as attributes, so they aren't
+    type-checked in templates yet. Write them in camelCase (`:clearOnSignOut="true"`): kebab-case
+    attributes such as `clear-on-sign-out` aren't picked up for now.
+
   </Tab>
   <Tab value="Svelte">
-    <include cwd lang="svelte" meta='title="App.svelte"'>
-      ../examples/docs/todo-client-localfirst-svelte/src/ProviderExample.svelte#provider-svelte
-    </include>
+    ```svelte title="App.svelte"
+    <script lang="ts">
+      import { JazzProvider } from "jazz-tools/svelte";
+    </script>
+
+    <JazzProvider client={() => import("jazz-tools/local-first")}>
+      <TodoApp />
+      {#snippet signedOut()}<SignIn />{/snippet}
+      {#snippet loading()}<p>Loading…</p>{/snippet}
+      {#snippet error(error, retry)}
+        <button onclick={retry}>{error.message}: retry</button>
+      {/snippet}
+    </JazzProvider>
+    ```
+
+    Call `getDb()`, `getJazzSession()` and the other `get…` helpers during component setup (the
+    top level of a component's `<script>`), not later in an event handler.
+
+    In SvelteKit, render the provider only in the browser (`{#if browser}` from `$app/environment`)
+    and load server-rendered data in `+page.server.ts` with
+    [`jazz.forReqUser`](/docs/setup/deployment/own-server#user-scoped-use). For production builds,
+    add `ssr: { external: ["jazz-napi"] }` to `vite.config.ts` so Vite doesn't bundle Jazz's native
+    module. Behind a proxy that terminates TLS, set `adapter-node`'s `PROTOCOL_HEADER` (for example
+    `x-forwarded-proto`), or Jazz sees `http://` and refuses sign-in as an origin it doesn't allow.
+
   </Tab>
   <Tab value="Solid">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-solid/src/ProviderExample.tsx
-    </include>
+    ```tsx title="App.tsx"
+    import { JazzProvider } from "jazz-tools/solid";
+
+    export function Root() {
+      return (
+        <JazzProvider
+          client={() => import("jazz-tools/local-first")}
+          signedOut={<SignIn />}
+          loading={<p>Loading…</p>}
+          error={(error, retry) => <button onClick={retry}>{error.message}: retry</button>}
+        >
+          <App />
+        </JazzProvider>
+      );
+    }
+    ```
+
   </Tab>
 </Tabs>
 
-Vue's `JazzProvider` creates and shuts down its client. If you already have a client, pass it
-to `JazzClientProvider` instead; you remain responsible for shutting that client down.
+Leave out `client` for a thin client. The provider creates its session when it mounts and closes it
+when it unmounts; use a `key` to replace it with new options.
 
 ## Query subscriptions
 
@@ -116,7 +184,7 @@ Get a handle to the database for inserts, updates, and deletes. See [Writing Dat
 
 ## Session/user identity
 
-Access the current user's session. See [Sessions](/docs/setup/auth/sessions) for details on authentication modes and identity linking.
+Access the current user's session. See [How Auth Works](/docs/setup/auth/backend#the-session) for details on authentication modes and identity linking.
 
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
   <Tab value="React">
