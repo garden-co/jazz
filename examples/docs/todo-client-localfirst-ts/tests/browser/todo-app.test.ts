@@ -39,6 +39,22 @@ async function waitFor(check: () => boolean, timeoutMs: number, message: string)
   throw new Error(`Timeout: ${message}`);
 }
 
+/**
+ * The list row showing this title, if any. Every guest can read every todo
+ * here, and all tests share one server, so a local-first client also shows
+ * other tests' todos: find this test's own rows, not a row count.
+ */
+function rowFor(el: HTMLElement, title: string): HTMLLIElement | undefined {
+  return [...el.querySelectorAll<HTMLLIElement>("#todo-list li")].find(
+    (li) => li.querySelector("span")?.textContent === title,
+  );
+}
+
+/** A title no other test uses. */
+function unique(title: string): string {
+  return `${title} ${crypto.randomUUID()}`;
+}
+
 /** Submit a todo via the app's form. */
 function addTodo(container: HTMLElement, title: string) {
   const input = container.querySelector<HTMLInputElement>("#title-input")!;
@@ -86,6 +102,10 @@ describe("Vanilla TS Todo App E2E", () => {
       serverUrl: SERVER_URL,
       driver: { type: "persistent", dbName: crypto.randomUUID() },
       store: memoryAccountStore(),
+      // Open local-first from the first render: these tests check local
+      // persistence, which the thin client doesn't keep.
+      client: () => import("jazz-tools/local-first"),
+      localFirst: "now",
       ...overrides,
       // A fixed key restores that device account; otherwise each store gets a new one.
       ...(secret === undefined ? {} : { initial: "signed-out" as const }),
@@ -122,66 +142,59 @@ describe("Vanilla TS Todo App E2E", () => {
     const title = '<img src="invalid" data-injected-title="true">';
     const description = '<img src="invalid" data-injected-description="true">';
 
-    addTodo(el, "Initial title");
+    const initial = unique("Initial title");
+    addTodo(el, initial);
 
     await waitFor(
-      () => el.querySelectorAll("#todo-list li").length === 1,
+      () => rowFor(el, initial) !== undefined,
       3000,
       "Todo should appear after submission",
     );
 
-    const todoId = el.querySelector<HTMLSelectElement>("#parent-select")?.options[1]?.value;
+    const todoId = [...el.querySelector<HTMLSelectElement>("#parent-select")!.options].find(
+      (option) => option.textContent === initial,
+    )?.value;
     if (!todoId) throw new Error("Submitted todo should be selectable as a parent");
     db.update(app.todos, todoId, { title, description });
 
-    await waitFor(
-      () => el.querySelector("#todo-list li span")?.textContent === title,
-      3000,
-      "Updated todo should render",
-    );
+    await waitFor(() => rowFor(el, title) !== undefined, 3000, "Updated todo should render");
 
-    expect(el.querySelector("#todo-list li span")?.textContent).toBe(title);
-    expect(el.querySelector("#todo-list li small")?.textContent).toBe(description);
+    expect(rowFor(el, title)!.querySelector("small")?.textContent).toBe(description);
     expect(el.querySelector("[data-injected-title], [data-injected-description]")).toBeNull();
   });
 
   it("renders child todos directly under their parent with nesting depth", async () => {
     const el = await mount();
 
-    addTodo(el, "Parent task");
+    const parent = unique("Parent task");
+    const child = unique("Child task");
+    addTodo(el, parent);
 
-    await waitFor(
-      () => el.querySelectorAll("#todo-list li").length === 1,
-      3000,
-      "Parent todo should appear",
-    );
+    await waitFor(() => rowFor(el, parent) !== undefined, 3000, "Parent todo should appear");
 
-    addTodoWithParent(el, "Child task", "Parent task");
+    addTodoWithParent(el, child, parent);
 
-    await waitFor(
-      () => el.querySelectorAll("#todo-list li").length === 2,
-      3000,
-      "Child todo should appear",
-    );
+    await waitFor(() => rowFor(el, child) !== undefined, 3000, "Child todo should appear");
 
-    const items = [...el.querySelectorAll<HTMLLIElement>("#todo-list li")];
-    const titles = items.map((li) => li.querySelector("span")!.textContent);
-    expect(titles).toEqual(["Parent task", "Child task"]);
-    expect(items[0].dataset.depth).toBe("0");
-    expect(items[1].dataset.depth).toBe("1");
+    // The child renders directly under its parent, one level deeper.
+    const parentRow = rowFor(el, parent)!;
+    expect(parentRow.nextElementSibling).toBe(rowFor(el, child));
+    expect(parentRow.dataset.depth).toBe("0");
+    expect(rowFor(el, child)!.dataset.depth).toBe("1");
   });
 
   it("persists todos across app destroy and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
+    const title = unique("Survive reload");
     // One store: the second mount reopens the first one's device account.
     const store = memoryAccountStore();
 
     // First session: mount, add todo, destroy
     const el1 = await mount({ store, driver: { type: "persistent", dbName } });
-    addTodo(el1, "Survive reload");
+    addTodo(el1, title);
 
     await waitFor(
-      () => el1.querySelectorAll("#todo-list li").length === 1,
+      () => rowFor(el1, title) !== undefined,
       3000,
       "Todo should appear in first session",
     );
@@ -192,12 +205,10 @@ describe("Vanilla TS Todo App E2E", () => {
     const el2 = await mount({ store, driver: { type: "persistent", dbName } });
 
     await waitFor(
-      () => el2.querySelectorAll("#todo-list li").length === 1,
+      () => rowFor(el2, title) !== undefined,
       5000,
       "Todo should survive remount from IndexedDB",
     );
-
-    expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Survive reload");
   });
 
   it("syncs a todo between two app instances through the server", async () => {
@@ -231,21 +242,16 @@ describe("Vanilla TS Todo App E2E", () => {
     await new Promise((r) => setTimeout(r, 750));
 
     // Add a todo in app 1
-    addTodo(el1, "Synced todo");
+    const title = unique("Synced todo");
+    addTodo(el1, title);
 
-    await waitFor(
-      () => el1.querySelectorAll("#todo-list li").length === 1,
-      3000,
-      "Todo should appear in app 1",
-    );
+    await waitFor(() => rowFor(el1, title) !== undefined, 3000, "Todo should appear in app 1");
 
     // Wait for it to appear in app 2 via server sync
     await waitFor(
-      () => el2.querySelectorAll("#todo-list li").length === 1,
+      () => rowFor(el2, title) !== undefined,
       10000,
       "Todo should sync to app 2 through the server",
     );
-
-    expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Synced todo");
   });
 });

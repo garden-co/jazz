@@ -40,6 +40,15 @@ function typeInto(input: HTMLInputElement, value: string) {
 // Tests
 // ---------------------------------------------------------------------------
 
+/**
+ * Whether the list shows a todo with this title. Every account can read every
+ * todo here, and all tests share one server, so a local-first client also
+ * shows other tests' todos: look for this test's own, not a row count.
+ */
+function hasTodo(el: HTMLElement, title: string): boolean {
+  return [...el.querySelectorAll("#todo-list li span")].some((span) => span.textContent === title);
+}
+
 describe("React Todo App E2E", () => {
   const mounts: Array<{
     root: Root;
@@ -69,6 +78,9 @@ describe("React Todo App E2E", () => {
       appId: SCOPE,
       store: memoryAccountStore(),
       driver: { type: "persistent", dbName: crypto.randomUUID() },
+      // Open local-first from the first render: these tests check local
+      // persistence and offline-style writes, which the thin client doesn't keep.
+      localFirst: "now",
       ...overrides,
     };
     // A fixed device key: open signed out, then restore that account.
@@ -145,6 +157,7 @@ describe("React Todo App E2E", () => {
 
   it("persists todos across app unmount and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
+    const title = `Survive reload ${crypto.randomUUID()}`;
     // One store: the second mount reopens the same device account.
     const store = memoryAccountStore();
 
@@ -154,15 +167,11 @@ describe("React Todo App E2E", () => {
     const form1 = input1.closest("form")!;
 
     await act(async () => {
-      typeInto(input1, "Survive reload");
+      typeInto(input1, title);
       form1.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
 
-    await waitFor(
-      () => el1.querySelectorAll("#todo-list li").length === 1,
-      3000,
-      "Todo should appear in first session",
-    );
+    await waitFor(() => hasTodo(el1, title), 3000, "Todo should appear in first session");
 
     // Unmount (triggers db.shutdown, flushes IndexedDB)
     await unmountApp(el1);
@@ -170,16 +179,11 @@ describe("React Todo App E2E", () => {
     // Second session: remount with same dbName — IndexedDB data should load
     const el2 = await mountApp({ store, driver: { type: "persistent", dbName } });
 
-    await waitFor(
-      () => el2.querySelectorAll("#todo-list li").length === 1,
-      5000,
-      "Todo should survive remount from IndexedDB",
-    );
-
-    expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Survive reload");
+    await waitFor(() => hasTodo(el2, title), 5000, "Todo should survive remount from IndexedDB");
   });
 
   it("syncs a todo between two app instances through the server", async () => {
+    const title = `Synced todo ${crypto.randomUUID()}`;
     (globalThis as { __JAZZ_SUBSCRIPTION_TRACE__?: boolean }).__JAZZ_SUBSCRIPTION_TRACE__ = true;
     const serverUrl = SERVER_URL;
 
@@ -203,24 +207,14 @@ describe("React Todo App E2E", () => {
     const form1 = input1.closest("form")!;
 
     await act(async () => {
-      typeInto(input1, "Synced todo");
+      typeInto(input1, title);
       form1.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
 
-    await waitFor(
-      () => el1.querySelectorAll("#todo-list li").length === 1,
-      3000,
-      "Todo should appear in app 1",
-    );
+    await waitFor(() => hasTodo(el1, title), 3000, "Todo should appear in app 1");
 
     // Wait for it to appear in app 2 via server sync
-    await waitFor(
-      () => el2.querySelectorAll("#todo-list li").length === 1,
-      20000,
-      "Todo should sync to app 2 through the server",
-    );
-
-    expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Synced todo");
+    await waitFor(() => hasTodo(el2, title), 20000, "Todo should sync to app 2 through the server");
   });
 
   it("syncs a todo between two app instances through the server without local persistence", async () => {
