@@ -1,12 +1,8 @@
-//! Actor storage uses Rivet's unmodified asynchronous SQLite worker.
-//! JazzRivetAppIdV1 is unchanged: UUIDv5(URL, UTF-8("jazz-rivet-v1:" + actor id)).
-mod actor;
+//! Jazz hosted by a public RivetKit actor and its actor-owned SQLite database.
+pub mod actor;
 mod scratch;
 mod sql;
 mod storage;
-pub use actor::ActorStore;
-pub use sql::{Store, Transaction};
-use sqlite_embedded::vfs::SqliteTransportHandle;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -21,36 +17,33 @@ pub fn app_id_for_actor(actor_id: &str) -> jazz::tools::AppId {
     jazz::tools::AppId::from_string(&id.to_string()).expect("UUIDv5 is a UUID")
 }
 
-/// One worker per actor generation. A crashed server must restart the actor;
-/// it must never silently reopen stale or ambiguously committed storage.
 pub fn worker_store(
-    transport: SqliteTransportHandle,
-    actor_id: String,
-    generation: u64,
+    db: rivetkit::SqliteDb,
     runtime: tokio::runtime::Handle,
+    on_failure: impl Fn(String) + Send + Sync + 'static,
 ) -> jazz_server::runtime::WorkerStore {
     let opened = Arc::new(AtomicBool::new(false));
-    let scratch_runtime = runtime.clone();
+    let on_failure: Arc<dyn Fn(String) + Send + Sync> = Arc::new(on_failure);
     jazz_server::runtime::WorkerStore::new(
         move || {
             if opened.swap(true, Ordering::SeqCst) {
-                return Err("Restart the actor before reopening its SQLite worker".into());
+                return Err("Restart the actor before reopening Jazz".into());
             }
             let _runtime = runtime.enter();
-            futures::executor::block_on(open_store(transport.clone(), actor_id.clone(), generation))
-                .map_err(|e| e.to_string())
-        },
-        move || {
-            let _runtime = scratch_runtime.enter();
-            futures::executor::block_on(open_store(
-                Arc::new(scratch::Scratch::default()),
-                format!("jazz-scratch-{}", uuid::Uuid::new_v4()),
-                1,
+            futures::executor::block_on(storage::open_store_with_failure(
+                db.clone(),
+                on_failure.clone(),
             ))
-            .map_err(|error| error.to_string())
+            .map_err(|e| e.to_string())
         },
+        || futures::executor::block_on(scratch::open()).map_err(|e| e.to_string()),
     )
 }
+
+#[cfg(feature = "testing")]
+pub use scratch::open as test_scratch;
+#[cfg(feature = "testing")]
+pub use storage::test_connection;
 
 #[cfg(test)]
 mod tests {

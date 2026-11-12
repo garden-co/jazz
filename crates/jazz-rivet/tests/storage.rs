@@ -1,6 +1,6 @@
 mod support;
 use std::sync::Arc;
-use support::Pages;
+use support::DatabaseFixture;
 
 /// Alice's authenticated backend creates her account through the ordinary
 /// server routes. After the host stops, the next host resolves the same account;
@@ -9,18 +9,13 @@ use support::Pages;
 #[tokio::test(flavor = "multi_thread")]
 async fn server_accounts_survive_host_restart() -> anyhow::Result<()> {
     use jazz_server::{AuthConfig, EmbeddedServer, ServerBuilder, ShutdownPhase, StorageBackend};
-    let pages = Arc::new(Pages::default());
+    let pages = Arc::new(DatabaseFixture::default());
     let actor_id = uuid::Uuid::new_v4().to_string();
     let app_id = jazz::tools::AppId::random();
     let secret = "test-backend-secret-at-least-32-characters";
     let mut account = None;
     for first in [true, false] {
-        let storage = jazz_rivet::worker_store(
-            pages.clone(),
-            actor_id.clone(),
-            1,
-            tokio::runtime::Handle::current(),
-        );
+        let storage = support::worker_store(pages.clone(), actor_id.clone()).await?;
         let runtime = tokio::runtime::Handle::current();
         let built = tokio::task::spawn_blocking(move || {
             runtime.block_on(
@@ -75,10 +70,12 @@ async fn server_accounts_survive_host_restart() -> anyhow::Result<()> {
 }
 
 const SECRET: &str = "test-backend-secret-at-least-32-characters";
-async fn start(pages: Arc<Pages>, actor: &str) -> anyhow::Result<jazz_server::EmbeddedServer> {
+async fn start(
+    pages: Arc<DatabaseFixture>,
+    actor: &str,
+) -> anyhow::Result<jazz_server::EmbeddedServer> {
     let app = jazz_rivet::app_id_for_actor(actor);
-    let storage =
-        jazz_rivet::worker_store(pages, actor.into(), 1, tokio::runtime::Handle::current());
+    let storage = support::worker_store(pages, actor.into()).await?;
     let runtime = tokio::runtime::Handle::current();
     let built = tokio::task::spawn_blocking(move || {
         runtime.block_on(
@@ -254,7 +251,7 @@ async fn request(
 #[tokio::test(flavor = "multi_thread")]
 async fn deployed_database_serves_authenticated_socket_and_reopens() -> anyhow::Result<()> {
     use jazz::thin::{ThinBody, ThinOp};
-    let pages = Arc::new(Pages::default());
+    let pages = Arc::new(DatabaseFixture::default());
     let actor = uuid::Uuid::new_v4().to_string();
     let server = start(pages.clone(), &actor).await?;
     let bundle = deploy(&server).await?;
@@ -357,7 +354,7 @@ async fn deployed_database_serves_authenticated_socket_and_reopens() -> anyhow::
 /// alice -> admitted commit (paused) -> disconnect -> close waits -> commit -> reopen
 #[tokio::test(flavor = "multi_thread")]
 async fn disconnected_request_finishes_before_storage_closes() -> anyhow::Result<()> {
-    let pages = Arc::new(Pages::default());
+    let pages = Arc::new(DatabaseFixture::default());
     let actor = uuid::Uuid::new_v4().to_string();
     let server = Arc::new(start(pages.clone(), &actor).await?);
     let pause = pages.pause_next_commit();

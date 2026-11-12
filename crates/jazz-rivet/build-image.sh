@@ -4,7 +4,7 @@
 # Requires a running Docker daemon. Does not push to a registry or deploy.
 set -eu
 cd "$(dirname "$0")/../.."
-tag="${1:-jazz-rivet:3.0.7}"
+tag="${1:-jazz-rivet:local}"
 mkdir -p crates/jazz-rivet/artifacts
 docker build --platform linux/amd64 -f crates/jazz-rivet/Dockerfile -t "$tag" .
 docker save -o crates/jazz-rivet/artifacts/image.tar "$tag"

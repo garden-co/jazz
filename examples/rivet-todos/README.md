@@ -2,8 +2,8 @@
 
 A browser todo app using `createJazz({ store: rivet(...) })`. The TypeScript
 backend authenticates local-first guests and publishes the schema and row
-permissions. Rivet hosts the Jazz core database in an actor, using its unmodified
-async SQLite worker. Browser storage remains local-first.
+permissions. Rivet hosts the Jazz core database in an actor, using RivetKit’s public
+`ctx.sql()` API. Browser storage remains local-first.
 
 ```text
 Browser → Vite /jazz backend → Rivet gateway → Jazz actor → Rivet SQLite / WarpDrive
@@ -16,7 +16,7 @@ tasks. Authentication is configured in `jazz.server.ts`; policies live in
 ## Run against an existing Rivet engine
 
 Requirements: Node 22.12+, pnpm, Rustup, and a Rivet 3.0+ engine with an existing
-`jazz` runner pool and an API token. The actor SDK is pinned to 3.0.7; the Rust
+`jazz` runner pool and an API token. The lockfile currently uses RivetKit 3.1.1; the Rust
 crate selects Rust 1.99.1. This example does not install or start the Rivet engine.
 
 From the repository root, install dependencies and build the SDK:
@@ -82,5 +82,5 @@ pnpm build
 
 `pnpm preview` serves the built browser app with the same Rivet backend and reads
 `.env.local`. Neither build nor typecheck needs Rivet credentials. Rust adapter
-and full-server tests live in `crates/jazz-rivet`; they use the real Rivet SQLite
-worker with a deterministic page service, not a live WarpDrive cluster.
+and full-server tests live in `crates/jazz-rivet`; they use real RivetKit actor databases against a local Rivet engine.
+They do not exercise managed Cloud provisioning.
