@@ -10,7 +10,7 @@ use jazz::wire::{
     TransportError, WireAuthorityEndpoint, WireError, WireFrame, WireHello, WirePeerRole,
     WireTransport, current_wire_features, decode_frame, encode_frame, negotiate_wire,
 };
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -25,6 +25,36 @@ use jazz::tools::native_transport_connector::{
 use jazz::tools::websocket_prelude_auth::AuthConfig;
 
 const WS_CLIENT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// When a link that carries nothing is given up.
+///
+/// A link that dies without closing (Wi-Fi off, a suspended server, a
+/// half-open TCP path) reports no error and no EOF: without a deadline it
+/// stays "connected" until the OS or the server's idle timeout (60 s) closes
+/// the socket. "Carries nothing" means the peer gave no sign of life: no byte
+/// arrived, and no write that was waiting on a full send buffer went through.
+/// A large message arriving slowly is progress, and so is a slow upload, since
+/// TCP only frees send buffer on the peer's ACK. A write into a buffer that
+/// has room is not: the kernel takes it whether the peer is there or not.
+///
+/// The client never pings. The server pings an idle link every 20 s
+/// (`WS_KEEPALIVE_PING_INTERVAL` in `jazz-server`), so the deadline sits above
+/// that, and a client ping would be one more message for a server whose
+/// writer queue is already full: it breaks the connection when it cannot
+/// queue a Pong.
+#[derive(Clone, Copy, Debug)]
+struct LivenessPolicy {
+    silence_deadline: Duration,
+    /// How often the pump checks. A check that comes more than two ticks
+    /// late means the runtime or the process was not running (a blocked
+    /// executor, an app suspended by the OS); that time is not the peer's
+    /// silence.
+    tick: Duration,
+}
+
+const WS_CLIENT_LIVENESS: LivenessPolicy = LivenessPolicy {
+    silence_deadline: Duration::from_secs(25),
+    tick: Duration::from_millis(500),
+};
 // The serving route caps client-to-server WebSocket messages at one MiB. Keep
 // a small postcard framing reserve so a burst of individually-valid wire
 // frames never becomes an invalid request message.
@@ -449,9 +479,10 @@ impl WebSocketTransport {
         } = upgrade;
         let deadline = tokio::time::Instant::now() + WS_CLIENT_HANDSHAKE_TIMEOUT;
         let url = ws_url(base_url.as_ref(), app_id);
+        let activity = LinkActivity::new();
         let (mut ws, _) = tokio::time::timeout_at(
             deadline,
-            open_client_websocket(url, authorization.as_deref()),
+            open_client_websocket(url, authorization.as_deref(), Arc::clone(&activity)),
         )
         .await
         .map_err(|_| NativeConnectFailure::WebSocket(WebSocketClientError::HandshakeTimeout))??;
@@ -505,6 +536,7 @@ impl WebSocketTransport {
         let task = tokio::spawn(async move {
             let terminal = run_ws_pump(
                 ws,
+                Liveness::new(activity, WS_CLIENT_LIVENESS),
                 inbound_tx,
                 inbound_budget,
                 outbound_rx,
@@ -638,14 +670,16 @@ fn ws_url(base_url: &str, app_id: AppId) -> String {
 /// server-side accept policy in `jazz-server`'s `tcp` module (#3268).
 /// The socket is dialed by hand (to keep resolver errors typed), so
 /// `set_nodelay` is applied here rather than via `connect_async`'s flag.
+///
+/// Every byte the socket moves, TLS records included, is reported to
+/// `activity`, which the pump's silence deadline reads.
 async fn open_client_websocket(
     url: String,
     authorization: Option<&str>,
+    activity: Arc<LinkActivity>,
 ) -> Result<
     (
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
+        ClientSocket,
         tokio_tungstenite::tungstenite::handshake::client::Response,
     ),
     NativeConnectFailure,
@@ -719,7 +753,7 @@ async fn open_client_websocket(
     };
     let connection = tokio_tungstenite::client_async_tls_with_config(
         request,
-        stream,
+        Metered::new(stream, activity),
         Some(client_websocket_config()),
         None,
     )
@@ -736,12 +770,352 @@ fn client_websocket_config() -> WebSocketConfig {
         .max_frame_size(Some(MAX_WIRE_FRAME_BYTES))
 }
 
-async fn receive_server_hello(
-    ws: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+type ClientSocket = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<Metered<tokio::net::TcpStream>>,
+>;
+
+/// The last moment the peer gave a sign of life on the socket.
+struct LinkActivity {
+    origin: tokio::time::Instant,
+    /// Nanoseconds after `origin`.
+    last: AtomicU64,
+}
+
+impl LinkActivity {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            origin: tokio::time::Instant::now(),
+            last: AtomicU64::new(0),
+        })
+    }
+
+    fn touch(&self) {
+        let nanos = u64::try_from(self.origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.last.fetch_max(nanos, Ordering::Relaxed);
+    }
+
+    /// Move the last sign of life forward by `gap`, never past now: time
+    /// the pump could not have heard anything in is not the peer's silence.
+    fn excuse(&self, gap: Duration) {
+        let gap = u64::try_from(gap.as_nanos()).unwrap_or(u64::MAX);
+        let now = u64::try_from(self.origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let _ = self
+            .last
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+                Some(last.saturating_add(gap).min(now))
+            });
+    }
+
+    fn quiet_for(&self, now: tokio::time::Instant) -> Duration {
+        let last = self.origin + Duration::from_nanos(self.last.load(Ordering::Relaxed));
+        now.saturating_duration_since(last)
+    }
+}
+
+/// A socket that reports the peer's signs of life to a [`LinkActivity`]:
+/// every byte read, and every write that goes through after the send buffer
+/// was full.
+struct Metered<S> {
+    inner: S,
+    activity: Arc<LinkActivity>,
+    /// The last write found the send buffer full. The next one that goes
+    /// through means the peer acknowledged data.
+    write_blocked: bool,
+}
+
+impl<S> Metered<S> {
+    fn new(inner: S, activity: Arc<LinkActivity>) -> Self {
+        activity.touch();
+        Self {
+            inner,
+            activity,
+            write_blocked: false,
+        }
+    }
+
+    fn observe_write(&mut self, polled: &std::task::Poll<std::io::Result<usize>>) {
+        match polled {
+            std::task::Poll::Pending => self.write_blocked = true,
+            std::task::Poll::Ready(Ok(written)) if *written > 0 => {
+                if std::mem::take(&mut self.write_blocked) {
+                    self.activity.touch();
+                }
+            }
+            std::task::Poll::Ready(_) => {}
+        }
+    }
+
+    #[cfg(test)]
+    fn get_ref(&self) -> &S {
+        &self.inner
+    }
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Metered<S> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let polled = std::pin::Pin::new(&mut this.inner).poll_read(cx, buf);
+        if buf.filled().len() > before {
+            this.activity.touch();
+        }
+        polled
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Metered<S> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let polled = std::pin::Pin::new(&mut this.inner).poll_write(cx, buf);
+        this.observe_write(&polled);
+        polled
+    }
+
+    fn poll_write_vectored(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let polled = std::pin::Pin::new(&mut this.inner).poll_write_vectored(cx, bufs);
+        this.observe_write(&polled);
+        polled
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+/// The pump's silence check over a socket's [`LinkActivity`].
+struct Liveness {
+    activity: Arc<LinkActivity>,
+    policy: LivenessPolicy,
+    checked_at: tokio::time::Instant,
+}
+
+impl Liveness {
+    fn new(activity: Arc<LinkActivity>, policy: LivenessPolicy) -> Self {
+        Self {
+            activity,
+            policy,
+            checked_at: tokio::time::Instant::now(),
+        }
+    }
+
+    fn ticker(&self) -> tokio::time::Interval {
+        let mut ticker = tokio::time::interval(self.policy.tick);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker
+    }
+
+    /// Why the link is given up, if it is.
+    fn check(&mut self) -> Option<String> {
+        let now = tokio::time::Instant::now();
+        let since_last_check = now.saturating_duration_since(self.checked_at);
+        self.checked_at = now;
+        if since_last_check > self.policy.tick * 2 {
+            // The pump was not running, so nothing could have been read in
+            // that gap: excuse it, and only it. Silence from before the gap
+            // still counts, and the judgement waits a tick, so data that
+            // arrived meanwhile is read first.
+            self.activity
+                .excuse(since_last_check.saturating_sub(self.policy.tick));
+            return None;
+        }
+        let quiet = self.activity.quiet_for(now);
+        (quiet >= self.policy.silence_deadline).then(|| {
+            format!(
+                "websocket peer silent for {} ms, no byte moved either way",
+                quiet.as_millis()
+            )
+        })
+    }
+
+    /// The pump was busy handing frames to the application, which is not the
+    /// peer's silence.
+    fn resume(&mut self) {
+        self.activity.touch();
+        self.checked_at = tokio::time::Instant::now();
+    }
+}
+
+/// How long a pump that is ending waits for its Close frame to be written. A
+/// peer that has gone would otherwise hold the ending, and with it the
+/// terminal the link waits on, for ever.
+const WS_CLIENT_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+
+type ClientSink<S> = futures::stream::SplitSink<tokio_tungstenite::WebSocketStream<S>, Message>;
+type ClientSource<S> = futures::stream::SplitStream<tokio_tungstenite::WebSocketStream<S>>;
+
+/// How a pump ends: with this terminal, closing the socket first or not.
+struct Ending {
+    terminal: NativeTransportTerminal,
+    close: bool,
+}
+
+impl Ending {
+    fn now(terminal: NativeTransportTerminal) -> Self {
+        Self {
+            terminal,
+            close: false,
+        }
+    }
+
+    fn closing(terminal: NativeTransportTerminal) -> Self {
+        Self {
+            terminal,
+            close: true,
+        }
+    }
+}
+
+/// Where received frames go: the application's bounded queue.
+struct InboundSide {
+    frames: mpsc::Sender<InboundFrame>,
+    budget: Arc<Semaphore>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl InboundSide {
+    /// Hand one received message to the application.
+    async fn deliver(
+        &self,
+        message: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
+    ) -> Result<(), Ending> {
+        let bytes = match message {
+            Some(Ok(Message::Binary(bytes))) => bytes,
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => return Ok(()),
+            Some(Ok(Message::Close(frame))) => {
+                let reason = format!("websocket peer closed: {frame:?}");
+                return Err(Ending::now(NativeTransportTerminal::PeerClosed(reason)));
+            }
+            Some(Ok(_)) => {
+                let reason = "websocket peer sent a non-binary wire batch".to_owned();
+                return Err(Ending::closing(NativeTransportTerminal::Failed(
+                    NativeTransportError::Terminal(reason),
+                )));
+            }
+            Some(Err(error)) => {
+                let classified = native_transport_error(WebSocketClientError::Receive(error));
+                return Err(Ending::now(NativeTransportTerminal::Failed(classified)));
+            }
+            None => {
+                let reason = "websocket peer closed before completing wire exchange".to_owned();
+                return Err(Ending::now(NativeTransportTerminal::PeerClosed(reason)));
+            }
+        };
+        let frames = decode_inbound_batch(&bytes).map_err(|error| {
+            Ending::closing(NativeTransportTerminal::Failed(
+                NativeTransportError::Terminal(error),
+            ))
+        })?;
+        for frame in frames {
+            validate_wire_frame_len(frame.len()).map_err(|error| {
+                Ending::closing(NativeTransportTerminal::Failed(
+                    NativeTransportError::Terminal(error),
+                ))
+            })?;
+            let permits = u32::try_from(frame.len()).expect("wire frame limit fits u32");
+            let Ok(budget) = Arc::clone(&self.budget).acquire_many_owned(permits).await else {
+                return Err(Ending::now(NativeTransportTerminal::OwnerDropped));
+            };
+            if self
+                .frames
+                .send(InboundFrame {
+                    bytes: frame,
+                    _budget: budget,
+                })
+                .await
+                .is_err()
+            {
+                return Err(Ending::now(NativeTransportTerminal::OwnerDropped));
+            }
+            // A maximum logical message can exceed the bounded channel. Wake
+            // on every frame so its consumer drains before the producer
+            // blocks on a later fragment.
+            (self.wake)();
+        }
+        Ok(())
+    }
+}
+
+/// Send one message, reading while it is sent, and giving the link up when
+/// the peer gives no sign of life for the silence deadline.
+///
+/// Reading goes on during the send because a send can wait a long time on a
+/// live peer: a server busy with a backlog stops reading the socket (its TCP
+/// window closes) but keeps sending, its keepalive pings included. Those are
+/// the signs of life, and frames it sends meanwhile reach the application, so
+/// neither side waits on the other. A socket whose peer has gone leaves the
+/// send pending with a full kernel buffer and nothing to read.
+async fn send_watched<S>(
+    sink: &mut ClientSink<S>,
+    source: &mut ClientSource<S>,
+    inbound: &InboundSide,
+    message: Message,
+    liveness: &mut Liveness,
+    ticker: &mut tokio::time::Interval,
+) -> Result<(), Ending>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let send = sink.send(message);
+    tokio::pin!(send);
+    loop {
+        tokio::select! {
+            biased;
+            sent = &mut send => {
+                return sent.map_err(|error| {
+                    Ending::now(NativeTransportTerminal::Failed(native_transport_error(
+                        WebSocketClientError::Send(error),
+                    )))
+                });
+            }
+            message = source.next() => {
+                inbound.deliver(message).await?;
+                liveness.resume();
+            }
+            _ = ticker.tick() => {
+                if let Some(reason) = liveness.check() {
+                    return Err(Ending::now(NativeTransportTerminal::Failed(
+                        NativeTransportError::Retryable(format!("{reason} while sending")),
+                    )));
+                }
+            }
+        }
+    }
+}
+
+async fn receive_server_hello<S>(
+    ws: &mut tokio_tungstenite::WebSocketStream<S>,
     deadline: tokio::time::Instant,
-) -> Result<WireHello, WebSocketClientError> {
+) -> Result<WireHello, WebSocketClientError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let message = tokio::time::timeout_at(deadline, ws.next())
         .await
         .map_err(|_| WebSocketClientError::HandshakeTimeout)?
@@ -795,23 +1169,38 @@ fn finish_outbound_pump(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_ws_pump(
-    mut ws: tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+async fn run_ws_pump<S>(
+    ws: tokio_tungstenite::WebSocketStream<S>,
+    mut liveness: Liveness,
     inbound: mpsc::Sender<InboundFrame>,
     inbound_budget: Arc<Semaphore>,
     mut outbound: mpsc::UnboundedReceiver<QueuedOutboundFrame>,
     outbound_backpressured: Arc<AtomicBool>,
     wake: Arc<dyn Fn() + Send + Sync>,
-) -> NativeTransportTerminal {
-    let terminal = async {
+) -> NativeTransportTerminal
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let (mut sink, mut source) = ws.split();
+    let inbound = InboundSide {
+        frames: inbound,
+        budget: inbound_budget,
+        wake: Arc::clone(&wake),
+    };
+    let ending = async {
+        let mut ticker = liveness.ticker();
         loop {
             tokio::select! {
+                _ = ticker.tick() => {
+                    if let Some(reason) = liveness.check() {
+                        return Ending::now(NativeTransportTerminal::Failed(
+                            NativeTransportError::Retryable(reason),
+                        ));
+                    }
+                }
                 maybe_frame = outbound.recv() => {
                     let Some(first_frame) = maybe_frame else {
-                        let _ = ws.close(None).await;
-                        return NativeTransportTerminal::OwnerDropped;
+                        return Ending::closing(NativeTransportTerminal::OwnerDropped);
                     };
                     let mut batch = vec![first_frame];
                     let mut batch_bytes = POSTCARD_BATCH_LENGTH_RESERVE
@@ -826,17 +1215,24 @@ async fn run_ws_pump(
                             let bytes = match encode_outbound_batch(&batch) {
                                 Ok(bytes) => bytes,
                                 Err(error) => {
-                                    return NativeTransportTerminal::Failed(NativeTransportError::Terminal(
-                                        format!(
+                                    return Ending::now(NativeTransportTerminal::Failed(
+                                        NativeTransportError::Terminal(format!(
                                             "failed to encode websocket wire batch: {error}"
-                                        ),
+                                        )),
                                     ));
                                 }
                             };
-                            if let Err(error) = ws.send(Message::Binary(bytes.into())).await {
-                                return NativeTransportTerminal::Failed(native_transport_error(
-                                    WebSocketClientError::Send(error),
-                                ));
+                            if let Err(ending) = send_watched(
+                                &mut sink,
+                                &mut source,
+                                &inbound,
+                                Message::Binary(bytes.into()),
+                                &mut liveness,
+                                &mut ticker,
+                            )
+                            .await
+                            {
+                                return ending;
                             }
                             batch.clear();
                             if outbound_backpressured.swap(false, Ordering::AcqRel) {
@@ -850,85 +1246,46 @@ async fn run_ws_pump(
                     let bytes = match encode_outbound_batch(&batch) {
                         Ok(bytes) => bytes,
                         Err(error) => {
-                            return NativeTransportTerminal::Failed(NativeTransportError::Terminal(format!(
-                                "failed to encode websocket wire batch: {error}"
-                            )));
+                            return Ending::now(NativeTransportTerminal::Failed(
+                                NativeTransportError::Terminal(format!(
+                                    "failed to encode websocket wire batch: {error}"
+                                )),
+                            ));
                         }
                     };
-                    if let Err(error) = ws.send(Message::Binary(bytes.into())).await {
-                        return NativeTransportTerminal::Failed(native_transport_error(
-                            WebSocketClientError::Send(error),
-                        ));
+                    if let Err(ending) = send_watched(
+                        &mut sink,
+                        &mut source,
+                        &inbound,
+                        Message::Binary(bytes.into()),
+                        &mut liveness,
+                        &mut ticker,
+                    )
+                    .await
+                    {
+                        return ending;
                     }
                     drop(batch);
                     if outbound_backpressured.swap(false, Ordering::AcqRel) {
                         wake();
                     }
                 }
-                message = ws.next() => {
-                    let bytes = match message {
-                        Some(Ok(Message::Binary(bytes))) => bytes,
-                        Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
-                        Some(Ok(Message::Close(frame))) => {
-                            let reason = format!("websocket peer closed: {frame:?}");
-                            return NativeTransportTerminal::PeerClosed(reason);
-                        }
-                        Some(Ok(_)) => {
-                            let reason = "websocket peer sent a non-binary wire batch".to_owned();
-                            let _ = ws.close(None).await;
-                            return NativeTransportTerminal::Failed(NativeTransportError::Terminal(reason));
-                        }
-                        Some(Err(error)) => {
-                            let classified = native_transport_error(WebSocketClientError::Receive(error));
-                            return NativeTransportTerminal::Failed(classified);
-                        }
-                        None => {
-                            let reason = "websocket peer closed before completing wire exchange"
-                                .to_owned();
-                            return NativeTransportTerminal::PeerClosed(reason);
-                        }
-                    };
-                    let frames = match decode_inbound_batch(&bytes) {
-                        Ok(frames) => frames,
-                        Err(error) => {
-                            let _ = ws.close(None).await;
-                            return NativeTransportTerminal::Failed(NativeTransportError::Terminal(error));
-                        }
-                    };
-                    for frame in frames {
-                        if let Err(error) = validate_wire_frame_len(frame.len()) {
-                            let _ = ws.close(None).await;
-                            return NativeTransportTerminal::Failed(NativeTransportError::Terminal(error));
-                        }
-                        let permits =
-                            u32::try_from(frame.len()).expect("wire frame limit fits u32");
-                        let Ok(budget) =
-                            Arc::clone(&inbound_budget).acquire_many_owned(permits).await
-                        else {
-                            return NativeTransportTerminal::OwnerDropped;
-                        };
-                        if inbound
-                            .send(InboundFrame {
-                                bytes: frame,
-                                _budget: budget,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            return NativeTransportTerminal::OwnerDropped;
-                        }
-                        // A maximum logical message can exceed the bounded
-                        // channel. Wake on every frame so its consumer drains
-                        // before the producer blocks on a later fragment.
-                        wake();
+                message = source.next() => {
+                    if let Err(ending) = inbound.deliver(message).await {
+                        return ending;
                     }
+                    // Waiting for the application to take frames is not silence.
+                    liveness.resume();
                 }
             }
         }
     }
     .await;
+    if ending.close {
+        let _ = tokio::time::timeout(WS_CLIENT_CLOSE_TIMEOUT, sink.close()).await;
+    }
     finish_outbound_pump(outbound, &outbound_backpressured, wake.as_ref());
-    terminal
+    ending.terminal
 }
 
 fn decode_inbound_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
@@ -1055,6 +1412,326 @@ mod tests {
         server.await.unwrap();
     }
 
+    /// Short timings, so a test sees the deadline in about a second.
+    const TEST_LIVENESS: LivenessPolicy = LivenessPolicy {
+        silence_deadline: Duration::from_millis(1_000),
+        tick: Duration::from_millis(50),
+    };
+
+    struct PumpUnderTest {
+        pump: tokio::task::JoinHandle<NativeTransportTerminal>,
+        outbound: BoundedOutbound,
+        inbound: mpsc::Receiver<InboundFrame>,
+    }
+
+    /// Runs the pump as a client over `io`, metered the way a real socket is.
+    async fn pump_over(io: tokio::io::DuplexStream) -> PumpUnderTest {
+        let activity = LinkActivity::new();
+        let ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            Metered::new(io, Arc::clone(&activity)),
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            Some(client_websocket_config()),
+        )
+        .await;
+        let (inbound_tx, inbound) = mpsc::channel(WS_CLIENT_INBOUND_FRAME_SLOTS);
+        let (outbound, outbound_rx, backpressured) = BoundedOutbound::channel();
+        let pump = tokio::spawn(run_ws_pump(
+            ws,
+            Liveness::new(activity, TEST_LIVENESS),
+            inbound_tx,
+            Arc::new(Semaphore::new(WS_CLIENT_MAX_QUEUED_BYTES)),
+            outbound_rx,
+            backpressured,
+            Arc::new(|| {}),
+        ));
+        PumpUnderTest {
+            pump,
+            outbound,
+            inbound,
+        }
+    }
+
+    async fn server_over(
+        io: tokio::io::DuplexStream,
+    ) -> tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream> {
+        tokio_tungstenite::WebSocketStream::from_raw_socket(
+            io,
+            tokio_tungstenite::tungstenite::protocol::Role::Server,
+            Some(client_websocket_config()),
+        )
+        .await
+    }
+
+    /// The server's keepalive, at a cadence under the test deadline. Ends,
+    /// saying why, if the link breaks or the client sends anything but a Pong:
+    /// a client ping is one more message for a server whose writer queue may
+    /// be full, and the server breaks the connection when it cannot queue the
+    /// Pong.
+    async fn keepalive(
+        mut ws: tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
+    ) -> String {
+        loop {
+            if let Err(error) = ws.send(Message::Ping(Vec::new().into())).await {
+                return format!("keepalive send failed: {error}");
+            }
+            let until = tokio::time::Instant::now() + Duration::from_millis(300);
+            while let Ok(Some(message)) = tokio::time::timeout_at(until, ws.next()).await {
+                match message {
+                    Ok(Message::Pong(_)) => {}
+                    other => return format!("client sent {other:?}"),
+                }
+            }
+        }
+    }
+
+    fn assert_given_up_retryably(terminal: NativeTransportTerminal) {
+        match terminal {
+            NativeTransportTerminal::Failed(error) => assert!(
+                error.is_retryable(),
+                "a dead link must be retried: {error:?}"
+            ),
+            other => panic!("a dead link must fail retryably, got {other:?}"),
+        }
+    }
+
+    // A link that goes silent without closing (Wi-Fi off, a paused server, a
+    // half-open TCP path) delivers no error and no EOF: only the absence of
+    // traffic says it is gone. The pump must give it up on its own, as a
+    // failure the link retries, instead of reporting it connected until the
+    // OS or the server's idle timeout (60 s) closes the socket.
+    #[tokio::test]
+    async fn a_silent_upstream_is_given_up_and_retried() {
+        let (client_io, _server_io) = tokio::io::duplex(64 << 10);
+        let under_test = pump_over(client_io).await;
+        let terminal = tokio::time::timeout(Duration::from_secs(5), under_test.pump)
+            .await
+            .expect("a silent upstream must end the pump")
+            .unwrap();
+        assert_given_up_retryably(terminal);
+    }
+
+    // The other side of the same rule: the server's keepalive pings are
+    // enough to keep an idle link up, and the client sends nothing of its own.
+    #[tokio::test]
+    async fn an_idle_upstream_that_sends_keepalive_pings_stays_up() {
+        let (client_io, server_io) = tokio::io::duplex(64 << 10);
+        let server = tokio::spawn(async move { keepalive(server_over(server_io).await).await });
+        let under_test = pump_over(client_io).await;
+        tokio::time::sleep(TEST_LIVENESS.silence_deadline * 3).await;
+        assert!(
+            !under_test.pump.is_finished(),
+            "an idle upstream with a keepalive was given up: {:?}",
+            under_test.pump.await
+        );
+        assert!(!server.is_finished(), "{:?}", server.await);
+        under_test.pump.abort();
+        server.abort();
+    }
+
+    // A message counts once it is complete, but the link is alive while its
+    // bytes are arriving: a catalogue of a few MiB over a slow mobile link
+    // takes longer than the deadline and must not be cut off mid-message.
+    #[tokio::test]
+    async fn a_large_message_arriving_slowly_is_not_silence() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        const CHUNK: usize = 32 << 10;
+        const CHUNK_EVERY: Duration = Duration::from_millis(100);
+        let frame = vec![7_u8; 1 << 20];
+        let message = postcard::to_allocvec(&vec![frame.clone()]).unwrap();
+        // About 3.2 s on the wire, three times the deadline.
+        assert!(
+            Duration::from_millis(100) * u32::try_from(message.len() / CHUNK).unwrap()
+                > TEST_LIVENESS.silence_deadline * 3
+        );
+        let (server_io, mut slow_in) = tokio::io::duplex(4 << 20);
+        let (mut slow_out, client_io) = tokio::io::duplex(CHUNK);
+        let throttle = tokio::spawn(async move {
+            let mut chunk = vec![0_u8; CHUNK];
+            loop {
+                let read = match slow_in.read(&mut chunk).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(read) => read,
+                };
+                if slow_out.write_all(&chunk[..read]).await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(CHUNK_EVERY).await;
+            }
+        });
+        let server = tokio::spawn(async move {
+            let mut ws = server_over(server_io).await;
+            ws.send(Message::Binary(message.into())).await.unwrap();
+            // Held open, silent, once the message is out.
+            std::future::pending::<()>().await;
+        });
+        let mut under_test = pump_over(client_io).await;
+        let received = tokio::time::timeout(Duration::from_secs(10), under_test.inbound.recv())
+            .await
+            .expect("the slow message must arrive")
+            .unwrap_or_else(|| panic!("pump ended mid-message: {:?}", under_test.pump));
+        assert_eq!(received.bytes, frame);
+        under_test.pump.abort();
+        server.abort();
+        throttle.abort();
+    }
+
+    // A runtime that could not run the pump (a blocked executor, an app the OS
+    // suspended) has not heard the peer, but that is not the peer's silence:
+    // the link must not be given up the moment the pump runs again.
+    #[tokio::test]
+    async fn a_stalled_runtime_is_not_silence() {
+        let (client_io, server_io) = tokio::io::duplex(64 << 10);
+        // Same single-threaded runtime as the pump, so it stalls too.
+        let server = tokio::spawn(async move { keepalive(server_over(server_io).await).await });
+        let under_test = pump_over(client_io).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        std::thread::sleep(TEST_LIVENESS.silence_deadline * 2);
+        tokio::time::sleep(TEST_LIVENESS.silence_deadline / 2).await;
+        assert!(
+            !under_test.pump.is_finished(),
+            "a live link was given up after the runtime stalled: {:?}",
+            under_test.pump.await
+        );
+        under_test.pump.abort();
+        server.abort();
+    }
+
+    // A send to a peer that has gone stays pending once the kernel buffer is
+    // full, with no error: the deadline must cover the pump while it sends.
+    #[tokio::test]
+    async fn a_send_that_makes_no_progress_is_given_up() {
+        let (client_io, _server_io) = tokio::io::duplex(16 << 10);
+        let under_test = pump_over(client_io).await;
+        under_test.outbound.send(vec![1_u8; 512 << 10]).unwrap();
+        let terminal = tokio::time::timeout(Duration::from_secs(5), under_test.pump)
+            .await
+            .expect("a send without progress must end the pump")
+            .unwrap();
+        assert_given_up_retryably(terminal);
+    }
+
+    // The kernel takes small writes into a send buffer that has room whether
+    // the peer is there or not, so an application that keeps writing (a
+    // presence beat) must not keep a dead link up.
+    #[tokio::test]
+    async fn writes_into_a_free_send_buffer_do_not_keep_a_dead_link_up() {
+        let (client_io, _server_io) = tokio::io::duplex(1 << 20);
+        let under_test = pump_over(client_io).await;
+        let beat = {
+            let outbound = under_test.outbound;
+            tokio::spawn(async move {
+                loop {
+                    if outbound.send(vec![3_u8; 100]).is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+        };
+        let terminal = tokio::time::timeout(Duration::from_secs(5), under_test.pump)
+            .await
+            .expect("a dead link must be given up while the application writes")
+            .unwrap();
+        assert_given_up_retryably(terminal);
+        beat.abort();
+    }
+
+    // A server busy with a backlog stops reading the socket, so a large send
+    // waits on it for as long as it is busy, but it keeps pinging: the link is
+    // alive, and the pump must read while it sends to hear it.
+    #[tokio::test]
+    async fn a_busy_server_that_keeps_pinging_keeps_the_link_up_during_a_send() {
+        let (client_io, server_io) = tokio::io::duplex(16 << 10);
+        let server = tokio::spawn(async move {
+            let mut ws = server_over(server_io).await;
+            // Pings only; the socket is never read.
+            loop {
+                if ws.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        });
+        let under_test = pump_over(client_io).await;
+        under_test.outbound.send(vec![1_u8; 512 << 10]).unwrap();
+        tokio::time::sleep(TEST_LIVENESS.silence_deadline * 3).await;
+        assert!(
+            !under_test.pump.is_finished(),
+            "a live, busy server was given up mid-send: {:?}",
+            under_test.pump.await
+        );
+        under_test.pump.abort();
+        server.abort();
+    }
+
+    // Excusing the time the pump could not run must not excuse the silence
+    // before it: a dead link on a runtime that keeps stalling is still given
+    // up.
+    #[tokio::test]
+    async fn repeated_stalls_do_not_keep_a_dead_link_up() {
+        let (client_io, _server_io) = tokio::io::duplex(64 << 10);
+        let under_test = pump_over(client_io).await;
+        let staller = tokio::spawn(async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                std::thread::sleep(TEST_LIVENESS.tick * 3);
+            }
+        });
+        let terminal = tokio::time::timeout(Duration::from_secs(10), under_test.pump)
+            .await
+            .expect("a dead link must be given up on a stalling runtime")
+            .unwrap();
+        assert_given_up_retryably(terminal);
+        staller.abort();
+    }
+
+    // A slow upload is progress, as a slow download is: the peer takes the
+    // bytes, so it is there, however long the whole message takes.
+    #[tokio::test]
+    async fn a_large_message_sent_slowly_is_not_silence() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        const CHUNK: usize = 32 << 10;
+        let (client_io, mut slow_in) = tokio::io::duplex(CHUNK);
+        let (mut slow_out, server_io) = tokio::io::duplex(4 << 20);
+        let throttle = tokio::spawn(async move {
+            let mut chunk = vec![0_u8; CHUNK];
+            loop {
+                let read = match slow_in.read(&mut chunk).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(read) => read,
+                };
+                if slow_out.write_all(&chunk[..read]).await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+        let server = tokio::spawn(async move {
+            let mut ws = server_over(server_io).await;
+            ws.next()
+                .await
+                .map(|message| message.map(|message| message.len()))
+        });
+        let under_test = pump_over(client_io).await;
+        // About 3 s through the throttle.
+        under_test.outbound.send(vec![1_u8; 960 << 10]).unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("the slow upload must arrive")
+            .unwrap();
+        assert!(
+            matches!(received, Some(Ok(len)) if len > 960 << 10),
+            "upload did not arrive whole: {received:?}"
+        );
+        assert!(
+            !under_test.pump.is_finished(),
+            "the link was given up during a slow upload: {:?}",
+            under_test.pump.await
+        );
+        under_test.pump.abort();
+        throttle.abort();
+    }
+
     // This reproduces the socket library's typed EOF result below the Db API;
     // constructing an error alone would miss the actual abrupt-close category.
     #[tokio::test]
@@ -1105,7 +1782,7 @@ mod tests {
         });
         let ws = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            open_client_websocket(format!("ws://{address}"), None),
+            open_client_websocket(format!("ws://{address}"), None, LinkActivity::new()),
         )
         .await
         .expect("bounded client connect")
@@ -1113,7 +1790,10 @@ mod tests {
         .0;
         match ws.get_ref() {
             tokio_tungstenite::MaybeTlsStream::Plain(stream) => {
-                assert!(stream.nodelay().unwrap(), "client socket keeps Nagle on");
+                assert!(
+                    stream.get_ref().nodelay().unwrap(),
+                    "client socket keeps Nagle on"
+                );
             }
             _ => panic!("ws:// URL must open a plain TCP stream"),
         }
