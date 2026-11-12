@@ -182,13 +182,12 @@ describe("the Inspector a backend serves", () => {
   });
 
   it("views as a user with the claims given for them, and flags when none are", async () => {
-    // Managers (a claim) see every todo; others see their own.
+    // Only managers (a claim) see todos. (This schema's owner is a plain
+    // string, so the policy reads the claim alone.)
     const jazz = await createJazz({
       app,
-      permissions: s.definePermissions(app, ({ policy, anyOf, session }) => {
-        policy.todos.allowRead.where(
-          anyOf([{ owner: session.user }, session.where({ "claims.role": "manager" })]),
-        );
+      permissions: s.definePermissions(app, ({ policy, session }) => {
+        policy.todos.allowRead.where(session.where({ "claims.role": "manager" }));
       }),
       store: memory(),
       authenticate: () => null,
