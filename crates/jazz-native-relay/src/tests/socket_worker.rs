@@ -55,6 +55,8 @@ enum Step {
     ConnectWhenReleased(tokio::sync::oneshot::Receiver<()>),
     /// Fail the attempt non-retryably for a reason other than the credential.
     Refuse,
+    /// Fail the attempt as an unreachable server does, retryably.
+    Unreachable,
     /// Refuse the attempt's credential, as Core refuses an expired bearer
     /// (`AuthFailed`, `WireRetry::Never`).
     RejectAuth,
@@ -108,6 +110,9 @@ impl NativeTransportConnector for ScriptedConnector {
                     let _ = release.await;
                     Ok(connected(Box::pin(std::future::pending())))
                 }
+                Some(Step::Unreachable) => Err(NativeTransportError::Retryable(
+                    "failed to connect websocket: connection refused".into(),
+                )),
                 Some(Step::Refuse) => Err(NativeTransportError::Terminal(
                     "websocket rejected: unsupported feature".into(),
                 )),
@@ -142,10 +147,22 @@ fn scripted_foreground(
     app_id: &str,
     connector: Arc<ScriptedConnector>,
 ) -> (NativeRelayHost, AdmissionCapability, u64) {
-    let mut host = NativeRelayHost {
-        socket_connector: Some(connector),
-        ..NativeRelayHost::default()
-    };
+    scripted_foreground_on(
+        NativeRelayHost {
+            socket_connector: Some(connector),
+            ..NativeRelayHost::default()
+        },
+        root,
+        app_id,
+    )
+}
+
+/// [`scripted_foreground`] on a host the test configured further.
+fn scripted_foreground_on(
+    mut host: NativeRelayHost,
+    root: &std::path::Path,
+    app_id: &str,
+) -> (NativeRelayHost, AdmissionCapability, u64) {
     let pending = host
         .begin_private_session(PrivateSessionSetupJson {
             server_url: "https://edge.example".to_owned(),
@@ -456,6 +473,339 @@ fn a_renewed_bearer_refused_for_the_same_reason_is_a_new_refusal() {
     );
     assert_eq!(connector.bearers(), [bearer(1), bearer(1), bearer(2)]);
     assert_eq!(host.tick_foreground(alice), Ok(()));
+}
+
+/// A host whose network path the test reports, on Wi-Fi to begin with,
+/// with retry waits long enough that only the path can cut them short.
+fn host_on_path(
+    connector: Arc<ScriptedConnector>,
+) -> (NativeRelayHost, tokio::sync::watch::Sender<NetworkPath>) {
+    let (path, network_path) = tokio::sync::watch::channel(NetworkPath {
+        satisfied: true,
+        interfaces: NETWORK_INTERFACE_WIFI,
+    });
+    let host = NativeRelayHost {
+        socket_connector: Some(connector),
+        network_path: Some(network_path),
+        link_policy: Some(jazz::link::LinkPolicy {
+            retry_initial_ms: 20_000,
+            retry_unreported_max_ms: 40_000,
+            retry_max_ms: 40_000,
+            ..jazz::link::LinkPolicy::default()
+        }),
+        ..NativeRelayHost::default()
+    };
+    (host, path)
+}
+
+fn wait_within(
+    host: &NativeRelayHost,
+    within: Duration,
+    what: &str,
+    done: impl Fn(&NativeRelayHost) -> bool,
+) {
+    let deadline = std::time::Instant::now() + within;
+    while !done(host) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "not within {within:?}: {what}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The device loses its network (Wi-Fi switched off, no cellular). The
+/// socket is dead, but nothing on it says so: no close, no error, only
+/// silence. The operating system says so at once, and the worker takes its
+/// word instead of waiting out the transport's silence deadline.
+///
+/// ```text
+/// alice ─open─► relay ══socket══► edge     (connected, on Wi-Fi)
+/// os: path unsatisfied
+///                 relay ══✗                (dropped at once, connected=false)
+/// ```
+#[test]
+fn a_lost_network_path_drops_the_live_link_at_once() {
+    let root = tempfile::tempdir().unwrap();
+    let (release, released) = tokio::sync::oneshot::channel();
+    release.send(()).unwrap();
+    let connector = ScriptedConnector::new([Step::ConnectWhenReleased(released)]);
+    let (host, path) = host_on_path(connector);
+    let (host, _, alice) = scripted_foreground_on(host, root.path(), "path-lost");
+    let scope = host.foregrounds[&alice].scope.clone();
+    wait_for(&host, "first connection", |host| connected(host, &scope));
+
+    path.send_replace(NetworkPath {
+        satisfied: false,
+        interfaces: 0,
+    });
+    wait_within(
+        &host,
+        Duration::from_secs(1),
+        "the dead link is dropped",
+        |host| !connected(host, &scope),
+    );
+}
+
+/// A link opened on Wi-Fi is bound to it. Cellular coming up alongside
+/// changes nothing; Wi-Fi going away leaves the socket on an interface the
+/// device no longer routes through, so the worker reconnects at once.
+///
+/// ```text
+/// alice ─open─► relay ══socket══► edge     (on Wi-Fi)
+/// os: Wi-Fi + cellular                     (kept)
+/// os: cellular only                        (dropped, reconnected on cellular)
+/// ```
+#[test]
+fn a_path_leaving_the_links_interface_reconnects_at_once() {
+    let root = tempfile::tempdir().unwrap();
+    let (first, first_released) = tokio::sync::oneshot::channel();
+    let (second, second_released) = tokio::sync::oneshot::channel();
+    first.send(()).unwrap();
+    second.send(()).unwrap();
+    let connector = ScriptedConnector::new([
+        Step::ConnectWhenReleased(first_released),
+        Step::ConnectWhenReleased(second_released),
+    ]);
+    let (host, path) = host_on_path(connector.clone());
+    let (host, _, alice) = scripted_foreground_on(host, root.path(), "path-moved");
+    let scope = host.foregrounds[&alice].scope.clone();
+    wait_for(&host, "first connection", |host| connected(host, &scope));
+
+    path.send_replace(NetworkPath {
+        satisfied: true,
+        interfaces: NETWORK_INTERFACE_WIFI | NETWORK_INTERFACE_CELLULAR,
+    });
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        connected(&host, &scope),
+        "an added interface keeps the link"
+    );
+    assert_eq!(connector.bearers().len(), 1);
+
+    path.send_replace(NetworkPath {
+        satisfied: true,
+        interfaces: NETWORK_INTERFACE_CELLULAR,
+    });
+    wait_within(
+        &host,
+        Duration::from_secs(2),
+        "reconnected on cellular",
+        |_| connector.bearers().len() == 2,
+    );
+    wait_within(
+        &host,
+        Duration::from_secs(2),
+        "the new link is up",
+        |host| connected(host, &scope),
+    );
+}
+
+/// The link dropped while the device had no network, and the worker is
+/// waiting out its backoff. The backoff spares a server that is down; the
+/// device's path coming back says nothing about the server, but it is the
+/// one moment a retry is most likely to land, so the worker retries at once.
+///
+/// ```text
+/// alice ─open─► relay ══socket══► edge     (connected)
+/// os: path unsatisfied; link lost          (backoff >= 10 s)
+/// os: path satisfied                       (retry at once, connected)
+/// ```
+#[test]
+fn a_returning_network_path_retries_without_waiting_out_the_backoff() {
+    let root = tempfile::tempdir().unwrap();
+    let (drop_link, link_dropped) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    release.send(()).unwrap();
+    let connector = ScriptedConnector::new([
+        Step::ConnectThenTerminal(link_dropped),
+        Step::ConnectWhenReleased(released),
+    ]);
+    let (host, path) = host_on_path(connector.clone());
+    let (host, _, alice) = scripted_foreground_on(host, root.path(), "path-back");
+    let scope = host.foregrounds[&alice].scope.clone();
+    wait_for(&host, "first connection", |host| connected(host, &scope));
+
+    path.send_replace(NetworkPath {
+        satisfied: false,
+        interfaces: 0,
+    });
+    drop_link.send(()).unwrap();
+    wait_for(&host, "the link is lost", |host| !connected(host, &scope));
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(connector.bearers().len(), 1, "waiting out the backoff");
+
+    path.send_replace(NetworkPath {
+        satisfied: true,
+        interfaces: NETWORK_INTERFACE_WIFI,
+    });
+    wait_within(&host, Duration::from_secs(2), "retried at once", |host| {
+        connected(host, &scope)
+    });
+    assert_eq!(connector.bearers().len(), 2);
+}
+
+/// The monitor can lag: a link may get through while the device still
+/// reports no path. Once the device reports one, the link is watched against
+/// it, so it is dropped when that interface goes, like any other.
+///
+/// ```text
+/// os: path unsatisfied (lagging)
+/// alice ─open─► relay ══socket══► edge     (connected anyway)
+/// os: Wi-Fi                                (kept)
+/// os: cellular only                        (dropped, reconnected)
+/// ```
+#[test]
+fn a_link_admitted_while_the_monitor_lagged_is_watched_on_the_path_it_reports_next() {
+    let root = tempfile::tempdir().unwrap();
+    let (first, first_released) = tokio::sync::oneshot::channel();
+    let (second, second_released) = tokio::sync::oneshot::channel();
+    first.send(()).unwrap();
+    second.send(()).unwrap();
+    let connector = ScriptedConnector::new([
+        Step::ConnectWhenReleased(first_released),
+        Step::ConnectWhenReleased(second_released),
+    ]);
+    let (host, path) = host_on_path(connector.clone());
+    path.send_replace(NetworkPath {
+        satisfied: false,
+        interfaces: 0,
+    });
+    let (host, _, alice) = scripted_foreground_on(host, root.path(), "path-lagged");
+    let scope = host.foregrounds[&alice].scope.clone();
+    wait_for(&host, "connected while the monitor lagged", |host| {
+        connected(host, &scope)
+    });
+
+    path.send_replace(NetworkPath {
+        satisfied: true,
+        interfaces: NETWORK_INTERFACE_WIFI,
+    });
+    thread::sleep(Duration::from_millis(300));
+    assert!(connected(&host, &scope), "the live link was dropped");
+    assert_eq!(connector.bearers().len(), 1);
+
+    path.send_replace(NetworkPath {
+        satisfied: true,
+        interfaces: NETWORK_INTERFACE_CELLULAR,
+    });
+    wait_within(
+        &host,
+        Duration::from_secs(2),
+        "reconnected on cellular",
+        |_| connector.bearers().len() == 2,
+    );
+}
+
+/// The path leaves cellular the moment Wi-Fi is preferred, but cellular
+/// stays up and keeps carrying the sockets opened on it: a live link there is
+/// kept, not dropped for a reconnect it does not need.
+///
+/// ```text
+/// alice ─open─► relay ══socket══► edge     (on cellular)
+/// os: Wi-Fi only                           (kept)
+/// ```
+#[test]
+fn a_link_on_cellular_is_kept_when_wifi_takes_over_the_path() {
+    let root = tempfile::tempdir().unwrap();
+    let (release, released) = tokio::sync::oneshot::channel();
+    release.send(()).unwrap();
+    let connector = ScriptedConnector::new([Step::ConnectWhenReleased(released)]);
+    let (host, path) = host_on_path(connector.clone());
+    path.send_replace(NetworkPath {
+        satisfied: true,
+        interfaces: NETWORK_INTERFACE_CELLULAR,
+    });
+    let (host, _, alice) = scripted_foreground_on(host, root.path(), "path-upgraded");
+    let scope = host.foregrounds[&alice].scope.clone();
+    wait_for(&host, "first connection", |host| connected(host, &scope));
+
+    path.send_replace(NetworkPath {
+        satisfied: true,
+        interfaces: NETWORK_INTERFACE_WIFI,
+    });
+    thread::sleep(Duration::from_millis(300));
+    assert!(connected(&host, &scope), "the cellular link was dropped");
+    assert_eq!(connector.bearers().len(), 1);
+}
+
+/// An attempt dialled while the device had no network can hang until its
+/// timeout. When the path comes back, a fresh attempt is the one that lands.
+///
+/// ```text
+/// os: path unsatisfied
+/// alice ─open─► relay ══socket…            (attempt hangs)
+/// os: path satisfied                       (abandoned, retried, connected)
+/// ```
+#[test]
+fn an_attempt_made_without_a_network_is_retried_when_the_network_returns() {
+    let root = tempfile::tempdir().unwrap();
+    let (_hang, hung) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    release.send(()).unwrap();
+    let connector = ScriptedConnector::new([
+        Step::ConnectWhenReleased(hung),
+        Step::ConnectWhenReleased(released),
+    ]);
+    let (host, path) = host_on_path(connector.clone());
+    path.send_replace(NetworkPath {
+        satisfied: false,
+        interfaces: 0,
+    });
+    let (host, _, alice) = scripted_foreground_on(host, root.path(), "path-returned");
+    let scope = host.foregrounds[&alice].scope.clone();
+    wait_for(&host, "the first attempt", |_| {
+        connector.bearers().len() == 1
+    });
+    thread::sleep(Duration::from_millis(100));
+
+    path.send_replace(NetworkPath {
+        satisfied: true,
+        interfaces: NETWORK_INTERFACE_WIFI,
+    });
+    wait_within(
+        &host,
+        Duration::from_secs(2),
+        "connected on the returned path",
+        |host| connected(host, &scope),
+    );
+    assert_eq!(connector.bearers().len(), 2);
+}
+
+/// A path that keeps changing while the server is unreachable cuts each
+/// backoff short, but not below a floor: a flapping network does not become
+/// a reconnect loop.
+#[test]
+fn a_flapping_path_does_not_become_a_reconnect_loop() {
+    let root = tempfile::tempdir().unwrap();
+    let connector = ScriptedConnector::new(std::iter::repeat_with(|| Step::Unreachable).take(200));
+    let (host, path) = host_on_path(connector.clone());
+    let (host, _, alice) = scripted_foreground_on(host, root.path(), "path-flapping");
+    let scope = host.foregrounds[&alice].scope.clone();
+    wait_for(&host, "the first attempt", |_| {
+        connector.bearers().len() == 1
+    });
+
+    let flapping = std::time::Instant::now();
+    let mut on_wifi = true;
+    while flapping.elapsed() < Duration::from_millis(2_500) {
+        on_wifi = !on_wifi;
+        path.send_replace(NetworkPath {
+            satisfied: true,
+            interfaces: if on_wifi {
+                NETWORK_INTERFACE_WIFI
+            } else {
+                NETWORK_INTERFACE_CELLULAR
+            },
+        });
+        thread::sleep(Duration::from_millis(20));
+    }
+    let attempts = connector.bearers().len();
+    assert!(
+        (2..=4).contains(&attempts),
+        "{attempts} attempts in 2.5 s of a flapping path"
+    );
+    assert!(!connected(&host, &scope));
 }
 
 /// No actors: pin the additive tick-events command and its response bytes

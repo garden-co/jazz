@@ -829,6 +829,12 @@ pub struct NativeRelayHost {
     /// Production always uses [`NativeWebSocketConnector`].
     #[cfg(test)]
     socket_connector: Option<Arc<dyn NativeTransportConnector>>,
+    /// Host-level tests drive their own network path and retry timing
+    /// instead of the process-wide ones.
+    #[cfg(test)]
+    network_path: Option<tokio::sync::watch::Receiver<NetworkPath>>,
+    #[cfg(test)]
+    link_policy: Option<jazz::link::LinkPolicy>,
 }
 
 #[derive(Clone)]
@@ -1036,6 +1042,10 @@ impl Default for NativeRelayHost {
             next_handle: 1,
             #[cfg(test)]
             socket_connector: None,
+            #[cfg(test)]
+            network_path: None,
+            #[cfg(test)]
+            link_policy: None,
         }
     }
 }
@@ -1153,6 +1163,8 @@ impl NativeRelayHost {
             peer_identity,
             session,
             self.socket_connector(),
+            self.socket_network_path(),
+            self.socket_link_policy(),
         )?;
         worker._worker.activate();
         self.private_scope_workers.insert(scope.clone(), worker);
@@ -1167,12 +1179,30 @@ impl NativeRelayHost {
         Arc::new(NativeWebSocketConnector)
     }
 
+    fn socket_network_path(&self) -> tokio::sync::watch::Receiver<NetworkPath> {
+        #[cfg(test)]
+        if let Some(path) = &self.network_path {
+            return path.clone();
+        }
+        network_path()
+    }
+
+    fn socket_link_policy(&self) -> jazz::link::LinkPolicy {
+        #[cfg(test)]
+        if let Some(policy) = self.link_policy {
+            return policy;
+        }
+        jazz::link::LinkPolicy::default()
+    }
+
     fn prepare_private_scope_worker(
         admitted_scope: AdmissionCapability,
         relay: NativeRelay,
         peer_identity: jazz::ids::AuthorSubject,
         session: PrivateRelaySocketSession,
         connector: Arc<dyn NativeTransportConnector>,
+        network_path: tokio::sync::watch::Receiver<NetworkPath>,
+        link_policy: jazz::link::LinkPolicy,
     ) -> Result<PrivateScopeSocketWorker, JazzNativeRelayStatus> {
         let link = Arc::new(Mutex::new(WorkerLink::default()));
         let link_for_event = Arc::clone(&link);
@@ -1203,6 +1233,8 @@ impl NativeRelayHost {
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .on_event(event);
                 }),
+                network_path,
+                link_policy,
             },
             connector,
         )
@@ -2281,6 +2313,19 @@ pub extern "C" fn jazz_native_relay_abi_version() -> u16 {
 #[unsafe(no_mangle)]
 pub extern "C" fn jazz_native_relay_supports_snapshot_capture() -> bool {
     true
+}
+
+/// The platform's network monitor reports the device's path (on iOS, every
+/// `NWPathMonitor` update). `interfaces` is a mask of the
+/// `JAZZ_NATIVE_RELAY_NETWORK_*` bits. Safe from any thread, at any time,
+/// before or after a relay exists; outside the command layout, so it does
+/// not change the ABI.
+#[unsafe(no_mangle)]
+pub extern "C" fn jazz_native_relay_network_path_changed(satisfied: bool, interfaces: u32) {
+    report_network_path(NetworkPath {
+        satisfied,
+        interfaces,
+    });
 }
 
 /// Run one C ABI body written with `?` and collapse it into its status code.
