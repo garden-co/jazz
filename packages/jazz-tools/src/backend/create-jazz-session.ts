@@ -40,7 +40,6 @@ import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-sou
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { createJazzSessionOwner, type SessionCore } from "../session/state.js";
 import {
-  coreInitial,
   createStartedJazzSession,
   type JazzSession,
 } from "../session/jazz-session.js";
@@ -265,9 +264,10 @@ export interface BackendClientSession extends Omit<JazzSession<JazzClient>, "clo
  * Supply an AccountStore to keep device accounts across process restarts.
  */
 export async function createJazzClient(input: JazzClientConfig): Promise<BackendClientSession> {
-  const initial = coreInitial(input.initial);
-  if (initial === "signed-out")
+  if (input.initial !== undefined && input.initial !== "device")
     throw new Error('createJazzClient: initial is "device" or left out');
+  // The session core's name for a device account.
+  const initial = input.initial === "device" ? ("local-first" as const) : undefined;
   let core!: SessionCore<JazzClient>;
   const session = await createStartedJazzSession({ ...input, initial }, async (config) => {
     core = await openJazzSession(config);
