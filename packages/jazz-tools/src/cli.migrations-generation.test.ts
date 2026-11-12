@@ -146,6 +146,22 @@ describe("cli migrations", () => {
     expect(module).not.toContain("`deploy`");
   });
 
+  it("counts the steps a stub leaves to fill in", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+    await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    await writeFile(
+      join(root, "schema.ts"),
+      rootSchemaWithTodoNotes().replace("notes: s.string().optional()", "points: s.int()"),
+    );
+    const { logs } = await captureConsoleLogs(() =>
+      createMigration({ schemaDir: root, migrationsDir, name: "add-points" }),
+    );
+    expect(logs).toContain("1. Fill in migrate: 1 step marked TODO.");
+  });
+
   // A migration validate passed used to fail only at deploy (adopter b22):
   // renaming an optional column to a required one.
   it("refuses in validate a migration that a deploy would refuse, naming the column", async () => {
@@ -289,6 +305,8 @@ describe("cli migrations", () => {
         expect.stringMatching(/^20260825T060001-[0-9a-f]{12}\.json$/i),
       ]);
       expect(logs.some((line) => line.startsWith("Generated:"))).toBe(true);
+      // An optional column's stub is complete: nothing to fill in.
+      expect(logs).toContain("1. Review migrate: it is complete as generated, nothing to fill in.");
 
       const filesBeforeNoop = await readdir(snapshotsDir);
       const { result: noopResult, logs: noopLogs } = await captureConsoleLogs(() =>

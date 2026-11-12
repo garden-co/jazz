@@ -181,6 +181,8 @@ type CreateMigrationResult =
       fromHash: string;
       toHash: string;
       needsRename: boolean;
+      /** The steps the stub leaves to fill in (its `// TODO`s). */
+      unfilledSteps: number;
       snapshotPath: string | null;
     };
 
@@ -1093,6 +1095,7 @@ async function createMigrationUnlocked(
     fromHash: fromSchema.hash,
     toHash: toSchema.hash,
     needsRename: !options.name,
+    unfilledSteps: stub.split("\n").filter((line) => UNFILLED_STUB_TODO.test(line)).length,
     snapshotPath: snapshot?.finalPath ?? null,
   };
 }
