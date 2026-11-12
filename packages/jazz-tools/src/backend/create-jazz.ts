@@ -326,12 +326,23 @@ function checkedUser(answer: unknown): JazzUser {
   );
 }
 
+/**
+ * `authenticate`'s answer for an error message: its shape, never its values,
+ * since a wrong answer may well be a token or a session.
+ */
 function describeAnswer(answer: unknown): string {
-  if (typeof answer !== "object" || answer === null) return String(answer);
+  if (typeof answer !== "object" || answer === null) return kindOf(answer);
   const keys = Reflect.ownKeys(answer).map(String);
-  const userId = (answer as { userId?: unknown }).userId;
-  const detail = "userId" in answer ? `, userId: ${JSON.stringify(userId) ?? String(userId)}` : "";
+  const detail =
+    "userId" in answer ? `, userId: ${kindOf((answer as { userId?: unknown }).userId)}` : "";
   return `an object with keys [${keys.join(", ")}]${detail}`;
+}
+
+function kindOf(value: unknown): string {
+  if (value === null || value === undefined) return String(value);
+  if (value === "") return "an empty string";
+  const type = Array.isArray(value) ? "array" : typeof value;
+  return `${/^[aeiou]/.test(type) ? "an" : "a"} ${type}`;
 }
 
 /** `request` without the credentials a browser sends with it (its cookies, an `Authorization` header). */
