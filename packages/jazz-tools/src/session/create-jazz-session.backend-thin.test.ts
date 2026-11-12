@@ -127,6 +127,16 @@ function tokenAuth(...initial: string[]) {
   };
 }
 
+/**
+ * A persistent store, so clearOnSignOut has something to wipe. Node keeps it
+ * in a directory (`dataPath`), which the browser session's driver type
+ * doesn't name.
+ */
+function persistentStore(prefix: string): { type: "persistent" } {
+  const dataPath = join(mkdtempSync(join(tmpdir(), prefix)), "store");
+  return { type: "persistent", dataPath } as { type: "persistent" };
+}
+
 function memoryStore(): AccountStore {
   let stored: string | null = null;
   return {
@@ -594,10 +604,7 @@ describe("browser session against the app's backend", () => {
       serverUrl: `${served.origin}/jazz`,
       store: memoryStore(),
       // Persistent, so clearOnSignOut has storage to wipe.
-      driver: {
-        type: "persistent",
-        dataPath: join(mkdtempSync(join(tmpdir(), "jazz-e6-")), "store"),
-      },
+      driver: persistentStore("jazz-e6-"),
       initial: "device",
       clearOnSignOut: true,
       onSignedOut,
@@ -672,10 +679,7 @@ describe("browser session against the app's backend", () => {
         // The wipe runs only for storage that persists.
         driver:
           variant === "local-first, clearOnSignOut"
-            ? {
-                type: "persistent",
-                dataPath: join(mkdtempSync(join(tmpdir(), "jazz-e12-")), "store"),
-              }
+            ? persistentStore("jazz-e12-")
             : { type: "memory" },
         clearOnSignOut: variant === "local-first, clearOnSignOut",
         ...(localFirst ? { client: async () => ({ createClient: createLocalFirstDb }) } : {}),
