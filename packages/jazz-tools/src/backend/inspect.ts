@@ -34,6 +34,7 @@ import {
   fromJsonForColumn,
   inspectorLink,
   isLoopbackHost,
+  readsClaims,
   rowLimit,
   toJsonValue,
   type InspectAs,
@@ -76,6 +77,8 @@ export interface InspectEvent {
   table?: string;
   /** The user whose permissions the call ran under, if not the backend's. */
   as?: string;
+  /** The names (not values) of the claims given for `as`, when some were. */
+  asClaims?: string[];
   /** Rows the answer carried, or rows the write touched. */
   rows?: number;
   write: boolean;
@@ -476,14 +479,43 @@ export function createInspector(deps: InspectorDeps) {
     } as unknown as TableProxy<Record<string, unknown>, Record<string, unknown>>;
   }
 
-  async function dbFor(as: InspectAs | undefined): Promise<{ db: Db; as?: string }> {
+  let claimsReadFor: { permissions: unknown; reads: boolean } | undefined;
+  /** Whether the app's permissions read anything from `session.claims`. */
+  function permissionsReadClaims(): boolean {
+    if (!claimsReadFor || claimsReadFor.permissions !== deps.permissions) {
+      claimsReadFor = { permissions: deps.permissions, reads: readsClaims(deps.permissions) };
+    }
+    return claimsReadFor.reads;
+  }
+
+  async function dbFor(
+    as: InspectAs | undefined,
+  ): Promise<{ db: Db; as?: string; asClaims?: string[]; warning?: string }> {
     if (as === undefined) return { db: deps.db() };
     const user = typeof as === "string" ? { userId: as } : as;
     if (!user || typeof user.userId !== "string" || !user.userId) {
       throw new InspectError("bad_request", "as must name a user id");
     }
+    if (
+      user.claims !== undefined &&
+      (user.claims === null || typeof user.claims !== "object" || Array.isArray(user.claims))
+    ) {
+      throw new InspectError("bad_request", "as.claims must be an object of the user's claims");
+    }
+    // A user's claims come from their sign-in, which the Inspector doesn't
+    // have: viewing as them without claims sees what a session with none
+    // would, and policies that read claims then quietly allow less.
+    const warning =
+      user.claims === undefined && permissionsReadClaims()
+        ? `This app's permissions read session claims, and none were given for ${user.userId}, so this ran as a session with no claims: rows or writes a claim would allow are missing or refused. Pass the user's claims with as: { userId, claims } (CLI: --claims '<json>'; MCP: claims; Inspector: the claims field next to "View as user").`
+        : undefined;
     try {
-      return { db: await deps.dbAs(user), as: user.userId };
+      return {
+        db: await deps.dbAs(user),
+        as: user.userId,
+        ...(user.claims ? { asClaims: Object.keys(user.claims).sort() } : {}),
+        ...(warning ? { warning } : {}),
+      };
     } catch (error) {
       // Viewing as a user who never signed in: there is no one to be.
       if (error instanceof NoJazzAccountError) throw new InspectError("not_found", error.message);
@@ -499,6 +531,8 @@ export function createInspector(deps: InspectorDeps) {
     rows: Record<string, unknown>[];
     truncated: boolean;
     as?: string;
+    asClaims?: string[];
+    warning?: string;
   }> {
     if (!query || typeof query !== "object") {
       throw new InspectError("bad_request", "query needs { table, ... }");
@@ -523,7 +557,7 @@ export function createInspector(deps: InspectorDeps) {
     const json = buildQueryJson(query, limit + 1, (column, value) =>
       fromJsonForColumn(columns.get(column), value),
     );
-    const { db, as: asUser } = await dbFor(as);
+    const { db, as: asUser, asClaims, warning } = await dbFor(as);
     const found = await db.all(queryBuilder(query.table, json), {
       tier: "remote",
     });
@@ -540,14 +574,20 @@ export function createInspector(deps: InspectorDeps) {
       }
       rows.push(shown);
     }
-    return { rows, truncated, ...(asUser ? { as: asUser } : {}) };
+    return {
+      rows,
+      truncated,
+      ...(asUser ? { as: asUser } : {}),
+      ...(asClaims ? { asClaims } : {}),
+      ...(warning ? { warning } : {}),
+    };
   }
 
   async function write(
     admitted: Admitted,
     ops: InspectWriteOp[],
     as: InspectAs | undefined,
-  ): Promise<{ ids: string[]; as?: string }> {
+  ): Promise<{ ids: string[]; as?: string; asClaims?: string[]; warning?: string }> {
     if (!admitted.write) {
       throw new InspectError(
         "forbidden",
@@ -594,7 +634,7 @@ export function createInspector(deps: InspectorDeps) {
       }
       return { op, values };
     });
-    const { db, as: asUser } = await dbFor(as);
+    const { db, as: asUser, asClaims, warning } = await dbFor(as);
     const ids: string[] = [];
     let result;
     try {
@@ -617,9 +657,17 @@ export function createInspector(deps: InspectorDeps) {
       await result.wait({ tier: "global" });
     } catch (error) {
       if (error instanceof InspectError) throw error;
-      throw new InspectError("forbidden", `the write was refused: ${errorMessage(error)}`);
+      throw new InspectError(
+        "forbidden",
+        `the write was refused: ${errorMessage(error)}${warning ? `. ${warning}` : ""}`,
+      );
     }
-    return { ids, ...(asUser ? { as: asUser } : {}) };
+    return {
+      ids,
+      ...(asUser ? { as: asUser } : {}),
+      ...(asClaims ? { asClaims } : {}),
+      ...(warning ? { warning } : {}),
+    };
   }
 
   function schemaAnswer(admitted: Admitted) {
@@ -670,6 +718,7 @@ export function createInspector(deps: InspectorDeps) {
           answer: {
             rows: read.rows,
             truncated: read.truncated,
+            ...(read.warning ? { warning: read.warning } : {}),
             inspectorUrl: inspectorLink(url, {
               query: body.query,
               as: body.as,
@@ -679,6 +728,7 @@ export function createInspector(deps: InspectorDeps) {
             table: body.query.table,
             rows: read.rows.length,
             as: read.as,
+            asClaims: read.asClaims,
           },
         };
       }
@@ -697,13 +747,19 @@ export function createInspector(deps: InspectorDeps) {
         return {
           answer: {
             row: read.rows[0] ?? null,
+            ...(read.warning ? { warning: read.warning } : {}),
             inspectorUrl: inspectorLink(url, {
               table: body.table,
               row: body.id,
               as: body.as,
             }),
           },
-          event: { table: body.table, rows: read.rows.length, as: read.as },
+          event: {
+            table: body.table,
+            rows: read.rows.length,
+            as: read.as,
+            asClaims: read.asClaims,
+          },
         };
       }
       case "history": {
@@ -733,11 +789,12 @@ export function createInspector(deps: InspectorDeps) {
       case "write": {
         const done = await write(admitted, body.ops, body.as);
         return {
-          answer: { ids: done.ids },
+          answer: { ids: done.ids, ...(done.warning ? { warning: done.warning } : {}) },
           event: {
             table: [...new Set(body.ops.map((op) => op.table))].join(","),
             rows: done.ids.length,
             as: done.as,
+            asClaims: done.asClaims,
             write: true,
           },
         };
