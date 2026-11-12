@@ -186,6 +186,10 @@ pub struct NativeRelayWire {
     outbound_ready: Arc<tokio::sync::Notify>,
     /// Set when the owner retired this connection: no more frames cross it.
     retired: Arc<AtomicBool>,
+    /// Why the relay's database dropped this connection on its own (see
+    /// [`Link::upstream_refusal`]): whoever carries it stops instead of
+    /// keeping a socket nothing syncs over, and reports why.
+    refusal: Arc<Mutex<Option<String>>>,
 }
 
 impl NativeRelayWire {
@@ -256,6 +260,24 @@ impl NativeRelayWire {
     fn retire(&self) {
         self.retired.store(true, Ordering::Release);
         self.outbound_ready.notify_one();
+    }
+
+    /// Retire the connection because the relay's database refused its
+    /// upstream, recording why first so the carrier reads it.
+    pub(crate) fn refuse(&self, reason: String) {
+        *self
+            .refusal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason);
+        self.retire();
+    }
+
+    /// Why the relay refused this connection, once it has.
+    pub fn refusal(&self) -> Option<String> {
+        self.refusal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -1175,6 +1197,16 @@ impl RelayWorker {
             if !progressed {
                 break;
             }
+        }
+        // A refused upstream syncs nothing: stop its connection and say why,
+        // rather than keeping the socket open.
+        if let Some(upstream) = &self.upstream
+            && upstream.wire.refusal().is_none()
+            && let Some(error) = upstream.link.upstream_refusal()
+        {
+            let reason = format!("native relay upstream refused: {error}");
+            tracing::warn!(target: "jazz_native_relay", "{reason}");
+            upstream.wire.refuse(reason);
         }
         for client in self.clients.values_mut() {
             if let Err(error) = client.collect_events() {
@@ -2295,6 +2327,11 @@ async fn bridge_connection(
     loop {
         if cancelled.load(Ordering::Acquire) {
             return LinkEnd::Cancelled;
+        }
+        // The relay refused this upstream: retrying the same link cannot
+        // succeed, so the link stops with the refusal until a reconnect.
+        if let Some(reason) = wire.refusal() {
+            return LinkEnd::Stop(reason);
         }
         // The relay's frames out.
         let outbound = match wire.take_outbound_encoded() {
