@@ -25,7 +25,8 @@ import lastGrooveCorpus from "../../fixtures/groove-linear-history-browser-jazz-
 import preLinearCorpus from "../../fixtures/pre-linear-browser-jazz-corpus.json?raw";
 import sqliteCorpus from "../../fixtures/sqlite-v1-browser-jazz-corpus.json?raw";
 import { jazzStorageCorpusBrowserCommands } from "./browser-commands.js";
-import { createAccountManager, ReadTier, schema as s, type DbConfig } from "../../src/index.js";
+import { ReadTier, schema as s, type DbConfig } from "../../src/index.js";
+import { createAccountManager } from "../../src/accounts/create-account-manager.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { accountRegistryUrl } from "../../src/accounts/context.js";
 import { createBrowserPhysicalDatabaseName } from "../../src/runtime/browser-worker-config.js";

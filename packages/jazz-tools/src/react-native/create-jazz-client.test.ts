@@ -36,14 +36,12 @@ vi.mock("react-native", () => ({
   },
 }));
 import {
-  createDb,
-  REACT_NATIVE_AUTH_SECRET_STORE_REQUIRED_ERROR,
   REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR,
   REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
   REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
   type JazzClient,
-  useLocalFirstAuth,
 } from "./index.js";
+import { createDb } from "./create-db.js";
 import { openJazzClient, type OpenJazzClientConfig } from "./create-jazz-client.js";
 
 const app = s.defineApp(
@@ -115,12 +113,6 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
 
   it("exports the exact installed-package persistence boundary messages", () => {
     expect(REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR).toMatch(/JazzRelay native artifact/);
-  });
-
-  it("never falls back to browser localStorage for a React Native auth root", () => {
-    expect(() => useLocalFirstAuth({} as never)).toThrow(
-      REACT_NATIVE_AUTH_SECRET_STORE_REQUIRED_ERROR,
-    );
   });
 
   it("rejects a server-only credential copied through a React Native client config", async () => {

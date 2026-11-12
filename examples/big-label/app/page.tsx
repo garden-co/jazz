@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { JazzProvider, useJazzAuth, useSession } from "jazz-tools/react";
+import { JazzProvider, useJazzSession, useSession } from "jazz-tools/react";
 import {
   Banner,
   Button,
@@ -32,7 +32,7 @@ function SignIn() {
   const [password, setPassword] = React.useState("big-label-demo");
   const [error, setError] = React.useState<string | null>(null);
   const [pending, setPending] = React.useState(false);
-  const { reauthenticate } = useJazzAuth();
+  const { refresh } = useJazzSession();
   async function authenticate() {
     setPending(true);
     setError(null);
@@ -43,7 +43,7 @@ function SignIn() {
     setPending(false);
     if (result.error) setError(result.error.message ?? "Authentication failed");
     // Jazz asks the backend who is signed in now and opens their account.
-    else await reauthenticate();
+    else await refresh();
   }
   return (
     <AuthScreen>
@@ -136,7 +136,7 @@ function Failure({ error, onRetry }: { error: Error; onRetry: () => void }) {
 export default function Page() {
   return (
     <JazzProvider
-      serverUrl="/jazz"
+      config={{ serverUrl: "/jazz" }}
       signedOut={<SignIn />}
       loading={<Waiting message="Preparing your personal label…" />}
       error={(state) => (
@@ -154,7 +154,7 @@ export default function Page() {
 function AccountApp() {
   const account = useSession()?.user;
   const email = authClient.useSession().data?.user.email ?? "";
-  const { reauthenticate } = useJazzAuth();
+  const { refresh } = useJazzSession();
   const [bootstrapping, setBootstrapping] = React.useState(false);
   // A failed background bootstrap is shown as a banner over the working app,
   // not the full-screen failure: the account and its local data are fine.
@@ -193,7 +193,7 @@ function AccountApp() {
       // Signs out of Better Auth, then Jazz follows the backend's answer.
       onSignOut={async () => {
         await authClient.signOut();
-        await reauthenticate();
+        await refresh();
       }}
     />
   );

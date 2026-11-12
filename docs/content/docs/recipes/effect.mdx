@@ -16,9 +16,9 @@ the Effect that runs inside them.
 
 ## The `Jazz` service
 
-`Jazz.layer(config)` opens a database for the lifetime of the layer and shuts it down when the layer's
-scope closes. It takes the same config as `createClient`. If you already own a `Db`, use
-`Jazz.layerDb(db)` instead.
+`Jazz.layer(config)` opens a Jazz session (`createJazzClient(config)`) for the lifetime of the layer,
+provides its `session.db`, and closes the session when the layer's scope closes. If you already own a
+session, use `Jazz.layerDb(session.db)` instead.
 
 ```ts
 import { Effect, Stream } from "effect";
@@ -35,7 +35,10 @@ const program = Effect.gen(function* () {
   const first = yield* jazz.one(app.todos); // Option<Todo>
 });
 
-program.pipe(Effect.provide(Jazz.layer(config)), Effect.runPromise);
+program.pipe(
+  Effect.provide(Jazz.layer({ serverUrl: "/jazz", initial: "device" })),
+  Effect.runPromise,
+);
 ```
 
 ## Writes and durability
@@ -129,5 +132,5 @@ const accountId = yield * JazzBackend.use((backend) => backend.createAccountFor(
 
 Provide `JazzBackend.layer(createJazzOptions)` once for the whole server (or
 `JazzBackend.layerJazz(jazz)` for a Jazz you already created). Because handlers only depend on
-`Jazz`, the same code runs in the browser against `Jazz.layer`, and in tests against an in-memory
+`Jazz`, the same code runs in the browser against `Jazz.layer(config)`, and in tests against an in-memory
 database.

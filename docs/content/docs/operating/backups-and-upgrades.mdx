@@ -48,6 +48,73 @@ can't talk to a newer backend.
 Back up before you upgrade. Releases don't migrate a data directory back to an older format, so
 rolling back means restoring the backup.
 
+## Upgrading from alpha.60
+
+Alpha.61 gives a client one auth object, the **session**, and renames guest accounts to **device
+accounts**. Data and backends need no changes beyond one rename; client code does. Your backend
+still decides who is signed in: after your own sign-in or sign-out, `refresh()` follows it.
+
+- **One session.** `const session = await createJazzClient(config)`, or
+  `<JazzProvider config={{ … }}>` in React, React Native, Expo, Vue, Solid and Svelte. Read it with
+  `useJazzSession()` (Svelte: `getJazzSession()`), also in the provider's `signedOut`, `loading` and
+  `error` views. `session.db` is the signed-in user's Db; it throws while there is none.
+- **Device accounts** are how you do guests, and a local-first friendly way to sign in: an account
+  whose key lives on the device. See [Device Accounts](/docs/setup/auth/local-first).
+- **Errors.** A failed operation that leaves the client usable keeps the session `ready`, with
+  `error` set. `status: "error"` now means there is no usable client.
+- **`<JazzProvider>` refuses the old shapes** (the config as its own props, `fallback`, a config
+  with an `account`) with an error that names the new one.
+
+| Alpha.60                                                                                                  | Alpha.61                                                                                                                               |
+| :-------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------- |
+| `createAccountManager(config)` + `createDb({ ...config, account })`                                       | `const session = await createJazzClient({ ...config, initial: "device" })`; `session.db`                                               |
+| `createDb` (`jazz-tools`, `jazz-tools/react-native`)                                                      | `createJazzClient(…)`, then `session.db`                                                                                               |
+| `createJazzApp(config)`                                                                                   | `<JazzProvider config={config}>`, or `await createJazzClient(config)`                                                                  |
+| `<JazzProvider serverUrl="/jazz" …>` (config as props)                                                    | `<JazzProvider config={{ serverUrl: "/jazz", … }}>`                                                                                    |
+| `<JazzProvider config={{ …, account }}>`, `JazzSvelteProvider`                                            | `<JazzProvider config={…}>`; a client you opened yourself: `<JazzClientProvider client>` (Svelte: `<JazzSvelteClientProvider client>`) |
+| `<JazzSessionProvider session={s}>`                                                                       | `<JazzProvider session={s}>`                                                                                                           |
+| `fallback`                                                                                                | `loading`, `signedOut`, `error`                                                                                                        |
+| `useJazzAuth()`, `useJazzSessionOwner()`, `useAccountState`, `accountState`                               | `useJazzSession()` (Svelte: `getJazzSession()`)                                                                                        |
+| `reauthenticate()`, `loginWithBackend()`                                                                  | `refresh()`                                                                                                                            |
+| `logout()` / `dispose()`                                                                                  | `signOut()` / `close()`                                                                                                                |
+| `createLocalFirst()`                                                                                      | `createDeviceAccount()`                                                                                                                |
+| `restoreLocalFirst(secret)`                                                                               | `restoreDeviceAccount(key)`                                                                                                            |
+| `linkWithBackend()`                                                                                       | `linkDeviceAccount()`                                                                                                                  |
+| `exportLocalFirstSecret(snapshot.account)`                                                                | `session.exportDeviceKey()`                                                                                                            |
+| `initial: "local-first"`                                                                                  | `initial: "device"`                                                                                                                    |
+| `linkGuestOnSignUp`                                                                                       | `linkDeviceAccountOnSignUp`                                                                                                            |
+| `snapshot.account?.id`                                                                                    | `snapshot.user?.accountId`                                                                                                             |
+| `user.id` (your backend's user ID)                                                                        | `user.identity.subject`                                                                                                                |
+| `sessionActions.createLocalFirst()` and the other `sessionActions`                                        | the same operations on the session itself                                                                                              |
+| `useLocalFirstAuth`, `LocalFirstAuth`, `BrowserAuthSecretStore`, `ExpoAuthSecretStore`, `AuthSecretStore` | `session.exportDeviceKey()` and `session.restoreDeviceAccount(key)`                                                                    |
+| `acceptLocalFirstAuth` (backend)                                                                          | `acceptDeviceAccounts`                                                                                                                 |
+
+`snapshot.user` is `{ accountId, kind: "device" | "backend", identity: { issuer, subject }, claims }`
+for whoever is signed in, a device account included, or `null`. A client config without `serverUrl`
+now means `"/jazz"` everywhere.
+
+### Device accounts kept by `useLocalFirstAuth`
+
+Device accounts the session already knows open on their own: alpha.61 reads the same account
+storage. A key that only `useLocalFirstAuth`, `BrowserAuthSecretStore` or `ExpoAuthSecretStore`
+held, and never reached the account manager, needs moving once, or that user starts with a new
+device account. Read it where the old store kept it and restore it into the session:
+
+```ts
+import { authSecretStorageKey, createJazzClient } from "jazz-tools";
+
+const session = await createJazzClient({ serverUrl: "/jazz" });
+// The key alpha.60's store used: the `key` you gave it, or else this, with its appId and profile.
+const legacyKey = authSecretStorageKey({ appId: "your-old-app-id" });
+const secret = localStorage.getItem(legacyKey);
+if (secret && session.getSnapshot().user?.kind !== "device") {
+  await session.restoreDeviceAccount(secret);
+  localStorage.removeItem(legacyKey);
+}
+```
+
+On Expo, read the same key with `SecureStore.getItemAsync(legacyKey)` instead of `localStorage`.
+
 ## Upgrading from alpha.59
 
 Alpha.60 changes how Jazz runs, so an alpha.59 app needs more than a version bump:
@@ -176,7 +243,7 @@ Then:
    const jazz = await createJazzClient({ scope: "<your alpha.59 app ID>" });
    ```
 
-   (`<JazzProvider scope="…">` in React.) With `scope` set, each guest's browser finds its
+   (`<JazzProvider config={{ scope: "…" }}>` in React.) With `scope` set, each guest's browser finds its
    alpha.59 account by itself, on the same origin; there's nothing else to do. Without it, those
    guests can't open their accounts. The import prints the exact `scope` line when it brings
    local-first guests over. If the alpha.59 app was reached through more than one Jazz server URL

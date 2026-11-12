@@ -2,8 +2,8 @@
 
 This directory is the native relay package for Jazz's supported React Native
 alpha. Applications use the public `jazz-tools/react-native` client API: open
-a client with `createJazzClient` (or `<JazzSessionProvider>` from
-`jazz-tools/expo`), which keeps an `AccountHandle` for its user. The
+a session with `createJazzClient` (or `<JazzProvider>` from
+`jazz-tools/expo`), which signs in a device account or your backend's user. The
 [canonical Expo scaffold](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-expo) shows the
 complete client lifecycle.
 

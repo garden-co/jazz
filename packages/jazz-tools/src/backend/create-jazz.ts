@@ -41,7 +41,7 @@ import { DeploymentError, type PublishedTableLens } from "../dev/catalogue-api.j
 import type { WasmSchema } from "../drivers/types.js";
 import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
-import type { JazzSession } from "../session/state.js";
+import type { SessionCore } from "../session/state.js";
 import {
   backendDbAttributedTo,
   backendDbForSession,
@@ -284,7 +284,7 @@ declare const localFirstGuestBrand: unique symbol;
 /**
  * `authenticate`'s answer for a request from a local-first guest: an account
  * a browser made on its own, before (or without) signing in. Return
- * {@link acceptLocalFirstAuth} for the requests you let guests make; any other
+ * {@link acceptDeviceAccounts} for the requests you let guests make; any other
  * answer refuses a guest.
  */
 export interface LocalFirstGuest {
@@ -296,14 +296,14 @@ export interface LocalFirstGuest {
  * a bundler may load this module more than once (Next dev evaluates it per
  * route), and a shared Jazz must still recognise a marker made by another copy.
  */
-const LOCAL_FIRST_GUEST_BRAND = Symbol.for("jazz-tools.acceptLocalFirstAuth.guest");
+const LOCAL_FIRST_GUEST_BRAND = Symbol.for("jazz-tools.acceptDeviceAccounts.guest");
 
 const LOCAL_FIRST_GUEST = Object.freeze({
   [LOCAL_FIRST_GUEST_BRAND]: true,
   kind: "jazz:local-first-guest",
 }) as unknown as LocalFirstGuest;
 
-/** Whether `answer` is {@link acceptLocalFirstAuth}'s marker, from any copy of this module. */
+/** Whether `answer` is {@link acceptDeviceAccounts}'s marker, from any copy of this module. */
 function isLocalFirstGuest(answer: unknown): answer is LocalFirstGuest {
   return (
     typeof answer === "object" &&
@@ -322,7 +322,7 @@ function checkedUser(answer: unknown): JazzUser {
   if (typeof answer === "object" && answer !== null && typeof userId === "string" && userId !== "")
     return answer as JazzUser;
   throw new TypeError(
-    `createJazz: authenticate must return { userId: string, expiresAt: number }, acceptLocalFirstAuth(request) or null; it returned ${describeAnswer(answer)}`,
+    `createJazz: authenticate must return { userId: string, expiresAt: number }, acceptDeviceAccounts(request) or null; it returned ${describeAnswer(answer)}`,
   );
 }
 
@@ -343,14 +343,17 @@ function withoutCredentials(request: Request): Request {
 }
 
 /**
- * Let this request through as a local-first guest, when it comes from one.
- * Guests are refused unless `authenticate` returns this: a guest has no user
- * in your auth, so only your permissions stand between it and your data.
+ * Let this request through as a device account, when it comes from one: an
+ * account whose key lives on the user's device, with no user in your auth.
+ * It's how your app lets people in as guests, and a local-first friendly way
+ * to sign in at all. Device accounts are refused unless `authenticate`
+ * returns this, since only your permissions stand between them and your
+ * data.
  *
  * ```ts
  * authenticate: async (request) => {
  *   const session = await auth.api.getSession({ headers: request.headers });
- *   if (!session) return acceptLocalFirstAuth(request);
+ *   if (!session) return acceptDeviceAccounts(request);
  *   return {
  *     userId: session.user.id,
  *     expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
@@ -358,19 +361,19 @@ function withoutCredentials(request: Request): Request {
  * },
  * ```
  *
- * An app with no sign-in of its own, where every browser is a guest, passes
- * it as is: `authenticate: acceptLocalFirstAuth`.
+ * An app with no sign-in of its own, where every browser has a device
+ * account, passes it as is: `authenticate: acceptDeviceAccounts`.
  *
- * For a request that is not a guest's, it means the same as `null`: no one
- * is signed in.
+ * For a request that is not a device account's, it means the same as `null`:
+ * no one is signed in.
  *
- * A guest's request may also carry a user's cookie: someone signed in (or
- * up) on that browser, and the guest still uploads its writes before it
- * links to them. Jazz then asks `authenticate` about the request without its
- * cookies and `Authorization` header, so the guest is let in as it would be
- * on its own.
+ * A device account's request may also carry a user's cookie: someone signed
+ * in (or up) on that browser, and the device account still uploads its
+ * writes before it links to them. Jazz then asks `authenticate` about the
+ * request without its cookies and `Authorization` header, so the device
+ * account is let in as it would be on its own.
  */
-export function acceptLocalFirstAuth(_request: Request): LocalFirstGuest {
+export function acceptDeviceAccounts(_request: Request): LocalFirstGuest {
   return LOCAL_FIRST_GUEST;
 }
 
@@ -430,8 +433,8 @@ export interface CreateJazzOptions {
    * ```
    *
    * Local-first guests are refused unless it returns
-   * `acceptLocalFirstAuth(request)` for them; an app with no sign-in passes
-   * `authenticate: acceptLocalFirstAuth`. Without `authenticate`, only
+   * `acceptDeviceAccounts(request)` for them; an app with no sign-in passes
+   * `authenticate: acceptDeviceAccounts`. Without `authenticate`, only
    * backend code reaches the data.
    */
   authenticate?: (
@@ -473,8 +476,8 @@ export interface CreateJazzOptions {
    */
   recheckSeconds?: never;
   /**
-   * What happens to a local-first guest's key once the guest links to a
-   * signed-in user (`linkWithBackend()`):
+   * What happens to a device account's key once it links to a signed-in
+   * user (`linkDeviceAccount()`):
    * - `"keep"` (the default): the key stays an identity of the account, so
    *   the device can still sign in as the guest (e.g. offline) alongside
    *   the linked user.
@@ -625,8 +628,8 @@ export interface Jazz {
    * Create the Jazz account of `userId` (the id your `authenticate` returns
    * for them), or return the one they have. Jazz never creates accounts on
    * its own on the backend: a user gets one when they sign in from a client,
-   * when a local-first guest links to them (`linkWithBackend`, so the
-   * guest's data becomes theirs), or here. Call it for a user who never
+   * when a device account links to them (`linkDeviceAccount()`, so its data
+   * becomes theirs), or here. Call it for a user who never
    * opens a client (a webhook, an import, an API-only user) or to seed data
    * before their first visit. A user with an account can no longer link a
    * guest, so don't call it in a sign-up flow whose browser may hold one.
@@ -1420,7 +1423,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   async function backendSession(
     next: CreateJazzOptions,
     published?: string,
-  ): Promise<{ session: JazzSession<JazzClient>; client: JazzClient }> {
+  ): Promise<{ session: SessionCore<JazzClient>; client: JazzClient }> {
     pin = published ?? (await publish(next));
     const session = await openJazzSession({
       appId,
@@ -1438,7 +1441,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     return { session, client: opened.client };
   }
 
-  let session: JazzSession<JazzClient>;
+  let session: SessionCore<JazzClient>;
   let backend: JazzClient;
   try {
     ({ session, client: backend } = await backendSession(options));
@@ -1465,7 +1468,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       const published = await publish(next);
       if (published !== pin) {
         const previousPin = pin;
-        let fresh: { session: JazzSession<JazzClient>; client: JazzClient };
+        let fresh: { session: SessionCore<JazzClient>; client: JazzClient };
         try {
           fresh = await backendSession(next, published);
         } catch (error) {
@@ -1489,7 +1492,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    * writes); a close of this Jazz closes those left.
    */
   const retiring = new Set<() => Promise<void>>();
-  function retire(old: JazzSession<JazzClient>): void {
+  function retire(old: SessionCore<JazzClient>): void {
     let closed: Promise<void> | undefined;
     const closeOld = (): Promise<void> => {
       clearTimeout(timer);
@@ -1550,7 +1553,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     return (await options.authenticate(request)) ?? null;
   }
 
-  /** Whether the app lets `request` in as a local-first guest (`acceptLocalFirstAuth`). */
+  /** Whether the app lets `request` in as a device account (`acceptDeviceAccounts`). */
   let warnedGuestsOff = false;
   async function acceptsGuest(request: Request): Promise<boolean> {
     const answer = await askAuthenticate(request);
@@ -1565,7 +1568,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     if (!warnedGuestsOff) {
       warnedGuestsOff = true;
       console.warn(
-        "createJazz: refused a local-first guest. To let guests sync, return acceptLocalFirstAuth(request) from authenticate for them.",
+        "createJazz: refused a local-first guest. To let guests sync, return acceptDeviceAccounts(request) from authenticate for them.",
       );
     }
     return false;
@@ -2109,7 +2112,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     access: BackendAccess;
     trusted: boolean;
     expiresAt?: number;
-    /** A local-first guest, let in by `acceptLocalFirstAuth`. */
+    /** A local-first guest, let in by `acceptDeviceAccounts`. */
     guest?: true;
   } | null> {
     let parsed: Record<string, unknown>;

@@ -72,7 +72,7 @@ describe("Node shared backend session", () => {
     };
     await expect(
       createJazzClient({ ...base, initial: { backendSecret: "secret" } } as never),
-    ).rejects.toThrow('initial is "local-first" or left out');
+    ).rejects.toThrow('initial is "device" or left out');
     for (const key of ["backendSecret", "adminSecret"]) {
       await expect(createJazzClient({ ...base, [key]: "secret" } as never)).rejects.toThrow(
         `${key} is not a createJazzClient option`,

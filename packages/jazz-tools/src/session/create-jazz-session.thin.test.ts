@@ -10,7 +10,10 @@ import { ThinConnectionLostError, ThinRemoteError, ThinRuntime } from "../thin/t
 import { RuntimeClosedError } from "../runtime/runtime-closed-error.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
-import { createJazzClient, type BrowserJazzSession } from "./create-jazz-session.js";
+import {
+  openBrowserSessionCore as createJazzClient,
+  type BrowserJazzSession,
+} from "./create-jazz-session.js";
 
 const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
 const permissions = definePermissions(app, ({ policy, session }) => {
@@ -71,7 +74,7 @@ async function open(
     scope: server.appId,
     serverUrl: server.url,
     store,
-    initial: "local-first",
+    initial: "device",
     driver: { type: "memory" },
     ...(client ? { client } : {}),
   });
@@ -132,16 +135,26 @@ describe("browser session", () => {
     // rc.3 adopter finding: the JSDoc'd `fetch` hook reached the Db config, so
     // opening the client threw DataCloneError in db.getConfig().
     const server = await startServer();
+    const asked: string[] = [];
+    const customFetch: typeof fetch = (input, init) => {
+      asked.push(String(input instanceof Request ? input.url : input));
+      return fetch(input, init);
+    };
     const session = await createJazzClient({
       scope: server.appId,
       serverUrl: server.url,
       store: memoryStore(),
-      initial: "local-first",
+      initial: "device",
       driver: { type: "memory" },
-      fetch: (input, init) => fetch(input, init),
+      fetch: customFetch,
     });
     sessions.push(session);
     expect(session.getSnapshot().status).toBe("ready");
+    // It also asks the backend who is signed in, without a bearer: an app
+    // whose cookies only its own fetch carries isn't read as signed out.
+    await expect
+      .poll(() => asked.some((url) => url.includes("backend-user")), { timeout: 10_000 })
+      .toBe(true);
     expect(db(session).getConfig()).not.toHaveProperty("fetch");
     expect(db(session).getConfig()).not.toHaveProperty("store");
 
@@ -612,4 +625,59 @@ describe("browser session", () => {
     await db(session).insert(app.notes, { text: "still thin" }).wait({ tier: "global" });
     warn.mockRestore();
   }, 60_000);
+
+  it('opens the local-first client at once with localFirst: "now", on a first visit too', async () => {
+    vi.stubGlobal("localStorage", memoryLocalStorage());
+    const server = await startServer();
+    const session = await createJazzClient({
+      scope: server.appId,
+      serverUrl: server.url,
+      store: memoryStore(),
+      initial: "device",
+      driver: { type: "memory" },
+      client: loadLocalFirst,
+      localFirst: "now",
+    });
+    sessions.push(session);
+    expect(isThinDb(db(session))).toBe(false);
+    await db(session).insert(app.notes, { text: "local at once" }).wait({ tier: "global" });
+  }, 60_000);
+
+  it('fails instead of running thin when localFirst: "now" can\'t load the client', async () => {
+    const server = await startServer();
+    await expect(
+      createJazzClient({
+        scope: server.appId,
+        serverUrl: server.url,
+        store: memoryStore(),
+        initial: "device",
+        driver: { type: "memory" },
+        client: async () => {
+          throw new Error("Failed to fetch dynamically imported module");
+        },
+        localFirst: "now",
+      }),
+    ).rejects.toThrow("Failed to fetch dynamically imported module");
+  }, 60_000);
+
+  it('refuses localFirst: "now" without a client loader, and an unknown timing', async () => {
+    const base = { serverUrl: "https://app.example.test/jazz", store: memoryStore() };
+    await expect(createJazzClient({ ...base, localFirst: "now" })).rejects.toThrow(
+      /localFirst: "now" opens the local-first client, which needs the `client` loader/,
+    );
+    await expect(
+      createJazzClient({ ...base, client: loadLocalFirst, localFirst: "soon" as never }),
+    ).rejects.toThrow(/Unknown localFirst "soon"/);
+  });
+
+  it("refuses alpha.60's linkGuestOnSignUp and account by name instead of ignoring them", async () => {
+    const base = { serverUrl: "https://app.example.test/jazz", store: memoryStore() };
+    // Ignored, an app that turned guest linking off would link again.
+    await expect(createJazzClient({ ...base, linkGuestOnSignUp: false } as never)).rejects.toThrow(
+      /linkGuestOnSignUp is now linkDeviceAccountOnSignUp/,
+    );
+    await expect(createJazzClient({ ...base, account: {} } as never)).rejects.toThrow(
+      /takes no account: the session signs in itself/,
+    );
+  });
 });

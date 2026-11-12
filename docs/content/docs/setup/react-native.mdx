@@ -7,16 +7,18 @@ React Native and Expo are supported as an alpha through `jazz-tools/react-native
 
 ## Setup
 
-React Native and Expo use the same session API with platform-specific runtime and account storage adapters:
+React Native and Expo use the same session API as the web, with platform-specific runtime and
+account storage adapters. `initial: "device"` starts people as guests on a
+[device account](/docs/setup/auth/local-first), which works offline:
 
 ```tsx
-import { JazzSessionProvider } from "jazz-tools/expo";
+import { JazzProvider } from "jazz-tools/expo";
 
 function App() {
   return (
-    <JazzSessionProvider config={{ serverUrl, initial: "local-first" }}>
+    <JazzProvider config={{ serverUrl, initial: "device" }}>
       <TodoApp />
-    </JazzSessionProvider>
+    </JazzProvider>
   );
 }
 ```
@@ -80,41 +82,48 @@ runtimes attached to one relay.
 
 ### Loading and errors
 
-`JazzSessionProvider` renders `fallback` until the session is ready. Inside it, `useJazzSession()`
-gives the session's `status` (`"transitioning"`, `"signed-out"`, `"error"`, `"ready"` or
-`"closed"`), its `error` and `retry()`:
+`JazzProvider` renders its children once someone is signed in, `loading` while the session starts
+or switches users, `signedOut` while no one is signed in, and `error` when there is no usable client.
+Anywhere inside it, those views included, `useJazzSession()` gives the session's `status`
+(`"starting"`, `"ready"`, `"signed-out"`, `"transitioning"`, `"error"` or `"closed"`), its `user`,
+its `error` and its operations, such as `retry()`:
 
 ```tsx
-import { JazzSessionProvider, useJazzSession } from "jazz-tools/expo";
+import { JazzProvider, useJazzSession } from "jazz-tools/expo";
 
-function Startup() {
-  const { status, error, retry } = useJazzSession();
-  if (status === "error") return <Button title={`${error?.message}: retry`} onPress={retry} />;
-  return <ActivityIndicator />;
+function StartupError() {
+  const { error, retry } = useJazzSession();
+  return <Button title={`${error?.message}: retry`} onPress={() => void retry()} />;
 }
 
-<JazzSessionProvider config={{ serverUrl, initial: "local-first" }} fallback={<Startup />}>
+<JazzProvider
+  config={{ serverUrl, initial: "device" }}
+  loading={<ActivityIndicator />}
+  error={<StartupError />}
+>
   <TodoApp />
-</JazzSessionProvider>;
+</JazzProvider>;
 ```
+
+A failed operation that leaves the client usable (a refused link, say) keeps the session `ready`
+with `error` set, so the app keeps working while you show it.
 
 ## Which entry exports what
 
 Import from `jazz-tools/expo` in an Expo app and `jazz-tools/react-native` in a bare one. Both
-export the providers, `useJazzSession`, `useJazzAuth`, `useDb`, `useSession`, `useAll`, `useOne`
-and `createAccountManager`. `useSyncStatus` and `useAccountState` are only in
-`jazz-tools/react-native` for now; an Expo app imports those two from there.
+export `JazzProvider`, `useJazzSession`, `createJazzClient`, `useDb`, `useSession`, `useAll`,
+`useOne` and `useSyncStatus`.
 
 <Callout type="info">
   `serverUrl` is your backend's Jazz endpoint (where `createJazz` is mounted); the app names no app
-  id. For Jazz on the device only, pass `serverUrl: null`: no backend, one local-first account on
-  this device.
+  id. For Jazz on the device only, pass `serverUrl: null`: no backend, one device account on this
+  device.
 </Callout>
 
 <Callout type="warn">
-  The local-first root is that identity's signing credential. If it is lost, the account needs
+  A device account's key is that identity's signing credential. If it is lost, the account needs
   another linked identity or a recovery backup to regain access. Plan for recovery with [backup and
-  restore](/docs/setup/auth/local-first#backing-up-and-restoring-the-secret).
+  restore](/docs/setup/auth/local-first#backing-up-and-restoring-the-key).
 </Callout>
 
 <Accordions type="single">
@@ -129,14 +138,22 @@ Some bundlers and runtimes cannot automatically resolve Jazz's Wasm and worker a
 
 An app has no cookie for your backend, so it hands Jazz its own token instead. Pass `bearer`, a
 function that returns the token your app holds for its backend (or `null` when signed out), next
-to `serverUrl` in `createAccountManager` from `jazz-tools/react-native` (or `jazz-tools/expo`). Jazz sends it as `Authorization: Bearer …` when it signs in and on the device's sync
-connection, so your backend's `authenticate` reads that header instead of a cookie.
+to `serverUrl` in the config of `<JazzProvider>` (or `createJazzClient`) from
+`jazz-tools/react-native` or `jazz-tools/expo`. Jazz sends it as `Authorization: Bearer …` when it
+signs in and on the device's sync connection, so your backend's `authenticate` reads that header
+instead of a cookie.
 
-After your own sign-in, call `loginWithBackend()` for the user's own account, or
-`linkWithBackend()` to keep a local-first guest's data under the new user, both from
-`useJazzAuth().sessionActions`; `useJazzAuth().logout()` signs out. Linking a user who already has an account
-fails with an `AccountAuthError` whose code is `link_refused`; sign them in with
-`loginWithBackend()` instead.
+```tsx
+<JazzProvider config={{ serverUrl, initial: "device", bearer: () => tokenStore.current() }}>
+  <TodoApp />
+</JazzProvider>
+```
+
+Your backend decides who is signed in, and the session follows it. After your own sign-in, call
+`refresh()` from `useJazzSession()` to sign in to the user's own account, or `linkDeviceAccount()`
+to keep a guest's data under the new user; `signOut()` signs out. Linking a user who already has an
+account fails with an `AccountAuthError` whose code is `link_refused`; sign them in with `refresh()`
+instead.
 
 To reach a development backend over plain `http://` on Android, allow cleartext traffic, for
 example with `expo-build-properties` (`android.usesCleartextTraffic: true`) in a development build

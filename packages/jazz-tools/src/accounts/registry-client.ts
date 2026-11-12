@@ -16,19 +16,19 @@ export class AccountAuthError extends Error {
 }
 
 /**
- * `linkWithBackend()` was called without a guest to link: the session is
- * signed out, or its account isn't a guest (it came from your backend or
- * another sign-in).
+ * `linkDeviceAccount()` was called without a device account to link: the
+ * session is signed out, or its account came from your backend.
  */
 export const LINK_NEEDS_GUEST_MESSAGE =
-  "local_first_account_required: linkWithBackend() links this device's guest (local-first) account to the user your backend signed in, and there is no guest to link: the session is signed out, or its account isn't a guest (it came from your backend or another sign-in). Call loginWithBackend() to open the backend user's account instead. To keep what a guest wrote, link while that guest is signed in.";
+  "local_first_account_required: linkDeviceAccount() links this device's device account (a guest) to the user your backend signed in, and there is no device account to link: the session is signed out, or its account came from your backend. Call refresh() to open the backend user's account instead. To keep what a device account wrote, link while it is signed in.";
 
 /**
- * `linkWithBackend()` was called with a guest whose key this client no longer
- * holds: it signed out meanwhile, or the handle comes from another client.
+ * `linkDeviceAccount()` was called with a device account whose key this
+ * client no longer holds: it signed out meanwhile, or the handle comes from
+ * another client.
  */
 export const LINK_GUEST_KEY_MISSING_MESSAGE =
-  "local_first_account_required: this guest's key isn't held by this client any more (the guest signed out, or its account handle comes from another Jazz client), so it can't prove itself to link. Link from the client where the guest is signed in, or call loginWithBackend() instead.";
+  "local_first_account_required: this device account's key isn't held by this client any more (it signed out, or comes from another Jazz client), so it can't prove itself to link. Link from the client where it is signed in, or call refresh() instead.";
 
 /**
  * The app's backend vouches to the core's registry for an identity it

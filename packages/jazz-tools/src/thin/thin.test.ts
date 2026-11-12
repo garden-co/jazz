@@ -6,13 +6,19 @@ import type { Db } from "../runtime/db.js";
 import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
+import { createAccountManagerWithMinter } from "../accounts/account-manager-core.js";
+import type { AccountManagerConfig } from "../accounts/create-account-manager.js";
 import {
-  createAccountManager,
   createClient,
+  mintLocalFirstTokenInJs,
   prefetchThinQueries,
   upgradeToLocalFirst,
 } from "./index.js";
 import { ThinRuntime } from "./thin-runtime.js";
+
+/** The account manager the thin entry used to export: it signs in JavaScript. */
+const createAccountManager = (config: AccountManagerConfig) =>
+  createAccountManagerWithMinter(config, mintLocalFirstTokenInJs);
 import { decodeThinResponse, isThinResponse } from "./wire.js";
 import { JazzClient } from "../runtime/client.js";
 import type { Session } from "../runtime/context.js";

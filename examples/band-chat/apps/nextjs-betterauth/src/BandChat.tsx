@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { DbConfig } from "jazz-tools";
+import type { JazzClientConfig } from "jazz-tools";
 import { JazzProvider, useAll, useSession } from "jazz-tools/react";
 import { AppShell, Button, Center, EmptyState, Spinner } from "@astryxdesign/core";
 import { app, type Profile } from "../schema";
@@ -33,7 +33,7 @@ export function BandChatPreview({
   config,
   initialParams,
 }: {
-  config: DbConfig;
+  config: JazzClientConfig;
   /** Query-string state for this preview, e.g. `{ join: roomId }` for a room link. */
   initialParams?: Record<string, string>;
 }) {
@@ -41,7 +41,7 @@ export function BandChatPreview({
   return (
     <ThemeProvider>
       <ParamStoreProvider store={store}>
-        <JazzProvider config={config} fallback={<Loading label="Opening local stage…" />}>
+        <JazzProvider config={config} loading={<Loading label="Opening local stage…" />}>
           <BandChat />
         </JazzProvider>
       </ParamStoreProvider>

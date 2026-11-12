@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
 import { makeFakeAccount } from "../react-core/test-utils.js";
-import { createJazzClient as createNativeSession } from "./create-jazz-session.js";
-import { createJazzClient as createExpoSession } from "../expo/create-jazz-session.js";
+import { openNativeSessionCore as createNativeSession } from "./create-jazz-session.js";
+import { openNativeSessionCore as createExpoSession } from "../expo/create-jazz-session.js";
 
 const mocks = vi.hoisted(() => ({
   nativeAccounts: vi.fn(),
@@ -55,7 +55,7 @@ for (const [host, create, prepare] of [
       const config = {
         scope: "app-1",
         serverUrl: "https://jazz.example.com",
-        initial: "local-first" as const,
+        initial: "device" as const,
         profile: "personal",
         env: "test",
         store: { read: async () => null, update: async () => {} },
@@ -156,7 +156,7 @@ for (const [host, create, prepare] of [
       const session = await create({
         scope: "app-1",
         serverUrl: "https://jazz.example.com",
-        initial: "local-first",
+        initial: "device",
         store: { read: async () => null, update: async () => {} },
       });
       expect(session.getSnapshot().status).toBe("ready");

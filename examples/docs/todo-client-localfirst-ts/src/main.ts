@@ -1,5 +1,5 @@
-import { createDb, type DbConfig, type Db } from "jazz-tools";
-import { sessionConfig } from "./account.js";
+import type { Db } from "jazz-tools";
+import { sessionConfig, type SessionOverrides } from "./account.js";
 import { createJazzClient, type JazzClient, type JazzSession } from "jazz-tools/client";
 import { authSessionExamples } from "./auth-session-snippets.js";
 import { app, type Todo } from "../schema.js";
@@ -54,9 +54,9 @@ function orderTodosWithDepth(todos: Todo[]): { todo: Todo; depth: number }[] {
 }
 
 // #region context-setup-ts-client
-async function openLocalFirst(config?: Partial<DbConfig>) {
+async function openSession(config?: SessionOverrides) {
   const session = await createJazzClient(sessionConfig(config));
-  // Read the current client from session.getSnapshot(); close the session on teardown.
+  // session.db is the signed-in user's Db; close the session on teardown.
   return session;
 }
 // #endregion context-setup-ts-client
@@ -92,15 +92,11 @@ export function followDb(
 
 export async function startApp(
   container: HTMLElement,
-  config?: Partial<DbConfig>,
-): Promise<{ db: Db; destroy: () => Promise<void> }> {
-  // Explicit fixed handles remain supported for advanced callers and replica tests.
-  const session = config?.account ? undefined : await openLocalFirst(config);
-  const fixed = config?.account
-    ? await createDb({ ...config, appId: config.appId!, account: config.account })
-    : undefined;
+  config?: SessionOverrides,
+): Promise<{ session: JazzSession<JazzClient>; db: Db; destroy: () => Promise<void> }> {
+  const session = await openSession(config);
   // Writes go to the current Db: the session swaps it when the user signs in or out.
-  const currentDb = () => fixed ?? session!.getSnapshot().client!.db;
+  const currentDb = () => session.db;
 
   // Build DOM
   const h1 = document.createElement("h1");
@@ -175,9 +171,7 @@ export async function startApp(
     }
     list.replaceChildren(items);
   };
-  const stopTodos = session
-    ? followDb(session, (db) => db.subscribe(query, render))
-    : fixed!.subscribe(query, render);
+  const stopTodos = followDb(session, (db) => db.subscribe(query, render));
 
   // Add todo form
   form.addEventListener("submit", (e) => {
@@ -207,13 +201,13 @@ export async function startApp(
   });
 
   return {
+    session,
     get db() {
       return currentDb();
     },
     destroy: async () => {
       stopTodos();
-      if (session) await session.close();
-      else await fixed!.shutdown();
+      await session.close();
       container.innerHTML = "";
     },
   };
