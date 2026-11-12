@@ -1,7 +1,12 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle, type AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
-import { browserSingleFlight, watchBackendUser, type BackendUser } from "./backend-watch.js";
+import {
+  browserSingleFlight,
+  SINGLE_FLIGHT_TURN_MS,
+  watchBackendUser,
+  type BackendUser,
+} from "./backend-watch.js";
 import { followUser } from "./follow-user.js";
 import { createJazzSessionOwner } from "./state.js";
 
@@ -308,66 +313,71 @@ it("signs out when the app's onSignedOut throws or answers nothing", async () =>
   }
 });
 
-it(
-  "lets a browser's windows ask the backend one at a time, sharing a fresh answer",
-  { timeout: 20_000 },
-  async () => {
-    // Two windows of one browser: one lock manager, one broadcast channel name.
-    const queue: Array<() => Promise<unknown>> = [];
-    let running: Promise<unknown> | undefined;
-    const locks = {
-      request: (_name: string, run: () => Promise<unknown>) =>
-        new Promise((resolve, reject) => {
-          queue.push(() => run().then(resolve, reject));
-          const pump = (): void => {
-            if (running || !queue.length) return;
-            running = queue.shift()!().finally(() => {
-              running = undefined;
-              pump();
-            });
-          };
-          pump();
-        }),
+it("lets a browser's windows ask the backend one at a time, each asking itself", async () => {
+  // Two windows of one browser: one lock manager.
+  const queue: Array<() => Promise<unknown>> = [];
+  let running: Promise<unknown> | undefined;
+  const locks = {
+    request: (_name: string, run: () => Promise<unknown>) =>
+      new Promise((resolve, reject) => {
+        queue.push(() => run().then(resolve, reject));
+        const pump = (): void => {
+          if (running || !queue.length) return;
+          running = queue.shift()!().finally(() => {
+            running = undefined;
+            pump();
+          });
+        };
+        pump();
+      }),
+  };
+  vi.stubGlobal("navigator", { locks });
+  try {
+    const windowA = browserSingleFlight("jazz-account:test:probe")!;
+    const windowB = browserSingleFlight("jazz-account:test:probe")!;
+    let inFlight = 0;
+    let most = 0;
+    let probes = 0;
+    const probe = async () => {
+      const n = ++probes;
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      await settle(20);
+      inFlight -= 1;
+      return { subject: "alice", n };
     };
-    const stored = new Map<string, string>();
-    vi.stubGlobal("navigator", { locks });
-    vi.stubGlobal("localStorage", {
-      getItem: (key: string) => stored.get(key) ?? null,
-      setItem: (key: string, value: string) => void stored.set(key, value),
-      removeItem: (key: string) => void stored.delete(key),
+    // Both wake at once: one after the other, never together, and each
+    // window's request carries what the one before it left (its cookie).
+    const [a, b] = await Promise.all([windowA(probe), windowB(probe)]);
+    expect(most).toBe(1);
+    expect(probes).toBe(2);
+    expect([a.n, b.n].sort()).toEqual([1, 2]);
+
+    // A window whose request hangs holds the turn only so long.
+    vi.useFakeTimers();
+    let release!: () => void;
+    const hung = windowA(
+      () =>
+        new Promise<{ subject: string; n: number }>(
+          (done) => (release = () => done({ subject: "alice", n: 0 })),
+        ),
+    );
+    let answered = false;
+    const next = windowB(async () => ({ subject: "alice", n: 3 })).then((answer) => {
+      answered = true;
+      return answer;
     });
-    try {
-      const windowA = browserSingleFlight("jazz-account:test:probe")!;
-      const windowB = browserSingleFlight("jazz-account:test:probe")!;
-      let inFlight = 0;
-      let most = 0;
-      let probes = 0;
-      const probe = async () => {
-        probes += 1;
-        inFlight += 1;
-        most = Math.max(most, inFlight);
-        await settle(20);
-        inFlight -= 1;
-        return { subject: "alice", n: probes };
-      };
-      // Both wake at once: one probe, the other window takes its answer.
-      const [a, b] = await Promise.all([windowA(probe), windowB(probe)]);
-      expect(most).toBe(1);
-      expect(probes).toBe(1);
-      expect(a).toEqual({ subject: "alice", n: 1 });
-      expect(b).toEqual(a);
-      // A later ask is a fresh probe, not the old answer.
-      await settle(5);
-      expect(await windowB(probe)).toEqual({ subject: "alice", n: 2 });
-      // Who is signed in doesn't stay on the device: the answer is gone soon.
-      expect(stored.size).toBe(1);
-      await new Promise((resolve) => setTimeout(resolve, 10_050));
-      expect(stored.size).toBe(0);
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  },
-);
+    await vi.advanceTimersByTimeAsync(SINGLE_FLIGHT_TURN_MS - 1);
+    expect(answered).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await next).toEqual({ subject: "alice", n: 3 });
+    release();
+    expect(await hung).toEqual({ subject: "alice", n: 0 });
+  } finally {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});
 
 it("follows the backend at once on reauthenticate, and only reconnects on a refusal", async () => {
   const t = await setup(user("alice"));
