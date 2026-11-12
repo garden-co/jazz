@@ -12,8 +12,9 @@ import type { ClientMigrations } from "../runtime/client-migrations.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 const root = fileURLToPath(new URL("../../../../", import.meta.url));
-// Original, shipped pre-1.7.16 schema identities from main5c3c; the fourth
-// coordinate pins ALL predecessor metadata, not just structural hash inputs.
+// The issuer-era (Better Auth 1.7.1) schema identities each example ships on
+// main; the fourth coordinate pins ALL predecessor metadata, not just
+// structural hash inputs.
 const examples = [
   [
     "examples/auth-betterauth-chat/migrations",
@@ -23,15 +24,15 @@ const examples = [
   ],
   [
     "examples/band-book/apps/nextjs-betterauth/migrations",
-    "6b7728f29ab763b9398f91988f71c10d54826c1d5217d18787dc54bc7dda6176",
-    "bee680a0972b72b7c83d95395a1667bff87cba7516d36cecf613a53755bbf8e5",
-    "706070f83202da74dbec6e922afbf1b9518a68c5c743c256721e421b264d735f",
+    "f9c2e1ab9391434b67488cb23410ed340cd4836de7fbc3ce673ed2a56bc07f2c",
+    "553979b0f2b20e85b22e5f83f56318fe11425287aea9f72eca6eb235c5512511",
+    "9a028955983b638d9905cfef17851df6f57fa97eff76a93199b56fb4f179e1b7",
   ],
   [
     "examples/band-chat/apps/nextjs-betterauth/migrations",
-    "22763a78d819642815e2ed6b1d3d0944f01f5415c59f7e0955cf5a734a2c522a",
-    "c05382c3683b3e0390ca0bdeb64182fadd80af33a2056b314645abb06c3a49b0",
-    "1d164397ee2e9ca640580849fdd28b4571600a6a67a78c5cd9fd375f160a21fc",
+    "0fe493411de2f896802f229b2d445a17fcb95794a8c492906c2ba22c1cf7a8d0",
+    "2322e143bd2759b30f51c27f300fb37206653faf1142a5cc7b16fc9f821ff7a7",
+    "8837f2aff350ecd2ac54d91fdf1c999a92060efd6a0f9b846f45d597eee3298c",
   ],
   [
     "examples/band-chat/apps/react-hono-betterauth/migrations",

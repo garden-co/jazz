@@ -710,7 +710,8 @@
         "column": "pageId"
       }
     },
-    "indexed_columns": ["pageId"]
+    "indexed_columns": ["pageId"],
+    "history": "latest"
   },
   "attachments": {
     "columns": [

@@ -316,13 +316,6 @@
           "type": "Text"
         },
         "nullable": false
-      },
-      {
-        "name": "lastActivityAt",
-        "column_type": {
-          "type": "Timestamp"
-        },
-        "nullable": true
       }
     ],
     "relations": {

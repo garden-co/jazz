@@ -9,8 +9,8 @@ export default m.defineMigration({
       issuer: m.drop.string({ backwardsDefault: "" }),
     },
   },
-  fromHash: "6b7728f29ab7",
-  toHash: "bee680a0972b",
+  fromHash: "f9c2e1ab9391",
+  toHash: "553979b0f2b2",
   from: {
     better_auth_account: s.table(
       {

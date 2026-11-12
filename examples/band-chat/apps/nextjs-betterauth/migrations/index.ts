@@ -715,7 +715,7 @@ export const migrations: ClientMigrations = {
       }
     },
     {
-      "hash": "c05382c3683b3e0390ca0bdeb64182fadd80af33a2056b314645abb06c3a49b0",
+      "hash": "2322e143bd2759b30f51c27f300fb37206653faf1142a5cc7b16fc9f821ff7a7",
       "schema": {
         "tables": {
           "better_auth_user": {
@@ -1035,13 +1035,6 @@ export const migrations: ClientMigrations = {
                   "type": "Text"
                 },
                 "nullable": false
-              },
-              {
-                "name": "lastActivityAt",
-                "column_type": {
-                  "type": "Timestamp"
-                },
-                "nullable": true
               }
             ],
             "relations": {
@@ -1424,8 +1417,8 @@ export const migrations: ClientMigrations = {
   ],
   "migrations": [
     {
-      "fromHash": "22763a78d819642815e2ed6b1d3d0944f01f5415c59f7e0955cf5a734a2c522a",
-      "toHash": "c05382c3683b3e0390ca0bdeb64182fadd80af33a2056b314645abb06c3a49b0",
+      "fromHash": "0fe493411de2f896802f229b2d445a17fcb95794a8c492906c2ba22c1cf7a8d0",
+      "toHash": "2322e143bd2759b30f51c27f300fb37206653faf1142a5cc7b16fc9f821ff7a7",
       "forward": [
         {
           "table": "better_auth_account",
