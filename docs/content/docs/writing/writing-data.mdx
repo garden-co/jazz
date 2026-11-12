@@ -231,12 +231,15 @@ into a long value stays cheap however long it grows.
 Store a file in a `bytes` column next to its metadata:
 
 ```ts title="schema.ts"
-files: s.table({
-  name: s.string(),
-  type: s.string(),
-  size: s.int(),
-  content: s.bytes(),
-}),
+files: s.table(
+  {
+    name: s.string(),
+    type: s.string(),
+    size: s.int(),
+    content: s.bytes(),
+  },
+  {},
+),
 ```
 
 Upload from the browser with `insertStreaming`, which streams the bytes into the row instead of

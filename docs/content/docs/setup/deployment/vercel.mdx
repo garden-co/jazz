@@ -145,9 +145,11 @@ as for [your own server](/docs/setup/deployment/own-server#large-values).
 
 Each Blob store or bucket serves one Vercel environment. A store you connect spans every
 environment unless you limit it, so create one store per environment, connect each to its own
-environment only, and enable OIDC for each environment in the project's settings. A store created
-through the API or CLI is connected to production, preview and development alike, and a second
-one fails with `project_env_var_not_unique`; connect and limit stores in the dashboard instead. A core given another environment's store refuses to start, for
+environment only, and enable OIDC for each environment in the project's settings. With the CLI,
+name the environment when you create the store, for example
+`vercel blob create-store my-app-production --access private --environment production --yes`.
+Without `--environment`, a store created through the CLI or the API is connected to production,
+preview and development alike, and a second one then fails with `project_env_var_not_unique`. A core given another environment's store refuses to start, for
 example "Blob store … serves the production environment, not preview; connect a separate Blob store
 to each environment". Both `vercelBlob()` and `s3()` also take a `prefix`, by default
 `jazz/<store id>/`.
