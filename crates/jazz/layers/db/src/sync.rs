@@ -1944,6 +1944,10 @@ struct LiveRead {
     /// point may still count them as held (a support row released with
     /// no change to the result settles nothing), so losing one forgets it.
     released: HashMap<String, HashSet<[u8; 16]>>,
+    /// Whether its resume point was settled in this process. One loaded
+    /// from the store (a reload, or the read reopened) may count rows its
+    /// holds here never named, so it is never kept until it settles again.
+    settled_here: bool,
     /// Whether this connection told the read what it holds yet.
     told: bool,
 }
@@ -2149,10 +2153,11 @@ pub(crate) struct Client {
     /// No resume point was stored since they were last all forgotten, so
     /// forgetting them again (another eviction this tick) costs nothing.
     forgotten: bool,
-    /// Every stored resume point belongs to a read in `reads` that kept
-    /// it when they were last forgotten, and none was stored since: a
-    /// forgetting that clears no read leaves the store as it is.
-    pruned: bool,
+    /// A superset of the keys of the stored resume points, as the last
+    /// forgetting left them, while none was stored since (`None`: not
+    /// known). A forgetting that keeps exactly these leaves the store as it
+    /// is; a point whose read closed since is not kept, so it is pruned.
+    stored_points: Option<HashSet<[u8; 32]>>,
 }
 
 /// A session's commit a relay uploads as its own, for its upload: the
@@ -5817,8 +5822,9 @@ impl Inner {
     /// (it was evicted, or is owed whole): each such read opens fresh until
     /// it settles again.
     ///
-    /// Only a live read this connection told what it holds can be cleared:
-    /// it keeps its resume point when neither its holds nor the rows they
+    /// Only a live read this connection told what it holds, whose point
+    /// settled in this process, can be cleared: it keeps its resume point
+    /// when neither its holds nor the rows they
     /// released since that point moved list any of the rows. Every other
     /// one is forgotten, since nothing here says which rows it held: a
     /// closed read's stored point, a one-shot read's, and a live read not
@@ -5850,7 +5856,10 @@ impl Inner {
                         held.get(table)
                             .is_some_and(|held| rows.iter().any(|row| held.contains(row)))
                     };
-                    live.told && !counts(&live.holds) && !counts(&live.released)
+                    live.settled_here
+                        && live.told
+                        && !counts(&live.holds)
+                        && !counts(&live.released)
                 });
             *keeps.entry(key).or_insert(true) &= keep;
         }
@@ -5858,19 +5867,17 @@ impl Inner {
             .into_iter()
             .filter_map(|(key, keep)| keep.then_some(key))
             .collect();
-        let mut cleared = false;
         for read in client.reads.values_mut() {
             if !read.watermark.is_some_and(|key| kept.contains(&key)) {
-                cleared |= read.through.is_some();
                 read.through = None;
                 read.context = None;
             }
         }
         client.forgotten = kept.is_empty();
-        if !kept.is_empty() && !cleared && client.pruned {
+        if !kept.is_empty() && client.stored_points.as_ref() == Some(&kept) {
             return Ok(());
         }
-        client.pruned = true;
+        client.stored_points = Some(kept.clone());
         if self.has_table("_jazz_watermarks")? {
             if kept.is_empty() {
                 self.exec("DELETE FROM _jazz_watermarks", [])
@@ -7309,7 +7316,7 @@ impl Client {
             deferred: VecDeque::new(),
             releasing: None,
             forgotten: false,
-            pruned: false,
+            stored_points: None,
         }
     }
 }
@@ -8152,6 +8159,7 @@ impl Inner {
                 visible: None,
                 holds: HashMap::new(),
                 released: HashMap::new(),
+                settled_here: false,
                 told: false,
             }),
         );
@@ -9035,10 +9043,11 @@ impl Db {
                                         // read holds now, not what it
                                         // released before.
                                         live.released.clear();
+                                        live.settled_here = true;
                                         read.through = Some(through);
                                         read.context = context;
                                         client.forgotten = false;
-                                        client.pruned = false;
+                                        client.stored_points = None;
                                         live_watermark = read.watermark;
                                     }
                                     (members.clone(), false)
@@ -9385,7 +9394,7 @@ impl Db {
                     inner.store_watermark(&watermark, through)?;
                     let client = inner.client.as_mut().expect("client");
                     client.forgotten = false;
-                    client.pruned = false;
+                    client.stored_points = None;
                 }
             }
         }

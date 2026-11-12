@@ -2654,3 +2654,87 @@ fn access_lost_through_one_window_keeps_another_windows_resume_point() {
     );
     assert_eq!(ids(&client, None), ids(&server, Some(alice())));
 }
+
+/// A read that closes keeps its stored resume point, and a row that point
+/// counts, lost after it closed, still forgets it, even when every open
+/// read keeps its own and an earlier forgetting already pruned the store.
+///
+/// The losses are injected `AccessLost`s: first for a cold sticker (no read
+/// holds it), so the open reads keep their points; then, once the
+/// messages read closed, for a message only its stored point counts.
+#[test]
+fn a_closed_reads_point_is_forgotten_when_a_row_it_counts_is_lost() {
+    let server = seeded(3);
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "stickers",
+            id(4, 0),
+            AuthorSubject::SYSTEM,
+            cells(&[("body", Value::String("s0".into()))]),
+        )
+        .unwrap();
+    let client = open(1, alice());
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let _upstream = block_on(client.connect_upstream(Box::new(LoggedPipe {
+        out: up.clone(),
+        inbound: down.clone(),
+        log: None,
+    })));
+    server
+        .accept_subscriber(
+            Box::new(LoggedPipe {
+                out: down.clone(),
+                inbound: up,
+                log: Some(log.clone()),
+            }),
+            alice(),
+        )
+        .unwrap();
+    let subscribe = |table: &str| {
+        let prepared = client.prepare_query(&Query::from(table)).unwrap();
+        block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap()
+    };
+    let lost = |row: RowUuid| {
+        let (table, key) = log
+            .borrow()
+            .iter()
+            .find_map(|message| match message {
+                SyncMessage::Rows { images, .. } => images
+                    .iter()
+                    .find(|image| image.id == *row.0.as_bytes())
+                    .map(|image| (image.table.clone(), image.key.clone())),
+                _ => None,
+            })
+            .expect("the row shipped");
+        down.borrow_mut().push_back(SyncMessage::AccessLost {
+            table,
+            id: *row.0.as_bytes(),
+            key,
+            hidden: false,
+        });
+        block_on(client.tick()).unwrap();
+    };
+    let stickers = subscribe("stickers");
+    pump(&server, &client);
+    drop(stickers);
+    pump(&server, &client);
+    let _rooms = subscribe("rooms");
+    let messages = subscribe("messages");
+    pump(&server, &client);
+    assert_eq!(ids(&client, None).len(), 3);
+
+    // No open read holds the cold sticker: both keep their points.
+    lost(id(4, 0));
+    drop(messages);
+    pump(&server, &client);
+    // m0 is counted only by the closed messages read's stored point.
+    lost(id(3, 0));
+    assert_eq!(ids(&client, None).len(), 2, "m0 is evicted");
+
+    // Reopened, the messages read opens fresh, so m0 returns.
+    let _messages = subscribe("messages");
+    pump(&server, &client);
+    assert_eq!(ids(&client, None), ids(&server, Some(alice())));
+}
