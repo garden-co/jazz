@@ -17,7 +17,7 @@ Migration:
 | `createAccountManager(config)` + `createDb({ ...config, account })` | `const session = await createJazzClient({ ...config, initial: "device" }); session.db` |
 | `createJazzApp(config)` | `<JazzProvider config={config}>`, or `await createJazzClient(config)` |
 | `<JazzProvider serverUrl="/jazz" …>` (config as props) | `<JazzProvider config={{ serverUrl: "/jazz", … }}>` |
-| `<JazzProvider config={{ …, account }}>`, `JazzSvelteProvider` | `<JazzProvider config={…}>` (no `account`); a client you opened: `<JazzClientProvider client>` |
+| `<JazzProvider config={{ …, account }}>`, `JazzSvelteProvider` | `<JazzProvider config={…}>` (no `account`); a client you opened: `<JazzClientProvider client>` (Svelte: `<JazzSvelteClientProvider client>`) |
 | `<JazzSessionProvider session={s}>` | `<JazzProvider session={s}>` |
 | `fallback` (session providers) | `loading`, `signedOut`, `error` |
 | `useJazzAuth()`, `useJazzSessionOwner()` | `useJazzSession()` (Svelte: `getJazzSession()`) |
