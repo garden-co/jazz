@@ -1594,7 +1594,15 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
   }
   if (message.type === "prepare-storage-reset") {
     peer.context.intentionalStorageReset = true;
-    result(peer, message.id);
+    // What the reset loses: every write of the store the server hasn't
+    // confirmed, whichever tab made it, recovered ones included.
+    let pendingUploads: number | undefined;
+    try {
+      pendingUploads = peer.context.runtime?.uploadStatus().pending;
+    } catch {
+      pendingUploads = undefined;
+    }
+    result(peer, message.id, undefined, { pendingUploads });
     return;
   }
   if (message.type === "abort-storage-reset") {
@@ -2041,6 +2049,7 @@ function result(
     inspectorAttachmentPhysicalDbName?: string;
     peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
     workerRealmId?: string;
+    pendingUploads?: number;
   },
 ): void {
   if (peer.context.peers.get(peer.tabId) !== peer) return;

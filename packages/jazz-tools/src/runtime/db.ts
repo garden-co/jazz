@@ -432,6 +432,7 @@ const FORWARDED_TO_SUCCESSOR = [
   "serializableTransaction",
   "upgradeToLocalFirst",
   "deleteClientStorage",
+  "wipeClientStorage",
   "logout",
   "all",
   "allInternal",
@@ -3856,6 +3857,16 @@ export class Db {
    */
   async deleteClientStorage(): Promise<void> {
     await this.connection.deleteClientStorage();
+  }
+
+  /**
+   * @internal {@link deleteClientStorage}, saying how many of the store's
+   * writes (any tab's) the server hadn't confirmed: the delete took them.
+   * `undefined` when the runtime can't say.
+   */
+  async wipeClientStorage(): Promise<{ pendingUploads: number | undefined }> {
+    const deletion = await this.connection.deleteClientStorage();
+    return { pendingUploads: deletion ? deletion.pendingUploads : undefined };
   }
 
   /**

@@ -217,35 +217,27 @@ export async function openBrowserSessionCore(
   const wipesOnSignOut = !!clearOnSignOut && (config.driver?.type ?? "persistent") === "persistent";
   // Local-first replicas a sign-out may leave behind (see `leftBehindReplicas`).
   const leftBehind = wipesOnSignOut && loadLocalFirst ? leftBehindReplicas(registry) : undefined;
-  // Accounts whose local-first client is (or was) the session's own in this
-  // page: signing them out here wiped their replica.
-  const inSession = new Set<string>();
   // Accounts this page is opening a local-first client for, and replicas
   // being wiped: an account's open waits for its wipe to finish.
   const opening = new Set<string>();
   const wiping = new Map<string, Promise<void>>();
-  // Accounts signed out in this page, whose entry goes once no tab holds
-  // their replica (another tab may still have it open).
-  const signedOutHere = new Set<string>();
-  const forgetSignedOut = (id: string) => {
-    if (!leftBehind || !signedOutHere.has(id)) return;
-    void whileNoTabHolds(registry, id, async () => {
-      if (!signedOutHere.delete(id) || opening.has(id) || inSession.has(id)) return;
-      leftBehind.forget(id);
-    }).catch(() => {});
-  };
-  /** Open `account`'s local-first client, recorded and held open against other tabs' wipes. */
+  /**
+   * Open `account`'s local-first client, held open against other tabs'
+   * wipes (a guest's too: its tabs share one store). A user the backend
+   * signed in is also recorded, so a later load wipes what a sign-out leaves
+   * behind.
+   */
   const openReplica = async (createDb: CreateAccountDb, account: AccountHandle) => {
-    // Only a user the backend signed in: a guest's replica is the device's own.
-    if (!leftBehind || !rememberBackendUser(account)) return openLocalFirst(createDb, account);
+    if (!leftBehind) return openLocalFirst(createDb, account);
+    // A guest's replica is the device's own: no later load wipes it.
+    const recorded = rememberBackendUser(account);
     opening.add(account.id);
-    signedOutHere.delete(account.id);
     try {
       await wiping.get(account.id)?.catch(() => {});
-      leftBehind.remember(account);
+      if (recorded) leftBehind.remember(account);
       const release = await holdReplica(registry, account.id);
-      // Again once held: another tab's forget may have run before it was.
-      leftBehind.remember(account);
+      // Again once held: another tab's wipe may have forgotten it before.
+      if (recorded) leftBehind.remember(account);
       let client: JazzClient;
       try {
         client = await openLocalFirst(createDb, account);
@@ -259,13 +251,56 @@ export async function openBrowserSessionCore(
           await shutdown(options);
         } finally {
           release();
-          forgetSignedOut(account.id);
         }
       };
       return client;
     } finally {
       opening.delete(account.id);
     }
+  };
+  /**
+   * Wipe `account`'s replica once no tab has it open, from a client opened
+   * only to delete it. Resolves false, wiping nothing, while a tab has it
+   * open: that tab's user is still signed in there, and the last tab to sign
+   * out wipes (or, if that tab goes away without, a later load). Never
+   * under an open client, so a tab's store is never reset beneath it.
+   */
+  const wipeReplica = (createDb: CreateAccountDb, account: AccountHandle) =>
+    whileNoTabHolds(registry, account.id, async () => {
+      const run = (async () => {
+        // Its socket carries the signed-out user's sign-in, or none: a
+        // write the server still accepts may upload meanwhile, never one
+        // the delete then counts twice.
+        const client = await openLocalFirst(createDb, account);
+        let pendingUploads: number | undefined;
+        try {
+          ({ pendingUploads } = await client.db.wipeClientStorage());
+        } finally {
+          await client.shutdown();
+        }
+        leftBehind?.forget(account.id);
+        if (pendingUploads)
+          console.warn(
+            `Jazz signed out and wiped ${pendingUploads} write(s) the server hadn't confirmed, as clearOnSignOut asks. They are gone from this device; any the server did receive stay there.`,
+          );
+      })();
+      wiping.set(account.id, run);
+      try {
+        await run;
+      } finally {
+        wiping.delete(account.id);
+      }
+    });
+  /**
+   * How this page signs a local-first account out under `clearOnSignOut`:
+   * upload what the server still accepts, close this tab's client (letting
+   * go of its hold), then wipe if no other tab has the account open.
+   */
+  const wipeSignedOut = async (client: JazzClient, account: AccountHandle) => {
+    await client.db.waitForSync({ timeoutMs: 5_000 }).catch(() => {});
+    await client.shutdown();
+    const { createClient } = await loadLocalFirst!();
+    await wipeReplica(createClient, account);
   };
   let session: BrowserJazzSession | undefined;
 
@@ -293,10 +328,7 @@ export async function openBrowserSessionCore(
     );
     // Only once the session took the new client: a superseded upgrade
     // (a logout or account switch meanwhile) is not remembered.
-    if (upgraded) {
-      upgrades.remember(upgraded);
-      inSession.add(upgraded.id);
-    }
+    if (upgraded) upgrades.remember(upgraded);
   };
 
   const openThin = async (account: AccountHandle) => {
@@ -330,9 +362,7 @@ export async function openBrowserSessionCore(
         console.warn("Jazz could not load the local-first client; starting thin.", error);
         return openThin(account);
       }
-      const client = await openReplica(module.createClient, account);
-      inSession.add(account.id);
-      return client;
+      return openReplica(module.createClient, account);
     }
     return openThin(account);
   };
@@ -342,6 +372,7 @@ export async function openBrowserSessionCore(
     initial: coreInitial(initial),
     // A memory-only client has no storage to wipe.
     clearOnSignOut: wipesOnSignOut,
+    ...(leftBehind ? { wipeSignedOut } : {}),
     openClient,
     decorate: followUser({
       registry,
@@ -363,17 +394,6 @@ export async function openBrowserSessionCore(
   if (leftBehind && loadLocalFirst) {
     const record = leftBehind;
     const following = session;
-    // Signed out in this page: the session wiped the replica as it did.
-    following.subscribe(() => {
-      const { status, account } = following.getSnapshot();
-      if (status !== "ready" && status !== "signed-out") return;
-      for (const id of inSession) {
-        if (id === account?.id) continue;
-        inSession.delete(id);
-        signedOutHere.add(id);
-        forgetSignedOut(id);
-      }
-    });
     const stillLeftBehind = (account: string) =>
       following.getSnapshot().status !== "closed" &&
       !opening.has(account) &&

@@ -4,8 +4,6 @@ import { openBrowserSessionCore as createJazzClient } from "../../src/session/cr
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
 import { isThinDb } from "../../src/runtime/local-first-upgrade.js";
 import { resolveDefaultPersistentDbName } from "../../src/runtime/db.js";
-import { BrowserConnectionManager } from "../../src/runtime/connection-manager/browser-connection-manager.js";
-import { isStoreHeldByAnotherTabError } from "../../src/runtime/store-held-by-another-tab-error.js";
 import { vfsPages, vfsPath } from "./idb-vfs.js";
 import { uniqueDbName, waitForCondition } from "./support.js";
 import { openSessionTab } from "./session-tab.js";
@@ -199,8 +197,8 @@ it("lets the tab that signed up in once the other guest tab crashes", async () =
 // in one tab signs out there before the other tab heard of the sign-up. The
 // other tab still holds the guest, which is the user's account now: it must
 // sign out too, wiping its replica, not stay open as them until it reloads.
-// This tab is local-first too, so its wipe needs the store the other tab
-// holds as the guest: it waits for the other tab to follow, then wipes.
+// Both tabs are local-first, on one store: the sign-out here leaves it to
+// the other tab, which still has it open, and the last tab out wipes it.
 it("signs the other guest tab out and wipes the store when the user signs up and out in this one (clearOnSignOut)", async () => {
   const { backend, visitorUrl, signingUp, other, guest, db } =
     await signUpWhileAnotherTabIsTheGuest("guest-sign-up-sign-out-tabs", true);
@@ -212,18 +210,16 @@ it("signs the other guest tab out and wipes the store when the user signs up and
   );
 
   await signOutOfJazzApp(backend, visitorUrl);
-  const signingOut = signingUp.reauthenticate();
-  // The other tab holds the store as the guest: the wipe waits for it.
-  await new Promise((resolve) => setTimeout(resolve, 3_000));
-  expect(signingUp.getSnapshot().status).toBe("transitioning");
-  expect(await other.state()).toMatchObject({ status: "ready", account: guest });
-
-  // The other tab hears of it (the account store's storage event, the
-  // sign-out's broadcast) once its backend requests go on.
-  await other.holdBackend(false);
-  await signingOut;
+  await signingUp.reauthenticate();
   expect(signingUp.getSnapshot()).toMatchObject({ status: "signed-out" });
   expect(signingUp.getSnapshot().error).toBeUndefined();
+  // Not wiped from under the other tab, which is still the guest.
+  expect(await other.state()).toMatchObject({ status: "ready", account: guest });
+  expect((await vfsPages(path, "guest-1")).holding).toBeGreaterThan(0);
+
+  // The other tab hears of it (the account store's storage event, the
+  // sign-out's broadcast) once its backend requests go on, and wipes.
+  await other.holdBackend(false);
   await waitForCondition(
     async () => (await other.state()).status === "signed-out",
     15_000,
@@ -233,46 +229,7 @@ it("signs the other guest tab out and wipes the store when the user signs up and
   await waitForCondition(
     async () => (await vfsPages(path, "guest-1")).pages === 0,
     15_000,
-    "The sign-out should wipe the replica both tabs shared",
+    "The last tab out should wipe the replica both tabs shared",
   );
-}, 120_000);
-
-// #5139: the other tab never lets go (frozen in the background, or a build
-// that doesn't follow sign-ups). The sign-out says so with a specific error
-// and keeps the session as it was, and goes through once the other tab lets go.
-it("reports a store the other guest tab holds too long when the user signs out, and signs out once it lets go (clearOnSignOut)", async () => {
-  const manager = BrowserConnectionManager as { HELD_BY_ANOTHER_TAB_PATIENCE_MS: number };
-  const patience = manager.HELD_BY_ANOTHER_TAB_PATIENCE_MS;
-  manager.HELD_BY_ANOTHER_TAB_PATIENCE_MS = 3_000;
-  cleanups.push(async () => {
-    manager.HELD_BY_ANOTHER_TAB_PATIENCE_MS = patience;
-  });
-  const { backend, visitorUrl, signingUp, other, guest, db } =
-    await signUpWhileAnotherTabIsTheGuest("guest-sign-up-sign-out-held", true);
-  const path = await vfsPath(resolveDefaultPersistentDbName(db.config));
-
-  await signOutOfJazzApp(backend, visitorUrl);
-  await expect(signingUp.reauthenticate()).rejects.toSatisfy(isStoreHeldByAnotherTabError);
-  expect(signingUp.getSnapshot()).toMatchObject({
-    status: "ready",
-    account: { id: guest },
-    recovery: "action",
-  });
-  expect(isStoreHeldByAnotherTabError(signingUp.getSnapshot().error)).toBe(true);
-  expect(signingUp.getSnapshot().client?.db).toBe(db);
-
-  await other.holdBackend(false);
-  await waitForCondition(
-    async () => (await other.state()).status === "signed-out",
-    15_000,
-    "The other tab should sign out of the account the guest became",
-  );
-  await signingUp.logout();
-  expect(signingUp.getSnapshot()).toMatchObject({ status: "signed-out" });
-  expect(signingUp.getSnapshot().error).toBeUndefined();
-  await waitForCondition(
-    async () => (await vfsPages(path, "guest-1")).pages === 0,
-    15_000,
-    "The sign-out should wipe the replica both tabs shared",
-  );
+  expect((await other.state()).history.errors).toEqual([]);
 }, 120_000);

@@ -114,6 +114,10 @@ async function setup(options: { guests?: boolean } = {}) {
             await hold.wipe;
             wiped.push(config.account.identity.subject);
           };
+          db.wipeClientStorage = async () => {
+            await db.deleteClientStorage();
+            return { pendingUploads: 0 };
+          };
           return db;
         },
       }),
@@ -327,7 +331,9 @@ it("doesn't record a guest's replica", async () => {
   await page.close();
 }, 60_000);
 
-it("keeps the entry while another tab still holds the replica a sign-out here wiped", async () => {
+// E13: a sign-out here never wipes the replica another tab still has open
+// (its user is still signed in there); the last tab to sign out wipes it.
+it("leaves the replica and its entry while another tab holds it, and the last tab out wipes", async () => {
   // Web Locks as a browser has them: both pages share them, and the storage.
   const held = new Map<string, number>();
   vi.stubGlobal("navigator", {
@@ -350,7 +356,7 @@ it("keeps the entry while another tab still holds the replica a sign-out here wi
       },
     },
   });
-  const { open, storage } = await setup();
+  const { open, storage, wiped } = await setup();
   const recorded = () =>
     [...storage].find(([key]) => key.startsWith("jazz-clear-on-sign-out-v1:"))?.[1] ?? "";
   const here = await signInLocalFirst(open);
@@ -359,10 +365,13 @@ it("keeps the entry while another tab still holds the replica a sign-out here wi
   cleanups.push(() => there.close());
 
   await here.logout();
+  expect(here.getSnapshot().status).toBe("signed-out");
   await new Promise((resolve) => setTimeout(resolve, 500));
   expect(there.getSnapshot().status).toBe("ready");
+  expect(wiped).toEqual([]);
   expect(recorded()).toContain('"subject":"alice"');
-  // Once the other tab signs out too, nothing holds it: the entry goes.
+  // Once the other tab signs out too, nothing holds it: it wipes, and the entry goes.
   await there.logout();
+  expect(wiped).toEqual(["alice"]);
   await expect.poll(recorded, { timeout: 5_000 }).toBe("");
 }, 60_000);

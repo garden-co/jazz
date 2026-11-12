@@ -586,6 +586,67 @@ describe("Jazz session: failures that leave a client usable (K2)", () => {
     expect(session.getSnapshot().status).toBe("signed-out");
   });
 
+  it("hands a clearOnSignOut sign-out to the host's wipe, which closes the client itself", async () => {
+    const old = handle("old");
+    const accounts = new AccountManager(
+      {
+        createLocalFirst: vi.fn(() => old),
+        restoreLocalFirst: vi.fn(() => old),
+        logout: vi.fn(),
+        loginWithBackend: vi.fn(async () => handle("next")),
+        linkWithBackend: vi.fn(async (_account: AccountHandle) => handle("next")),
+      },
+      old,
+    );
+    const db = { deleteClientStorage: vi.fn(async () => {}), markReplaced: vi.fn() };
+    const client = { db, shutdown: vi.fn(async () => {}) };
+    const wipeSignedOut = vi.fn(async (_client: typeof client, _account: AccountHandle) => {});
+    const session = await createJazzSessionOwner({
+      accounts,
+      clearOnSignOut: true,
+      openClient: async () => client,
+      wipeSignedOut,
+    });
+    await session.logout();
+    expect(wipeSignedOut).toHaveBeenCalledWith(client, old);
+    expect(db.deleteClientStorage).not.toHaveBeenCalled();
+    expect(db.markReplaced).toHaveBeenCalledWith("signed-out");
+    expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+    expect(session.getSnapshot().error).toBeUndefined();
+  });
+
+  it("signs out with the wipe's failure as its error when the host's wipe fails", async () => {
+    const old = handle("old");
+    const accounts = new AccountManager(
+      {
+        createLocalFirst: vi.fn(() => old),
+        restoreLocalFirst: vi.fn(() => old),
+        logout: vi.fn(),
+        loginWithBackend: vi.fn(async () => handle("next")),
+        linkWithBackend: vi.fn(async (_account: AccountHandle) => handle("next")),
+      },
+      old,
+    );
+    // The client is closed by then: the failure is the wipe's, after teardown.
+    const db = { isUsable: () => false, markReplaced: vi.fn() };
+    const client = { db, shutdown: vi.fn(async () => {}) };
+    const failure = new Error("the wipe's open failed");
+    const session = await createJazzSessionOwner({
+      accounts,
+      clearOnSignOut: true,
+      openClient: async () => client,
+      wipeSignedOut: async () => {
+        throw failure;
+      },
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    await session.logout();
+    error.mockRestore();
+    expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+    expect(session.getSnapshot().error?.message).toContain("couldn't finish wiping");
+    expect(session.getSnapshot().error?.cause).toBe(failure);
+  });
+
   it("stays ready with the client when a sign-in's teardown fails before it began", async () => {
     const { session, client, enrollment, old } = await wipingSetup();
     // Not one of the known graceful errors, but the Db says it still works.
