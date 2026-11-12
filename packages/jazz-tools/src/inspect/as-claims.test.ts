@@ -51,6 +51,16 @@ describe("claims with `as`", () => {
       await runInspectCommand(["query", '{"table":"expenses"}', "--claims", "{}", ...app], io),
     ).not.toBe(0);
     expect(out).toMatch(/--claims goes with --as/);
+    // Not an object: refused here, whatever the backend's version.
+    const sent = bodies.length;
+    expect(
+      await runInspectCommand(
+        ["query", '{"table":"expenses"}', "--as", "m", "--claims", '"manager"', ...app],
+        io,
+      ),
+    ).not.toBe(0);
+    expect(out).toMatch(/--claims must be a JSON object/);
+    expect(bodies).toHaveLength(sent);
   });
 
   it("MCP tools take claims next to as", async () => {
@@ -74,6 +84,8 @@ describe("claims with `as`", () => {
     call(2, "query", { query: { table: "expenses" }, as: "m", claims: { role: "manager" } });
     call(3, "write", { ops: [], as: "m", claims: { role: "manager" } });
     call(4, "query", { query: { table: "expenses" }, claims: { role: "manager" } });
+    // Claims that aren't an object reach the backend as given, which refuses them.
+    call(5, "query", { query: { table: "expenses" }, as: "m", claims: "manager" });
     input.end();
     await served;
     const tools = lines.find((line) => line.id === 1).result.tools;
@@ -86,6 +98,7 @@ describe("claims with `as`", () => {
     expect(bodies.map((body) => body.as)).toEqual([
       { userId: "m", claims: { role: "manager" } },
       { userId: "m", claims: { role: "manager" } },
+      { userId: "m", claims: "manager" },
     ]);
     expect(lines.find((line) => line.id === 4).result.isError).toBe(true);
   });
@@ -115,9 +128,25 @@ describe("claims with `as`", () => {
     const byClaimValue = definePermissions(app, ({ policy, session }) => {
       policy.expenses.allowUpdate.whereOld({ owner: session.claims.team as never });
     });
+    const byClaimList = definePermissions(app, ({ policy, session }) => {
+      policy.expenses.allowRead.where({ owner: { in: session.claims.owners as never } });
+    });
+    const sessionForms = [
+      { "claims.role": { in: ["manager", "admin"] } },
+      { "claims.teams": { contains: "finance" } },
+      { "claims.suspended": { isNull: true } },
+      { "claims.suspended": { isNull: false } },
+    ];
     expect(readsClaims(byOwner)).toBe(false);
     expect(readsClaims(byClaim)).toBe(true);
     expect(readsClaims(byClaimValue)).toBe(true);
+    expect(readsClaims(byClaimList)).toBe(true);
+    for (const form of sessionForms) {
+      const permissions = definePermissions(app, ({ policy, session }) => {
+        policy.expenses.allowRead.where(session.where(form));
+      });
+      expect(readsClaims(permissions), JSON.stringify(form)).toBe(true);
+    }
     expect(readsClaims(undefined)).toBe(false);
   });
 });

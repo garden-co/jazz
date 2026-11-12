@@ -153,7 +153,7 @@ export async function runInspectCommand(args: string[], io: InspectCliIo): Promi
         ? {}
         : claimsText === undefined
           ? { as }
-          : { as: { userId: as, claims: json(claimsText, "--claims") as Record<string, unknown> } };
+          : { as: { userId: as, claims: claimsObject(json(claimsText, "--claims")) } };
 
     switch (command) {
       case "login": {
@@ -329,6 +329,16 @@ export async function runInspectCommand(args: string[], io: InspectCliIo): Promi
     io.stdout(`${JSON.stringify({ error: failed.code, message: failed.message })}\n`);
     return 1;
   }
+}
+
+function claimsObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new InspectError(
+      "bad_request",
+      `--claims must be a JSON object, like '{"role":"manager"}'`,
+    );
+  }
+  return value as Record<string, unknown>;
 }
 
 function need(value: string | undefined, what: string): string {

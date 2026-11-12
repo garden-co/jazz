@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { definePermissions } from "../permissions/index.js";
 import { schema as s } from "../schema-namespace.js";
-import { createInspector, type InspectorDeps } from "./inspect.js";
+import { createInspector, type InspectEvent, type InspectorDeps } from "./inspect.js";
 
 // E10 (alpha.61): viewing as a user ran as a session with no claims, so
 // policies that read claims answered as if the user had none, silently.
@@ -22,12 +22,13 @@ const readsNoClaims = definePermissions(app, ({ policy, session }) => {
 
 function inspector(permissions: unknown) {
   const sessions: unknown[] = [];
+  const events: InspectEvent[] = [];
   const db = { all: async () => [] };
   const deps = {
     appId: "app",
     basePath: "/jazz",
     publicUrls: [],
-    options: {},
+    options: { audit: (event: InspectEvent) => events.push(event) },
     schema: () => ({
       expenses: { columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }] },
     }),
@@ -56,14 +57,14 @@ function inspector(permissions: unknown) {
     );
     return { status: response.status, body: (await response.json()) as any };
   };
-  return { call, sessions };
+  return { call, sessions, events };
 }
 
 describe("viewing as a user when the permissions read claims", () => {
   const query = { table: "expenses" };
 
   it("warns when no claims were given, and runs with the claims that were", async () => {
-    const { call, sessions } = inspector(readsClaims);
+    const { call, sessions, events } = inspector(readsClaims);
     const bare = await call({ op: "query", query, as: "manager" });
     expect(bare.status).toBe(200);
     expect(bare.body.warning).toMatch(/read session claims.*none were given for manager/);
@@ -72,6 +73,11 @@ describe("viewing as a user when the permissions read claims", () => {
     const withClaims = await call({ op: "query", query, as });
     expect(withClaims.body.warning).toBeUndefined();
     expect(sessions).toEqual([{ userId: "manager" }, as]);
+    // The audit log tells the two apart by the claims' names (never their values).
+    expect(events.slice(0, 2).map((event) => [event.as, event.asClaims])).toEqual([
+      ["manager", undefined],
+      ["manager", ["role"]],
+    ]);
 
     expect((await call({ op: "query", query })).body.warning).toBeUndefined();
     expect((await call({ op: "query", query, as: { userId: "m", claims: [1] } })).status).toBe(400);

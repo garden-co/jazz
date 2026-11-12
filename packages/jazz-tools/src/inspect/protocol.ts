@@ -482,8 +482,10 @@ export function isLoopbackCallback(callback: string): boolean {
 }
 
 /**
- * Whether compiled permissions read `session.claims` anywhere: a
- * `SessionRef` or `SessionCmp` whose path starts at `claims`.
+ * Whether compiled permissions read `session.claims` anywhere: any node
+ * whose session path (`path`, `session_path`, or a `SessionRef`) starts at
+ * `claims`, whatever compares it (`SessionCmp`, `SessionInList`,
+ * `SessionContains`, `SessionIsNull`, `In`, a `SessionRef` value, ...).
  */
 export function readsClaims(permissions: unknown): boolean {
   const seen = new Set<object>();
@@ -492,10 +494,13 @@ export function readsClaims(permissions: unknown): boolean {
     seen.add(value);
     const node = value as Record<string, unknown>;
     const startsAtClaims = (path: unknown) => Array.isArray(path) && path[0] === "claims";
-    if ((node.type === "SessionRef" || node.type === "SessionCmp") && startsAtClaims(node.path)) {
+    if (
+      startsAtClaims(node.path) ||
+      startsAtClaims(node.session_path) ||
+      startsAtClaims(node.SessionRef)
+    ) {
       return true;
     }
-    if (startsAtClaims(node.SessionRef)) return true;
     return Object.values(node).some(visit);
   };
   return visit(permissions);

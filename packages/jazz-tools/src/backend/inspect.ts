@@ -77,6 +77,8 @@ export interface InspectEvent {
   table?: string;
   /** The user whose permissions the call ran under, if not the backend's. */
   as?: string;
+  /** The names (not values) of the claims given for `as`, when some were. */
+  asClaims?: string[];
   /** Rows the answer carried, or rows the write touched. */
   rows?: number;
   write: boolean;
@@ -488,7 +490,7 @@ export function createInspector(deps: InspectorDeps) {
 
   async function dbFor(
     as: InspectAs | undefined,
-  ): Promise<{ db: Db; as?: string; warning?: string }> {
+  ): Promise<{ db: Db; as?: string; asClaims?: string[]; warning?: string }> {
     if (as === undefined) return { db: deps.db() };
     const user = typeof as === "string" ? { userId: as } : as;
     if (!user || typeof user.userId !== "string" || !user.userId) {
@@ -511,6 +513,7 @@ export function createInspector(deps: InspectorDeps) {
       return {
         db: await deps.dbAs(user),
         as: user.userId,
+        ...(user.claims ? { asClaims: Object.keys(user.claims).sort() } : {}),
         ...(warning ? { warning } : {}),
       };
     } catch (error) {
@@ -528,6 +531,7 @@ export function createInspector(deps: InspectorDeps) {
     rows: Record<string, unknown>[];
     truncated: boolean;
     as?: string;
+    asClaims?: string[];
     warning?: string;
   }> {
     if (!query || typeof query !== "object") {
@@ -553,7 +557,7 @@ export function createInspector(deps: InspectorDeps) {
     const json = buildQueryJson(query, limit + 1, (column, value) =>
       fromJsonForColumn(columns.get(column), value),
     );
-    const { db, as: asUser, warning } = await dbFor(as);
+    const { db, as: asUser, asClaims, warning } = await dbFor(as);
     const found = await db.all(queryBuilder(query.table, json), {
       tier: "remote",
     });
@@ -570,14 +574,20 @@ export function createInspector(deps: InspectorDeps) {
       }
       rows.push(shown);
     }
-    return { rows, truncated, ...(asUser ? { as: asUser } : {}), ...(warning ? { warning } : {}) };
+    return {
+      rows,
+      truncated,
+      ...(asUser ? { as: asUser } : {}),
+      ...(asClaims ? { asClaims } : {}),
+      ...(warning ? { warning } : {}),
+    };
   }
 
   async function write(
     admitted: Admitted,
     ops: InspectWriteOp[],
     as: InspectAs | undefined,
-  ): Promise<{ ids: string[]; as?: string; warning?: string }> {
+  ): Promise<{ ids: string[]; as?: string; asClaims?: string[]; warning?: string }> {
     if (!admitted.write) {
       throw new InspectError(
         "forbidden",
@@ -624,7 +634,7 @@ export function createInspector(deps: InspectorDeps) {
       }
       return { op, values };
     });
-    const { db, as: asUser, warning } = await dbFor(as);
+    const { db, as: asUser, asClaims, warning } = await dbFor(as);
     const ids: string[] = [];
     let result;
     try {
@@ -652,7 +662,12 @@ export function createInspector(deps: InspectorDeps) {
         `the write was refused: ${errorMessage(error)}${warning ? `. ${warning}` : ""}`,
       );
     }
-    return { ids, ...(asUser ? { as: asUser } : {}), ...(warning ? { warning } : {}) };
+    return {
+      ids,
+      ...(asUser ? { as: asUser } : {}),
+      ...(asClaims ? { asClaims } : {}),
+      ...(warning ? { warning } : {}),
+    };
   }
 
   function schemaAnswer(admitted: Admitted) {
@@ -713,6 +728,7 @@ export function createInspector(deps: InspectorDeps) {
             table: body.query.table,
             rows: read.rows.length,
             as: read.as,
+            asClaims: read.asClaims,
           },
         };
       }
@@ -738,7 +754,12 @@ export function createInspector(deps: InspectorDeps) {
               as: body.as,
             }),
           },
-          event: { table: body.table, rows: read.rows.length, as: read.as },
+          event: {
+            table: body.table,
+            rows: read.rows.length,
+            as: read.as,
+            asClaims: read.asClaims,
+          },
         };
       }
       case "history": {
@@ -773,6 +794,7 @@ export function createInspector(deps: InspectorDeps) {
             table: [...new Set(body.ops.map((op) => op.table))].join(","),
             rows: done.ids.length,
             as: done.as,
+            asClaims: done.asClaims,
             write: true,
           },
         };

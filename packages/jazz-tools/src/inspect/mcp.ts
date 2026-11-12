@@ -192,15 +192,19 @@ export async function runMcpServer(options: {
     });
 
   async function callTool(name: string, args: Json): Promise<unknown> {
-    const claims =
-      args.claims && typeof args.claims === "object" && !Array.isArray(args.claims)
-        ? (args.claims as Record<string, unknown>)
-        : undefined;
     if (args.claims !== undefined && typeof args.as !== "string") {
       throw new InspectError("bad_request", "claims goes with as (the user they belong to)");
     }
+    // Claims go to the backend as given: it refuses ones that aren't an object.
     const as =
-      typeof args.as === "string" ? { as: claims ? { userId: args.as, claims } : args.as } : {};
+      typeof args.as === "string"
+        ? {
+            as:
+              args.claims === undefined
+                ? args.as
+                : { userId: args.as, claims: args.claims as Record<string, unknown> },
+          }
+        : {};
     switch (name) {
       case "whoami":
         return call({ op: "whoami" });
