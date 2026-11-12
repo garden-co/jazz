@@ -707,7 +707,11 @@ const ACCESS_HEADER = "x-jazz-backend-access";
 const STAND_IN_SECRET = "stated-by-backend-credential";
 /** The core's refusal of every local-first identity: it admits none. */
 const LOCAL_FIRST_AUTH_DISABLED = "local_first_auth_disabled";
-/** What a core that admits no local-first identity tells a guest's session. */
+/**
+ * What a core that admits no local-first identity tells a guest's session
+ * (`LOCAL_FIRST_AUTH_DISABLED_MESSAGE` in jazz-server's middleware/auth.rs;
+ * vercel-guest.integration.test.ts pins it against a real core).
+ */
 const CORE_REFUSES_GUESTS = "Local-first auth is not enabled";
 // What a browser's request to a public route carries on to a remote core:
 // never its cookies or its app session.
@@ -1861,7 +1865,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       // this user's link: say that, not that the user has another account.
       if ((error as { code?: string }).code === LOCAL_FIRST_AUTH_DISABLED) {
         warnGuestsOffOnCore();
-        return new Response(LOCAL_FIRST_AUTH_DISABLED, { status: 409 });
+        // A setup problem on the backend's side, not a refusal of this link:
+        // 503, so the client tries again later.
+        return new Response(LOCAL_FIRST_AUTH_DISABLED, { status: 503 });
       }
       // Only the core's own refusals refuse the link for good: an invalid
       // link intent (400), a retired or foreign identity (403), a user with
@@ -2028,17 +2034,17 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       }
       // A guest's session the core refuses because it admits no device
       // accounts at all: the client only goes offline, so say why here.
-      const relay: typeof onEvent = admitted.guest
-        ? (error, event) => {
-            if (
-              event.kind === "message" &&
-              event.data &&
-              Buffer.from(event.data).includes(CORE_REFUSES_GUESTS)
-            )
-              warnGuestsOffOnCore();
-            onEvent(error, event);
-          }
-        : onEvent;
+      // The core refuses in its first message, so only that one is looked at.
+      let firstFromCore = admitted.guest === true;
+      const relay: typeof onEvent = (error, event) => {
+        if (firstFromCore && event.kind === "message" && event.data) {
+          firstFromCore = false;
+          const { buffer, byteOffset, byteLength } = event.data;
+          if (Buffer.from(buffer, byteOffset, byteLength).includes(CORE_REFUSES_GUESTS))
+            warnGuestsOffOnCore();
+        }
+        onEvent(error, event);
+      };
       socket = core.openSocket(headerPairs(request.headers), relay, admitted.access);
       return socket.send(admitted.prelude);
     };

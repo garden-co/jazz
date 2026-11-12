@@ -1,10 +1,16 @@
 import { createHmac, randomUUID } from "node:crypto";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import type { AddressInfo } from "node:net";
 import { Readable } from "node:stream";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
+import { generateSecret, signToken } from "../local-first-auth/index.js";
 import { acceptDeviceAccounts, createJazz, createJazzClient, vercel, type Jazz } from "./index.js";
 import type { SandboxHandle, SandboxSdk } from "./vercel-store.js";
 
@@ -159,19 +165,46 @@ function fakeSandbox(appId: string, issuer: string, override: Record<string, unk
       },
     },
   };
-  return sdk;
+  return { sdk, coreUrl: () => coreUrl };
+}
+
+/**
+ * Sockets the deployment's instances open to the core, with the access each
+ * states: a guest naming the app rides on `session` access, the backend's
+ * own and a signed-in user's on `backend`.
+ */
+function watchCoreSockets() {
+  const opened: { url: string; access: string }[] = [];
+  const Real = globalThis.WebSocket;
+  globalThis.WebSocket = class extends Real {
+    constructor(url: string | URL, options?: { headers?: Record<string, string> }) {
+      const headers = options?.headers ?? {};
+      if (headers["x-jazz-backend-credential"]) {
+        opened.push({ url: String(url), access: headers["x-jazz-backend-access"] ?? "session" });
+      }
+      super(url, options as never);
+    }
+  } as typeof WebSocket;
+  cleanups.push(async () => {
+    globalThis.WebSocket = Real;
+  });
+  return opened;
 }
 
 /** Two function instances of one deployment: two createJazz, one Sandbox core. */
-async function deployment(override?: Record<string, unknown>) {
+async function deployment(
+  override?: Record<string, unknown>,
+  auth: (request: Request) => ReturnType<typeof authenticate> | null = authenticate,
+) {
+  const coreSockets = watchCoreSockets();
   const appId = randomUUID();
   const issuer = await startIssuer();
-  const sdk = fakeSandbox(appId, issuer, override);
+  const { sdk, coreUrl } = fakeSandbox(appId, issuer, override);
   const instance = async () => {
     const jazz = await createJazz({
       app,
       permissions,
-      authenticate,
+      authenticate: auth,
       store: vercel({ sdk, backendCredential: () => oidcToken(issuer) }),
     }).ready();
     cleanups.push(() => jazz.close());
@@ -179,7 +212,7 @@ async function deployment(override?: Record<string, unknown>) {
   };
   const a = await instance();
   const b = await instance();
-  return { appId, instances: [a, b] as const };
+  return { appId, instances: [a, b] as const, coreUrl: coreUrl(), coreSockets };
 }
 
 /**
@@ -293,7 +326,7 @@ function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
 
 it("syncs a local-first guest over the HTTP stream through two instances, and keeps it on sign-up", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
-  const { appId, instances } = await deployment();
+  const { appId, instances, coreSockets } = await deployment();
   const { origin, log } = await route(instances);
 
   const session = await guestOf(appId, origin);
@@ -311,6 +344,8 @@ it("syncs a local-first guest over the HTTP stream through two instances, and ke
   expect(log.some(({ path }) => path.endsWith("/ws"))).toBe(true);
   expect(new Set(log.map(({ instance }) => instance))).toEqual(new Set([0, 1]));
   expect(log.filter(({ status }) => status === 404)).toEqual([]);
+  // The guest's own session reached the core, on session access.
+  expect(coreSockets.some(({ access }) => access === "session")).toBe(true);
   // Each instance reads the guest's row from the shared core.
   for (const jazz of instances) {
     const seen = await jazz.db.all(app.todos.where({ id: row.id }));
@@ -365,4 +400,57 @@ it("logs it on the server when the core refuses a guest's sync session", async (
   const logged = () =>
     error.mock.calls.filter((call) => /local_first_auth_disabled/.test(call.join(" ")));
   await vi.waitFor(() => expect(logged()).toHaveLength(1), { timeout: 20_000 });
+}, 60_000);
+
+it("admits no guest at the core except through the backend's own sockets", async () => {
+  const { appId, coreUrl } = await deployment();
+  // A guest's own token, straight to the core: refused without the
+  // deployment's OIDC token, guest sign-in on or not.
+  const token = signToken(generateSecret(), { audience: appId });
+  const status = await new Promise<number>((resolve, reject) => {
+    const req = httpRequest(`${coreUrl}/apps/${appId}/ws`, {
+      headers: {
+        connection: "Upgrade",
+        upgrade: "websocket",
+        "sec-websocket-version": "13",
+        "sec-websocket-key": Buffer.from(randomUUID()).toString("base64").slice(0, 24),
+        authorization: `Bearer ${token}`,
+      },
+    });
+    req.on("response", (res) => {
+      res.resume();
+      resolve(res.statusCode!);
+    });
+    req.on("upgrade", (_res, socket) => {
+      socket.destroy();
+      reject(new Error("the core upgraded a socket without the workload's token"));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+  expect(status).toBe(401);
+}, 60_000);
+
+it("never opens a guest's session on the core when the app doesn't accept device accounts", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  const { appId, instances, coreSockets } = await deployment(undefined, (request) => {
+    const userId = request.headers.get("x-test-user");
+    return userId ? { userId, expiresAt: Math.floor(Date.now() / 1000) + 3600 } : null;
+  });
+  const { origin } = await route(instances);
+
+  const session = await guestOf(appId, origin);
+  const guest = session.getSnapshot().client!;
+  void guest.db
+    .insert(app.todos, { title: "made as a guest", owner: guest.session!.user! })
+    .wait({ tier: "global" })
+    .catch(() => undefined);
+  await vi.waitFor(
+    () =>
+      expect(
+        warn.mock.calls.filter((call) => /refused a local-first guest/.test(call.join(" "))),
+      ).toHaveLength(1),
+    { timeout: 20_000 },
+  );
+  expect(coreSockets.filter(({ access }) => access === "session")).toEqual([]);
 }, 60_000);
