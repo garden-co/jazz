@@ -1906,3 +1906,105 @@ fn a_listing_eviction_keeps_open_subscriptions_resume_points() {
     );
     assert_eq!(ids(&client, None), ids(&server, Some(alice())));
 }
+
+/// A server end that logs what it sends, beside a client end whose inbound
+/// queue a test can add to.
+struct LoggedPipe {
+    out: Rc<RefCell<VecDeque<SyncMessage>>>,
+    inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
+    log: Option<Rc<RefCell<Vec<SyncMessage>>>>,
+}
+
+impl Transport for LoggedPipe {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        if let Some(log) = &self.log {
+            log.borrow_mut().push(message.clone());
+        }
+        self.out.borrow_mut().push_back(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inbound.borrow_mut().pop_front()
+    }
+}
+
+/// A read whose holds drop a row with no settle of its own (a support row
+/// released while its result stands) keeps counting that row in its resume
+/// point. Losing the row then forgets the point: resuming from it, the
+/// server would count the row as held and never ship it again.
+///
+/// The release is injected: the server sends the read `Holds { removed }`
+/// for a row it still lists, then `AccessLost` for it, with no `Settled`.
+#[test]
+fn a_row_released_without_a_settle_still_forgets_the_reads_point() {
+    let server = seeded(3);
+    let client = open(1, alice());
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let upstream = block_on(client.connect_upstream(Box::new(LoggedPipe {
+        out: up.clone(),
+        inbound: down.clone(),
+        log: None,
+    })));
+    server
+        .accept_subscriber(
+            Box::new(LoggedPipe {
+                out: down.clone(),
+                inbound: up,
+                log: Some(log.clone()),
+            }),
+            alice(),
+        )
+        .unwrap();
+    let messages = client.prepare_query(&Query::from("messages")).unwrap();
+    let _messages = block_on(client.subscribe(&messages, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(ids(&client, None).len(), 3);
+
+    // The read's id and m0's stored table and key, as the server sent them.
+    let (read, table) = log
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::Holds {
+                id: read, added, ..
+            } => added
+                .iter()
+                .find(|(_, row)| *row == *id(3, 0).0.as_bytes())
+                .map(|(table, _)| (*read, table.clone())),
+            _ => None,
+        })
+        .expect("the read holds m0");
+    let key = log
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::Rows { images, .. } => images
+                .iter()
+                .find(|image| image.id == *id(3, 0).0.as_bytes())
+                .map(|image| image.key.clone()),
+            _ => None,
+        })
+        .expect("m0 shipped");
+    down.borrow_mut().extend([
+        SyncMessage::Holds {
+            id: read,
+            added: Vec::new(),
+            removed: vec![(table.clone(), *id(3, 0).0.as_bytes())],
+        },
+        SyncMessage::AccessLost {
+            table,
+            id: *id(3, 0).0.as_bytes(),
+            key,
+            hidden: false,
+        },
+    ]);
+    block_on(client.tick()).unwrap();
+    assert_eq!(ids(&client, None).len(), 2, "m0 is evicted");
+
+    // The read reopens fresh, so m0, which the server still lists, returns.
+    reconnect_shipped(&server, &client, &upstream);
+    assert_eq!(ids(&client, None), ids(&server, Some(alice())));
+}

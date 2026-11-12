@@ -1940,6 +1940,10 @@ struct LiveRead {
     /// leaves it out, and a read the server never answers again (its
     /// upstream gone for good) keeps its holds until it closes.
     holds: HashMap<String, HashSet<[u8; 16]>>,
+    /// Rows its holds dropped since its resume point last moved: that
+    /// point may still count them as held (a support row released with
+    /// no change to the result settles nothing), so losing one forgets it.
+    released: HashMap<String, HashSet<[u8; 16]>>,
     /// Whether this connection told the read what it holds yet.
     told: bool,
 }
@@ -2145,6 +2149,10 @@ pub(crate) struct Client {
     /// No resume point was stored since they were last all forgotten, so
     /// forgetting them again (another eviction this tick) costs nothing.
     forgotten: bool,
+    /// Every stored resume point belongs to a read in `reads` that kept
+    /// it when they were last forgotten, and none was stored since: a
+    /// forgetting that clears no read leaves the store as it is.
+    pruned: bool,
 }
 
 /// A session's commit a relay uploads as its own, for its upload: the
@@ -5810,10 +5818,17 @@ impl Inner {
     /// it settles again.
     ///
     /// Only a live read this connection told what it holds can be cleared:
-    /// it keeps its resume point when its holds list none of the rows. Every
-    /// other one is forgotten, since nothing here says which rows it held:
-    /// a closed read's stored point, a one-shot read's, and a live read not
-    /// yet told on this connection.
+    /// it keeps its resume point when neither its holds nor the rows they
+    /// released since that point moved list any of the rows. Every other
+    /// one is forgotten, since nothing here says which rows it held: a
+    /// closed read's stored point, a one-shot read's, and a live read not
+    /// yet told on this connection. Reads sharing a watermark key (the same
+    /// query, binding and view: two live reads, or a live and a one-shot
+    /// one) read the same result: one that keeps its point keeps the
+    /// stored row for all, while the others' in-memory points are cleared.
+    ///
+    /// `table` is a stored name, as holds, `AccessLost` and evictions name
+    /// tables: a table no holds name is one no told read holds a row of.
     fn forget_watermarks_holding(&mut self, table: &str, rows: &[[u8; 16]]) -> Result<(), Error> {
         let Some(client) = self.client.as_mut() else {
             return Ok(());
@@ -5822,26 +5837,32 @@ impl Inner {
             return Ok(());
         }
         let mut kept = HashSet::new();
+        let mut cleared = false;
         for read in client.reads.values_mut() {
             let keeps = read.through.is_some()
                 && read.live().is_some_and(|live| {
-                    live.told
-                        && live
-                            .holds
-                            .get(table)
-                            .is_none_or(|held| !rows.iter().any(|row| held.contains(row)))
+                    let counts = |held: &HashMap<String, HashSet<[u8; 16]>>| {
+                        held.get(table)
+                            .is_some_and(|held| rows.iter().any(|row| held.contains(row)))
+                    };
+                    live.told && !counts(&live.holds) && !counts(&live.released)
                 });
             match read.watermark.filter(|_| keeps) {
                 Some(key) => {
                     kept.insert(key);
                 }
                 None => {
+                    cleared |= read.through.is_some();
                     read.through = None;
                     read.context = None;
                 }
             }
         }
         client.forgotten = kept.is_empty();
+        if !kept.is_empty() && !cleared && client.pruned {
+            return Ok(());
+        }
+        client.pruned = true;
         if self.has_table("_jazz_watermarks")? {
             if kept.is_empty() {
                 self.exec("DELETE FROM _jazz_watermarks", [])
@@ -7279,6 +7300,7 @@ impl Client {
             deferred: VecDeque::new(),
             releasing: None,
             forgotten: false,
+            pruned: false,
         }
     }
 }
@@ -7347,9 +7369,12 @@ impl Db {
         // A new server session knows nothing: attach every remote query
         // again and resend unsettled commits (the server dedupes by node
         // and transaction).
-        // What the old session refused, the new one answers afresh.
-        for remote in client.reads.values().filter_map(ActiveRead::live) {
+        // What the old session refused, the new one answers afresh, and
+        // what it said each read holds stands only until the new one says
+        // (a transport swapped without a detach included).
+        for remote in client.reads.values_mut().filter_map(ActiveRead::live_mut) {
             remote.refused.borrow_mut().take();
+            remote.told = false;
         }
         let resubscribe: Vec<SyncMessage> = client
             .reads
@@ -8117,6 +8142,7 @@ impl Inner {
                 global: global.clone(),
                 visible: None,
                 holds: HashMap::new(),
+                released: HashMap::new(),
                 told: false,
             }),
         );
@@ -8996,9 +9022,14 @@ impl Db {
                                     // Resumable only in the context it was
                                     // read in, known once the `Welcome` said.
                                     if resumable && let Some(context) = client.context {
+                                        // The new point counts what the
+                                        // read holds now, not what it
+                                        // released before.
+                                        live.released.clear();
                                         read.through = Some(through);
                                         read.context = context;
                                         client.forgotten = false;
+                                        client.pruned = false;
                                         live_watermark = read.watermark;
                                     }
                                     (members.clone(), false)
@@ -9292,7 +9323,9 @@ impl Db {
                                 })
                         {
                             if !std::mem::replace(&mut live.told, true) {
-                                live.holds.clear();
+                                for (table, rows) in live.holds.drain() {
+                                    live.released.entry(table).or_default().extend(rows);
+                                }
                             }
                             for (table, row) in removed {
                                 if let Some(rows) = live.holds.get_mut(&table) {
@@ -9301,6 +9334,7 @@ impl Db {
                                         live.holds.remove(&table);
                                     }
                                 }
+                                live.released.entry(table).or_default().insert(row);
                             }
                             for (table, row) in added {
                                 live.holds.entry(table).or_default().insert(row);
@@ -9340,7 +9374,9 @@ impl Db {
                 let mut inner = self.inner.borrow_mut();
                 if inner.client.as_ref().expect("client").whole.is_empty() {
                     inner.store_watermark(&watermark, through)?;
-                    inner.client.as_mut().expect("client").forgotten = false;
+                    let client = inner.client.as_mut().expect("client");
+                    client.forgotten = false;
+                    client.pruned = false;
                 }
             }
         }
