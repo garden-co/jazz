@@ -167,15 +167,17 @@ const testJazz: TestJazz = await startTestJazz({ app, permissions });
 ```
 
 - **Guests** (anonymous clients, or device accounts) connect to `testJazz.url`.
-- **Signed-in users in tests that run in Node** (Vitest, a CLI) sign in with a bearer token:
-  `testJazz.bearer(userId, claims)` returns one your permissions see as that user. Pass it as
-  `bearer: () => token` on `createJazzClient`, with `serverUrl: testJazz.url`, and call
-  `refresh()`, as below. React Native tests do the same.
-- **Signed-in users in a browser** (Vitest browser mode, Playwright) call
-  `await testJazz.as(userId, claims)` instead. Each user gets their own origin, which stands in
-  for their browser's session cookie; point the client at its `serverUrl`. Outside a browser that
-  `serverUrl` doesn't sign anyone in: `refresh()` throws "loginWithBackend and linkWithBackend need
-  a browser".
+- **Signed-in users where there is no DOM** (plain Node Vitest, a CLI) sign in with a bearer
+  token: `testJazz.bearer(userId, claims)` returns one your permissions see as that user. Pass it
+  as `bearer: () => token` on `createJazzClient`, with `serverUrl: testJazz.url`, and call
+  `refresh()`, as below. There, the `serverUrl` from `testJazz.as()` doesn't sign anyone in:
+  `refresh()` throws "loginWithBackend and linkWithBackend need a browser".
+- **Signed-in users where there is a DOM** (a real browser, or jsdom and happy-dom) call
+  `await testJazz.as(userId, claims)` instead and point the client at its `serverUrl`: each user
+  gets their own origin, which stands in for their session cookie. `bearer` is refused there.
+- **React Native logic** runs in plain Node the same way (see
+  [React Native](/docs/setup/react-native#testing-without-a-device)), not under the React Native
+  Jest preset, where `bearer` on `createJazzClient` from `jazz-tools/client` is refused.
 - `testJazz.jazz` is the app's `Jazz` handle, for `forReqUser`, `db` and the rest of your backend
   code.
 - `await testJazz.stop()` stops everything it started.
@@ -258,9 +260,10 @@ it("signs in the user authenticate names", async () => {
 
 ### UI tests
 
-For browser or framework tests, start one `startTestJazz` for the test project (for example in
-Vitest's [globalSetup](https://vitest.dev/config/globalsetup)) and point your app's Jazz client
-at it: `testJazz.url` for guests, or the `serverUrl` from `testJazz.as(userId)` for a signed-in
+For browser or framework tests, start one `startTestJazz` for the test project and point your
+app's Jazz client at it. `startTestJazz` runs in Node (it starts HTTP servers), so in Vitest browser
+mode start it in [globalSetup](https://vitest.dev/config/globalsetup) and hand the URLs to the
+tests, for example with `provide`/`inject`: `testJazz.url` for guests, or the `serverUrl` from `testJazz.as(userId)` for a signed-in
 user. Your framework's bindings then create their own clients against it.
 
 If you need to isolate data across tests, give each client its own `dbName`.

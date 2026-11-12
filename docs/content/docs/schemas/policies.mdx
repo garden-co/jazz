@@ -179,7 +179,7 @@ transactions.
 
 ### Access through related rows
 
-When access depends on a row two steps away, check that a matching path exists with
+When access depends on rows in another table, check that a matching path exists with
 `policy.exists(...)` around a relation: start from a table, filter it, follow a relation with
 `hopTo`, and filter again. For example, a doctor may read the patients they have an appointment
 with:
@@ -212,7 +212,7 @@ s.definePermissions(app, ({ policy, session }) => [
 ```
 
 `hopTo` takes a relation name declared with `s.rel` or `s.reverse`, and the `where` after it
-filters the rows it reaches. A key qualified with a table name, such as `"doctors.userId"`, filters
+filters the rows it reaches. A relation takes one `hopTo`: chaining a second one is not supported yet. A key qualified with a table name, such as `"doctors.userId"`, filters
 a related table directly; it works when exactly one relation leads from the table to that one.
 
 <Accordions type="single">
