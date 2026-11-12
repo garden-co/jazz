@@ -1,3 +1,4 @@
+import type { SignedOutDecision } from "./backend-watch.js";
 import type { AccountManagerConfig } from "../accounts/create-account-manager.js";
 import type { AccountHandle } from "../accounts/state.js";
 import {
@@ -92,6 +93,16 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
      */
     linkDeviceAccountOnSignUp?: boolean;
     /**
+     * Called when your backend says no one is signed in any more (confirmed
+     * by a second answer a moment later), before the session signs the
+     * user out. Return `"keep"` to stay signed in for now (your app refreshed
+     * its session itself, or redirects to sign-in first): the session asks
+     * your backend again on the next focus, refusal or `refresh()`.
+     * Return `"sign-out"` (or nothing) to sign out. A hook that throws signs
+     * out.
+     */
+    onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
+    /**
      * On sign-out (or a switch to another user), wipe the account's local
      * storage instead of keeping it for that user's next sign-in. For shared
      * devices. Jazz first waits up to 5 seconds for pending writes to upload;
@@ -182,6 +193,7 @@ export async function openBrowserSessionCore(
     initial,
     clearOnSignOut,
     linkDeviceAccountOnSignUp,
+    onSignedOut,
     client: loadLocalFirst,
     localFirst,
     // The account manager's own: neither is client configuration, and a Db
@@ -344,6 +356,7 @@ export async function openBrowserSessionCore(
         : config.fetch
           ? { fetch: config.fetch }
           : {}),
+      onSignedOut,
     }),
   });
   if (loadLocalFirst) upgradeInBackground(session, loadLocalFirst);
@@ -526,6 +539,7 @@ async function createDeviceOnlySession(config: JazzClientConfig): Promise<Browse
     clearOnSignOut,
     linkDeviceAccountOnSignUp: _linkDeviceAccountOnSignUp,
     localFirst: _localFirst,
+    onSignedOut: _onSignedOut,
     client: loadLocalFirst,
     store: _store,
     fetch: _fetch,

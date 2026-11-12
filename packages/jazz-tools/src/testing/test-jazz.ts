@@ -128,9 +128,15 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
   const core =
     options.core ?? (await startLocalJazzServer({ inMemory: true, ...options.coreOptions }));
   // Which user each origin (by its Host) is signed in as.
-  const users = new Map<string, { userId: string; claims?: Record<string, unknown> }>();
+  const users = new Map<
+    string,
+    { userId: string; claims?: Record<string, unknown>; expiresAt?: number }
+  >();
   // Who each bearer from `bearer()` is.
-  const bearers = new Map<string, { userId: string; claims?: Record<string, unknown> }>();
+  const bearers = new Map<
+    string,
+    { userId: string; claims?: Record<string, unknown>; expiresAt?: number }
+  >();
   // Origins from `visitor()`, where no one signed in yet.
   const visitors = new Set<string>();
   const userFor = (request: Request) => {
@@ -138,7 +144,9 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
     const user = authorization?.startsWith("Bearer ")
       ? bearers.get(authorization.slice(7))
       : users.get(new URL(request.url).host);
-    return user ?? (options.guests === false ? null : acceptDeviceAccounts(request));
+    // A test user's sign-in holds for an hour unless the test says otherwise.
+    if (user) return { ...user, expiresAt: user.expiresAt ?? Math.floor(Date.now() / 1000) + 3600 };
+    return options.guests === false ? null : acceptDeviceAccounts(request);
   };
   const servers: Server[] = [];
   // Every connection, including upgraded sync sockets, which `server.close`

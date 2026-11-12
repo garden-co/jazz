@@ -34,7 +34,7 @@ async function setup(options: { guests?: boolean } = {}) {
     store: memory(),
     authenticate: (request: Request) => {
       const userId = request.headers.get("x-test-user");
-      if (userId) return { userId };
+      if (userId) return { userId, expiresAt: Math.floor(Date.now() / 1000) + 3600 };
       return options.guests ? acceptDeviceAccounts(request) : null;
     },
   }).ready();

@@ -222,7 +222,9 @@ it("signs in the user authenticate names", async () => {
     // In tests, the user is named in a header instead of your session cookie.
     authenticate: (request) => {
       const userId = request.headers.get("x-test-user");
-      return userId ? { userId, claims: { role: "admin" } } : null;
+      return userId
+        ? { userId, claims: { role: "admin" }, expiresAt: Math.floor(Date.now() / 1000) + 3600 }
+        : null;
     },
   });
   await jazz.ready(); // jazz.appId is known once the store is open

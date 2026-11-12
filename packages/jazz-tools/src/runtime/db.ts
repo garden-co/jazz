@@ -3859,6 +3859,15 @@ export class Db {
   }
 
   /**
+   * @internal Whether this Db still reads and writes: it isn't shutting down
+   * or replaced, and its storage wasn't reset under it. A session whose
+   * sign-out or sign-in failed keeps a usable Db rather than ending in error.
+   */
+  isUsable(): boolean {
+    return !this.shutdownPromise && !this.replaced && this.connection.isUsable();
+  }
+
+  /**
    * Release the current Db instance for logout flows.
    *
    * When `wipeData` is enabled, Jazz clears local client storage before shutting this Db down.

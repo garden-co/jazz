@@ -4,8 +4,8 @@ description: "Learn how your backend decides who a user is, how the browser foll
 ---
 
 To authenticate users with Jazz, sign in your users with your auth library as usual. Provide an
-`authenticate` function that reads the user's session and returns their user ID and any claims,
-which your permission policies can use. In the browser, `JazzProvider` asks your backend who is
+`authenticate` function that reads the user's session and returns their user ID, when that session
+expires and any claims, which your permission policies can use. In the browser, `JazzProvider` asks your backend who is
 signed in; after your own sign-in or sign-out, call `refresh()` on the session.
 
 ## Your backend decides
@@ -25,12 +25,20 @@ export const jazz = createJazz({
   store: sqlite({ path: "./data/jazz" }),
   authenticate: async (request) => {
     const session = await auth.api.getSession({ headers: request.headers });
-    return session ? { userId: session.user.id, claims: { role: session.user.role } } : null;
+    if (!session) return null;
+    return {
+      userId: session.user.id,
+      expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
+      claims: { role: session.user.role },
+    };
   },
 });
 ```
 
 - `userId` is your user's stable ID: any string your auth library provides. Jazz gives each one an account the first time they sign in.
+- `expiresAt` (required) is when this answer stops holding, as Unix time in seconds: the expiry of
+  the session the user is signed in with (the one a sign-out ends), or a token's `exp`. Not the
+  expiry of a short-lived access token your auth refreshes on its own.
 - `claims` are anything your [policies](/docs/schemas/policies) should see, such as the user's role or
   organization, under `session.claims`.
 - Return `null` for a signed-out request.
@@ -38,51 +46,54 @@ export const jazz = createJazz({
   [device account](/docs/setup/auth/local-first) sync: that's how guests work. Device accounts are
   refused otherwise. An app with no sign-in at all passes `authenticate: acceptDeviceAccounts`.
 
-Jazz asks `authenticate` on every sign-in, on every sync connection and in `jazz.forReqUser`. It
-also asks again for each open sync connection, every minute by default (`recheckSeconds`). When the
-answer is no one, someone else or the same user with different `claims` (say their role changed),
-the connection ends and the client reconnects, so your policies see the new claims. A sign-out or a
-claims change therefore reaches an open connection within `recheckSeconds`; `jazz.forReqUser` sees
-it on the next request. With `recheckSeconds: 0` it waits until the connection's sign-in expires
-(after an hour by default, `sessionTtlSeconds`). Return claims that only change when the user's
-access does: a claim that changes on every call (a timestamp, a request ID) would end the
-connection on every check.
+Jazz asks `authenticate` on every sign-in, on every sync connection and in `jazz.forReqUser`, always
+while handling that request, so your framework's request helpers (`cookies()`, `withAuth()`,
+`auth()`) work there. Return claims that only change when the user's access does.
 
 **Several sign-in methods.** If your auth library supports multiple sign-in methods, users can use
 any of them, as long as your auth library maps them to a single stable ID for each user. Return
 that ID from your `authenticate` function.
 
-### Re-checking open connections
+### When a session expires
 
-A re-check is not a request. Jazz calls `authenticate` again from a timer, outside your framework's
-request scope, with the request that opened the connection and the cookies it had then. So
-`authenticate` must decide from `request` alone:
+A sync connection lasts until the `expiresAt` its `authenticate` answer gave, and at most
+`sessionTtlSeconds` (one hour by default). Shortly before then, the connection asks its client to
+connect again, and Jazz calls `authenticate` on that new request, with the cookies (or token) the
+client has now:
 
-- **Read the session from `request.headers`**, as in the example above. Don't use helpers that
-  find the current request on their own: in Next.js, `cookies()` and `headers()` throw outside a
-  request, and so do the auth helpers built on them (AuthKit's `withAuth()`, NextAuth's `auth()`,
-  Clerk's `auth()`).
-- **Read the long-lived session, not a short-lived token.** If your auth rotates a cookie (say a
-  five-minute access token next to a longer session), a re-check still sees the one the connection
-  opened with. Name the user from the session it belongs to, or re-checks refuse them once the
-  token expires and the connection reconnects each time it does.
-- **A re-check only sees a sign-out your auth keeps on the server** (a deleted session row, a
-  revoked token). A stateless cookie, signed or sealed with nothing behind it, stays valid until it
-  expires, so the opening one still names the user after they sign out. Check it against your
-  session store, or a sign-out reaches open connections only when they end
-  (`sessionTtlSeconds`).
+- **Still the same user:** the client carries on. It swaps connections underneath, and your app sees
+  no change: no reconnecting status, no event, and queries and writes continue.
+- **Their claims changed** (say their role): the new connection carries the new claims, so your
+  policies see them from then on.
+- **No one, or someone else:** the connection is refused, and the browser asks your backend who is
+  signed in. Once a second answer agrees, it signs the user out.
 
-When a re-check throws Next.js's "called outside a request scope" error (or another framework's),
-`authenticate` will fail the same way on every re-check, so Jazz ends the connection at once and
-logs an error. The client reconnects, and its next re-check ends it again: with that mistake, every
-signed-in user reconnects every `recheckSeconds`, and a sign-out still reaches them within it. Read
-the session from `request` to fix it.
+So a sign-out on another device, a ban or a changed role reaches an open connection within
+`sessionTtlSeconds` at the latest. To end a user's open connections at once, call
+`jazz.revokeUser(userId)` from your sign-out handler or your auth provider's session-revoked
+webhook. It ends their connections on this backend instance; connections on other instances end
+within `sessionTtlSeconds`.
 
-Any other error is logged and asked again next time, so a brief outage of your auth database ends
-nothing. Three failed re-checks in a row end the connection, as a refusal does: the client
-reconnects, and if the user signed out in the meantime that reconnect is refused. An outage longer
-than that ends every open connection within about one `recheckSeconds` of each other, and their
-clients reconnect together once your auth answers again (until then, reconnects fail and retry).
+### Keep auth middleware off Jazz's routes
+
+`authenticate` should only read and verify the user's session; never refresh it there. Auth
+middleware that refreshes sessions (AuthKit's `authkitMiddleware`, Clerk's `clerkMiddleware`,
+Auth.js's `auth` as middleware) must not run on Jazz's routes (`/jazz/*` by default). When a laptop
+wakes, every window of a browser can reach Jazz at about the same moment; with refresh tokens that
+work once, all but one of those refreshes fail, and the middleware deletes the session cookie. Pages
+keep refreshing the session as usual.
+
+In Next.js, leave Jazz's path out of the middleware's matcher:
+
+```ts title="middleware.ts"
+export const config = {
+  // Everything except Next.js internals, static files and Jazz's routes.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|jazz/).*)"],
+};
+```
+
+The same matcher works for AuthKit, Clerk and Auth.js middleware. In `authenticate`, read the
+session without refreshing it, and return its expiry as `expiresAt`.
 
 ## In the browser
 
@@ -123,9 +134,13 @@ Without React, call `refresh()` on the session `createJazzClient` returns.
 - **Sign-out.** When your backend answers signed out, Jazz closes the account's client. A local-first client's
   unsynced writes stay in that account's local storage and sync the next time the same user signs
   in. On shared devices, pass `clearOnSignOut` to wipe them instead.
-- **Sign-out elsewhere.** Another tab, an expired session or a revoked one: your backend re-runs
-  `authenticate` on open connections, and when it returns `null` Jazz ends the connection as
-  signed out. No client code needed.
+- **Sign-out elsewhere.** Another tab, an expired session or a revoked one: when the connection
+  re-authenticates at its `expiresAt` (or `jazz.revokeUser` ends it) and `authenticate` returns
+  `null`, Jazz signs the user out. No client code needed.
+- **Before a sign-out.** Pass `onSignedOut` to `createJazzClient` to hear about a confirmed
+  sign-out before Jazz signs the user out. Return `"keep"` to stay signed in for now (your app
+  refreshes its session itself, or shows its sign-in first); Jazz asks your backend again on the
+  next focus or `refresh()`. Return `"sign-out"`, or nothing, to sign out.
 
 Without a framework, call `refresh()` from your auth library's own listener:
 

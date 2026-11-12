@@ -206,7 +206,7 @@ describe("JazzBackend Effect layer", () => {
       store: memory(),
       authenticate: (request) => {
         seenBodies.push(request.body);
-        return { userId: "body-reader" };
+        return { userId: "body-reader", expiresAt: Math.floor(Date.now() / 1000) + 3600 };
       },
     });
     try {

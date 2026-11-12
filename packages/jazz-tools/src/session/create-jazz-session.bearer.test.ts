@@ -33,7 +33,7 @@ function authenticate(request: Request) {
   const header = request.headers.get("authorization");
   seen.push(header);
   const match = /^Bearer token-(\w+)$/.exec(header ?? "");
-  return match ? { userId: match[1]! } : null;
+  return match ? { userId: match[1]!, expiresAt: Math.floor(Date.now() / 1000) + 3600 } : null;
 }
 
 async function serve() {
