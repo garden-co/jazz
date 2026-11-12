@@ -183,6 +183,8 @@ mod sync_access_loss;
 mod sync_aggregates;
 #[path = "../sync_connection_settled.rs"]
 mod sync_connection_settled;
+#[path = "../sync_debug_log.rs"]
+mod sync_debug_log;
 #[path = "../sync_differential.rs"]
 mod sync_differential;
 #[path = "../sync_echo.rs"]
