@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
 import { registerInProcessTransport } from "../runtime/in-process-transport.js";
 import { accountAppId, localFirstAccountId } from "../accounts/local-first.js";
+import { AUTHENTICATE_EXPIRES_AT_MISSING } from "../accounts/registry-client.js";
 import { LOCAL_FIRST_JWT_ISSUER, parseJwtPayload } from "../runtime/client-session.js";
 import { verifyLocalFirstToken } from "../runtime/local-first-token.js";
 import { endpointScope } from "../runtime/client-scope.js";
@@ -2644,6 +2645,17 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     try {
       return await route(request, upgrades);
     } catch (error) {
+      if (error instanceof AuthenticateExpiresAtError) {
+        // The app's own setup is wrong, the same way on every request: tell
+        // the client by a stable code it explains (naming the fix), and log
+        // the detail (what `authenticate` returned) here once. The response
+        // carries nothing of the app's answer.
+        warnMissingExpiry(error);
+        return new Response(AUTHENTICATE_EXPIRES_AT_MISSING, {
+          status: 500,
+          headers: { "Cache-Control": "no-store" },
+        });
+      }
       if (!(error instanceof BackendClientsUnavailable)) throw error;
       // The reason stays in the backend's logs.
       console.error(error);

@@ -39,6 +39,9 @@ export const jazz = createJazz({
 - `expiresAt` (required) is when this answer stops holding, as Unix time in seconds: the expiry of
   the session the user is signed in with (the one a sign-out ends), or a token's `exp`. Not the
   expiry of a short-lived access token your auth refreshes on its own.
+  Without a valid one, Jazz refuses the sign-in: your backend's log says what `authenticate`
+  returned, and the browser gets only the code `authenticate_expires_at_missing`, which its
+  session's error explains.
 - `claims` are anything your [policies](/docs/schemas/policies) should see, such as the user's role or
   organization, under `session.claims`.
 - Return `null` for a signed-out request.
@@ -130,6 +133,10 @@ devices, pass `clearOnSignOut: true` to `createJazzClient`: the device then neve
 user, so a reload waits for your backend's answer. After your own sign-in or sign-out, call
 `refresh()` from `useJazzSession()` and Jazz follows your backend's answer.
 Without React, call `refresh()` on the session `createJazzClient` returns.
+If Jazz can't ask your backend (it is offline, or `authenticate` throws or returns no `expiresAt`),
+`refresh()` rejects, and the session shows the failure too: it keeps its current user and client
+(`status` stays `"ready"`), with `error` set and `recovery: "action"`. `retry()` asks your backend
+again.
 
 - **Sign-out.** When your backend answers signed out, Jazz closes the account's client. A local-first client's
   unsynced writes stay in that account's local storage and sync the next time the same user signs

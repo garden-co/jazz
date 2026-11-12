@@ -161,13 +161,61 @@ export function registerPageDb(db: PageDb, appId: string | null): () => void {
   };
 }
 
-/** Install `window.__jazz` (storage and sync status), keeping what's already on it. */
+/**
+ * Marks the `window.__jazz` Jazz installed, so a later install (another
+ * client, another copy of jazz-tools on the page) extends it, and a value the
+ * app put there is told apart. `Symbol.for`, so every copy agrees.
+ */
+const JAZZ_PAGE_HANDLE = Symbol.for("jazz-tools.window-jazz");
+
+/**
+ * `window.__jazz` is reserved for Jazz: it is set by the first Db opened on
+ * the page. A value the app (or another library) put there first is refused
+ * by name rather than overwritten, or extended (it may be sealed or frozen).
+ */
+export class WindowJazzConflictError extends Error {
+  constructor(existing: unknown) {
+    super(
+      `window.__jazz is reserved for Jazz (its page handle: window.__jazz.status(), waitForSync(), clearStorage()), and this page already has a window.__jazz that Jazz didn't set (${
+        existing === null ? "null" : typeof existing
+      }). Rename your app's global: Jazz doesn't overwrite it.`,
+    );
+    this.name = "WindowJazzConflictError";
+  }
+}
+
+/**
+ * Throw {@link WindowJazzConflictError} if `page` has a `window.__jazz` Jazz
+ * didn't set. A browser session checks this when it starts, so the conflict
+ * shows there rather than when a Db first opens (on the thin client, which
+ * doesn't install it, only at the upgrade to local-first).
+ */
+export function refuseWindowJazzConflict(page: Window): void {
+  const existing = page.__jazz as unknown;
+  if (existing === undefined) return;
+  if (isJazzPageHandle(existing)) return;
+  throw new WindowJazzConflictError(existing);
+}
+
+/**
+ * Jazz's own `window.__jazz`: marked by this or a later copy of jazz-tools,
+ * or, from a copy before the mark (alpha.60 and earlier), the version-1
+ * handle shape, which it extends as before.
+ */
+function isJazzPageHandle(value: unknown): value is Record<string | symbol, unknown> {
+  if (!value || typeof value !== "object") return false;
+  if (JAZZ_PAGE_HANDLE in value) return true;
+  const legacy = value as { version?: unknown; status?: unknown };
+  return legacy.version === 1 && typeof legacy.status === "function";
+}
+
+/** Install `window.__jazz` (storage and sync status), extending the one Jazz installed. */
 export function ensureWindowJazz(page: Window): WindowJazzClientApi & JazzPageHandle {
-  const existing = page.__jazz;
-  const host =
-    existing && typeof existing === "object"
-      ? (existing as unknown as Record<string, unknown>)
-      : {};
+  refuseWindowJazzConflict(page);
+  const existing = page.__jazz as unknown;
+  const host = (existing as Record<string | symbol, unknown> | undefined) ?? {};
+  // An older copy's handle gets the mark too, for copies after this one.
+  host[JAZZ_PAGE_HANDLE] = true;
   const api = Object.assign(host, handle(), {
     async clearStorage(namespace?: string): Promise<void> {
       await resolveStorageTarget(page, namespace).deleteClientStorage();
