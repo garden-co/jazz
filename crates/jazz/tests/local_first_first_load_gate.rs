@@ -34,6 +34,7 @@ use jazz::query::{OrderDirection, Query};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tx::DurabilityTier;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -1487,4 +1488,79 @@ fn no_wait_subscriptions_follow_the_server_through_random_link_changes() {
     eprintln!(
         "no-wait openings by hint (Live, Attempting, Failed): {opened_under:?}, windows: {windows_opened}"
     );
+}
+
+/// Follow a stream until the server's turns settle it at the global tier,
+/// asserting it never reopens.
+fn assert_settles_globally(foreground: &Foreground, server: &Db, stream: &mut SubscriptionStream) {
+    for _ in 0..MAX_TURNS {
+        foreground.turn(Some(server));
+        while let Some(event) = stream.try_next_event() {
+            match event {
+                SubscriptionEvent::Delta { reset: true, .. } => {
+                    panic!("a store-served opening was published again: {event:?}")
+                }
+                SubscriptionEvent::Delta {
+                    settled: true,
+                    tier: DurabilityTier::Global,
+                    ..
+                } => return,
+                SubscriptionEvent::Delta { .. } => {}
+                other => panic!("expected a delta, got {other:?}"),
+            }
+        }
+    }
+    panic!("the stream never learned the server settled its result");
+}
+
+/// A read its owner served from its store (a no-wait read, or one whose
+/// first-load wait ran out) opens settled at the owner's tier, Local, and
+/// is told once the server's answer settles it globally: the owner forwards
+/// its upstream read's global settle, not the tier it opened at.
+///
+/// ```text
+/// server(a..j, silent) ══ worker(cache a..j, hint Live) ══ tab (hint Live)
+/// tab: subscribe (no wait | wait 200 ms, run out) ─► opening a..j, Local
+/// server answers ─► worker ─► tab: settled, Global (no second opening)
+/// ```
+fn assert_store_served_read_settles_globally(node: u8, opts: ReadOpts, wait: Option<Duration>) {
+    let server = seeded_server();
+    let foreground = foreground_over(node, node + 1, warm_worker(node + 1, &server));
+    foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
+    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let mut stream = subscribe(&foreground.tab, &items(), opts);
+    if let Some(wait) = wait {
+        foreground.turn(None);
+        std::thread::sleep(wait + Duration::from_millis(50));
+    }
+    let event = foreground.first_event(&mut stream, None);
+    let SubscriptionEvent::Delta {
+        reset: true,
+        settled: true,
+        tier,
+        ..
+    } = event
+    else {
+        panic!("expected a settled opening, got {event:?}");
+    };
+    assert_eq!(
+        tier,
+        DurabilityTier::Local,
+        "the owner's store settles the opening locally"
+    );
+    assert_settles_globally(&foreground, &server, &mut stream);
+}
+
+#[test]
+fn a_no_wait_store_served_read_learns_the_servers_global_settle() {
+    assert_store_served_read_settles_globally(
+        0xc1,
+        ReadOpts::for_read_tier(jazz::db::ReadTier::LocalFirst),
+        None,
+    );
+}
+
+#[test]
+fn a_timed_out_store_served_read_learns_the_servers_global_settle() {
+    assert_store_served_read_settles_globally(0xc3, wait_for_remote(SHORT), Some(SHORT));
 }
