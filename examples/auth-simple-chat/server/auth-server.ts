@@ -10,7 +10,7 @@ import { findUser, createUser, type User } from "./users.ts";
 // This is a workaround to resolve correctly NAPI modules in the monorepo
 // Real-world apps should just `import { createJazz } from "jazz-tools/backend"`
 import { createRequire } from "node:module";
-const { acceptLocalFirstAuth, createJazz, memory, sqlite } = createRequire(import.meta.url)(
+const { acceptDeviceAccounts, createJazz, memory, sqlite } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
@@ -59,7 +59,7 @@ export async function startAuthServer(options: AuthServerOptions = {}): Promise<
       const user = userFromCookie(request.headers.get("cookie"));
       return user
         ? { userId: user.userId, claims: { role: user.role } }
-        : acceptLocalFirstAuth(request);
+        : acceptDeviceAccounts(request);
     },
   });
 

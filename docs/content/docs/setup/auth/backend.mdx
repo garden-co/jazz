@@ -34,9 +34,9 @@ export const jazz = createJazz({
 - `claims` are anything your [policies](/docs/schemas/policies) should see, such as the user's role or
   organization, under `session.claims`.
 - Return `null` for a signed-out request.
-- Return `acceptLocalFirstAuth(request)` (from `jazz-tools/backend`) to let a signed-out
+- Return `acceptDeviceAccounts(request)` (from `jazz-tools/backend`) to let a signed-out
   [local-first](/docs/setup/auth/local-first) guest sync. Guests are refused otherwise. An app with
-  no sign-in at all passes `authenticate: acceptLocalFirstAuth`.
+  no sign-in at all passes `authenticate: acceptDeviceAccounts`.
 
 Jazz asks `authenticate` on every sign-in, on every sync connection and in `jazz.forReqUser`. It
 also asks again for each open sync connection, every minute by default (`recheckSeconds`). When the

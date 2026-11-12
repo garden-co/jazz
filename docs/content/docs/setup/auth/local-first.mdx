@@ -21,8 +21,8 @@ const jazz = await createJazzClient({
 });
 ```
 
-Your backend lets guests sync by returning `acceptLocalFirstAuth(request)` from `authenticate`
-for signed-out requests (an app with no sign-in passes `authenticate: acceptLocalFirstAuth`).
+Your backend lets guests sync by returning `acceptDeviceAccounts(request)` from `authenticate`
+for signed-out requests (an app with no sign-in passes `authenticate: acceptDeviceAccounts`).
 Guests are refused otherwise. With `serverUrl: null`, Jazz stays on the device: no backend, one
 local-first account per browser profile.
 

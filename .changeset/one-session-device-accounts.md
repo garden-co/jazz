@@ -1,0 +1,40 @@
+---
+"jazz-tools": minor
+---
+
+**One session object for auth, and device accounts.** Now that your backend decides who is signed in, a client has one auth object: the **session**. `createAccountManager`, account handles and the second session type are gone from the public API.
+
+- `createJazzClient(config)` resolves to a `JazzSession` once it started. `<JazzProvider config={…}>` (or `session={…}`) owns or shows one in React, React Native, Expo, Vue, Solid and Svelte, and `useJazzSession()` (Svelte: `getJazzSession()`) reads it anywhere below, including the `signedOut`, `loading` and `error` views.
+- `session.db` is the signed-in user's Db. It throws, naming the status, while there is none; read it again after a sign-in or sign-out (a Db kept from before throws `DbReplacedError`).
+- **Device accounts** are accounts whose key lives on the device: how an app lets people start as guests, and a local-first friendly way to sign in that works offline. `createDeviceAccount()`, `linkDeviceAccount()` (keep its data when the user signs up), `exportDeviceKey()` / `restoreDeviceAccount(key)`, and `initial: "device"`. On the backend, `acceptDeviceAccounts` (was `acceptLocalFirstAuth`).
+- `snapshot.user` is `{ accountId, kind: "device" | "backend", identity: { issuer, subject }, claims }` for whoever is signed in (a device account too), or `null`.
+- A failed operation that leaves the client usable keeps the session `ready`, with `error` and `recovery` set. `status: "error"` now means there is no usable client. `retry()` repeats the failed operation (`recovery: "action"`) or reopens the account (`"session"`).
+
+Migration:
+
+| Before (alpha.60) | Now |
+| --- | --- |
+| `createAccountManager(config)` + `createDb({ ...config, account })` | `const session = await createJazzClient({ ...config, initial: "device" }); session.db` |
+| `createJazzApp(config)` | `<JazzProvider config={config}>`, or `await createJazzClient(config)` |
+| `<JazzProvider serverUrl="/jazz" …>` (config as props) | `<JazzProvider config={{ serverUrl: "/jazz", … }}>` |
+| `<JazzProvider config={{ …, account }}>`, `JazzSvelteProvider` | `<JazzProvider config={…}>` (no `account`); a client you opened: `<JazzClientProvider client>` |
+| `<JazzSessionProvider session={s}>` | `<JazzProvider session={s}>` |
+| `fallback` (session providers) | `loading`, `signedOut`, `error` |
+| `useJazzAuth()`, `useJazzSessionOwner()` | `useJazzSession()` (Svelte: `getJazzSession()`) |
+| `session.reauthenticate()`, `loginWithBackend()` | `session.refresh()` |
+| `session.logout()` / `dispose()` | `session.signOut()` / `close()` |
+| `createLocalFirst()` | `createDeviceAccount()` |
+| `restoreLocalFirst(secret)` | `restoreDeviceAccount(key)` |
+| `linkWithBackend()` | `linkDeviceAccount()` |
+| `exportLocalFirstSecret(snapshot.account)` | `session.exportDeviceKey()` |
+| `initial: "local-first"` | `initial: "device"` |
+| `linkGuestOnSignUp` | `linkDeviceAccountOnSignUp` |
+| `snapshot.account?.id` | `snapshot.user?.accountId` |
+| `user.id` (your backend's user id) | `user.identity.subject` |
+| `sessionActions.createLocalFirst()` etc. | the same operations on the session itself |
+| `useLocalFirstAuth`, `LocalFirstAuth`, `BrowserAuthSecretStore`, `ExpoAuthSecretStore`, `AuthSecretStore` | device accounts on the session (`exportDeviceKey`, `restoreDeviceAccount`) |
+| `useAccountState`, `accountState`, `createAccountState` | `useJazzSession()` / `getJazzSession()` |
+| `acceptLocalFirstAuth` (backend) | `acceptDeviceAccounts` |
+| `createDb` (`jazz-tools`, `jazz-tools/react-native`) | `createJazzClient(...)` then `session.db` |
+
+`<JazzProvider>` refuses the old shapes (config as its own props, `fallback`, a config with an `account`) with an error that names the new one. This also fixes a client config without `serverUrl` meaning `"/jazz"` in the account manager but "local" in the Db (#5113): there is one config now, resolved in one place.

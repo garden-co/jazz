@@ -1,4 +1,4 @@
-import { acceptLocalFirstAuth, createJazz, remote, sqlite, type Jazz } from "jazz-tools/backend";
+import { acceptDeviceAccounts, createJazz, remote, sqlite, type Jazz } from "jazz-tools/backend";
 import { app } from "../../../schema";
 import permissions from "../../../permissions";
 import { serverConfig } from "./config";
@@ -26,7 +26,7 @@ export function jazz(): Promise<Jazz> {
       const { auth } = await import("./auth");
       const session = await auth().api.getSession({ headers: request.headers });
       // Signed out: a local-first guest, until sign-up links its account.
-      return session ? { userId: session.user.id } : acceptLocalFirstAuth(request);
+      return session ? { userId: session.user.id } : acceptDeviceAccounts(request);
     },
   }).ready();
   pending = started;
