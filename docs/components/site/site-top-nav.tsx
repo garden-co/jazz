@@ -104,13 +104,10 @@ function CenterSearch({ onOpen }: { onOpen: () => void }) {
   if (useTopNavRenderMode() === "drawer") return null;
   return (
     <>
-      {/* Below 1360px the centred field would collide with the links,
-        so search collapses to an icon. */}
+      {/* Below 1360px the centred field would collide with the links, so
+        search collapses to an icon in the end slot (see EndContent). */}
       <span className="site-search-field site-search-wide contents">
         <SearchField onOpen={onOpen} />
-      </span>
-      <span className="site-search-narrow contents">
-        <SearchIconButton onOpen={onOpen} />
       </span>
     </>
   );
@@ -127,6 +124,11 @@ function EndContent({ pathname, onOpen }: { pathname: string; onOpen: () => void
   }
   return (
     <HStack gap={2} vAlign="center" className="site-nav-end">
+      {/* The centred slot is absolutely positioned, so an icon there sits on
+        top of the start links; below 1360px it lives here instead. */}
+      <span className="site-search-narrow contents">
+        <SearchIconButton onOpen={onOpen} />
+      </span>
       {END_LINKS.map((link) => (
         <NavLink key={link.href} {...link} pathname={pathname} />
       ))}

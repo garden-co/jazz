@@ -63,7 +63,7 @@ new Hono()
   .all("/jazz/*", (c) => jazz.handle(c.req.raw));
 ```
 
-You can also query and write to the database right from your frontend. It is protected by the same auth as your backend, and the same permission policies apply. Pick a thin client (about 160 KB gzipped) or a full local-first client (about 3.4 MB gzipped, mostly the WASM engine).
+You can also query and write to the database right from your frontend. It is protected by the same auth as your backend, and the same permission policies apply. Pick a thin client (%bundle.thin% gzipped) or a full local-first client (its Wasm engine adds %bundle.wasm% gzipped).
 
 <Tabs groupId="client-framework" items={["JavaScript", "React", "Vue", "Svelte", "Solid", "Effect"]} persist updateAnchor>
   <Tab value="JavaScript">
