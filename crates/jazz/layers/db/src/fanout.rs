@@ -835,21 +835,28 @@ impl Inner {
                 {
                     if let Some(ids) = entry {
                         for array in arrays.iter().filter(|array| array.table == table) {
-                            let values = array_images
-                                .entry((
-                                    table.to_owned(),
-                                    row,
-                                    key.to_vec(),
-                                    array.column.clone(),
-                                    gone.is_some(),
-                                ))
-                                .or_insert_with(|| {
-                                    if let Some(gone) = gone {
-                                        gone.get(&array.column)
-                                            .cloned()
-                                            .into_iter()
-                                            .collect::<BTreeSet<_>>()
-                                    } else {
+                            // A dropped version is read from its own image,
+                            // never shared: one dispatch can drop a row more
+                            // than once (a rebase drops the overlaid version,
+                            // then the replayed one), each naming its parent.
+                            let left;
+                            let values = match gone {
+                                Some(gone) => {
+                                    left = gone
+                                        .get(&array.column)
+                                        .cloned()
+                                        .into_iter()
+                                        .collect::<BTreeSet<_>>();
+                                    &left
+                                }
+                                None => array_images
+                                    .entry((
+                                        table.to_owned(),
+                                        row,
+                                        key.to_vec(),
+                                        array.column.clone(),
+                                    ))
+                                    .or_insert_with(|| {
                                         self.images(
                                             table,
                                             row,
@@ -859,9 +866,9 @@ impl Inner {
                                         .into_iter()
                                         .flatten()
                                         .map(|(_, value)| value)
-                                        .collect()
-                                    }
-                                });
+                                        .collect::<BTreeSet<_>>()
+                                    }),
+                            };
                             ids.extend(
                                 group
                                     .rows
