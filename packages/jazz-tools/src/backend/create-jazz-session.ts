@@ -40,6 +40,11 @@ import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-sou
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { createJazzSessionOwner, type SessionCore } from "../session/state.js";
 import {
+  coreInitial,
+  createStartedJazzSession,
+  type JazzSession,
+} from "../session/jazz-session.js";
+import {
   createJazzClientFromDb,
   type JazzClient as SharedJazzClient,
 } from "../web/create-jazz-client.js";
@@ -73,8 +78,8 @@ export type JazzClientConfig = Omit<
   permissions: NonNullable<BackendContextConfig["permissions"]>;
   serverUrl: string;
   store?: AccountStore;
-  /** Start as a local-first guest. */
-  initial?: "local-first";
+  /** Start as a device account (a guest of the main backend). */
+  initial?: "device";
   /**
    * For a backend client (a machine that syncs through an app's main backend,
    * not a browser): its workload's OIDC token, or a function that returns a
@@ -90,6 +95,7 @@ export type JazzClientConfig = Omit<
 
 /** @internal `createJazz`'s own session config: it may admit itself with the core's backend secret. */
 type OpenJazzSessionConfig = Omit<JazzClientConfig, "initial"> & {
+  /** `"local-first"`: the session core's name for a device account. */
   initial?: "local-first" | BackendAuth;
 };
 
@@ -242,7 +248,7 @@ export interface BackendClientCloseOptions {
 }
 
 /** A backend client's session: its `close()` uploads the writes it holds first. */
-export interface BackendClientSession extends SessionCore<JazzClient> {
+export interface BackendClientSession extends Omit<JazzSession<JazzClient>, "close"> {
   /**
    * Upload the writes this client holds, for up to `timeoutMs`, then close.
    * With the memory driver, writes that didn't reach the server are lost:
@@ -255,18 +261,27 @@ export interface BackendClientSession extends SessionCore<JazzClient> {
 
 /**
  * A Node client that syncs through an app's main backend (`createJazz`) as
- * a backend client, with `credential`, or as a local-first guest. Supply an
- * AccountStore to retain local roots across process restarts.
+ * a backend client, with `credential`, or as a device account (a guest).
+ * Supply an AccountStore to keep device accounts across process restarts.
  */
 export async function createJazzClient(input: JazzClientConfig): Promise<BackendClientSession> {
-  if (input.initial !== undefined && input.initial !== "local-first")
-    throw new Error('createJazzClient: initial is "local-first" or left out');
-  const session = await openJazzSession(input);
-  const keeps = input.driver.type !== "memory";
-  return Object.freeze({
-    ...session,
-    close: (options?: BackendClientCloseOptions) => closeAfterUploads(session, keeps, options),
+  const initial = coreInitial(input.initial);
+  if (initial === "signed-out")
+    throw new Error('createJazzClient: initial is "device" or left out');
+  let core!: SessionCore<JazzClient>;
+  const session = await createStartedJazzSession({ ...input, initial }, async (config) => {
+    core = await openJazzSession(config);
+    return core;
   });
+  const keeps = input.driver.type !== "memory";
+  const close = async (options?: BackendClientCloseOptions) => {
+    await closeAfterUploads(core, keeps, options);
+    await session.close();
+  };
+  // The session's own members (and its `db` getter), with this close.
+  return Object.freeze(
+    Object.create(session, { close: { value: close, enumerable: true } }),
+  ) as BackendClientSession;
 }
 
 /** How long a backend client's `close()` waits for its writes to reach the server. */
@@ -607,15 +622,15 @@ export async function openJazzSession(
       owned.getSnapshot().account?.identity.issuer === "urn:jazz:system"
         ? Promise.reject(
             new Error(
-              `${operation}() on a backend session is not supported yet: open a session at the app's /jazz endpoint for a local-first guest`,
+              `${operation}() on a backend session is not supported yet: open a session at the app's /jazz endpoint for a device account`,
             ),
           )
         : switchTo(...args);
   const owned = session;
   const guarded: SessionCore<JazzClient> = Object.freeze({
     ...owned,
-    createLocalFirst: refuseGuest("createLocalFirst", owned.createLocalFirst),
-    restoreLocalFirst: refuseGuest("restoreLocalFirst", owned.restoreLocalFirst),
+    createLocalFirst: refuseGuest("createDeviceAccount", owned.createLocalFirst),
+    restoreLocalFirst: refuseGuest("restoreDeviceAccount", owned.restoreLocalFirst),
   });
   if (signInAsUser) {
     try {

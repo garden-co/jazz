@@ -161,7 +161,7 @@ async function userSession(appId: string, origin: string, userId: string) {
     driver: { type: "memory" },
   });
   cleanups.push(() => session.close());
-  await session.loginWithBackend();
+  await session.refresh();
   const { client, status, error } = session.getSnapshot();
   if (status !== "ready") throw error ?? new Error(status);
   return client!;
@@ -902,7 +902,7 @@ describe("createJazz", () => {
       driver: { type: "memory" },
     });
     cleanups.push(() => session.close());
-    await session.loginWithBackend();
+    await session.refresh();
     const alice = session.getSnapshot().client!;
     const owner = alice.session!.user!;
     const outcome = (write: { wait(options: { tier: "global" }): Promise<unknown> }) =>
@@ -973,7 +973,7 @@ describe("createJazz", () => {
       permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
     });
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
@@ -1020,7 +1020,7 @@ describe("createJazz", () => {
       permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
     });
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
@@ -1048,7 +1048,7 @@ describe("createJazz", () => {
       permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
     });
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
@@ -1097,7 +1097,7 @@ describe("createJazz", () => {
       driver: { type: "memory" },
     });
     cleanups.push(() => session.close());
-    await session.loginWithBackend();
+    await session.refresh();
     const firstAccount = session.getSnapshot().client!.session!.user!;
     await session
       .getSnapshot()
@@ -1126,7 +1126,7 @@ describe("createJazz", () => {
       driver: { type: "memory" },
     });
     cleanups.push(() => again.close());
-    await again.loginWithBackend();
+    await again.refresh();
     const account = again.getSnapshot().client!.session!.user!;
     expect(account).not.toBe(firstAccount);
     await expect(second.accountFor(asAlice)).resolves.toBe(account);
@@ -1227,7 +1227,7 @@ describe("createJazz", () => {
         permissions,
         serverUrl: `${origin}/jazz`,
         driver: { type: "memory" },
-        initial: "local-first",
+        initial: "device",
       });
       cleanups.push(() => session.close());
       const guest = session.getSnapshot().client!;
@@ -1244,7 +1244,7 @@ describe("createJazz", () => {
 
       // The app's sign-up created "alice"; the backend now names her.
       signInAs(origin, "alice");
-      await session.linkWithBackend();
+      await session.linkDeviceAccount();
       const alice = session.getSnapshot().client!;
       expect(alice.session!.user!).toBe(account);
       expect(alice.session!.identity).toEqual({
@@ -1831,7 +1831,7 @@ describe("createJazz", () => {
         driver: { type: "memory" },
       });
       cleanups.push(() => session.close());
-      await session.loginWithBackend();
+      await session.refresh();
       const alice = session.getSnapshot().client!;
 
       const data = new Uint8Array(24 * 1024 * 1024);
@@ -2299,7 +2299,7 @@ describe("createJazz", () => {
       permissions,
       serverUrl: `${guestOrigin}/jazz`,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
     });
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
@@ -2699,7 +2699,7 @@ describe("createJazz", () => {
         permissions,
         serverUrl: `${origin}/jazz`,
         driver: { type: "memory" },
-        initial: "local-first",
+        initial: "device",
       });
       cleanups.push(() => session.close());
       return session.getSnapshot().client!;
