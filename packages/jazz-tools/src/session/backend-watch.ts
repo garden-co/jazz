@@ -17,11 +17,11 @@ export interface BackendWatchEvents {
   isVisible?(): boolean;
   /**
    * Run `probe` so that the windows of one browser ask the backend one at a
-   * time, never at once, and a window waiting its turn takes the answer of a
-   * probe that started after it asked instead of asking again. Several
-   * windows asking at once (on focus after a laptop wakes) each carry the
-   * session cookie, and auth middleware on the route may refresh it once per
-   * request: with single-use refresh tokens, all but one refresh fail.
+   * time, never at once. Several windows asking at once (on focus after a
+   * laptop wakes) each carry the session cookie, and auth middleware on the
+   * route may refresh it once per request: with single-use refresh tokens,
+   * all but one refresh fail. Asked one after another, each request carries
+   * the cookie the one before it refreshed. Each window still asks itself.
    */
   singleFlight?<T>(probe: () => Promise<T>): Promise<T>;
 }
@@ -684,72 +684,49 @@ export function browserBackendWatchEvents(channelName: string): BackendWatchEven
 }
 
 /**
- * How long a shared answer stays in `localStorage`: long enough for the
- * windows queued behind the lock, so who is signed in isn't kept on the
- * device past that (a sign-out with `clearOnSignOut` leaves nothing behind).
+ * The longest one window holds the turn: a window whose request hangs (its
+ * page is frozen, its network stalled) lets the others ask after this long.
  */
-const SHARED_ANSWER_MS = 10_000;
+export const SINGLE_FLIGHT_TURN_MS = 5_000;
 
 /**
  * {@link BackendWatchEvents.singleFlight} for the windows of one browser: a
- * Web Lock takes turns, and the answer is left in `localStorage` before the
- * lock is let go, so the window that takes it next reads it at once. The
- * answer is removed again after {@link SHARED_ANSWER_MS}. Where either is
- * missing, every probe runs on its own.
+ * Web Lock takes turns, held until the probe settles or for
+ * {@link SINGLE_FLIGHT_TURN_MS}, whichever is first. Each window's probe asks
+ * the backend itself; no answer is shared or stored. Without Web Locks,
+ * every probe runs on its own.
  */
 export function browserSingleFlight(
   name: string,
 ): (<T>(probe: () => Promise<T>) => Promise<T>) | undefined {
   const locks = globalThis.navigator?.locks;
-  const storage = (() => {
-    try {
-      return globalThis.localStorage ?? undefined;
-    } catch {
-      return undefined;
-    }
-  })();
-  if (!locks || !storage) return undefined;
-  const forget = (stored?: string) => {
-    try {
-      if (stored === undefined || storage.getItem(name) === stored) storage.removeItem(name);
-    } catch {
-      // Storage off: nothing was kept.
-    }
-  };
-  const read = (): { startedAt: number; value: unknown } | undefined => {
-    try {
-      const stored = storage.getItem(name);
-      if (!stored) return undefined;
-      const answer = JSON.parse(stored) as { startedAt: number; value: unknown };
-      if (Date.now() - answer.startedAt > SHARED_ANSWER_MS) {
-        forget(stored);
-        return undefined;
-      }
-      return answer;
-    } catch {
-      return undefined;
-    }
-  };
-  return <T>(probe: () => Promise<T>) => {
-    const askedAt = Date.now();
-    return locks.request(name, async () => {
-      // Another window's probe started after this one asked: its answer is
-      // as fresh as this window's own would be.
-      const latest = read();
-      if (latest && latest.startedAt >= askedAt) return latest.value as T;
-      const startedAt = Date.now();
-      const value = await probe();
-      try {
-        const stored = JSON.stringify({ startedAt, value });
-        storage.setItem(name, stored);
-        const expire = setTimeout(() => forget(stored), SHARED_ANSWER_MS);
-        (expire as unknown as { unref?: () => void }).unref?.();
-      } catch {
-        // Storage full or off: this window's answer is its own.
-      }
-      return value;
-    }) as Promise<T>;
-  };
+  if (!locks) return undefined;
+  return <T>(probe: () => Promise<T>) =>
+    new Promise<T>((resolve, reject) => {
+      let started = false;
+      const run = () => {
+        started = true;
+        const answer = probe();
+        answer.then(resolve, reject);
+        return answer;
+      };
+      locks
+        .request(name, () => {
+          const answer = run();
+          let turn: ReturnType<typeof setTimeout> | undefined;
+          return Promise.race([
+            answer.then(
+              () => undefined,
+              () => undefined,
+            ),
+            new Promise<void>((done) => (turn = setTimeout(done, SINGLE_FLIGHT_TURN_MS))),
+          ]).finally(() => clearTimeout(turn));
+        })
+        // Locks unavailable here after all (an opaque origin): ask anyway.
+        .catch(() => {
+          if (!started) run();
+        });
+    });
 }
 
 /** Whether a failed check may pass if asked again: the network, a timeout, or a 5xx. */

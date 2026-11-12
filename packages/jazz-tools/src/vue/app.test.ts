@@ -161,7 +161,45 @@ describe("Vue ergonomic app", () => {
     app.unmount();
     await flush();
   });
-  it.each(["unknown", "graceful"] as const)(
+  it("detaches consumers before a sign-out whose teardown fails, and still signs out", async () => {
+    const { session, events } = await fixture("unknown");
+    mocks.factory.mockReset().mockResolvedValue(session);
+    let auth!: UseJazzAuth;
+    const Child = defineComponent({
+      setup() {
+        auth = useJazzAuth();
+        onUnmounted(() => events.push("child-cleanup"));
+        return () => h("p", "active");
+      },
+    });
+    const node = document.createElement("div");
+    const app = createApp({
+      render: () =>
+        h(
+          JazzProvider,
+          { scope: "test" },
+          { default: () => h(Child), signedOut: () => h("p", "signed out") },
+        ),
+    });
+    app.mount(node);
+    await flush();
+    // Its teardown began, so the client can't be offered again: the user
+    // asked to leave and is signed out, with the failure logged (K2).
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(auth.logout()).resolves.toBeUndefined();
+    await flush();
+    expect(auth.snapshot.value.status).toBe("signed-out");
+    expect(logged).toHaveBeenCalledWith(
+      "Jazz signed out, but closing the signed-out client failed.",
+      expect.objectContaining({ message: expect.stringContaining("flush failed") }),
+    );
+    logged.mockRestore();
+    expect(events.indexOf("child-cleanup")).toBeLessThan(events.indexOf("shutdown"));
+    expect(node.textContent).toBe("signed out");
+    app.unmount();
+    await flush();
+  });
+  it.each(["graceful"] as const)(
     "detaches consumers before %s logout failure and retries",
     async (failure) => {
       const { session, events } = await fixture(failure);
