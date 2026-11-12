@@ -79,6 +79,9 @@ fn config(node: u8, author: AuthorSubject) -> DbConfig {
     )
 }
 
+/// The seeded row's value: no log line may carry it.
+const SEEDED: &str = "seeded-label-7f3a";
+
 /// Subscribe a fresh client to a one-row server under `level`, and return
 /// what was logged.
 fn logged_subscription(level: Level) -> Vec<BTreeMap<String, String>> {
@@ -98,7 +101,7 @@ fn logged_subscription(level: Level) -> Vec<BTreeMap<String, String>> {
                 "items",
                 RowUuid::from_bytes([0x62; 16]),
                 AuthorSubject::SYSTEM,
-                BTreeMap::from([("label".to_owned(), Value::String("a".to_owned()))]),
+                BTreeMap::from([("label".to_owned(), Value::String(SEEDED.to_owned()))]),
             )
             .unwrap();
         let client = block_on(Db::open(config(
@@ -151,6 +154,13 @@ fn debug_logging_names_each_sync_message_and_the_subscriptions_delivery() {
             &[("message", "subscription delivered"), ("table", "items")]
         ),
         "the opening is logged: {events:#?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .flat_map(BTreeMap::values)
+            .any(|value| value.contains(SEEDED)),
+        "no row value reaches the log: {events:#?}"
     );
     let read = events
         .iter()

@@ -1585,14 +1585,21 @@ impl SyncMessage {
     }
 }
 
+/// Whether sync messages are logged (`debug` on target `jazz::sync`).
+fn log_enabled() -> bool {
+    tracing::enabled!(target: "jazz::sync", tracing::Level::DEBUG)
+}
+
 /// Log one sync message crossing a link at `debug` (target `jazz::sync`):
 /// the hop, its kind, the read or transaction it is about, what it carries
 /// and its encoded size (before the link frames or compresses it). Free when debug logging is off.
 fn log_message(hop: &'static str, message: &SyncMessage) {
-    if !tracing::enabled!(target: "jazz::sync", tracing::Level::DEBUG) {
+    if !log_enabled() {
         return;
     }
     // The message's own encoding, before the link frames or compresses it.
+    // At debug this serializes each message a second time, for its size
+    // alone: worth it for a diagnostic, never paid with debug off.
     let bytes = postcard::serialize_with_flavor(message, postcard::ser_flavors::Size::default())
         .unwrap_or(0);
     let detail = match message {
@@ -12012,8 +12019,24 @@ impl Db {
                 // host tells it why (see `take_closed_subscribers`): a
                 // backed-up one may reconnect, one sent a message that
                 // cannot be encoded would fail the same way again.
-                log_message("store→session", &message);
-                if let Err(error) = session.transport.send(message) {
+                // Logged once sent: a message the session never got is not.
+                let logged = log_enabled().then(|| message.clone());
+                let sent = session.transport.send(message);
+                if let Some(message) = &logged
+                    && sent.is_ok()
+                {
+                    log_message("store→session", message);
+                }
+                if let Err(error) = sent {
+                    if let Some(message) = &logged {
+                        tracing::debug!(
+                            target: "jazz::sync",
+                            hop = "store→session",
+                            kind = message.kind(),
+                            %error,
+                            "send failed: the session closes",
+                        );
+                    }
                     let code = match error {
                         TransportError::Backpressure => ErrorCode::Backpressure,
                         TransportError::Failed(_) => ErrorCode::Protocol,
