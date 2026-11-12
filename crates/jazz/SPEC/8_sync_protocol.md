@@ -846,7 +846,7 @@ The responder opens a resumed read one of three ways:
 
 - **Fresh**, when it cannot resume: the store is a relay (its store may be
   cold, and its seqs are not the ones its sessions resume from), the read is
-  windowed, a flat join, an aggregate, a relation or a history read, the
+  a flat join, an aggregate, a relation or a history read, the
   session has its own claims (policies read them, and they are not part of
   what the client resumes from), `since` is past what the store serves (a
   reset store), or `since` is at or before the current schema's activation.
@@ -858,7 +858,12 @@ The responder opens a resumed read one of three ways:
   without changing. The authority evaluates the result as of `since` and ships
   every row not in it, rows that changed after `since`, rows it held then that
   have since left (as they are now, or their eviction), and supporting rows
-  whose access changed.
+  whose access changed. A window (`limit`, or the prefix through an
+  `offset` a replica asks for) resumes the same way: its own table is one
+  of its membership inputs, so any write to it takes this path, and rows
+  pushed out of the window or let into it without changing are judged
+  against the window as of `since`; its opening's `members` drop the ones
+  that left.
 
 Each ends with a `Settled` (and its `members` where §8.4 calls for one), so a
 resumed read leaves the replica with the same rows as a fresh one
