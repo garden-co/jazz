@@ -6745,11 +6745,10 @@ impl Inner {
     /// other read: a write to its own table makes the result as of `since`
     /// decide which unchanged rows entered or left it, and its opening lists
     /// its rows. A flat-join, aggregate, relation or history read opens
-    /// fresh, as does a one-shot read with its own claims (they are not
-    /// part of the session's read context the client resumes from), a
-    /// `since` past what this store
-    /// serves (a reset store), or one at or before the current schema's
-    /// activation (its policies may read differently).
+    /// fresh, as does a one-shot read with its own claims (they are not part
+    /// of the session's read context the client resumes from), a `since`
+    /// past what this store serves (a reset store), or one at or before the
+    /// current schema's activation (its policies may read differently).
     fn resume_from(
         &self,
         prepared: &PreparedQuery,
