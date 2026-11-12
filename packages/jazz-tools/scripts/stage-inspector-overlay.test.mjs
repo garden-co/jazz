@@ -165,6 +165,8 @@ test("the staged Inspector UI is served from a bundle of the code alone, with no
   const page = await serve(request, "/");
   assert.ok(page, "the page is served");
   assert.match(await page.text(), /Jazz Inspector/);
+  // Without the trailing slash (Next.js strips it), its assets still resolve below /inspect/.
+  assert.match(await (await serve(request, "")).text(), /src="inspect\/assets\/app-abc\.js"/);
   assert.equal(await (await serve(request, "/embedded.html")).text(), "overlay page");
   assert.equal(
     await (await serve(request, "/assets/app-abc.js")).text(),
