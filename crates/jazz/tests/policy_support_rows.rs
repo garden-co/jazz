@@ -60,6 +60,11 @@ fn is_member(outer: &str) -> PolicyExpr {
 /// their doc, so a comment rests on its doc and on everything the doc's
 /// read rests on.
 fn docs_schema() -> JazzSchema {
+    docs_schema_inheriting(None)
+}
+
+/// [`docs_schema`] with comments inheriting at most `max_depth` hops.
+fn docs_schema_inheriting(max_depth: Option<usize>) -> JazzSchema {
     compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -85,7 +90,11 @@ fn docs_schema() -> JazzSchema {
                 TableSchemaBuilder::new("comments")
                     .fk_column("doc", "docs")
                     .column("body", ColumnType::Text)
-                    .policies(all_writes(PolicyExpr::inherits(Operation::Select, "doc"))),
+                    .policies(all_writes(PolicyExpr::Inherits {
+                        operation: Operation::Select,
+                        via_column: "doc".into(),
+                        max_depth,
+                    })),
             )
             .build(),
     )
@@ -244,6 +253,21 @@ fn connect(server: &Db, client: &Db, who: AuthorSubject) -> (Upstream, Rc<RefCel
         .accept_subscriber(Box::new(server_side), who)
         .unwrap();
     (upstream, log)
+}
+
+/// Poll `future` to completion, ticking `dbs` between polls.
+fn drive<T>(dbs: &[&Db], future: impl std::future::Future<Output = T>) -> T {
+    let mut future = std::pin::pin!(future);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    for _ in 0..200 {
+        if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        for db in dbs {
+            block_on(db.tick()).unwrap();
+        }
+    }
+    panic!("did not complete");
 }
 
 fn pump(server: &Db, client: &Db) {
@@ -555,4 +579,153 @@ fn notes_with_three_self_consulting_arms_ship_exactly_the_readable_notes() {
         "after a revoke while offline"
     );
     assert_current(&server, &now);
+}
+
+/// The docs fixture of [`comments_ship_exactly_the_docs_and_members_their_read_rests_on`],
+/// before anything changes.
+fn seed_docs(server: &Db) {
+    for (doc, owner, visibility) in [
+        (id(1, 1), BO, "private"),
+        (id(1, 2), ADA, "private"),
+        (id(1, 3), BO, "world"),
+        (id(1, 4), BO, "private"),
+    ] {
+        seed(
+            server,
+            "docs",
+            doc,
+            cells(&[("owner", subject(owner)), ("visibility", visibility.into())]),
+        );
+    }
+    for (member, doc, who) in [
+        (id(2, 1), 1, ADA),
+        (id(2, 2), 1, BO),
+        (id(2, 3), 2, BO),
+        (id(2, 4), 3, CY),
+        (id(2, 5), 4, CY),
+    ] {
+        seed(
+            server,
+            "members",
+            member,
+            cells(&[("doc_id", uuid(id(1, doc))), ("user_id", subject(who))]),
+        );
+    }
+    for (comment, doc) in [(id(3, 1), 1), (id(3, 2), 2), (id(3, 4), 4)] {
+        seed(
+            server,
+            "comments",
+            comment,
+            cells(&[("doc", uuid(id(1, doc))), ("body", "c".into())]),
+        );
+    }
+}
+
+/// A bounded inherit (two hops: the doc, then what the doc's read rests
+/// on) and a one-shot remote read ship what the live read does.
+#[test]
+fn bounded_inherits_and_one_shot_reads_ship_the_same_support() {
+    let first = expect(&[
+        ("comments", &[id(3, 1), id(3, 2)]),
+        ("docs", &[id(1, 1), id(1, 2)]),
+        ("members", &[id(2, 1), id(2, 2)]),
+    ]);
+    let tables = ["comments", "docs", "members"];
+    for max_depth in [None, Some(2)] {
+        let server = open(docs_schema_inheriting(max_depth), 0, AuthorSubject::SYSTEM);
+        seed_docs(&server);
+
+        let live = open(docs_schema_inheriting(max_depth), 1, user(ADA));
+        let (_link, _log) = connect(&server, &live, user(ADA));
+        let comments = live.prepare_query(&Query::from("comments")).unwrap();
+        let _sub = block_on(live.subscribe(&comments, ReadOpts::default())).unwrap();
+        pump(&server, &live);
+        let now = held(&live, &tables);
+        assert_eq!(ids(&now), first, "live read, max_depth {max_depth:?}");
+        assert_current(&server, &now);
+
+        let once = open(docs_schema_inheriting(max_depth), 2, user(ADA));
+        let (_link, _log) = connect(&server, &once, user(ADA));
+        pump(&server, &once);
+        // As `db.all` in TypeScript issues it.
+        let bytes = postcard::to_allocvec(&Query::from("comments")).unwrap();
+        let rows = match drive(
+            &[&once, &server, &once],
+            once.all_serialized_query(
+                &bytes,
+                ReadOpts::for_read_tier(ReadTier::Remote),
+                None,
+                None,
+                None,
+            ),
+        )
+        .unwrap()
+        {
+            jazz::db::SerializedReadResult::Rows(rows) => rows,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(rows.len(), 2, "one-shot read, max_depth {max_depth:?}");
+        let now = held(&once, &tables);
+        assert_eq!(ids(&now), first, "one-shot read, max_depth {max_depth:?}");
+        assert_current(&server, &now);
+    }
+}
+
+/// While Ada is away, a comment is posted on d2, which she reads as its
+/// owner, and her membership of d2 is deleted, so Bo's membership of d2 is
+/// no longer hers to read; d2 itself doesn't change. On reconnect, d2's
+/// support is reached twice: below the new comment, which ships (so its
+/// support is followed whole, with no floor), and below the held one,
+/// which diffs against the resume floor. Only the second reports what she
+/// lost, so neither visit may hide it.
+#[test]
+fn support_reached_below_new_and_held_rows_reports_access_lost_offline() {
+    let (d2, m2_bo, m2_ada) = (id(1, 2), id(2, 3), id(2, 6));
+    // Sorts before c2, so the walk reaches d2 below it first.
+    let (c_new, c2) = (id(3, 0), id(3, 2));
+    let server = open(docs_schema(), 0, AuthorSubject::SYSTEM);
+    seed_docs(&server);
+    seed(
+        &server,
+        "members",
+        m2_ada,
+        cells(&[("doc_id", uuid(d2)), ("user_id", subject(ADA))]),
+    );
+    let tables = ["comments", "docs", "members"];
+
+    let ada = open(docs_schema(), 1, user(ADA));
+    let (link, _log) = connect(&server, &ada, user(ADA));
+    let comments = ada.prepare_query(&Query::from("comments")).unwrap();
+    let _live = block_on(ada.subscribe(&comments, ReadOpts::default())).unwrap();
+    pump(&server, &ada);
+    let now = ids(&held(&ada, &tables));
+    assert!(
+        now["members"].contains(&m2_bo) && now["members"].contains(&m2_ada),
+        "Ada reads d2's members as one of them: {now:?}"
+    );
+
+    assert!(ada.detach_connection(&link));
+    insert(
+        &server,
+        "comments",
+        c_new,
+        cells(&[("doc", uuid(d2)), ("body", "c".into())]),
+    );
+    block_on(server.delete("members", m2_ada, Default::default())).unwrap();
+    let (_link, log) = connect(&server, &ada, user(ADA));
+    pump(&server, &ada);
+    let sent = Sent::take(&log);
+    let now = held(&ada, &tables);
+    assert!(
+        ids(&now)["comments"].contains(&c_new) && ids(&now)["comments"].contains(&c2),
+        "{now:?}"
+    );
+    assert!(
+        sent.lost.contains(&("members".to_owned(), m2_bo)),
+        "the server reports Bo's membership of d2 lost: {sent:?}"
+    );
+    assert!(
+        !ids(&now)["members"].contains(&m2_bo),
+        "and the replica drops it: {now:?}"
+    );
 }

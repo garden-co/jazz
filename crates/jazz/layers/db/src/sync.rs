@@ -2912,8 +2912,10 @@ struct Follow<'w> {
     /// inputs changed: the client may hold them, so each ships its
     /// eviction.
     gone: &'w mut Vec<RowKey>,
-    /// The deepest support each key was followed with in this traversal.
-    followed: &'w mut HashMap<(NestedKind, u64), usize>,
+    /// The deepest support each key was followed with in this traversal, by
+    /// whether the visit diffed against a resume floor (see
+    /// [`Inner::follow_value`]).
+    followed: &'w mut HashMap<(NestedKind, u64, bool), usize>,
 }
 
 /// The watch on row `id` of stored table `table`.
@@ -3934,11 +3936,21 @@ impl Inner {
         // again, so following it anew costs (rows per key)^depth. A key
         // reached with deeper support than before is still followed; what
         // shallower support reaches, the deeper walk reached already.
+        //
+        // A visit diffing against a resume floor is told apart from one
+        // that isn't: only it reports the rows access was lost to while
+        // the client was away (`gone`), so a key first reached below a
+        // newly shipped row (no floor) is followed again below a held one.
+        //
+        // Non-policy support is told apart by its node. Every empty
+        // `nested` shares one dangling pointer, which is fine: with nothing
+        // nested, visits of a key differ in nothing the pointer would tell.
         let (kind, depth) = match policy_depth {
             Some(depth) => (NestedKind::Policy, depth),
             None => (NestedKind::Node(nested.as_ptr() as usize), 0),
         };
-        match follow.followed.entry((kind, key)) {
+        let diff = floor.is_some_and(|floor| floor.diff);
+        match follow.followed.entry((kind, key, diff)) {
             std::collections::hash_map::Entry::Occupied(mut deepest) => {
                 if *deepest.get() >= depth {
                     return Ok(());
