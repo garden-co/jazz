@@ -6,7 +6,7 @@ import { createJazz, memory, type Jazz } from "../backend/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { createJazzClient } from "./create-jazz-session.js";
+import { openBrowserSessionCore as createJazzClient } from "./create-jazz-session.js";
 import type { ThinRuntime } from "../thin/thin-runtime.js";
 import { decodeThinResponse, isThinResponse } from "../thin/wire.js";
 
@@ -31,7 +31,7 @@ afterEach(async () => {
 /** The test app's own auth: the user named in a header, standing in for a cookie. */
 function authenticate(request: Request) {
   const userId = request.headers.get("x-test-user");
-  return userId ? { userId } : null;
+  return userId ? { userId, expiresAt: Math.floor(Date.now() / 1000) + 3600 } : null;
 }
 
 async function serve(jazz: Jazz, port = 0): Promise<string> {
@@ -117,7 +117,9 @@ function tokenAuth(...initial: string[]) {
     valid,
     authenticate(request: Request) {
       const token = request.headers.get("x-test-user");
-      return token && valid.has(token) ? { userId: token.split(":")[0]! } : null;
+      return token && valid.has(token)
+        ? { userId: token.split(":")[0]!, expiresAt: Math.floor(Date.now() / 1000) + 3600 }
+        : null;
     },
   };
 }
@@ -352,9 +354,50 @@ describe("browser session against the app's backend", () => {
   }, 60_000);
 
   // The app's access token expires before it refreshes it (a laptop
-  // asleep): the backend's re-check ends the socket, and a write made
+  // asleep) and the app ends its session, and a write made
   // meanwhile waits. Once the app signs in again and says so, the same
   // client reconnects and the write lands.
+  it("re-authenticates a thin session at its expiresAt without the app seeing a change", async () => {
+    let calls = 0;
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        const token = request.headers.get("x-test-user");
+        calls += 1;
+        // Each answer holds for 6 s, so the session re-authenticates after 5 s.
+        return token ? { userId: token.split(":")[0]!, expiresAt: Date.now() / 1000 + 6 } : null;
+      },
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const served = await listen(jazz);
+    cookies(served.origin, "alice:1");
+    const session = await createJazzClient({
+      serverUrl: `${served.origin}/jazz`,
+      store: memoryStore(),
+      driver: { type: "memory" },
+    });
+    cleanups.push(() => session.close());
+    await session.loginWithBackend();
+    const client = session.getSnapshot().client!;
+    expect(isThinDb(client.db)).toBe(true);
+    const owner = client.session!.user!;
+    await client.db.insert(app.todos, { title: "before", owner }).wait({ tier: "global" });
+    const before = calls;
+    const seen: unknown[] = [];
+    const stop = client.db.onSyncStatusChange((status) => seen.push(status.link));
+    await expect.poll(() => calls, { timeout: 15_000, interval: 20 }).toBeGreaterThan(before);
+    await client.db.insert(app.todos, { title: "after", owner }).wait({ tier: "global" });
+    stop();
+    expect(seen.filter((link) => (link as { state: string }).state !== "connected")).toEqual([]);
+    expect((await jazz.db.all(app.todos)).map((todo) => todo.title).sort()).toEqual([
+      "after",
+      "before",
+    ]);
+    await session.close();
+  }, 60_000);
+
   it("lands a write made while the session expired, once the app signs in again", async () => {
     const auth = tokenAuth("alice:1");
     const jazz = await createJazz({
@@ -362,7 +405,6 @@ describe("browser session against the app's backend", () => {
       permissions,
       store: memory(),
       authenticate: auth.authenticate,
-      recheckSeconds: 1,
     }).ready();
     cleanups.push(() => jazz.close());
     const served = await listen(jazz);
@@ -378,8 +420,10 @@ describe("browser session against the app's backend", () => {
     const owner = client.session!.user!;
     await client.db.insert(app.todos, { title: "first", owner }).wait({ tier: "global" });
 
-    // Expired: the backend no longer accepts the token the tab holds.
+    // Expired: the backend no longer accepts the token the tab holds, and
+    // the app ends the session (its sign-out handler calls revokeUser).
     auth.valid.delete("alice:1");
+    await jazz.revokeUser("alice");
     await expect
       .poll(() => client.db.getSyncStatus().link, { timeout: 15_000 })
       .toMatchObject({ state: "offline", reason: "auth" });
@@ -407,7 +451,7 @@ describe("browser session against the app's backend", () => {
   }, 60_000);
 
   // R29 as reported: the write is on the wire when the token expires, and
-  // the backend's re-check ends the socket before its answer arrives. The
+  // the app ends the session before its answer arrives. The
   // refusal is final for that credential, so the thin client doesn't send
   // it again: the write ends with its fate unknown (it may have committed,
   // and here it did), and the app signs in again without writing it twice.
@@ -418,7 +462,6 @@ describe("browser session against the app's backend", () => {
       permissions,
       store: memory(),
       authenticate: auth.authenticate,
-      recheckSeconds: 1,
     }).ready();
     cleanups.push(() => jazz.close());
     const served = await listen(jazz);
@@ -461,8 +504,9 @@ describe("browser session against the app's backend", () => {
     await expect.poll(() => dropped).toBe(1);
     expect(internals.oneShots.has(id)).toBe(true);
 
-    // Then the token expires, and the re-check ends the socket.
+    // Then the token expires, and the app ends the session.
     auth.valid.delete("alice:1");
+    await jazz.revokeUser("alice");
     await expect
       .poll(() => client.db.getSyncStatus().link, { timeout: 15_000 })
       .toMatchObject({ state: "offline", reason: "auth" });
@@ -483,7 +527,7 @@ describe("browser session against the app's backend", () => {
   }, 60_000);
 
   // The app revokes a user whose tab stays open and in view: the backend's
-  // re-check ends the socket, and the tab signs out with no app code.
+  // revokeUser ends the socket, and the tab signs out with no other app code.
   it("signs a revoked user's open tab out", async () => {
     const auth = tokenAuth("alice:1");
     const jazz = await createJazz({
@@ -491,7 +535,6 @@ describe("browser session against the app's backend", () => {
       permissions,
       store: memory(),
       authenticate: auth.authenticate,
-      recheckSeconds: 1,
     }).ready();
     cleanups.push(() => jazz.close());
     const served = await listen(jazz);
@@ -509,6 +552,7 @@ describe("browser session against the app's backend", () => {
     await client.db.insert(app.todos, { title: "private", owner }).wait({ tier: "global" });
 
     auth.valid.delete("alice:1");
+    await jazz.revokeUser("alice");
     const revokedAt = Date.now();
     await expect
       .poll(() => session.getSnapshot().status, {
@@ -539,7 +583,10 @@ describe("browser session against the app's backend", () => {
 
     const refusal = /need a browser.*jazz-tools\/react-native or jazz-tools\/expo/;
     await expect(session.loginWithBackend()).rejects.toThrow(refusal);
-    expect(requests).toEqual([]);
+    // The sign-in made no request. (The session's own "who is signed in"
+    // check goes through the app's fetch too, so it isn't counted here.)
+    const signIns = () => requests.filter((url) => !url.includes("backend-user"));
+    expect(signIns()).toEqual([]);
     expect(session.getSnapshot().status).not.toBe("ready");
 
     // A guest can't sign up through the backend here either.
@@ -547,7 +594,7 @@ describe("browser session against the app's backend", () => {
       serverUrl: "http://127.0.0.1:9/jazz",
       store: memoryStore(),
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
       client: async () => ({ createClient: createLocalFirstDb }),
       fetch: async (input) => {
         requests.push(String(input));
@@ -557,7 +604,7 @@ describe("browser session against the app's backend", () => {
     cleanups.push(() => guest.close());
     const account = guest.getSnapshot().account;
     await expect(guest.linkWithBackend()).rejects.toThrow(refusal);
-    expect(requests).toEqual([]);
+    expect(signIns()).toEqual([]);
     expect(guest.getSnapshot().account).toBe(account);
   });
 });
@@ -663,7 +710,7 @@ describe("a shared device (clearOnSignOut)", () => {
       serverUrl: `${origin}/jazz`,
       store,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
       clearOnSignOut: true,
       client: async () => ({ createClient: createLocalFirstDb }),
     });
@@ -696,13 +743,83 @@ describe("a shared device (clearOnSignOut)", () => {
       serverUrl: `${origin}/jazz`,
       store,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
       clearOnSignOut: true,
       client: async () => ({ createClient: createLocalFirstDb }),
     });
     cleanups.push(() => next.close());
     expect(next.getSnapshot().client!.session!.user).not.toBe(account);
     expect(stored).not.toContain(root);
+  }, 60_000);
+});
+
+describe("a guest open in two tabs of a shared device (clearOnSignOut)", () => {
+  // Two tabs share one account store and are open as the same guest. Kim
+  // signs up in tab A (the backend links the guest, so its account is hers)
+  // and signs out there. Tab B must not stay open, in memory, as her account.
+  async function twoTabs() {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz);
+    const jar = cookies(origin, null);
+    // Tab B hears of tab A only when it checks (as a tab whose broadcast
+    // came while it was busy or asleep): no BroadcastChannel between them.
+    vi.stubGlobal("BroadcastChannel", undefined);
+    const store = memoryStore();
+    const open = async () => {
+      const session = await createJazzClient({
+        serverUrl: `${origin}/jazz`,
+        store,
+        driver: { type: "memory" },
+        initial: "device",
+        clearOnSignOut: true,
+      });
+      cleanups.push(() => session.close());
+      return session;
+    };
+    const a = await open();
+    const b = await open();
+    // Both have asked the backend once on start: no one is signed in yet.
+    await a.reauthenticate();
+    await b.reauthenticate();
+    const guest = a.getSnapshot().account!;
+    expect(b.getSnapshot()).toMatchObject({ status: "ready", account: { id: guest.id } });
+    return { jar, a, b, guest };
+  }
+
+  it("signs the other tab out once the user who took over its guest signs out", async () => {
+    const { jar, a, b, guest } = await twoTabs();
+    jar.user = jar.socketUser = "kim";
+    await a.linkWithBackend();
+    expect(a.getSnapshot().account!.id).toBe(guest.id);
+    jar.user = jar.socketUser = null;
+    await a.logout();
+    expect(a.getSnapshot().status).toBe("signed-out");
+
+    // Tab B checks (another tab's sign-out, focus): no one is signed in, and
+    // the guest it holds is now Kim's account.
+    await b.reauthenticate();
+    expect(b.getSnapshot()).toMatchObject({ status: "signed-out", account: undefined });
+  }, 60_000);
+
+  it("follows the user into their account while they are still signed in", async () => {
+    const { jar, a, b, guest } = await twoTabs();
+    jar.user = jar.socketUser = "kim";
+    await a.linkWithBackend();
+
+    await b.reauthenticate();
+    expect(b.getSnapshot().status).toBe("ready");
+    expect(b.getSnapshot().account).toMatchObject({
+      id: guest.id,
+      identity: { issuer: "jazz:backend", subject: "kim" },
+    });
+  }, 60_000);
+
+  it("leaves a guest no tab linked alone when no one is signed in", async () => {
+    const { a, b, guest } = await twoTabs();
+    await b.reauthenticate();
+    expect(b.getSnapshot()).toMatchObject({ status: "ready", account: { id: guest.id } });
+    expect(a.getSnapshot()).toMatchObject({ status: "ready", account: { id: guest.id } });
   }, 60_000);
 });
 

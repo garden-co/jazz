@@ -1,42 +1,264 @@
 ---
 title: Backups & Upgrades
-description: "Keep a self-hosted Jazz server's data safe across releases."
+description: "Learn how to keep the data in your backend's Jazz directory safe and upgrade it across releases."
 ---
 
-<Callout type="info">
-  Preview: this page is a rough outline for the server-first docs restructure. The bullets below are
-  what it will cover.
-</Callout>
+## What the data directory holds
 
-- What the data dir holds (one SQLite database)
-- Backups and restores per platform
-- Upgrading between releases
+Everything your [main backend](/docs/how-jazz-works#how-a-backend-talks-to-jazz) stores lives in the directory you pass to
+`sqlite({ path })`:
 
-## Upgrading a self-hosted alpha.59 server
+| File or folder                         | What it is                                                                                                   |
+| :------------------------------------- | :----------------------------------------------------------------------------------------------------------- |
+| `jazz.sqlite` (with `-wal` and `-shm`) | Rows, history, schemas, permissions and the index of large-value chunks                                      |
+| `blobs/`                               | The chunks of large values, unless you chose [another place](/docs/setup/deployment/own-server#large-values) |
+| `app-id`                               | The app this directory belongs to                                                                            |
+| `store-id`, `blob-store`               | This directory's identity, and where its chunks live                                                         |
+| `jazz.lock`                            | Held by the running process, so a second one on the same directory is refused                                |
 
-alpha.60 stores an app's data in one SQLite database, and its server can't read an alpha.59 data dir. Move the data with the two `alpha59-alpha60` binaries attached to the [2.0.0-alpha.60 GitHub release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.60). They stay attached to that release, so you can upgrade from alpha.59 whenever you're ready.
+If your chunks are in another directory (`files({ dir })`) or a bucket (`s3()`), they're part of the
+data too.
 
-Ship your new backend and clients at the same cutover: an alpha.60 server admits only your app's backend, and alpha.59 clients can't reach it.
+## Backing up
 
-1. Stop the alpha.59 server. Keep its data dir; nothing below writes to it.
-2. Download `jazz-alpha59-alpha60-export-<platform>` and `jazz-alpha59-alpha60-import-<platform>` (Linux x64/arm64, macOS arm64), check them against `jazz-alpha59-alpha60-export.sha256` and `jazz-alpha59-alpha60-import.sha256`, and make them executable.
-3. Export. `--work` is an empty scratch dir; the exporter reads a private copy of the data dir, never the original.
+Back up the whole directory together, and its chunk directory or bucket prefix with it:
 
-   ```sh
-   jazz-alpha59-alpha60-export --data-dir ./data --work ./export-work --out app.dump
+- **Stop the backend first**, or snapshot the disk it's on atomically (a volume snapshot). Copying
+  `jazz.sqlite` while it's being written can give you a copy that doesn't open.
+- **Copy the `-wal` file with the database.** It holds recent writes that aren't in `jazz.sqlite`
+  yet.
+- **Back up chunks at least as recently as the database.** A database that refers to chunks the
+  backup doesn't have can't serve those large values.
+
+## Restoring
+
+To restore in place, stop the backend, put the files back, and start it again.
+
+To restore into a new place while the original keeps running, such as a staging copy, give the copy
+its own chunk directory or `s3()` prefix and delete its `store-id` and `blob-store` files before it
+first starts. Otherwise it claims the original's chunks.
+
+## Upgrading between releases
+
+Upgrade by deploying your backend with the new `jazz-tools`. On start, it opens the data directory
+in the new release's format and applies your schema, migrations and permissions as usual. Upgrade
+browsers and backends together: they ship in one bundle, and a release notes when an older client
+can't talk to a newer backend.
+
+Back up before you upgrade. Releases don't migrate a data directory back to an older format, so
+rolling back means restoring the backup.
+
+## Upgrading from alpha.60
+
+Alpha.61 gives a client one auth object, the **session**, and renames guest accounts to **device
+accounts**. Data and backends need no changes beyond one rename; client code does. Your backend
+still decides who is signed in: after your own sign-in or sign-out, `refresh()` follows it.
+
+- **One session.** `const session = await createJazzClient(config)`, or
+  `<JazzProvider config={{ … }}>` in React, React Native, Expo, Vue, Solid and Svelte. Read it with
+  `useJazzSession()` (Svelte: `getJazzSession()`), also in the provider's `signedOut`, `loading` and
+  `error` views. `session.db` is the signed-in user's Db; it throws while there is none.
+- **Device accounts** are how you do guests, and a local-first friendly way to sign in: an account
+  whose key lives on the device. See [Device Accounts](/docs/setup/auth/local-first).
+- **Errors.** A failed operation that leaves the client usable keeps the session `ready`, with
+  `error` set. `status: "error"` now means there is no usable client.
+- **`<JazzProvider>` refuses the old shapes** (the config as its own props, `fallback`, a config
+  with an `account`) with an error that names the new one.
+
+| Alpha.60                                                                                                  | Alpha.61                                                                                                                               |
+| :-------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------- |
+| `createAccountManager(config)` + `createDb({ ...config, account })`                                       | `const session = await createJazzClient({ ...config, initial: "device" })`; `session.db`                                               |
+| `createDb` (`jazz-tools`, `jazz-tools/react-native`)                                                      | `createJazzClient(…)`, then `session.db`                                                                                               |
+| `createJazzApp(config)`                                                                                   | `<JazzProvider config={config}>`, or `await createJazzClient(config)`                                                                  |
+| `<JazzProvider serverUrl="/jazz" …>` (config as props)                                                    | `<JazzProvider config={{ serverUrl: "/jazz", … }}>`                                                                                    |
+| `<JazzProvider config={{ …, account }}>`, `JazzSvelteProvider`                                            | `<JazzProvider config={…}>`; a client you opened yourself: `<JazzClientProvider client>` (Svelte: `<JazzSvelteClientProvider client>`) |
+| `<JazzSessionProvider session={s}>`                                                                       | `<JazzProvider session={s}>`                                                                                                           |
+| `fallback`                                                                                                | `loading`, `signedOut`, `error`                                                                                                        |
+| `useJazzAuth()`, `useJazzSessionOwner()`, `useAccountState`, `accountState`                               | `useJazzSession()` (Svelte: `getJazzSession()`)                                                                                        |
+| `reauthenticate()`, `loginWithBackend()`                                                                  | `refresh()`                                                                                                                            |
+| `logout()` / `dispose()`                                                                                  | `signOut()` / `close()`                                                                                                                |
+| `createLocalFirst()`                                                                                      | `createDeviceAccount()`                                                                                                                |
+| `restoreLocalFirst(secret)`                                                                               | `restoreDeviceAccount(key)`                                                                                                            |
+| `linkWithBackend()`                                                                                       | `linkDeviceAccount()`                                                                                                                  |
+| `exportLocalFirstSecret(snapshot.account)`                                                                | `session.exportDeviceKey()`                                                                                                            |
+| `initial: "local-first"`                                                                                  | `initial: "device"`                                                                                                                    |
+| `linkGuestOnSignUp`                                                                                       | `linkDeviceAccountOnSignUp`                                                                                                            |
+| `snapshot.account?.id`                                                                                    | `snapshot.user?.accountId`                                                                                                             |
+| `user.id` (your backend's user ID)                                                                        | `user.identity.subject`                                                                                                                |
+| `sessionActions.createLocalFirst()` and the other `sessionActions`                                        | the same operations on the session itself                                                                                              |
+| `useLocalFirstAuth`, `LocalFirstAuth`, `BrowserAuthSecretStore`, `ExpoAuthSecretStore`, `AuthSecretStore` | `session.exportDeviceKey()` and `session.restoreDeviceAccount(key)`                                                                    |
+| `acceptLocalFirstAuth` (backend)                                                                          | `acceptDeviceAccounts`                                                                                                                 |
+
+`snapshot.user` is `{ accountId, kind: "device" | "backend", identity: { issuer, subject }, claims }`
+for whoever is signed in, a device account included, or `null`. A client config without `serverUrl`
+now means `"/jazz"` everywhere.
+
+### Device accounts kept by `useLocalFirstAuth`
+
+Device accounts the session already knows open on their own: alpha.61 reads the same account
+storage. A key that only `useLocalFirstAuth`, `BrowserAuthSecretStore` or `ExpoAuthSecretStore`
+held, and never reached the account manager, needs moving once, or that user starts with a new
+device account. Read it where the old store kept it and restore it into the session:
+
+```ts
+import { authSecretStorageKey, createJazzClient } from "jazz-tools";
+
+const session = await createJazzClient({ serverUrl: "/jazz" });
+// The key alpha.60's store used: the `key` you gave it, or else this, with its appId and profile.
+const legacyKey = authSecretStorageKey({ appId: "your-old-app-id" });
+const secret = localStorage.getItem(legacyKey);
+if (secret && session.getSnapshot().user?.kind !== "device") {
+  await session.restoreDeviceAccount(secret);
+  localStorage.removeItem(legacyKey);
+}
+```
+
+On Expo, read the same key with `SecureStore.getItemAsync(legacyKey)` instead of `localStorage`.
+
+## Upgrading from alpha.59
+
+Alpha.60 changes how Jazz runs, so an alpha.59 app needs more than a version bump:
+
+- **Jazz runs inside your backend.** Clients no longer talk to a Jazz server with a JWT. Add a main
+  backend with `createJazz` (see [Your Own Server](/docs/setup/deployment/own-server)), and have it point at Jazz
+  Cloud with `remote()` if that's where your data is. The core admits only its own app's backend, so
+  browsers can't connect to it directly any more.
+- **Auth moves into `authenticate`.** Your backend decides who each request is. To keep returning
+  users on their old accounts, return the old token's `sub` as `userId` (see
+  [Custom auth](/docs/setup/auth/custom)).
+- **Clients and backends upgrade together.** Alpha.59 clients can't sync with an alpha.60 backend.
+  Ship the new client in the same release as the new backend. A client left on alpha.59 looks
+  healthy: its session reports ready and local writes succeed, but nothing syncs and nothing is
+  logged. Against a `createJazz` backend, queries and waits that need the server reject with a bare
+  `Error: [object Event]`, and a reloaded alpha.59 tab never signs in. Against Jazz Cloud, the first query that waits for the server rejects with "this Jazz
+  client speaks wire protocol 3..=3, older than this server's 6".
+- **The storage engine is now SQLite.** Alpha.59's data directory doesn't open in alpha.60.
+
+### Code changes
+
+Besides moving to `createJazz` and `authenticate`, change these before the new backend first
+starts:
+
+- **Pass your migrations to `defineApp`**, also when your data was imported:
+
+  ```ts title="schema.ts"
+  import { migrations } from "./migrations";
+
+  export const app = s.defineApp(schema, { migrations });
+  ```
+
+  Don't use `{ migrations: "none" }` here: it's for an app that only ever has one version, such as
+  a test's. Then run `jazz-tools validate`. It creates `migrations/index.ts` if it's missing and moves
+  alpha.59's migrations to `migrations/legacy/`, and every snapshot except the one matching
+  `schema.ts` to `migrations/legacy/snapshots/`. The upgraded app's history starts again from its
+  current schema. If no snapshot matches `schema.ts`, validate keeps the newest one and tells you to
+  run `jazz-tools migrations create` before the app starts.
+
+- **Snapshot the current schema before you change it.** Run `jazz-tools migrations create` with no
+  flags while `schema.ts` still matches what you imported. Later schema changes follow
+  [Migrations](/docs/schemas/migrations) as usual.
+- **Replace `isCreator`** with `{ $createdBy: session.user }`. It compares accounts, so it keeps
+  matching the rows users wrote on alpha.59 whose author was imported with an account.
+- **Replace `session.user.account` with `session.user`**, which is now the account, and
+  `session.user.identity` with `session.identity`, in permissions and in client code. Permissions
+  that still use the old form fail with an error saying so; in client code it is silently
+  `undefined`.
+- **Rename removed read tiers.** In reads, `"global"` is now `"remote"` (`ReadTier.Remote`), and
+  `"local"` is `"local-first"`; `"edge"` is gone. Write waits keep `"local"` and `"global"`:
+  `wait({ tier: "remote" })` throws. See
+  [Removed read tiers](/docs/reference/durability-tiers#removed-read-tiers).
+- **Create accounts for users who never open a client.** `forReqUser` and `accountFor` no longer
+  create an account. If your API serves users before they sign in from a client, call
+  `jazz.createAccountFor(userId)` in your sign-in route; see
+  [Users without an account](/docs/setup/deployment/own-server#users-without-an-account).
+
+### Data on Jazz Cloud
+
+Jazz Cloud moves your app's data to alpha.60 for you. The move keeps every row with its history,
+authors and timestamps, your current schema and permissions, and every account. It also links each
+signed-in user's alpha.59 identity to `jazz:backend` so `authenticate` can open their old
+account.
+
+### Self-hosted alpha.59 servers
+
+Move a self-hosted data directory with the same import tool Jazz Cloud uses. You need only the two
+downloads below, no Node or Rust toolchain, and nothing writes to your alpha.59 directory.
+
+Before you start:
+
+- **Plan the downtime.** It runs from stopping the alpha.59 server until the new backend and the new
+  client bundle are both live, since old clients can't sync with the new backend. The tools
+  themselves take seconds for a small app.
+- **Let clients finish syncing, then close them.** Writes still queued in an alpha.59 browser, such as
+  ones made offline, are not carried over: alpha.60 opens a new local database and the old one is
+  left unused. Rolling back to alpha.59 is the only way to recover them, so drain open tabs before
+  step 1.
+- **Rehearse on a copy if you like.** `cp -a ./data ./data-rehearsal` with the alpha.59 server
+  stopped, then run steps 3 and 4 against the copy; nothing in them writes to it.
+- **Make the [code changes](#code-changes) first**, so the new backend can start as soon as the
+  import is verified.
+- **Run `verify` before the new backend's first start.** That first start moves large values out of
+  `jazz.sqlite` into `blobs/`, and `verify` can't read the directory after that.
+
+Then:
+
+1. **Stop the alpha.59 server.** It drains open connections first, for up to 30 seconds by default
+   (`--shutdown-timeout-secs`).
+2. **Download the tools.** Get `jazz-alpha59-alpha60-export-<platform>` and
+   `jazz-alpha59-alpha60-import-<platform>` (`linux-x64`, `linux-arm64` or `darwin-arm64`) and the
+   two checksum files from the
+   [v2.0.0-alpha.60 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.60). Each
+   checksum file lists every platform, so check with `--ignore-missing`, then rename the tools to
+   drop the platform suffix and make them executable:
+
+   ```bash title="Terminal"
+   sha256sum -c --ignore-missing jazz-alpha59-alpha60-export.sha256 jazz-alpha59-alpha60-import.sha256
+   mv jazz-alpha59-alpha60-export-linux-x64 jazz-alpha59-alpha60-export
+   mv jazz-alpha59-alpha60-import-linux-x64 jazz-alpha59-alpha60-import
+   chmod +x jazz-alpha59-alpha60-export jazz-alpha59-alpha60-import
    ```
 
-4. Import into a new, empty dir, then verify:
+   On macOS, use `shasum -a 256 -c --ignore-missing` and the `darwin-arm64` names.
 
-   ```sh
-   jazz-alpha59-alpha60-import import --dump app.dump --data-dir ./data-new --app-id <app id>
-   jazz-alpha59-alpha60-import verify --dump app.dump --data-dir ./data-new --app-id <app id>
+3. **Export** the data with alpha.59's own code. `--work` is an empty scratch directory: the
+   exporter reads a private copy of your data there.
+
+   ```bash title="Terminal"
+   ./jazz-alpha59-alpha60-export --data-dir ./data --work ./export-work --out app.dump
    ```
 
-   `--app-id` must be the alpha.59 app's id exactly, case included.
+4. **Import and verify** into a new, empty directory. Verify checks every row, sign-in and identity
+   link against what alpha.59 read.
 
-5. Serve `./data-new` from your backend with `createJazz({ store: sqlite({ path: "./data-new" }) })`. Keep `./data` until you're satisfied.
+   ```bash title="Terminal"
+   ./jazz-alpha59-alpha60-import import --dump app.dump --data-dir ./data-new --app-id <appId>
+   ./jazz-alpha59-alpha60-import verify --dump app.dump --data-dir ./data-new --app-id <appId>
+   ```
 
-The dump holds all of the app's data. Keep it on the same machine as the data dir, and delete it when you're done.
+5. **Start your new backend** with `sqlite({ path: "./data-new" })`, then deploy the new client.
+   If your alpha.59 app had local-first guests, pass your old app ID as `scope` to the client, so
+   each guest's device finds its account again:
 
-The import keeps every row with its authors and timestamps, the accounts, and the active schema and permissions. It links each user's existing identity to `(jazz:backend, sub)`, so returning users keep their accounts when your `authenticate` answers with their old `sub` (as [`fromJWT()`](/docs/setup/auth/custom) does). Pass `--no-backend-identity-links` to skip that.
+   ```ts
+   const jazz = await createJazzClient({ scope: "<your alpha.59 app ID>" });
+   ```
+
+   (`<JazzProvider config={{ scope: "…" }}>` in React.) With `scope` set, each guest's browser finds its
+   alpha.59 account by itself, on the same origin; there's nothing else to do. Without it, those
+   guests can't open their accounts. The import prints the exact `scope` line when it brings
+   local-first guests over. If the alpha.59 app was reached through more than one Jazz server URL
+   on that origin, guests aren't picked up automatically.
+   Keep `./data` and the dump until you're happy with the result.
+
+`--app-id` is your app's ID exactly as before, case included: the import uses it to link each
+returning user's old sign-in to their account, as `jazz:backend` with their old `sub` (as [`fromJWT()`](/docs/setup/auth/custom) returns it), and to keep
+local-first guests on their accounts once the client is scoped to the alpha.59 app ID (step 5). It's written to `<data-dir>/app-id`, so your code never needs
+it: `sqlite({ path })` runs as the old app. Pass
+`--no-backend-identity-links` to skip that. The dump holds all your app's data, so store it like the
+data directory and delete it when you're done.
+
+The import brings over your current schema and its permissions. A few things alpha.59 could store
+are not supported yet, and the import stops with an error naming them rather than leaving them
+out: branched rows, writes the server hadn't settled yet, and rows with no migration path to the
+current schema. Versions that carry transaction metadata are refused too; pass
+`--drop-transaction-metadata` to import them without it. A failed import cleans up after itself.

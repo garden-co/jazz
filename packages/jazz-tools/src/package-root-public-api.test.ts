@@ -363,13 +363,27 @@ function listSourceFiles(dir: string): string[] {
 }
 
 describe("package root public API", () => {
+  it("has one auth object, the session: no account manager, handles or Db opener", () => {
+    expect(packageRoot).toHaveProperty("createJazzClient");
+    expect(packageRoot).toHaveProperty("AccountAuthError");
+    for (const removed of [
+      "createAccountManager",
+      "createDb",
+      "exportLocalFirstSecret",
+      "BrowserAuthSecretStore",
+      "createJazzApp",
+    ]) {
+      expect(packageRoot, `package root removed auth export ${removed}`).not.toHaveProperty(
+        removed,
+      );
+    }
+  });
+
   it("exposes intended runtime APIs without core internals", () => {
     for (const publicRuntimeExport of [
-      "BrowserAuthSecretStore",
       "Db",
       "PersistedWriteRejectedError",
       "Transaction",
-      "createDb",
       "fetchPublishedBundles",
       "fetchSchemaHashes",
       "fetchStoredWasmSchema",

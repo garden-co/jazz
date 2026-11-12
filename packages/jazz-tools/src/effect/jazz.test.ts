@@ -14,9 +14,24 @@ const app = s.defineApp(
 
 class Oops extends Data.TaggedError("Oops")<{}> {}
 
+/** A device account of its own (a fresh store) for each session a test opens. */
+function memoryAccountStore() {
+  let stored: string | null = null;
+  return {
+    read: async () => stored,
+    update: async (transform: (current: string | null) => string | null) => {
+      stored = transform(stored);
+    },
+  };
+}
+
 async function jazzLayer(name: string): Promise<Layer.Layer<Jazz, JazzError>> {
+  // Jazz on this device only, as a device account.
   return Jazz.layer({
-    ...(await localAccountConfig(`effect-${name}`)),
+    scope: `effect-${name}`,
+    serverUrl: null,
+    client: async () => ({ createClient: createDb }),
+    store: memoryAccountStore(),
     driver: { type: "memory" },
   });
 }
@@ -310,7 +325,14 @@ describe("Jazz Effect service", { timeout: 30_000 }, () => {
     );
 
     expect([...result]).toEqual([
-      { link: { state: "local-only" }, pendingUploads: 0, synced: true },
+      {
+        link: { state: "local-only" },
+        pendingUploads: 0,
+        oldestPendingAt: null,
+        rejected: 0,
+        lastError: null,
+        synced: true,
+      },
     ]);
   });
 });

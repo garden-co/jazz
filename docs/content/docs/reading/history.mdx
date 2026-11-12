@@ -1,6 +1,6 @@
 ---
 title: History
-description: Query and subscribe to previous versions of your data.
+description: "Learn how to query and subscribe to earlier versions of your data."
 ---
 
 Every table has a read-only history table, available as `app.$history.tableName`.
@@ -47,7 +47,8 @@ History rows include two additional columns by default:
 | `$transactionId` | `TxId`          | The transaction that wrote the version. |
 
 The usual attribution columns (`$createdAt`, `$createdBy`, `$updatedAt`, and
-`$updatedBy`) are also available.
+`$updatedBy`) are also available. Anyone who can read a row's history sees the author of every
+version, including `identity.subject`; see [Metadata](/docs/reading/metadata).
 
 ## Local and remote reads
 

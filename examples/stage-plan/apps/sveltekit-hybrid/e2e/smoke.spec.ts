@@ -8,7 +8,7 @@ test("a guest plans a show, signs up without losing it, and it survives a reload
   const run = Date.now().toString(36);
   await page.goto("/");
 
-  // A local-first guest: no sign-up needed to start planning.
+  // A device-account guest: no sign-up needed to start planning.
   await page.getByLabel("Your name", { exact: true }).fill("Ada");
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByLabel("Show", { exact: true }).fill(`Album launch ${run}`);

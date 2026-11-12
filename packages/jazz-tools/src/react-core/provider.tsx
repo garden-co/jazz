@@ -39,7 +39,8 @@ export type JazzClientProviderProps = {
   children: ReactNode;
 };
 
-export type JazzProviderProps = {
+/** @internal */
+export type JazzDbProviderProps = {
   config: DbConfig;
   /** Rendered during SSR and until client acquisition completes after browser commit. */
   fallback?: ReactNode;
@@ -117,12 +118,16 @@ export function JazzClientProvider({ client: clientPromise, children }: JazzClie
 }
 
 /**
- * Default Jazz provider. Creates a Jazz client and makes it available to children
- * components through a React context.
- * If you need to create a Jazz client outside of the React component lifecycle,
- * use {@link JazzClientProvider}.
+ * @internal Opens a client straight from a Db config (a local or test Db, no
+ * session) and makes it available to children. Apps use `<JazzProvider>`,
+ * which owns a session, or `<JazzClientProvider>` for a client they opened.
  */
-export function JazzProvider({ config, fallback, children, openJazzClient }: JazzProviderProps) {
+export function JazzDbProvider({
+  config,
+  fallback,
+  children,
+  openJazzClient,
+}: JazzDbProviderProps) {
   // Stable per-provider identity, used as the registry holder across effect
   // cleanup and re-acquisition (including React Strict Mode's effect replay).
   const holder = useRef({}).current;
@@ -186,7 +191,7 @@ export function JazzProvider({ config, fallback, children, openJazzClient }: Jaz
 
 export function useJazzClient(): CoreJazzClient {
   const ctx = useContext(JazzContext);
-  if (!ctx) throw new Error("useDb must be used within <JazzProvider>");
+  if (!ctx) throw new Error("useDb must be used within <JazzProvider> or <JazzClientProvider>");
   return ctx.client;
 }
 

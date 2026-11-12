@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createAccountManager, createDb, type Db } from "jazz-tools";
+import { createJazzClient, type Db, type JazzClientConfig } from "jazz-tools";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
 import {
   TestCleanup,
@@ -13,12 +13,14 @@ import {
 } from "../../../../../../packages/jazz-tools/tests/browser/topology-harness";
 import {
   getJazzServerInfo,
-  signInWithJazzApp,
+  jazzAppFetch,
+  jazzAppUserUrl,
   startJazzApp,
   type JazzServerInfo,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server";
 import permissions from "../../permissions";
 import { app } from "../../schema";
+import { memoryAccountStore } from "../../../../../testing/accounts";
 
 const cleanup = new TestCleanup();
 afterEach(async () => cleanup.cleanup());
@@ -472,21 +474,39 @@ describe("BandChat cross-topology recovery", () => {
   }, 75_000);
 });
 
+const loadLocalFirst = () => import("jazz-tools/local-first");
+
+/**
+ * Sign `userId` in on their own origin of the app backend, and open their
+ * local-first client: a session of its own (its own account store), closed
+ * with the test's cleanup.
+ */
+async function openSession(
+  server: JazzServerInfo,
+  userId: string,
+  config: Partial<JazzClientConfig>,
+) {
+  const session = await createJazzClient({
+    serverUrl: await jazzAppUserUrl(server, userId),
+    fetch: jazzAppFetch,
+    store: memoryAccountStore(),
+    client: loadLocalFirst,
+    // These tests write offline and read the local tiers: local-first from the start.
+    localFirst: "now",
+    ...config,
+  });
+  cleanup.trackTransport({ stop: () => session.close() });
+  return { db: session.db, author: session.getSnapshot().user!.accountId };
+}
+
 async function openMemberDb(
   server: JazzServerInfo,
   userId: string,
 ): Promise<Pick<ClientIdentity, "db" | "author">> {
-  const { serverUrl, account } = await signInWithJazzApp(createAccountManager, server, userId);
-  const db = cleanup.track(
-    await createDb({
-      appId: server.appId,
-      serverUrl,
-      account,
-      logLevel: "trace",
-      driver: { type: "persistent", dbName: uniqueDbName(`band-chat-${userId}`) },
-    }),
-  );
-  return { db, author: account.id };
+  return openSession(server, userId, {
+    logLevel: "trace",
+    driver: { type: "persistent", dbName: uniqueDbName(`band-chat-${userId}`) },
+  });
 }
 
 /**

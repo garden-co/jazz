@@ -30,7 +30,13 @@ import type {
   TxId,
 } from "../runtime/client.js";
 import { parseSnapshotRef, type SnapshotRef } from "../runtime/snapshot-ref.js";
-import { CONNECTED, CONNECTING, offlineLink, type LinkStatus } from "../runtime/sync-status.js";
+import {
+  CONNECTED,
+  CONNECTING,
+  offlineLink,
+  type LinkStatus,
+  type UploadStatus,
+} from "../runtime/sync-status.js";
 import { streamingChunks } from "../runtime/streaming-source.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import { writeRow } from "../runtime/write-row.js";
@@ -72,6 +78,7 @@ import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import {
   WebSocketCarrier,
   peerIdentityForWebSocketAuth,
+  isReauthenticateWireError,
   wireAuthFailureReason,
   type WebSocketConstructor,
   type WireError,
@@ -216,6 +223,8 @@ type Write = {
   confirmed: boolean;
   /** The rows it wrote on the main branch, for {@link ThinRuntime.handOffWrittenRows}. */
   rows: readonly WrittenRow[];
+  /** When it was made, in Unix ms. */
+  madeAt: number;
 };
 
 /** A row a thin write touched. */
@@ -243,6 +252,8 @@ export class ThinRuntime implements Runtime {
   private authJson?: string;
   /** Requests and live queries go out only once the schema is bound. */
   private bound = false;
+  /** A planned re-authentication is reconnecting a bound connection (see `lost`). */
+  private reauthenticating = false;
   private wanted = false;
   private closed = false;
   private attempt = 0;
@@ -271,6 +282,9 @@ export class ThinRuntime implements Runtime {
   private nextWriteSeq = 1;
   /** Writes the server has not answered yet. */
   private unanswered = 0;
+  /** Writes the server rejected, and the latest rejection. */
+  private rejected = 0;
+  private lastRejection: UploadStatus["lastRejection"] = null;
   private readonly syncStatusListeners = new Set<() => void>();
   private readonly transactions = new Map<OpenTransactionId, OpenTransaction>();
   private mutationErrorCallback?: (event: MutationErrorEvent) => void;
@@ -382,6 +396,11 @@ export class ThinRuntime implements Runtime {
       authJson: this.authJson,
       WebSocket: this.WebSocketImpl,
       onFrame: (frame) => this.receive(carrier, frame),
+      // The server's planned re-authentication arrives as an error on an open
+      // connection, ahead of its close: handle it as the connection's end.
+      onError: (error) => {
+        if (isReauthenticateWireError(error)) this.lost(carrier, error);
+      },
       onTerminal: (error) => this.lost(carrier, error),
     });
     this.carrier = carrier;
@@ -413,6 +432,7 @@ export class ThinRuntime implements Runtime {
         }
         this.attempt = 0;
         this.bound = true;
+        this.reauthenticating = false;
         this.refused = false;
         this.stopped = false;
         this.clearOutage();
@@ -455,6 +475,19 @@ export class ThinRuntime implements Runtime {
   private lost(carrier: WebSocketCarrier, error: WireError): void {
     if (this.carrier !== carrier) return;
     const lostError = new ThinConnectionLostError(`${error.code}: ${error.message}`);
+    const wasBound = this.bound;
+    // A planned swap that ends any other way is reported as that ending.
+    this.reauthenticating = false;
+    if (isReauthenticateWireError(error) && wasBound) {
+      // The session reached the expiry the app's auth gave it: connect again
+      // at once so `authenticate` decides with the current credential. The
+      // app keeps seeing a connected link meanwhile; unanswered writes go
+      // out again on the new connection.
+      this.reauthenticating = true;
+      this.dropConnection(lostError, true);
+      this.open();
+      return;
+    }
     const authFailure = wireAuthFailureReason(error);
     if (authFailure) {
       // Refused before the drop publishes, so the link never reads
@@ -1230,7 +1263,7 @@ export class ThinRuntime implements Runtime {
   upstreamLinkStatus(): LinkStatus {
     if (this.stopped) return offlineLink("stopped");
     if (this.refused) return offlineLink("auth");
-    if (this.bound) return CONNECTED;
+    if (this.bound || this.reauthenticating) return CONNECTED;
     return this.outagePublished ? offlineLink("network") : CONNECTING;
   }
 
@@ -1260,6 +1293,22 @@ export class ThinRuntime implements Runtime {
   /** How many writes still wait for the server's answer. */
   pendingUploadCount(): number {
     return this.unanswered;
+  }
+
+  /** The writes waiting for the server's answer, and what it rejected, for the sync status. */
+  uploadStatus(): UploadStatus {
+    let oldestPendingAt: number | null = null;
+    for (const write of this.writes.values()) {
+      if (write.answered) continue;
+      if (oldestPendingAt === null || write.madeAt < oldestPendingAt)
+        oldestPendingAt = write.madeAt;
+    }
+    return {
+      pending: this.unanswered,
+      oldestPendingAt,
+      rejected: this.rejected,
+      lastRejection: this.lastRejection,
+    };
   }
 
   /** Observe changes of {@link pendingUploadCount} and {@link upstreamLinkStatus}. */
@@ -1321,6 +1370,7 @@ export class ThinRuntime implements Runtime {
       answered: false,
       confirmed: false,
       rows,
+      madeAt: Date.now(),
       done: Promise.resolve(),
     };
     // A standalone write goes under this runtime's next write id, so it can
@@ -1349,6 +1399,11 @@ export class ThinRuntime implements Runtime {
       },
       (error: unknown) => {
         const failure = error instanceof Error ? error : new Error(String(error));
+        // The sync status counts a rejection whether or not a wait takes it.
+        if (failure instanceof ThinRemoteError) {
+          this.rejected++;
+          this.lastRejection = { code: failure.code, message: failure.message, at: Date.now() };
+        }
         // A failure no wait observes is reported once, like a local-first
         // client's rejected write.
         queueMicrotask(() => {

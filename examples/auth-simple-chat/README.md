@@ -6,7 +6,7 @@ What it demonstrates:
 
 - A local Express server with its own email/password sign-in and an HttpOnly session cookie
 - Jazz running inside that server with `createJazz`: `authenticate` reads the same cookie, so the browser never holds a Jazz credential
-- Starting every visitor as a local-first guest, and keeping the guest's data on sign-up with `linkWithBackend()`
+- Starting every visitor as a guest on a device account, and keeping the guest's data on sign-up with `linkDeviceAccount()`
 - Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./permissions.ts), with generic-chat message ownership enforced via `$createdBy.account`.
 
 Passwords are stored in plain text in memory for example simplicity only.
@@ -51,8 +51,9 @@ Announcements vs the general chat, against a local test server.
 
 ### Account lifecycle
 
-Every visitor starts as a local-first guest. Sign-in calls `loginWithBackend()`: the backend
-names the signed-in user and Jazz opens that user's account. Sign-up calls `linkWithBackend()`:
-the guest proves itself with its own local-first key, and the backend links it to the new user,
-so the messages it wrote as a guest stay its own. Signing out flushes Jazz before clearing the
-session cookie, then starts a new local-first guest.
+Every visitor starts as a guest on a device account (`initial: "device"`). Sign-in calls
+`refresh()`: the backend names the signed-in user and Jazz opens that user's account. Sign-up calls
+`linkDeviceAccount()`: the guest proves itself with its device account's key, and the backend links
+it to the new user, so the messages it wrote as a guest stay its own. Signing out (`signOut()`)
+flushes Jazz before clearing the session cookie, then starts a new guest with
+`createDeviceAccount()`.

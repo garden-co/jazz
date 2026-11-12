@@ -12,7 +12,7 @@ pnpm dev
 
 ## Who sees what
 
-Every visitor has a local-first account. Band membership, enforced in [`permissions.ts`](./permissions.ts), decides the rest:
+Every visitor has a device account (its key lives in their browser). Band membership, enforced in [`permissions.ts`](./permissions.ts), decides the rest:
 
 - **Public visitors** see the band and its confirmed stops. Tentative and cancelled stops, private notes, invites and the member list never reach them.
 - **Members** see and edit every stop, rename the band and add venues. They join with the owner's invite link (`#/bands/<id>/join/<code>`); nobody can add themselves to a band without the current code.

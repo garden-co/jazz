@@ -1,8 +1,6 @@
-import { createAccountManager, createDb, type AccountStore, type Db } from "jazz-tools";
+import { createJazzClient, type AccountStore, type Db } from "jazz-tools";
 import jazzWasmModule from "jazz-wasm/pkg/jazz_wasm_bg.wasm";
 import { app } from "./schema.js";
-
-const APP_ID = "cloudflare-worker-runtime-ts";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
@@ -13,9 +11,10 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-// This smoke example deliberately has one disposable account per request.
-// Production request handlers use createJazz and jazz.forReqUser(request).
-async function openRequestDb(origin: string): Promise<Db> {
+// This smoke example deliberately has one disposable device account per
+// request. Production request handlers use createJazz and
+// jazz.forReqUser(request).
+function openRequestSession() {
   let stored: string | null = null;
   const store: AccountStore = {
     async read() {
@@ -25,19 +24,14 @@ async function openRequestDb(origin: string): Promise<Db> {
       stored = transform(stored);
     },
   };
-  const runtimeSources = { wasmModule: jazzWasmModule };
-  const accounts = await createAccountManager({
-    appId: APP_ID,
-    serverUrl: origin,
+  return createJazzClient({
+    // No server: Jazz runs on this request only, with no sync.
+    serverUrl: null,
+    client: () => import("jazz-tools/local-first"),
+    initial: "device",
     store,
-    runtimeSources,
-  });
-  const account = accounts.createLocalFirst();
-  return createDb({
-    appId: APP_ID,
-    account,
     driver: { type: "memory" },
-    runtimeSources,
+    runtimeSources: { wasmModule: jazzWasmModule },
   });
 }
 
@@ -78,11 +72,11 @@ export default {
     }
 
     if (url.pathname === "/smoke") {
-      const db = await openRequestDb(url.origin);
+      const session = await openRequestSession();
       try {
-        return await handleSmoke(db);
+        return await handleSmoke(session.db);
       } finally {
-        await db.shutdown();
+        await session.close();
       }
     }
 

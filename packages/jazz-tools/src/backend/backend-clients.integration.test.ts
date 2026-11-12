@@ -94,7 +94,7 @@ afterAll(() => new Promise((resolve) => issuerServer.close(resolve)));
 /** The app's own auth: the user named in a header. */
 function authenticate(request: Request) {
   const userId = request.headers.get("x-test-user");
-  return userId ? { userId } : null;
+  return userId ? { userId, expiresAt: Math.floor(Date.now() / 1000) + 3600 } : null;
 }
 
 async function serve(jazz: Jazz): Promise<string> {
@@ -323,7 +323,7 @@ describe("trusted backend clients", () => {
       createJazzClient({
         ...base,
         credential: () => sign({ sub: "ops" }),
-        initial: "local-first",
+        initial: "device",
       }),
     ).rejects.toThrow(/leave out initial/);
   });
@@ -605,7 +605,7 @@ describe("a backend client's close()", () => {
       permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
     });
     const { client } = session.getSnapshot();
     const me = client!.session!.user!;
@@ -627,7 +627,7 @@ describe("a backend client's close()", () => {
       permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
     });
     const { client } = session.getSnapshot();
     client!.db.insert(app.todos, { title: "dropped", owner: client!.session!.user! });
@@ -651,7 +651,7 @@ describe("a backend client's close()", () => {
       permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "persistent", dataPath },
-      initial: "local-first",
+      initial: "device",
     });
     const { client } = session.getSnapshot();
     client!.db.insert(app.todos, { title: "kept on disk", owner: client!.session!.user! });

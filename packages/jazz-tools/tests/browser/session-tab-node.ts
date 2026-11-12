@@ -13,7 +13,7 @@ export async function openSessionTab(
   currentPage: Page,
   id: string,
   serverUrl: string,
-  options: { clearOnSignOut?: boolean } = {},
+  options: { clearOnSignOut?: boolean; localFirst?: "now" } = {},
 ): Promise<void> {
   await closeSessionTab(id);
   const page = await context.newPage();

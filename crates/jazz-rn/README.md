@@ -2,8 +2,8 @@
 
 This directory is the native relay package for Jazz's supported React Native
 alpha. Applications use the public `jazz-tools/react-native` client API: open
-a client with `createJazzClient` (or `<JazzSessionProvider>` from
-`jazz-tools/expo`), which keeps an `AccountHandle` for its user. The
+a session with `createJazzClient` (or `<JazzProvider>` from
+`jazz-tools/expo`), which signs in a device account or your backend's user. The
 [canonical Expo scaffold](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-expo) shows the
 complete client lifecycle.
 
@@ -59,7 +59,7 @@ iOS link that artifact directly from the `jazz-rn-android` and `jazz-rn-ios`
 payloads; neither routes through the obsolete UniFFI library.
 
 The wrapper accepts exactly one ABI version, `NATIVE_RELAY_ABI_V1` (currently
-4, generated from `jazz-native-relay`), and refuses any other native build. That
+5, generated from `jazz-native-relay`), and refuses any other native build. That
 ABI uses opaque host-generated admission capabilities and trusted revocation.
 It defines the shared foreground
 `NativeDb` postcard seam with canonical-query prepare/read/subscribe/drain,
@@ -83,7 +83,7 @@ autolinking must discover it from the application, not through `jazz-tools`.
 For an Expo development build, the minimal configuration is:
 
 ```bash
-pnpm add jazz-tools@alpha jazz-rn@alpha
+pnpm add jazz-tools jazz-rn
 ```
 
 Install the same version of both. A release candidate is not on npm: install

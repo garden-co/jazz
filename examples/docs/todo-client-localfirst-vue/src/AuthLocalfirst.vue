@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import type { JazzSession, JazzClient } from "jazz-tools/vue";
-import { JazzSessionProvider } from "jazz-tools/vue";
-// Configure once with await createJazzClient({ serverUrl, initial: "local-first", client }).
+import { JazzProvider, type JazzClient, type JazzSession } from "jazz-tools/vue";
+// Open once with await createJazzClient({ serverUrl, initial: "device", client }).
 defineProps<{ session: JazzSession<JazzClient> }>();
 </script>
 <template>
-  <JazzSessionProvider :session="session"><slot /></JazzSessionProvider>
+  <JazzProvider :session="session"><slot /></JazzProvider>
 </template>

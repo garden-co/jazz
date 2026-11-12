@@ -207,7 +207,20 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.rejectReconnectWaiters(error);
     this.notifyWorkerRemoteLink();
     const refused = this.admissionRefused(connection);
+    // A refusal for another reason (an older deploy's schema) means the other
+    // tab no longer holds the store: report that refusal. A retry that hit an
+    // unresponsive worker says nothing about the other tab, so the held state
+    // and its patience stand.
     if (refused) this.startHeldPatience();
+    else if (!(error instanceof BrowserWorkerUnresponsiveError)) this.clearHeldPatience();
+    // Close the failed connection's port and release its page lock now, so
+    // the worker detaches it instead of counting it as a live tab until the
+    // page goes away, whether or not this tab ever reconnects. Its follower
+    // already failed, so this sends no request and doesn't wait for the
+    // worker. A refused admission let go of both already, and the retry
+    // shuts it down itself.
+    if (!refused && !connection.canRetryInitialConfigurationAdmission?.())
+      void connection.shutdown().catch(() => undefined);
     if (error instanceof BrowserWorkerUnresponsiveError || refused)
       this.scheduleWorkerRecovery(connection);
   }
@@ -518,6 +531,10 @@ export class BrowserConnectionManager extends ConnectionManager {
     await this.storageReset;
   }
 
+  override isUsable(): boolean {
+    return !this.shutdownStarted && !this.storageReset && !this.storageResetError;
+  }
+
   override async openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort> {
     await waitForInspectorOpening(this.connectionReady ?? Promise.resolve(), signal);
     if (!this.connection) throw new Error("Shared browser runtime is not connected");
@@ -583,6 +600,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (!this.recoverableConnectionFailure) return;
     this.clearWorkerRecoveryTimer();
     this.host.clearAuthenticatedInspectorLocalReads();
+    // The failed connection was shut down when its failure was observed.
     this.connection = null;
     this.connectionReady = null;
     this.connectionError = null;

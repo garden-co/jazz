@@ -103,6 +103,8 @@ mod pending_rebase_scope;
 mod permission_advice;
 #[path = "../policy_activation.rs"]
 mod policy_activation;
+#[path = "../policy_support_rows.rs"]
+mod policy_support_rows;
 #[path = "../pre_sync_writes.rs"]
 mod pre_sync_writes;
 #[path = "../prepared_claim_routing.rs"]
@@ -115,6 +117,8 @@ mod recheck_policies;
 mod recheck_queries;
 #[path = "../recheck_sync.rs"]
 mod recheck_sync;
+#[path = "../reconnect_fanout.rs"]
+mod reconnect_fanout;
 #[path = "../rejected_retry_store.rs"]
 mod rejected_retry_store;
 #[path = "../relation_policies.rs"]

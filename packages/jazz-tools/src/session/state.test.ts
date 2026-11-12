@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import {
-  attachJazzSessionConsumer,
+  attachSessionCoreConsumer,
   createJazzSessionOwner,
   replaceJazzSessionClient,
   switchJazzSessionUser,
@@ -121,7 +121,7 @@ describe("Jazz session lifecycle", () => {
 
   it("waits for committed consumer detach before sync and enrollment", async () => {
     const { session, clients, enrollment, next } = await setup();
-    const lease = attachJazzSessionConsumer(session),
+    const lease = attachSessionCoreConsumer(session),
       previous = session.getSnapshot();
     const command = session.linkWithBackend();
     await tick();
@@ -288,7 +288,7 @@ describe("Jazz session lifecycle", () => {
   });
   it("release unblocks close while transition awaits detach", async () => {
     const { session, enrollment, clients } = await setup();
-    const lease = attachJazzSessionConsumer(session);
+    const lease = attachSessionCoreConsumer(session);
     const command = session.loginWithBackend(),
       rejected = expect(command).rejects.toThrow("superseded");
     await tick();
@@ -507,5 +507,147 @@ describe("replacing the signed-in client", () => {
     await expect(
       replaceJazzSessionClient(session, async () => ({ shutdown: async () => {} })),
     ).rejects.toThrow("no signed-in client");
+  });
+});
+
+describe("Jazz session: failures that leave a client usable (K2)", () => {
+  async function wipingSetup() {
+    const old = handle("old");
+    const enrollment = {
+      createLocalFirst: vi.fn(() => old),
+      restoreLocalFirst: vi.fn(() => old),
+      logout: vi.fn(),
+      loginWithBackend: vi.fn(async () => handle("next")),
+      linkWithBackend: vi.fn(async (_account: AccountHandle) => handle("next")),
+    };
+    const accounts = new AccountManager(enrollment, old);
+    let usable = true;
+    const db = {
+      waitForSync: vi.fn(async () => {}),
+      deleteClientStorage: vi.fn(async () => {}),
+      getSyncStatus: () => ({ pendingUploads: 0 }),
+      markReplaced: vi.fn(),
+      isUsable: () => usable,
+    };
+    const client = {
+      db,
+      shutdown: vi.fn(async (_options?: { waitForSync?: boolean }) => {}),
+    };
+    const session = await createJazzSessionOwner({
+      accounts,
+      clearOnSignOut: true,
+      openClient: async () => client,
+    });
+    return { session, client, db, enrollment, old, setUsable: (next: boolean) => (usable = next) };
+  }
+
+  it("stays ready with the client when an offline sign-out can't wipe storage", async () => {
+    const { session, client, db, enrollment, old } = await wipingSetup();
+    const failure = new Error("deleteClientStorage(): the browser worker is not connected");
+    db.deleteClientStorage.mockRejectedValueOnce(failure);
+    await expect(session.logout()).rejects.toBe(failure);
+    expect(enrollment.logout).not.toHaveBeenCalled();
+    expect(client.shutdown).not.toHaveBeenCalled();
+    expect(session.getSnapshot()).toMatchObject({
+      status: "ready",
+      account: old,
+      client,
+      error: failure,
+      recovery: "action",
+    });
+    // Tried again once the worker is back, it signs out.
+    await session.logout();
+    expect(session.getSnapshot().status).toBe("signed-out");
+  });
+
+  it("stays ready with the client when a sign-in's teardown fails before it began", async () => {
+    const { session, client, enrollment, old } = await wipingSetup();
+    // Not one of the known graceful errors, but the Db says it still works.
+    const failure = new Error("flushLocal: worker unreachable");
+    client.shutdown.mockRejectedValueOnce(failure);
+    await expect(session.loginWithBackend()).rejects.toBe(failure);
+    expect(enrollment.loginWithBackend).not.toHaveBeenCalled();
+    expect(session.getSnapshot()).toMatchObject({
+      status: "ready",
+      account: old,
+      client,
+      error: failure,
+      recovery: "action",
+    });
+  });
+
+  it("ends a sign-in whose teardown began and failed in error, with no client", async () => {
+    const { session, client, setUsable } = await wipingSetup();
+    const failure = new Error("runtime shutdown failed");
+    client.shutdown.mockImplementationOnce(async () => {
+      setUsable(false);
+      throw failure;
+    });
+    await expect(session.loginWithBackend()).rejects.toBe(failure);
+    expect(session.getSnapshot()).toMatchObject({ status: "error", error: failure });
+    expect(session.getSnapshot().client).toBeUndefined();
+  });
+
+  it("still signs out when the sign-out's teardown began and failed", async () => {
+    const { session, client, db, enrollment, setUsable } = await wipingSetup();
+    const failure = new Error("runtime shutdown failed");
+    client.shutdown.mockImplementationOnce(async () => {
+      setUsable(false);
+      throw failure;
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    await session.logout();
+    expect(enrollment.logout).toHaveBeenCalledOnce();
+    expect(db.markReplaced).toHaveBeenCalledWith("signed-out");
+    expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+    expect(session.getSnapshot().error).toBeUndefined();
+    expect(error).toHaveBeenCalledWith(
+      "Jazz signed out, but closing the signed-out client failed.",
+      failure,
+    );
+    error.mockRestore();
+    expect(session.getSnapshot().client).toBeUndefined();
+  });
+});
+
+describe("Jazz session: a clearOnSignOut wipe that didn't finish", () => {
+  it("signs out and says the wipe may not have finished", async () => {
+    const old = handle("old");
+    const enrollment = {
+      createLocalFirst: vi.fn(() => old),
+      restoreLocalFirst: vi.fn(() => old),
+      logout: vi.fn(),
+      loginWithBackend: vi.fn(async () => handle("next")),
+      linkWithBackend: vi.fn(async (_account: AccountHandle) => handle("next")),
+    };
+    let usable = true;
+    const failure = new Error("IndexedDB deletion was blocked");
+    const client = {
+      db: {
+        waitForSync: vi.fn(async () => {}),
+        // The worker started the reset (the client is gone), then failed.
+        deleteClientStorage: vi.fn(async () => {
+          usable = false;
+          throw failure;
+        }),
+        getSyncStatus: () => ({ pendingUploads: 0 }),
+        markReplaced: vi.fn(),
+        isUsable: () => usable,
+      },
+      shutdown: vi.fn(async () => {}),
+    };
+    const session = await createJazzSessionOwner({
+      accounts: new AccountManager(enrollment, old),
+      clearOnSignOut: true,
+      openClient: async () => client,
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    await session.logout();
+    error.mockRestore();
+    expect(enrollment.logout).toHaveBeenCalledOnce();
+    const snapshot = session.getSnapshot();
+    expect(snapshot.status).toBe("signed-out");
+    expect(snapshot.error?.message).toMatch(/couldn't finish wiping this device's data/);
+    expect(snapshot.error?.cause).toBe(failure);
   });
 });

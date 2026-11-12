@@ -82,6 +82,51 @@ pub use conflicts::WriteConflict;
 pub use large_delta::{CellDelta, WireDelta};
 pub(crate) use pending::PENDING_DDL;
 
+/// What [`Db::upload_status`] reports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadStatus {
+    /// Commits awaiting the upstream's verdict (see
+    /// [`Db::pending_upload_count`]).
+    pub pending: usize,
+    /// When the oldest of them was committed, in Unix ms.
+    pub oldest_pending_at: Option<u64>,
+    /// This store's own commits the upstream refused since it opened.
+    pub rejected: u64,
+    /// The latest of those refusals.
+    pub last_rejection: Option<UploadRefusal>,
+}
+
+/// One refused upload, as [`UploadStatus`] names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadRefusal {
+    /// The public error code (`permission_denied`, ...).
+    pub code: String,
+    pub message: String,
+    /// When the refusal arrived, in Unix ms.
+    pub at: u64,
+}
+
+/// The upstream's refusals of this store's own commits since it opened.
+#[derive(Debug, Default)]
+pub(crate) struct Refusals {
+    count: u64,
+    last: Option<UploadRefusal>,
+}
+
+impl Refusals {
+    fn record(&mut self, error: &Error) {
+        let (code, message) = crate::binding_host::mutation_error_parts(error, true);
+        self.count += 1;
+        self.last = Some(UploadRefusal {
+            code: code.to_owned(),
+            message,
+            at: now_ms().max(0) as u64,
+        });
+    }
+}
+
 /// Wall-clock Unix ms.
 fn now_ms() -> i64 {
     web_time::SystemTime::now()
@@ -2867,7 +2912,10 @@ struct Follow<'w> {
     /// inputs changed: the client may hold them, so each ships its
     /// eviction.
     gone: &'w mut Vec<RowKey>,
-    followed: &'w mut HashSet<(usize, u64)>,
+    /// The deepest support each key was followed with in this traversal, by
+    /// whether the visit diffed against a resume floor (see
+    /// [`Inner::follow_value`]).
+    followed: &'w mut HashMap<(NestedKind, u64, bool), usize>,
 }
 
 /// The watch on row `id` of stored table `table`.
@@ -2883,13 +2931,16 @@ fn id_watch(table: &str, id: [u8; 16]) -> u64 {
 pub(super) const NAMESPACE_META: &str = "namespace";
 
 /// The stored tables `support` reads rows of.
-fn support_tables(support: &[Support], out: &mut Vec<String>) {
+fn support_tables(support: &[Support], out: &mut Vec<String>, seen: &mut HashSet<usize>) {
     for support in support {
         match support {
             Support::Include { target, .. } => out.push(target.clone()),
             Support::Array { table, nested, .. } => {
                 out.push(table.clone());
-                support_tables(nested, out);
+                // Nested support is shared: walk each node once.
+                if seen.insert(nested.as_ptr() as usize) {
+                    support_tables(nested, out, seen);
+                }
             }
             Support::Reach { edges, .. } => out.push(edges.clone()),
         }
@@ -2919,13 +2970,18 @@ pub(crate) enum Support {
     /// A forward array relation (`outer` holds child ids) correlates each
     /// element; a reverse one (`inner` holds parent ids) each child whose
     /// array contains the parent's value.
+    /// `nested` is shared between arrays that rest on the same support (see
+    /// [`SupportMemo`]). `policy_depth` is the remaining depth when `nested`
+    /// is the table's own policy support, so the walk can tell a key was
+    /// followed deeper already.
     Array {
         table: String,
         inner: String,
         outer: String,
         outer_array: bool,
         inner_array: bool,
-        nested: Vec<Support>,
+        nested: Rc<Vec<Support>>,
+        policy_depth: Option<usize>,
     },
     /// The edges of a gather from the row's `frontier` value: edge rows
     /// whose `member` holds it, then transitively from each edge's
@@ -2936,6 +2992,20 @@ pub(crate) enum Support {
         member: String,
         parent: String,
     },
+}
+
+/// The nested policy support built for one [`Support`] tree, by (stored table,
+/// remaining depth). Sharing it keeps the tree's size at tables x depth where a
+/// policy's arms would otherwise rebuild it arms^depth.
+type SupportMemo = HashMap<(String, usize), Rc<Vec<Support>>>;
+
+/// Which walks of a key [`Inner::follow_value`] counts as the same: a table's
+/// policy support at any depth (what a key's rows reach at a depth, they reach
+/// at any deeper one), any other nested support by its node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum NestedKind {
+    Policy,
+    Node(usize),
 }
 
 /// A snapshot whose history this store has not observed (yet): it may be
@@ -3336,7 +3406,11 @@ impl Inner {
         }
         support.extend(self.array_support(table, &query.array_subqueries)?);
         support.extend(self.join_support(table, &query.joins)?);
-        support.extend(self.policy_support(table, crate::compile::DEFAULT_INHERITS_DEPTH)?);
+        support.extend(self.policy_support(
+            table,
+            crate::compile::DEFAULT_INHERITS_DEPTH,
+            &mut SupportMemo::new(),
+        )?);
         for via in &query.reachable {
             // Seed rows that reference the rows the walk starts from.
             if let Some(seed) = via.seed.as_ref().filter(|seed| seed.team_column != "id") {
@@ -3347,7 +3421,8 @@ impl Inner {
                     outer: "id".to_owned(),
                     outer_array: false,
                     inner_array: crate::compile::is_array(seeds, &seed.team_column),
-                    nested: Vec::new(),
+                    nested: Rc::default(),
+                    policy_depth: None,
                 });
             }
             let edges = self.schema.table(&via.edge_table)?;
@@ -3377,7 +3452,8 @@ impl Inner {
                 outer: parent.stored_name(&array.outer_column).to_owned(),
                 outer_array: crate::compile::is_array(parent, &array.outer_column),
                 inner_array: crate::compile::is_array(child, &array.inner_column),
-                nested: self.array_support(child, &array.nested_arrays)?,
+                nested: Rc::new(self.array_support(child, &array.nested_arrays)?),
+                policy_depth: None,
             });
         }
         Ok(support)
@@ -3391,9 +3467,26 @@ impl Inner {
         &self,
         table: &crate::values::Table,
         depth: usize,
+        memo: &mut SupportMemo,
     ) -> Result<Vec<Support>, Error> {
-        let mut support = self.inherited_support(table, depth)?;
-        support.extend(self.exists_support(table, depth)?);
+        let mut support = self.inherited_support(table, depth, memo)?;
+        support.extend(self.exists_support(table, depth, memo)?);
+        Ok(support)
+    }
+
+    /// [`Inner::policy_support`] as a node shared across `memo`'s tree.
+    fn shared_support(
+        &self,
+        table: &crate::values::Table,
+        depth: usize,
+        memo: &mut SupportMemo,
+    ) -> Result<Rc<Vec<Support>>, Error> {
+        let key = (table.stored.clone(), depth);
+        if let Some(shared) = memo.get(&key) {
+            return Ok(Rc::clone(shared));
+        }
+        let support = Rc::new(self.policy_support(table, depth, memo)?);
+        memo.insert(key, Rc::clone(&support));
         Ok(support)
     }
 
@@ -3405,6 +3498,7 @@ impl Inner {
         &self,
         table: &crate::values::Table,
         depth: usize,
+        memo: &mut SupportMemo,
     ) -> Result<Vec<Support>, Error> {
         use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
         /// The `(inner, outer)` columns an `EXISTS` condition correlates.
@@ -3451,7 +3545,8 @@ impl Inner {
                 outer: table.stored_name(outer).to_owned(),
                 outer_array: crate::compile::is_array(table, outer),
                 inner_array: crate::compile::is_array(consulted, inner),
-                nested: self.policy_support(consulted, depth - 1)?,
+                nested: self.shared_support(consulted, depth - 1, memo)?,
+                policy_depth: Some(depth - 1),
             });
         }
         Ok(support)
@@ -3464,6 +3559,7 @@ impl Inner {
         &self,
         table: &crate::values::Table,
         depth: usize,
+        memo: &mut SupportMemo,
     ) -> Result<Vec<Support>, Error> {
         use crate::tools::{Operation, PolicyExpr};
         fn hops<'p>(policy: &'p PolicyExpr, out: &mut Vec<(&'p str, Option<usize>)>) {
@@ -3505,7 +3601,8 @@ impl Inner {
                 // The parent's read rests on its own policy's support,
                 // its correlated `EXISTS` clauses included, not just on its
                 // parents in turn.
-                nested: self.policy_support(parent, depth - 1)?,
+                nested: self.shared_support(parent, depth - 1, memo)?,
+                policy_depth: Some(depth - 1),
             });
         }
         Ok(support)
@@ -3529,7 +3626,8 @@ impl Inner {
                 outer: parent.stored_name(source).to_owned(),
                 outer_array: crate::compile::is_array(parent, source),
                 inner_array: crate::compile::is_array(target, &join.on_column),
-                nested: self.join_support(target, &join.nested_joins)?,
+                nested: Rc::new(self.join_support(target, &join.nested_joins)?),
+                policy_depth: None,
             });
         }
         Ok(support)
@@ -3708,7 +3806,7 @@ impl Inner {
         follow: &mut Follow<'_>,
     ) -> Result<(), Error> {
         for item in support {
-            let (table, column, values, nested, contains) = match item {
+            let (table, column, values, nested, policy_depth, contains) = match item {
                 Support::Reach {
                     frontier,
                     edges,
@@ -3726,7 +3824,7 @@ impl Inner {
                     continue;
                 }
                 Support::Include { column, target } => match image_cell(image, column) {
-                    Some(value @ Sql::Blob(_)) => (target, "id", vec![value], &[][..], false),
+                    Some(value @ Sql::Blob(_)) => (target, "id", vec![value], &[][..], None, false),
                     _ => continue,
                 },
                 Support::Array {
@@ -3736,23 +3834,41 @@ impl Inner {
                     outer_array,
                     inner_array,
                     nested,
+                    policy_depth,
                 } => match image_cell(image, outer) {
                     Some(Sql::Null) | None => continue,
                     Some(value) if *outer_array => {
                         let elements = array_elements(&value).unwrap_or_default();
-                        (table, inner.as_str(), elements, &nested[..], *inner_array)
+                        (
+                            table,
+                            inner.as_str(),
+                            elements,
+                            &nested[..],
+                            *policy_depth,
+                            *inner_array,
+                        )
                     }
                     Some(value) => (
                         table,
                         inner.as_str(),
                         vec![value],
                         &nested[..],
+                        *policy_depth,
                         *inner_array,
                     ),
                 },
             };
             for value in values {
-                self.follow_value(table, column, value, contains, nested, floor, follow)?;
+                self.follow_value(
+                    table,
+                    column,
+                    value,
+                    contains,
+                    nested,
+                    policy_depth,
+                    floor,
+                    follow,
+                )?;
             }
         }
         Ok(())
@@ -3800,6 +3916,7 @@ impl Inner {
         value: Sql,
         contains: bool,
         nested: &[Support],
+        policy_depth: Option<usize>,
         floor: Option<Floor>,
         follow: &mut Follow<'_>,
     ) -> Result<(), Error> {
@@ -3816,11 +3933,33 @@ impl Inner {
         // Once per traversal, though: a policy whose EXISTS consults its
         // own table (a member reads the band's members) nests the same
         // support at every depth, and each row reaches the same key
-        // again, so following it anew costs (rows per key)^depth. The
-        // nested support node tells depths apart, so a key reached with
-        // deeper support than before is still followed.
-        if !follow.followed.insert((nested.as_ptr() as usize, key)) {
-            return Ok(());
+        // again, so following it anew costs (rows per key)^depth. A key
+        // reached with deeper support than before is still followed; what
+        // shallower support reaches, the deeper walk reached already.
+        //
+        // A visit diffing against a resume floor is told apart from one
+        // that isn't: only it reports the rows access was lost to while
+        // the client was away (`gone`), so a key first reached below a
+        // newly shipped row (no floor) is followed again below a held one.
+        //
+        // Non-policy support is told apart by its node. Every empty
+        // `nested` shares one dangling pointer, which is fine: with nothing
+        // nested, visits of a key differ in nothing the pointer would tell.
+        let (kind, depth) = match policy_depth {
+            Some(depth) => (NestedKind::Policy, depth),
+            None => (NestedKind::Node(nested.as_ptr() as usize), 0),
+        };
+        let diff = floor.is_some_and(|floor| floor.diff);
+        match follow.followed.entry((kind, key, diff)) {
+            std::collections::hash_map::Entry::Occupied(mut deepest) => {
+                if *deepest.get() >= depth {
+                    return Ok(());
+                }
+                deepest.insert(depth);
+            }
+            std::collections::hash_map::Entry::Vacant(first) => {
+                first.insert(depth);
+            }
         }
         let filter = if column == "id" {
             "id = ?1".to_owned()
@@ -5441,8 +5580,12 @@ impl Inner {
             client.unavailable.insert(request);
         }
         client.arrived = true;
-        // Pulls this relay parked for its sessions are answered now.
-        client.relay_ready |= parked;
+        // Pulls this relay parked for its sessions are answered now, and so
+        // are its sessions' subscriptions that waited on these chunks: the
+        // tick re-runs them after this serving pass, so they go out on the
+        // one that follows. Without it they wait for an unrelated tick, which
+        // a host that ticks when asked never runs.
+        client.relay_ready |= parked || !self.sessions.is_empty();
         Ok(())
     }
 
@@ -6635,7 +6778,7 @@ impl Inner {
             .as_ref()
             .map_or(&*self.owner, |schema| schema.policy_schema());
         let mut tables = Vec::new();
-        support_tables(support, &mut tables);
+        support_tables(support, &mut tables, &mut HashSet::new());
         for table in tables {
             if let Some(author) = identity
                 && policies.by_stored(&table).is_some()
@@ -8302,6 +8445,30 @@ impl Db {
             .map_or(0, |client| client.pending.len())
     }
 
+    /// This replica's uploads as its host reports them: what still awaits
+    /// the upstream's verdict, since when, and what the upstream refused
+    /// since the store opened. Refusals of the sessions it relays are
+    /// theirs to count, not this store's.
+    pub fn upload_status(&self) -> UploadStatus {
+        let inner = self.inner.borrow();
+        let (pending, oldest_pending_at) = inner.client.as_ref().map_or((0, None), |client| {
+            (
+                client.pending.len(),
+                client
+                    .pending
+                    .iter()
+                    .map(|pending| crate::db::shard::hlc_ms(pending.clock))
+                    .min(),
+            )
+        });
+        UploadStatus {
+            pending,
+            oldest_pending_at,
+            rejected: inner.refusals.count,
+            last_rejection: inner.refusals.last.clone(),
+        }
+    }
+
     /// Whether chunks this replica requested may still arrive: it is
     /// connected to an upstream that may answer, with requests outstanding
     /// (sent, or recorded by a read for the next send). A non-durable
@@ -8972,6 +9139,9 @@ impl Db {
                                 let refused = Err(wire_error(error));
                                 inner.record_fate(node, session_tx, &refused)?;
                                 inner.record_settled(node, session_tx, None)?;
+                            }
+                            if !relayed && origins.is_empty() {
+                                inner.refusals.record(error);
                             }
                             let me = *inner.identity.node.as_bytes();
                             if let (Some(rejections), false) =
@@ -11211,7 +11381,7 @@ impl Db {
                     });
                     let mut extra = Vec::new();
                     let mut gone = Vec::new();
-                    let mut followed = HashSet::new();
+                    let mut followed = HashMap::new();
                     let mut follow = Follow {
                         owner: id,
                         identity: policy,
@@ -12379,7 +12549,7 @@ impl Db {
                 let mut extra = Vec::new();
                 let mut watch = Watches::default();
                 let mut held = Kept::default();
-                let (mut gone, mut followed) = (Vec::new(), HashSet::new());
+                let (mut gone, mut followed) = (Vec::new(), HashMap::new());
                 let mut follow = Follow {
                     owner: id,
                     identity: policy,

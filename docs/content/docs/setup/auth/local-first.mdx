@@ -1,62 +1,95 @@
 ---
-title: Local-First Auth
-description: "Start offline with a recoverable account, then link an external identity without changing ownership."
+title: Device Accounts
+description: "Let users start as guests, with no sign-in, and keep their data when they sign up: device accounts are Jazz's local-first friendly auth method."
 reviewedAt: "20017a2694"
 ---
 
-A local-first account lets someone start using an app before signing up. Jazz derives its founding identity and account from a random signing root. Creating that account works offline. When it connects, the core verifies the signing proof and admits the deterministic account.
+A device account is a Jazz account whose key lives on the device. It needs no sign-in and works
+offline. Device accounts are how you do **guests** in Jazz: someone can use your app before they sign
+up, and keep everything they made when they do. They are also a **local-first friendly** way to
+sign in at all: an app with no sign-in of its own can run on device accounts alone.
+
+Jazz derives a device account's founding identity from a random key. Creating one works offline.
+When it connects, the server verifies the key's signing proof and admits the account.
 
 ## Client setup
 
-Configure a session once:
+Start the session as a device account with `initial: "device"`:
 
 ```ts
 import { createJazzClient } from "jazz-tools/client";
 
-const jazz = await createJazzClient({
+const session = await createJazzClient({
   serverUrl: "/jazz",
-  initial: "local-first",
-  // Local data, so a guest works offline from its first visit.
+  initial: "device",
+  // Local data, so a guest keeps working offline once its first visit has reached the backend.
   client: () => import("jazz-tools/local-first"),
 });
 ```
 
-Your backend lets guests sync by returning `acceptLocalFirstAuth(request)` from `authenticate`
-for signed-out requests (an app with no sign-in passes `authenticate: acceptLocalFirstAuth`).
-Guests are refused otherwise. With `serverUrl: null`, Jazz stays on the device: no backend, one
-local-first account per browser profile.
+In React, React Native, Expo, Vue, Solid and Svelte, pass the same config to the provider:
+`<JazzProvider config={{ serverUrl: "/jazz", initial: "device" }}>`.
 
-Session creation prepares crypto, restores usable saved selection, or creates a local-first account. Browser sessions retain signing roots in browser storage. Native hosts use an atomic, protected `AccountStore`. Creating a local-first account works offline once runtime assets are available.
+Your backend lets device accounts sync by returning `acceptDeviceAccounts(request)` from
+`authenticate` for signed-out requests (an app with no sign-in passes
+`authenticate: acceptDeviceAccounts`). Device accounts are refused otherwise. With
+`serverUrl: null`, Jazz stays on the device: no backend, one device account per browser profile.
 
-Framework `JazzSessionProvider` and session hooks expose the same lifecycle. Account commands run outside contexts after ordinary graceful shutdown, which Jazz coordinates automatically. See [Lifecycle](/docs/setup/auth/lifecycle). Lower-level account handles and client factories remain available when an app deliberately owns its own context lifecycle.
+Your backend still decides who is signed in. A device account is who the session is signed in as
+while your backend names no one; once your backend's `authenticate` names a user, `refresh()`
+follows it. See [How Auth Works](/docs/setup/auth/backend).
 
-## Backing up and restoring the secret
+Jazz creates the device account, or reopens the one already on the device. Provided the app has
+fully loaded at least once, new device accounts can be created offline. In a browser, the key is
+kept in browser storage. On Expo, Jazz stores it using SecureStore. In a bare React Native app,
+provide your own atomic `AccountStore` backed by protected device storage. A first visit made while
+your backend is unreachable is not safe yet: the client stays thin, and a guest write made then can
+be lost on reload.
 
-A signing root is a credential. Possession allows acting as its local-first identity. Jazz represents it as `jazz-auth-v1:` followed by 43 unpadded base64url characters encoding 32 random bytes. Export it explicitly from a live local-first handle:
+To start signed out and create the device account only when the user asks (a "Continue as guest"
+button), leave out `initial` and call `createDeviceAccount()` on the session, or from
+`useJazzSession()` under `<JazzProvider>` (Svelte: `getJazzSession()`).
+
+`snapshot.user.kind` is `"device"` while the session is signed in as a device account, and
+`"backend"` for a user your backend signed in.
+
+## Backing up and restoring the key
+
+A device account's key is held by the user's device. It is 32 random bytes. If it is lost, the user
+can't get back into their account without a linked sign-in method. You can turn the key into a
+recovery phrase that users can back up and use to regain access if the key is deleted from the
+device's storage.
+
+The recovery phrase is like a password: anyone who has it can sign in to the account. Keep it out of
+logs, and warn the user that it's sensitive. `session.exportDeviceKey()` returns the key as a
+`jazz-auth-v1:…` string:
 
 ```ts
-import { exportLocalFirstSecret } from "jazz-tools";
 import { RecoveryPhrase } from "jazz-tools/passphrase";
 
-const secret = exportLocalFirstSecret(jazz.getSnapshot().account!);
-const phrase = RecoveryPhrase.fromSecret(secret);
+const phrase = RecoveryPhrase.fromSecret(session.exportDeviceKey());
 ```
 
-The recovery phrase encodes the same root; it is not a second password. Keep it out of logs and ordinary account-state UI. Export fails for external or logged-out handles, and secrets never appear in snapshots. Signing roots remain retained after logout so explicit recovery can restore them.
+You can only export the key while the session is signed in as the device account. Signing out
+doesn't delete the key from the device, so the account can still be restored later.
 
 ### Recovery passphrase
 
-Restore through the session; it owns the graceful handoff:
+To restore a device account from a recovery phrase, turn the phrase back into a key and pass it to
+`restoreDeviceAccount`:
 
 ```ts
-await jazz.restoreLocalFirst(RecoveryPhrase.toSecret(userInput));
+await session.restoreDeviceAccount(RecoveryPhrase.toSecret(userInput));
 ```
 
-Session account transitions wait for pending writes to sync before replacing the client. Ordinary `jazz.close()` preserves local durability without requiring online sync.
+If the phrase is invalid, `RecoveryPhrase.toSecret` throws a `RecoveryPhraseError` whose `code` is
+`invalid-word`, `invalid-checksum` or `invalid-length`, so handle it in your sign-in form. See
+[Lifecycle](/docs/setup/auth/backend#lifecycle) for what happens to pending writes when the account
+changes.
 
 ### Passkey backup
 
-Browser apps can wrap the same exported root with a passkey:
+Browser apps can wrap the same key with a passkey:
 
 ```ts
 import { BrowserPasskeyBackup } from "jazz-tools/passkey-backup";
@@ -65,26 +98,40 @@ const backup = new BrowserPasskeyBackup({
   appName: "My App",
   appHostname: "app.example",
 });
-await backup.backup(exportLocalFirstSecret(jazz.getSnapshot().account!), "My account");
+await backup.backup(session.exportDeviceKey(), "My account");
 ```
 
-`await backup.restore()` returns the root for `await jazz.restoreLocalFirst(secret)`. Pin the canonical production hostname when configuring a passkey backup; passkey availability and synchronization depend on the user's platform.
+Pass the value returned by `await backup.restore()` to `await session.restoreDeviceAccount(key)` to
+sign in to the account.
+
+Passkey support and sync depend on the user's platform. Passkeys are associated with a domain: if
+`appHostname` isn't set correctly, the user may not be offered the passkey when restoring their
+account, or may not be able to create it. Without `appHostname`, the passkey belongs to the current
+page's hostname, so a passkey made on a preview URL won't work on production. Set it to your
+production hostname.
 
 ## Signing up later
 
-When a local-first user signs up with your auth, call `await jazz.linkWithBackend()` after your
-sign-up has set its session. The client proves it owns the local-first account with its own key;
-your backend's `authenticate` names the new user, and Jazz links that user to the existing account.
-Jazz performs graceful shutdown, linking, and client replacement. The account ID stays the same, so
-account-based ownership remains valid, and earlier rows keep the identity that authored them.
+When a guest signs up with your auth, call `await session.linkDeviceAccount()` after your sign-up
+has set its session. The client proves it owns the device account with its key; your backend's
+`authenticate` names the new user, and Jazz links that user to the existing account. Jazz performs
+graceful shutdown, linking, and client replacement. The account ID stays the same, so account-based
+ownership remains valid, and earlier rows keep the identity that authored them.
+
+The session also links on its own when your backend names a user with no Jazz account yet while a
+device account is signed in. Turn that off on shared devices with
+`linkDeviceAccountOnSignUp: false`.
 
 The user must not have a Jazz account of their own yet. If they do, the app chooses whether to
-sign in to that account (`loginWithBackend()`) or migrate data explicitly; Jazz never merges
-accounts. See [Other / Custom](/docs/setup/auth/custom#guests-who-sign-up) and
-[Lifecycle](/docs/setup/auth/lifecycle) for failure and logout handling.
+sign in to that account (`refresh()`) or migrate data explicitly; Jazz never merges accounts. See
+[Other / Custom](/docs/setup/auth/custom#guests-who-sign-up) and
+[Lifecycle](/docs/setup/auth/backend#lifecycle) for failure and sign-out handling.
 
 ## Permissions by auth mode
 
-Use `session.user`, the account, for stable ownership. Use `session.identity`, the exact issuer and subject, when a policy deliberately distinguishes linked identities. A local-first identity is authenticated by its signing key; it is not an unauthenticated guest.
+Use `session.user`, the account, for stable ownership. Use `session.identity`, the exact issuer and
+subject, when a policy deliberately distinguishes linked identities. A device account's identity
+(issuer `urn:jazz:local-first`) is authenticated by its signing key; it is not an unauthenticated
+guest.
 
-Claims from your backend can add application requirements, such as a verified role. They cannot replace the account assignment. Define those checks in [Permissions](/docs/schemas/policies), alongside ownership policies.
+You can also use claims returned by your backend's `authenticate` function in your permission policies. For example, you could give users with an admin role access to additional data. See [Declarative Permissions](/docs/schemas/policies).

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useDb } from "jazz-tools/react";
+import { useAll, useDb } from "jazz-tools/react";
 import {
   Badge,
   Banner,
@@ -46,6 +46,25 @@ export function MembersDialog({
   const memberAuthors = new Set(members.map((member) => member.memberAuthor));
   const pending = requests.filter((request) => !memberAuthors.has(request.requester));
   const [error, setError] = useState<string | null>(null);
+  // The room's read markers, so removing a member drops theirs too.
+  const { data: markers = [] } = useAll(isCreator ? app.readMarkers.where({ roomId }) : undefined);
+
+  // Removing a member and dropping their read marker commit together, so an
+  // ex-member leaves no read position behind.
+  function remove(member: RoomMember) {
+    setError(null);
+    db.transaction((tx) => {
+      for (const marker of markers)
+        if (marker.reader === member.memberAuthor) tx.delete(app.readMarkers, marker.id);
+      tx.delete(app.roomMembers, member.id);
+    })
+      .then((result) => result.wait({ tier: "global" }))
+      .catch((cause: unknown) =>
+        setError(
+          `Could not remove the member: ${cause instanceof Error ? cause.message : String(cause)}`,
+        ),
+      );
+  }
 
   // Admission and clearing the request commit together. Both policies check
   // only the committed room, profile and request, never each other.
@@ -127,7 +146,7 @@ export function MembersDialog({
                       label="Remove"
                       size="sm"
                       variant="ghost"
-                      onClick={() => db.delete(app.roomMembers, member.id)}
+                      onClick={() => remove(member)}
                     />
                   ) : undefined
                 }

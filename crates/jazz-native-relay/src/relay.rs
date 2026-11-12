@@ -33,8 +33,8 @@ use std::time::{Duration, Instant};
 
 use jazz::binding_host::{self, Binding, EventChunk, HostError, Link};
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, LargeValueUpdate, RemoteLinkHint, SubscriptionStream,
-    block_on,
+    Db, DbConfig, DbIdentity, FileOptions, LargeValueUpdate, Migrations, RemoteLinkHint,
+    SubscriptionStream, block_on,
 };
 use jazz::ids::{AuthorSubject, RowUuid};
 use jazz::link::{
@@ -121,6 +121,11 @@ impl RelayScope {
     }
 }
 
+pub(crate) type MigrationsKey = (
+    Vec<jazz::ids::SchemaVersionId>,
+    Vec<jazz::ids::MigrationLensId>,
+);
+
 /// Immutable configuration used to start a relay owner thread.
 #[derive(Clone, Debug)]
 pub struct RelayOpenConfig {
@@ -133,10 +138,27 @@ pub struct RelayOpenConfig {
     /// interpolates auth tokens or untrusted strings into a filesystem path.
     pub sqlite_path: PathBuf,
     pub schema: JazzSchema,
+    /// The app's earlier schema versions and the lenses between them, as it
+    /// ships them: the store keeps each column where the authority does.
+    pub migrations: Migrations,
     pub identity: DbIdentity,
 }
 
 impl RelayOpenConfig {
+    /// What identifies this config's schema history: its earlier versions
+    /// and its content-addressed lenses, in the order shipped. A scope
+    /// reopened with another history is another configuration.
+    pub(crate) fn migrations_key(&self) -> MigrationsKey {
+        (
+            self.migrations
+                .schemas
+                .iter()
+                .map(|schema| schema.version_id())
+                .collect(),
+            self.migrations.lenses.iter().map(|lens| lens.id).collect(),
+        )
+    }
+
     fn validate(&self) -> Result<(), RelayError> {
         ensure_native_relay_abi_compatible(self.supported_abi)?;
         self.scope.validate()
@@ -258,6 +280,7 @@ struct RelayInner {
     alive: Arc<AtomicBool>,
     sqlite_path: PathBuf,
     schema_version: jazz::ids::SchemaVersionId,
+    migrations: MigrationsKey,
     identity: DbIdentity,
 }
 
@@ -308,6 +331,7 @@ impl NativeRelay {
         config.validate()?;
         let sqlite_path = config.sqlite_path.clone();
         let schema_version = config.schema.version_id();
+        let migrations = config.migrations_key();
         let identity = config.identity;
         let alive = Arc::new(AtomicBool::new(true));
         let (commands, receiver) =
@@ -341,6 +365,7 @@ impl NativeRelay {
                 alive,
                 sqlite_path,
                 schema_version,
+                migrations,
                 identity,
             }),
         })
@@ -808,6 +833,7 @@ fn poll_once<T>(future: &mut Pin<Box<dyn Future<Output = T>>>) -> Poll<T> {
 
 pub(crate) struct RelayWorker {
     schema: JazzSchema,
+    migrations: Migrations,
     persistent: Binding,
     persistent_dirty: Rc<Cell<bool>>,
     upstream: Option<UpstreamConnection>,
@@ -862,7 +888,10 @@ impl RelayWorker {
                 .map_err(|error| RelayError::Storage(error.to_string()))?;
         }
         let db = block_on(Db::open_at(
-            DbConfig::new(config.schema.clone(), config.identity),
+            DbConfig::new(config.schema.clone(), config.identity).with_migrations(
+                config.migrations.schemas.clone(),
+                config.migrations.lenses.clone(),
+            ),
             &config.sqlite_path,
             FileOptions::default(),
         ))
@@ -871,6 +900,7 @@ impl RelayWorker {
         let persistent_dirty = hook(&persistent);
         Ok(Self {
             schema: config.schema,
+            migrations: config.migrations,
             persistent,
             persistent_dirty,
             upstream: None,
@@ -966,8 +996,13 @@ impl RelayWorker {
             .db
             .check_serves(identity.author)
             .map_err(|error| RelayError::Host(error.into()))?;
-        let db = block_on(Db::open(DbConfig::new(self.schema.clone(), identity)))
-            .map_err(|error| RelayError::Host(error.into()))?;
+        let db = block_on(Db::open(
+            DbConfig::new(self.schema.clone(), identity).with_migrations(
+                self.migrations.schemas.clone(),
+                self.migrations.lenses.clone(),
+            ),
+        ))
+        .map_err(|error| RelayError::Host(error.into()))?;
         // Continue after the node's previous holder: its transaction ids
         // were (seq, node), and the relay deduplicates by them.
         if high_water > 0 {
@@ -1637,6 +1672,10 @@ fn foreground_command(
         Request::PendingUploadCount => Response::PendingUploadCount {
             count: binding.pending_upload_count() as u64,
         },
+        Request::UploadStatus => Response::UploadStatus {
+            status_json: serde_json::to_string(&binding.upload_status())
+                .expect("an upload status serializes"),
+        },
         Request::BeginStreamingMutation {
             mutation,
             table,
@@ -1822,6 +1861,7 @@ impl NativeRelayRegistry {
         if let Some(existing) = relays.get(&config.scope) {
             if existing.inner.sqlite_path != config.sqlite_path
                 || existing.inner.schema_version != config.schema.version_id()
+                || existing.inner.migrations != config.migrations_key()
                 || existing.inner.identity != config.identity
             {
                 return Err(RelayError::ScopeConfigurationMismatch);

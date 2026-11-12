@@ -1,6 +1,6 @@
 ---
 title: Effect
-description: Use Jazz from Effect v4 programs, in the browser and on the server.
+description: "Learn how to use Jazz from Effect v4 programs, in the browser and on the server."
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
@@ -10,15 +10,15 @@ Effects with typed errors, live queries are Streams, and transactions commit or 
 the Effect that runs inside them.
 
 <Callout type="info">
-  The bindings target Effect v4 (`effect@4.0.0-rc.118` or later). Install it next to Jazz: `pnpm add
-  effect@rc`.
+  The bindings target Effect v4 (`effect@4.0.0-rc.118` or later). Install a release next to Jazz:
+  `pnpm add effect@^4.1`. The `rc` tag can pull in prereleases whose packages need exact pins.
 </Callout>
 
 ## The `Jazz` service
 
-`Jazz.layer(config)` opens a database for the lifetime of the layer and shuts it down when the layer's
-scope closes. It takes the same config as `createDb`. If you already own a `Db`, use
-`Jazz.layerDb(db)` instead.
+`Jazz.layer(config)` opens a Jazz session (`createJazzClient(config)`) for the lifetime of the layer,
+provides its `session.db`, and closes the session when the layer's scope closes. If you already own a
+session, use `Jazz.layerDb(session.db)` instead.
 
 ```ts
 import { Effect, Stream } from "effect";
@@ -35,7 +35,10 @@ const program = Effect.gen(function* () {
   const first = yield* jazz.one(app.todos); // Option<Todo>
 });
 
-program.pipe(Effect.provide(Jazz.layer(config)), Effect.runPromise);
+program.pipe(
+  Effect.provide(Jazz.layer({ serverUrl: "/jazz", initial: "device" })),
+  Effect.runPromise,
+);
 ```
 
 ## Writes and durability
@@ -105,17 +108,29 @@ const listTodos = Effect.gen(function* () {
   return yield* jazz.all(app.todos);
 });
 
-// With a fetch Request from the signed-in user:
-listTodos.pipe(JazzBackend.forRequest(request));
+// With a request your `authenticate` can read (your session cookie):
+listTodos.pipe(JazzBackend.forReqUser(request));
 
 // Inside an `effect/http` handler, from the current HttpServerRequest:
-listTodos.pipe(JazzBackend.forCurrentRequest());
+listTodos.pipe(JazzBackend.forCurrentReqUser());
 
 // With the backend's own authority:
 listTodos.pipe(JazzBackend.asAuthority);
 ```
 
+For a user with no Jazz account yet, `JazzBackend.forReqUser` and `forCurrentReqUser` fail with a
+`JazzNoAccount` error (`{ userId, operation }`, exported from `jazz-tools/effect/backend`), which
+you can handle with `Effect.catchTag("JazzNoAccount", …)`. `createAccountFor(userId)` and
+`withAttribution(request)` are methods of the `JazzBackend` service, not statics:
+
+```ts
+const accountId = yield * JazzBackend.use((backend) => backend.createAccountFor(userId));
+```
+
+`createAccountFor` creates the account, or returns the existing one's id; see
+[Users without an account](/docs/setup/deployment/own-server#users-without-an-account).
+
 Provide `JazzBackend.layer(createJazzOptions)` once for the whole server (or
 `JazzBackend.layerJazz(jazz)` for a Jazz you already created). Because handlers only depend on
-`Jazz`, the same code runs in the browser against `Jazz.layer`, and in tests against an in-memory
+`Jazz`, the same code runs in the browser against `Jazz.layer(config)`, and in tests against an in-memory
 database.
