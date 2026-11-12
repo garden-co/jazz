@@ -1,7 +1,7 @@
 // Runs in a tab of its own (see session-tab-node.ts): an app's page with a
 // Jazz session, as `createJazzClient` opens it there.
 import {
-  createJazzClient,
+  openBrowserSessionCore as createJazzClient,
   type BrowserJazzSession,
 } from "../../src/session/create-jazz-session.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
@@ -49,7 +49,7 @@ export async function openSessionTab(input: {
   session = await createJazzClient({
     serverUrl: input.serverUrl,
     fetch: nodeFetch,
-    initial: "local-first",
+    initial: "device",
     clearOnSignOut: input.clearOnSignOut,
     client: async () => ({ createClient: createLocalFirstDb }),
   });

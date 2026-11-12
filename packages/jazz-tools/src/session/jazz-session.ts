@@ -105,6 +105,17 @@ export interface JazzSession<Client> {
   getSnapshot(): JazzSessionSnapshot<Client>;
   subscribe(listener: () => void): () => void;
   /**
+   * The signed-in user's Db: `getSnapshot().client.db`. Throws, naming the
+   * status, while there is no usable client (starting, signed out, switching
+   * users, failed or closed).
+   *
+   * The session replaces its Db when someone signs in or out (or switches
+   * users): read `session.db` again after those rather than keeping it. A Db
+   * kept from before throws `DbReplacedError` (the local-first upgrade keeps
+   * the same Db).
+   */
+  readonly db: Client extends { db: infer TDb } ? TDb : never;
+  /**
    * Sign in as a new device account: an account whose key lives on this
    * device. It needs no sign-in and works offline. It's how an app lets
    * people start as guests, and a local-first friendly way to sign in at
@@ -334,6 +345,22 @@ export function ownJazzSession<Config, Client>(
   };
 
   const session: JazzSession<Client> = {
+    get db() {
+      const current = snapshot;
+      const client = current.client as { db?: unknown } | undefined;
+      if (current.status !== "ready" || !client?.db)
+        throw new Error(
+          `session.db: there is no Db while the session is ${current.status}` +
+            (current.status === "signed-out"
+              ? ": sign in first (createDeviceAccount(), or your backend's user)"
+              : current.status === "starting" || current.status === "transitioning"
+                ? ": wait for status \"ready\" (subscribe to the session)"
+                : current.error
+                  ? ` (${current.error.message})`
+                  : ""),
+        );
+      return client.db as JazzSession<Client>["db"];
+    },
     getSnapshot: () => snapshot,
     subscribe: listeners.subscribe,
     createDeviceAccount: action((current) => current.createLocalFirst()),
@@ -405,10 +432,7 @@ export function ownJazzSession<Config, Client>(
         .then(async () => {
           if (closed || generation !== actionGeneration) return;
           try {
-            if (
-              manualRetry &&
-              (snapshot.recovery === "action" || manualRetry === session.refresh)
-            )
+            if (manualRetry && (snapshot.recovery === "action" || manualRetry === session.refresh))
               await manualRetry();
             else {
               await current.retry();
@@ -501,4 +525,24 @@ export function coreInitial(initial: unknown): "local-first" | "signed-out" | un
   if (initial === "local-first")
     throw new Error('initial: "local-first" is now initial: "device" (a device account)');
   throw new Error(`Unknown initial ${JSON.stringify(initial)}; expected "device" or "signed-out"`);
+}
+
+/**
+ * @internal A session's operations, bound and without its state, for the
+ * framework hooks (never a spread: `db` is a getter that throws while there
+ * is no client).
+ */
+export function jazzSessionActions<Client>(
+  session: JazzSession<Client>,
+): Omit<JazzSession<Client>, "getSnapshot" | "subscribe" | "db"> {
+  return {
+    createDeviceAccount: session.createDeviceAccount,
+    restoreDeviceAccount: session.restoreDeviceAccount,
+    linkDeviceAccount: session.linkDeviceAccount,
+    refresh: session.refresh,
+    exportDeviceKey: session.exportDeviceKey,
+    signOut: session.signOut,
+    retry: session.retry,
+    close: session.close,
+  };
 }

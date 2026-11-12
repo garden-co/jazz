@@ -51,7 +51,7 @@ publicDb.getInternalSession();
 // @ts-expect-error Trusted reserved sessions are not public configuration.
 void publicDb.getConfig().trustedReservedSession;
 
-declare const account: import("../index.js").AccountHandle;
+declare const account: import("../accounts/state.js").AccountHandle;
 const enrolled: PackageDbConfig = { appId: "app", serverUrl: "https://core.example", account };
 const runtimeEnrolled: RuntimeDbConfig = enrolled;
 // @ts-expect-error Public contexts require an enrolled account handle.

@@ -12,6 +12,7 @@ import {
 import type { JazzClient } from "../web/create-jazz-client.js";
 import {
   attachJazzSessionConsumer,
+  jazzSessionActions,
   ownJazzSession,
   startJazzSession,
   type JazzSession,
@@ -27,10 +28,14 @@ import {
 } from "../runtime/removed-provider-props.js";
 import type { SolidJazzClient } from "./create-solid-jazz-client.js";
 
-const SessionContext = createContext<JazzSession<JazzClient>>();
+type ProvidedSession = {
+  session: JazzSession<JazzClient>;
+  snapshot: Accessor<JazzSessionSnapshot<JazzClient>>;
+};
+const SessionContext = createContext<ProvidedSession>();
 
 /** `useJazzSession()`: the session's state as an accessor, and its operations. */
-export type UseJazzSession = Omit<JazzSession<JazzClient>, "getSnapshot" | "subscribe"> & {
+export type UseJazzSession = Omit<JazzSession<JazzClient>, "getSnapshot" | "subscribe" | "db"> & {
   readonly snapshot: Accessor<JazzSessionSnapshot<JazzClient>>;
 };
 
@@ -41,12 +46,23 @@ export type UseJazzSession = Omit<JazzSession<JazzClient>, "getSnapshot" | "subs
  * views. Operations reject on failure; the failure also shows in
  * `snapshot().error`.
  */
-export function useJazzSession(session = useContext(SessionContext)): UseJazzSession {
+export function useJazzSession(session?: JazzSession<JazzClient>): UseJazzSession {
+  // Under a provider, its own snapshot: it stays current for as long as the
+  // provider lives, even in a view that has since been disposed.
+  const provided = session ? undefined : useContext(SessionContext);
+  if (provided) return withActions(provided.session, provided.snapshot);
   if (!session) throw new Error("useJazzSession requires <JazzProvider> or a session argument");
-  const [snapshot, setSnapshot] = createSignal(session.getSnapshot());
-  onCleanup(session.subscribe(() => setSnapshot(session.getSnapshot())));
-  const { getSnapshot: _get, subscribe: _subscribe, ...actions } = session;
-  return { ...actions, snapshot };
+  const own = session;
+  const [snapshot, setSnapshot] = createSignal(own.getSnapshot());
+  onCleanup(own.subscribe(() => setSnapshot(own.getSnapshot())));
+  return withActions(own, snapshot);
+}
+
+function withActions(
+  session: JazzSession<JazzClient>,
+  snapshot: Accessor<JazzSessionSnapshot<JazzClient>>,
+): UseJazzSession {
+  return { ...jazzSessionActions(session), snapshot };
 }
 
 export type JazzProviderProps = NoAutoAttachDevTools & {
@@ -100,7 +116,7 @@ export function JazzProvider(props: JazzProviderProps) {
   refuseAutoAttachDevTools("JazzProvider", props);
   if (!props.config === !props.session)
     throw new Error(
-      "<JazzProvider> takes either `config` (its session's configuration, e.g. config={{ serverUrl: \"/jazz\" }}) or a `session` from createJazzClient.",
+      '<JazzProvider> takes either `config` (its session\'s configuration, e.g. config={{ serverUrl: "/jazz" }}) or a `session` from createJazzClient.',
     );
   if (props.config && "account" in props.config)
     throw new Error(
@@ -152,7 +168,7 @@ export function JazzProvider(props: JazzProviderProps) {
     </Show>
   );
   return (
-    <SessionContext.Provider value={session}>
+    <SessionContext.Provider value={{ session, snapshot }}>
       <Show
         when={snapshot().status === "ready" ? snapshot().client : undefined}
         keyed

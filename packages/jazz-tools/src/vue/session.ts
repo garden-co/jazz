@@ -16,6 +16,7 @@ import {
 import type { JazzClient } from "../web/create-jazz-client.js";
 import {
   attachJazzSessionConsumer,
+  jazzSessionActions,
   ownJazzSession,
   startJazzSession,
   type JazzSession,
@@ -28,10 +29,14 @@ import {
   type NoAutoAttachDevTools,
 } from "../runtime/removed-provider-props.js";
 
-const SessionKey: InjectionKey<JazzSession<JazzClient>> = Symbol("JazzSession");
+type ProvidedSession = {
+  session: JazzSession<JazzClient>;
+  snapshot: Readonly<ShallowRef<JazzSessionSnapshot<JazzClient>>>;
+};
+const SessionKey: InjectionKey<ProvidedSession> = Symbol("JazzSession");
 
 /** `useJazzSession()`: the session's state as a ref, and its operations. */
-export type UseJazzSession = Omit<JazzSession<JazzClient>, "getSnapshot" | "subscribe"> & {
+export type UseJazzSession = Omit<JazzSession<JazzClient>, "getSnapshot" | "subscribe" | "db"> & {
   readonly snapshot: Readonly<ShallowRef<JazzSessionSnapshot<JazzClient>>>;
 };
 
@@ -41,16 +46,27 @@ export type UseJazzSession = Omit<JazzSession<JazzClient>, "getSnapshot" | "subs
  * bound when destructured. Available under `<JazzProvider>`, in every slot.
  * Operations reject on failure; the failure also shows in `snapshot.error`.
  */
-export function useJazzSession(session = inject(SessionKey)): UseJazzSession {
+export function useJazzSession(session?: JazzSession<JazzClient>): UseJazzSession {
+  // Under a provider, its own snapshot: it stays current for as long as the
+  // provider is mounted, even in a view that has since unmounted.
+  const provided = session ? undefined : inject(SessionKey, undefined);
+  if (provided) return withActions(provided.session, provided.snapshot);
   if (!session) throw new Error("useJazzSession requires <JazzProvider> or a session argument");
-  const snapshot = shallowRef(session.getSnapshot());
+  const own = session;
+  const snapshot = shallowRef(own.getSnapshot());
   onScopeDispose(
-    session.subscribe(() => {
-      snapshot.value = session.getSnapshot();
+    own.subscribe(() => {
+      snapshot.value = own.getSnapshot();
     }),
   );
-  const { getSnapshot: _get, subscribe: _subscribe, ...actions } = session;
-  return { ...actions, snapshot: shallowReadonly(snapshot) };
+  return withActions(own, shallowReadonly(snapshot));
+}
+
+function withActions(
+  session: JazzSession<JazzClient>,
+  snapshot: Readonly<ShallowRef<JazzSessionSnapshot<JazzClient>>>,
+): UseJazzSession {
+  return { ...jazzSessionActions(session), snapshot };
 }
 
 export interface JazzProviderProps extends NoAutoAttachDevTools {
@@ -85,8 +101,8 @@ export const JazzProvider = defineComponent({
     const owned = !props.session;
     const session =
       props.session ?? ownJazzSession(props.config!, openBrowserSessionCore, { start: false });
-    provide(SessionKey, session);
     const snapshot = shallowRef(session.getSnapshot());
+    provide(SessionKey, { session, snapshot: shallowReadonly(snapshot) });
     const lease = attachJazzSessionConsumer(session);
     const stop = session.subscribe(() => {
       const observed = session.getSnapshot();

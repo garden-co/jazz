@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import {
-  acceptLocalFirstAuth,
+  acceptDeviceAccounts,
   createJazz,
   remote,
   type CreateJazzOptions,
@@ -110,7 +110,7 @@ export interface StartTestJazzOptions {
   port?: number;
   /**
    * Whether the app lets local-first guests sync, as an app's `authenticate`
-   * does by returning `acceptLocalFirstAuth(request)` (default true).
+   * does by returning `acceptDeviceAccounts(request)` (default true).
    */
   guests?: boolean;
   /** More `createJazz` options (not `app`, `permissions`, `store` or `authenticate`). */
@@ -138,7 +138,7 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
     const user = authorization?.startsWith("Bearer ")
       ? bearers.get(authorization.slice(7))
       : users.get(new URL(request.url).host);
-    return user ?? (options.guests === false ? null : acceptLocalFirstAuth(request));
+    return user ?? (options.guests === false ? null : acceptDeviceAccounts(request));
   };
   const servers: Server[] = [];
   // Every connection, including upgraded sync sockets, which `server.close`

@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { afterEach, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
-import { acceptLocalFirstAuth, createJazz, memory } from "../backend/index.js";
+import { acceptDeviceAccounts, createJazz, memory } from "../backend/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
@@ -35,7 +35,7 @@ async function setup(options: { guests?: boolean } = {}) {
     authenticate: (request: Request) => {
       const userId = request.headers.get("x-test-user");
       if (userId) return { userId };
-      return options.guests ? acceptLocalFirstAuth(request) : null;
+      return options.guests ? acceptDeviceAccounts(request) : null;
     },
   }).ready();
   cleanups.push(() => jazz.close());

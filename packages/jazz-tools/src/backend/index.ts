@@ -42,7 +42,7 @@ export {
   type BackendCredential,
   type JazzUser,
   type LocalFirstGuest,
-  acceptLocalFirstAuth,
+  acceptDeviceAccounts,
   type VercelStoreOptions,
   type WsLikeSocket,
   type InspectEvent,

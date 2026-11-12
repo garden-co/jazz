@@ -283,7 +283,7 @@ declare const localFirstGuestBrand: unique symbol;
 /**
  * `authenticate`'s answer for a request from a local-first guest: an account
  * a browser made on its own, before (or without) signing in. Return
- * {@link acceptLocalFirstAuth} for the requests you let guests make; any other
+ * {@link acceptDeviceAccounts} for the requests you let guests make; any other
  * answer refuses a guest.
  */
 export interface LocalFirstGuest {
@@ -303,30 +303,33 @@ function withoutCredentials(request: Request): Request {
 }
 
 /**
- * Let this request through as a local-first guest, when it comes from one.
- * Guests are refused unless `authenticate` returns this: a guest has no user
- * in your auth, so only your permissions stand between it and your data.
+ * Let this request through as a device account, when it comes from one: an
+ * account whose key lives on the user's device, with no user in your auth.
+ * It's how your app lets people in as guests, and a local-first friendly way
+ * to sign in at all. Device accounts are refused unless `authenticate`
+ * returns this, since only your permissions stand between them and your
+ * data.
  *
  * ```ts
  * authenticate: async (request) => {
  *   const session = await auth.api.getSession({ headers: request.headers });
- *   return session ? { userId: session.user.id } : acceptLocalFirstAuth(request);
+ *   return session ? { userId: session.user.id } : acceptDeviceAccounts(request);
  * },
  * ```
  *
- * An app with no sign-in of its own, where every browser is a guest, passes
- * it as is: `authenticate: acceptLocalFirstAuth`.
+ * An app with no sign-in of its own, where every browser has a device
+ * account, passes it as is: `authenticate: acceptDeviceAccounts`.
  *
- * For a request that is not a guest's, it means the same as `null`: no one
- * is signed in.
+ * For a request that is not a device account's, it means the same as `null`:
+ * no one is signed in.
  *
- * A guest's request may also carry a user's cookie: someone signed in (or
- * up) on that browser, and the guest still uploads its writes before it
- * links to them. Jazz then asks `authenticate` about the request without its
- * cookies and `Authorization` header, so the guest is let in as it would be
- * on its own.
+ * A device account's request may also carry a user's cookie: someone signed
+ * in (or up) on that browser, and the device account still uploads its
+ * writes before it links to them. Jazz then asks `authenticate` about the
+ * request without its cookies and `Authorization` header, so the device
+ * account is let in as it would be on its own.
  */
-export function acceptLocalFirstAuth(_request: Request): LocalFirstGuest {
+export function acceptDeviceAccounts(_request: Request): LocalFirstGuest {
   return LOCAL_FIRST_GUEST;
 }
 
@@ -366,8 +369,8 @@ export interface CreateJazzOptions {
    * ```
    *
    * Local-first guests are refused unless it returns
-   * `acceptLocalFirstAuth(request)` for them; an app with no sign-in passes
-   * `authenticate: acceptLocalFirstAuth`. Without `authenticate`, only
+   * `acceptDeviceAccounts(request)` for them; an app with no sign-in passes
+   * `authenticate: acceptDeviceAccounts`. Without `authenticate`, only
    * backend code reaches the data.
    */
   authenticate?: (
@@ -1444,7 +1447,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     return (await options.authenticate(request)) ?? null;
   }
 
-  /** Whether the app lets `request` in as a local-first guest (`acceptLocalFirstAuth`). */
+  /** Whether the app lets `request` in as a local-first guest (`acceptDeviceAccounts`). */
   let warnedGuestsOff = false;
   async function acceptsGuest(request: Request): Promise<boolean> {
     const answer = await askAuthenticate(request);
@@ -1459,7 +1462,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     if (!warnedGuestsOff) {
       warnedGuestsOff = true;
       console.warn(
-        "createJazz: refused a local-first guest. To let guests sync, return acceptLocalFirstAuth(request) from authenticate for them.",
+        "createJazz: refused a local-first guest. To let guests sync, return acceptDeviceAccounts(request) from authenticate for them.",
       );
     }
     return false;
@@ -2016,7 +2019,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     access: BackendAccess;
     trusted: boolean;
     expiresAt?: number;
-    /** A local-first guest, let in by `acceptLocalFirstAuth`. */
+    /** A local-first guest, let in by `acceptDeviceAccounts`. */
     guest?: true;
   } | null> {
     let parsed: Record<string, unknown>;

@@ -27,7 +27,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import {
-  acceptLocalFirstAuth,
+  acceptDeviceAccounts,
   createJazz,
   createJazzClient,
   files,
@@ -69,7 +69,7 @@ afterEach(async () => {
 /** The test app's own auth: the user named in a header, else a local-first guest. */
 function authenticate(request: Request) {
   const userId = request.headers.get("x-test-user");
-  return userId ? { userId } : acceptLocalFirstAuth(request);
+  return userId ? { userId } : acceptDeviceAccounts(request);
 }
 
 const requestPaths: string[] = [];
@@ -1000,7 +1000,7 @@ describe("createJazz", () => {
       // The documented setup: the session cookie's user, else a guest.
       authenticate: (request) => {
         const user = /(?:^|; )sid=([^;]+)/.exec(request.headers.get("cookie") ?? "")?.[1];
-        return user ? { userId: user } : acceptLocalFirstAuth(request);
+        return user ? { userId: user } : acceptDeviceAccounts(request);
       },
     });
     cleanups.push(() => jazz.close());

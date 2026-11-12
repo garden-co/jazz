@@ -122,7 +122,12 @@ export function JazzClientProvider({ client: clientPromise, children }: JazzClie
  * session) and makes it available to children. Apps use `<JazzProvider>`,
  * which owns a session, or `<JazzClientProvider>` for a client they opened.
  */
-export function JazzDbProvider({ config, fallback, children, openJazzClient }: JazzDbProviderProps) {
+export function JazzDbProvider({
+  config,
+  fallback,
+  children,
+  openJazzClient,
+}: JazzDbProviderProps) {
   // Stable per-provider identity, used as the registry holder across effect
   // cleanup and re-acquisition (including React Strict Mode's effect replay).
   const holder = useRef({}).current;

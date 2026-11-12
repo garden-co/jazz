@@ -11,6 +11,7 @@ import {
 } from "react";
 import {
   attachJazzSessionConsumer,
+  jazzSessionActions,
   ownJazzSession,
   startJazzSession,
   type JazzSession,
@@ -21,7 +22,7 @@ import { JazzClientProvider, type CoreJazzClient } from "./provider.js";
 
 /** `useJazzSession()`: the session's state, and its operations. */
 export type UseJazzSessionResult<Client = CoreJazzClient> = JazzSessionSnapshot<Client> &
-  Omit<JazzSession<Client>, "getSnapshot" | "subscribe">;
+  Omit<JazzSession<Client>, "getSnapshot" | "subscribe" | "db">;
 const SessionContext = createContext<UseJazzSessionResult<any> | null>(null);
 
 /**
@@ -140,19 +141,7 @@ function JazzSessionView<Client extends CoreJazzClient>({
     // The previous view is committed and its query subscriptions detached.
     consumer.lease?.acknowledge(snapshot);
   }, [consumer, snapshot]);
-  const actions = useMemo(
-    () => ({
-      createDeviceAccount: session.createDeviceAccount,
-      restoreDeviceAccount: session.restoreDeviceAccount,
-      linkDeviceAccount: session.linkDeviceAccount,
-      refresh: session.refresh,
-      exportDeviceKey: session.exportDeviceKey,
-      signOut: session.signOut,
-      retry: session.retry,
-      close: session.close,
-    }),
-    [session],
-  );
+  const actions = useMemo(() => jazzSessionActions(session), [session]);
   const state = useMemo<UseJazzSessionResult<Client>>(
     () => ({ ...snapshot, ...actions }),
     [snapshot, actions],

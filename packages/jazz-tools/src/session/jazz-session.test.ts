@@ -584,3 +584,20 @@ describe("coreInitial", () => {
     expect(() => coreInitial("guest")).toThrow('expected "device" or "signed-out"');
   });
 });
+
+describe("session.db", () => {
+  it("is the ready client's Db, and names the status when there is none", async () => {
+    const f = await setup();
+    const app = ownJazzSession({}, async () => f.session, { start: false });
+    expect(() => app.db).toThrow("there is no Db while the session is starting");
+    await startJazzSession(app as JazzSession<unknown>);
+    expect(() => app.db).toThrow(/while the session is signed-out: sign in first/);
+    await app.createDeviceAccount();
+    const client = app.getSnapshot().client as { db?: unknown } | undefined;
+    // The fake clients here have no db: a real one returns it.
+    expect(() => app.db).toThrow("while the session is ready");
+    expect(client).toBeDefined();
+    await app.close();
+    expect(() => app.db).toThrow("while the session is closed");
+  });
+});

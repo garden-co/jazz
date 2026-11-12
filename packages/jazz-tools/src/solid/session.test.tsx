@@ -3,7 +3,8 @@ import { render } from "solid-js/web";
 import { describe, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
-import { JazzSessionProvider, useJazzSession } from "./session.js";
+import { JazzProvider, useJazzSession } from "./session.js";
+import { ownJazzSession, startJazzSession, type JazzSession } from "../session/jazz-session.js";
 import { useJazzClient } from "./provider.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
@@ -36,7 +37,9 @@ async function fixture() {
     },
     {} as never,
   );
-  const session = await createJazzSessionOwner({ accounts, openClient: async () => client });
+  const core = await createJazzSessionOwner({ accounts, openClient: async () => client });
+  const session = ownJazzSession({}, async () => core, { start: false });
+  await startJazzSession(session as JazzSession<unknown>);
   return { events, client, session };
 }
 const flush = async () => {
@@ -49,7 +52,7 @@ describe("Solid session provider", () => {
       const active = useJazzClient();
       expect(active.db).toBe(client.db);
       expect(getSubscriptionStore(active)).toBe(getSubscriptionStore(client));
-      expect(useJazzSession().snapshot().account).toBe(account);
+      expect(useJazzSession().snapshot().user?.accountId).toBe(account.id);
       onCleanup(() => {
         events.push("child-cleanup");
       });
@@ -57,21 +60,21 @@ describe("Solid session provider", () => {
     };
     const Fallback = () => {
       const state = useJazzSession();
-      expect(state.logout).toBe(session.logout);
+      expect(state.signOut).toBe(session.signOut);
       return <p>{state.snapshot().status}</p>;
     };
     const node = document.createElement("div");
     const dispose = render(
       () => (
-        <JazzSessionProvider session={session} fallback={<Fallback />}>
+        <JazzProvider session={session} signedOut={<Fallback />} loading={<Fallback />}>
           <Child />
-        </JazzSessionProvider>
+        </JazzProvider>
       ),
       node,
     );
     await flush();
     expect(node.textContent).toBe("active");
-    await session.logout();
+    await session.signOut();
     await flush();
     expect(node.textContent).toBe("signed-out");
     expect(events).toContain("child-cleanup");
@@ -86,14 +89,14 @@ describe("Solid session provider", () => {
     const { session, client } = await fixture();
     const dispose = render(
       () => (
-        <JazzSessionProvider session={session}>
+        <JazzProvider session={session}>
           <p>active</p>
-        </JazzSessionProvider>
+        </JazzProvider>
       ),
       document.createElement("div"),
     );
     await flush();
-    const logout = session.logout();
+    const logout = session.signOut();
     dispose();
     expect(client.shutdown).not.toHaveBeenCalled();
     await logout;
@@ -107,19 +110,19 @@ describe("Solid session provider", () => {
     expect(() =>
       render(
         () => (
-          <JazzSessionProvider session={session} {...removed}>
+          <JazzProvider session={session} {...removed}>
             <p>ready</p>
-          </JazzSessionProvider>
+          </JazzProvider>
         ),
         node,
       ),
-    ).toThrow(/JazzSessionProvider takes no autoAttachDevTools.*mountInspector/);
+    ).toThrow(/JazzProvider takes no autoAttachDevTools.*mountInspector/);
     const unset = { autoAttachDevTools: undefined } as Record<string, unknown>;
     const dispose = render(
       () => (
-        <JazzSessionProvider session={session} {...unset}>
+        <JazzProvider session={session} {...unset}>
           <p>ready</p>
-        </JazzSessionProvider>
+        </JazzProvider>
       ),
       node,
     );

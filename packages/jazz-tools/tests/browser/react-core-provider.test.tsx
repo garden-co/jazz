@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import {
   JazzClientProvider as JazzProvider,
-  JazzProvider as ConfiguredJazzProvider,
+  JazzDbProvider as ConfiguredJazzProvider,
   useDb,
   useSession,
 } from "../../src/react-core/provider.js";

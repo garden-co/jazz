@@ -1,22 +1,9 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
   authSecretStorageKey,
   generateAuthSecret,
   parseAuthSecret,
 } from "./auth-secret-store.js";
-
-function createMockStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
-  const store = new Map<string, string>();
-  return {
-    getItem: (key: string) => store.get(key) ?? null,
-    setItem: (key: string, value: string) => {
-      store.set(key, value);
-    },
-    removeItem: (key: string) => {
-      store.delete(key);
-    },
-  };
-}
 
 describe("generateAuthSecret", () => {
   it("produces the versioned canonical 256-bit representation", () => {

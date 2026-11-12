@@ -1,6 +1,10 @@
 import { getContext, setContext } from "svelte";
 import { readable, type Readable } from "svelte/store";
-import type { JazzSession, JazzSessionSnapshot } from "../session/jazz-session.js";
+import {
+  jazzSessionActions,
+  type JazzSession,
+  type JazzSessionSnapshot,
+} from "../session/jazz-session.js";
 import type { JazzClient } from "./create-jazz-client.js";
 
 const SESSION_CONTEXT = Symbol("jazz-session");
@@ -11,7 +15,7 @@ const SESSION_CONTEXT = Symbol("jazz-session");
  * `session.signOut()`, ...) bound to it.
  */
 export type JazzSessionState<Client = JazzClient> = Readable<JazzSessionSnapshot<Client>> &
-  Omit<JazzSession<Client>, "subscribe" | "getSnapshot">;
+  Omit<JazzSession<Client>, "subscribe" | "getSnapshot" | "db">;
 
 /** A session you own (from `createJazzClient`), as a Svelte store. */
 export function sessionState<Client>(session: JazzSession<Client>): JazzSessionState<Client> {
@@ -20,8 +24,7 @@ export function sessionState<Client>(session: JazzSession<Client>): JazzSessionS
     set(session.getSnapshot());
     return unsubscribe;
   });
-  const { getSnapshot: _get, subscribe: _subscribe, ...actions } = session;
-  return { ...actions, subscribe: state.subscribe };
+  return { ...jazzSessionActions(session), subscribe: state.subscribe };
 }
 
 /** @internal */
