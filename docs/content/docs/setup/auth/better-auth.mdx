@@ -278,7 +278,16 @@ export const auth = betterAuth({
 
 ### Compatibility
 
-The adapter is currently aligned with Better Auth `1.7.1`.
+The adapter is currently aligned with Better Auth `1.7.22`, and accepts later 1.7.x patch releases (`~1.7.22`).
+
+Upgrading from Better Auth 1.7.0–1.7.2 changes the auth schema. Before the new version serves traffic:
+
+1. Resolve duplicate `better_auth_account` rows that share a `(providerId, accountId)` pair. The adapter keeps account identity unique on that pair; writes to duplicated accounts fail until only one row per pair remains.
+2. Regenerate `schema-better-auth/schema.ts` as shown in [Generate the tables](#generate-the-tables). The account table no longer has a required `issuer` column.
+3. Run `npx jazz-tools migrations create --name remove-better-auth-issuer`, set `issuer: m.drop.string({ backwardsDefault: "" })` in the generated migration, and run `npx jazz-tools validate`.
+4. Deploy the backend with that migration in the same release as the Better Auth upgrade. Against the old schema, sign-ups and account links fail because `issuer` is still required.
+
+See the [Better Auth 1.7 upgrade guide](https://www.better-auth.com/docs/guides/1-7-upgrade-guide) for changes outside the adapter.
 
 | Plugin/Feature        | Compatibility |
 | --------------------- | :-----------: |
