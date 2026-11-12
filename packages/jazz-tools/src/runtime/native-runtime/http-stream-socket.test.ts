@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  HttpStreamSocket,
+  encodeStreamClose,
   SOCKET_OPEN_DEADLINE_MS,
   STREAM_RECORD_SESSION,
   UPGRADE_FAILURES_BEFORE_STREAM,
@@ -100,6 +102,85 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   vi.useRealTimers();
+});
+
+describe("HTTP stream session lifetime", () => {
+  it("does not reopen on a session record already buffered when the client closes", async () => {
+    vi.stubGlobal("fetch", async () => openStreamResponse("a"));
+    const socket = new HttpStreamSocket("ws://stream.test/apps/a/ws");
+    const opened = vi.fn();
+    socket.addEventListener("open", opened);
+    socket.close();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(opened).not.toHaveBeenCalled();
+    expect(socket.readyState).toBe(3);
+  });
+
+  it.each(["client", "server", "send failure"] as const)(
+    "ends outstanding sends on %s close",
+    async (end) => {
+      const events: string[] = [];
+      let feed!: ReadableStreamDefaultController<Uint8Array>;
+      let rejectSend!: (error: Error) => void;
+      let sendSignal: AbortSignal | null | undefined;
+      const methods: string[] = [];
+      let deleteSignal: AbortSignal | null | undefined;
+      vi.stubGlobal("fetch", (url: string, init: RequestInit) => {
+        methods.push(init.method!);
+        if (init.method === "DELETE") {
+          deleteSignal = init.signal;
+          return Promise.resolve(new Response(null, { status: 204 }));
+        }
+        if (url.endsWith("/stream")) {
+          return Promise.resolve(
+            new Response(
+              new ReadableStream<Uint8Array>({
+                start(controller) {
+                  feed = controller;
+                  feed.enqueue(
+                    encodeStreamRecord(
+                      STREAM_RECORD_SESSION,
+                      new TextEncoder().encode(JSON.stringify({ id: "a", key: "k" })),
+                    ),
+                  );
+                },
+              }),
+            ),
+          );
+        }
+        sendSignal = init.signal;
+        return new Promise<Response>((_, reject) => {
+          rejectSend = reject;
+        });
+      });
+      const socket = new HttpStreamSocket("ws://stream.test/apps/a/ws");
+      socket.addEventListener("error", () => events.push("error"));
+      const closed = new Promise<void>((resolve) =>
+        socket.addEventListener("close", ({ code }) => {
+          events.push("close:" + code);
+          resolve();
+        }),
+      );
+      expect(await outcome(socket)).toBe("open");
+      socket.send("in flight");
+      socket.send("queued");
+      if (end === "client") socket.close();
+      else if (end === "server") feed.enqueue(encodeStreamClose(1001, "server closed"));
+      else rejectSend(new Error("send failed while open"));
+      await closed;
+      rejectSend(new Error("late failure"));
+      await Promise.resolve();
+      expect(sendSignal?.aborted).toBe(true);
+      expect(events).toEqual(
+        end === "send failure"
+          ? ["error", "close:1000"]
+          : [end === "server" ? "close:1001" : "close:1000"],
+      );
+      expect(methods).toEqual(end === "server" ? ["POST", "POST"] : ["POST", "POST", "DELETE"]);
+      expect(deleteSignal?.aborted).not.toBe(true);
+      feed.close();
+    },
+  );
 });
 
 /** A createJazz backend that upgrades sockets (426, no stream marker) and serves the stream. */

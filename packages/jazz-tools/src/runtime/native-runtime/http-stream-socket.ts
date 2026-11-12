@@ -164,6 +164,7 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
       const records = new StreamRecordReader();
       for (;;) {
         const { done, value } = await reader.read();
+        if (this.abort.signal.aborted) return;
         if (done) break;
         for (const record of records.push(value)) {
           this.receive(record.kind, record.payload);
@@ -225,11 +226,13 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
               [STREAM_KEY_HEADER]: this.session.key,
             },
             body: body as BodyInit,
+            signal: this.abort.signal,
           },
         );
         if (!response.ok) throw new Error(`HTTP stream send refused (${response.status})`);
       }
     } catch (error) {
+      if (this.abort.signal.aborted) return;
       this.emit("error", error);
       this.close();
     } finally {
@@ -244,6 +247,7 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
   private finish(code: number, reason: string): void {
     if (this.readyState >= 2) return;
     this.readyState = 3;
+    this.queued.length = 0;
     this.abort.abort();
     this.emit("close", { code, reason });
   }
