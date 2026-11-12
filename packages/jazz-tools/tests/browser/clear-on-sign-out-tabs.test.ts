@@ -43,17 +43,25 @@ async function appAt(name: string, user?: string) {
   );
   const url = user ? await jazzAppUserUrl(backend, user) : await jazzAppVisitor(backend);
   // The backend answers no CORS: send the session's own requests to it from Node.
+  const origins = new Set([new URL(url).origin]);
   const pageFetch = globalThis.fetch;
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
     const target = input instanceof Request ? input.url : String(input);
-    return target.startsWith(new URL(url).origin)
-      ? jazzAppFetch(input, init)
-      : pageFetch(input, init);
+    return origins.has(new URL(target).origin) ? jazzAppFetch(input, init) : pageFetch(input, init);
   }) as typeof fetch;
   cleanups.push(async () => {
     globalThis.fetch = pageFetch;
   });
-  return { backend, url };
+  /** Another browser of `userId`: a thin session reading what the server has. */
+  const serverReader = async (userId: string) => {
+    const at = await jazzAppUserUrl(backend, userId);
+    origins.add(new URL(at).origin);
+    const reader = await createJazzClient({ serverUrl: at, fetch: jazzAppFetch });
+    cleanups.push(() => reader.close());
+    if (reader.getSnapshot().status !== "ready") await reader.reauthenticate();
+    return async () => (await reader.getSnapshot().client!.db.all(app.tasks)).length;
+  };
+  return { backend, url, serverReader };
 }
 
 /** This page's session at `url`, local-first once loaded. */
@@ -82,7 +90,7 @@ async function openHere(url: string, options: { initial?: "device" } = {}) {
 
 /** Both tabs signed in as alice, each with a write only this browser has. */
 async function aliceInTwoTabs(name: string) {
-  const { backend, url } = await appAt(name, "alice");
+  const { backend, url, serverReader } = await appAt(name, "alice");
   const { session: here, statuses } = await openHere(url);
   // Its id is the test's own: other files run beside this one, with tabs of their own.
   const other = await openSessionTab(name, url, { clearOnSignOut: true, signedIn: true });
@@ -110,11 +118,13 @@ async function aliceInTwoTabs(name: string) {
     15_000,
     "The other tab should read both offline writes from the shared store",
   );
-  return { backend, url, here, statuses, other, path };
+  return { backend, url, serverReader, here, statuses, other, path };
 }
 
 it("leaves the other tab, still signed in, its data and its link when this tab signs out offline (E13)", async () => {
-  const { here, other, path } = await aliceInTwoTabs("clear-on-sign-out-tabs-e13");
+  const { backend, url, serverReader, here, other, path } = await aliceInTwoTabs(
+    "clear-on-sign-out-tabs-e13",
+  );
 
   // The app's own sign-out can't reach its backend offline, so it signs
   // out of Jazz only: the other tab's user is still signed in.
@@ -138,23 +148,28 @@ it("leaves the other tab, still signed in, its data and its link when this tab s
     "there-offline",
   ]);
 
-  // The last tab out wipes, nothing lost: this tab signs in again and reads
-  // everything from the server.
+  // Nothing was lost: the server has all four.
+  const onServer = await serverReader("alice");
+  await waitForCondition(
+    async () => (await onServer()) === 4,
+    30_000,
+    "The server should have all four tasks",
+  );
+
+  // The user signs out for real now (the app's own sign-out reaches its
+  // backend, so neither tab signs back in): the last tab out wipes.
+  await signOutOfJazzApp(backend, url);
   await other.signOut();
-  expect(await other.state()).toMatchObject({ status: "signed-out" });
+  await waitForCondition(
+    async () =>
+      (await other.state()).status === "signed-out" && here.getSnapshot().status === "signed-out",
+    45_000,
+    "Both tabs should be signed out",
+  );
   await waitForCondition(
     async () => (await vfsPages(path, "synced")).pages === 0,
     15_000,
     "The last tab to sign out should wipe the replica",
-  );
-  await here.loginWithBackend();
-  await waitForCondition(
-    async () => {
-      const db = here.getSnapshot().client?.db;
-      return !!db && (await db.all(app.tasks)).length === 4;
-    },
-    30_000,
-    "Signed in again, this tab should read all four tasks from the server",
   );
   expect((await other.state()).history.errors).toEqual([]);
 }, 180_000);

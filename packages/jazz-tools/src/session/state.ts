@@ -165,7 +165,7 @@ export async function createJazzSessionOwner<
    * deleting it through the client: the browser closes this tab's client
    * first and wipes only once no other tab has the account open.
    */
-  wipeSignedOut?(client: Client, account: AccountHandle): Promise<void>;
+  wipeSignedOut?(client: Client, account: AccountHandle): Promise<boolean | void>;
   /** Add host methods (e.g. `reauthenticate`) to the session before it is sealed. */
   decorate?(session: SessionCore<Client>): Extra;
 }): Promise<SessionCore<Client> & Extra> {
@@ -236,8 +236,8 @@ export async function createJazzSessionOwner<
         // A thin client keeps nothing in the browser, so there is nothing to wipe.
         const thin = isThinDb((client as WipeableClient).db as Db);
         if (signsOut && options.clearOnSignOut && !thin && options.wipeSignedOut && selected) {
-          await options.wipeSignedOut(client, selected);
-          wiped = true;
+          // False: another tab still has the account open, and wipes it.
+          wiped = (await options.wipeSignedOut(client, selected)) !== false;
         } else if (signsOut && options.clearOnSignOut && !thin) {
           const db = (client as WipeableClient).db;
           // Upload what the server still accepts before wiping the rest.
