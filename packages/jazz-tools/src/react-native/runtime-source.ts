@@ -112,10 +112,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
             this.explicitlyOffline = true;
             this.lifecycleForeground?.disconnectNativeUpstream();
           },
-          reconnect: () => {
-            this.explicitlyOffline = false;
-            this.lifecycleForeground?.reconnectNativeUpstream();
-          },
+          reconnect: () => this.reconnectOwnedUpstream(config),
         };
         return;
       }
@@ -295,6 +292,64 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
     this.pendingCapability = null;
     this.lifecycleForeground = null;
     this.ownsAdmission = false;
+  }
+
+  /**
+   * Reconnect the upstream of a scope this source admitted. A worker whose
+   * credential the sync server refused is handed the app's bearer first: it
+   * would only be refused again with the one it has. Any other reconnect goes
+   * straight through, without waiting on the app.
+   */
+  private async reconnectOwnedUpstream(config: ReactNativeDbConfig): Promise<void> {
+    this.explicitlyOffline = false;
+    if (this.credentialMayBeRefused()) await this.presentCurrentBearer(config);
+    this.lifecycleForeground?.reconnectNativeUpstream();
+  }
+
+  /**
+   * Whether the worker's credential was refused. Without a foreground to ask
+   * (no client opened yet) it may have been.
+   */
+  private credentialMayBeRefused(): boolean {
+    const foreground = this.lifecycleForeground;
+    if (!foreground) return true;
+    try {
+      return Boolean(foreground.nativeConnectionStatus().authRejected);
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * A user signed in through the app's backend syncs with the app's bearer,
+   * which the native socket worker was handed when the account was admitted.
+   * Once it expires the sync server refuses it, and a reconnect with the same
+   * one is refused again: so a reconnect (the one `followUser` asks for after
+   * a refusal, or the app's own) asks the app for its bearer again first, and
+   * a different one replaces the worker's. The app's bearer failing leaves the
+   * worker's as it was: the reconnect still happens.
+   */
+  private async presentCurrentBearer(config: ReactNativeDbConfig): Promise<void> {
+    if (!config.cookieSession) return;
+    const capability = this.admittedCapability ?? this.pendingCapability;
+    if (!capability) return;
+    let bearer: string | null | undefined;
+    try {
+      bearer = await accountConfigBearer(config)?.();
+    } catch {
+      return;
+    }
+    // Released or replaced while the app answered: not this worker's any more.
+    if (!bearer || (this.admittedCapability ?? this.pendingCapability) !== capability) return;
+    try {
+      this.foregroundFactory!.refreshAccountSession!(
+        capability,
+        JSON.stringify({ bearer, claims: config.cookieSession.claims ?? {} }),
+      );
+    } catch {
+      // The worker keeps the bearer it has; reconnecting with it is no worse
+      // than before.
+    }
   }
 
   override refreshAccountToken(token: string): boolean {
