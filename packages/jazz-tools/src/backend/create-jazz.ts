@@ -38,7 +38,7 @@ import { DeploymentError, type PublishedTableLens } from "../dev/catalogue-api.j
 import type { WasmSchema } from "../drivers/types.js";
 import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
-import type { JazzSession } from "../session/state.js";
+import type { SessionCore } from "../session/state.js";
 import {
   backendDbAttributedTo,
   backendDbForSession,
@@ -1345,7 +1345,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   async function backendSession(
     next: CreateJazzOptions,
     published?: string,
-  ): Promise<{ session: JazzSession<JazzClient>; client: JazzClient }> {
+  ): Promise<{ session: SessionCore<JazzClient>; client: JazzClient }> {
     pin = published ?? (await publish(next));
     const session = await openJazzSession({
       appId,
@@ -1363,7 +1363,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     return { session, client: opened.client };
   }
 
-  let session: JazzSession<JazzClient>;
+  let session: SessionCore<JazzClient>;
   let backend: JazzClient;
   try {
     ({ session, client: backend } = await backendSession(options));
@@ -1390,7 +1390,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       const published = await publish(next);
       if (published !== pin) {
         const previousPin = pin;
-        let fresh: { session: JazzSession<JazzClient>; client: JazzClient };
+        let fresh: { session: SessionCore<JazzClient>; client: JazzClient };
         try {
           fresh = await backendSession(next, published);
         } catch (error) {
@@ -1414,7 +1414,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    * writes); a close of this Jazz closes those left.
    */
   const retiring = new Set<() => Promise<void>>();
-  function retire(old: JazzSession<JazzClient>): void {
+  function retire(old: SessionCore<JazzClient>): void {
     let closed: Promise<void> | undefined;
     const closeOld = (): Promise<void> => {
       clearTimeout(timer);

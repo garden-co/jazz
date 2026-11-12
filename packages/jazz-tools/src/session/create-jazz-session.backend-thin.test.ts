@@ -6,7 +6,7 @@ import { createJazz, memory, type Jazz } from "../backend/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { createJazzClient } from "./create-jazz-session.js";
+import { openBrowserSessionCore as createJazzClient } from "./create-jazz-session.js";
 import type { ThinRuntime } from "../thin/thin-runtime.js";
 import { decodeThinResponse, isThinResponse } from "../thin/wire.js";
 
@@ -547,7 +547,7 @@ describe("browser session against the app's backend", () => {
       serverUrl: "http://127.0.0.1:9/jazz",
       store: memoryStore(),
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
       client: async () => ({ createClient: createLocalFirstDb }),
       fetch: async (input) => {
         requests.push(String(input));
@@ -663,7 +663,7 @@ describe("a shared device (clearOnSignOut)", () => {
       serverUrl: `${origin}/jazz`,
       store,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
       clearOnSignOut: true,
       client: async () => ({ createClient: createLocalFirstDb }),
     });
@@ -696,7 +696,7 @@ describe("a shared device (clearOnSignOut)", () => {
       serverUrl: `${origin}/jazz`,
       store,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
       clearOnSignOut: true,
       client: async () => ({ createClient: createLocalFirstDb }),
     });

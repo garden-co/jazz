@@ -2,14 +2,14 @@ import { AccountAuthError, requestBackendUser } from "../accounts/registry-clien
 import type { AccountIdentity } from "../accounts/state.js";
 import type { SyncStatus } from "../runtime/sync-status.js";
 import { watchBackendUser, type BackendUser, type BackendWatchEvents } from "./backend-watch.js";
-import type { JazzSession } from "./state.js";
+import type { SessionCore } from "./state.js";
 
 /**
  * A Jazz session that follows the user your backend names. Jazz asks your
  * backend (its `authenticate`) who is signed in on start, on focus and when
  * another tab signs in or out.
  */
-export interface UserFollowingSession<Client> extends JazzSession<Client> {
+export interface UserFollowingSession<Client> extends SessionCore<Client> {
   /**
    * Your auth changed: call this after your own sign-in, sign-out or account
    * switch, once your session cookie (or bearer) is fresh. Jazz asks your
@@ -40,10 +40,10 @@ export function followUser(options: {
   registry: string;
   events: BackendWatchEvents;
   fetch?: typeof fetch;
-  /** See `linkGuestOnSignUp` on `createJazzClient`. Default true. */
+  /** See `linkDeviceAccountOnSignUp` on `createJazzClient`. Default true. */
   linkGuest?: boolean;
 }) {
-  return <Client>(session: JazzSession<Client>) => decorate(session, options);
+  return <Client>(session: SessionCore<Client>) => decorate(session, options);
 }
 
 // Each following session's first backend answer (see `firstBackendAnswer`).
@@ -60,7 +60,7 @@ const firstAnswers = new WeakMap<object, Promise<void>>();
  * a failed or timed-out check (the auth request deadline) opens signed out as
  * before. Never rejects.
  */
-export async function firstBackendAnswer(session: JazzSession<unknown>): Promise<void> {
+export async function firstBackendAnswer(session: SessionCore<unknown>): Promise<void> {
   if (session.getSnapshot().status !== "signed-out") return;
   await firstAnswers.get(session);
 }
@@ -69,12 +69,12 @@ export async function firstBackendAnswer(session: JazzSession<unknown>): Promise
  * @internal Settles once a `followUser` session's watch has followed the
  * backend's first answer (or failed to ask), whatever the session opened as.
  */
-export function backendAnswered(session: JazzSession<unknown>): Promise<void> {
+export function backendAnswered(session: SessionCore<unknown>): Promise<void> {
   return firstAnswers.get(session) ?? Promise.resolve();
 }
 
 function decorate<Client>(
-  session: JazzSession<Client>,
+  session: SessionCore<Client>,
   options: {
     registry: string;
     events: BackendWatchEvents;

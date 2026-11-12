@@ -10,7 +10,10 @@ import { ThinConnectionLostError, ThinRemoteError, ThinRuntime } from "../thin/t
 import { RuntimeClosedError } from "../runtime/runtime-closed-error.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
-import { createJazzClient, type BrowserJazzSession } from "./create-jazz-session.js";
+import {
+  openBrowserSessionCore as createJazzClient,
+  type BrowserJazzSession,
+} from "./create-jazz-session.js";
 
 const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
 const permissions = definePermissions(app, ({ policy, session }) => {
@@ -71,7 +74,7 @@ async function open(
     scope: server.appId,
     serverUrl: server.url,
     store,
-    initial: "local-first",
+    initial: "device",
     driver: { type: "memory" },
     ...(client ? { client } : {}),
   });
@@ -136,7 +139,7 @@ describe("browser session", () => {
       scope: server.appId,
       serverUrl: server.url,
       store: memoryStore(),
-      initial: "local-first",
+      initial: "device",
       driver: { type: "memory" },
       fetch: (input, init) => fetch(input, init),
     });

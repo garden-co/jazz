@@ -1,22 +1,20 @@
-import type { ReactNode } from "react";
 import { View, Text, Pressable } from "react-native";
-import { ConfiguredJazzAppProvider, type JazzAppViewProps } from "../react-core/app.js";
-import type { JazzSession } from "../session/state.js";
-import { createJazzClient, type JazzClientConfig } from "./create-jazz-session.js";
 import type { PublicSession } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
 import {
-  JazzProvider as CoreJazzProvider,
   useDb as useCoreDb,
   useJazzClient as useCoreJazzClient,
   useSession,
-  type OpenJazzClient,
 } from "../react-core/provider.js";
-import { openJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
-import type { OpenJazzClientConfig as DbConfig } from "./create-jazz-client.js";
-
-const createClient: OpenJazzClient = (config) =>
-  openJazzClient(config as DbConfig) as Promise<CreatedJazzClient>;
+import {
+  JazzSessionProvider,
+  type JazzSessionSourceProps,
+  type JazzSessionViewProps,
+} from "../react-core/session.js";
+import type { SessionCore } from "../session/state.js";
+import { refuseRemovedProviderProps } from "../react/provider-props.js";
+import { openNativeSessionCore, type JazzClientConfig } from "./create-jazz-session.js";
+import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 
 export { JazzClientProvider, type JazzClientProviderProps } from "../react-core/provider.js";
 
@@ -26,23 +24,17 @@ interface JazzClientContextValue {
   shutdown: CreatedJazzClient["shutdown"];
 }
 
-export type LegacyJazzProviderProps = {
-  config: DbConfig;
-  fallback?: ReactNode;
-  children: ReactNode;
-};
+export type JazzProviderProps = JazzSessionSourceProps<JazzClientConfig, CreatedJazzClient> &
+  JazzSessionViewProps<CreatedJazzClient>;
 
-export type JazzAppProviderProps = JazzClientConfig & JazzAppViewProps<CreatedJazzClient>;
-export type JazzProviderProps = LegacyJazzProviderProps | JazzAppProviderProps;
-
+/**
+ * Jazz for a React Native app: owns a session (`config`) or shows yours
+ * (`session`), renders `children` with its client once someone is signed in,
+ * and `signedOut`, `loading` or `error` otherwise. Read the session anywhere
+ * below with `useJazzSession()`.
+ */
 export function JazzProvider(props: JazzProviderProps) {
-  if (!("config" in props)) return <ApplicationJazzProvider {...props} />;
-  const { config, fallback, children } = props;
-  return (
-    <CoreJazzProvider config={config} fallback={fallback} openJazzClient={createClient}>
-      {children}
-    </CoreJazzProvider>
-  );
+  return <NativeJazzProvider {...props} openCore={openNativeSessionCore} />;
 }
 
 export function useJazzClient(): JazzClientContextValue {
@@ -56,28 +48,18 @@ export function useDb(): Db {
 export { useSession };
 export type { JazzClientContextValue };
 
-function ApplicationJazzProvider(props: JazzAppProviderProps) {
-  const { children, signedOut, loading, error, ...config } = props;
-  const view = { children, signedOut, loading, error };
-  return <NativeJazzAppProvider {...view} config={config} createJazzClient={createJazzClient} />;
-}
-
-/** The app shell shared by React Native and Expo, with native default loading and error views. */
-export function NativeJazzAppProvider<Config extends { initial?: unknown }>({
-  config,
-  createJazzClient,
-  loading,
-  error,
-  ...view
-}: JazzAppViewProps<CreatedJazzClient> & {
-  config: Config;
-  createJazzClient: (config: Config) => Promise<JazzSession<CreatedJazzClient>>;
-}) {
+/** @internal The provider shared by React Native and Expo, with native default views. */
+export function NativeJazzProvider<Config>(
+  props: JazzSessionSourceProps<Config, CreatedJazzClient> &
+    JazzSessionViewProps<CreatedJazzClient> & {
+      openCore: (config: Config) => Promise<SessionCore<CreatedJazzClient>>;
+    },
+) {
+  refuseRemovedProviderProps(props);
+  const { loading, error, ...rest } = props;
   return (
-    <ConfiguredJazzAppProvider
-      {...view}
-      config={config}
-      createJazzClient={createJazzClient}
+    <JazzSessionProvider
+      {...rest}
       loading={
         loading === undefined ? (
           <View>
@@ -91,8 +73,11 @@ export function NativeJazzAppProvider<Config extends { initial?: unknown }>({
         error === undefined
           ? (state) => (
               <View accessibilityRole="alert">
-                <Text>We couldn’t connect to your account. Please try again.</Text>
-                <Pressable accessibilityRole="button" onPress={() => void state.retry()}>
+                <Text>Jazz couldn’t start. Please try again.</Text>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => void state.retry().catch(() => {})}
+                >
                   <Text>Try again</Text>
                 </Pressable>
               </View>

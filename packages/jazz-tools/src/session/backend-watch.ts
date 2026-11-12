@@ -1,6 +1,6 @@
 import type { AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
-import { switchJazzSessionUser, type JazzSession } from "./state.js";
+import { switchJazzSessionUser, type SessionCore } from "./state.js";
 
 const LOCAL_FIRST_ISSUER = "urn:jazz:local-first";
 const SYSTEM_ISSUER = "urn:jazz:system";
@@ -104,7 +104,7 @@ export interface BackendWatch {
  * stop the watch. A stopped watch rejects every later `reauthenticate`.
  */
 export function watchBackendUser<Client>(
-  session: JazzSession<Client>,
+  session: SessionCore<Client>,
   probe: () => Promise<BackendUser | null>,
   events: BackendWatchEvents,
   options: {

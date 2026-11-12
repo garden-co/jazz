@@ -6,7 +6,7 @@ import { acceptLocalFirstAuth, createJazz, memory } from "../backend/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { createJazzClient } from "./create-jazz-session.js";
+import { openBrowserSessionCore as createJazzClient } from "./create-jazz-session.js";
 
 // `clearOnSignOut` on a shared browser: a user signed out where the page
 // didn't see it (on the server, or another user signing in through the app)

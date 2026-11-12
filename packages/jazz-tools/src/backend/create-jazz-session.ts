@@ -38,7 +38,7 @@ import { selfSignedClientProofFromConfig } from "../runtime/default-runtime-sour
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
-import { createJazzSessionOwner, type JazzSession } from "../session/state.js";
+import { createJazzSessionOwner, type SessionCore } from "../session/state.js";
 import {
   createJazzClientFromDb,
   type JazzClient as SharedJazzClient,
@@ -242,7 +242,7 @@ export interface BackendClientCloseOptions {
 }
 
 /** A backend client's session: its `close()` uploads the writes it holds first. */
-export interface BackendClientSession extends JazzSession<JazzClient> {
+export interface BackendClientSession extends SessionCore<JazzClient> {
   /**
    * Upload the writes this client holds, for up to `timeoutMs`, then close.
    * With the memory driver, writes that didn't reach the server are lost:
@@ -282,7 +282,7 @@ export const CLOSE_WAITS_FOR_UPLOADS_MS = 10_000;
  * it, and closes either way.
  */
 async function closeAfterUploads(
-  session: JazzSession<JazzClient>,
+  session: SessionCore<JazzClient>,
   keeps: boolean,
   options: BackendClientCloseOptions = {},
 ): Promise<void> {
@@ -387,7 +387,7 @@ function lostOnClose(pending: number, why: unknown): Error {
  */
 export async function openJazzSession(
   input: OpenJazzSessionConfig,
-): Promise<JazzSession<JazzClient>> {
+): Promise<SessionCore<JazzClient>> {
   if (Object.hasOwn(input, "webSocket")) throw new Error("Use credential instead of webSocket");
   if (input.credential !== undefined && input.initial !== undefined) {
     throw new Error("A backend client's credential decides how it opens; leave out initial");
@@ -612,7 +612,7 @@ export async function openJazzSession(
           )
         : switchTo(...args);
   const owned = session;
-  const guarded: JazzSession<JazzClient> = Object.freeze({
+  const guarded: SessionCore<JazzClient> = Object.freeze({
     ...owned,
     createLocalFirst: refuseGuest("createLocalFirst", owned.createLocalFirst),
     restoreLocalFirst: refuseGuest("restoreLocalFirst", owned.restoreLocalFirst),

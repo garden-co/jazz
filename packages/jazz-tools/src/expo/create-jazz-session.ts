@@ -13,6 +13,11 @@ import {
   type OpenJazzClientConfig,
 } from "../react-native/create-jazz-client.js";
 import { refuseClientAppId } from "../runtime/client-scope.js";
+import {
+  coreInitial,
+  createStartedJazzSession,
+  type JazzSession,
+} from "../session/jazz-session.js";
 
 export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl" | "appId"> &
   Omit<AccountManagerConfig, "appId"> & {
@@ -25,37 +30,49 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
     appId?: never;
     /**
      * Who the app starts as before your backend names a user: signed out
-     * (the default, also `"signed-out"`), or a `"local-first"` guest, an
-     * account on this device that can later link to your backend's user
-     * (`linkWithBackend`). Your backend must accept guests
-     * (`acceptLocalFirstAuth`).
+     * (the default, also `"signed-out"`), or a `"device"` account: an
+     * account whose key lives on this device, which is how you let people
+     * start as guests, and which can later link to your backend's user
+     * (`linkDeviceAccount()`). Your backend must accept device accounts
+     * (`acceptDeviceAccounts`).
      */
-    initial?: "local-first" | "signed-out";
+    initial?: "device" | "signed-out";
     /**
-     * When a local-first guest is on this device and the user who signs in
-     * has no Jazz account yet (they just signed up, or they are an existing
-     * user signing in to Jazz for the first time), link the guest to them:
-     * the account and everything the guest wrote become theirs. On by
-     * default. Turn it off on shared devices, where the guest may be someone
-     * else's: the session then leaves such a guest as it is, and your app
-     * decides after its own sign-in, with `linkWithBackend()` (the guest's
-     * data becomes the user's) or `loginWithBackend()` (an account of the
-     * user's own; the guest stays on this device).
+     * When a device account is on this device and the user who signs in has
+     * no Jazz account yet (they just signed up, or they are an existing user
+     * signing in to Jazz for the first time), link the device account to
+     * them: the account and everything it wrote become theirs. On by
+     * default. Turn it off on shared devices, where the device account may be
+     * someone else's guest: the session then leaves it as it is, and your
+     * app decides after its own sign-in, with `linkDeviceAccount()` (its data
+     * becomes the user's) or `refresh()` (an account of the user's own; the
+     * device account stays on this device).
      */
-    linkGuestOnSignUp?: boolean;
+    linkDeviceAccountOnSignUp?: boolean;
   };
 
-/** Prepare the host account store once and own client replacement across authentication. */
-export async function createJazzClient(
+/**
+ * Open a Jazz session on this device: who is signed in, and the client that
+ * reads and writes as them. Resolves once it started; rejects if it can't.
+ * Your backend decides who is signed in; call `session.refresh()` after your
+ * own sign-in or sign-out.
+ */
+export function createJazzClient(config: JazzClientConfig): Promise<JazzSession<JazzClient>> {
+  return createStartedJazzSession(config, openNativeSessionCore);
+}
+
+/** @internal The session core `createJazzClient` and `<JazzProvider>` own. */
+export async function openNativeSessionCore(
   config: JazzClientConfig,
 ): Promise<UserFollowingSession<JazzClient>> {
   refuseClientAppId(config);
   const { serverUrl } = config;
+  const initial = coreInitial(config.initial);
   // Jazz on this device only: no backend names a user, so the session opens
-  // this device's local-first account and never asks one.
-  if (serverUrl === null && config.initial !== undefined && config.initial !== "local-first") {
+  // this device's device account and never asks one.
+  if (serverUrl === null && initial === "signed-out") {
     throw new Error(
-      'serverUrl: null has no backend to sign in through, so it always opens this device\'s local-first account: leave out initial or set it to "local-first"',
+      'serverUrl: null has no backend to sign in through, so it always opens this device\'s device account: leave out initial or set it to "device"',
     );
   }
   const accounts = await createAccountManager(config);
@@ -69,12 +86,12 @@ export async function createJazzClient(
   }
   const session = await createJazzSessionOwner({
     accounts,
-    initial: config.initial,
+    initial,
     openClient: (account) => openJazzClient({ ...config, serverUrl, account }),
     decorate: followUser({
       registry: clientRegistryUrl(config),
       events: nativeBackendWatchEvents,
-      linkGuest: config.linkGuestOnSignUp,
+      linkGuest: config.linkDeviceAccountOnSignUp,
     }),
   });
   await firstBackendAnswer(session);

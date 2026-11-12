@@ -2,7 +2,7 @@ import React from "react";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
-import { createJazzSessionOwner, type JazzSession } from "../session/state.js";
+import { createJazzSessionOwner, type SessionCore } from "../session/state.js";
 import { makeFakeAccount, makeFakeClient } from "./test-utils.js";
 
 import { ConfiguredJazzAppProvider } from "./app.js";
@@ -21,7 +21,7 @@ function TestAppProvider(
   );
 }
 const fixture = vi.hoisted(() => ({
-  session: undefined as JazzSession<ReturnType<typeof makeFakeClient>> | undefined,
+  session: undefined as SessionCore<ReturnType<typeof makeFakeClient>> | undefined,
   signedIn: false,
   signOutCalls: 0,
   failSignOut: false,

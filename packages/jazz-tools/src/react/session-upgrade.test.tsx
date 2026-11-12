@@ -66,7 +66,7 @@ it("upgrades to the local-first client under a mounted tree, keeping its state a
     scope: server.appId,
     serverUrl: server.url,
     store: memoryStore(),
-    initial: "local-first",
+    initial: "device",
     driver: { type: "memory" },
   });
   const db = session.getSnapshot().client!.db;

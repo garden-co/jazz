@@ -82,7 +82,7 @@ describe("Vue ergonomic app", () => {
     expect(config).toMatchObject({
       scope: "test",
       clearOnSignOut: true,
-      linkGuestOnSignUp: false,
+      linkDeviceAccountOnSignUp: false,
       logLevel: "debug",
     });
     expect(Object.keys(config).filter((key) => key.includes("-"))).toEqual([]);
@@ -99,7 +99,7 @@ describe("Vue ergonomic app", () => {
     await flush();
     const config = mocks.factory.mock.calls[0]![0] as Record<string, unknown>;
     expect(config).not.toHaveProperty("clearOnSignOut");
-    expect(config).not.toHaveProperty("linkGuestOnSignUp");
+    expect(config).not.toHaveProperty("linkDeviceAccountOnSignUp");
     app.unmount();
   });
 
