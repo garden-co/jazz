@@ -154,6 +154,12 @@ export declare class NapiDb {
    * this is not a query.
    */
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
+  /**
+   * The Inspector's `explain`: for each of `rows` (uuid strings) of
+   * `table`, which clauses of its read policy (the arms of its top-level
+   * `Or`) hold for `author` with `claims`.
+   */
+  explainReadClauses(table: string, rows: Array<string>, author: Uint8Array, claims?: JsonValue | undefined | null): { clauses: number; rows: Array<{ id: string; holds: boolean[] }> }
   subscribe(query: Uint8Array, opts?: { tier?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Subscription
   /** Apply received frames and send what is due on every link. */
   tick(): void

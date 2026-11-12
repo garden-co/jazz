@@ -1562,6 +1562,36 @@ impl Binding {
         Ok((id, future))
     }
 
+    /// The Inspector's `explain`: for each of `rows` (uuid strings) of
+    /// `table`, which clauses of its read policy (the arms of its top-level
+    /// `Or`) hold for `author` with `claims`. Answers
+    /// `{ "clauses": <count>, "rows": [{ "id": "<uuid>", "holds": [bool, ...] }, ...] }`
+    /// for the rows found.
+    pub fn explain_read_clauses(
+        &self,
+        table: &str,
+        rows: &[String],
+        author: &[u8],
+        claims: Option<serde_json::Value>,
+    ) -> HostResult<serde_json::Value> {
+        let author = self.author_of(author)?;
+        let claims = self::claims(author, claims.unwrap_or(serde_json::Value::Null))?;
+        let rows = rows
+            .iter()
+            .map(|row| {
+                uuid::Uuid::parse_str(row)
+                    .map(|id| RowUuid::from_bytes(*id.as_bytes()))
+                    .map_err(|error| HostError::Argument(format!("row id {row}: {error}")))
+            })
+            .collect::<HostResult<Vec<_>>>()?;
+        let (clauses, found) = self.db.explain_read_clauses(table, &rows, author, claims)?;
+        let rows: Vec<serde_json::Value> = found
+            .into_iter()
+            .map(|(id, holds)| serde_json::json!({ "id": id.0.hyphenated().to_string(), "holds": holds }))
+            .collect();
+        Ok(serde_json::json!({ "clauses": clauses, "rows": rows }))
+    }
+
     /// Drop a pending advice request; it resolves `"unknown"`.
     pub fn cancel_permission_advice(&self, id: u64) {
         self.db.cancel_permission_advice_request(id);
