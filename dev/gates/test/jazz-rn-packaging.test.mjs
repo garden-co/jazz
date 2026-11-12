@@ -889,8 +889,8 @@ test("the canonical Expo scaffold documents the account-handle client and direct
     readme,
     /Expo local-first todos using `jazz-tools\/react-native` and the installed `jazz-rn` runtime/,
   );
-  assert.match(readme, /creates or restores a local-first `AccountHandle`/);
-  assert.match(readme, /effect-owned client/);
+  assert.match(readme, /owns the session: it starts \(or reopens\) a device account/);
+  assert.match(readme, /Expo SecureStore/);
   assert.match(readme, /account-scoped persistent relay admission is handled by the runtime/);
 });
 
@@ -1005,7 +1005,7 @@ test("React Native docs advertise the supported alpha session and account-handle
   assert.match(readme, /Expo Go is not\s+supported/);
   assert.match(readme, /supported React Native\s+alpha/);
   assert.match(readme, /`jazz-tools\/react-native`/);
-  assert.match(readme, /`AccountHandle`/);
+  assert.match(readme, /signs in a device account or your backend's user/);
   assert.match(readme, /`createJazzClient`/);
   assert.match(readme, /canonical Expo\s+scaffold/);
   assert.match(readme, /two physical JSI runtimes/);
@@ -1061,9 +1061,8 @@ test("React Native docs advertise the supported alpha session and account-handle
     exampleReadme,
     /Expo local-first todos using `jazz-tools\/react-native` and the installed `jazz-rn` runtime/,
   );
-  assert.match(exampleReadme, /creates or restores a local-first `AccountHandle`/);
+  assert.match(exampleReadme, /owns the session: it starts \(or reopens\) a device account/);
   assert.match(exampleReadme, /Expo SecureStore/);
-  assert.match(exampleReadme, /effect-owned client/);
   assert.doesNotMatch(exampleReadme, /not a runnable persistent Jazz client/);
 });
 

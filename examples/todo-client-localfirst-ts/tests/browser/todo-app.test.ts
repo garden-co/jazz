@@ -64,6 +64,9 @@ describe("Vanilla TS Todo App E2E", () => {
 
     const { db, destroy } = await startApp(el, {
       appId: SCOPE,
+      // On this device only, unless a test gives a server: each mount sees
+      // only its own todos (every user may read every todo on the server).
+      serverUrl: null,
       store: memoryAccountStore(),
       client: loadLocalFirst,
       localFirst: "now",
