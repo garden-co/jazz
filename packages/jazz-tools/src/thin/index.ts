@@ -87,7 +87,12 @@ export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Pr
   // the server down, waiting for them would hold the upgrade until it is
   // back. Shutting `next` down ends the wait, and the thin runtime closes.
   runtime?.endUnsentReads();
-  next.onShutdown(() => thin.abortGracefulShutdown());
+  // A stream still sending its value finishes first, unless `next` shuts down.
+  const streams = thin.letStreamsFinish();
+  next.onShutdown(() => {
+    streams.abort();
+    thin.abortGracefulShutdown();
+  });
   void thin
     .shutdown({ waitForSync: true })
     .catch(() => thin.shutdown())
