@@ -9,13 +9,13 @@ use jazz_model::{
     query::Query,
     schema::JazzSchema,
 };
-use jazz_rivet::open_jazz;
 use jazz_types::{
     ids::{AuthorSubject, NodeUuid},
     records::Value,
 };
 use std::{collections::BTreeMap, sync::Arc};
-use support::Pages;
+use support::DatabaseFixture;
+use support::open_jazz;
 
 struct Local;
 impl LocalSpawn for Local {
@@ -66,14 +66,14 @@ async fn bodies(db: &Db) -> Result<Vec<String>, Error> {
 }
 
 /// Alice writes a large value and rolls back a second write. Bob reopens the
-/// same persisted pages through a new real Rivet worker and sees only Alice's
-/// committed value. The page transport is deterministic, not a live cluster.
+/// same actor database through a new Jazz owner and sees only Alice's
+/// committed value. RivetKit supplies the real local-engine database.
 #[tokio::test(flavor = "multi_thread")]
 async fn full_database_reopens_committed_values() -> anyhow::Result<()> {
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
         tokio::task::LocalSet::new().run_until(async {
-            let pages = Arc::new(Pages::default());
+            let pages = Arc::new(DatabaseFixture::default());
             let actor = uuid::Uuid::new_v4().to_string();
             let owner = DbOwner::spawn(
                 open_jazz(pages.clone(), actor.clone(), 1, config()).await?,
@@ -119,14 +119,14 @@ async fn full_database_reopens_committed_values() -> anyhow::Result<()> {
     .await?
 }
 
-/// Alice disconnects while the real SQLite worker waits for commit. The owner
+/// Alice disconnects while the provider boundary pauses before commit. The owner
 /// finishes her write before Bob reads it, and shutdown drains independently.
 #[tokio::test(flavor = "multi_thread")]
 async fn cancelled_caller_does_not_cancel_database_write() -> anyhow::Result<()> {
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
         tokio::task::LocalSet::new().run_until(async {
-            let pages = Arc::new(Pages::default());
+            let pages = Arc::new(DatabaseFixture::default());
             let owner = DbOwner::spawn(
                 open_jazz(pages.clone(), uuid::Uuid::new_v4().to_string(), 1, config()).await?,
                 4,
@@ -169,7 +169,7 @@ async fn replicas_sync_through_worker_storage() -> anyhow::Result<()> {
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
         tokio::task::LocalSet::new().run_until(async {
-            let pages = Arc::new(Pages::default());
+            let pages = Arc::new(DatabaseFixture::default());
             let actor = uuid::Uuid::new_v4().to_string();
             let mut server_config = config();
             server_config.identity.node = NodeUuid::from_bytes([2; 16]);
@@ -186,7 +186,7 @@ async fn replicas_sync_through_worker_storage() -> anyhow::Result<()> {
                 .await?;
             let client = DbOwner::spawn(
                 open_jazz(
-                    Arc::new(Pages::default()),
+                    Arc::new(DatabaseFixture::default()),
                     uuid::Uuid::new_v4().to_string(),
                     1,
                     config(),
@@ -257,7 +257,7 @@ async fn database_commit_failures_preserve_persisted_outcome() -> anyhow::Result
         std::time::Duration::from_secs(30),
         tokio::task::LocalSet::new().run_until(async {
             for failure in [1, 2] {
-                let pages = Arc::new(Pages::default());
+                let pages = Arc::new(DatabaseFixture::default());
                 let actor = uuid::Uuid::new_v4().to_string();
                 let owner = DbOwner::spawn(
                     open_jazz(pages.clone(), actor.clone(), 1, config()).await?,

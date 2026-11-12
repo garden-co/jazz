@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { openAsBlob } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 
-/** Actor host using Rivet 3.0.7's unmodified async SQLite worker. */
+/** Jazz actor using RivetKit’s public actor-local SQLite API. */
 export interface RivetStoreOptions {
   /** Stable database key. Use a different key for each independent database. */
   name: string;

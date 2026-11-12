@@ -1,82 +1,103 @@
-//! Isolated, bounded pages for Jazz's first-deployment validation. These pages
-//! never go to WarpDrive and never share an actor's persistent namespace.
-use async_trait::async_trait;
-use rivet_envoy_protocol as p;
-use sqlite_embedded::vfs::SqliteTransport;
-use std::{collections::HashMap, sync::Mutex};
+//! Disposable schema-validation database. Never used for actor persistence.
+use futures::future::LocalBoxFuture;
+use jazz_db::{
+    backend::{WorkerCell, WorkerRows, WorkerSql},
+    db::{Error, ErrorCode},
+    host::StoreFile,
+};
+use jazz_sql::Param;
+use rusqlite::{
+    Connection,
+    types::{Value, ValueRef},
+};
 
-#[derive(Default)]
-pub(crate) struct Scratch(Mutex<(u64, HashMap<u32, Vec<u8>>)>);
-#[async_trait]
-impl SqliteTransport for Scratch {
-    async fn get_pages(
-        &self,
-        req: p::SqliteGetPagesRequest,
-    ) -> anyhow::Result<p::SqliteGetPagesResponse> {
-        let state = self.0.lock().unwrap();
-        Ok(p::SqliteGetPagesResponse::SqliteGetPagesOk(
-            p::SqliteGetPagesOk {
-                head_txid: Some(state.0),
-                pages: req
-                    .pgnos
-                    .into_iter()
-                    .map(|pgno| p::SqliteFetchedPage {
-                        pgno,
-                        bytes: state.1.get(&pgno).cloned().map(Into::into),
-                    })
-                    .collect(),
-            },
-        ))
+fn error(e: impl std::fmt::Display) -> Error {
+    Error::new(ErrorCode::Storage, e.to_string())
+}
+fn params(values: &[Param<'_>]) -> Result<Vec<Value>, Error> {
+    values
+        .iter()
+        .map(|v| {
+            Ok(match v {
+                Param::Null => Value::Null,
+                Param::Integer(v) => Value::Integer(*v),
+                Param::Real(v) => Value::Real(*v),
+                Param::Text(v) => Value::Text((*v).into()),
+                Param::TextBytes(v) => Value::Text(std::str::from_utf8(v).map_err(error)?.into()),
+                Param::Blob(v) => Value::Blob(v.to_vec()),
+            })
+        })
+        .collect()
+}
+struct Scratch(Connection);
+impl WorkerSql for Scratch {
+    fn query<'a>(
+        &'a self,
+        sql: &'a str,
+        values: &'a [Param<'a>],
+    ) -> LocalBoxFuture<'a, Result<WorkerRows, Error>> {
+        Box::pin(async move {
+            let values = params(values)?;
+            let mut stmt = self.0.prepare(sql).map_err(error)?;
+            let columns = stmt
+                .column_names()
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>();
+            let mut rows = stmt
+                .query(rusqlite::params_from_iter(values))
+                .map_err(error)?;
+            let mut result = Vec::new();
+            while let Some(row) = rows.next().map_err(error)? {
+                let mut cells = Vec::new();
+                for i in 0..columns.len() {
+                    cells.push(match row.get_ref(i).map_err(error)? {
+                        ValueRef::Null => WorkerCell::Null,
+                        ValueRef::Integer(v) => WorkerCell::Integer(v),
+                        ValueRef::Real(v) => WorkerCell::Real(v),
+                        ValueRef::Text(v) => WorkerCell::Text(v.to_vec()),
+                        ValueRef::Blob(v) => WorkerCell::Blob(v.to_vec()),
+                    });
+                }
+                result.push(cells);
+            }
+            Ok(WorkerRows {
+                columns,
+                rows: result,
+            })
+        })
     }
-    async fn commit(&self, req: p::SqliteCommitRequest) -> anyhow::Result<p::SqliteCommitResponse> {
-        let mut state = self.0.lock().unwrap();
-        anyhow::ensure!(
-            req.expected_head_txid.is_none_or(|head| head == state.0),
-            "scratch head mismatch"
-        );
-        // Rivet's database page size is at most SQLite's 64 KiB maximum.
-        // Bound by page number before allocating; this is only schema validation.
-        anyhow::ensure!(
-            req.db_size_pages <= 256,
-            "Deployment validation exceeding 256 SQLite pages is not supported by this Rivet host"
-        );
-        for page in &req.dirty_pages {
-            anyhow::ensure!(
-                page.bytes.len() <= 65536 && page.pgno <= req.db_size_pages,
-                "invalid scratch page"
-            );
-        }
-        for page in req.dirty_pages {
-            state.1.insert(page.pgno, page.bytes.to_vec());
-        }
-        state.1.retain(|pgno, _| *pgno <= req.db_size_pages);
-        state.0 += 1;
-        Ok(p::SqliteCommitResponse::SqliteCommitOk(p::SqliteCommitOk {
-            head_txid: Some(state.0),
-        }))
+    fn execute<'a>(
+        &'a self,
+        sql: &'a str,
+        values: &'a [Param<'a>],
+    ) -> LocalBoxFuture<'a, Result<usize, Error>> {
+        Box::pin(async move {
+            self.0
+                .execute(sql, rusqlite::params_from_iter(params(values)?))
+                .map_err(error)
+        })
     }
-    async fn commit_stage_begin(
-        &self,
-        _: p::SqliteCommitStageBeginRequest,
-    ) -> anyhow::Result<p::SqliteCommitStageBeginResponse> {
-        anyhow::bail!(
-            "Staged commits for deployment validation are not supported by this Rivet host"
-        )
+    fn execute_script<'a>(&'a self, sql: &'a str) -> LocalBoxFuture<'a, Result<(), Error>> {
+        Box::pin(async move { self.0.execute_batch(sql).map_err(error) })
     }
-    async fn commit_stage_segment(
-        &self,
-        _: p::SqliteCommitStageSegmentRequest,
-    ) -> anyhow::Result<p::SqliteCommitStageSegmentResponse> {
-        anyhow::bail!(
-            "Staged commits for deployment validation are not supported by this Rivet host"
-        )
+    fn transaction_open(&self) -> bool {
+        !self.0.is_autocommit()
     }
-    async fn commit_finalize(
-        &self,
-        _: p::SqliteCommitFinalizeRequest,
-    ) -> anyhow::Result<p::SqliteCommitFinalizeResponse> {
-        anyhow::bail!(
-            "Staged commits for deployment validation are not supported by this Rivet host"
-        )
+    fn parameter_limit(&self) -> Result<usize, Error> {
+        Ok(self
+            .0
+            .limit(rusqlite::limits::Limit::SQLITE_LIMIT_VARIABLE_NUMBER) as usize)
     }
+    fn request_close(&self) {}
+    fn close(&self) -> LocalBoxFuture<'_, Result<(), Error>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+pub async fn open() -> Result<StoreFile, Error> {
+    let connection = Connection::open_in_memory().map_err(error)?;
+    connection
+        .execute_batch("PRAGMA max_page_count = 256")
+        .map_err(error)?;
+    StoreFile::worker(Scratch(connection)).await
 }

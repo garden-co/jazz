@@ -6,18 +6,60 @@ use jazz_db::{
     db::{Db, DbConfig, Error, ErrorCode},
 };
 use jazz_sql::Param;
-use sqlite_embedded::{
-    database::NativeDatabaseHandle, query::ColumnValue, vfs::SqliteTransportHandle,
-};
+use rivetkit::{ColumnValue, SqliteDb, SqliteTransaction};
+use std::cell::{Cell, RefCell};
 
 fn storage(error: impl std::fmt::Display) -> Error {
     Error::new(ErrorCode::Storage, error.to_string())
 }
 
-struct RivetConnection {
-    db: NativeDatabaseHandle,
+pub struct RivetConnection {
+    db: SqliteDb,
+    transaction: RefCell<Option<SqliteTransaction>>,
+    savepoints: RefCell<Vec<String>>,
+    poisoned: Cell<bool>,
+    failure: std::sync::Arc<dyn Fn(String) + Send + Sync>,
     parameters: usize,
     runtime: tokio::runtime::Handle,
+}
+impl RivetConnection {
+    async fn in_runtime<T>(&self, future: impl std::future::Future<Output = T>) -> T {
+        let mut future = std::pin::pin!(future);
+        futures::future::poll_fn(|cx| {
+            let _runtime = self.runtime.enter();
+            future.as_mut().poll(cx)
+        })
+        .await
+    }
+    fn check(&self) -> Result<(), Error> {
+        if self.poisoned.get() {
+            Err(storage("Rivet transaction failed; restart the actor"))
+        } else {
+            Ok(())
+        }
+    }
+    // The public SDK does not expose SQLite autocommit state. On SQL errors,
+    // fail closed and explicitly roll back the entire lease. Never guess state
+    // from SQL text or reuse an ambiguously committed connection.
+    async fn checked<T>(&self, result: anyhow::Result<T>) -> Result<T, Error> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                let first_failure = !self.poisoned.replace(true);
+                let tx = self.transaction.borrow().clone();
+                if let Some(tx) = tx
+                    && self.in_runtime(tx.rollback()).await.is_ok()
+                {
+                    self.transaction.borrow_mut().take();
+                    self.savepoints.borrow_mut().clear();
+                }
+                if first_failure {
+                    (self.failure)(format!("{error:#}"));
+                }
+                Err(storage(format!("{error:#}")))
+            }
+        }
+    }
 }
 impl WorkerSql for RivetConnection {
     fn query<'a>(
@@ -26,15 +68,23 @@ impl WorkerSql for RivetConnection {
         params: &'a [Param<'a>],
     ) -> LocalBoxFuture<'a, Result<WorkerRows, Error>> {
         async move {
-            let result = self
-                .db
-                .query(sql.into(), bind(params).map_err(storage)?)
-                .await
-                .map_err(storage)?;
+            self.check()?;
+            let tx = self.transaction.borrow().clone();
+            let params = bind(params).map_err(storage)?;
+            let (columns, rows) = if let Some(tx) = tx {
+                let result = self
+                    .checked(self.in_runtime(tx.execute(sql, params)).await)
+                    .await?;
+                (result.columns, result.rows)
+            } else {
+                let result = self
+                    .checked(self.in_runtime(self.db.query(sql, params)).await)
+                    .await?;
+                (result.columns, result.rows)
+            };
             Ok(WorkerRows {
-                columns: result.columns,
-                rows: result
-                    .rows
+                columns,
+                rows: rows
                     .into_iter()
                     .map(|row| {
                         row.into_iter()
@@ -58,85 +108,152 @@ impl WorkerSql for RivetConnection {
         params: &'a [Param<'a>],
     ) -> LocalBoxFuture<'a, Result<usize, Error>> {
         async move {
-            let result = self
-                .db
-                .run(sql.into(), bind(params).map_err(storage)?)
-                .await
-                .map_err(storage)?;
-            usize::try_from(result.changes).map_err(storage)
+            self.check()?;
+            let tx = self.transaction.borrow().clone();
+            let params = bind(params).map_err(storage)?;
+            let changes = if let Some(tx) = tx {
+                self.checked(self.in_runtime(tx.execute(sql, params)).await)
+                    .await?
+                    .changes
+            } else {
+                self.checked(self.in_runtime(self.db.run(sql, params)).await)
+                    .await?
+                    .changes
+            };
+            usize::try_from(changes).map_err(storage)
         }
         .boxed_local()
     }
     fn execute_script<'a>(&'a self, sql: &'a str) -> LocalBoxFuture<'a, Result<(), Error>> {
         async move {
-            self.db.exec(sql.into()).await.map_err(storage)?;
+            self.check()?;
+            let tx = self.transaction.borrow().clone();
+            let result = if let Some(tx) = tx {
+                self.in_runtime(tx.exec(sql)).await
+            } else {
+                self.in_runtime(self.db.exec(sql)).await
+            };
+            self.checked(result).await?;
+            Ok(())
+        }
+        .boxed_local()
+    }
+    fn begin_savepoint<'a>(&'a self, name: &'a str) -> LocalBoxFuture<'a, Result<(), Error>> {
+        async move {
+            self.check()?;
+            let tx = self.transaction.borrow().clone();
+            if let Some(tx) = tx {
+                self.checked(self.in_runtime(tx.exec(format!("SAVEPOINT {name}"))).await)
+                    .await?;
+            } else {
+                let tx = self
+                    .checked(self.in_runtime(self.db.begin_transaction(None)).await)
+                    .await?;
+                *self.transaction.borrow_mut() = Some(tx);
+            }
+            self.savepoints.borrow_mut().push(name.into());
+            Ok(())
+        }
+        .boxed_local()
+    }
+    fn end_savepoint<'a>(
+        &'a self,
+        name: &'a str,
+        keep: bool,
+    ) -> LocalBoxFuture<'a, Result<(), Error>> {
+        async move {
+            // Cleanup is still allowed after an error, but no later SQL is.
+            let tx = self.transaction.borrow().clone();
+            let Some(tx) = tx else {
+                return if keep {
+                    Err(storage("Rivet transaction was rolled back"))
+                } else {
+                    Ok(())
+                };
+            };
+            if self.savepoints.borrow().last().map(String::as_str) != Some(name) {
+                return Err(storage("Rivet savepoints must finish in reverse order"));
+            }
+            if self.savepoints.borrow().len() == 1 {
+                let result = if keep {
+                    self.in_runtime(tx.commit()).await
+                } else {
+                    self.in_runtime(tx.rollback()).await
+                };
+                self.checked(result).await?;
+                self.transaction.borrow_mut().take();
+            } else {
+                let sql = if keep {
+                    format!("RELEASE {name}")
+                } else {
+                    format!("ROLLBACK TO {name}; RELEASE {name}")
+                };
+                self.checked(self.in_runtime(tx.exec(sql)).await).await?;
+            }
+            self.savepoints.borrow_mut().pop();
             Ok(())
         }
         .boxed_local()
     }
     fn transaction_open(&self) -> bool {
-        self.db.explicit_transaction_open()
+        self.transaction.borrow().is_some()
     }
     fn parameter_limit(&self) -> Result<usize, Error> {
         Ok(self.parameters)
     }
     fn request_close(&self) {
-        self.db.request_close();
+        self.poisoned.set(true);
+        if let Some(tx) = self.transaction.borrow_mut().take() {
+            self.runtime.spawn(async move {
+                let _ = tx.rollback().await;
+            });
+        }
     }
     fn close(&self) -> LocalBoxFuture<'_, Result<(), Error>> {
-        // The Jazz owner thread parks outside Tokio. Enter the worker runtime
-        // for each poll so the SDK's close watchdog can create its timer.
-        let mut close = Box::pin(self.db.close_and_wait());
-        futures::future::poll_fn(move |cx| {
-            let _runtime = self.runtime.enter();
-            close
-                .as_mut()
-                .poll(cx)
-                .map(|result| result.map_err(storage))
-        })
+        async move {
+            self.poisoned.set(true);
+            let tx = self.transaction.borrow_mut().take();
+            if let Some(tx) = tx {
+                self.in_runtime(tx.rollback()).await.map_err(storage)?;
+            }
+            // RivetKit owns the database, including its final state save and close.
+            Ok(())
+        }
         .boxed_local()
     }
 }
 
-/// Open admitted storage for the existing Jazz server's catalogue, accounts,
-/// and core Db. Rivet owns the only SQLite connection in this build.
-pub async fn open_store(
-    transport: SqliteTransportHandle,
-    actor_id: String,
-    generation: u64,
+/// Borrow the actor's public database API. Call only once per Jazz owner;
+/// the actor runtime owns database initialization and shutdown.
+pub async fn open_store(db: SqliteDb) -> anyhow::Result<jazz_db::host::StoreFile> {
+    open_store_with_failure(db, std::sync::Arc::new(|_| {})).await
+}
+pub(crate) async fn open_store_with_failure(
+    db: SqliteDb,
+    failure: std::sync::Arc<dyn Fn(String) + Send + Sync>,
 ) -> anyhow::Result<jazz_db::host::StoreFile> {
-    let db = sqlite_embedded::database::open_database_from_transport(
-        transport,
-        actor_id,
-        generation,
-        tokio::runtime::Handle::current(),
-        None,
-    )
-    .await?;
-    let result = async {
-        let parameters = parameter_limit(&db).await?;
-        jazz_db::host::StoreFile::worker(RivetConnection {
-            db: db.clone(),
-            parameters,
-            runtime: tokio::runtime::Handle::current(),
-        })
-        .await
-        .map_err(anyhow::Error::from)
+    let parameters = parameter_limit(&db).await?;
+    let mut connection = connection_with_limit(db, parameters);
+    connection.failure = failure;
+    Ok(jazz_db::host::StoreFile::worker_with_provider_tables(connection, &["_rivet_"]).await?)
+}
+fn connection_with_limit(db: SqliteDb, parameters: usize) -> RivetConnection {
+    RivetConnection {
+        db,
+        parameters,
+        runtime: tokio::runtime::Handle::current(),
+        transaction: RefCell::new(None),
+        savepoints: RefCell::new(Vec::new()),
+        poisoned: Cell::new(false),
+        failure: std::sync::Arc::new(|_| {}),
     }
-    .await;
-    if result.is_err() {
-        db.close_and_wait().await?;
-    }
-    result
+}
+#[cfg(feature = "testing")]
+pub async fn test_connection(db: SqliteDb) -> anyhow::Result<RivetConnection> {
+    let parameters = parameter_limit(&db).await?;
+    Ok(connection_with_limit(db, parameters))
 }
 
-/// Open a full Jazz database using Rivet-owned SQLite. Drive complete operations
-/// through DbOwner, or the server's dedicated owner thread, and drain on shutdown.
-pub async fn open_jazz(
-    transport: SqliteTransportHandle,
-    actor_id: String,
-    generation: u64,
-    config: DbConfig,
-) -> anyhow::Result<Db> {
-    Ok(Db::open_file(config, open_store(transport, actor_id, generation).await?).await?)
+pub async fn open_jazz(db: SqliteDb, config: DbConfig) -> anyhow::Result<Db> {
+    Ok(Db::open_file(config, open_store(db).await?).await?)
 }

@@ -7,6 +7,9 @@ publish = false
 [workspace]
 resolver = "2"
 
+[features]
+testing = []
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
@@ -15,18 +18,34 @@ jazz = { path = "../jazz", default-features = false, features = ["runtime"] }
 jazz-server = { path = "../jazz-server", default-features = false, features = ["embedded-server"] }
 jazz-db = { path = "../jazz/layers/db", default-features = false }
 jazz-sql = { path = "../jazz-sql" }
-sqlite-embedded = "=3.0.7"
-rivet-envoy-protocol = "=3.0.7"
-rivet-envoy-client = "=3.0.7"
+rivetkit = { version = "3.1.1", default-features = false, features = ["sqlite-local"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "net", "time"] }
 uuid = { version = "1", features = ["v4", "v5"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum = "0.8.9"
+rusqlite = { version = "0.32", features = ["bundled", "limits"] }
 
 [dev-dependencies]
+tokio-tungstenite = "0.26"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
 jazz-protocol = { path = "../jazz/layers/protocol" }
 jazz-model = { path = "../jazz/layers/model" }
 jazz-types = { path = "../jazz/layers/types" }
 postcard = { version = "1", features = ["alloc"] }
+
+[[test]]
+name = "storage"
+required-features = ["testing"]
+[[test]]
+name = "jazz"
+required-features = ["testing"]
+[[test]]
+name = "host"
+required-features = ["testing"]
+
+[[test]]
+name = "actor"
+required-features = ["testing"]
