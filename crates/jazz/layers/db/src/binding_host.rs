@@ -1564,16 +1564,15 @@ impl Binding {
 
     /// The Inspector's `explain`: for each of `rows` (uuid strings) of
     /// `table`, which clauses of its read policy (the arms of its top-level
-    /// `Or`) hold for `author` with `claims`. Answers
-    /// `{ "clauses": <count>, "rows": [{ "id": "<uuid>", "holds": [bool, ...] }, ...] }`
-    /// for the rows found.
+    /// `Or`) hold for `author` with `claims`. Answers the number of clauses,
+    /// and for each row found its id (hyphenated) and which clauses hold.
     pub fn explain_read_clauses(
         &self,
         table: &str,
         rows: &[String],
         author: &[u8],
         claims: Option<serde_json::Value>,
-    ) -> HostResult<serde_json::Value> {
+    ) -> HostResult<(usize, Vec<(String, Vec<bool>)>)> {
         let author = self.author_of(author)?;
         let claims = self::claims(author, claims.unwrap_or(serde_json::Value::Null))?;
         let rows = rows
@@ -1585,11 +1584,13 @@ impl Binding {
             })
             .collect::<HostResult<Vec<_>>>()?;
         let (clauses, found) = self.db.explain_read_clauses(table, &rows, author, claims)?;
-        let rows: Vec<serde_json::Value> = found
-            .into_iter()
-            .map(|(id, holds)| serde_json::json!({ "id": id.0.hyphenated().to_string(), "holds": holds }))
-            .collect();
-        Ok(serde_json::json!({ "clauses": clauses, "rows": rows }))
+        Ok((
+            clauses,
+            found
+                .into_iter()
+                .map(|(id, holds)| (id.0.hyphenated().to_string(), holds))
+                .collect(),
+        ))
     }
 
     /// Drop a pending advice request; it resolves `"unknown"`.
