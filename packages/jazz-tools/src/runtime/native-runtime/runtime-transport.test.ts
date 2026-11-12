@@ -761,6 +761,61 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it("reports a failed scheduler-woken core tick on a connected client as one terminal transport error", async () => {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const tickFailure = new Error("scheduled core tick failed");
+    let schedulerCallback: ((urgency: "immediate" | "deferred") => void) | undefined;
+    let failTicks = false;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setTickScheduler: (callback: typeof schedulerCallback) => {
+              schedulerCallback = callback;
+            },
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => {
+              if (!failTicks) return;
+              failTicks = false;
+              throw tickFailure;
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const unhandled = vi.fn();
+    const uncaught = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    process.on("uncaughtException", uncaught);
+    try {
+      const terminal = vi.fn();
+      runtime.onServerTransportError(terminal);
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+
+      failTicks = true;
+      schedulerCallback?.("immediate");
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      expect(failTicks).toBe(false);
+      expect(terminal).toHaveBeenCalledWith(tickFailure, { retrying: false });
+      expect(terminal).toHaveBeenCalledTimes(1);
+      expect(uncaught).not.toHaveBeenCalled();
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+      process.off("uncaughtException", uncaught);
+      await runtime.close().catch(() => undefined);
+    }
+  });
+
   it.each([
     { code: 6, name: "not_ready", message: "account registry unavailable" },
     { code: 4, name: "backpressure", message: "wire frame queue backpressure" },
