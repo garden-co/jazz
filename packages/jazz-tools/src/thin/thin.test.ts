@@ -790,6 +790,21 @@ describe("thin client", () => {
     const write = db.insert(app.notes, { text: "after the ban", done: false });
     const outcome = write.wait({ tier: "global" }).catch((error: unknown) => error);
     await expect.poll(() => db.getSyncStatus().pendingUploads).toBe(1);
+    // The upgrade's drain runs beside the app, which may still renew the
+    // credential: it waits through the refusal until the app shuts down
+    // (`endStreamWait` aborts its signal), and then fails too.
+    const appRunning = new AbortController();
+    let upgradeDrain: unknown = "pending";
+    void runtime.waitForPendingWrites("global", { inFlightStreams: appRunning.signal }).then(
+      () => (upgradeDrain = "drained"),
+      (error: unknown) => (upgradeDrain = error),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(upgradeDrain).toBe("pending");
+    appRunning.abort();
+    await expect
+      .poll(() => upgradeDrain)
+      .toMatchObject({ message: expect.stringMatching(/refused this client's sign-in/) });
     // A drain that waits through the refusal would never settle.
     await expect(db.shutdown({ waitForSync: true })).rejects.toMatchObject({
       name: "GracefulShutdownSyncError",
