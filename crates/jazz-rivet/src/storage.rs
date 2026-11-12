@@ -235,7 +235,7 @@ pub(crate) async fn open_store_with_failure(
     let parameters = parameter_limit(&db).await?;
     let mut connection = connection_with_limit(db, parameters);
     connection.failure = failure;
-    Ok(jazz_db::host::StoreFile::worker_with_provider_tables(connection, &["_rivet_"]).await?)
+    Ok(jazz_db::host::StoreFile::worker(connection).await?)
 }
 fn connection_with_limit(db: SqliteDb, parameters: usize) -> RivetConnection {
     RivetConnection {

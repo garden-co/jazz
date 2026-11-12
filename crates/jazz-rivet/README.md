@@ -31,9 +31,11 @@ RivetKit’s default transaction timeout (60 seconds) applies.
 
 ## Shared database and validation
 
-RivetKit metadata and Jazz live in the same SQLite file. Admission exempts only
-the provider-reserved `_rivet_` table namespace. Existing Jazz format stamps are
-still validated; unrelated unstamped tables are rejected. No storage or sync
+RivetKit metadata and Jazz live in the same SQLite file. Jazz discovers its
+application tables from its persisted schema catalogue, including historical
+schemas, and leaves unrelated tables alone. No provider-specific exclusions are
+needed. New Jazz tables cannot adopt existing unrelated SQLite objects. Existing
+Jazz format stamps are still validated, and unstamped Jazz metadata is rejected. No storage or sync
 encoding changes: the Jazz format remains 1 and `JazzRivetAppIdV1` continues to
 map an actor ID deterministically to the same app ID.
 
