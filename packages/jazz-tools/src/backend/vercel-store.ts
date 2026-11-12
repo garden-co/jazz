@@ -1035,11 +1035,15 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
         const inner = (await ensure()).core.serverUrl;
         return fetchFor(inner)(new Request(`${inner}${url.pathname}${url.search}`, sent));
       };
-      const again = request.clone();
+      // Kept to send again only when that costs little: a clone tees the
+      // body, buffering a streamed upload whole while the first send runs.
+      const again = resendable(request, init?.body) ? request.clone() : undefined;
       const response = await send(request);
       if (!response.headers.has(ROUTER_ERROR_HEADER)) return response;
-      // Refused before it reached the core: wake it and send it again.
+      // Refused before it reached the core: wake it (for the next request
+      // too) and send it again.
       distrust();
+      if (!again) return response;
       void response.body?.cancel().catch(() => {});
       return send(again);
     },
@@ -1124,6 +1128,21 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       await live?.core.close();
     },
   };
+}
+
+/** The largest request body kept to send again after the router refused it. */
+const RESEND_MAX_BYTES = 1024 * 1024;
+
+/** Whether `request` has no body, or a small one already in memory or of stated size. */
+function resendable(request: Request, given?: unknown): boolean {
+  if (request.body === null) return true;
+  const size =
+    typeof given === "string"
+      ? Buffer.byteLength(given)
+      : given instanceof ArrayBuffer || ArrayBuffer.isView(given)
+        ? given.byteLength
+        : Number(request.headers.get("content-length") ?? NaN);
+  return Number.isFinite(size) && size <= RESEND_MAX_BYTES;
 }
 
 /** A WebSocket that wakes the core, then connects to wherever it now runs. */
