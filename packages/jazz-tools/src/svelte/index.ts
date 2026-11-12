@@ -20,3 +20,16 @@ export type {
 } from "../session/jazz-session.js";
 export { default as JazzProvider } from "./JazzProvider.svelte";
 export { sessionState, getJazzSession, type JazzSessionState } from "./session-state.js";
+
+// Removed in alpha.61: stubs that throw, naming the replacement (one release).
+export {
+  AccountManager,
+  BrowserAuthSecretStore,
+  JazzSessionProvider,
+  JazzSvelteProvider,
+  LocalFirstAuth,
+  accountState,
+  createAccountManager,
+  exportLocalFirstSecret,
+  useJazzAuth,
+} from "../removed-api.js";

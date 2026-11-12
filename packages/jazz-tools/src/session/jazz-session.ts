@@ -135,6 +135,9 @@ export interface JazzSession<Client> {
    * Your auth changed: call this after your own sign-in, sign-out or account
    * switch. Jazz asks your backend who is signed in now (its `authenticate`
    * decides, from your session cookie or bearer) and follows its answer.
+   * If your backend can't be asked (offline, or its `authenticate` failed),
+   * it rejects and the snapshot shows the failure too: a usable client stays
+   * `ready`, with `error` set and `recovery: "action"` (`retry()` asks again).
    */
   refresh(): Promise<void>;
   /**

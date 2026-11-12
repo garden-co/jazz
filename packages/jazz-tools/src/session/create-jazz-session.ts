@@ -27,12 +27,7 @@ import {
   type LocalFirstModule,
 } from "../runtime/local-first-upgrade.js";
 import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
-import {
-  coreInitial,
-  createStartedJazzSession,
-  refuseRemovedSessionOptions,
-  type JazzSession,
-} from "./jazz-session.js";
+import { coreInitial, createStartedJazzSession, type JazzSession } from "./jazz-session.js";
 import { DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
 import {
@@ -51,6 +46,8 @@ import {
   WIPE_TIMEOUT_MS,
   type ReplicaOwner,
 } from "./left-behind-replicas.js";
+import { refuseInvalidSessionConfig } from "./config-options.js";
+import { refuseWindowJazzConflict } from "../runtime/page-handle.js";
 import { accountForgotten, type AccountStore } from "../accounts/persistence.js";
 import { rememberBackendUser } from "../accounts/enrollment.js";
 
@@ -140,6 +137,34 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
     localFirst?: "now" | "background";
   };
 
+/**
+ * Every option `createJazzClient` takes in a browser, checked against the
+ * config type both ways (`appId` and `backendSecret` are refused by type, and
+ * `appId` by name too).
+ */
+const BROWSER_SESSION_OPTIONS = {
+  serverUrl: true,
+  initial: true,
+  linkDeviceAccountOnSignUp: true,
+  onSignedOut: true,
+  clearOnSignOut: true,
+  client: true,
+  localFirst: true,
+  scope: true,
+  driver: true,
+  env: true,
+  runtimeSources: true,
+  dbName: true,
+  initialSyncFlushEvery: true,
+  logLevel: true,
+  telemetryCollectorUrl: true,
+  devMode: true,
+  slowQueryThresholdMs: true,
+  store: true,
+  fetch: true,
+  bearer: true,
+} as const satisfies Record<Exclude<keyof JazzClientConfig, "appId" | "backendSecret">, true>;
+
 /** @internal A browser session's core, which follows your auth's signed-in user. */
 export type BrowserJazzSession = UserFollowingSession<JazzClient>;
 
@@ -187,8 +212,12 @@ export function createJazzClient(config: JazzClientConfig): Promise<JazzSession<
 export async function openBrowserSessionCore(
   config: JazzClientConfig,
 ): Promise<BrowserJazzSession> {
-  refuseClientAppId(config);
-  refuseRemovedSessionOptions(config);
+  if (config && typeof config === "object") refuseClientAppId(config);
+  refuseInvalidSessionConfig(config, BROWSER_SESSION_OPTIONS);
+  // `window.__jazz` is Jazz's page handle: an app's own global there would
+  // only fail later, when the local-first client opens.
+  const page = (globalThis as { window?: Window }).window;
+  if (page && typeof page.document !== "undefined") refuseWindowJazzConflict(page);
   if (config.serverUrl === null) return createDeviceOnlySession(config);
   const serverUrl = config.serverUrl ?? DEFAULT_SERVER_URL;
   const {

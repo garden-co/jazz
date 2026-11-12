@@ -242,3 +242,6 @@ export function mintLocalFirstTokenInJs(secret: string, audience: string): strin
     nowSeconds: BigInt(Math.floor(Date.now() / 1000)),
   });
 }
+
+// Removed in alpha.61: stubs that throw, naming the replacement (one release).
+export { AccountManager, createAccountManager } from "../removed-api.js";
