@@ -217,7 +217,7 @@ async function route(instances: readonly Jazz[]) {
       res.writeHead(response.status, Object.fromEntries(response.headers));
       if (!response.body) return res.end();
       const reader = response.body.getReader();
-      let first = path.endsWith('/stream');
+      let first = path.endsWith("/stream");
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -308,7 +308,7 @@ it("syncs a local-first guest over the HTTP stream through two instances, and ke
   );
   // It came over the stream, and both instances served the guest.
   expect(log.some(({ path }) => path.endsWith(`/apps/${appId}/stream`))).toBe(true);
-  expect(log.some(({ path }) => path.endsWith('/ws'))).toBe(true);
+  expect(log.some(({ path }) => path.endsWith("/ws"))).toBe(true);
   expect(new Set(log.map(({ instance }) => instance))).toEqual(new Set([0, 1]));
   expect(log.filter(({ status }) => status === 404)).toEqual([]);
   // Each instance reads the guest's row from the shared core.
@@ -330,21 +330,12 @@ it("says a core that admits no guests refuses them, not that the user has an acc
   const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
   // A core an older jazz-tools started: local-first auth off.
   const { appId, instances } = await deployment({ allowLocalFirstAuth: false });
-  const { origin, log } = await route(instances);
+  const { origin } = await route(instances);
 
   const session = await guestOf(appId, origin);
   const guest = session.getSnapshot().client!;
-  void guest.db
-    .insert(app.todos, { title: "made as a guest", owner: guest.session!.user! })
-    .wait({ tier: "global" })
-    .catch(() => undefined);
-  // The core refuses the guest's session; a send after that is told it ended.
-  await vi.waitFor(() => expect(log.some(({ path }) => /\/stream\/[^/]+$/.test(path))).toBe(true), {
-    timeout: 20_000,
-  });
-  expect(log.filter(({ path, status }) => /\/stream\/[^/]+$/.test(path) && status === 404)).toEqual(
-    [],
-  );
+  // (No writes: linking first uploads them, and this core refuses that
+  // upload with its own explicit "Local-first auth is not enabled" error.)
 
   signInAs(origin, "alice");
   const linked = session.linkDeviceAccount();

@@ -1829,7 +1829,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       } catch (error) {
         // A guest key an earlier link retired: only that link's own user
         // gets an answer (the retry of a link whose response was lost).
-        if ((error as { status?: number }).status !== 403 || !(await userIs(account))) throw error;
+        if (
+          (error as { status?: number }).status !== 403 ||
+          (error as { code?: string }).code === LOCAL_FIRST_AUTH_DISABLED ||
+          !(await userIs(account))
+        )
+          throw error;
         guestRevoked = true;
       }
       if (!guestRevoked) {
