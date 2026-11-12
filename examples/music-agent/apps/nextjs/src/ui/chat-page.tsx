@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useAll, useJazzAuth, useSession } from "jazz-tools/react";
+import { useAll, useJazzSession, useSession } from "jazz-tools/react";
 import { AppShell } from "@astryxdesign/core/AppShell";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
@@ -18,8 +18,8 @@ export function ChatPage({ agentLabel }: { agentLabel: string }) {
   const { data: session } = authClient.useSession();
   // The server prepares the workspace of the user's Jazz account, which their
   // first Jazz sign-in creates: wait for it rather than race it.
-  const jazz = useJazzAuth();
-  const account = jazz.status === "ready" ? jazz.client?.session?.user : undefined;
+  const jazz = useJazzSession();
+  const account = jazz.status === "ready" ? jazz.user?.accountId : undefined;
   const [bootstrap, setBootstrap] = useState<"loading" | "ready" | "failed">("loading");
   useEffect(() => {
     if (!session || !account) return;

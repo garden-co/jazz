@@ -8,7 +8,7 @@ What it demonstrates:
 - Better Auth tables stored in Jazz through `jazz-tools/better-auth-adapter`
 - `authenticate` reading the Better Auth session cookie, so the browser never holds a Jazz credential
 - The `admin` plugin to assign roles (`admin` / `member`) to users, passed to Jazz as the `role` claim
-- Starting as a local-first guest and keeping the guest's data on sign-up with `linkWithBackend()`
+- Starting as a guest on a device account and keeping the guest's data on sign-up with `linkDeviceAccount()`
 - Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./permissions.ts), with generic-chat message ownership enforced via `$createdBy.account`.
 
 One default account is seeded on startup: `admin@example.com / admin` with `role = "admin"`.
@@ -72,14 +72,15 @@ ordinary clients cannot read or mutate authentication rows; `jazz.db` acts with 
 
 ### Client: `app/page.tsx`
 
-The browser connects to `serverUrl: "/jazz"` and starts as a local-first guest. If Better Auth
-already has a session, startup calls `loginWithBackend()`. Sign-in calls `loginWithBackend()` after
-Better Auth's sign-in sets its cookie. Sign-up calls `linkWithBackend()`: the guest proves itself
-with its own local-first key and the backend links it to the new Better Auth user, so the guest's
-messages stay its own. If linking fails, the guest account stays open and the UI offers a retry.
+The browser connects to `serverUrl: "/jazz"` and starts as a guest on a device account
+(`initial: "device"`). If Better Auth already has a session, startup calls `refresh()`. Sign-in
+calls `refresh()` after Better Auth's sign-in sets its cookie. Sign-up calls `linkDeviceAccount()`:
+the guest proves itself with its device account's key and the backend links it to the new Better
+Auth user, so the guest's messages stay its own. If linking fails, the guest account stays open and
+the UI offers a retry.
 
-Sign-out calls `logout` before clearing the Better Auth session, then creates a new local-first
-guest.
+Sign-out calls `signOut()` before clearing the Better Auth session, then creates a new device
+account for the next guest (`createDeviceAccount()`).
 
 ## Tests
 

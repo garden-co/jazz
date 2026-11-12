@@ -27,7 +27,7 @@ export function jazz(): Promise<Jazz> {
     authenticate: async (request) => {
       const { auth } = await import("./auth");
       const session = await (await auth).api.getSession({ headers: request.headers });
-      // Signed out: a local-first guest, until sign-up links its account.
+      // Signed out: a guest on a device account, until sign-up links it.
       if (!session) return acceptDeviceAccounts(request);
       const role = (session.user as { role?: string | string[] | null }).role;
       return {

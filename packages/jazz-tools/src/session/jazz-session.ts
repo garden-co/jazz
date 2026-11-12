@@ -114,7 +114,7 @@ export interface JazzSession<Client> {
    * kept from before throws `DbReplacedError` (the local-first upgrade keeps
    * the same Db).
    */
-  readonly db: Client extends { db: infer TDb } ? TDb : never;
+  readonly db: Client extends { db: infer TDb } ? TDb : unknown;
   /**
    * Sign in as a new device account: an account whose key lives on this
    * device. It needs no sign-in and works offline. It's how an app lets

@@ -1,7 +1,7 @@
 import "@garden-co/design/jazz/tokens.css";
 import "@garden-co/design/jazz/fonts.css";
 import "./styles.css";
-import { createJazzApp } from "jazz-tools/client";
+import { createJazzClient, type JazzClient, type JazzSession } from "jazz-tools/client";
 import { Jazz } from "jazz-tools/effect";
 import { authClient } from "./auth-client";
 import { h } from "./dom";
@@ -18,9 +18,19 @@ const status = (message: string, error = false) =>
 
 // Better Auth's session drives sign-in; the server's Jazz (`createJazz` in
 // server/jazz.ts) reads it in `authenticate`.
-const jazz = createJazzApp({
-  serverUrl: "/jazz",
-});
+let jazz: JazzSession<JazzClient> | undefined;
+let startFailure: Error | undefined;
+createJazzClient({ serverUrl: "/jazz" }).then(
+  (session) => {
+    jazz = session;
+    session.subscribe(update);
+    update();
+  },
+  (error: unknown) => {
+    startFailure = error instanceof Error ? error : new Error(String(error));
+    update();
+  },
+);
 
 let shown: { key: string; dispose?(): void } | undefined;
 function show(key: string, render: () => HTMLElement | { element: HTMLElement; dispose(): void }) {
@@ -35,7 +45,7 @@ async function signOut() {
   // Signs out of Better Auth, then Jazz follows the backend's answer.
   await authClient.signOut();
   // A failure shows as Jazz's error state; leave the page either way.
-  await jazz.reauthenticate().catch(() => {});
+  await jazz?.refresh().catch(() => {});
   window.location.assign("/");
 }
 
@@ -45,9 +55,14 @@ function update() {
   if (!session.data)
     return show("signed-out", () =>
       // A failure shows as Jazz's error state below.
-      signInScreen(() => jazz.reauthenticate().catch(() => {})),
+      signInScreen(async () => {
+        await jazz?.refresh().catch(() => {});
+      }),
     );
-  const snapshot = jazz.getSnapshot();
+  if (startFailure)
+    return show(`error:${startFailure.message}`, () => status(startFailure!.message, true));
+  const snapshot = jazz?.getSnapshot();
+  if (!snapshot) return show("loading", () => status("Opening StagePlan…"));
   if (snapshot.status === "error")
     return show(`error:${snapshot.error?.message}`, () =>
       status(snapshot.error?.message ?? "Could not open StagePlan.", true),
@@ -61,5 +76,4 @@ function update() {
 }
 
 authClient.$store.atoms.session!.subscribe(update);
-jazz.subscribe(update);
 update();

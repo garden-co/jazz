@@ -1,6 +1,5 @@
 import { todoCrudTest } from "../../../testing/todo-app-scenarios.js";
-import { createAccountManager } from "jazz-tools";
-import { prepareTestAccount } from "../../../testing/accounts.js";
+import { memoryAccountStore } from "../../../testing/accounts.js";
 /**
  * E2E browser tests for the Vue todo app.
  *
@@ -11,7 +10,10 @@ import { prepareTestAccount } from "../../../testing/accounts.js";
 import { describe, it, expect, afterEach } from "vitest";
 import { createApp, type App as VueApp } from "vue";
 import { SCOPE, SERVER_URL } from "./test-constants.js";
-import type { DbConfig } from "jazz-tools";
+import type { AppConfig } from "../../src/app-config.js";
+
+// These tests are about the local-first client (IndexedDB, sync between replicas).
+const loadLocalFirst = () => import("jazz-tools/local-first");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -37,25 +39,19 @@ describe("Vue Todo App E2E", () => {
     storageNamespace: string | undefined;
   }> = [];
 
-  /** Mount the real App. Returns the container element. */
-  async function mountApp(config: Partial<DbConfig> = {}): Promise<HTMLDivElement> {
+  /** Mount the real App. Each mount is its own user unless it shares a `store`. */
+  async function mountApp(config: AppConfig = {}): Promise<HTMLDivElement> {
     const el = document.createElement("div");
     document.body.appendChild(el);
 
     // Dynamic import so the Vue compiler processes the SFC
     const { default: App } = await import("../../src/App.vue");
-    const account =
-      config.account ??
-      (await prepareTestAccount(
-        createAccountManager,
-        config.appId ?? "test-app",
-        config.serverUrl ?? SERVER_URL,
-      ));
-    const resolvedConfig: Partial<DbConfig> = {
+    const resolvedConfig: AppConfig = {
       appId: config.appId ?? "test-app",
       driver: { type: "persistent", dbName: crypto.randomUUID() },
+      store: memoryAccountStore(),
+      client: loadLocalFirst,
       ...config,
-      account,
     };
     const storageNamespace =
       resolvedConfig.driver?.type === "persistent" ? resolvedConfig.driver.dbName : undefined;
@@ -105,10 +101,10 @@ describe("Vue Todo App E2E", () => {
 
   it("persists todos across app unmount and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
-    const account = await prepareTestAccount(createAccountManager, "test-app", SERVER_URL);
+    const store = memoryAccountStore();
 
     // First session: mount app, add a todo via the form
-    const el1 = await mountApp({ account, driver: { type: "persistent", dbName } });
+    const el1 = await mountApp({ store, driver: { type: "persistent", dbName } });
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
     const form1 = input1.closest("form")!;
 
@@ -125,8 +121,8 @@ describe("Vue Todo App E2E", () => {
     // Unmount (triggers db.shutdown, flushes IndexedDB)
     await unmountApp(el1);
 
-    // Second session: remount with same account and dbName — IndexedDB data should load
-    const el2 = await mountApp({ account, driver: { type: "persistent", dbName } });
+    // Second session: remount with same store and dbName — IndexedDB data should load
+    const el2 = await mountApp({ store, driver: { type: "persistent", dbName } });
 
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,
