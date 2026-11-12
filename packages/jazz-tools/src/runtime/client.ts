@@ -265,7 +265,7 @@ export interface Runtime {
     objectId: string,
     session?: Session,
   ): Promise<PermissionAdvice>;
-  explainReadClauses?(table: string, rows: string[], session: Session): ExplainedRow[];
+  explainReadClauses?(table: string, rows: string[], session: Session): ExplainedRows;
   requestUpdatePermissionAdvice?(
     table: string,
     objectId: string,
@@ -338,10 +338,13 @@ export interface Runtime {
  */
 export type PermissionAdvice = "allowed" | "denied" | "unknown";
 
-/** One row's answer to the Inspector's `explain`: which read-policy clauses hold for it. */
-export interface ExplainedRow {
-  id: string;
-  holds: boolean[];
+/**
+ * The engine's answer to the Inspector's `explain`: how many clauses the
+ * table's read policy has, and for each row found which of them hold.
+ */
+export interface ExplainedRows {
+  clauses: number;
+  rows: { id: string; holds: boolean[] }[];
 }
 
 declare const openTransactionIdBrand: unique symbol;
@@ -2076,7 +2079,7 @@ export class JazzClient {
   }
 
   /** For the Inspector's `explain`; see {@link Runtime.explainReadClauses}. */
-  explainReadClauses(table: string, rows: string[], session: Session): ExplainedRow[] {
+  explainReadClauses(table: string, rows: string[], session: Session): ExplainedRows {
     if (!this.runtime.explainReadClauses) {
       throw new Error("explain is not supported yet by this runtime");
     }

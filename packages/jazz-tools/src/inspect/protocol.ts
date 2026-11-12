@@ -137,8 +137,11 @@ export interface InspectExplainAnswer {
   /**
    * Each row the query matches with the backend's authority: whether `as`
    * may read it, and by which clauses (their indexes; empty when denied).
+   * `by` is left out for an agent token limited to some tables or with
+   * redacted columns in this one: a clause's verdict tells about what it
+   * reads.
    */
-  rows: { id: string; allowed: boolean; by: number[]; row: Record<string, unknown> }[];
+  rows: { id: string; allowed: boolean; by?: number[]; row: Record<string, unknown> }[];
   /** More rows matched than this answer carries. */
   truncated: boolean;
   /** Set when the table has no read policy (every row is denied). */

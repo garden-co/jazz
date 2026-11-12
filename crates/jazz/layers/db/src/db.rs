@@ -2577,8 +2577,11 @@ impl Db {
     /// hold for `author` with `claims` (as bound to an identity: see
     /// [`crate::binding_args::policy_claims`]). The clauses are the arms of the
     /// policy's top-level `Or` (one clause when it is not an `Or`); none when
-    /// the table has no read policy, which denies every row. Rows not found
-    /// are left out. Branched tables are not supported yet.
+    /// the table has no read policy, which denies every row. The policy is
+    /// the one reads are judged by (an older schema's rows by the current
+    /// schema's policies). Answers the number of clauses and, for each row
+    /// found (current, not deleted), whether each holds. Branched tables are
+    /// not supported yet.
     #[doc(hidden)]
     pub fn explain_read_clauses(
         &self,
@@ -2586,19 +2589,25 @@ impl Db {
         rows: &[RowUuid],
         author: AuthorSubject,
         claims: BTreeMap<String, Value>,
-    ) -> Result<Vec<(RowUuid, Vec<bool>)>, Error> {
+    ) -> Result<(usize, Vec<(RowUuid, Vec<bool>)>), Error> {
         let inner = self.inner();
         let table = inner.schema.table(table)?;
         if !table.branch_by.is_empty() {
             return Err(unsupported("explain for a table with branches"));
         }
-        let clauses: Vec<PolicyExpr> = match table.policy(Operation::Select) {
+        // As `Ctx::under_policy_schema` judges reads: by the schema whose
+        // policies govern this table's rows.
+        let governing = match inner.schema.policies_from.as_deref() {
+            None => Some(table),
+            Some(current) => current.by_stored(&table.stored),
+        };
+        let clauses: Vec<PolicyExpr> = match governing.and_then(|t| t.policy(Operation::Select)) {
             None => Vec::new(),
             Some(PolicyExpr::Or(exprs)) => exprs.clone(),
             Some(policy) => vec![policy.clone()],
         };
         if rows.is_empty() {
-            return Ok(Vec::new());
+            return Ok((clauses.len(), Vec::new()));
         }
         let session = Session::for_author(author, claims);
         let binding = BTreeMap::new();
@@ -2641,7 +2650,7 @@ impl Db {
                 .map_err(|_| crate::values::query_error("a row id is not 16 bytes"))?;
             answer.push((RowUuid::from_bytes(id), holds));
         }
-        Ok(answer)
+        Ok((count, answer))
     }
 
     /// Text merges that ran past [`jazz_text::MERGE_WORK_BUDGET`] since the

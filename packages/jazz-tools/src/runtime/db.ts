@@ -49,7 +49,7 @@ import {
   type BranchView,
   type OpenTransactionId,
   type TxId,
-  type ExplainedRow,
+  type ExplainedRows,
   type PermissionAdvice,
   type StreamingMutationKind,
   type StreamingValueSource,
@@ -3709,7 +3709,7 @@ export class Db {
    * clauses of its read policy (the arms of its top-level `Or`) hold for
    * this Db's session. Backend only.
    */
-  explainReadClauses<T, Init>(table: TableProxy<T, Init>, ids: string[]): ExplainedRow[] {
+  explainReadClauses<T, Init>(table: TableProxy<T, Init>, ids: string[]): ExplainedRows {
     const session = this.getAccessContext()?.readSession;
     if (!session) throw new Error("explain needs a Db acting as a user");
     return this.getClient(table._schema).explainReadClauses(table._table, ids, session);

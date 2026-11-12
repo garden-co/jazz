@@ -688,6 +688,13 @@ export function createInspector(deps: InspectorDeps) {
     if (historySourceTable(query.table) !== undefined) {
       throw new InspectError("bad_request", "explain needs a table, not its history");
     }
+    checkTable(admitted, query.table);
+    if (deps.schema()[query.table]?.branchBy?.length) {
+      throw new InspectError(
+        "not_supported",
+        "explain for a table with branches is not supported yet",
+      );
+    }
     // Every row the query matches, whoever may see it; then, as the user,
     // which clauses hold for each.
     const read = await readRows(admitted, query, undefined);
@@ -696,12 +703,24 @@ export function createInspector(deps: InspectorDeps) {
     const policy = policies?.select?.using ?? policies?.select?.with_check;
     const clauses = policyClauses(policy);
     const ids = read.rows.map((row) => String(row.id));
-    const found = new Map(
-      db.explainReadClauses(tableProxy(query.table), ids).map((row) => [row.id, row.holds]),
-    );
+    const engine = db.explainReadClauses(tableProxy(query.table), ids);
+    // The clause numbers are the engine's, the text ours: both must split
+    // the same policy.
+    if (engine.clauses !== clauses.length) {
+      throw new InspectError(
+        "failed",
+        `the read policy this backend was given for ${query.table} has ${clauses.length} clause(s), but the store judges reads by one with ${engine.clauses}: explain can't say which is which`,
+      );
+    }
+    const found = new Map(engine.rows.map((row) => [row.id, row.holds]));
     // A table-scoped token doesn't see the app's permissions (see `schema`),
-    // so it gets the clauses' numbers without their text.
-    const showPolicy = !(admitted.via === "token" && admitted.tables);
+    // so it gets the clauses' numbers without their text. Nor which clause
+    // let a row through, for it or a token with redacted columns here: a
+    // clause's verdict tells about what it reads (a redacted column's
+    // value, a table outside the token's scope).
+    const scoped = admitted.via === "token" && admitted.tables !== undefined;
+    const showPolicy = !scoped;
+    const showWhy = !scoped && !redactedFor(admitted, query.table);
     const answer: Omit<InspectExplainAnswer, "inspectorUrl"> = {
       table: query.table,
       as: asUser!,
@@ -714,7 +733,7 @@ export function createInspector(deps: InspectorDeps) {
         // Gone between the two reads.
         if (!holds) return [];
         const by = holds.flatMap((held, index) => (held ? [index] : []));
-        return [{ id: String(row.id), allowed: by.length > 0, by, row }];
+        return [{ id: String(row.id), allowed: by.length > 0, ...(showWhy ? { by } : {}), row }];
       }),
       truncated: read.truncated,
       ...(policy === undefined

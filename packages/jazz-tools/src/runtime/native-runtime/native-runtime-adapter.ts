@@ -49,7 +49,7 @@ import type {
   MutationErrorEvent,
   MutationResult,
   OpenTransactionId,
-  ExplainedRow,
+  ExplainedRows,
   PermissionAdvice,
   Runtime,
   RuntimeWriteWaitOptions,
@@ -382,7 +382,7 @@ type NativeDb = {
     rows: string[],
     author: Uint8Array,
     claims?: Record<string, unknown>,
-  ): ExplainedRow[];
+  ): ExplainedRows;
   requestUpdatePermissionAdvice?(
     table: string,
     rowId: Uint8Array,
@@ -2266,7 +2266,7 @@ export class NativeRuntimeAdapter implements Runtime {
    * of its read policy (the arms of its top-level `Or`) hold for `session`.
    * Backend only.
    */
-  explainReadClauses(table: string, rows: string[], session: Session): ExplainedRow[] {
+  explainReadClauses(table: string, rows: string[], session: Session): ExplainedRows {
     if (!this.trustedBackend) throw new Error("explain runs only on a trusted backend");
     const explain = this.db.explainReadClauses;
     if (!explain) throw new Error("explain is not supported yet by this runtime");

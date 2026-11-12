@@ -1872,7 +1872,7 @@ impl NapiDb {
     /// `Or`) hold for `author` with `claims`.
     #[napi(
         js_name = "explainReadClauses",
-        ts_return_type = "Array<{ id: string; holds: boolean[] }>"
+        ts_return_type = "{ clauses: number; rows: Array<{ id: string; holds: boolean[] }> }"
     )]
     pub fn explain_read_clauses(
         &self,

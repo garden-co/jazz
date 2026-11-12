@@ -278,7 +278,7 @@ function ExplainRows({ query, as }: { query: InspectQuery; as: InspectAs }) {
                   <td>{row.allowed ? "yes" : "no"}</td>
                   <td>
                     {row.allowed
-                      ? row.by.map(clause).join("; ")
+                      ? (row.by?.map(clause).join("; ") ?? "not shown to this token")
                       : answer.clauses.length
                         ? "no clause holds"
                         : "no read policy"}
