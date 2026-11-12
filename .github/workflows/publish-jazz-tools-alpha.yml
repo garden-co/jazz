@@ -679,6 +679,9 @@ jobs:
           tar -tf "${TARBALL}" | grep -q "package/dist/dev/inspector-overlay/embedded/embedded.html"
           # So must the Inspector that createJazz serves at <basePath>/inspect/.
           tar -tf "${TARBALL}" | grep -q "package/dist/dev/inspector-overlay/embedded/backend.html"
+          # It serves it from this module, which ships wherever the code does.
+          tar -xOf "${TARBALL}" package/dist/backend/inspector-ui-files.js > "${TMP_DIR}/inspector-ui-files.js"
+          grep -Fq '"backend.html":' "${TMP_DIR}/inspector-ui-files.js"
 
       - name: Verify packed create-jazz manifest
         run: |
