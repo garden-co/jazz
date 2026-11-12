@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { migration as m } from "../migration-namespace.js";
-import { computeSchemaHash, deploy } from "./catalogue.js";
+import { computeSchemaHash, deploy, shortSchemaHash } from "./catalogue.js";
 import type { DeploymentRequest } from "./catalogue-api.js";
 
 const server = { appId: "deploy-test", serverUrl: "http://localhost:1625", adminSecret: "test" };
@@ -190,7 +190,7 @@ it("keeps a single historical migration separate from the deployment head", asyn
     "fetch",
     vi.fn(async (input: string, init?: RequestInit) => {
       if (input.endsWith("/migrations/graph"))
-        return reply({ activeSchemaHash: hashes[2], schemas: hashes, migrations: [] });
+        return reply({ latestBundleSchemaHash: hashes[2], schemas: hashes, migrations: [] });
       expect(input.endsWith("/admin/bundles")).toBe(true);
       const body = JSON.parse(String(init?.body)) as DeploymentRequest;
       expect(body.migrations.map(({ fromHash, toHash }) => [fromHash, toHash])).toEqual([
@@ -228,7 +228,7 @@ it.each([false, true])(
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
       if (input.endsWith("/migrations/graph"))
         return reply({
-          activeSchemaHash: toHash,
+          latestBundleSchemaHash: toHash,
           schemas: [fromHash, otherHash, toHash],
           migrations: [
             { fromHash, toHash },
@@ -258,3 +258,102 @@ it.each([false, true])(
     }
   },
 );
+
+it.each(["from", "to"] as const)(
+  "refuses an empty %s witness instead of matching any published schema",
+  async (empty) => {
+    const common = s.table({ title: s.string() }, {});
+    const added = s.table({ value: s.string() }, {});
+    const source = s.defineApp({ common }, { migrations: "none" });
+    const target = s.defineApp({ common, added }, { migrations: "none" });
+    const sourceHash = await computeSchemaHash(source.wasmSchema);
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/migrations/graph"))
+        return reply({ latestBundleSchemaHash: sourceHash, schemas: [sourceHash], migrations: [] });
+      if (input.endsWith(`/schema/${sourceHash}`))
+        return reply({ schema: { tables: source.wasmSchema } });
+      throw new Error(`Unexpected request ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const migration =
+      empty === "from"
+        ? m.defineMigration({ from: {}, to: { added }, createTables: { added: true } })
+        : m.defineMigration({ from: {}, to: {} });
+    await expect(deploy({ ...server, schema: target, migration, permissions: {} })).rejects.toThrow(
+      `Migration ${empty} schema witness names no tables, so it cannot identify a published schema; supply ${empty}Hash.`,
+    );
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/admin/bundles"))).toBe(
+      false,
+    );
+  },
+);
+
+it("explains that an active target without an incoming migration cannot supply a partial source", async () => {
+  const common = s.table({ title: s.string() }, {});
+  const other = s.table({ body: s.string() }, {});
+  const added = s.table({ value: s.string() }, {});
+  const target = s.defineApp({ common, other, added }, { migrations: "none" });
+  const targetHash = await computeSchemaHash(target.wasmSchema);
+  const fetchMock = vi.fn(async (input: string) => {
+    if (input.endsWith("/migrations/graph"))
+      return reply({ latestBundleSchemaHash: targetHash, schemas: [targetHash], migrations: [] });
+    throw new Error(`Unexpected request ${input}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  const migration = m.defineMigration({
+    from: { common },
+    to: { common, added },
+    createTables: { added: true },
+  });
+  await expect(deploy({ ...server, schema: target, migration, permissions: {} })).rejects.toThrow(
+    `Partial migration source cannot be resolved: target schema ${shortSchemaHash(targetHash)} is already the latest published bundle's schema and no published migration leads to it; supply fromHash.`,
+  );
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+it("resolves a partial source against the latest bundle's schema when the graph has several tips", async () => {
+  const common = s.table({ title: s.string() }, {});
+  const other = s.table({ body: s.string() }, {});
+  const added = s.table({ value: s.string() }, {});
+  const source = s.defineApp({ common, other }, { migrations: "none" });
+  const sibling = s.defineApp({ common, third: other }, { migrations: "none" });
+  const target = s.defineApp({ common, other, added }, { migrations: "none" });
+  const [sourceHash, siblingHash, targetHash] = await Promise.all(
+    [source, sibling, target].map((app) => computeSchemaHash(app.wasmSchema)),
+  );
+  let published = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith("/migrations/graph"))
+        return reply({
+          latestBundleSchemaHash: sourceHash,
+          schemas: [sourceHash, siblingHash],
+          migrations: [],
+        });
+      if (input.endsWith(`/schema/${sourceHash}`))
+        return reply({ schema: { tables: source.wasmSchema } });
+      expect(input.endsWith("/admin/bundles")).toBe(true);
+      const body = JSON.parse(String(init?.body)) as DeploymentRequest;
+      expect(body.migrations.map(({ fromHash, toHash }) => [fromHash, toHash])).toEqual([
+        [sourceHash, targetHash],
+      ]);
+      published++;
+      return reply({
+        changed: true,
+        published: { schemas: [targetHash], migrations: body.migrations },
+      });
+    }),
+  );
+  await deploy({
+    ...server,
+    schema: target,
+    migration: m.defineMigration({
+      from: { common },
+      to: { common, added },
+      createTables: { added: true },
+    }),
+    permissions: {},
+  });
+  expect(published).toBe(1);
+});

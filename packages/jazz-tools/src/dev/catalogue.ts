@@ -387,10 +387,11 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     ...(options.migration ? [options.migration] : []),
   ];
   // Explicit hashes select canonical schemas. A single direct deployment also
-  // accepts partial witnesses against the active source and requested target.
+  // accepts partial witnesses against the latest bundle's schema and requested target.
   // Graph migrations retain their own endpoints; never infer them from the head.
   const direct = options.migration !== undefined && !options.migrations?.length;
   const resolveEndpoint = async (
+    label: "from" | "to",
     witness: unknown,
     embedded: string | undefined,
     canonicalHash?: string | null,
@@ -407,6 +408,12 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     );
     const witnessHash = await computeSchemaHash(witnessSchema);
     if (canonicalHash && !schemas.has(witnessHash) && !graph.schemas.includes(witnessHash)) {
+      // A witness without tables would match every schema, so it is no evidence.
+      if (Object.keys(witnessSchema).length === 0) {
+        throw new Error(
+          `Migration ${label} schema witness names no tables, so it cannot identify a published schema; supply ${label}Hash.`,
+        );
+      }
       const canonical = schemas.get(canonicalHash) ?? (await loadSchema(options, canonicalHash));
       if (
         Object.entries(witnessSchema).every(([table, definition]) =>
@@ -423,21 +430,26 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
   const migrations: DeploymentArtifacts["migrations"] = [];
   for (const migration of definitions) {
     const to = await resolveEndpoint(
+      "to",
       migration.to,
       migration.toHash,
       direct ? targetSchemaHash : null,
     );
-    let sourceHash = direct && to.hash === targetSchemaHash ? graph.activeSchemaHash : null;
+    let sourceHash = direct && to.hash === targetSchemaHash ? graph.latestBundleSchemaHash : null;
     if (direct && to.hash === targetSchemaHash && !sourceHash && !migration.fromHash) {
       const outgoing = new Set(graph.migrations.map((edge) => edge.fromHash));
       const tips = graph.schemas.filter((hash) => !outgoing.has(hash));
       if (tips.length === 1) sourceHash = tips[0]!;
     }
+    let unresolvedSource = "Partial migration source is ambiguous; supply fromHash.";
     if (sourceHash === targetSchemaHash && !migration.fromHash) {
       // Re-deploying a direct migration must still validate against its original
       // source. Only an unambiguous incoming edge can supply an omitted hash.
       const incoming = graph.migrations.filter((edge) => edge.toHash === targetSchemaHash);
       sourceHash = incoming.length === 1 ? incoming[0]!.fromHash : null;
+      if (incoming.length === 0) {
+        unresolvedSource = `Partial migration source cannot be resolved: target schema ${shortSchemaHash(targetSchemaHash)} is already the latest published bundle's schema and no published migration leads to it; supply fromHash.`;
+      }
       if (incoming.length > 1) {
         const witnessHash = await computeSchemaHash(
           mergePermissionsIntoWasmSchema(resolveMigrationDefinitionWasmSchema(migration.from), {}),
@@ -458,9 +470,9 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
         mergePermissionsIntoWasmSchema(resolveMigrationDefinitionWasmSchema(migration.from), {}),
       );
       if (!schemas.has(witnessHash) && !graph.schemas.includes(witnessHash))
-        throw new Error("Partial migration source is ambiguous; supply fromHash.");
+        throw new Error(unresolvedSource);
     }
-    const from = await resolveEndpoint(migration.from, migration.fromHash, sourceHash);
+    const from = await resolveEndpoint("from", migration.from, migration.fromHash, sourceHash);
     assertMigrationMatchesCanonicalBundle(migration, {
       fromHash: from.hash,
       toHash: to.hash,

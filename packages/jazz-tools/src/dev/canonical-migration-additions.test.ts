@@ -68,7 +68,7 @@ it.each([false, true])(
         if (input.endsWith("/migrations/graph"))
           return new Response(
             JSON.stringify({
-              activeSchemaHash: null,
+              latestBundleSchemaHash: null,
               schemas: history ? [olderHash, sourceHash] : [sourceHash],
               migrations: history ? [{ fromHash: olderHash, toHash: sourceHash }] : [],
             }),
@@ -127,7 +127,7 @@ it("refuses an ambiguous partial source without publishing", async () => {
       if (input.endsWith("/migrations/graph"))
         return new Response(
           JSON.stringify({
-            activeSchemaHash: null,
+            latestBundleSchemaHash: null,
             schemas: ["0".repeat(64), "1".repeat(64)],
             migrations: [],
           }),
