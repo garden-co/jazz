@@ -3,6 +3,8 @@ import {
   resolveBrowserWorkerRuntimeSources,
   resolveBrowserWorkerUrl,
 } from "../browser-worker-config.js";
+import { bundledBrowserWorkerType } from "../browser-worker-assets.js";
+import { METRO_SETUP_ERROR } from "../metro-setup-error.js";
 import {
   BrowserWorkerUnresponsiveError,
   deserializeBrowserRelayError,
@@ -44,13 +46,27 @@ function createBrokerSharedWorker(
   runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
   name: string,
 ): SharedWorker {
-  if (runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion) {
-    return new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), { type: "module", name });
+  const appServesWorker = Boolean(runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl);
+  // Metro cannot build the worker from the expression below. It names the
+  // worker it built by URL instead, as a classic script.
+  const bundledType = appServesWorker ? null : bundledBrowserWorkerType();
+  if (appServesWorker || runtimeSources?.wasmVersion || bundledType) {
+    return new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), {
+      type: bundledType ?? "module",
+      name,
+    });
   }
-  return new SharedWorker(new URL("../../worker/jazz-broker-worker.js", import.meta.url), {
+  const worker = new SharedWorker(new URL("../../worker/jazz-broker-worker.js", import.meta.url), {
     type: "module",
     name,
   });
+  // Expo's Metro rewrites the expression above into a dedicated Worker, which
+  // has no port to attach a lease or a runtime to.
+  if (!("port" in worker)) {
+    (worker as { terminate?: () => void }).terminate?.();
+    throw new Error(METRO_SETUP_ERROR);
+  }
+  return worker;
 }
 
 export type BrowserForegroundNodeLeaseOptions = Pick<
