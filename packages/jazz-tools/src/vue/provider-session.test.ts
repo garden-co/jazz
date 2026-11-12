@@ -148,7 +148,7 @@ describe("Vue JazzProvider", () => {
     await flush();
   });
   it.each(["unknown", "graceful"] as const)(
-    "detaches consumers before %s sign-out failure and retries",
+    "detaches consumers before a %s sign-out failure, then signs out",
     async (failure) => {
       const { session, events } = await fixture(failure);
       mocks.factory.mockReset().mockResolvedValue(session);
@@ -172,18 +172,21 @@ describe("Vue JazzProvider", () => {
       });
       app.mount(node);
       await flush();
-      await expect(auth.signOut()).rejects.toThrow();
-      // An unsynced client that is still usable stays ready, with the error;
-      // a failed teardown leaves no usable client.
-      await flush();
-      expect(auth.snapshot.value.status).toBe(failure === "graceful" ? "ready" : "error");
-      const errorMessage = failure === "graceful" ? "could not synchronize" : "flush failed";
-      expect(auth.snapshot.value.error?.message).toContain(errorMessage);
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      if (failure === "graceful") {
+        // The client couldn't sync but still works: ready, with the error.
+        await expect(auth.signOut()).rejects.toThrow();
+        await flush();
+        expect(auth.snapshot.value.status).toBe("ready");
+        expect(auth.snapshot.value.error?.message).toContain("could not synchronize");
+        await auth.retry();
+      } else {
+        // The user asked to leave and teardown began: signed out, logged.
+        await auth.signOut();
+      }
+      logged.mockRestore();
       await flush();
       expect(events.indexOf("child-cleanup")).toBeLessThan(events.indexOf("shutdown"));
-      if (failure !== "graceful") expect(node.textContent).toContain(errorMessage);
-      await auth.retry();
-      await flush();
       expect(node.textContent).toBe("signed out");
       app.unmount();
       await flush();
