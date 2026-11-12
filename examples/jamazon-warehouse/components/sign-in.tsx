@@ -7,7 +7,7 @@ import { Center } from "@astryxdesign/core/Center";
 import { VStack } from "@astryxdesign/core/Stack";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
-import { useJazzAuth } from "jazz-tools/react";
+import { useJazzSession } from "jazz-tools/react";
 import { useState, type FormEvent } from "react";
 import { authClient } from "@/src/lib/auth-client";
 
@@ -18,7 +18,7 @@ export function SignIn() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string>();
   const [pending, setPending] = useState(false);
-  const { reauthenticate } = useJazzAuth();
+  const { refresh } = useJazzSession();
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -29,7 +29,7 @@ export function SignIn() {
       : authClient.signIn.email({ email, password }));
     setPending(false);
     if (error) setError(error.message ?? "Authentication failed");
-    else await reauthenticate();
+    else await refresh();
   }
 
   return (

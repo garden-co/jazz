@@ -33,7 +33,7 @@ export function shopper(testApp: PolicyTestApp, name: string): { account: string
 }
 
 /**
- * A guest: the local-first account every visitor gets on first load, before
+ * A guest: the device account every visitor gets on first load, before
  * signing in. A real guest session: no issuer, no admitted account and no
  * custom claims; the test app derives its account from the device key.
  */

@@ -73,7 +73,9 @@ function update() {
   if (!session.data)
     return show("signed-out", () =>
       // A failure shows as Jazz's error state below.
-      signInScreen(() => jazz?.refresh().catch(() => {})),
+      signInScreen(async () => {
+        await jazz?.refresh().catch(() => {});
+      }),
     );
   const user = session.data.user as { id: string; name: string };
   const snapshot = jazz?.getSnapshot();

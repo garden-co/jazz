@@ -19,7 +19,7 @@
   {@render children()}
   {#snippet loading()}<p class="status" role="status">Opening StagePlan…</p>{/snippet}
   {#snippet signedOut()}<p class="status" role="status">Opening StagePlan…</p>{/snippet}
-  {#snippet error(cause, retry)}
+  {#snippet error(cause: Error, retry: () => Promise<void>)}
     <div class="status" role="alert">
       <p>Could not open StagePlan: {cause.message}</p>
       <button onclick={() => void retry()}>Try again</button>

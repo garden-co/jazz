@@ -1,9 +1,6 @@
-import * as React from "react";
 import { JazzProvider } from "jazz-tools/react";
-import type { DbConfig } from "jazz-tools";
 import { Center } from "@astryxdesign/core/Center";
 import { Spinner } from "@astryxdesign/core/Spinner";
-import { prepareAccountConfig } from "./account.js";
 import { FileBrowser } from "./FileBrowser.js";
 
 function Opening() {
@@ -15,26 +12,18 @@ function Opening() {
 }
 
 export function App() {
-  const [config, setConfig] = React.useState<DbConfig>();
-  const [error, setError] = React.useState<Error>();
-  React.useEffect(() => {
-    let cancelled = false;
-    prepareAccountConfig().then(
-      (value) => {
-        if (!cancelled) setConfig(value);
-      },
-      (cause) => {
-        if (!cancelled) setError(cause instanceof Error ? cause : new Error(String(cause)));
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  if (error) throw error;
-  if (!config) return <Opening />;
   return (
-    <JazzProvider config={config} fallback={<Opening />}>
+    <JazzProvider
+      config={{
+        // The app's backend serves Jazz on this origin (`/jazz`, the default).
+        env: "dev",
+        // Every visitor starts as a device account: no login.
+        initial: "device",
+        // The local-first client: files stay readable offline.
+        client: () => import("jazz-tools/local-first"),
+      }}
+      loading={<Opening />}
+    >
       <FileBrowser />
     </JazzProvider>
   );

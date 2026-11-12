@@ -31,11 +31,11 @@ export function backend(): Promise<Jazz> {
       ? remote({ ...sync, appId: serverConfig.appId })
       : sqlite({ path: serverConfig.dataPath }),
     // Better Auth's session cookie decides who the shopper is. Guests have
-    // no Better Auth session: they stay on their local-first account.
+    // no Better Auth session: they stay on their device account.
     authenticate: async (request) => {
       const { auth } = await import("./auth");
       const session = await auth.api.getSession({ headers: request.headers });
-      // Signed out: a local-first guest shopper.
+      // Signed out: a device-account guest shopper.
       return session ? { userId: session.user.id } : acceptDeviceAccounts(request);
     },
   }).ready());

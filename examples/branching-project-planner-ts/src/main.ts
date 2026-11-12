@@ -4,6 +4,8 @@ import { app, type Task } from "../schema.js";
 // This database runs without a server, on this browser's device account.
 const session = await createJazzClient({
   serverUrl: null,
+  // Keeps the device account (and its data) created under this example's earlier app id.
+  scope: "branching-project-planner-example",
   client: () => import("jazz-tools/local-first"),
   initial: "device",
   driver: { type: "persistent" },
