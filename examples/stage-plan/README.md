@@ -18,8 +18,8 @@ StagePlan is the Jazz example for two things:
 
 | App                                                      | Stack                                                                      |
 | -------------------------------------------------------- | -------------------------------------------------------------------------- |
-| [`apps/react-localfirst`](apps/react-localfirst)         | React, Vite, local-first accounts, Astryx with the Jazz theme              |
-| [`apps/sveltekit-hybrid`](apps/sveltekit-hybrid)         | SvelteKit, Jazz in the app, local-first guest then Better Auth             |
+| [`apps/react-localfirst`](apps/react-localfirst)         | React, Vite, device accounts, Astryx with the Jazz theme                   |
+| [`apps/sveltekit-hybrid`](apps/sveltekit-hybrid)         | SvelteKit, Jazz in the app, device-account guest then Better Auth          |
 | [`apps/ts-effect-betterauth`](apps/ts-effect-betterauth) | TypeScript and Effect, no UI framework, Jazz in a Hono server, Better Auth |
 
 ## Run it
@@ -79,8 +79,8 @@ and are enforced by the server.
 
 ## Identity
 
-Like the todo examples, StagePlan uses a local-first account: no sign-up, the
-browser profile holds the account. That keeps the example small; see the
+Like the todo examples, StagePlan uses a device account: no sign-up, the
+browser profile holds the account's key. That keeps the example small; see the
 [auth docs](https://jazz.tools/docs/auth/authentication) to add a provider.
 
 ## Schema and the W1 workload

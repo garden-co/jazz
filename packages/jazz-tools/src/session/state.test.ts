@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import {
-  attachJazzSessionConsumer,
+  attachSessionCoreConsumer,
   createJazzSessionOwner,
   replaceJazzSessionClient,
   switchJazzSessionUser,
@@ -121,7 +121,7 @@ describe("Jazz session lifecycle", () => {
 
   it("waits for committed consumer detach before sync and enrollment", async () => {
     const { session, clients, enrollment, next } = await setup();
-    const lease = attachJazzSessionConsumer(session),
+    const lease = attachSessionCoreConsumer(session),
       previous = session.getSnapshot();
     const command = session.linkWithBackend();
     await tick();
@@ -288,7 +288,7 @@ describe("Jazz session lifecycle", () => {
   });
   it("release unblocks close while transition awaits detach", async () => {
     const { session, enrollment, clients } = await setup();
-    const lease = attachJazzSessionConsumer(session);
+    const lease = attachSessionCoreConsumer(session);
     const command = session.loginWithBackend(),
       rejected = expect(command).rejects.toThrow("superseded");
     await tick();

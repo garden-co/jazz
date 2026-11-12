@@ -74,4 +74,4 @@ export function useAuthState() {
   return () => client.authState;
 }
 
-export { JazzProvider, type JazzProviderProps } from "./app.js";
+export { JazzProvider, type JazzProviderProps } from "./session.js";

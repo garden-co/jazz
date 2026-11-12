@@ -1,29 +1,29 @@
-import { createDb, type DbConfig } from "jazz-tools";
+import type { JazzClient, JazzSession } from "jazz-tools/client";
 import { app } from "../session-app.js";
 
-export async function authSessionExamples(config: DbConfig) {
-  const db = await createDb(config);
+export async function authSessionExamples(session: JazzSession<JazzClient>) {
+  const db = session.db;
 
   // #region auth-session-ts-hook
-  const session = db.getAuthState().session;
+  const user = session.getSnapshot().user;
   // #endregion auth-session-ts-hook
 
   // #region auth-session-ts-user
-  const sessionUser = session?.user ?? null;
+  const accountId = user?.accountId ?? null;
   // #endregion auth-session-ts-user
 
   // #region auth-session-ts-query
-  const ownedTodos = sessionUser ? await db.all(app.todos.where({ owner_id: sessionUser })) : [];
+  const ownedTodos = accountId ? await db.all(app.todos.where({ owner_id: accountId })) : [];
   // #endregion auth-session-ts-query
 
   // #region auth-session-ts-insert
   function addOwnedTodo(title: string) {
-    if (!sessionUser) return;
+    if (!accountId) return;
 
     db.insert(app.todos, {
       title,
       done: false,
-      owner_id: sessionUser,
+      owner_id: accountId,
     });
   }
   // #endregion auth-session-ts-insert

@@ -31,7 +31,7 @@ export interface SessionTabState {
 export async function openSessionTab(
   id: string,
   serverUrl: string,
-  options: { clearOnSignOut?: boolean } = {},
+  options: { clearOnSignOut?: boolean; localFirst?: "now" } = {},
 ) {
   await commands.sessionTabOpen(id, serverUrl, options);
   return {

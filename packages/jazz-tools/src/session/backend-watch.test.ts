@@ -26,8 +26,8 @@ async function setup(
     noBackend?: boolean;
     clearOnSignOut?: boolean;
     visible?: boolean;
-    onSignedOut?: () => "sign-out" | "keep" | void | Promise<"sign-out" | "keep" | void>;
     forgotten?: (account: AccountHandle) => Promise<boolean>;
+    onSignedOut?: () => "sign-out" | "keep" | void | Promise<"sign-out" | "keep" | void>;
   } = {},
 ) {
   let backendUser: AccountHandle | null = null;
@@ -101,8 +101,8 @@ async function setup(
       reconnectBackoffMs: 20,
       refusedConfirmMs: 30,
       notFoundRetryMs: 10,
-      onSignedOut: options.onSignedOut,
       forgotten: options.forgotten,
+      onSignedOut: options.onSignedOut,
     },
   );
   return {

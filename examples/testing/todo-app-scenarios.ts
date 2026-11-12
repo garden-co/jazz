@@ -31,6 +31,14 @@ export function todoCrudTest({
     expect(rows()[0].querySelector("span")!.textContent).toBe("Buy milk");
     expect(rows()[0].classList.contains("done")).toBe(false);
 
+    // Delete an open todo: several examples only let open todos be deleted
+    // (`allowDelete.where({ done: false })`), which a thin client hears from
+    // the server at once.
+    await click(el.querySelector<HTMLButtonElement>(".delete-btn")!);
+    await waitFor(() => rows().length === 0, 3000, "Todo should be removed");
+
+    await submit(el, "Walk the dog");
+    await waitFor(() => rows().length === 1, 3000, "Todo should appear after form submit");
     await click(el.querySelector<HTMLInputElement>("input.toggle")!);
     await waitFor(
       () => rows()[0]?.classList.contains("done") ?? false,
@@ -38,17 +46,14 @@ export function todoCrudTest({
       "Todo should be marked done",
     );
 
-    await click(el.querySelector<HTMLButtonElement>(".delete-btn")!);
-    await waitFor(() => rows().length === 0, 3000, "Todo should be removed");
-
     const titles = ["First", "Second", "Third"];
     for (const [index, title] of titles.entries()) {
       await submit(el, title);
-      await waitFor(() => rows().length === index + 1, 3000, `Todo ${title} should appear`);
+      await waitFor(() => rows().length === index + 2, 3000, `Todo ${title} should appear`);
     }
     expect(
       [...el.querySelectorAll("#todo-list li span")].map((span) => span.textContent).sort(),
-    ).toEqual(titles);
+    ).toEqual([...titles, "Walk the dog"].sort());
   });
 }
 

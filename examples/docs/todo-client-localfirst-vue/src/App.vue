@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import type { DbConfig } from "jazz-tools";
-import { JazzProvider } from "jazz-tools/vue";
+import { JazzProvider, type JazzClientConfig } from "jazz-tools/vue";
 import TodoList from "./TodoList.vue";
 
-defineProps<{ config: DbConfig }>();
+defineProps<{ config: JazzClientConfig }>();
 </script>
 
 <template>
@@ -11,7 +10,7 @@ defineProps<{ config: DbConfig }>();
     <h1>Todos</h1>
     <TodoList />
 
-    <template #fallback>
+    <template #loading>
       <p>Loading...</p>
     </template>
   </JazzProvider>

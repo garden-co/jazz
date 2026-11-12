@@ -6,7 +6,6 @@ const { startSpy } = vi.hoisted(() => ({ startSpy: vi.fn() }));
 vi.mock("../dev/inspector-overlay/loader.js", () => ({ startInspectorOverlay: startSpy }));
 
 vi.mock("../react-core/provider.js", () => ({
-  JazzProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   JazzClientProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   useDb: () => ({}),
   useJazzClient: () => ({ db: {} }),
@@ -14,13 +13,11 @@ vi.mock("../react-core/provider.js", () => ({
 }));
 vi.mock("../react-core/session.js", () => ({
   JazzSessionProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-  ConfiguredJazzSessionProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   useJazzSession: () => null,
 }));
-vi.mock("../session/create-jazz-session.js", () => ({ createJazzClient: vi.fn() }));
+vi.mock("../session/create-jazz-session.js", () => ({ openBrowserSessionCore: vi.fn() }));
 
 import { JazzProvider } from "./provider.js";
-import { JazzSessionProvider } from "./session.js";
 
 // The providers no longer open the Inspector overlay themselves: a page
 // mounts it with `mountInspector(db)` from `jazz-tools/inspector`.
@@ -34,9 +31,9 @@ describe("React providers without dev auto-attach", () => {
           <JazzProvider config={{} as never}>
             <div />
           </JazzProvider>
-          <JazzSessionProvider session={{} as never}>
+          <JazzProvider session={{} as never}>
             <div />
-          </JazzSessionProvider>
+          </JazzProvider>
         </>,
       );
       await new Promise((r) => setTimeout(r, 20));
@@ -59,11 +56,11 @@ describe("React providers without dev auto-attach", () => {
       ).toThrow(/JazzProvider takes no autoAttachDevTools.*mountInspector/);
       expect(() =>
         render(
-          <JazzSessionProvider session={{} as never} {...props}>
+          <JazzProvider session={{} as never} {...props}>
             <div />
-          </JazzSessionProvider>,
+          </JazzProvider>,
         ),
-      ).toThrow(/JazzSessionProvider takes no autoAttachDevTools/);
+      ).toThrow(/JazzProvider takes no autoAttachDevTools/);
       const unset = { autoAttachDevTools: undefined } as Record<string, unknown>;
       render(
         <JazzProvider config={{} as never} {...unset}>

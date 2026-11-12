@@ -7,7 +7,8 @@ import { createJazzSessionOwner } from "../session/state.js";
 const mocks = vi.hoisted(() => ({ openJazzClient: vi.fn() }));
 vi.mock("./create-jazz-client.js", () => ({ openJazzClient: mocks.openJazzClient }));
 import { JazzClientProvider, LegacyJazzProvider } from "./provider.js";
-import { JazzSessionProvider } from "./session.js";
+import { JazzProvider } from "./session.js";
+import { ownJazzSession } from "../session/jazz-session.js";
 
 const client = {
   db: { onAuthChanged: () => () => {} },
@@ -15,13 +16,14 @@ const client = {
   shutdown: async () => {},
 };
 const account = { id: "local", identity: { issuer: "test", subject: "local" } } as AccountHandle;
-const session = await createJazzSessionOwner({
+const core = await createJazzSessionOwner({
   accounts: new AccountManager(
     { createLocalFirst: () => account, loginWithBackend: async () => account },
     account,
   ),
   openClient: async () => client as never,
 });
+const session = ownJazzSession({}, async () => core);
 
 function mountWith(component: Component, props: () => Record<string, unknown>) {
   const errors: unknown[] = [];
@@ -40,7 +42,7 @@ describe("Vue providers refuse the removed autoAttachDevTools", () => {
   const providers: [string, Component, Record<string, unknown>][] = [
     ["JazzProvider", LegacyJazzProvider, { config: { appId: "x", driver: { type: "memory" } } }],
     ["JazzClientProvider", JazzClientProvider, { client }],
-    ["JazzSessionProvider", JazzSessionProvider, { session }],
+    ["JazzProvider", JazzProvider, { session }],
   ];
 
   for (const [name, component, props] of providers) {

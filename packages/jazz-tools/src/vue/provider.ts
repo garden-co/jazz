@@ -280,4 +280,4 @@ export function useSession(): ComputedRef<PublicSession | null> {
   return computed(() => ctx.value?.session ?? null);
 }
 
-export { JazzProvider, type JazzProviderProps } from "./app.js";
+export { JazzProvider, type JazzProviderProps } from "./session.js";

@@ -3,15 +3,21 @@ import React, { useEffect } from "react";
 import { act, render, waitFor } from "@testing-library/react";
 import { expect, it } from "vitest";
 import { schema } from "../../src/schema-namespace.js";
+import { useAll, useOne, useDb, useSession, type Db } from "../../src/react-native/index.js";
+import { JazzDbProvider } from "../../src/react-core/provider.js";
 import {
-  JazzProvider,
-  useAll,
-  useOne,
-  useDb,
-  useSession,
-  type Db,
-  type DbConfig,
-} from "../../src/react-native/index.js";
+  openJazzClient,
+  type OpenJazzClientConfig as DbConfig,
+} from "../../src/react-native/create-jazz-client.js";
+
+/** A client opened straight from a Db config, as the hooks see it under a session. */
+function JazzProvider(props: {
+  config: DbConfig;
+  fallback?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return <JazzDbProvider {...props} openJazzClient={openJazzClient as never} />;
+}
 import type { QueryBuilder, QueryOptions } from "../../src/runtime/db.js";
 import { withNativeRelayFixture } from "./fixture.js";
 

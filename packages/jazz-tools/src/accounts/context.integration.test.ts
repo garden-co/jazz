@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDb, schema } from "../index.js";
+import { schema } from "../index.js";
+import { createDb } from "../runtime/default-create-db.js";
 import { getDbInternalSession } from "../runtime/db-internal-session.js";
 import { mapAuthReason, type AuthFailureReason } from "../runtime/auth-state.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
