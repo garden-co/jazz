@@ -90,6 +90,17 @@ export function historyQuery(roomId: string, bound: { before?: HistoryCursor; fr
     : query.limit(HISTORY_PAGE);
 }
 
+/** One message older than `cursor`, if there is any: whether to offer "Load older". */
+function olderProbeQuery(roomId: string, cursor: HistoryCursor) {
+  return app.messages
+    .where({ roomId, $createdAt: { lte: cursor.at } })
+    .select("id")
+    .orderBy("$createdAt", "desc")
+    .orderBy("id", "desc")
+    .offset(cursor.offset)
+    .limit(1);
+}
+
 function cursorKey(cursor: HistoryCursor) {
   return `${cursor.at.getTime()}:${cursor.offset}`;
 }
@@ -140,16 +151,29 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
   }, [newestFirst, olderCursors, olderPages]);
   const lastCursor = olderCursors.at(-1);
   const lastPage = lastCursor ? olderPages.get(cursorKey(lastCursor)) : newestFirst;
-  const hasOlder = !!lastPage && lastPage.length >= HISTORY_PAGE;
-  function loadOlder() {
+  // Where the next older page starts: before the oldest shown message,
+  // skipping the messages already shown at its timestamp.
+  const nextCursor = useMemo((): HistoryCursor | undefined => {
     const oldest = messages[0];
-    if (!oldest) return;
-    if (!pinnedFrom) setPinnedFrom(oldest.$createdAt);
+    if (!oldest) return undefined;
     const at = oldest.$createdAt;
     const offset = messages.filter(
       (message) => message.$createdAt.getTime() === at.getTime(),
     ).length;
-    setOlderCursors((cursors) => [...cursors, { at, offset }]);
+    return { at, offset };
+  }, [messages]);
+  // A full last page may still be the last one: ask for one more message
+  // before offering "Load older".
+  const { data: olderProbe } = useAll(
+    lastPage && lastPage.length >= HISTORY_PAGE && nextCursor
+      ? olderProbeQuery(roomId, nextCursor)
+      : undefined,
+  );
+  const hasOlder = (olderProbe?.length ?? 0) > 0;
+  function loadOlder() {
+    if (!nextCursor) return;
+    if (!pinnedFrom) setPinnedFrom(nextCursor.at);
+    setOlderCursors((cursors) => [...cursors, nextCursor]);
   }
   const { data: loadedMembers } = useAll(roomMembersQuery(roomId));
   const members = loadedMembers ?? [];
@@ -164,8 +188,8 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
     [loadedMarkers, author],
   );
   const readUpTo = useMemo(
-    () => othersReadUpTo(loadedMarkers ?? [], author),
-    [loadedMarkers, author],
+    () => othersReadUpTo(loadedMarkers ?? [], loadedMembers ?? [], author),
+    [loadedMarkers, loadedMembers, author],
   );
   const [readByMessage, setReadByMessage] = useState<MessageSummary | undefined>(undefined);
   const [isMembersOpen, setMembersOpen] = useState(false);
@@ -180,13 +204,14 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
     author,
     newestAt: newestFirst[0]?.$createdAt,
     markers: loadedMarkers ? markers : undefined,
-    membershipId: members.find((member) => member.memberAuthor === author)?.id,
+    isMember,
   });
 
   function leave() {
     const mine = members.find((member) => member.memberAuthor === author);
     if (!mine) return;
-    // Leaving and dropping this reader's private markers commit together.
+    // Leaving and dropping this reader's marker commit together: an
+    // ex-member leaves no read position behind.
     setActionError(null);
     db.transaction((tx) => {
       for (const marker of markers) tx.delete(app.readMarkers, marker.id);
@@ -402,11 +427,22 @@ function OlderPage({
   return null;
 }
 
-/** The newest marker among other members: what they have all read up to. */
-function othersReadUpTo(markers: readonly ReadMarker[], author: string): number {
+/**
+ * The newest marker among the room's other current members: a message at or
+ * before it has two check marks. A marker left by someone no longer in the
+ * room (written before markers were removed with their member) counts for
+ * nothing.
+ */
+function othersReadUpTo(
+  markers: readonly ReadMarker[],
+  members: readonly { memberAuthor: string }[],
+  author: string,
+): number {
+  const others = new Set(members.map((member) => member.memberAuthor));
+  others.delete(author);
   let newest = 0;
   for (const marker of markers)
-    if (marker.reader !== author) newest = Math.max(newest, marker.lastReadAt.getTime());
+    if (others.has(marker.reader)) newest = Math.max(newest, marker.lastReadAt.getTime());
   return newest;
 }
 
@@ -527,17 +563,24 @@ function ReadMark({ isRead }: { isRead: boolean }) {
   );
 }
 
+/** How often, at most, this reader's marker is written while a room is open. */
+export const MARK_READ_INTERVAL_MS = 5_000;
+
 /**
  * Moves this reader's marker to the room's newest message while the room is
- * open and the page is visible, and journals the move in the same
- * transaction. The marker only moves forward.
+ * open, the page is visible and the reader is a member. The marker is one row,
+ * updated in place, never a history, and it only moves forward.
+ *
+ * Writes are throttled: at most one every {@link MARK_READ_INTERVAL_MS} (the
+ * last position always lands, trailing), plus one at once when the reader
+ * switches rooms or hides the page, so co-members' check marks catch up.
  */
 function useMarkRead({
   roomId,
   author,
   newestAt,
   markers,
-  membershipId,
+  isMember,
 }: {
   roomId: string;
   author: string;
@@ -545,8 +588,8 @@ function useMarkRead({
   newestAt: Date | undefined;
   /** Undefined until this reader's markers have loaded. */
   markers: ReadMarker[] | undefined;
-  /** This reader's membership; journaling a read needs it. */
-  membershipId: string | undefined;
+  /** Only members keep a marker: the policy refuses anyone else's. */
+  isMember: boolean;
 }) {
   const db = useDb();
   const [isVisible, setVisible] = useState(
@@ -557,23 +600,57 @@ function useMarkRead({
     document.addEventListener("visibilitychange", update);
     return () => document.removeEventListener("visibilitychange", update);
   }, []);
+
+  // This room's write state, read when a write runs rather than when it is
+  // scheduled. A new object per room: the flush that runs as the reader
+  // leaves a room writes that room's marker, not the next one's.
+  const room = useMemo(
+    () => ({
+      markerId: undefined as string | undefined,
+      writtenUpTo: 0,
+      pendingUpTo: undefined as number | undefined,
+      lastWriteAt: 0,
+      timer: undefined as ReturnType<typeof setTimeout> | undefined,
+    }),
+    [roomId],
+  );
   const marker = markers?.[0];
-  const markedAt = marker?.lastReadAt.getTime();
-  const upTo = newestAt?.getTime();
-  const isLoaded = markers !== undefined;
-  useEffect(() => {
-    if (!isVisible || !isLoaded || !membershipId || upTo === undefined) return;
-    if (markedAt !== undefined && markedAt >= upTo) return;
+  if (marker) {
+    room.markerId = marker.id;
+    room.writtenUpTo = Math.max(room.writtenUpTo, marker.lastReadAt.getTime());
+  }
+
+  // Writes the pending position, if it moves the marker forward.
+  const flush = useCallback(() => {
+    clearTimeout(room.timer);
+    room.timer = undefined;
+    const upTo = room.pendingUpTo;
+    room.pendingUpTo = undefined;
+    if (upTo === undefined || upTo <= room.writtenUpTo) return;
+    room.lastWriteAt = Date.now();
+    room.writtenUpTo = upTo;
     const lastReadAt = new Date(upTo);
-    db.transaction((tx) => {
-      if (marker) tx.update(app.readMarkers, marker.id, { lastReadAt });
-      else tx.insert(app.readMarkers, { roomId, reader: author, lastReadAt });
-      tx.insert(app.readProgress, {
-        roomId,
-        memberId: membershipId,
-        reader: author,
-        upToAt: lastReadAt,
-      });
-    });
-  }, [db, isVisible, isLoaded, membershipId, upTo, markedAt, marker, roomId, author]);
+    if (room.markerId) {
+      db.update(app.readMarkers, room.markerId, { lastReadAt });
+    } else {
+      room.markerId = db.insert(app.readMarkers, { roomId, reader: author, lastReadAt }).value.id;
+    }
+  }, [db, room, roomId, author]);
+
+  const isLoaded = markers !== undefined;
+  const upTo = newestAt?.getTime();
+  useEffect(() => {
+    if (!isVisible || !isLoaded || !isMember || upTo === undefined) return;
+    if (upTo <= room.writtenUpTo) return;
+    room.pendingUpTo = upTo;
+    const wait = room.lastWriteAt + MARK_READ_INTERVAL_MS - Date.now();
+    if (wait <= 0) flush();
+    else room.timer ??= setTimeout(flush, wait);
+  }, [isVisible, isLoaded, isMember, upTo, room, flush]);
+
+  // Hiding the page or leaving the room writes what is pending at once.
+  useEffect(() => {
+    if (!isVisible) flush();
+  }, [isVisible, flush]);
+  useEffect(() => flush, [flush]);
 }

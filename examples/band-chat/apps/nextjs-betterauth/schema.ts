@@ -31,7 +31,6 @@ const schema = {
       reactionsViaRoom: s.reverse("reactions", "room"),
       joinRequestsViaRoom: s.reverse("joinRequests", "room"),
       readMarkersViaRoom: s.reverse("readMarkers", "room"),
-      readProgressViaRoom: s.reverse("readProgress", "room"),
       canvasesViaRoom: s.reverse("canvases", "room"),
     },
   ),
@@ -43,11 +42,7 @@ const schema = {
       // avatar. Permissions require it to belong to `memberAuthor`.
       memberProfileId: s.uuid().optional(),
     },
-    {
-      room: s.rel("rooms", "roomId"),
-      memberProfile: s.rel("profiles", "memberProfileId"),
-      progressViaMember: s.reverse("readProgress", "member"),
-    },
+    { room: s.rel("rooms", "roomId"), memberProfile: s.rel("profiles", "memberProfileId") },
   ),
   // "Ask to join": anyone holding a room link may ask; only the room creator
   // can see the request and admit the requester.
@@ -55,18 +50,14 @@ const schema = {
     { roomId: s.uuid(), requester: s.uuid(), profileId: s.uuid() },
     { room: s.rel("rooms", "roomId"), profile: s.rel("profiles", "profileId") },
   ),
-  // One row per reader and room: the `$createdAt` of the newest message the
-  // reader has seen. Messages from others after it are unread. Co-members can
-  // read it, which is what the check marks under a message show.
+  // One row per member and room, updated in place, never a history: the
+  // `$createdAt` of the newest message the reader has seen. Messages from
+  // others after it are unread. Co-members can read it, which is what the
+  // check marks under a message and "Read by" show; it only moves forward,
+  // and it goes when its reader leaves or is removed.
   readMarkers: s.table(
     { roomId: s.uuid(), reader: s.uuid(), lastReadAt: s.timestamp() },
     { room: s.rel("rooms", "roomId") },
-  ),
-  // Every marker move, appended in the same transaction as the move. The
-  // first entry that reaches a message dates when that member read it.
-  readProgress: s.table(
-    { roomId: s.uuid(), memberId: s.uuid(), reader: s.uuid(), upToAt: s.timestamp() },
-    { room: s.rel("rooms", "roomId"), member: s.rel("roomMembers", "memberId") },
   ),
   messages: s.table(
     {
@@ -125,7 +116,6 @@ export type Room = s.RowOf<typeof app.rooms>;
 export type RoomMember = s.RowOf<typeof app.roomMembers>;
 export type JoinRequest = s.RowOf<typeof app.joinRequests>;
 export type ReadMarker = s.RowOf<typeof app.readMarkers>;
-export type ReadProgress = s.RowOf<typeof app.readProgress>;
 export type Message = s.RowOf<typeof app.messages>;
 export type Reaction = s.RowOf<typeof app.reactions>;
 export type Canvas = s.RowOf<typeof app.canvases>;

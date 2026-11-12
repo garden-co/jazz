@@ -95,32 +95,25 @@ const bandChatPermissions = definePermissions(
       anyOf([{ requester: me }, isCreatorOf(request.roomId)]),
     );
 
-    // Co-members see each other's markers: the check marks under a message.
+    // Read markers: one "read up to" row per member and room, no history.
+    // Co-members see each other's markers (the check marks and "Read by"
+    // under a message); outsiders and ex-members see none.
     policy.readMarkers.allowRead.where((marker) => isMemberOf(marker.roomId));
     policy.readMarkers.allowInsert.where((marker) =>
       allOf([{ reader: me }, isMemberOf(marker.roomId)]),
     );
+    // Only the reader moves their own marker, and only while a member. That a
+    // marker only moves forward is the app's rule (useMarkRead never writes
+    // an earlier position), not this policy's: a policy cannot yet compare a
+    // column with the written row's value other than for equality (#5130).
     policy.readMarkers.allowUpdate
       .whereOld({ reader: me })
       .whereNew((marker) => allOf([{ reader: me }, isMemberOf(marker.roomId)]));
-    policy.readMarkers.allowDelete.where({ reader: me });
-
-    // The read journal is append-only. Each entry names the reader's own
-    // membership in the room, so "Read by" can list members with the date
-    // their marker first reached a message.
-    policy.readProgress.allowRead.where((progress) => isMemberOf(progress.roomId));
-    policy.readProgress.allowInsert.where((progress) =>
-      allOf([
-        { reader: me },
-        policy.roomMembers.exists.where({
-          id: progress.memberId,
-          roomId: progress.roomId,
-          memberAuthor: me,
-        }),
-      ]),
+    // A reader drops their own marker when they leave; the room creator drops
+    // a member's marker when removing them, so an ex-member leaves no trace.
+    policy.readMarkers.allowDelete.where((marker) =>
+      anyOf([{ reader: me }, isCreatorOf(marker.roomId)]),
     );
-    policy.readProgress.allowUpdate.never();
-    policy.readProgress.allowDelete.where({ reader: me });
 
     policy.messages.allowRead.where((message) => isMemberOf(message.roomId));
     policy.messages.allowInsert.where((message) =>

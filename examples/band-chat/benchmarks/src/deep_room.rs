@@ -1,6 +1,6 @@
 //! BandChat after years of use: one room with a long history, a member who is
 //! in a hundred rooms, unread state derived from each room's newest message,
-//! and read receipts with read dates.
+//! and read receipts.
 //!
 //! The schema and policies mirror `apps/nextjs-betterauth/schema.ts` and
 //! `permissions.ts` with the read-state model those files describe:
@@ -10,8 +10,10 @@
 //!   newest message (`messagesViaRoom`, newest first, limit 1); no member has
 //!   to update the room when they post.
 //! - The unread count is a capped read of the messages after the marker.
-//! - Markers are readable by the room's members (check marks), and every
-//!   marker move appends a `readProgress` row (read dates for "Read by").
+//! - A marker is one "read up to" row per member and room, updated in place
+//!   (no history), readable by the room's members. The check marks and
+//!   "Read by" both derive from it; the app writes it at most every 5 s per
+//!   open room, so a marker move here is one update.
 //!
 //! Only the tables these workloads touch are duplicated, with their
 //! membership policies; no application runtime code is imported. Canvases,
@@ -27,8 +29,7 @@ use jazz::db::{
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{
-    ArraySubquery, ArraySubqueryRequirement, OrderDirection, Query, col, contains, eq, gt, gte,
-    lit, lt, lte, ne,
+    ArraySubquery, OrderDirection, Query, col, contains, eq, gt, gte, lit, lt, lte, ne,
 };
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
@@ -61,8 +62,6 @@ pub const SEARCH_EVERY: usize = 2_000;
 pub const SEARCH_WORD: &str = "cadenza";
 /// One in this many messages in the deep and busy rooms has reactions.
 const REACTED_EVERY: usize = 10;
-/// A member's marker moves (and is journaled) about every this many messages.
-const JOURNAL_STRIDE: usize = 500;
 /// Seeded history spans this many milliseconds, so every room's newest
 /// message is recent and live sends are newer than all of it.
 const BASE_MS: u64 = 1_700_000_000_000;
@@ -194,21 +193,6 @@ impl Shape {
             newest
         }
     }
-
-    /// Journaled marker positions for a member: every `JOURNAL_STRIDE`
-    /// messages, staggered by slot, then the current marker. Only rooms with
-    /// a long history are journaled; small rooms have only markers.
-    fn journal(&self, room: usize, slot: usize) -> Vec<usize> {
-        if room > self.busy_rooms {
-            return Vec::new();
-        }
-        let up_to = self.read_up_to(room, slot);
-        let mut entries = (slot * 10..up_to)
-            .step_by(JOURNAL_STRIDE)
-            .collect::<Vec<_>>();
-        entries.push(up_to);
-        entries
-    }
 }
 
 pub fn user(index: usize) -> AuthorSubject {
@@ -263,10 +247,6 @@ fn reaction_row(room: usize, k: usize, j: usize) -> RowUuid {
 
 fn marker_row(room: usize, slot: usize) -> RowUuid {
     row(0xd6, (room as u64) << 8 | slot as u64)
-}
-
-fn progress_row(room: usize, slot: usize, j: usize) -> RowUuid {
-    row(0xd7, (room as u64) << 40 | (slot as u64) << 24 | j as u64)
 }
 
 fn account(user: usize) -> Value {
@@ -338,11 +318,15 @@ fn schema() -> JazzSchema {
                 .policies(TablePolicies::new().with_select(allowed_to_read("roomId"))),
         )
         .table(
-            // Readable by the room's members: check marks.
+            // One "read up to" row per member, readable by the room's members:
+            // check marks and "Read by". (The app also lets the reader and the
+            // room creator delete it; nothing here deletes.)
             TableSchemaBuilder::new("readMarkers")
                 .fk_column("roomId", "rooms")
                 .column("reader", ColumnType::Uuid)
                 .column("lastReadAt", ColumnType::Timestamp)
+                // "Read by": the room's markers at or past a message.
+                .composite_index(["roomId", "lastReadAt"])
                 .policies(
                     TablePolicies::new()
                         .with_select(is_member_of("roomId"))
@@ -351,28 +335,6 @@ fn schema() -> JazzSchema {
                             Some(is("reader", me())),
                             all_of([is("reader", me()), is_member_of("roomId")]),
                         ),
-                ),
-        )
-        .table(
-            // Append-only journal of marker moves: read dates.
-            TableSchemaBuilder::new("readProgress")
-                .fk_column("roomId", "rooms")
-                .fk_column("memberId", "roomMembers")
-                .column("reader", ColumnType::Uuid)
-                .column("upToAt", ColumnType::Timestamp)
-                // "Read by": a member's first entry at or after a message.
-                .composite_index(["memberId", "upToAt"])
-                .policies(
-                    TablePolicies::new()
-                        .with_select(is_member_of("roomId"))
-                        .with_insert(all_of([
-                            is("reader", me()),
-                            is_member_of("roomId"),
-                            exists(table("roomMembers").where_(all_of([
-                                is("id", outer("memberId")),
-                                is("memberAuthor", me()),
-                            ]))),
-                        ])),
                 ),
         )
         .table(
@@ -500,8 +462,8 @@ fn commit_batch(db: &Db, batch: &[Seed], shape: &Shape) {
     .expect("seed BandChat history");
 }
 
-/// Seed profiles, rooms, memberships, history, reactions, markers and the
-/// read journal. Writes run as the database identity and are settled.
+/// Seed profiles, rooms, memberships, history, reactions and read markers.
+/// Writes run as the database identity and are settled.
 fn seed(db: &Db, shape: &Shape) {
     block_on(db.transaction(async |tx| {
         for user in 0..USERS {
@@ -579,28 +541,11 @@ fn seed(db: &Db, shape: &Shape) {
                     ),
                 )
                 .await?;
-                for (j, k) in shape.journal(room, slot).into_iter().enumerate() {
-                    tx.insert(
-                        "readProgress",
-                        cells([
-                            ("roomId", uuid(room_row(room))),
-                            ("memberId", uuid(member_row(room, slot))),
-                            ("reader", account(member)),
-                            ("upToAt", Value::U64(shape.sent_at(room, k))),
-                        ]),
-                        // Read a little after the message arrived.
-                        with_id(
-                            progress_row(room, slot, j),
-                            Some(shape.sent_at(room, k) + 10),
-                        ),
-                    )
-                    .await?;
-                }
             }
         }
         Ok(())
     }))
-    .expect("seed BandChat markers and read journal");
+    .expect("seed BandChat read markers");
 }
 
 fn local_opts() -> ReadOpts {
@@ -746,20 +691,13 @@ impl DeepRoom {
         let receipts = prepare(
             Query::from("readMarkers").filter(eq(col("roomId"), lit(uuid(room_row(DEEP_ROOM))))),
         );
-        // "Read by": members whose journal reaches the message, with the
-        // first time it did.
+        // "Read by": the room's markers at or past the message (the app
+        // shows the current members among them, by name, with no times).
         let read_by_at = shape.sent_at(DEEP_ROOM, shape.read_by_target());
         let read_by = prepare(
-            Query::from("roomMembers")
+            Query::from("readMarkers")
                 .filter(eq(col("roomId"), lit(uuid(room_row(DEEP_ROOM)))))
-                .include("memberProfileId")
-                .array_subquery(
-                    ArraySubquery::new("progressViaMember", "readProgress", "memberId", "id")
-                        .filter(gte(col("upToAt"), lit(Value::U64(read_by_at))))
-                        .order_by("upToAt", OrderDirection::Asc)
-                        .limit(1)
-                        .requirement(ArraySubqueryRequirement::AtLeastOne),
-                ),
+                .filter(gte(col("lastReadAt"), lit(Value::U64(read_by_at)))),
         );
         Self {
             shape,
@@ -892,9 +830,9 @@ impl DeepRoom {
         id
     }
 
-    /// A member moves their marker to the newest message: the marker update
-    /// and its journal row commit as one transaction.
-    fn member_reads_to(&self, slot: usize, member: usize, at: u64, journal_entry: usize) {
+    /// A member moves their marker to the newest message: one update of their
+    /// marker row (the app writes it at most every 5 s while the room is open).
+    fn member_reads_to(&self, slot: usize, member: usize, at: u64) {
         block_on(self.db.transaction_for_identity(user(member), async |tx| {
             tx.update(
                 "readMarkers",
@@ -904,20 +842,6 @@ impl DeepRoom {
                     updated_at_ms: Some(at + 10),
                     ..Default::default()
                 },
-            )
-            .await?;
-            tx.insert(
-                "readProgress",
-                cells([
-                    ("roomId", uuid(room_row(DEEP_ROOM))),
-                    ("memberId", uuid(member_row(DEEP_ROOM, slot))),
-                    ("reader", account(member)),
-                    ("upToAt", Value::U64(at)),
-                ]),
-                with_id(
-                    progress_row(DEEP_ROOM, slot, 1 << 16 | journal_entry),
-                    Some(at + 10),
-                ),
             )
             .await?;
             Ok(())
@@ -1092,7 +1016,7 @@ impl ReceiptsFanout {
         let slot = 1 + self.moves % (DEEP_MEMBERS - 1);
         let member = self.room.shape.members(DEEP_ROOM)[slot];
         let at = BASE_MS + SPAN_MS + (self.room.next_send + self.moves) as u64;
-        self.room.member_reads_to(slot, member, at, self.moves);
+        self.room.member_reads_to(slot, member, at);
         let start = Instant::now();
         let mut pending = (0..self.streams.len()).collect::<Vec<_>>();
         while !pending.is_empty() {

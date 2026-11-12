@@ -38,9 +38,9 @@ fn room_list_and_unread_count_derive_from_the_newest_message_and_the_marker() {
     assert_eq!(room.open_unread_count().1, DEEP_UNREAD);
 }
 
-/// "Read by" lists the members whose read journal reaches the message.
+/// "Read by" finds the members whose read marker reaches the message.
 #[test]
-fn read_by_lists_members_whose_journal_reaches_the_message() {
+fn read_by_finds_members_whose_marker_reaches_the_message() {
     let shape = Shape::miniature(DEEP);
     let room = DeepRoom::seeded(shape);
     let expected = shape.expected_read_by();
@@ -81,7 +81,7 @@ fn a_new_message_reaches_the_open_room_list() {
 }
 
 /// Every member has the room open; when bob reads to the newest message, their
-/// marker moves (with a journal row) and every open view shows it.
+/// marker moves (one update of their marker row) and every open view shows it.
 #[test]
 fn a_marker_move_reaches_every_open_view() {
     let mut fanout = ReceiptsFanout::new(DeepRoom::seeded(Shape::miniature(DEEP)), DEEP_MEMBERS);

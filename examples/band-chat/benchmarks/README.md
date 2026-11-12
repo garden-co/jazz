@@ -48,13 +48,14 @@ its fixture; `band_chat_open_room` measures opening a policy-protected room.
 in one room's history, in a room list of a hundred rooms, and on read state.
 Its schema and policies mirror the app's `schema.ts` and `permissions.ts`: the
 room list reads each room's newest message instead of a `lastActivityAt` that
-members bump, markers are readable by co-members (check marks), and every
-marker move appends a `readProgress` row (read dates).
+members bump, and each member's read marker, one "read up to" row per room
+updated in place, is readable by co-members (check marks and "Read by").
 
 The fixture is a power law, not a uniform spread: 200 members and 1,000 rooms,
 one with 100,000 messages and 50 members, ten with 10,000 and 989 with 10–200
-(303,695 messages). The busy rooms carry reactions and a read journal; the
-reader belongs to 100 rooms and has five unread messages in the deep room.
+(303,695 messages). The busy rooms carry reactions, and every member has a read
+marker per room; the reader belongs to 100 rooms and has five unread messages
+in the deep room.
 
 | Case                                         | What the user does                                  |
 | -------------------------------------------- | --------------------------------------------------- |
@@ -81,7 +82,7 @@ with `cargo bench -p jazz-example-band-chat-benchmark --bench nightly`.
 
 The schema declares the two indexes these reads need, as an app developer
 would: `messages (roomId, $createdAt)` serves every page, the count and each
-room's newest message, and `readProgress (memberId, upToAt)` serves "Read by".
+room's newest message, and `readMarkers (roomId, lastReadAt)` serves "Read by".
 Without them the pages sort the whole room (tens of milliseconds at 100,000),
 and a live update, which re-runs its query, costs as much.
 `tests/deep_room.rs` checks every case's result on a miniature of the same

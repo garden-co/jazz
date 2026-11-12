@@ -151,8 +151,8 @@ fn band_chat_unread_count_new_message(bencher: divan::Bencher<'_, '_>, _deep: us
 }
 
 /// All 50 members have the deep room open with everyone's markers (check
-/// marks). One reads to the newest message: the marker moves and is
-/// journaled in one transaction, and every open view shows it.
+/// marks). One reads to the newest message: their marker row is updated in
+/// place, and every open view shows it.
 #[divan::bench(args = [DEEP_MEMBERS], sample_count = 10, sample_size = 1)]
 fn band_chat_marker_move_fanout(bencher: divan::Bencher<'_, '_>, open_by: usize) {
     let previous = RefCell::new(None);
@@ -169,8 +169,8 @@ fn band_chat_marker_move_fanout(bencher: divan::Bencher<'_, '_>, open_by: usize)
     drop(previous.into_inner());
 }
 
-/// "Read by" on a recent message in the 50-member deep room: members whose
-/// read journal reaches it, with the first entry that did, one read.
+/// "Read by" on a recent message in the 50-member deep room: the markers at
+/// or past it, one read.
 #[divan::bench(args = [DEEP_MEMBERS], sample_count = 3, sample_size = 1)]
 fn band_chat_read_by_sheet(bencher: divan::Bencher<'_, '_>, _members: usize) {
     let room = band();

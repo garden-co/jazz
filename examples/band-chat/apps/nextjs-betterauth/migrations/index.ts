@@ -8,7 +8,7 @@ import type { ClientMigrations } from "jazz-tools";
 export const migrations: ClientMigrations = {
   "schemas": [
     {
-      "hash": "d46ff6236ee77f7e2036979cb3105a7ccc2a29ff897d1a19471082c1fccc20fb",
+      "hash": "0fe493411de2f896802f229b2d445a17fcb95794a8c492906c2ba22c1cf7a8d0",
       "schema": {
         "tables": {
           "better_auth_user": {
@@ -363,11 +363,6 @@ export const migrations: ClientMigrations = {
                 "table": "readMarkers",
                 "relation": "room"
               },
-              "readProgressViaRoom": {
-                "kind": "reverse",
-                "table": "readProgress",
-                "relation": "room"
-              },
               "canvasesViaRoom": {
                 "kind": "reverse",
                 "table": "canvases",
@@ -411,11 +406,6 @@ export const migrations: ClientMigrations = {
                 "kind": "forward",
                 "table": "profiles",
                 "column": "memberProfileId"
-              },
-              "progressViaMember": {
-                "kind": "reverse",
-                "table": "readProgress",
-                "relation": "member"
               }
             }
           },
@@ -488,52 +478,6 @@ export const migrations: ClientMigrations = {
                 "kind": "forward",
                 "table": "rooms",
                 "column": "roomId"
-              }
-            }
-          },
-          "readProgress": {
-            "columns": [
-              {
-                "name": "roomId",
-                "column_type": {
-                  "type": "Uuid"
-                },
-                "nullable": false,
-                "references": "rooms"
-              },
-              {
-                "name": "memberId",
-                "column_type": {
-                  "type": "Uuid"
-                },
-                "nullable": false,
-                "references": "roomMembers"
-              },
-              {
-                "name": "reader",
-                "column_type": {
-                  "type": "Uuid"
-                },
-                "nullable": false
-              },
-              {
-                "name": "upToAt",
-                "column_type": {
-                  "type": "Timestamp"
-                },
-                "nullable": false
-              }
-            ],
-            "relations": {
-              "room": {
-                "kind": "forward",
-                "table": "rooms",
-                "column": "roomId"
-              },
-              "member": {
-                "kind": "forward",
-                "table": "roomMembers",
-                "column": "memberId"
               }
             }
           },

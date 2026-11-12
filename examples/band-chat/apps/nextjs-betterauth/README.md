@@ -49,17 +49,20 @@ product slice, not another generic Todo tutorial.
   someone else after the marker, and only unread rooms pay for a count, capped
   at 100. `$createdAt` is the sender's clock, so a message sent from a clock
   far behind can land before the marker and not count as unread.
-- **Read receipts.** Markers are readable by the room's members: under your own
-  messages, one check mark means sent and two mean another member's marker has
-  reached it. This is a privacy change: a marker used to be private to its
-  reader, and now every member of a room can see how far every other member has
-  read it, and when. Every marker move also appends a `readProgress` row in the
-  same transaction. "Read by" on your message lists the members whose journal
-  reaches it, dated by the first entry that did. The journal grows with marker
-  moves, not with messages times readers; a member who jumps to the end reads
-  everything they skipped at once. BandChat does not limit who may see read
-  dates by room size or message age; Telegram, for example, stops at 100
-  participants and 7 days.
+- **Read receipts.** The marker is the only read state: one "read up to" row
+  per member and room, updated in place, never a history. The room's current
+  members can read it: under your own messages, one check mark means sent and
+  two mean another member's marker has reached it, and "Read by" lists the
+  members whose marker reaches a message, by name, without times. This is a
+  privacy change from a marker private to its reader: co-members see how far
+  you have read, and the marker's `$updatedAt` shows roughly when you last had
+  the room open. The app writes the marker only while the room is open and the
+  page visible, at most every 5 seconds (plus once when you switch rooms or
+  hide the page), so its cost does not grow with the room's traffic. Leaving a
+  room, or being removed by its creator, deletes your marker in the same
+  transaction: ex-members leave no read position behind and can read no one
+  else's. That a marker only moves forward is the app's rule, not a policy's:
+  a policy cannot yet compare a column with the written row's new value.
 - **History.** A room opens on its newest 50 messages, each with its reactions.
   Older messages load 50 at a time before a cursor: the oldest shown
   `$createdAt`, skipping only the messages already shown at that same time, so
