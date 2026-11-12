@@ -832,9 +832,12 @@ pub(crate) enum Who {
 
 /// How long a LocalFirst read's first load waits for a relay's upstream
 /// (`firstLoadRemoteWaitMs`), as a non-durable foreground tells its relay.
+/// A zero wait is `FirstLoad::Deliver`: no wait at all.
 pub(crate) fn first_load_wait(tier: ReadTier, first_load: &FirstLoad) -> Option<u64> {
     match (tier, first_load) {
-        (ReadTier::LocalFirst, FirstLoad::WaitForRemote { timeout_ms }) => Some(*timeout_ms),
+        (ReadTier::LocalFirst, FirstLoad::WaitForRemote { timeout_ms }) if *timeout_ms > 0 => {
+            Some(*timeout_ms)
+        }
         _ => None,
     }
 }
@@ -2743,8 +2746,9 @@ impl Db {
 
     /// On a client a subscription also attaches remotely (unless
     /// LocalOnly); its opening is withheld while it waits for the server
-    /// (the Remote tier, or `FirstLoad::WaitForRemote` while the link could
-    /// answer), and its deltas report whether the server answered.
+    /// (the Remote tier, or `FirstLoad::WaitForRemote` with a non-zero wait
+    /// while the link could answer), and its deltas report whether the
+    /// server answered.
     fn open_subscription(
         &self,
         prepared: &PreparedQuery,
