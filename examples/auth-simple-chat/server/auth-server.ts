@@ -57,8 +57,13 @@ export async function startAuthServer(options: AuthServerOptions = {}): Promise<
     store: options.dataDir ? sqlite({ path: options.dataDir }) : memory(),
     authenticate: (request) => {
       const user = userFromCookie(request.headers.get("cookie"));
+      // This demo's sessions never expire: an open connection asks again hourly.
       return user
-        ? { userId: user.userId, claims: { role: user.role } }
+        ? {
+            userId: user.userId,
+            claims: { role: user.role },
+            expiresAt: Math.floor(Date.now() / 1000) + 3600,
+          }
         : acceptLocalFirstAuth(request);
     },
   });

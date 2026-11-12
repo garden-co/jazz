@@ -42,7 +42,10 @@ async function tempDir(): Promise<string> {
   return join(dir, "store");
 }
 
-const as = (userId: string) => (_request: Request) => ({ userId });
+const as = (userId: string) => (_request: Request) => ({
+  userId,
+  expiresAt: Math.floor(Date.now() / 1000) + 3600,
+});
 
 describe("createJazz, opened on first use", () => {
   it("opens nothing when called, and its db takes writes before the store opens", async () => {

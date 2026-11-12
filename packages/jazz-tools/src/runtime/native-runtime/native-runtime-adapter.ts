@@ -110,6 +110,7 @@ import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
   isReconnectLaterWireError,
+  isReauthenticateWireError,
   isSocketDropWireError,
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
@@ -576,7 +577,7 @@ type ServerConnectionAttempt = {
  */
 type NativeUpstreamLink = { handle(nowMs: number, input: string): string };
 type UpstreamLinkFailure = {
-  kind: "network" | "refused" | "serverNotReady" | "authRejected" | "fatal";
+  kind: "network" | "refused" | "serverNotReady" | "authRejected" | "fatal" | "reauthenticate";
   message: string;
 };
 type UpstreamLinkInput =
@@ -620,6 +621,10 @@ type UpstreamLinkStep = {
 /** How the link machine should treat a server connection that ended with `error`. */
 function upstreamLinkFailure(error: WireError, negotiated: boolean): UpstreamLinkFailure {
   const message = error.message;
+  // The server's session reached the expiry the app's auth gave it: a
+  // planned reconnect, so the app's auth decides again with this client's
+  // current credential (see `isReauthenticateWireError`).
+  if (isReauthenticateWireError(error)) return { kind: "reauthenticate", message };
   if (wireAuthFailureReason(error)) return { kind: "authRejected", message };
   // The server's bootstrap and overload signals. Before its hello the server
   // is still starting; afterwards they end a link like an outage.

@@ -1,3 +1,4 @@
+import type { SignedOutDecision } from "./backend-watch.js";
 import type { AccountManagerConfig } from "../accounts/create-account-manager.js";
 import type { AccountHandle } from "../accounts/state.js";
 import {
@@ -85,6 +86,16 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
      */
     linkGuestOnSignUp?: boolean;
     /**
+     * Called when your backend says no one is signed in any more (confirmed
+     * by a second answer a moment later), before the session signs the
+     * user out. Return `"keep"` to stay signed in for now (your app refreshed
+     * its session itself, or redirects to sign-in first): the session asks
+     * your backend again on the next focus, refusal or `reauthenticate()`.
+     * Return `"sign-out"` (or nothing) to sign out. A hook that throws signs
+     * out.
+     */
+    onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
+    /**
      * On sign-out (or a switch to another user), wipe the account's local
      * storage instead of keeping it for that user's next sign-in. For shared
      * devices. Jazz first waits up to 5 seconds for pending writes to upload;
@@ -148,6 +159,7 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
     initial,
     clearOnSignOut,
     linkGuestOnSignUp,
+    onSignedOut,
     client: loadLocalFirst,
     // The account manager's own: neither is client configuration, and a Db
     // keeps only cloneable data (db.getConfig()).
@@ -296,6 +308,7 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
       registry,
       events: browserBackendWatchEvents(`jazz-account:${registry}`),
       linkGuest: linkGuestOnSignUp,
+      onSignedOut,
       forgotten: (account) => accountForgotten(accounts, account.id),
       watchAccounts: (changed) => watchStoredSelection(accounts, changed),
       // Without cookies, the bearer is what names the user to the backend.
@@ -481,6 +494,7 @@ async function createDeviceOnlySession(config: JazzClientConfig): Promise<Browse
     initial,
     clearOnSignOut,
     linkGuestOnSignUp: _linkGuestOnSignUp,
+    onSignedOut: _onSignedOut,
     client: loadLocalFirst,
     store: _store,
     fetch: _fetch,

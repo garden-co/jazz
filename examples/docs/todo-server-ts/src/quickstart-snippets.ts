@@ -6,7 +6,10 @@ import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
 // Your own auth decides who a request is (a session cookie, a header).
-declare function currentUser(request: Request): Promise<{ id: string } | null>;
+// `sessionExpiresAt`: when that session expires, in Unix seconds.
+declare function currentUser(
+  request: Request,
+): Promise<{ id: string; sessionExpiresAt: number } | null>;
 
 const jazz = createJazz({
   app: schemaApp,
@@ -14,7 +17,7 @@ const jazz = createJazz({
   store: sqlite({ path: "./data/jazz" }),
   async authenticate(request) {
     const user = await currentUser(request);
-    return user ? { userId: user.id } : null;
+    return user ? { userId: user.id, expiresAt: user.sessionExpiresAt } : null;
   },
 });
 const api = new Hono();

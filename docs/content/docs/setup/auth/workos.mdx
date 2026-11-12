@@ -9,6 +9,7 @@ backend that hosts Jazz: the callback stores a sealed session cookie, and `authe
 ```ts title="server.ts"
 import { WorkOS } from "@workos-inc/node";
 import { createJazz, remote } from "jazz-tools/backend";
+import { decodeJwt } from "jose";
 
 const workos = new WorkOS(process.env.WORKOS_API_KEY, {
   clientId: WORKOS_CLIENT_ID,
@@ -33,7 +34,12 @@ export const jazz = createJazz({
       .loadSealedSession({ sessionData, cookiePassword })
       .authenticate();
     return session.authenticated
-      ? { userId: session.user.id, claims: { role: session.role ?? "" } }
+      ? {
+          userId: session.user.id,
+          claims: { role: session.role ?? "" },
+          // Re-authenticated with the cookie the client holds by then.
+          expiresAt: decodeJwt(session.accessToken).exp!,
+        }
       : null;
   },
 });

@@ -1,6 +1,6 @@
 import { parseJwtPayload, type JwtPayload } from "../runtime/client-session.js";
 import { verifyExternalJwt, type BackendJwtPublicKey } from "./external-jwt.js";
-import type { JazzUser } from "./create-jazz.js";
+import type { AuthenticatedUser } from "./create-jazz.js";
 import { isRequestAuthenticationError } from "./request-auth.js";
 
 export interface FromJWTOptions {
@@ -74,7 +74,9 @@ function isReservedIssuer(issuer: string): boolean {
  * });
  * ```
  */
-export function fromJWT(options: FromJWTOptions): (request: Request) => Promise<JazzUser | null> {
+export function fromJWT(
+  options: FromJWTOptions,
+): (request: Request) => Promise<AuthenticatedUser | null> {
   if (!options.issuer) throw new Error("fromJWT: issuer is required");
   if (isReservedIssuer(options.issuer)) {
     throw new Error(`fromJWT: ${options.issuer} is reserved for Jazz's own identities`);
@@ -125,6 +127,12 @@ export function fromJWT(options: FromJWTOptions): (request: Request) => Promise<
       if (isRequestAuthenticationError(error)) return null;
       throw error;
     }
-    return { userId: payload.sub, claims: readClaims(payload) };
+    // Verified with `requireExp`, so the token says until when it holds; it
+    // is accepted up to the clock tolerance past that, and so holds as long.
+    return {
+      userId: payload.sub,
+      claims: readClaims(payload),
+      expiresAt: (payload.exp as number) + lifetime.clockToleranceSeconds,
+    };
   };
 }
