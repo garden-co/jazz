@@ -626,10 +626,14 @@ function upstreamLinkFailure(error: WireError, negotiated: boolean): UpstreamLin
   // current credential (see `isReauthenticateWireError`).
   if (isReauthenticateWireError(error)) return { kind: "reauthenticate", message };
   if (wireAuthFailureReason(error)) return { kind: "authRejected", message };
-  // The server's bootstrap and overload signals. Before its hello the server
-  // is still starting; afterwards they end a link like an outage.
+  // The server's bootstrap and overload signals. Before its hello, `not_ready`
+  // means the server is still starting; `backpressure` means it answered and
+  // refused this connection for now (such as the connection cap per user),
+  // which is retried like an outage but published at once with the server's
+  // reason. After its hello both end a link like an outage.
   if (isReconnectLaterWireError(error)) {
-    return { kind: negotiated ? "network" : "serverNotReady", message };
+    if (negotiated) return { kind: "network", message };
+    return { kind: error.code === "backpressure" ? "refused" : "serverNotReady", message };
   }
   // The network or the server dropped the socket. A local-first client must
   // survive an outage of any length, including one it was opened in.

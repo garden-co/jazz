@@ -814,6 +814,71 @@ describe("NativeRuntimeAdapter server transport", () => {
     },
   );
 
+  // R42: a server at its connection cap per user refuses a new connection
+  // before its hello with `backpressure` / `later`. The link reports that
+  // refusal at once, naming the cap, and keeps retrying with backoff.
+  it("publishes a pre-hello backpressure refusal with the server's reason and retries", async () => {
+    const sockets: FakeWebSocket[] = [];
+    let refuse = true;
+    const refusal =
+      "websocket connection cap per user reached: this user already has 2 open connections";
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+      override send(data: Uint8Array | string): void {
+        if (refuse && typeof data !== "string" && isClientHelloBatch(data)) {
+          const error = new PostcardWriter();
+          error.u64(1); // WireFrame::Error
+          error.u64(4); // Backpressure
+          error.u64(3); // Later
+          error.string(refusal);
+          queueMicrotask(() => {
+            this.emitMessage(encodeWebSocketFrameBatch([error.finish()]));
+            this.emitServerClose();
+          });
+          return;
+        }
+        super.send(data);
+      }
+    } as unknown as typeof WebSocket;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const terminal = vi.fn();
+    runtime.onServerTransportError(terminal);
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+
+    await vi.waitFor(() =>
+      expect(runtime.upstreamLinkStatus()).toEqual({
+        state: "offline",
+        reason: "network",
+        retrying: true,
+      }),
+    );
+    expect(runtime.lastLinkFailure()).toMatchObject({ kind: "network", message: refusal });
+
+    refuse = false;
+    await vi.waitFor(() => expect(runtime.upstreamLinkStatus()).toEqual({ state: "connected" }), {
+      timeout: 15_000,
+    });
+    expect(sockets.length).toBeGreaterThan(1);
+    expect(terminal).not.toHaveBeenCalled();
+    await runtime.close();
+  }, 30_000);
+
   it.each(["disconnect", "close"] as const)(
     "cancels an established-network retry on %s",
     async (action) => {
