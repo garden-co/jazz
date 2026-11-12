@@ -420,6 +420,11 @@ function coreOptions(
             ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
           },
     trustedWorkload: { issuer: trust.issuer, audience: trust.audience, subject: trust.subject },
+    // Local-first guests (`initial: "device"`) sync with their own key.
+    // `serveCore` refuses them unless asked; here the backend decides, with
+    // `acceptDeviceAccounts`, which guests' sockets it opens, and the core
+    // admits no socket the workload didn't open.
+    allowLocalFirstAuth: true,
   };
 }
 

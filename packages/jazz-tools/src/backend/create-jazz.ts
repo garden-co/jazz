@@ -705,6 +705,8 @@ const ACCESS_HEADER = "x-jazz-backend-access";
 // What the secret slots carry to a remote core: the access stated next to
 // the backend credential decides what a request gets, not these.
 const STAND_IN_SECRET = "stated-by-backend-credential";
+/** The core's refusal of every local-first identity: it admits none. */
+const LOCAL_FIRST_AUTH_DISABLED = "local_first_auth_disabled";
 // What a browser's request to a public route carries on to a remote core:
 // never its cookies or its app session.
 const REMOTE_FORWARDED_HEADERS = ["accept", "content-type", "if-none-match"];
@@ -1574,6 +1576,16 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     return false;
   }
 
+  /** Say once that the core turns every local-first guest away, whatever `authenticate` says. */
+  let warnedGuestsOffOnCore = false;
+  function warnGuestsOffOnCore() {
+    if (warnedGuestsOffOnCore) return;
+    warnedGuestsOffOnCore = true;
+    console.error(
+      "createJazz: the core refuses local-first guests (local_first_auth_disabled), so device accounts can't sync or link. Start the core with allowLocalFirstAuth: true. A vercel() core started by an older jazz-tools keeps refusing them until a deployment of a newer one restarts it.",
+    );
+  }
+
   /** One admin account request to the core: this backend vouches for the identities. */
   async function adminAccounts(operation: string, body: unknown): Promise<{ account: string }> {
     const response = await core.handle(
@@ -1838,6 +1850,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       }
     } catch (error) {
       const status = (error as { status?: number }).status;
+      // A core that admits no local-first accounts refuses every guest, not
+      // this user's link: say that, not that the user has another account.
+      if ((error as { code?: string }).code === LOCAL_FIRST_AUTH_DISABLED) {
+        warnGuestsOffOnCore();
+        return new Response(LOCAL_FIRST_AUTH_DISABLED, { status: 409 });
+      }
       // Only the core's own refusals refuse the link for good: an invalid
       // link intent (400), a retired or foreign identity (403), a user with
       // no account to check (404), an identity of another account (409).
@@ -2226,6 +2244,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   >();
   // Sockets accepted for clients, so close() can end them.
   const clientSockets = new Set<WsLikeSocket>();
+  // Why stream sessions this process served lately ended, by id: a send that
+  // arrives after its session ended (refused at sign-in, say) is told that,
+  // not that it reached the wrong instance.
+  const endedStreams = new Map<string, { key: Buffer; reason: string }>();
+  const ENDED_STREAMS_KEPT = 1000;
 
   function openStream(request: Request): Response {
     const id = randomUUID();
@@ -2237,6 +2260,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       if (closed) return;
       closed = true;
       streams.delete(id);
+      endedStreams.set(id, { key, reason: reason || `closed (${code})` });
+      if (endedStreams.size > ENDED_STREAMS_KEPT) {
+        endedStreams.delete(endedStreams.keys().next().value!);
+      }
       try {
         controller.enqueue(encodeStreamClose(code, reason));
         controller.close();
@@ -2286,6 +2313,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     });
   }
 
+  function holdsKey(request: Request, key: Buffer): boolean {
+    const given = Buffer.from(request.headers.get(STREAM_KEY_HEADER) ?? "", "base64url");
+    return given.length === key.length && timingSafeEqual(given, key);
+  }
+
   /**
    * The stream session `id`, when `request` comes from the client that
    * opened it (it carries the session's key) and, once the session is
@@ -2296,14 +2328,19 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   async function ownStream(id: string, request: Request): Promise<ClientSession | Response> {
     const entry = streams.get(id);
     if (!entry) {
+      const ended = endedStreams.get(id);
+      if (ended !== undefined) {
+        if (!holdsKey(request, ended.key))
+          return new Response("not this stream's client", { status: 403 });
+        return new Response(`stream session ended: ${ended.reason}`, { status: 410 });
+      }
       // Sessions live in the process that opened them.
       return new Response(
         "unknown stream session: HTTP stream sessions need a single backend instance or sticky routing",
         { status: 404 },
       );
     }
-    const given = Buffer.from(request.headers.get(STREAM_KEY_HEADER) ?? "", "base64url");
-    if (given.length !== entry.key.length || !timingSafeEqual(given, entry.key)) {
+    if (!holdsKey(request, entry.key)) {
       return new Response("not this stream's client", { status: 403 });
     }
     const socket = entry.session;
