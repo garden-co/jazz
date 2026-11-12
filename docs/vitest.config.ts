@@ -12,6 +12,7 @@ export default defineConfig({
       "lib/copy-analytics.test.ts",
       "lib/sidebar-rules.test.ts",
       "lib/bundle-sizes/**/*.test.ts",
+      "lib/llm-text.test.ts",
     ],
     exclude: ["**/node_modules/**", "**/.next/**"],
   },
