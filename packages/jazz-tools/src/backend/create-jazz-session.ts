@@ -256,6 +256,12 @@ export interface BackendClientSession extends Omit<JazzSession<JazzClient>, "clo
   close(options?: BackendClientCloseOptions): Promise<void>;
 }
 
+function refuseClientCredentials(config: object): void {
+  for (const key of ["backendSecret", "jwtToken", "cookieSession", "adminSecret"]) {
+    if (Object.hasOwn(config, key)) throw new Error(`${key} is not a createJazzClient option`);
+  }
+}
+
 /** Every option a Node `createJazzClient` takes, checked against its config type. */
 const BACKEND_SESSION_OPTIONS = {
   serverUrl: true,
@@ -279,6 +285,8 @@ const BACKEND_SESSION_OPTIONS = {
  * Supply an AccountStore to keep device accounts across process restarts.
  */
 export async function createJazzClient(input: JazzClientConfig): Promise<BackendClientSession> {
+  // Credentials a backend client must not carry keep their own message.
+  if (input && typeof input === "object") refuseClientCredentials(input);
   refuseInvalidSessionConfig(input, BACKEND_SESSION_OPTIONS);
   if (input.initial !== undefined && input.initial !== "device")
     throw new Error('createJazzClient: initial is "device" or left out');
@@ -431,9 +439,7 @@ export async function openJazzSession(
     ...input,
     webSocket: transport?.WebSocket,
   };
-  for (const key of ["backendSecret", "jwtToken", "cookieSession", "adminSecret"]) {
-    if (Object.hasOwn(config, key)) throw new Error(`${key} is not a createJazzClient option`);
-  }
+  refuseClientCredentials(config);
   if (!config.app) throw new Error("Node createJazzClient requires app");
   if (config.permissions == null) {
     throw new Error(

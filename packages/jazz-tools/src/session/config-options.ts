@@ -51,6 +51,17 @@ export function refuseInvalidSessionConfig(
   refuseRemovedSessionOptions(config);
   for (const key of Object.keys(config)) {
     if (Object.hasOwn(options, key)) continue;
+    const value = (config as Record<string, unknown>)[key];
+    if (typeof value === "function") {
+      // A function or class: no option takes one (the browser's WebSocket is
+      // the platform's own).
+      throw new TypeError(
+        `${call} has no option "${key}" that takes a function or class` +
+          (key === "WebSocket"
+            ? ": the client uses the platform's own WebSocket (Node has one from 22)"
+            : ""),
+      );
+    }
     const replaced = Object.hasOwn(REPLACED_OPTIONS, key) ? `: ${REPLACED_OPTIONS[key]}` : "";
     throw new TypeError(`${call} has no option "${key}"${replaced}. ${list}`);
   }

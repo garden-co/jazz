@@ -684,7 +684,7 @@ describe("browser session", () => {
   it("refuses a missing config and unknown options, naming the options it takes", async () => {
     // Before: `TypeError: Cannot read properties of undefined (reading 'appId')`.
     await expect((createJazzClient as (config?: unknown) => Promise<unknown>)()).rejects.toThrow(
-      /^createJazzClient needs a config object, e\.g\. createJazzClient\(\{ serverUrl: "\/jazz" \}\), or createJazzClient\(\{\}\) for the defaults; got nothing\. Options: bearer, client, clearOnSignOut, .*serverUrl.*\.$/,
+      /^createJazzClient needs a config object, e\.g\. createJazzClient\(\{ serverUrl: "\/jazz" \}\), or createJazzClient\(\{\}\) for the defaults; got nothing\. Options: bearer, clearOnSignOut, client, .*serverUrl.*\.$/,
     );
     const base = { serverUrl: "https://app.example.test/jazz", store: memoryStore() };
     // Before: accepted and ignored.
