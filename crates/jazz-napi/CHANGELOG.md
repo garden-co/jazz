@@ -1,5 +1,7 @@
 # jazz-napi
 
+## 2.0.0-alpha.61
+
 ## 2.0.0-alpha.60
 
 ### Major Changes
