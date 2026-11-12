@@ -394,7 +394,12 @@ jobs:
 
   publish-npm:
     name: Publish npm alpha
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # npm trusted publishing and its sigstore provenance accept only
+    # GitHub-hosted runners: on a self-hosted (Blacksmith) runner the registry
+    # refuses the upload with E422 "Unsupported GitHub Actions runner
+    # environment". This job only downloads built artifacts and runs
+    # `npm publish`, so a standard runner is enough.
+    runs-on: ubuntu-24.04
     needs:
       - release-push-gate
       - release-test-gate
