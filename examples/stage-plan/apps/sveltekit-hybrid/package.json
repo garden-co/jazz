@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
-    "better-auth": "1.7.16",
+    "better-auth": "1.7.22",
     "jazz-napi": "workspace:*",
     "jazz-tools": "workspace:*",
     "svelte": "^5.0.0"
