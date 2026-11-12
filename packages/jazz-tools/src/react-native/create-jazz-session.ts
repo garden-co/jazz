@@ -15,6 +15,7 @@ import {
   type OpenJazzClientConfig,
 } from "../react-native/create-jazz-client.js";
 import { refuseClientAppId } from "../runtime/client-scope.js";
+import { bearerFetch } from "../runtime/credentialed-transport.js";
 import {
   coreInitial,
   createStartedJazzSession,
@@ -110,6 +111,9 @@ export async function openNativeSessionCore(
       linkGuest: config.linkDeviceAccountOnSignUp,
       forgotten: (account) => accountForgotten(accounts, account.id),
       onSignedOut,
+      // Ask "who is signed in" with the app's bearer, as sign-in does: a
+      // backend that authenticates by bearer, not cookie, never answers otherwise.
+      ...(config.bearer ? { fetch: bearerFetch(config.bearer) } : {}),
     }),
   });
   await firstBackendAnswer(session);
