@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -65,7 +64,7 @@ it("upgrades an existing issuer-era account through createJazz and signs in afte
     }
   });
   const path = await mkdtemp(join(tmpdir(), "jazz-better-auth-upgrade-"));
-  const store = sqlite({ path, appId: randomUUID() });
+  const store = sqlite({ path });
   let jazz: Jazz | undefined;
   try {
     // Seed an actual predecessor store, with real persistent user/account rows.
