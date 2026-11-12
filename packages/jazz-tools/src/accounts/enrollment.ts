@@ -26,6 +26,13 @@ import {
 const LINK_REFUSED_MESSAGE =
   "link_refused: the backend won't link this device account to the signed-in user, most likely because they already have an account (from another device). Call refresh() to open their account instead. The device account stays signed in on this device until then, and linking never moves its data into an existing account.";
 
+/**
+ * The app's core admits no device accounts at all: nothing about this user.
+ * Linking can pass once the core does (a backend fix, then a retry).
+ */
+const LINK_GUESTS_OFF_MESSAGE =
+  "local_first_auth_disabled: the backend's core admits no device accounts, so this device account can't be linked (or sync) yet. It is a backend setup problem, not this user's: the device account stays signed in on this device, with its data, and linking can be retried once the core admits device accounts (allowLocalFirstAuth).";
+
 /** @internal A local-first account's self-minted token, or its refresh callback. */
 export type JWTAuth = string | { getToken(): Promise<string> };
 
@@ -371,6 +378,8 @@ export function createAccountManagerWithRuntime(options: {
           }).catch((error: unknown) => {
             if (error instanceof AccountAuthError && error.code === "link_refused")
               throw new AccountAuthError(error.code, error.status, LINK_REFUSED_MESSAGE);
+            if (error instanceof AccountAuthError && error.code === "local_first_auth_disabled")
+              throw new AccountAuthError(error.code, error.status, LINK_GUESTS_OFF_MESSAGE);
             throw error;
           });
         });
