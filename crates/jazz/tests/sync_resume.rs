@@ -1801,3 +1801,108 @@ fn a_row_a_union_holds_stays_when_the_losing_read_reopens_first() {
 fn a_row_a_union_holds_stays_when_the_union_reopens_first() {
     a_row_a_union_holds_stays_when_another_read_loses_it(false);
 }
+
+/// Subscribe to every room and to every message, settle both, and return
+/// the client with its upstream connection and the streams.
+fn rooms_and_messages(
+    server: &Db,
+) -> (
+    Db,
+    jazz::db::Upstream,
+    jazz::db::SubscriptionStream,
+    jazz::db::SubscriptionStream,
+) {
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    let rooms = client.prepare_query(&Query::from("rooms")).unwrap();
+    let rooms = block_on(client.subscribe(&rooms, ReadOpts::default())).unwrap();
+    let messages = client.prepare_query(&Query::from("messages")).unwrap();
+    let messages = block_on(client.subscribe(&messages, ReadOpts::default())).unwrap();
+    pump(server, &client);
+    assert_eq!(ids(&client, None).len(), 3, "the room's messages arrive");
+    (client, upstream, rooms, messages)
+}
+
+/// Reconnect `client` and count the rows the server ships it.
+fn reconnect_shipped(server: &Db, client: &Db, upstream: &jazz::db::Upstream) -> usize {
+    assert!(client.detach_connection(upstream));
+    let (client_side, server_side, shipped) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    pump(server, client);
+    let shipped = *shipped.borrow();
+    shipped
+}
+
+/// Losing access to rows one open subscription holds forgets that
+/// subscription's resume point only: another open subscription that never
+/// held them still resumes, shipping nothing, on the next reconnect.
+#[test]
+fn access_lost_through_one_subscription_keeps_the_others_resume_point() {
+    let server = seeded(3);
+    let (client, upstream, _rooms, _messages) = rooms_and_messages(&server);
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    pump(&server, &client);
+    assert!(
+        ids(&client, None).is_empty(),
+        "the room's messages are evicted"
+    );
+
+    assert_eq!(
+        reconnect_shipped(&server, &client, &upstream),
+        0,
+        "rooms resumes; messages reopens with nothing readable"
+    );
+    assert_eq!(ids(&client, None), ids(&server, Some(alice())));
+}
+
+/// A cached row a listing evicts is held by no open subscription (a held
+/// row is never evicted), so every open subscription keeps its resume
+/// point, the one whose answer listed the row out included. A closed one's
+/// stored point is forgotten: nothing says whether it held the row.
+#[test]
+fn a_listing_eviction_keeps_open_subscriptions_resume_points() {
+    use jazz::query::{col, eq, lit};
+    let server = seeded(3);
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    // A closed read leaves m0 cold in the replica.
+    let m0 = client
+        .prepare_query(
+            &Query::from("messages").filter(eq(col("body"), lit(Value::String("m0".into())))),
+        )
+        .unwrap();
+    let cold = block_on(client.subscribe(&m0, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(ids(&client, None), [id(3, 0)]);
+    drop(cold);
+    pump(&server, &client);
+
+    // Access lost while away: no `AccessLost` reaches the cold row.
+    assert!(client.detach_connection(&upstream));
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    pump(&server, &client);
+
+    let rooms = client.prepare_query(&Query::from("rooms")).unwrap();
+    let _rooms = block_on(client.subscribe(&rooms, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    // The messages answer lists m0 out: the replica evicts it.
+    let messages = client.prepare_query(&Query::from("messages")).unwrap();
+    let _messages = block_on(client.subscribe(&messages, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert!(ids(&client, None).is_empty(), "the listing evicts m0");
+
+    assert_eq!(
+        reconnect_shipped(&server, &client, &upstream),
+        0,
+        "both open subscriptions resume"
+    );
+    assert_eq!(ids(&client, None), ids(&server, Some(alice())));
+}
