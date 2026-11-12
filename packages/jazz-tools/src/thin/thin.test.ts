@@ -767,6 +767,49 @@ describe("thin client", () => {
     expect(db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "stopped" });
   }, 60_000);
 
+  // E12: a sign-out drains writes with `shutdown({ waitForSync: true })`.
+  // Once the server refuses the sign-in (the user's access was revoked),
+  // nothing answers a write that waits to go out, and nothing renews a
+  // stopping runtime's credential: the drain fails instead of hanging, and
+  // the write ends saying why, not that it timed out.
+  it("fails the shutdown drain while the server refuses its sign-in, and says so to the write", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const internals = runtime as unknown as {
+      carrier: unknown;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    internals.lost(internals.carrier, {
+      code: "auth_failed",
+      retry: "never",
+      message: "session revoked: revokeUser",
+    });
+    expect(db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "auth" });
+    const write = db.insert(app.notes, { text: "after the ban", done: false });
+    const outcome = write.wait({ tier: "global" }).catch((error: unknown) => error);
+    await expect.poll(() => db.getSyncStatus().pendingUploads).toBe(1);
+    // A drain that waits through the refusal would never settle.
+    await expect(db.shutdown({ waitForSync: true })).rejects.toMatchObject({
+      name: "GracefulShutdownSyncError",
+    });
+    // `waitForSync` still waits: the app may renew the credential.
+    let synced = false;
+    void db.waitForSync().then(
+      () => (synced = true),
+      () => (synced = true),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(synced).toBe(false);
+    await db.shutdown();
+    const error = (await outcome) as Error;
+    expect(error.name).toBe("ThinRequestNotSentError");
+    expect(error.message).toMatch(
+      /the server refused this client's sign-in \(auth_failed: session revoked: revokeUser\)/,
+    );
+  }, 60_000);
+
   it("fails a transaction its connection took with it, and nothing else", async () => {
     const server = await startServer();
     const db = await thinDb(server);

@@ -638,6 +638,70 @@ describe("browser session against the app's backend", () => {
     expect(session.getSnapshot().status).toBe("signed-out");
   }, 60_000);
 
+  // E12: a revoked tab with a write that can never upload used to hang in
+  // `transitioning` (signOut) for good, its write's wait neither resolving
+  // nor rejecting: sign-out waited for an upload the server will never take.
+  for (const variant of ["thin", "local-first", "local-first, clearOnSignOut"] as const)
+    it(`signs a revoked ${variant} tab with a pending write out, and fails the write (E12)`, async () => {
+      const auth = tokenAuth("alice:1");
+      const jazz = await createJazz({
+        app,
+        permissions,
+        store: memory(),
+        authenticate: auth.authenticate,
+      }).ready();
+      cleanups.push(() => jazz.close());
+      const served = await listen(jazz);
+      cookies(served.origin, "alice:1");
+      vi.stubGlobal("document", { visibilityState: "visible" });
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+      cleanups.push(async () => warned.mockRestore());
+      const localFirst = variant !== "thin";
+      const session = await createJazzClient({
+        serverUrl: `${served.origin}/jazz`,
+        store: memoryStore(),
+        driver: { type: "memory" },
+        clearOnSignOut: variant === "local-first, clearOnSignOut",
+        ...(localFirst ? { client: async () => ({ createClient: createLocalFirstDb }) } : {}),
+      });
+      cleanups.push(() => session.close());
+      await session.loginWithBackend();
+      await expect
+        .poll(() => isThinDb(session.getSnapshot().client!.db), { timeout: 15_000 })
+        .toBe(!localFirst);
+      const client = session.getSnapshot().client!;
+      const owner = client.session!.user!;
+      await client.db.insert(app.todos, { title: "before", owner }).wait({ tier: "global" });
+
+      auth.valid.delete("alice:1");
+      await jazz.revokeUser("alice");
+      // The tab sees the refusal first, then takes a write (as a form would).
+      await expect
+        .poll(() => client.db.getSyncStatus().link, { timeout: 15_000 })
+        .toMatchObject({ state: "offline", reason: "auth" });
+      const pending = client.db.insert(app.todos, { title: "after the ban", owner });
+      const outcome = pending.wait({ tier: "global" }).then(
+        () => "landed",
+        (error: unknown) => error,
+      );
+      await expect
+        .poll(() => session.getSnapshot().status, { timeout: 15_000, interval: 50 })
+        .toBe("signed-out");
+      // The write fails, saying the server refused this user, not timing out.
+      const error = (await outcome) as Error;
+      expect(error).toBeInstanceOf(Error);
+      expect(error.name).not.toBe("WriteWaitTimeoutError");
+      if (localFirst) expect(error.message).toMatch(/session revoked/);
+      else {
+        expect(error.name).toBe("ThinRequestNotSentError");
+        expect(error.message).toMatch(/the server refused this client's sign-in/);
+      }
+      // The sign-out says what became of it.
+      const warnings = warned.mock.calls.map((call) => String(call[0]));
+      expect(warnings).toContainEqual(expect.stringMatching(/(dropped|wiped) 1 write\(s\)/));
+      expect((await jazz.db.all(app.todos)).map((todo) => todo.title)).toEqual(["before"]);
+    }, 60_000);
+
   // Node, Deno, a CLI: no cookie carries the backend's session on the sync
   // connection, so a backend sign-in would report ready and never sync.
   it("refuses a backend sign-in on a host that sends no cookies, before any request", async () => {

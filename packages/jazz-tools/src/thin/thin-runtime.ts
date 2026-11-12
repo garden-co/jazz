@@ -262,6 +262,8 @@ export class ThinRuntime implements Runtime {
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   /** The server refused the credential: nothing reconnects until `updateAuth`. */
   private refused = false;
+  /** How the server put that refusal, for the writes it leaves unsent at close. */
+  private refusal: Error | undefined;
   /** The connection ended for good (`fatal`, `close`). */
   private stopped = false;
   /** When connecting started failing; cleared once connected or refused. */
@@ -364,8 +366,14 @@ export class ThinRuntime implements Runtime {
     this.closed = true;
     this.wanted = false;
     this.stop();
-    const closed = new ThinConnectionLostError("the thin runtime is closed", {
-      cause: new RuntimeClosedError("the thin runtime is closed"),
+    // Closed while the server refused this client's sign-in (its user's
+    // access was revoked, or their session ended, and they signed out):
+    // what never reached the server says so, not just that it closed.
+    const why = this.refused
+      ? `the server refused this client's sign-in (${this.refusal?.message ?? "auth_failed"}), and the thin runtime closed before it signed in again`
+      : "the thin runtime is closed";
+    const closed = new ThinConnectionLostError(why, {
+      cause: new RuntimeClosedError(why),
     });
     this.dropConnection(closed);
     // Nothing connects again: a request not sent yet ends too (a write
@@ -373,9 +381,12 @@ export class ThinRuntime implements Runtime {
     // while the server was down asks the Db's successor instead.
     this.endWaitingRequests(
       closed,
-      new ThinRequestNotSentError("the thin runtime closed before sending the request", {
-        cause: closed.cause,
-      }),
+      new ThinRequestNotSentError(
+        this.refused
+          ? `the request never reached the server: ${why}`
+          : "the thin runtime closed before sending the request",
+        { cause: closed.cause },
+      ),
     );
     for (const live of this.liveQueries.values()) live.callback = undefined;
     this.liveQueries.clear();
@@ -494,6 +505,7 @@ export class ThinRuntime implements Runtime {
       // "connecting" in between.
       this.clearOutage();
       this.refused = true;
+      this.refusal = lostError;
       // Writes left unanswered wait for the renewed credential's connection.
       this.dropConnection(lostError, this.wanted && !this.closed && error.retry !== "never");
       this.notifySyncStatus();
@@ -1268,6 +1280,7 @@ export class ThinRuntime implements Runtime {
   }
 
   private setRefused(refused: boolean): void {
+    if (!refused) this.refusal = undefined;
     if (this.refused === refused) return;
     this.refused = refused;
     this.notifySyncStatus();
@@ -1337,7 +1350,7 @@ export class ThinRuntime implements Runtime {
     // Waiting for sync fails on the server's rejection. A write whose
     // connection ended unanswered is not rejected, and the shutdown drain
     // only waits for every write to be answered.
-    const answered = options.throughOutage
+    let answered: Promise<unknown> = options.throughOutage
       ? Promise.all(
           dones.map((done) =>
             done.catch((error: unknown) => {
@@ -1346,6 +1359,12 @@ export class ThinRuntime implements Runtime {
           ),
         )
       : Promise.allSettled(dones);
+    // The shutdown drain is final: no new credential comes for a runtime
+    // that is stopping, so while the server refuses this client's sign-in
+    // (now or once the drain started) nothing will answer those writes, and
+    // the drain fails instead of waiting for good. (`waitForSync` waits
+    // through a refusal, which the app may renew.)
+    if (!options.throughOutage && dones.length > 0) answered = this.unlessRefused(answered);
     const signal = options.signal;
     if (!signal) {
       await answered;
@@ -1360,6 +1379,26 @@ export class ThinRuntime implements Runtime {
         }),
       ),
     ]);
+  }
+
+  /** `pending`, failing as soon as the server refuses this client's sign-in. */
+  private unlessRefused<T>(pending: Promise<T>): Promise<T> {
+    const stop = new AbortController();
+    const refused = new Promise<never>((_, reject) => {
+      const check = () => {
+        if (!this.refused) return;
+        stop.abort();
+        reject(
+          new ThinConnectionLostError(
+            `the server refused this client's sign-in (${this.refusal?.message ?? "auth_failed"}), so its writes can't upload`,
+            { cause: this.refusal },
+          ),
+        );
+      };
+      check();
+      this.onSyncStatusChange(check, stop.signal);
+    });
+    return Promise.race([pending, refused]).finally(() => stop.abort());
   }
 
   private write(op: ThinOp, rows: readonly WrittenRow[] = []): TxId {
