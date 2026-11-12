@@ -5824,8 +5824,8 @@ impl Inner {
     /// closed read's stored point, a one-shot read's, and a live read not
     /// yet told on this connection. Reads sharing a watermark key (the same
     /// query, binding and view: two live reads, or a live and a one-shot
-    /// one) read the same result: one that keeps its point keeps the
-    /// stored row for all, while the others' in-memory points are cleared.
+    /// one) share its stored point, kept only when every one of them keeps
+    /// it.
     ///
     /// `table` is a stored name, as holds, `AccessLost` and evictions name
     /// tables: a table no holds name is one no told read holds a row of.
@@ -5836,10 +5836,15 @@ impl Inner {
         if client.forgotten {
             return Ok(());
         }
-        let mut kept = HashSet::new();
-        let mut cleared = false;
-        for read in client.reads.values_mut() {
-            let keeps = read.through.is_some()
+        // A stored point is kept only when every read using its key keeps
+        // it: reads sharing a key read the same result, and any one of them
+        // counting a lost row speaks for the stored row.
+        let mut keeps: HashMap<[u8; 32], bool> = HashMap::new();
+        for read in client.reads.values() {
+            let Some(key) = read.watermark else {
+                continue;
+            };
+            let keep = read.through.is_some()
                 && read.live().is_some_and(|live| {
                     let counts = |held: &HashMap<String, HashSet<[u8; 16]>>| {
                         held.get(table)
@@ -5847,15 +5852,18 @@ impl Inner {
                     };
                     live.told && !counts(&live.holds) && !counts(&live.released)
                 });
-            match read.watermark.filter(|_| keeps) {
-                Some(key) => {
-                    kept.insert(key);
-                }
-                None => {
-                    cleared |= read.through.is_some();
-                    read.through = None;
-                    read.context = None;
-                }
+            *keeps.entry(key).or_insert(true) &= keep;
+        }
+        let kept: HashSet<[u8; 32]> = keeps
+            .into_iter()
+            .filter_map(|(key, keep)| keep.then_some(key))
+            .collect();
+        let mut cleared = false;
+        for read in client.reads.values_mut() {
+            if !read.watermark.is_some_and(|key| kept.contains(&key)) {
+                cleared |= read.through.is_some();
+                read.through = None;
+                read.context = None;
             }
         }
         client.forgotten = kept.is_empty();
