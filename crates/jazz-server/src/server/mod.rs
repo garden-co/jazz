@@ -63,16 +63,22 @@ pub async fn push_catalogue_in_memory(
     Ok(())
 }
 
-/// Cap on concurrent connections sharing a single `client_id`. When a new
-/// connection would exceed this cap, the oldest connection(s) for the same
-/// `client_id` are evicted so a reconnecting client is never locked out by
-/// its own zombies. Bounds the fan-out memory described in jaz0-a803.
+/// Cap on concurrent public-session connections sharing one authenticated
+/// identity (one user). When a new connection would exceed it, the
+/// connection of that identity heard from least recently is evicted, so a
+/// reconnecting client is never locked out by its own half-open zombies.
+/// Bounds the fan-out memory described in jaz0-a803; the process-wide
+/// `DEFAULT_MAX_WEBSOCKET_CONNECTIONS` bounds the total.
 ///
-/// Value of 4 gives headroom for the realistic legitimate case (a brief
-/// overlap between an old half-open socket and a new reconnect, plus a
-/// small amount of slack for unusual topologies) without giving an
-/// attacker meaningful amplification before the cap bites.
-pub(crate) const PER_CLIENT_CONNECTION_CAP: usize = 4;
+/// The cap was introduced as 4 per `client_id` (one runtime), sized for a
+/// reconnect briefly overlapping its old half-open socket. It is now keyed by
+/// the user, and one user legitimately holds a socket per thin-client tab
+/// (thin tabs share nothing), per browser profile or device running the
+/// local-first client (whose tabs share one SharedWorker socket), plus
+/// reconnect overlap on each. 16 covers a dozen tabs or devices opening
+/// together while still bounding one identity to a small fraction of the
+/// process cap.
+pub(crate) const PER_CLIENT_CONNECTION_CAP: usize = 16;
 /// Default cap on live WebSocket connections per server process.
 ///
 /// Every connection may hold up to its per-session ingress and egress
