@@ -28,17 +28,9 @@ import {
   encodeStreamRecord,
 } from "../runtime/native-runtime/http-stream-socket.js";
 import { resolveSchemaSource } from "../schema-source.js";
-import {
-  mergePermissionsIntoWasmSchema,
-  type CompiledPermissionsMap,
-} from "../schema-permissions.js";
-import { shippedMigrations } from "../runtime/client-migrations.js";
-import { computeSchemaHash } from "../schema-hash.js";
-import { validateSchemaAndPermissions } from "../dev/schema-validation.js";
-import { deployArtifacts } from "../dev/catalogue.js";
-import { fetchMigrationGraph } from "../dev/migration-graph.js";
-import { DeploymentError, type PublishedTableLens } from "../dev/catalogue-api.js";
-import type { WasmSchema } from "../drivers/types.js";
+import type { CompiledPermissionsMap } from "../schema-permissions.js";
+import { deployApp } from "../dev/catalogue.js";
+import { DeploymentError } from "../dev/catalogue-api.js";
 import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
 import type { SessionCore } from "../session/state.js";
@@ -919,31 +911,16 @@ async function applyBundle(
     allowDroppingHistory?: boolean;
   },
 ): Promise<string> {
-  const declared = resolveSchemaSource(options.app);
-  const schema = mergePermissionsIntoWasmSchema(declared, {});
-  await validateSchemaAndPermissions(schema, options.permissions);
-  const targetSchemaHash = await computeSchemaHash(schema);
-  const shipped = shippedMigrations(declared);
-  const schemas = new Map<string, WasmSchema>();
-  for (const version of shipped?.schemas ?? []) {
-    schemas.set(version.hash, (version.schema as { tables: WasmSchema }).tables);
-  }
-  schemas.set(targetSchemaHash, schema);
-  const server = { appId: options.appId, serverUrl: origin, adminSecret: options.adminSecret };
-  const graph = await fetchMigrationGraph(server);
-  const confirm = { ...server, allowDroppingHistory: options.allowDroppingHistory };
   // Published, never activated: this backend's sessions are pinned to its
   // bundle, so deployments of the app serve side by side and a rollback is
   // publishing the older bundle again.
-  const deployed = await deployArtifacts(confirm, graph, {
-    targetSchemaHash,
-    schemas: [...schemas].map(([hash, schema]) => ({ hash, schema })),
-    migrations: (shipped?.migrations ?? []).map((edge) => ({
-      fromHash: edge.fromHash,
-      toHash: edge.toHash,
-      forward: edge.forward as PublishedTableLens[],
-    })),
+  const deployed = await deployApp({
+    appId: options.appId,
+    serverUrl: origin,
+    adminSecret: options.adminSecret,
+    app: options.app,
     permissions: options.permissions,
+    allowDroppingHistory: options.allowDroppingHistory,
   }).catch((error: unknown) => {
     // A core without `/bundles` predates per-deployment permissions; it
     // must not be handed a deployment it would activate for every backend.
