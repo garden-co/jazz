@@ -1056,9 +1056,13 @@ describe("JazzClient runtime transaction waits", () => {
 
     await expect(handle.wait()).resolves.toBeUndefined();
 
-    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-serializable", "global", {
+    // The runtime receives the pending ID, so the wait's timeout also covers the commit.
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith(expect.any(Promise), "global", {
       signal: expect.any(AbortSignal),
     });
+    await expect(runtime.waitForTransaction.mock.calls[0]![0]).resolves.toBe(
+      "transaction-serializable",
+    );
   });
 
   it("waits for local-only serializable transactions at the local tier", async () => {
@@ -1071,9 +1075,13 @@ describe("JazzClient runtime transaction waits", () => {
 
     await expect(handle.wait()).resolves.toBeUndefined();
 
-    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-serializable", "local", {
+    // The runtime receives the pending ID, so the wait's timeout also covers the commit.
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith(expect.any(Promise), "local", {
       signal: expect.any(AbortSignal),
     });
+    await expect(runtime.waitForTransaction.mock.calls[0]![0]).resolves.toBe(
+      "transaction-serializable",
+    );
   });
 
   it("surfaces runtime wait rejection as PersistedWriteRejectedError", async () => {
