@@ -158,6 +158,10 @@ test("the staged Inspector UI is served from a bundle of the code alone, with no
     logLevel: "silent",
   });
   rmSync(packageRoot, { recursive: true, force: true });
+  // Each file is its own chunk, loaded when asked for: the code that serves
+  // the page doesn't carry the assets.
+  const assetBase64 = Buffer.from("console.log('inspector')").toString("base64");
+  assert.ok(!readFileSync(join(deployed, "inspect-ui.mjs"), "utf8").includes(assetBase64));
 
   const { createInspectorUi } = await import(join(deployed, "inspect-ui.mjs"));
   const serve = createInspectorUi();

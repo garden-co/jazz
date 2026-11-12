@@ -1,7 +1,7 @@
 // The Inspector UI an app's backend serves at `<basePath>/inspect/`: the
 // inspector package's `backend.html` build, and at
 // `<basePath>/inspect/embedded.html` the overlay for local-first pages.
-// Published jazz-tools carries it as a module, `inspector-ui-files.js`
+// Published jazz-tools carries it as modules, `inspector-ui-files.js`
 // (generated with the overlay's embedded build, see
 // scripts/stage-inspector-overlay.mjs), so that it ships wherever the code
 // does: Next.js's output file tracing leaves files read from disk behind. In
@@ -81,10 +81,13 @@ function filesInDir(dir: string): UiFiles {
   };
 }
 
-function filesInModule(files: Readonly<Record<string, string>>): UiFiles {
+function filesInModules(
+  files: Readonly<Record<string, () => Promise<{ default: string }>>>,
+): UiFiles {
   return async (file) => {
-    const encoded = files[file.split(sep).join("/")];
-    if (encoded === undefined) return null;
+    const path = file.split(sep).join("/");
+    if (!Object.hasOwn(files, path)) return null;
+    const { default: encoded } = await files[path]!();
     const binary = atob(encoded);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -95,7 +98,7 @@ function filesInModule(files: Readonly<Record<string, string>>): UiFiles {
 /** The installed UI: the generated module, else (in this monorepo) the build directory. */
 async function installedUi(): Promise<UiFiles | null> {
   const { INSPECTOR_UI_FILES } = await import("./inspector-ui-files.js");
-  if (INSPECTOR_UI_FILES) return filesInModule(INSPECTOR_UI_FILES);
+  if (INSPECTOR_UI_FILES) return filesInModules(INSPECTOR_UI_FILES);
   const dir = resolveInspectorUiDir();
   return dir ? filesInDir(dir) : null;
 }
