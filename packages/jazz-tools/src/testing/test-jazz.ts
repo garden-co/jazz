@@ -76,7 +76,7 @@ export interface TestJazz {
    * Sign `userId` in on the origin `originUrl` (from {@link visitor}), as the
    * app's own sign-up sets their cookie: the app's `authenticate` names them
    * there from now on. No Jazz account is made for them: a guest who signs
-   * up there keeps theirs with `linkWithBackend()`. Returns false when
+   * up there keeps theirs with `linkDeviceAccount()`. Returns false when
    * `originUrl` is not one of this app's origins.
    */
   signUp(originUrl: string, userId: string, claims?: Record<string, unknown>): boolean;

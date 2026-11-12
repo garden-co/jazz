@@ -415,8 +415,8 @@ export interface CreateJazzOptions {
    */
   recheckSeconds?: number;
   /**
-   * What happens to a local-first guest's key once the guest links to a
-   * signed-in user (`linkWithBackend()`):
+   * What happens to a device account's key once it links to a signed-in
+   * user (`linkDeviceAccount()`):
    * - `"keep"` (the default): the key stays an identity of the account, so
    *   the device can still sign in as the guest (e.g. offline) alongside
    *   the linked user.
@@ -567,8 +567,8 @@ export interface Jazz {
    * Create the Jazz account of `userId` (the id your `authenticate` returns
    * for them), or return the one they have. Jazz never creates accounts on
    * its own on the backend: a user gets one when they sign in from a client,
-   * when a local-first guest links to them (`linkWithBackend`, so the
-   * guest's data becomes theirs), or here. Call it for a user who never
+   * when a device account links to them (`linkDeviceAccount()`, so its data
+   * becomes theirs), or here. Call it for a user who never
    * opens a client (a webhook, an import, an API-only user) or to seed data
    * before their first visit. A user with an account can no longer link a
    * guest, so don't call it in a sign-up flow whose browser may hold one.
@@ -1447,7 +1447,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     return (await options.authenticate(request)) ?? null;
   }
 
-  /** Whether the app lets `request` in as a local-first guest (`acceptDeviceAccounts`). */
+  /** Whether the app lets `request` in as a device account (`acceptDeviceAccounts`). */
   let warnedGuestsOff = false;
   async function acceptsGuest(request: Request): Promise<boolean> {
     const answer = await askAuthenticate(request);
