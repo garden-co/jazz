@@ -447,6 +447,9 @@ export function watchBackendUser<Client>(
     // A background tab's cookie may be stale: a refusal there waits for a
     // check after focus. A visible page's cookies are fresh, so its answer
     // counts as the first, and a second one shortly after confirms it.
+    // Visibility counts when the refusal is checked: a tab that goes to the
+    // background during the confirmation wait is still signed out once the
+    // second answer agrees (and `onSignedOut` lets it).
     if (refused && !(events.isVisible?.() ?? false)) return;
     if (!asked) {
       await new Promise((resolve) => setTimeout(resolve, confirmMs));

@@ -198,6 +198,54 @@ describe("Jazz session lifecycle", () => {
     warned.mockRestore();
     await session.close();
   });
+  // A new sign-in that isn't a sign-out (the core lost a refused user's
+  // account, so the watch signs them in again) from a client the server
+  // refuses: its writes can't upload, and the operation must not fail (and
+  // be retried) for good while the refusal lasts.
+  it("signs in again past a thin client the server refuses, dropping its pending write", async () => {
+    const { session, clients, next } = await setup();
+    const client = clients[0]! as (typeof clients)[0] & { db?: unknown };
+    const db = {
+      getAuthState: () => ({ error: "revoked" }),
+      getSyncStatus: () => ({ pendingUploads: 1 }),
+    };
+    markThinDb(db as never);
+    client.db = db;
+    const failure = new GracefulShutdownSyncError(new Error("session revoked: revokeUser"));
+    client.shutdown.mockRejectedValueOnce(failure);
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await session.loginWithBackend();
+    expect(session.getSnapshot()).toMatchObject({ status: "ready", account: next });
+    expect(session.getSnapshot().error).toBeUndefined();
+    // Its drain failed on the refusal, so it stops without waiting.
+    expect(client.shutdown.mock.calls).toEqual([[{ waitForSync: true }], []]);
+    expect(warned).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /closed the previous client and dropped 1 write\(s\) the server refused/,
+      ),
+      failure.cause,
+    );
+    warned.mockRestore();
+    await session.close();
+  });
+  it("closes a replaced client the server refuses instead of leaving it open", async () => {
+    const { session, clients } = await setup();
+    const client = clients[0]! as (typeof clients)[0] & { db?: unknown };
+    client.db = {
+      getAuthState: () => ({ error: "revoked" }),
+      getSyncStatus: () => ({ pendingUploads: 0 }),
+      getConfig: () => ({ driver: { type: "persistent" } }),
+    };
+    client.shutdown.mockRejectedValueOnce(
+      new GracefulShutdownSyncError(new Error("session revoked: revokeUser")),
+    );
+    const replacement = { account: client.account, shutdown: vi.fn(async () => {}) };
+    await replaceJazzSessionClient(session, async () => replacement as never);
+    await tick();
+    expect(session.getSnapshot().client).toBe(replacement);
+    expect(client.shutdown.mock.calls).toEqual([[{ waitForSync: true }], []]);
+    await session.close();
+  });
   it("keeps a sign-out failing while its writes may still upload (an outage)", async () => {
     const { session, clients, old } = await setup();
     const client = clients[0]! as (typeof clients)[0] & { db?: unknown };
