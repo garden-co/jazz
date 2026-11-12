@@ -88,9 +88,12 @@ then, but the HTTP stream needs a single instance or sticky routing.
 Set `publicUrl` to the URLs browsers reach `/jazz` at. Without it, the backend takes its URL from
 each request's headers, and logs "createJazz: vouched for a local-first guest of …, taken from the
 request's headers. Set publicUrl …" the first time a device account signs in. With `publicUrl` set,
-the backend accepts device accounts only for the URLs it lists, so list every URL your users reach
-`/jazz` at, a second custom domain included. Vercel's system environment variables name the
-production domain and the current deployment's URLs:
+the backend accepts device accounts only for the URLs it lists and refuses others with a warning
+("refused a local-first guest whose proof is for …"), so list every URL your users reach `/jazz`
+at, a second custom domain included. Device accounts belong to one origin: a guest on your
+production domain and one on a deployment URL are different accounts, while signed-in users see the
+same data on every URL. Vercel's system environment variables name the production domain and the
+current deployment's URLs:
 
 ```ts title="jazz.server.ts"
 export const jazz = createJazz({
