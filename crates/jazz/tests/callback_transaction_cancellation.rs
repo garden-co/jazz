@@ -270,3 +270,41 @@ fn unwinding_a_callback_rolls_back_before_the_owner_is_reused() {
     .unwrap();
     assert_eq!(bodies(&alice), [Value::String("retry".to_owned())]);
 }
+
+/// While Alice's callback is suspended, her store learns it must never hand
+/// out a seq at or below a floor (a peer's position, a host's seeded floor).
+/// Rolling her unit back, by cancellation or by error, undoes only the unit:
+/// the floor stays, so her next commit's transaction id is above it and the
+/// authority cannot mistake it for one it already deduplicated.
+#[test]
+fn rolling_back_a_callback_keeps_seq_floors_raised_while_it_ran() {
+    for cancel in [true, false] {
+        let alice = open(1, AuthorSubject::for_test_bytes([1; 16]));
+        let floor = alice.seq_high_water().saturating_mul(2) + 1_000;
+        let mut transaction = Box::pin(alice.transaction(async |tx| {
+            tx.insert("notes", body("rolled back"), Default::default())
+                .await?;
+            alice.seed_seq_floor(floor);
+            if cancel {
+                pending::<Result<(), Error>>().await
+            } else {
+                Err(Error::new(jazz::db::ErrorCode::Protocol, "refused"))
+            }
+        }));
+        if cancel {
+            poll_pending(transaction.as_mut());
+            drop(transaction);
+        } else {
+            assert!(block_on(transaction).is_err());
+        }
+        assert!(bodies(&alice).is_empty());
+        assert!(alice.seq_high_water() >= floor, "cancel: {cancel}");
+        let ((), receipt) = block_on(alice.transaction(async |tx| {
+            tx.insert("notes", body("committed"), Default::default())
+                .await?;
+            Ok(())
+        }))
+        .unwrap();
+        assert!(receipt.0 > floor, "cancel: {cancel}");
+    }
+}
