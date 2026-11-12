@@ -43,7 +43,13 @@ async function readSession(sealed: string | undefined) {
   const current = (await refreshed.get(sealed)) ?? sealed;
   const session = workos.userManagement.loadSealedSession({ sessionData: current, cookiePassword });
   const result = await session.authenticate();
-  if (result.authenticated) return { user: result.user, role: result.role, sealed: current };
+  if (result.authenticated)
+    return {
+      user: result.user,
+      role: result.role,
+      sealed: current,
+      expiresAt: expOf(result.accessToken),
+    };
   if (!refreshed.has(sealed))
     refreshed.set(
       sealed,
@@ -54,7 +60,15 @@ async function readSession(sealed: string | undefined) {
   const again = await workos.userManagement
     .loadSealedSession({ sessionData: fresh, cookiePassword })
     .authenticate();
-  return again.authenticated ? { user: again.user, role: again.role, sealed: fresh } : null;
+  return again.authenticated
+    ? { user: again.user, role: again.role, sealed: fresh, expiresAt: expOf(again.accessToken) }
+    : null;
+}
+
+/** When a WorkOS access token expires (its `exp`, Unix seconds). */
+function expOf(accessToken: string): number {
+  const payload = JSON.parse(Buffer.from(accessToken.split(".")[1]!, "base64url").toString());
+  return payload.exp as number;
 }
 // #endregion workos-session
 
@@ -71,7 +85,13 @@ const jazz = createJazz({
   store: sqlite({ path: ".jazz" }),
   authenticate: async (request) => {
     const session = await readSession(readCookie(request.headers.get("cookie")));
-    return session ? { userId: session.user.id, claims: { role: session.role ?? "" } } : null;
+    return session
+      ? {
+          userId: session.user.id,
+          claims: { role: session.role ?? "" },
+          expiresAt: session.expiresAt,
+        }
+      : null;
   },
 });
 // #endregion workos-jazz-server

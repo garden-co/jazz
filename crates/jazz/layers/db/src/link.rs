@@ -156,6 +156,12 @@ pub enum LinkFailure {
     /// protocol, an invalid endpoint). The link stops until an explicit
     /// reconnect.
     Fatal(String),
+    /// The server ended a live link because its authentication is about to
+    /// expire, asking the client to reconnect so the app's auth decides
+    /// again with the client's current credential. A planned swap: the link
+    /// reconnects at once, and observers keep seeing it live while the new
+    /// attempt is admitted. Any other ending is handled as itself.
+    Reauthenticate(String),
 }
 
 impl LinkFailure {
@@ -165,7 +171,8 @@ impl LinkFailure {
             | Self::Refused(message)
             | Self::ServerNotReady(message)
             | Self::AuthRejected { message, .. }
-            | Self::Fatal(message) => message,
+            | Self::Fatal(message)
+            | Self::Reauthenticate(message) => message,
         }
     }
 }
@@ -300,6 +307,9 @@ pub struct UpstreamLink {
     outage_started_at: Option<u64>,
     outage_published: bool,
     auth_unrestored: bool,
+    /// A planned re-authentication is reconnecting a link that was live.
+    /// Observers keep seeing it live until the attempt ends either way.
+    reauthenticating: bool,
     reason: Option<String>,
     published: Option<LinkStatus>,
     events: VecDeque<LinkEvent>,
@@ -324,6 +334,7 @@ impl UpstreamLink {
             outage_started_at: None,
             outage_published: false,
             auth_unrestored: false,
+            reauthenticating: false,
             reason: None,
             published: None,
             events: VecDeque::new(),
@@ -337,6 +348,16 @@ impl UpstreamLink {
     }
 
     pub fn status(&self) -> LinkStatus {
+        if self.reauthenticating {
+            // A planned swap is no news: the link was live, and stays so
+            // unless the new attempt fails.
+            return LinkStatus {
+                phase: LinkPhase::Live,
+                reason: None,
+                consecutive_failures: 0,
+                outage_published: false,
+            };
+        }
         LinkStatus {
             phase: self.phase.clone(),
             reason: self.reason.clone(),
@@ -376,6 +397,7 @@ impl UpstreamLink {
             }
             LinkInput::Admitted(attempt) => {
                 if self.attempt == Some(attempt) && self.phase != LinkPhase::Live {
+                    self.reauthenticating = false;
                     self.phase = LinkPhase::Live;
                     self.reset_failures();
                     self.reason = None;
@@ -431,6 +453,7 @@ impl UpstreamLink {
     /// Start over from the configuration: an explicit reconnect, a disconnect,
     /// or a server added or removed.
     fn restart(&mut self, actions: &mut Vec<LinkAction>) {
+        self.reauthenticating = false;
         self.close(actions);
         self.reset_failures();
         self.reason = None;
@@ -445,6 +468,22 @@ impl UpstreamLink {
     }
 
     fn ended(&mut self, now_ms: u64, failure: LinkFailure, actions: &mut Vec<LinkAction>) {
+        // A planned swap that fails ends as that failure does, visibly.
+        self.reauthenticating = false;
+        // Only a link the server admitted can be asked to re-authenticate;
+        // asked before that, it is an ordinary failed attempt, so a server
+        // that keeps asking can't make the link reconnect in a tight loop.
+        let failure = match failure {
+            LinkFailure::Reauthenticate(_) if self.phase == LinkPhase::Live => {
+                self.reason = None;
+                self.reauthenticating = true;
+                self.phase = LinkPhase::Connecting;
+                self.connect(actions);
+                return;
+            }
+            LinkFailure::Reauthenticate(message) => LinkFailure::Network(message),
+            failure => failure,
+        };
         self.reason = Some(failure.message().to_owned());
         match failure {
             LinkFailure::AuthRejected { reason, message } => {
@@ -469,7 +508,11 @@ impl UpstreamLink {
             }
             // A server that is not ready after it once admitted this link is
             // an outage like any other.
-            LinkFailure::ServerNotReady(_) | LinkFailure::Network(_) | LinkFailure::Refused(_) => {
+            // (A re-authentication was turned into a network failure above.)
+            LinkFailure::ServerNotReady(_)
+            | LinkFailure::Network(_)
+            | LinkFailure::Refused(_)
+            | LinkFailure::Reauthenticate(_) => {
                 let started = *self.outage_started_at.get_or_insert(now_ms);
                 if matches!(failure, LinkFailure::Refused(_)) {
                     self.outage_published = true;

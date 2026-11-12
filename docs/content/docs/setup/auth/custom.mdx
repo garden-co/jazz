@@ -24,15 +24,18 @@ export const jazz = createJazz({
   }),
   authenticate: async (request) => {
     const user = await getUser(request); // your cookie, or a bearer token you verify
-    return user ? { userId: user.id, claims: { role: user.role } } : null;
+    // expiresAt: when the user's session (or token) expires, in Unix seconds.
+    return user
+      ? { userId: user.id, claims: { role: user.role }, expiresAt: user.sessionExpiresAt }
+      : null;
   },
 });
 ```
 
-Read the user from `request` itself, never from a helper that finds the current request on its own
-(Next.js's `cookies()`, `withAuth()`, Clerk's or NextAuth's `auth()`): Jazz also calls
-`authenticate` again for open connections, outside any request. See
-[Re-checking open connections](/docs/setup/auth/backend#re-checking-open-connections).
+Return `expiresAt`, when the user's session expires: an open connection authenticates again on a new
+request shortly before then. Only read and verify the session in `authenticate`, never refresh it,
+and keep auth middleware off Jazz's routes. See
+[When a session expires](/docs/setup/auth/backend#when-a-session-expires).
 
 Mount it under `/jazz` (see [Main Backend](/docs/setup/deployment/own-server)). The browser talks only to your
 backend; the core behind `remote()` trusts your backend to say who the user is, and never sees your
@@ -83,10 +86,12 @@ fetched throws instead, so clients retry rather than signing out.
   verifying tokens until the cache expires. A token signed with a key the cache doesn't know yet
   makes it fetch again; within 30 seconds of the last fetch it throws instead, so the client retries
   shortly rather than signing out.
+- **Expiry:** `fromJWT` returns the token's `exp` as `expiresAt`, so an open sync session
+  re-authenticates when its token expires, with the token the client holds by then.
 - **Revoking a session:** once `authenticate` stops accepting a user's token, their open sync
-  sessions end at the next check (`recheckSeconds`). A tab that stays in view then shows them signed
-  out about 32 seconds after the refusal: a 30-second grace in case the refusal was a blip, plus a
-  2-second confirmation.
+  sessions end when their token expires, or at once if you call `jazz.revokeUser(userId)`. A tab
+  that stays in view then shows them signed out about 32 seconds after the refusal: a 30-second
+  grace in case the refusal was a blip, plus a 2-second confirmation.
 - **Refreshing short-lived tokens:** store the new token where `token(request)` reads it, such as
   your cookie, then call `reauthenticate()` so the client asks your backend again.
 
@@ -190,7 +195,9 @@ from `authenticate` for signed-out requests; guests are refused otherwise:
 ```ts
 authenticate: async (request) => {
   const user = await yourAuth.userFor(request);
-  return user ? { userId: user.id } : acceptLocalFirstAuth(request);
+  return user
+    ? { userId: user.id, expiresAt: user.sessionExpiresAt }
+    : acceptLocalFirstAuth(request);
 },
 ```
 

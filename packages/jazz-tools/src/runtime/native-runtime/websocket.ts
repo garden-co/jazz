@@ -45,6 +45,17 @@ export function isReconnectLaterWireError(error: WireError): boolean {
 }
 
 /**
+ * Whether the server ended an admitted session because the expiry its app's
+ * auth gave it is near, asking the client to connect again so the app's
+ * `authenticate` decides with the client's current credential. It is an
+ * `auth_failed` error with `after_resume` retry: a client that doesn't know
+ * it treats it as a refused credential and asks its backend again.
+ */
+export function isReauthenticateWireError(error: WireError): boolean {
+  return error.code === "auth_failed" && error.retry === "after_resume";
+}
+
+/**
  * Whether the carrier itself ended the link because the socket went away:
  * closed, failed, or silent past {@link HEARTBEAT_SILENCE_MS}. These are
  * network outages, which a client retries however long they last.

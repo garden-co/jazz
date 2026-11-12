@@ -76,6 +76,7 @@ describe("fromJWT", () => {
     expect(await authenticate(request(token))).toEqual({
       userId: "user_01",
       claims: { role: "admin", permissions: ["posts:write"], org_id: "org_1" },
+      expiresAt: expect.any(Number),
     });
   });
 
@@ -90,6 +91,7 @@ describe("fromJWT", () => {
     expect(await authenticate(request(token))).toEqual({
       userId: "user_01",
       claims: { role: "member" },
+      expiresAt: expect.any(Number),
     });
   });
 

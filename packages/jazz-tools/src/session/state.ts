@@ -21,8 +21,20 @@ type WipeableClient = {
     waitForSync?(options?: { timeoutMs?: number }): Promise<void>;
     deleteClientStorage?(): Promise<void>;
     getSyncStatus?(): { pendingUploads: number };
+    isUsable?(): boolean;
   };
 };
+
+/**
+ * Whether `client` still works after a teardown step failed: its Db says
+ * so, or (a client without one) the failure is one that stops before
+ * teardown, its sync wait or a shared client still in use elsewhere.
+ */
+function stillUsable(client: unknown, cause: unknown): boolean {
+  const usable = (client as WipeableClient | undefined)?.db?.isUsable?.();
+  if (usable !== undefined) return usable;
+  return cause instanceof GracefulShutdownSyncError || cause instanceof SharedClientShutdownError;
+}
 export type JazzSessionOperation =
   | "createLocalFirst"
   | "restoreLocalFirst"
@@ -235,20 +247,34 @@ export async function createJazzSessionOwner<
         client = undefined;
       }
     } catch (cause) {
-      if (token === generation) {
-        const usable =
-          cause instanceof GracefulShutdownSyncError || cause instanceof SharedClientShutdownError;
-        // Unknown teardown failures retain the client privately as a shutdown
-        // barrier. Never publish a potentially stopped runtime or enroll over it.
+      if (token !== generation) throw cause;
+      if (stillUsable(client, cause)) {
+        // The step failed before the client's teardown began (offline, a
+        // storage delete the worker couldn't start): it keeps working, and
+        // the app may try the operation again.
         publish({
-          status: usable ? "ready" : "error",
+          status: "ready",
           account: selected,
-          client: usable ? client : undefined,
+          client,
           error: toError(cause),
           recovery: "action",
         });
+        throw cause;
       }
-      throw cause;
+      if (operation !== "logout") {
+        // Its teardown began, so it can't be offered again. Unknown teardown
+        // failures retain the client privately as a shutdown barrier: never
+        // publish a potentially stopped runtime or enroll over it.
+        publish({ status: "error", account: selected, error: toError(cause), recovery: "action" });
+        throw cause;
+      }
+      // A sign-out whose teardown began and failed still signs out: the
+      // user asked to leave, and did. The failure is logged, not published
+      // as the session's error. Code that kept the half-closed client's Db
+      // learns it is gone.
+      console.error("Jazz signed out, but closing the signed-out client failed.", cause);
+      (client as WipeableClient).db?.markReplaced?.("signed-out");
+      client = undefined;
     }
     if (token !== generation) throw superseded();
     try {
