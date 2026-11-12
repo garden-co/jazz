@@ -3,7 +3,7 @@ title: React Native
 description: "Learn how to use Jazz from React Native and Expo apps."
 ---
 
-React Native and Expo are supported as an alpha through `jazz-tools/react-native` and the direct `jazz-rn` native dependency. Use a matching development or release build: Expo Go is unsupported, and so is Expo web (it renders a blank page). For the web, build a separate app with the [web client](/docs/setup/web-client/thin-client).
+React Native and Expo are supported as an alpha through `jazz-tools/react-native` and the direct `jazz-rn` native dependency. Use a matching development or release build: Expo Go is unsupported. On the web target, `jazz-tools/react-native` and `jazz-tools/expo` throw an error that says so: for Expo web, render the [web client](/docs/setup/web-client/thin-client) from `jazz-tools/react` in a `.web.tsx` platform file, which signs in with your backend's same-origin cookie like any web app.
 
 ## Setup
 
@@ -71,12 +71,18 @@ Jazz needs the New Architecture, which is the default from SDK 54. Then build th
 can't load Jazz's native module. After changing the Babel config, start Metro with
 `npx expo start --clear`.
 
+Your schema and its migrations ship in the JavaScript bundle, and the app hands them to the native
+module when it starts, so a schema change or a new migration needs no native rebuild: an over-the-air
+JavaScript update (EAS Update, say) carries it. Upgrading `jazz-tools` does need one: its JavaScript
+and the `jazz-rn` native module must come from the same release, so ship it as a new native build
+(with EAS Update, a new `runtimeVersion`), not over the air.
+
 To reach a backend on your computer, the Android emulator uses `http://10.0.2.2:<port>` instead of
 `localhost`, and Android blocks plain `http://` unless you allow cleartext traffic for development.
 
 A bare React Native host uses the same direct dependency and New Architecture, with an OS-protected
 account store. The [canonical Expo
-scaffold](https://github.com/garden-co/jazz/tree/v2.0.0-alpha.60/examples/todo-client-localfirst-expo)
+scaffold](https://github.com/garden-co/jazz/tree/v2.0.0-alpha.61/examples/todo-client-localfirst-expo)
 shows the complete lifecycle and platform configuration. The alpha has not yet proven two physical JSI
 runtimes attached to one relay.
 
@@ -168,7 +174,4 @@ testing page shows an in-memory one), since outside the browser and the app ther
 Use `bearer: () => testJazz.bearer(userId)` to sign in the way the app does. The React Native UI
 itself needs an emulator or a device.
 
-## Coming next
-
-- Expo vs bare React Native setup, step by step
-- Today React Native clients run the local-first engine on the device; a thin client follows the web thin client
+{/* TODO, coming next: Expo vs bare React Native setup, step by step; a thin client for React Native, like the web thin client (today React Native runs the local-first engine on the device) */}

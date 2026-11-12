@@ -2046,6 +2046,9 @@ pub(crate) struct Client {
     node: [u8; 16],
     connection: u64,
     fates: HashMap<u64, Result<(), Error>>,
+    /// Fates the upstream gave this replica's commits, counted: each is
+    /// progress a read queued behind them makes (see [`Db::settled_upstream`]).
+    settled_upstream: u64,
     /// Accepted fates from a replica with no server: they order the
     /// commit, but it never becomes `Global`.
     local_fates: HashSet<u64>,
@@ -7197,6 +7200,7 @@ impl Client {
             pending: PendingQueue::default(),
             unsent: Vec::new(),
             fates: HashMap::new(),
+            settled_upstream: 0,
             local_fates: HashSet::new(),
             refused: Vec::new(),
             stored: HashSet::new(),
@@ -8258,6 +8262,8 @@ impl Db {
                          deploy it to the server",
                     )));
                 }
+                // The check may look at this store (its progress).
+                drop(inner);
                 if expired() {
                     return Poll::Ready(Err(Error::new(
                         ErrorCode::NotObserved,
@@ -9166,6 +9172,10 @@ impl Db {
                             client.local_fates.insert(tx);
                         }
                         client.fates.insert(tx, result);
+                        // A relayed commit is a session's, not this store's.
+                        if !relayed {
+                            client.settled_upstream += 1;
+                        }
                         let node = client.node;
                         if let Some(hashes) = client.pushed.remove(&tx) {
                             crate::large::mark_pushed(&inner.conn, &hashes)?;
@@ -10542,6 +10552,47 @@ impl Db {
         self.inner.borrow().replayed_commits
     }
 
+    /// Echoes the serving passes examined to match the images they ship
+    /// against the writers' own commits (for tests and metrics): one per
+    /// image a session's commits could have produced, however many commits
+    /// one tick applied for it.
+    #[doc(hidden)]
+    pub fn echo_probes(&self) -> u64 {
+        self.inner.borrow().echo_probes
+    }
+
+    /// Fates the upstream has given this replica's own commits (not ones
+    /// it relays for its sessions) since it opened, and how many of its
+    /// own commits are still pending: a read is queued behind those, and
+    /// the server answers it after their fates (see
+    /// `binding_host::CoverageBudget`).
+    #[doc(hidden)]
+    pub fn own_upload_progress(&self) -> (u64, u64) {
+        self.inner
+            .borrow()
+            .client
+            .as_ref()
+            .map_or((0, 0), |client| {
+                let pending = client
+                    .pending
+                    .iter()
+                    .filter(|p| !client.relayed_fates.contains_key(&p.tx))
+                    .count();
+                (client.settled_upstream, pending as u64)
+            })
+    }
+
+    /// The settled count of [`Self::own_upload_progress`] alone, without
+    /// counting what is pending.
+    #[doc(hidden)]
+    pub fn settled_upstream(&self) -> u64 {
+        self.inner
+            .borrow()
+            .client
+            .as_ref()
+            .map_or(0, |client| client.settled_upstream)
+    }
+
     /// Sessions currently served (for tests and metrics).
     pub fn open_subscribers(&self) -> usize {
         self.inner
@@ -11534,6 +11585,7 @@ impl Db {
             }
             // Superseded versions of the client's own commits land in its
             // history, while the row stays readable.
+            let mut superseded_rows = HashSet::new();
             for (table, row, key, at) in committed {
                 let superseded = match inner.current_image(&table, row, &key)? {
                     Some(current) => {
@@ -11542,7 +11594,7 @@ impl Db {
                     None => false,
                 };
                 if superseded {
-                    echoes.retain(|e| !(e.table == table && e.row == row && e.key == key));
+                    superseded_rows.insert((table.clone(), row, key.clone()));
                 }
                 if superseded && readable(&inner, &policies, &table, row, &key, policy)? {
                     let id = row.0.as_bytes().to_vec();
@@ -11555,6 +11607,11 @@ impl Db {
                         &[&id, &key, &at.0.t(), &w],
                     )?);
                 }
+            }
+            if !superseded_rows.is_empty() {
+                echoes.retain(|e| {
+                    !superseded_rows.contains(&(e.table.clone(), e.row, e.key.clone()))
+                });
             }
             // An eviction is the row's state as of now, after every event
             // drained above: a version of it a result shipped earlier in the
@@ -11646,18 +11703,44 @@ impl Db {
                 })
                 .collect();
             echoes.retain(|echo| fated.contains(&echo.id));
+            let mut echo_probes = 0;
             if !echoes.is_empty() {
+                // By version, each in the order it was echoed: a tick that
+                // applied N commits of one writer matches its N images in
+                // one pass, not N scans of N echoes.
+                let mut by_version: HashMap<(&str, [u8; 16], &[u8], Pos), Vec<usize>> =
+                    HashMap::with_capacity(echoes.len());
+                for (i, echo) in echoes.iter().enumerate() {
+                    by_version
+                        .entry((
+                            echo.table.as_str(),
+                            *echo.row.0.as_bytes(),
+                            echo.key.as_slice(),
+                            echo.at,
+                        ))
+                        .or_default()
+                        .push(i);
+                }
+                let mut taken = vec![false; echoes.len()];
                 images.retain(|image| {
-                    let Some(at) = echoes.iter().position(|e| {
-                        e.table == image.table
-                            && *e.row.0.as_bytes() == image.id
-                            && e.key == image.key
-                            && e.at == image.at
-                            && image.at.accepted()
-                    }) else {
+                    if !image.at.accepted() {
+                        return true;
+                    }
+                    echo_probes += 1;
+                    let version = (
+                        image.table.as_str(),
+                        image.id,
+                        image.key.as_slice(),
+                        image.at,
+                    );
+                    let Some(&at) = by_version
+                        .get(&version)
+                        .and_then(|candidates| candidates.iter().find(|&&i| !taken[i]))
+                    else {
                         return true;
                     };
-                    let echo = echoes.swap_remove(at);
+                    taken[at] = true;
+                    let echo = &echoes[at];
                     as_written
                         .entry(echo.id)
                         .or_default()
@@ -11706,6 +11789,7 @@ impl Db {
                 session.connection_settled = Some(through);
                 out.push(SyncMessage::ConnectionSettled { through });
             }
+            inner.echo_probes += echo_probes;
             // A relay's versions of the session's own commits it still
             // uploads are the session's pending writes, which it holds as
             // it wrote them: shipped at the relay's seqs, they would stand
@@ -13751,9 +13835,15 @@ fn readable_version(
     )
 }
 
-/// Whether `identity` may read the version of `row` at `seq` and, still,
-/// the row as it stands: losing read access takes effect at once for the
-/// content of every earlier version too (SPEC 19.9, INV-RLS-13).
+/// Whether `identity` may read the version of `row` at `at`: the row as it
+/// stands, when the version is the row's current one; otherwise also the
+/// version as of its own position, as history (SPEC 19.9, INV-RLS-13).
+/// Losing read access to the row takes effect at once for every version.
+///
+/// So a reader granted access after the row's last write (a share row made
+/// later) reads the current version's content, though nothing granted it
+/// as of that version's position. A relay judges "current" by its own
+/// store, which may lag; its upstream judges again.
 fn still_readable_version(
     inner: &Inner,
     policies: &Schema,
@@ -13763,10 +13853,16 @@ fn still_readable_version(
     at: Pos,
     identity: Option<AuthorSubject>,
 ) -> Result<bool, Error> {
-    Ok(
-        readable_version(inner, policies, table, row, key, at, identity)?
-            && readable(inner, policies, table, row, key, identity)?,
-    )
+    if !readable(inner, policies, table, row, key, identity)? {
+        return Ok(false);
+    }
+    if inner
+        .current_image(table, row, key)?
+        .is_some_and(|current| current.at == at)
+    {
+        return Ok(true);
+    }
+    readable_version(inner, policies, table, row, key, at, identity)
 }
 
 /// Whether `identity` may read a row of stored table `table`, by
