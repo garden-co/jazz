@@ -72,8 +72,10 @@ can't load Jazz's native module. After changing the Babel config, start Metro wi
 `npx expo start --clear`.
 
 Your schema and its migrations ship in the JavaScript bundle, and the app hands them to the native
-module when it starts, so a schema change or a new migration needs no native rebuild. Upgrading
-`jazz-tools` does: its JavaScript and the `jazz-rn` native module must come from the same release.
+module when it starts, so a schema change or a new migration needs no native rebuild: an over-the-air
+JavaScript update (EAS Update, say) carries it. Upgrading `jazz-tools` does need one: its JavaScript
+and the `jazz-rn` native module must come from the same release, so ship it as a new native build
+(with EAS Update, a new `runtimeVersion`), not over the air.
 
 To reach a backend on your computer, the Android emulator uses `http://10.0.2.2:<port>` instead of
 `localhost`, and Android blocks plain `http://` unless you allow cleartext traffic for development.

@@ -57,12 +57,17 @@ in: after your own sign-in or sign-out, `refresh()` follows it.
 
 - **`authenticate` returns `expiresAt`.** A signed-in answer is now
   `{ userId, expiresAt, claims? }`, where `expiresAt` is when the user's session ends, in Unix
-  seconds: the session a sign-out ends, not a short-lived access token. A sync session lasts until
-  then and authenticates again on its next connection. Without it, `createJazz` refuses the answer
-  with an error that says so.
-- **`recheckSeconds` is removed.** Jazz no longer re-asks `authenticate` on a timer. To end a user's
-  sessions at once, for example after a sign-out on your server or a permission change, call
-  `await jazz.revokeUser(userId)`. Passing `recheckSeconds` throws.
+  seconds: the session a sign-out ends, not a short-lived access token. A sync connection lasts
+  until then, or `sessionTtlSeconds` after it opened (one hour by default), whichever comes first,
+  and then authenticates again on a new connection. Without `expiresAt`, `createJazz` refuses the
+  answer with an error that says so. See
+  [When a session expires](/docs/setup/auth/backend#when-a-session-expires).
+- **`recheckSeconds` is removed.** Jazz no longer re-checks open connections on a fixed interval; it
+  authenticates again when a connection's session ends. To end a user's connections sooner, for
+  example from your sign-out handler, call `await jazz.revokeUser(userId)`: it ends them on this
+  backend instance, and their clients ask your backend again (and reconnect if it still names the
+  user). Connections on other instances, such as other Vercel functions, end at their deadline.
+  Passing `recheckSeconds` throws.
 
 - **One session.** `const session = await createJazzClient(config)`, or
   `<JazzProvider config={{ … }}>` in React, React Native, Expo, Vue, Solid and Svelte. Read it with
@@ -99,7 +104,7 @@ in: after your own sign-in or sign-out, `refresh()` follows it.
 | `sessionActions.createLocalFirst()` and the other `sessionActions`                                        | the same operations on the session itself                                                                                              |
 | `useLocalFirstAuth`, `LocalFirstAuth`, `BrowserAuthSecretStore`, `ExpoAuthSecretStore`, `AuthSecretStore` | `session.exportDeviceKey()` and `session.restoreDeviceAccount(key)`                                                                    |
 | `acceptLocalFirstAuth` (backend)                                                                          | `acceptDeviceAccounts`                                                                                                                 |
-| `recheckSeconds` (backend)                                                                                | removed: sessions last until `expiresAt`; `jazz.revokeUser(userId)` ends them at once                                                  |
+| `recheckSeconds` (backend)                                                                                | removed: connections end at `expiresAt` or `sessionTtlSeconds`; `jazz.revokeUser(userId)` ends them sooner on this instance            |
 
 `snapshot.user` is `{ accountId, kind: "device" | "backend", identity: { issuer, subject }, claims }`
 for whoever is signed in, a device account included, or `null`. So code that checked

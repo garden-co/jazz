@@ -11,10 +11,11 @@ call commits as its own transaction, which the server checks against your
 [declarative permissions](/docs/schemas/policies) and accepts or rejects as a whole. To make several
 reads and writes commit together, group them in a [transaction](#transactions).
 
-Every write returns a `WriteResult`:
+`insert` and `restore` return a `WriteResult`; `update`, `upsert` and `delete` return a
+`WriteHandle`. Both have:
 
-- `value`&hairsp;—&hairsp;The written result. `insert` and `restore` return the row, so a new
-  row's id is `db.insert(…).value.id`; `upsert`, `update`, and `delete` return `undefined`. Inside a
+- `value`&hairsp;—&hairsp;The written result: the row for `insert` and `restore`, so a new row's id
+  is `db.insert(…).value.id`; `undefined` for the others. Inside a
   [transaction](#transactions), `tx.insert(…)` returns the staged row itself.
 - `txId`&hairsp;—&hairsp;A promise for the committed transaction ID, the durable identity of this
   write.
