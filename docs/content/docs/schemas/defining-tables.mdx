@@ -4,8 +4,6 @@ description: "Learn how to define tables and the relations between them in schem
 reviewedAt: "b29b48d1a"
 ---
 
-import SchemaSetup from "../../partials/schema-setup.mdx";
-
 ## Project layout
 
 A Jazz project has a small set of files at the app root:
@@ -118,7 +116,7 @@ guarantee its history is complete.
 
 ## Validate locally
 
-<SchemaSetup />
+<include>../../partials/schema-setup.mdx</include>
 
 When you change your schema on a shared app, prepare any required migration and deploy your main backend: `createJazz` publishes the schema, permissions and migrations when it starts. See [Migrations](/docs/schemas/migrations) for details.
 

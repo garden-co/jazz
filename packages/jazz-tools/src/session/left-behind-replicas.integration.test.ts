@@ -6,7 +6,11 @@ import { acceptDeviceAccounts, createJazz, memory } from "../backend/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { openBrowserSessionCore as createJazzClient } from "./create-jazz-session.js";
+import {
+  openBrowserSessionCore as createJazzClient,
+  WIPE_RETRY_MS,
+} from "./create-jazz-session.js";
+import { WIPE_TIMEOUT_MS } from "./left-behind-replicas.js";
 
 // `clearOnSignOut` on a shared browser: a user signed out where the page
 // didn't see it (on the server, or another user signing in through the app)
@@ -114,11 +118,43 @@ async function setup(options: { guests?: boolean } = {}) {
             await hold.wipe;
             wiped.push(config.account.identity.subject);
           };
+          db.wipeClientStorage = async () => {
+            await db.deleteClientStorage();
+            return { pendingUploads: 0 };
+          };
           return db;
         },
       }),
     });
   return { jar, open, wiped, hold, storage };
+}
+
+/** Web Locks as a browser has them: every page of the test shares them. */
+function stubWebLocks() {
+  const held = new Map<string, number>();
+  vi.stubGlobal("navigator", {
+    locks: {
+      async query() {
+        return { held: [...held].filter(([, n]) => n !== 0).map(([name]) => ({ name })) };
+      },
+      async request(
+        name: string,
+        options: { mode: "shared" | "exclusive"; ifAvailable?: boolean },
+        callback: (lock: unknown) => Promise<unknown>,
+      ) {
+        if (options.mode === "exclusive") {
+          if (held.get(name)) return callback(null);
+          held.set(name, -1);
+        } else held.set(name, (held.get(name) ?? 0) + 1);
+        try {
+          return await callback({ name });
+        } finally {
+          if (options.mode === "exclusive") held.delete(name);
+          else held.set(name, held.get(name)! - 1);
+        }
+      },
+    },
+  });
 }
 
 function memoryStore(): AccountStore {
@@ -327,30 +363,11 @@ it("doesn't record a guest's replica", async () => {
   await page.close();
 }, 60_000);
 
-it("keeps the entry while another tab still holds the replica a sign-out here wiped", async () => {
-  // Web Locks as a browser has them: both pages share them, and the storage.
-  const held = new Map<string, number>();
-  vi.stubGlobal("navigator", {
-    locks: {
-      async request(
-        name: string,
-        options: { mode: "shared" | "exclusive"; ifAvailable?: boolean },
-        callback: (lock: unknown) => Promise<unknown>,
-      ) {
-        if (options.mode === "exclusive") {
-          if (held.get(name)) return callback(null);
-          held.set(name, -1);
-        } else held.set(name, (held.get(name) ?? 0) + 1);
-        try {
-          return await callback({ name });
-        } finally {
-          if (options.mode === "exclusive") held.delete(name);
-          else held.set(name, held.get(name)! - 1);
-        }
-      },
-    },
-  });
-  const { open, storage } = await setup();
+// E13: a sign-out here never wipes the replica another tab still has open
+// (its user is still signed in there); the last tab to sign out wipes it.
+it("leaves the replica and its entry while another tab holds it, and the last tab out wipes", async () => {
+  stubWebLocks();
+  const { open, storage, wiped } = await setup();
   const recorded = () =>
     [...storage].find(([key]) => key.startsWith("jazz-clear-on-sign-out-v1:"))?.[1] ?? "";
   const here = await signInLocalFirst(open);
@@ -359,10 +376,52 @@ it("keeps the entry while another tab still holds the replica a sign-out here wi
   cleanups.push(() => there.close());
 
   await here.logout();
+  expect(here.getSnapshot().status).toBe("signed-out");
   await new Promise((resolve) => setTimeout(resolve, 500));
   expect(there.getSnapshot().status).toBe("ready");
+  expect(wiped).toEqual([]);
   expect(recorded()).toContain('"subject":"alice"');
-  // Once the other tab signs out too, nothing holds it: the entry goes.
+  // Once the other tab signs out too, nothing holds it: it wipes, and the entry goes.
   await there.logout();
+  expect(wiped).toEqual(["alice"]);
   await expect.poll(recorded, { timeout: 5_000 }).toBe("");
 }, 60_000);
+
+// A wipe the other tab held off is tried again in this page, without a
+// reload, once no tab holds the replica and the backend no longer names the
+// user (here the other tab goes away without signing out).
+it("wipes in the page once the tab that held the replica goes away, without a reload", async () => {
+  stubWebLocks();
+  const { jar, open, wiped } = await setup();
+  const here = await signInLocalFirst(open);
+  cleanups.push(() => here.close());
+  const there = await signInLocalFirst(open);
+  jar.user = null;
+  await here.logout();
+  expect(wiped).toEqual([]);
+  // Closed (a crash, a reload elsewhere) before it heard of the sign-out.
+  await there.close();
+  await expect.poll(() => wiped, { timeout: WIPE_RETRY_MS + 15_000 }).toEqual(["alice"]);
+  await new Promise((resolve) => setTimeout(resolve, 1_000));
+  expect(wiped).toEqual(["alice"]);
+}, 90_000);
+
+// A sign-out whose wipe hangs (its open never finishes) gives up after
+// `WIPE_TIMEOUT_MS`, so the session signs out and an open of the account
+// doesn't wait on it, and tries again in the page.
+it("gives up a sign-out's wipe that hangs, signs out, and wipes on a later try", async () => {
+  stubWebLocks();
+  const { jar, open, wiped, hold } = await setup();
+  const here = await signInLocalFirst(open);
+  cleanups.push(() => here.close());
+  let finish!: () => void;
+  hold.open = new Promise<void>((resolve) => (finish = resolve));
+  jar.user = null;
+  const started = Date.now();
+  await here.logout();
+  expect(Date.now() - started).toBeLessThan(WIPE_TIMEOUT_MS + 10_000);
+  expect(here.getSnapshot().status).toBe("signed-out");
+  expect(wiped).toEqual([]);
+  finish();
+  await expect.poll(() => wiped, { timeout: WIPE_RETRY_MS + 15_000 }).toEqual(["alice"]);
+}, 120_000);

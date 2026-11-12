@@ -34,7 +34,7 @@ use crate::server::shutdown::ActiveWebSocketGuard;
 use crate::server::{ServerState, WebSocketEntryRefused};
 
 const WS_HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-const WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_CLIENT_CONNECTION_CAP;
+const WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_IDENTITY_CONNECTION_CAP;
 const WS_MAX_FRAME_BYTES: usize = MAX_WIRE_FRAME_BYTES;
 const WS_MAX_MESSAGE_BYTES: usize = WS_MAX_FRAME_BYTES;
 const WS_AT_CAPACITY_RETRY_AFTER_SECS: u64 = 5;
@@ -67,6 +67,8 @@ impl<T> SyncSocket for T where
 pub(crate) struct WebSocketAdmissionState {
     registry: std::sync::Mutex<WebSocketAdmissionRegistry>,
     next_connection_id: AtomicU64,
+    /// Origin of every admission's `last_heard` clock.
+    clock_origin: std::time::Instant,
 }
 
 impl Default for WebSocketAdmissionState {
@@ -74,7 +76,14 @@ impl Default for WebSocketAdmissionState {
         Self {
             registry: std::sync::Mutex::new(WebSocketAdmissionRegistry::default()),
             next_connection_id: AtomicU64::new(1),
+            clock_origin: std::time::Instant::now(),
         }
+    }
+}
+
+impl WebSocketAdmissionState {
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.clock_origin.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 }
 
@@ -164,10 +173,20 @@ struct WebSocketAdmissionKey {
 struct WebSocketAdmissionEntry {
     id: u64,
     evict_tx: mpsc::UnboundedSender<WebSocketEviction>,
+    /// When this connection's peer was last heard from (see
+    /// [`WebSocketAdmissionState::now_ms`]), or [`WS_STILL_HANDSHAKING`]
+    /// until the server's Hello is sent. A half-open socket stops advancing
+    /// it, so it is the one the cap evicts first.
+    last_heard: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
 struct WebSocketEviction;
+
+/// `last_heard` of a connection that hasn't finished its handshake: it ranks
+/// as the most recent, so a burst over the cap never evicts a socket on its
+/// first connect before it could be heard from at all.
+const WS_STILL_HANDSHAKING: u64 = u64::MAX;
 
 #[derive(Debug, Default)]
 struct WebSocketAdmissionRegistry {
@@ -182,9 +201,19 @@ struct WebSocketAdmissionRegistration {
     key: Option<WebSocketAdmissionKey>,
     id: u64,
     evict_rx: mpsc::UnboundedReceiver<WebSocketEviction>,
+    last_heard: Arc<AtomicU64>,
     /// Keeps an unbounded registration's receiver pending without retaining an
     /// admission-registry entry.
     _unbounded_keepalive: Option<mpsc::UnboundedSender<WebSocketEviction>>,
+}
+
+impl WebSocketAdmissionRegistration {
+    /// Record that the peer was heard from, so the cap evicts quieter links
+    /// of the same identity before this one.
+    fn heard(&self) {
+        self.last_heard
+            .store(self.owner.now_ms(), Ordering::Relaxed);
+    }
 }
 
 impl Drop for WebSocketAdmissionRegistration {
@@ -207,6 +236,7 @@ fn ws_register_admission(
             key: None,
             id: 0,
             evict_rx,
+            last_heard: Arc::default(),
             _unbounded_keepalive: Some(keepalive),
         };
     }
@@ -216,13 +246,33 @@ fn ws_register_admission(
         .registry
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let last_heard = Arc::new(AtomicU64::new(WS_STILL_HANDSHAKING));
     let entries = registry.by_key.entry(key).or_default();
-    entries.push_back(WebSocketAdmissionEntry { id, evict_tx });
+    entries.push_back(WebSocketAdmissionEntry {
+        id,
+        evict_tx,
+        last_heard: Arc::clone(&last_heard),
+    });
 
+    // The newest connection is always admitted. Past the cap, the link heard
+    // from least recently goes first: a half-open socket a reconnect left
+    // behind stops answering keepalives, so it is usually evicted before a
+    // live tab or device of the same identity. Equally quiet links go oldest
+    // first. Known limit: an idle live tab is heard from only by its pong to
+    // the keepalive ping, so a zombie whose peer vanished less than one
+    // keepalive interval ago can still rank above it.
     while entries.len() > WS_PER_IDENTITY_CONNECTION_CAP {
-        if let Some(oldest) = entries.pop_front() {
-            let _ = oldest.evict_tx.send(WebSocketEviction);
-        }
+        let newest = entries.len() - 1;
+        let quietest = entries
+            .iter()
+            .take(newest)
+            .enumerate()
+            .min_by_key(|(index, entry)| (entry.last_heard.load(Ordering::Relaxed), *index))
+            .map(|(index, _)| index);
+        let Some(evicted) = quietest.and_then(|index| entries.remove(index)) else {
+            break;
+        };
+        let _ = evicted.evict_tx.send(WebSocketEviction);
     }
 
     drop(registry);
@@ -232,6 +282,7 @@ fn ws_register_admission(
         key: Some(key),
         id,
         evict_rx,
+        last_heard,
         _unbounded_keepalive: None,
     }
 }
@@ -910,6 +961,9 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
             return;
         }
     };
+    // From here the peer can be heard from; until now it ranked as the most
+    // recent connection (see `WS_STILL_HANDSHAKING`).
+    admission_registration.heard();
     if send_ws_encoded_frames(&mut socket, &[server_hello])
         .await
         .is_err()
@@ -993,6 +1047,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 // pongs included: that is not the peer going quiet.
                 if thin_reader.waiting() || held.is_some() {
                     last_inbound = tokio::time::Instant::now();
+                    admission_registration.heard();
                 }
                 if last_inbound.elapsed() >= WS_IDLE_TIMEOUT {
                     tracing::debug!("closing idle websocket: no inbound traffic within the idle timeout");
@@ -1024,7 +1079,11 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     // turn, so this link is told not to come back.
                     queue_ws_error(&writer_tx, WireError::new(
                         WireErrorCode::Backpressure, WireRetry::Never,
-                        "websocket peer_identity connection cap exceeded",
+                        format!(
+                            "websocket peer_identity connection cap exceeded: this user has more \
+                             than {WS_PER_IDENTITY_CONNECTION_CAP} open connections (tabs or \
+                             devices), and this was the one heard from least recently"
+                        ),
                     ));
                     let _ = writer_tx.try_send(vec![Message::Close(Some(CloseFrame {
                         code: close_code::POLICY, reason: "websocket connection cap exceeded".into(),
@@ -1103,6 +1162,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
             }
             msg = socket_reader.next(), if !thin_reader.waiting() && held.is_none() => {
                 last_inbound = tokio::time::Instant::now();
+                admission_registration.heard();
                 match msg {
                 Some(Ok(Message::Binary(bytes))) => {
                     if let Err(error) = account_admission_current(&state, account_identity, &mut account_changes).await {
@@ -5040,6 +5100,173 @@ mod tests {
         .expect("websocket admission cleanup");
         assert_eq!(
             ws_live_admissions_for(&state, key),
+            WS_PER_IDENTITY_CONNECTION_CAP
+        );
+    }
+
+    /// Ping `ws` and wait for its pong, failing if the server closed or
+    /// evicted it instead. The server reads the ping, so this also counts as
+    /// hearing from this peer.
+    async fn assert_ws_answers_ping(ws: &mut TestWs, label: &str) {
+        let payload = label.as_bytes().to_vec();
+        ws.send(WsMessage::Ping(payload.clone().into()))
+            .await
+            .unwrap_or_else(|error| panic!("{label}: send ping: {error}"));
+        tokio::time::timeout(WS_SETTLE_DEADLINE, async {
+            loop {
+                match ws.next().await {
+                    Some(Ok(WsMessage::Pong(got))) if got.as_ref() == payload.as_slice() => {
+                        return;
+                    }
+                    Some(Ok(WsMessage::Binary(bytes))) => {
+                        for frame in decode_ws_message(&WsMessage::Binary(bytes)) {
+                            if let WireFrame::Error(error) = frame {
+                                panic!("{label}: server sent {error:?}");
+                            }
+                        }
+                    }
+                    Some(Ok(WsMessage::Close(frame))) => panic!("{label}: closed: {frame:?}"),
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => panic!("{label}: socket failed: {error}"),
+                    None => panic!("{label}: socket ended"),
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{label}: no pong"));
+    }
+
+    /// Wait until `ws` is evicted by the per-identity cap: a retry-never
+    /// backpressure error followed by a policy close.
+    async fn expect_ws_cap_eviction(ws: &mut TestWs, label: &str) {
+        let mut saw_error = false;
+        tokio::time::timeout(WS_SETTLE_DEADLINE, async {
+            while let Some(msg) = ws.next().await {
+                let msg = msg.unwrap_or_else(|error| panic!("{label}: {error}"));
+                for frame in decode_ws_message(&msg) {
+                    if let WireFrame::Error(error) = frame {
+                        saw_error = error.code == WireErrorCode::Backpressure
+                            && error.retry == WireRetry::Never
+                            && error.message.contains("connection cap exceeded");
+                    }
+                }
+                if let WsMessage::Close(Some(close)) = msg {
+                    assert_eq!(
+                        close.code,
+                        tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
+                        "{label}: eviction must close with a policy code"
+                    );
+                    return;
+                }
+            }
+            panic!("{label}: socket ended without a close frame");
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{label}: was not evicted"));
+        assert!(saw_error, "{label}: eviction must carry a WireError");
+    }
+
+    // A connection still in its handshake ranks as the most recent, so a burst
+    // over the cap evicts an established quiet link instead of a socket on
+    // its first connect.
+    #[test]
+    fn per_identity_cap_never_evicts_a_connection_still_handshaking() {
+        let owner = Arc::new(WebSocketAdmissionState::default());
+        let key = WebSocketAdmissionKey {
+            app_id: AppId::random(),
+            identity: AuthorSubject::for_test_bytes([0x44; 16]),
+        };
+        let mut registrations: Vec<_> = (0..WS_PER_IDENTITY_CONNECTION_CAP)
+            .map(|_| ws_register_admission(Arc::clone(&owner), key, true))
+            .collect();
+        // Every link but the oldest finished its handshake and was heard.
+        for registration in registrations.iter().skip(1) {
+            registration.heard();
+        }
+        let _newest = ws_register_admission(Arc::clone(&owner), key, true);
+
+        assert!(
+            registrations[0].evict_rx.try_recv().is_err(),
+            "a connection still handshaking must not be evicted"
+        );
+        assert!(
+            registrations[1].evict_rx.try_recv().is_ok(),
+            "the established link heard from least recently is evicted"
+        );
+        for registration in registrations.iter_mut().skip(2) {
+            assert!(registration.evict_rx.try_recv().is_err());
+        }
+    }
+
+    // R42 (adopter repro c04): a cold start of six tabs of one signed-in user,
+    // all connecting at once. Thin-client tabs hold one socket each, and so
+    // does every browser profile or device running the local-first client.
+    // None of them may be evicted by that user's own connection cap.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cold_start_of_six_tabs_for_one_identity_keeps_every_tab() {
+        const TABS: usize = 6;
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let identity = AuthorSubject::for_test_bytes([0x42; 16]);
+        let key = WebSocketAdmissionKey {
+            app_id: state.app_id,
+            identity,
+        };
+
+        let mut pending = FuturesUnordered::new();
+        for _ in 0..TABS {
+            pending.push(open_negotiated_ws_session(addr, &state, identity));
+        }
+        let mut tabs = Vec::with_capacity(TABS);
+        while let Some(ws) = pending.next().await {
+            tabs.push(ws);
+        }
+
+        assert_eq!(
+            wait_for_ws_live_admissions(&state, key, |count| count == TABS).await,
+            TABS,
+            "every tab of the cold start must stay admitted"
+        );
+        for (index, tab) in tabs.iter_mut().enumerate() {
+            assert_ws_answers_ping(tab, &format!("tab {index}")).await;
+        }
+        assert_eq!(ws_live_admissions_for(&state, key), TABS);
+    }
+
+    // Past the cap, the connection heard from least recently is evicted, not
+    // simply the oldest: a half-open socket left behind by a reconnect goes
+    // before a live tab that opened earlier.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn per_identity_cap_evicts_the_connection_heard_from_least_recently() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let identity = AuthorSubject::for_test_bytes([0x43; 16]);
+        let key = WebSocketAdmissionKey {
+            app_id: state.app_id,
+            identity,
+        };
+        const QUIET: usize = 2;
+
+        let mut sockets = Vec::with_capacity(WS_PER_IDENTITY_CONNECTION_CAP);
+        for _ in 0..WS_PER_IDENTITY_CONNECTION_CAP {
+            sockets.push(open_negotiated_ws_session(addr, &state, identity).await);
+        }
+        // Let the clock move, then hear from every socket except one.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        for (index, ws) in sockets.iter_mut().enumerate() {
+            if index != QUIET {
+                assert_ws_answers_ping(ws, &format!("socket {index}")).await;
+            }
+        }
+
+        let mut newest = open_negotiated_ws_session(addr, &state, identity).await;
+        expect_ws_cap_eviction(&mut sockets[QUIET], "quiet socket").await;
+        assert_ws_answers_ping(&mut sockets[0], "oldest live socket").await;
+        assert_ws_answers_ping(&mut newest, "newest socket").await;
+        assert_eq!(
+            wait_for_ws_live_admissions(&state, key, |count| count
+                == WS_PER_IDENTITY_CONNECTION_CAP)
+            .await,
             WS_PER_IDENTITY_CONNECTION_CAP
         );
     }

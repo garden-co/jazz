@@ -377,7 +377,7 @@ export abstract class ConnectionManager {
     this.client?.updateCookieSession(auth.cookieSession);
   }
 
-  abstract deleteClientStorage(): Promise<void>;
+  abstract deleteClientStorage(): Promise<{ pendingUploads?: number } | void>;
 
   /**
    * Whether this connection can still serve its Db: no storage reset took
@@ -428,12 +428,17 @@ export abstract class ConnectionManager {
       }) ?? null;
   }
 
-  async waitForPendingWrites(): Promise<void> {
+  /**
+   * Wait until every write committed so far is answered, for a graceful
+   * shutdown. With `inFlightStreams`, streaming writes still sending their
+   * value finish first, until that signal aborts (see `Db.letStreamsFinish`).
+   */
+  async waitForPendingWrites(options: { inFlightStreams?: AbortSignal } = {}): Promise<void> {
     const runtime = this.getCurrentClient()?.getRuntime();
     if (!runtime) return;
     if (!runtime.waitForPendingWrites)
       throw new Error("Runtime does not support graceful sync shutdown");
-    await runtime.waitForPendingWrites("global");
+    await runtime.waitForPendingWrites("global", { inFlightStreams: options.inFlightStreams });
   }
 
   async shutdown(): Promise<void> {

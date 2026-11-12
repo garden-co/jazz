@@ -150,6 +150,11 @@ Sometimes access isn't determined by ownership or a parent relationship, but by 
 
 The callback form `(todo) => ...` gives you access to the current row, so you can correlate it with rows in other tables.
 
+A `where(...)` key can also reach one hop through a relation, qualified with the relation's name:
+`policy.docs.allowRead.where({ "author.uid": session.identity.subject })` reads `uid` on the
+row `author` leads to (from alpha.62). The name of the table a relation leads to works too, when
+only one of the table's relations leads there, also before alpha.62.
+
 One correlation links the two rows: the one on the other table's `id`, if there is one. It must
 follow a relation, either `id` against a column declared with `s.rel` to that table, or two columns
 that are relations to the same table; otherwise validation fails with `JoinNotRefCompatible`.
@@ -212,8 +217,11 @@ s.definePermissions(app, ({ policy, session }) => [
 ```
 
 `hopTo` takes a relation name declared with `s.rel` or `s.reverse`, and the `where` after it
-filters the rows it reaches. A relation takes one `hopTo`: chaining a second one is not supported yet. A key qualified with a table name, such as `"doctors.userId"`, filters
-a related table directly; it works when exactly one relation leads from the table to that one.
+filters the rows it reaches. A relation takes one `hopTo`: chaining a second one is not supported
+yet. A qualified key filters a related table directly: `"doctors.userId"` is qualified with the
+table's name, which works because only one relation leads from `appointments` to `doctors`. From
+alpha.62 the relation's name, `"doctor.userId"`, works as well (see
+[Share-based access](#share-based-access)).
 
 <Accordions type="single">
 <Accordion title="Recursive inheritance">

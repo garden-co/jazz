@@ -19,11 +19,13 @@
     signedOut?: Snippet;
     loading?: Snippet;
     error?: Snippet<[Error, () => Promise<void>]>;
+    /** Shown once the session is closed (`session.close()`): nothing by default. */
+    closed?: Snippet;
   } & (
       | { config: JazzClientConfig; session?: never }
       | { session: JazzSession<JazzClient>; config?: never }
     );
-  let { children, signedOut, loading, error, config, session: external, ...rest }: Props = $props();
+  let { children, signedOut, loading, error, closed, config, session: external, ...rest }: Props = $props();
   // Re-checked whenever the props change: Classic configuration arriving
   // later is refused too.
   $effect.pre(() => {
@@ -74,6 +76,8 @@
     {/if}
   {:else if $snapshotStore.status === "signed-out"}
     {@render signedOut?.()}
+  {:else if $snapshotStore.status === "closed"}
+    {@render closed?.()}
   {:else if loading}
     {@render loading()}
   {:else}

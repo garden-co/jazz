@@ -2115,7 +2115,19 @@ fn append_exists_rel_policy_clause(
                 if correlation.join_column != nested.on_column {
                     return Err(err(
                         policy_path(table, path),
-                        "core schema ExistsRel nested outer correlation must use its join key",
+                        format!(
+                            "Correlating `{hop}.{column}` with this row's `{outer}` is not \
+                             supported in policies yet: `{hop}` is joined past the first table \
+                             of this `exists` (through `hopTo`, a relation-qualified key or a \
+                             join), and such a table can only be correlated with the protected \
+                             row on its join key `{hop}.{key}`. Correlate on columns of \
+                             `{start}` instead.",
+                            hop = nested.table,
+                            column = correlation.join_column,
+                            outer = correlation.source_column,
+                            key = nested.on_column,
+                            start = lowered_table,
+                        ),
                     ));
                 }
                 correlated_filters.push(JoinCorrelation {

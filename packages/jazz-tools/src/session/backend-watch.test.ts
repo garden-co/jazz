@@ -26,6 +26,8 @@ async function setup(
     noBackend?: boolean;
     clearOnSignOut?: boolean;
     visible?: boolean;
+    /** The wait before a signed-out answer is confirmed (the default when left out: 10ms). */
+    confirmMs?: number;
     forgotten?: (account: AccountHandle) => Promise<boolean>;
     onSignedOut?: () => "sign-out" | "keep" | void | Promise<"sign-out" | "keep" | void>;
   } = {},
@@ -96,10 +98,9 @@ async function setup(
       isVisible: () => options.visible ?? false,
     },
     {
-      confirmMs: 10,
+      confirmMs: options.confirmMs ?? 10,
       reconnect,
       reconnectBackoffMs: 20,
-      refusedConfirmMs: 30,
       notFoundRetryMs: 10,
       forgotten: options.forgotten,
       onSignedOut: options.onSignedOut,
@@ -774,18 +775,103 @@ it("signs out after a refusal only once a check after focus agrees, and backs of
   await t.session.close();
 });
 
-it("signs out a revoked user in a visible tab once a later check agrees", async () => {
+it("signs out a revoked user in a visible tab once a second answer agrees", async () => {
   const t = await setup(user("alice"), { visible: true });
   t.signIn(user("alice"));
   await settle();
   t.signIn(null);
   t.watch.authRefused();
   await settle();
-  // A refusal alone never signs out.
+  // A refusal and one signed-out answer alone never sign out.
   expect(t.session.getSnapshot().status).toBe("ready");
-  // 30ms later (30s by default) the page is still visible: a plain check signs out.
-  await settle(80);
+  // The second answer, confirmMs later, does.
+  await settle(30);
   expect(t.session.getSnapshot().status).toBe("signed-out");
+  t.watch.stop();
+  await t.session.close();
+});
+
+// E6: after jazz.revokeUser, a visible tab signed out only ~30s later,
+// keeping the old user's rows and taking writes that never synced (and that
+// clearOnSignOut then wiped). It signs out once the second answer agrees.
+it("signs a revoked user out of a visible tab at the second signed-out answer, not 30s later", async () => {
+  vi.useFakeTimers();
+  const onSignedOut = vi.fn(() => "sign-out" as const);
+  const t = await setup(user("alice"), {
+    visible: true,
+    clearOnSignOut: true,
+    confirmMs: 2_000,
+    onSignedOut,
+  });
+  t.signIn(user("alice"));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(t.probe).toHaveBeenCalledTimes(1);
+  // The backend revokes her: her session is gone, her socket is refused
+  // (the sync status goes offline: auth more than once as it closes).
+  t.signIn(null);
+  t.watch.authRefused();
+  t.watch.authRefused();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(t.probe).toHaveBeenCalledTimes(2);
+  expect(t.session.getSnapshot().status).toBe("ready");
+  await vi.advanceTimersByTimeAsync(1_999);
+  expect(t.probe).toHaveBeenCalledTimes(2);
+  expect(onSignedOut).not.toHaveBeenCalled();
+  // The second answer, 2s after the first, signs her out.
+  await vi.advanceTimersByTimeAsync(1);
+  // (The second refusal, queued behind the first, asks once more and finds
+  // no one to sign out.)
+  expect(t.probe).toHaveBeenCalledTimes(4);
+  expect(onSignedOut).toHaveBeenCalledOnce();
+  expect(t.session.getSnapshot().status).toBe("signed-out");
+  expect(t.events).toEqual(["wipe:alice", "close:alice"]);
+  expect(t.statuses).toEqual(["ready:alice", "transitioning:alice", "signed-out:-"]);
+  // Nothing else is pending: no late check signs anyone out again.
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(t.probe).toHaveBeenCalledTimes(4);
+  expect(onSignedOut).toHaveBeenCalledOnce();
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("reconnects a refused visible tab whose second answer names the user again", async () => {
+  vi.useFakeTimers();
+  const onSignedOut = vi.fn(() => "sign-out" as const);
+  const t = await setup(user("alice"), { visible: true, confirmMs: 2_000, onSignedOut });
+  t.signIn(user("alice"));
+  await vi.advanceTimersByTimeAsync(0);
+  // Refused while the app's session cookie is being refreshed: the first
+  // answer says no one, the second (after the refresh) names her again.
+  t.signIn(null);
+  t.watch.authRefused();
+  await vi.advanceTimersByTimeAsync(0);
+  t.signIn(user("alice"));
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(onSignedOut).not.toHaveBeenCalled();
+  expect(t.reconnect).toHaveBeenCalledOnce();
+  expect(t.session.getSnapshot()).toMatchObject({ status: "ready" });
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("alice");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("keeps a refused visible tab signed in when onSignedOut says keep", async () => {
+  vi.useFakeTimers();
+  const t = await setup(user("alice"), {
+    visible: true,
+    confirmMs: 2_000,
+    onSignedOut: () => "keep",
+  });
+  t.signIn(user("alice"));
+  await vi.advanceTimersByTimeAsync(0);
+  t.signIn(null);
+  t.watch.authRefused();
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(t.session.getSnapshot().status).toBe("ready");
+  // The next focus asks again, and the hook decides again.
+  t.focus();
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(t.session.getSnapshot().status).toBe("ready");
   t.watch.stop();
   await t.session.close();
 });
