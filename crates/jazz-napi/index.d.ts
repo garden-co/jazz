@@ -122,6 +122,13 @@ export declare class NapiDb {
   static openPersistentAsBackend(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
   static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
   /**
+   * Authority table UUID as 16 canonical bytes, or empty for an unknown name.
+   * Refuses with NotObserved until the authority confirms this schema.
+   */
+  tableIdentity(table: string): Uint8Array
+  /** Authority column UUID as 16 canonical bytes, or empty for an unknown name. */
+  columnIdentity(table: string, column: string): Uint8Array
+  /**
    * Register and return a typed view backed by this same runtime owner,
    * of an app shipping `migrations` (its bundle as JSON).
    */
