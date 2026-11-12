@@ -354,7 +354,7 @@ export function ownJazzSession<Config, Client>(
             (current.status === "signed-out"
               ? ": sign in first (createDeviceAccount(), or your backend's user)"
               : current.status === "starting" || current.status === "transitioning"
-                ? ": wait for status \"ready\" (subscribe to the session)"
+                ? ': wait for status "ready" (subscribe to the session)'
                 : current.error
                   ? ` (${current.error.message})`
                   : ""),

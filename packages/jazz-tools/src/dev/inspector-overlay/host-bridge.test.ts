@@ -171,6 +171,26 @@ describe("installInspectorHost", () => {
     expect((fake.db as any).openInspectorControlPort).toHaveBeenCalledOnce();
   });
 
+  it("names a browser session's context by its endpoint scope, since it has no app id", () => {
+    const iframeWindow = { postMessage: () => {} } as unknown as Window;
+    const fake = makeFakeDb({
+      getConfig: () => ({
+        serverUrl: "http://server.test/jazz",
+        jwtToken: "header.eyJpc3MiOiJodHRwczovL2luc3BlY3Rvci50ZXN0Iiwic3ViIjoidXNlciJ9.signature",
+        accountId: "00000000-0000-4000-8000-000000000001",
+        accountRegistryAuthority:
+          "http://server.test/jazz/apps/http%3A%2F%2Fserver.test%2Fjazz/accounts",
+      }),
+    });
+    installInspectorHost(fake.db, iframeWindow, "http://localhost");
+    const config = (window as any)[INSPECTOR_HOST_GLOBAL].getConnectionConfig();
+    // The overlay picks the host's runtime context by this and the physical name.
+    expect(config.appId).toBe("http://server.test/jazz");
+    expect(resolveDefaultPersistentDbName(config)).toBe(
+      config.runtimeSources.inspectorHostPhysicalDbName,
+    );
+  });
+
   it("forwards a resolved local-first session from the host JWT when private session state is unavailable", () => {
     const iframeWindow = { postMessage: () => {} } as unknown as Window;
     const fake = makeFakeDb({

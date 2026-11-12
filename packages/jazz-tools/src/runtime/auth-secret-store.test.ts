@@ -1,9 +1,5 @@
 import { describe, it, expect } from "vitest";
-import {
-  authSecretStorageKey,
-  generateAuthSecret,
-  parseAuthSecret,
-} from "./auth-secret-store.js";
+import { authSecretStorageKey, generateAuthSecret, parseAuthSecret } from "./auth-secret-store.js";
 
 describe("generateAuthSecret", () => {
   it("produces the versioned canonical 256-bit representation", () => {

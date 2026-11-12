@@ -135,16 +135,26 @@ describe("browser session", () => {
     // rc.3 adopter finding: the JSDoc'd `fetch` hook reached the Db config, so
     // opening the client threw DataCloneError in db.getConfig().
     const server = await startServer();
+    const asked: string[] = [];
+    const customFetch: typeof fetch = (input, init) => {
+      asked.push(String(input instanceof Request ? input.url : input));
+      return fetch(input, init);
+    };
     const session = await createJazzClient({
       scope: server.appId,
       serverUrl: server.url,
       store: memoryStore(),
       initial: "device",
       driver: { type: "memory" },
-      fetch: (input, init) => fetch(input, init),
+      fetch: customFetch,
     });
     sessions.push(session);
     expect(session.getSnapshot().status).toBe("ready");
+    // It also asks the backend who is signed in, without a bearer: an app
+    // whose cookies only its own fetch carries isn't read as signed out.
+    await expect
+      .poll(() => asked.some((url) => url.includes("backend-user")), { timeout: 10_000 })
+      .toBe(true);
     expect(db(session).getConfig()).not.toHaveProperty("fetch");
     expect(db(session).getConfig()).not.toHaveProperty("store");
 

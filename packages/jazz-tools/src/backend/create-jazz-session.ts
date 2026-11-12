@@ -39,10 +39,7 @@ import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-a
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { createJazzSessionOwner, type SessionCore } from "../session/state.js";
-import {
-  createStartedJazzSession,
-  type JazzSession,
-} from "../session/jazz-session.js";
+import { createStartedJazzSession, type JazzSession } from "../session/jazz-session.js";
 import {
   createJazzClientFromDb,
   type JazzClient as SharedJazzClient,

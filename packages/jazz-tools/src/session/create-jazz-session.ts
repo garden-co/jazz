@@ -328,8 +328,13 @@ export async function openBrowserSessionCore(
       registry,
       events: browserBackendWatchEvents(`jazz-account:${registry}`),
       linkGuest: linkDeviceAccountOnSignUp,
-      // Without cookies, the bearer is what names the user to the backend.
-      ...(bearer ? { fetch: bearerFetch(bearer, config.fetch) } : {}),
+      // Ask "who is signed in" the way sign-in asks: through the app's own
+      // `fetch` when it gives one, and with its bearer when it has no cookies.
+      ...(bearer
+        ? { fetch: bearerFetch(bearer, config.fetch) }
+        : config.fetch
+          ? { fetch: config.fetch }
+          : {}),
     }),
   });
   if (loadLocalFirst) upgradeInBackground(session, loadLocalFirst);
