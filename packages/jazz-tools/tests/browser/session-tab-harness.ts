@@ -38,6 +38,7 @@ const nodeFetch: typeof fetch = async (input, init) => {
 export async function openSessionTab(input: {
   serverUrl: string;
   clearOnSignOut?: boolean;
+  localFirst?: "now";
 }): Promise<void> {
   const pageFetch = globalThis.fetch;
   globalThis.fetch = ((request: RequestInfo | URL, init?: RequestInit) => {
@@ -52,6 +53,7 @@ export async function openSessionTab(input: {
     initial: "device",
     clearOnSignOut: input.clearOnSignOut,
     client: async () => ({ createClient: createLocalFirstDb }),
+    ...(input.localFirst ? { localFirst: input.localFirst } : {}),
   });
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
