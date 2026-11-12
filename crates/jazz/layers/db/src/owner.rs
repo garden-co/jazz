@@ -38,7 +38,7 @@ where
             let clean = {
                 let inner = db.inner.metadata();
                 !inner.conn.sql().transaction_open()
-                    || (inner.overlay.is_some() && inner.conn.journal.depth() == 1)
+                    || (inner.overlay.is_some() && inner.conn.journal_state().depth() == 1)
             };
             if !clean {
                 let error =

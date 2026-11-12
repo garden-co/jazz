@@ -185,12 +185,12 @@ pub(crate) async fn begin_savepoint<C: TransactionConnection + ?Sized>(
 }
 
 pub(crate) fn rollbacks(conn: &crate::host::DbConnection) -> u64 {
-    conn.journal.rollbacks()
+    conn.journal_state().rollbacks()
 }
 
 /// Log an enum's prior state in the innermost owned savepoint.
 pub(crate) fn tags_changing(conn: &crate::host::DbConnection, tags: &ColumnTags) {
-    conn.journal.changed(tags);
+    conn.journal_state().changed(tags);
 }
 
 /// Release `SAVEPOINT name` (`keep`), or roll back everything since it. SQLite

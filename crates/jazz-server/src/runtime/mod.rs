@@ -82,16 +82,11 @@ pub type AbiBytes = Vec<u8>;
 /// including recovery after a runtime failure. A host may refuse reopening.
 type OpenWorkerStore = Arc<dyn Fn() -> Result<StoreFile, String> + Send + Sync>;
 #[derive(Clone)]
-pub struct WorkerStore(OpenWorkerStore, OpenWorkerStore);
+pub struct WorkerStore(OpenWorkerStore);
 
 impl WorkerStore {
-    /// `scratch` must open a fresh, isolated, disposable store on every call.
-    /// Deployment validation uses it before changing the actor's real store.
-    pub fn new(
-        open: impl Fn() -> Result<StoreFile, String> + Send + Sync + 'static,
-        scratch: impl Fn() -> Result<StoreFile, String> + Send + Sync + 'static,
-    ) -> Self {
-        Self(Arc::new(open), Arc::new(scratch))
+    pub fn new(open: impl Fn() -> Result<StoreFile, String> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(open))
     }
 }
 impl std::fmt::Debug for WorkerStore {
@@ -326,7 +321,8 @@ struct Runtime {
 /// Open the runtime on the store.
 struct Start {
     runtime: Runtime,
-    reply: std_mpsc::Sender<Result<(), String>>,
+    initial: Option<Box<CatalogueChange>>,
+    reply: std_mpsc::Sender<Result<(), CatalogueApplyError>>,
 }
 
 /// Sendable handle for the thread that owns one app's store file: its host
@@ -343,7 +339,6 @@ struct StoreThread {
     /// Committed host tables, read without waiting for the store's thread.
     /// An in-memory store lives as long as this connection to it.
     reader: Option<Arc<HostReader>>,
-    scratch: StorageConfig,
     join: Mutex<Option<thread::JoinHandle<()>>>,
     tick_queued: Arc<AtomicBool>,
     fault: Arc<Mutex<Option<String>>>,
@@ -796,12 +791,6 @@ impl AppStore {
                 work: Mutex::new(Some(work)),
                 host,
                 reader,
-                scratch: match source {
-                    Source::Worker(worker) => {
-                        StorageConfig::Worker(WorkerStore(worker.1.clone(), worker.1))
-                    }
-                    _ => StorageConfig::InMemory,
-                },
                 join: Mutex::new(Some(join)),
                 tick_queued,
                 fault,
@@ -852,10 +841,6 @@ impl AppStore {
     /// Why the runtime stopped serving, if it failed (panicked) and could
     /// not be restarted. The host tables stay available; the server
     /// reports itself unhealthy so it is restarted.
-    pub(crate) fn scratch_storage(&self) -> StorageConfig {
-        self.inner.scratch.clone()
-    }
-
     pub fn fault(&self) -> Option<String> {
         self.inner.fault.lock().ok().and_then(|fault| fault.clone())
     }
@@ -897,7 +882,17 @@ impl AppStore {
         role: NodeRole,
         any_stored_catalogue: bool,
     ) -> Result<ServerRuntimeHandle, String> {
-        self.start(schema, role, any_stored_catalogue, false)
+        self.start(schema, role, any_stored_catalogue, false, None)
+            .map_err(String::from)
+    }
+
+    /// Initialize and commit the first deployment before making the runtime available.
+    pub(crate) fn start_deployment(
+        &self,
+        schema: JazzSchema,
+        change: CatalogueChange,
+    ) -> Result<ServerRuntimeHandle, CatalogueApplyError> {
+        self.start(schema, NodeRole::Core, false, false, Some(change))
     }
 
     fn start(
@@ -906,9 +901,12 @@ impl AppStore {
         role: NodeRole,
         any_stored_catalogue: bool,
         owns_store: bool,
-    ) -> Result<ServerRuntimeHandle, String> {
+        initial: Option<CatalogueChange>,
+    ) -> Result<ServerRuntimeHandle, CatalogueApplyError> {
         if role == NodeRole::Relay {
-            return Err("relay nodes are not supported yet on SQLite".to_owned());
+            return Err(CatalogueApplyError::Failed(
+                "relay nodes are not supported yet on SQLite".to_owned(),
+            ));
         }
         let (reply, started) = std_mpsc::channel();
         self.send(Work::Start(Start {
@@ -916,6 +914,7 @@ impl AppStore {
                 schema,
                 any_stored_catalogue,
             },
+            initial: initial.map(Box::new),
             reply,
         }))?;
         started
@@ -1284,8 +1283,12 @@ impl StoreLoop {
             Work::Owner(job) => self.on_owner(job),
             Work::Start(start) => {
                 let started = match &self.state {
-                    State::Running(_) => Err("the server runtime is already running".to_owned()),
-                    State::Idle(_) => self.open_runtime(start.runtime),
+                    State::Running(_) => Err(CatalogueApplyError::Failed(
+                        "the server runtime is already running".to_owned(),
+                    )),
+                    State::Idle(_) => {
+                        self.open_runtime(start.runtime, start.initial.map(|change| *change))
+                    }
                 };
                 let _ = start.reply.send(started);
             }
@@ -1306,33 +1309,40 @@ impl StoreLoop {
         true
     }
 
-    /// Open the runtime on the file. If it fails, the file is opened afresh
-    /// for the host tables: the failed open consumed the connection, and the
-    /// store (even an in-memory one) outlives it.
-    fn open_runtime(&mut self, runtime: Runtime) -> Result<(), String> {
+    /// Open the runtime on the file. Rejected initialization retains the rolled-
+    /// back file; storage failures reopen it according to the provider policy.
+    fn open_runtime(
+        &mut self,
+        runtime: Runtime,
+        initial: Option<CatalogueChange>,
+    ) -> Result<(), CatalogueApplyError> {
         let file = match std::mem::replace(&mut self.state, State::Idle(Err(String::new()))) {
             State::Idle(file) => file,
             State::Running(owner) => {
                 self.state = State::Running(owner);
-                return Err("the server runtime is already running".to_owned());
+                return Err(CatalogueApplyError::Failed(
+                    "the server runtime is already running".to_owned(),
+                ));
             }
         };
-        let opened = file.and_then(|file| {
+        let mut recover = None;
+        let opened = file.map_err(CatalogueApplyError::Failed).and_then(|file| {
             catch_unwind(AssertUnwindSafe(|| {
                 Owner::open(
-                    runtime.schema.clone(),
+                    runtime.clone(),
                     file,
                     self.source.chunk_store()?,
                     self.wake.clone(),
-                    runtime.any_stored_catalogue,
+                    initial,
+                    &mut recover,
                     self.app.lock().ok().and_then(|app| app.clone()),
                 )
             }))
             .unwrap_or_else(|panic| {
-                Err(format!(
+                Err(CatalogueApplyError::Failed(format!(
                     "opening the runtime panicked: {}",
                     panic_message(&*panic)
-                ))
+                )))
             })
         });
         match opened {
@@ -1346,7 +1356,10 @@ impl StoreLoop {
                 Ok(())
             }
             Err(error) => {
-                self.state = State::Idle(self.source.open());
+                self.state = State::Idle(match recover {
+                    Some(file) => Ok(file),
+                    None => self.source.open(),
+                });
                 Err(error)
             }
         }
@@ -1382,7 +1395,7 @@ impl StoreLoop {
                     .is_none_or(|restarted| restarted.elapsed() >= RESTART_INTERVAL) =>
             {
                 self.restarted = Some(Instant::now());
-                self.open_runtime(runtime)
+                self.open_runtime(runtime, None).map_err(String::from)
             }
             _ => Err("it failed again within a minute of restarting".to_owned()),
         };
@@ -1561,7 +1574,9 @@ impl ServerRuntimeHandle {
         if role == NodeRole::Relay {
             return Err("relay nodes are not supported yet on SQLite".to_owned());
         }
-        AppStore::open(&storage)?.start(schema, role, any_stored_catalogue, true)
+        AppStore::open(&storage)?
+            .start(schema, role, any_stored_catalogue, true, None)
+            .map_err(String::from)
     }
 
     /// Start a runtime whose schema comes from the administrative catalogue.
@@ -2151,6 +2166,21 @@ pub enum CatalogueApplyError {
     Failed(String),
 }
 
+impl CatalogueApplyError {
+    fn from_db(error: jazz::db::Error) -> Self {
+        if error.code == jazz::db::ErrorCode::Storage {
+            Self::Failed(error.to_string())
+        } else {
+            Self::Rejected(error.to_string())
+        }
+    }
+}
+impl From<String> for CatalogueApplyError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
 impl std::fmt::Display for CatalogueApplyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2608,13 +2638,18 @@ impl Owner {
     /// current instead when the store has no revision yet, or (unless
     /// `any_stored_catalogue`) none whose catalogue admits `schema`.
     fn open(
-        schema: JazzSchema,
+        runtime: Runtime,
         file: StoreFile,
         chunk_store: Option<ChunkStoreChoice>,
         wake: std_mpsc::Sender<Work>,
-        any_stored_catalogue: bool,
+        initial: Option<CatalogueChange>,
+        recover: &mut Option<StoreFile>,
         app: Option<String>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, CatalogueApplyError> {
+        let Runtime {
+            schema,
+            any_stored_catalogue,
+        } = runtime;
         let rows =
             block_on(file.catalogue()).map_err(|error| format!("read catalogue: {error}"))?;
         let stored = any_stored_catalogue
@@ -2651,8 +2686,21 @@ impl Owner {
             Some(choice) if choice.network => Some(ChunkIoRunner::start(choice.store, wake)?),
             _ => None,
         };
-        let db = block_on(Db::open_file(config, file))
-            .map_err(|error| format!("open server store: {error}"))?;
+        let db = block_on(async {
+            match initial {
+                Some(change) => match Db::open_file_with_catalogue(config, file, change).await {
+                    Ok(db) => Ok(db),
+                    Err((error, file)) => {
+                        if error.code != jazz::db::ErrorCode::Storage {
+                            *recover = Some(file);
+                        }
+                        Err(error)
+                    }
+                },
+                None => Db::open_file(config, file).await,
+            }
+        })
+        .map_err(CatalogueApplyError::from_db)?;
         block_on(db.set_authority());
         db.require_session_pins();
         db.track_closed_subscribers();

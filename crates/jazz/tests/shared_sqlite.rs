@@ -242,3 +242,64 @@ fn a_missing_catalogued_table_is_not_recreated() {
         0
     );
 }
+
+/// Alice's first deployment collides with Bob's table after initializing its
+/// genesis. Failure rolls back all Jazz initialization; Bob's data survives,
+/// and Alice can retry with a different genesis. Raw SQL observes ownership
+/// boundaries that the Jazz row API intentionally cannot expose.
+#[test]
+fn first_deployment_rolls_back_initialization_and_can_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("initial.sqlite");
+    let other = rusqlite::Connection::open(&path).unwrap();
+    other
+        .execute_batch("CREATE TABLE tasks (value TEXT); INSERT INTO tasks VALUES ('bob')")
+        .unwrap();
+    let file = jazz::host::StoreFile::open(&path, FileOptions::default()).unwrap();
+    let before: Vec<(String, Option<String>)> = other
+        .prepare("SELECT name, sql FROM sqlite_master ORDER BY name")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let result = block_on(Db::open_file_with_catalogue(
+        config(schema(&["notes"])),
+        file,
+        jazz::catalogue::CatalogueChange {
+            admit: vec![(schema(&["notes", "tasks"]), vec![])],
+            ..Default::default()
+        },
+    ));
+    assert!(result.is_err());
+    drop(result);
+    let after: Vec<(String, Option<String>)> = other
+        .prepare("SELECT name, sql FROM sqlite_master ORDER BY name")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "failed deployment must leave no initialized tables"
+    );
+    assert_eq!(
+        other
+            .query_row("SELECT value FROM tasks", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "bob"
+    );
+    let db = block_on(Db::open_file_with_catalogue(
+        config(schema(&["messages"])),
+        jazz::host::StoreFile::open(&path, FileOptions::default()).unwrap(),
+        Default::default(),
+    ))
+    .unwrap_or_else(|(error, _)| panic!("{error}"));
+    insert(&db, "messages", "alice");
+    drop(db);
+    assert_eq!(
+        bodies(&open(&path, schema(&["messages"])), "messages"),
+        ["alice"]
+    );
+}

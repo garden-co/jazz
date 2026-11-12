@@ -195,6 +195,17 @@ pub(crate) async fn deploy(
                 .reload_catalogue()
                 .await
                 .map_err(DeployError::internal)?;
+        } else {
+            // The first commit may have succeeded without its acknowledgement.
+            // Its retry must restore a serving runtime, not just return "unchanged".
+            let genesis = JazzSchema::new(&prepared.schemas()[0]).map_err(DeployError::invalid)?;
+            let runtime = state
+                .store
+                .as_ref()
+                .ok_or_else(|| DeployError::internal("server store unavailable"))?
+                .start_runtime(genesis, crate::runtime::NodeRole::Core, true)
+                .map_err(DeployError::internal)?;
+            *state.core_server_shell.write().unwrap() = Some(runtime);
         }
         return Ok(staged.response);
     }
@@ -205,32 +216,32 @@ pub(crate) async fn deploy(
     let runtime = match state.runtime() {
         Some(runtime) => runtime,
         None => {
-            // Apply on a scratch store first, so a deployment the catalogue
-            // refuses never creates the app's database. The real store
-            // starts as empty as the scratch one, so the same change
-            // applies there; only a storage failure can still fail it, and
-            // then leaves an empty store that the next deployment reuses.
-            let probe = ServerRuntimeHandle::start_with_storage(
-                genesis.clone(),
-                state
-                    .store
-                    .as_ref()
-                    .ok_or_else(|| DeployError::internal("server store unavailable"))?
-                    .scratch_storage(),
+            let change = deployment::prepare_catalogue_change(
+                &prepared,
+                &Default::default(),
+                staged.put.clone(),
             )
-            .map_err(DeployError::internal)?;
-            let applied = match change(&probe, &prepared, staged.put.clone()).await {
-                Ok(change) => probe
-                    .apply_catalogue(change, None)
-                    .await
-                    .map_err(DeployError::from),
-                Err(error) => Err(error),
-            };
-            probe.shutdown().await.map_err(DeployError::internal)?;
-            applied?;
+            .map_err(DeployError::invalid)?;
             state
-                .start_core_server_shell(genesis)
-                .map_err(DeployError::internal)?
+                .catalogue_store
+                .check_unchanged(&staged)
+                .map_err(DeployError::invalid)?;
+            let runtime = state
+                .store
+                .as_ref()
+                .ok_or_else(|| DeployError::internal("server store unavailable"))?
+                .start_deployment(genesis, change);
+            // Refresh even after a storage error: commit acknowledgement can be
+            // lost after the deployment has durably committed.
+            state
+                .catalogue_store
+                .refresh()
+                .map_err(DeployError::internal)?;
+            let runtime = runtime.map_err(DeployError::from)?;
+            // No request can obtain this handle before initialization and the
+            // complete catalogue deployment have committed on the store thread.
+            *state.core_server_shell.write().unwrap() = Some(runtime);
+            return Ok(staged.response);
         }
     };
     state

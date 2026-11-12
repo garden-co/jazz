@@ -1437,6 +1437,31 @@ impl Db {
         .await
     }
 
+    /// Initialize a runtime and admit its first deployment atomically. Failure
+    /// returns the rolled-back file so its owner can retry without reopening the
+    /// provider. The returned database is visible only after commit.
+    pub async fn open_file_with_catalogue(
+        config: DbConfig,
+        file: crate::host::StoreFile,
+        change: crate::catalogue::CatalogueChange,
+    ) -> Result<Self, (Error, crate::host::StoreFile)> {
+        let opening = crate::host::StoreFile {
+            conn: file.conn.initialization_handle(),
+            path: file.path.clone(),
+        };
+        let result =
+            crate::values::in_savepoint_async(&file.conn, "jazz_initialize", async move || {
+                let db = Self::open_file(config, opening).await?;
+                db.apply_catalogue(change).await?;
+                Ok(db)
+            })
+            .await;
+        match result {
+            Ok(db) => Ok(db),
+            Err(error) => Err((error, file)),
+        }
+    }
+
     /// Run `f` on the store's connection, outside any transaction handle's
     /// overlay (see [`crate::host`]).
     pub(crate) async fn with_host_connection<T>(

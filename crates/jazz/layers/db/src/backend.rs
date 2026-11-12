@@ -8,6 +8,7 @@ use jazz_sql::Connection as _;
 use jazz_sql::{Cell, Param, QueryStats, Row, Sql};
 use std::cell::{Cell as Flag, RefCell};
 use std::ops::ControlFlow;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// A worker result owns its bytes until the synchronous row callback returns.
@@ -75,6 +76,10 @@ enum Backend {
 }
 
 pub(crate) struct DbConnection {
+    shared: Rc<ConnectionState>,
+}
+
+struct ConnectionState {
     backend: Backend,
     pub(crate) journal: TransactionJournal,
     chunks: RefCell<Option<Arc<crate::large::Chunks>>>,
@@ -85,7 +90,7 @@ impl DbConnection {
     /// Configure Jazz-owned native SQLite; a worker's host owns its connection settings.
     pub(crate) fn stable_plans(&self) -> Result<(), Error> {
         #[cfg(feature = "native")]
-        if let Backend::Native(native) = &self.backend {
+        if let Backend::Native(native) = &self.shared.backend {
             crate::host::stable_plans(native)?;
         }
         Ok(())
@@ -100,12 +105,24 @@ impl DbConnection {
     }
     fn from_backend(backend: Backend) -> Self {
         Self {
-            backend,
-            journal: Default::default(),
-            chunks: Default::default(),
-            cleanup: Default::default(),
-            poisoned: Flag::new(false),
+            shared: Rc::new(ConnectionState {
+                backend,
+                journal: Default::default(),
+                chunks: Default::default(),
+                cleanup: Default::default(),
+                poisoned: Flag::new(false),
+            }),
         }
+    }
+    /// Retain transaction ownership while initialization transfers the connection
+    /// into a Db. This handle never leaves the single database owner.
+    pub(crate) fn initialization_handle(&self) -> Self {
+        Self {
+            shared: self.shared.clone(),
+        }
+    }
+    pub(crate) fn journal_state(&self) -> &TransactionJournal {
+        &self.shared.journal
     }
     pub(crate) fn sql(&self) -> ConnectionSql<'_> {
         ConnectionSql {
@@ -115,7 +132,7 @@ impl DbConnection {
         }
     }
     pub(crate) fn single_connection(&self) -> bool {
-        match &self.backend {
+        match &self.shared.backend {
             #[cfg(feature = "native")]
             Backend::Native(_) => false,
             Backend::Worker(_) => true,
@@ -123,7 +140,7 @@ impl DbConnection {
     }
     #[cfg(feature = "native")]
     pub(crate) fn native(&self) -> Result<&rusqlite::Connection, Error> {
-        match &self.backend {
+        match &self.shared.backend {
             Backend::Native(native) => Ok(native),
             Backend::Worker(_) => Err(Error::new(
                 ErrorCode::Storage,
@@ -133,7 +150,7 @@ impl DbConnection {
     }
     pub(crate) fn set_statement_cache_capacity(&self, capacity: usize) {
         #[cfg(feature = "native")]
-        if let Backend::Native(native) = &self.backend {
+        if let Backend::Native(native) = &self.shared.backend {
             native.set_prepared_statement_cache_capacity(capacity);
         }
         let _ = capacity;
@@ -143,33 +160,33 @@ impl DbConnection {
         chunks: &Arc<crate::large::Chunks>,
     ) -> Result<(), Error> {
         #[cfg(feature = "native")]
-        if let Backend::Native(native) = &self.backend {
+        if let Backend::Native(native) = &self.shared.backend {
             let committed = chunks.clone();
             native.commit_hook(Some(move || {
                 committed.unpin();
                 false
             }))?;
             let rolled_back = chunks.clone();
-            let rollbacks = self.journal.rollback_counter();
+            let rollbacks = self.shared.journal.rollback_counter();
             native.rollback_hook(Some(move || {
                 rolled_back.unpin();
                 rollbacks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }))?;
         }
-        *self.chunks.borrow_mut() = Some(chunks.clone());
+        *self.shared.chunks.borrow_mut() = Some(chunks.clone());
         Ok(())
     }
     fn observed(&self, was_open: bool, failed: bool) {
-        match &self.backend {
+        match &self.shared.backend {
             #[cfg(feature = "native")]
             Backend::Native(_) => {}
             Backend::Worker(worker) => {
                 if was_open && !worker.transaction_open() {
-                    if let Some(chunks) = self.chunks.borrow().as_ref() {
+                    if let Some(chunks) = self.shared.chunks.borrow().as_ref() {
                         chunks.unpin();
                     }
                     if failed {
-                        self.journal.note_rollback();
+                        self.shared.journal.note_rollback();
                     }
                 }
             }
@@ -177,7 +194,7 @@ impl DbConnection {
     }
     async fn raw_script(&self, sql: &str) -> Result<(), Error> {
         let before = self.transaction_open();
-        let result = match &self.backend {
+        let result = match &self.shared.backend {
             #[cfg(feature = "native")]
             Backend::Native(native) => native.sql().execute_script(sql).await.map_err(Error::from),
             Backend::Worker(worker) => worker.execute_script(sql).await,
@@ -187,7 +204,7 @@ impl DbConnection {
     }
     async fn end_savepoint_raw(&self, name: &str, keep: bool) -> Result<(), Error> {
         let before = self.transaction_open();
-        let result = match &self.backend {
+        let result = match &self.shared.backend {
             #[cfg(feature = "native")]
             Backend::Native(native) => {
                 let sql = if keep {
@@ -203,14 +220,14 @@ impl DbConnection {
         result
     }
     pub(crate) async fn settle(&self) -> Result<(), Error> {
-        if self.poisoned.get() {
+        if self.shared.poisoned.get() {
             return Err(Error::new(
                 ErrorCode::Storage,
                 "connection cleanup failed; reopen the database",
             ));
         }
         loop {
-            let name = self.cleanup.borrow().last().cloned();
+            let name = self.shared.cleanup.borrow().last().cloned();
             let Some(name) = name else {
                 return Ok(());
             };
@@ -218,14 +235,14 @@ impl DbConnection {
             // let another operation skip a cleanup command already in flight.
             let result = self.end_savepoint_raw(&name, false).await;
             if let Err(error) = crate::values::finish_savepoint(self, false, result) {
-                self.poisoned.set(true);
+                self.shared.poisoned.set(true);
                 return Err(error);
             }
-            self.cleanup.borrow_mut().pop();
+            self.shared.cleanup.borrow_mut().pop();
         }
     }
     pub(crate) async fn close_worker(&self) -> Result<(), Error> {
-        match &self.backend {
+        match &self.shared.backend {
             #[cfg(feature = "native")]
             Backend::Native(_) => {}
             Backend::Worker(worker) => {
@@ -235,7 +252,7 @@ impl DbConnection {
         Ok(())
     }
 }
-impl Drop for DbConnection {
+impl Drop for ConnectionState {
     fn drop(&mut self) {
         match &self.backend {
             #[cfg(feature = "native")]
@@ -267,7 +284,7 @@ impl std::ops::Deref for DbConnection {
 }
 impl TransactionConnection for DbConnection {
     fn transaction_open(&self) -> bool {
-        match &self.backend {
+        match &self.shared.backend {
             #[cfg(feature = "native")]
             Backend::Native(native) => native.sql().transaction_open(),
             Backend::Worker(worker) => worker.transaction_open(),
@@ -279,7 +296,7 @@ impl TransactionConnection for DbConnection {
     }
     async fn begin_savepoint(&self, name: &str) -> Result<(), Error> {
         self.settle().await?;
-        match &self.backend {
+        match &self.shared.backend {
             #[cfg(feature = "native")]
             Backend::Native(native) => native
                 .sql()
@@ -294,15 +311,15 @@ impl TransactionConnection for DbConnection {
         self.end_savepoint_raw(name, keep).await
     }
     fn journal(&self) -> Option<&TransactionJournal> {
-        Some(&self.journal)
+        Some(&self.shared.journal)
     }
     fn abandon_savepoint(&self, name: &str) {
-        match &self.backend {
+        match &self.shared.backend {
             #[cfg(feature = "native")]
             Backend::Native(_) => {
                 let _ = crate::values::end_savepoint_inline(self, name, false);
             }
-            Backend::Worker(_) => self.cleanup.borrow_mut().push(name.into()),
+            Backend::Worker(_) => self.shared.cleanup.borrow_mut().push(name.into()),
         }
     }
 }
@@ -391,7 +408,7 @@ impl Sql for ConnectionSql<'_> {
         }
         self.owner().settle().await?;
         let before = self.owner().transaction_open();
-        let result = match &self.owner().backend {
+        let result = match &self.owner().shared.backend {
             #[cfg(feature = "native")]
             Backend::Native(native) => native.sql().execute(sql, params).await.map_err(Error::from),
             Backend::Worker(worker) => worker.execute(sql, params).await,
@@ -434,7 +451,7 @@ impl Sql for ConnectionSql<'_> {
         }
         self.owner().settle().await?;
         let before = self.owner().transaction_open();
-        let result = match &self.owner().backend {
+        let result = match &self.owner().shared.backend {
             #[cfg(feature = "native")]
             Backend::Native(native) => {
                 let mut callback_error = None;
@@ -492,7 +509,7 @@ impl jazz_sql::Connection for ConnectionSql<'_> {
                 .parameter_limit()
                 .map_err(Error::from);
         }
-        match &self.owner().backend {
+        match &self.owner().shared.backend {
             #[cfg(feature = "native")]
             Backend::Native(native) => native.sql().parameter_limit().map_err(Error::from),
             Backend::Worker(worker) => worker.parameter_limit(),
@@ -507,7 +524,7 @@ impl jazz_sql::Connection for ConnectionSql<'_> {
                 .map_err(Error::from);
         }
         self.owner().settle().await?;
-        match &self.owner().backend {
+        match &self.owner().shared.backend {
             #[cfg(feature = "native")]
             Backend::Native(native) => native.sql().total_changes().await.map_err(Error::from),
             Backend::Worker(_) => {
