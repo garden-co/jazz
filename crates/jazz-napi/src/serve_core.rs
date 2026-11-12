@@ -183,9 +183,8 @@ pub fn serve_core(options: JsonValue) -> Result<ServedCore> {
     };
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("jazz=info".parse().expect("static directive"))
-                .add_directive("jazz_tools=info".parse().expect("static directive")),
+            // `RUST_LOG` sets the level of any target it names.
+            jazz_otel::env_filter_with_defaults(&["jazz=info", "jazz_tools=info"]),
         )
         .try_init();
     let (stop, stop_requested) = tokio::sync::watch::channel(false);
