@@ -538,6 +538,10 @@ struct Inner {
     /// of staging cost count.
     #[cfg(any(test, feature = "testing"))]
     overlay_replays: usize,
+    /// Times a write check copied the evidence set it shares with its
+    /// batch: what tests of staging cost count.
+    #[cfg(any(test, feature = "testing"))]
+    evidence_copies: std::cell::Cell<usize>,
     /// Large-value chunks: the cache the collation and decoders read.
     chunks: Arc<crate::large::Chunks>,
     /// Nodes a large-value edit consolidated, stored when the edited cell
@@ -1627,6 +1631,8 @@ impl Db {
                 failing_ticks: VecDeque::new(),
                 #[cfg(any(test, feature = "testing"))]
                 overlay_replays: 0,
+                #[cfg(any(test, feature = "testing"))]
+                evidence_copies: std::cell::Cell::new(0),
                 chunks,
                 pending_nodes: Vec::new(),
                 merging: false,
@@ -1951,17 +1957,23 @@ impl Db {
         Query::from(table)
     }
 
-    pub fn set_identity_claims(&self, identity: AuthorSubject, claims: BTreeMap<String, Value>) {
+    /// Bind `claims` to `identity`; returns whether they changed.
+    pub fn set_identity_claims(
+        &self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> bool {
         // A peek: a host repeats an identity's claims before each of its
         // writes, and the store gate would undo an open transaction's
         // cached overlay, so its next stage would replay every write it
         // staged so far.
         if self.inner.staging().claims.get(&identity) == Some(&claims) {
-            return;
+            return false;
         }
         let mut inner = self.inner();
         inner.claims.insert(identity, claims);
         inner.refresh_identity(identity);
+        true
     }
 
     pub async fn tick(&self) -> Result<(), Error> {
@@ -5408,8 +5420,20 @@ impl Inner {
         grounded: Arc<GroundedRows>,
     ) -> Result<(), Error> {
         let pending = self.deferred.borrow_mut().take().unwrap_or_default();
+        let trusted = std::mem::take(&mut *self.trusted_rows.borrow_mut());
+        // Nothing to ground: writes no policy checks (a backend's own, a
+        // replica's) leave only trusted rows, and merging those into the
+        // set a staged write shares with its batch would copy that set on
+        // every stage.
+        if pending.is_empty() {
+            return Ok(());
+        }
         let mut grounded = grounded;
-        for (table, rows) in std::mem::take(&mut *self.trusted_rows.borrow_mut()) {
+        #[cfg(any(test, feature = "testing"))]
+        if !trusted.is_empty() && Arc::strong_count(&grounded) > 1 {
+            self.evidence_copies.set(self.evidence_copies.get() + 1);
+        }
+        for (table, rows) in trusted {
             Arc::make_mut(&mut grounded)
                 .entry(table)
                 .or_default()
@@ -8920,6 +8944,15 @@ impl Db {
     pub fn overlay_replays_for_test(&self) -> usize {
         // A peek: the store gate would undo the cached overlay.
         self.inner.staging().overlay_replays
+    }
+
+    /// How many times a staged write's check copied the evidence set it
+    /// shares with its batch (see [`Batch::rows`]).
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn evidence_copies_for_test(&self) -> usize {
+        // A peek: the store gate would undo the cached overlay.
+        self.inner.staging().evidence_copies.get()
     }
 
     /// The open transaction `id`, mergeable or serializable.

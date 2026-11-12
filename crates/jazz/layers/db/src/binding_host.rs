@@ -1450,8 +1450,11 @@ impl Binding {
     pub fn set_identity_claims(&self, author: &[u8], claims: serde_json::Value) -> HostResult<()> {
         let author = self.author_of(author)?;
         let claims = self::claims(author, claims)?;
-        self.db.set_identity_claims(author, claims);
-        self.hooks.progress.wake_all();
+        // Unchanged claims (a host repeats them before each write) wake
+        // nobody.
+        if self.db.set_identity_claims(author, claims) {
+            self.hooks.progress.wake_all();
+        }
         Ok(())
     }
 

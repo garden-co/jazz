@@ -271,6 +271,27 @@ fn staging_many_inserts_replays_no_earlier_write() {
 
     assert!(db.commit_transaction(tx, None).unwrap().rejected.is_none());
     assert_eq!(titles(&db).len(), 2 * N);
+    assert_eq!(db.db.evidence_copies_for_test(), 0);
+}
+
+/// The backend's own writes (no session) are checked by no policy, so
+/// their rows are trusted. Staging many of them in one transaction neither
+/// replays earlier writes nor copies the batch's written-row set for each
+/// stage's check: either would make N inserts cost O(N²) (R41).
+#[test]
+fn staging_many_unchecked_inserts_copies_nothing_per_stage() {
+    let db = authority();
+    let tx = &OpenTransactionId::new().to_string();
+    db.begin_transaction(tx, "mergeable", None, None).unwrap();
+    const N: usize = 200;
+    for n in 0..N {
+        db.insert_in_transaction(tx, "notes", &title(&format!("note {n}")), &none())
+            .unwrap();
+    }
+    assert_eq!(db.db.overlay_replays_for_test(), 0);
+    assert_eq!(db.db.evidence_copies_for_test(), 0);
+    assert!(db.commit_transaction(tx, None).unwrap().rejected.is_none());
+    assert_eq!(titles(&db).len(), N);
 }
 
 #[test]
