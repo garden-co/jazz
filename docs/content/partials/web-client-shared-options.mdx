@@ -6,3 +6,6 @@ Both clients take these options, in `createJazzClient(config)` or `<JazzProvider
 | `initial`                   | `"signed-out"` | `"device"` starts visitors as guests on a device account                        |
 | `linkDeviceAccountOnSignUp` | `true`         | Link the device account to a user who signs up; turn off on shared devices      |
 | `clearOnSignOut`            | `false`        | Wipe the account's local data on sign-out, for shared devices                   |
+
+`createJazzClient` needs a config (`{}` for the defaults) and refuses an option it doesn't take, naming
+the ones it does, rather than ignoring it.

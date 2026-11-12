@@ -14,24 +14,54 @@ import { Link } from "react-router";
 import { useDevtoolsContext } from "../contexts/devtools-context.js";
 import { stringifyForPresentation } from "../utility/presentation-serialization.js";
 import { decodeRow } from "./api-data.js";
-import { useBackendContext } from "./backend-context.js";
+import { asForApi, useBackendContext } from "./backend-context.js";
 import styles from "./backend.module.css";
 
 const VIA_LABEL = { hook: "app sign-in", token: "agent token", dev: "local development" } as const;
 
+function claimsText(claims: Record<string, unknown> | undefined): string {
+  return claims === undefined ? "" : JSON.stringify(claims);
+}
+
+/** The claims a person typed: undefined for none, null when it isn't a JSON object. */
+function parseClaims(text: string): Record<string, unknown> | undefined | null {
+  if (!text.trim()) return undefined;
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function BackendIdentity() {
   const backend = useBackendContext();
-  const [draft, setDraft] = useState(backend?.viewAs ?? "");
-  useEffect(() => setDraft(backend?.viewAs ?? ""), [backend?.viewAs]);
+  const [draft, setDraft] = useState(backend?.viewAs?.userId ?? "");
+  const [claimsDraft, setClaimsDraft] = useState(claimsText(backend?.viewAs?.claims));
+  useEffect(() => {
+    setDraft(backend?.viewAs?.userId ?? "");
+    setClaimsDraft(claimsText(backend?.viewAs?.claims));
+  }, [backend?.viewAs]);
   if (!backend) return null;
   const { whoami } = backend;
+  const claims = parseClaims(claimsDraft);
+  const apply = () => {
+    const userId = draft.trim();
+    if (!userId) return backend.setViewAs(null);
+    if (claims === null) return;
+    backend.setViewAs(claims === undefined ? { userId } : { userId, claims });
+  };
+  const missingClaims =
+    backend.permissionsReadClaims && backend.viewAs !== null && !backend.viewAs.claims;
   return (
     <>
       <form
         className={styles.viewAs}
         onSubmit={(event) => {
           event.preventDefault();
-          backend.setViewAs(draft.trim() || null);
+          apply();
         }}
       >
         <label htmlFor="jazz-inspect-view-as">View as user</label>
@@ -41,8 +71,32 @@ export function BackendIdentity() {
           value={draft}
           placeholder="everything (backend)"
           onChange={(event) => setDraft(event.target.value)}
-          onBlur={() => backend.setViewAs(draft.trim() || null)}
+          onBlur={apply}
         />
+        {draft.trim() ? (
+          <>
+            <label htmlFor="jazz-inspect-view-as-claims">with claims</label>
+            <input
+              id="jazz-inspect-view-as-claims"
+              className={`${styles.viewAsInput} ${claims === null ? styles.viewAsInvalid : ""}`}
+              value={claimsDraft}
+              placeholder='{"role":"manager"}'
+              aria-invalid={claims === null}
+              title={claims === null ? "Claims must be a JSON object" : undefined}
+              onChange={(event) => setClaimsDraft(event.target.value)}
+              onBlur={apply}
+            />
+          </>
+        ) : null}
+        {missingClaims ? (
+          <span
+            className={`${styles.badge} ${styles.badgeWarn}`}
+            role="status"
+            title="This app's permissions read session claims, and none are given for this user, so you see what a session with no claims would: rows or writes a claim would allow are missing or refused."
+          >
+            no claims
+          </span>
+        ) : null}
       </form>
       <span className={styles.identity} title={`Signed in through ${VIA_LABEL[whoami.via]}`}>
         {whoami.by}
@@ -171,7 +225,9 @@ export function LinkedQuery() {
   const [answer, setAnswer] = useState<InspectRowsAnswer | null>(null);
   const [error, setError] = useState<string | null>(null);
   const query = backend?.link?.query;
-  const as = backend?.viewAs ?? undefined;
+  const viewAs = backend?.viewAs ?? null;
+  const as = asForApi(viewAs);
+  const asKey = JSON.stringify(as ?? null);
   useEffect(() => {
     if (!backend || !query) return;
     let stopped = false;
@@ -182,7 +238,9 @@ export function LinkedQuery() {
     return () => {
       stopped = true;
     };
-  }, [backend, query, as]);
+    // `asKey` captures `as`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backend, query, asKey]);
   if (!backend || !query)
     return <p className={styles.note}>This Inspector was opened without a query.</p>;
   const sourceTable = query.table.startsWith("history.") ? query.table.slice(8) : query.table;
@@ -197,13 +255,14 @@ export function LinkedQuery() {
       <h1 className={styles.heading}>Linked query</h1>
       <p className={styles.note}>
         Exactly the rows this link&apos;s query matches
-        {as ? `, as ${as} sees them` : ", with the backend's authority"}.{" "}
+        {viewAs ? `, as ${viewAs.userId} sees them` : ", with the backend's authority"}.{" "}
         {explorerHref ? (
           <Link to={explorerHref}>Open {query.table} in the data explorer</Link>
         ) : null}
       </p>
       <pre className={styles.code}>{JSON.stringify(query, null, 2)}</pre>
       {error ? <p className={styles.error}>{error}</p> : null}
+      {answer?.warning ? <p className={styles.error}>{answer.warning}</p> : null}
       {answer ? (
         <>
           <p className={styles.note}>

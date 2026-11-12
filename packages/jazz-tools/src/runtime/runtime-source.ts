@@ -71,7 +71,8 @@ export interface BrowserWorkerConnection {
   updateAuth(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
   disconnect(): Promise<void>;
   reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
-  deleteStorage(): Promise<void>;
+  /** Delete the store; resolves with how many unconfirmed writes it took, when the worker says. */
+  deleteStorage(): Promise<{ pendingUploads?: number } | void>;
   flushLocal(): Promise<void>;
   waitForPendingWrites(): Promise<void>;
   openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort>;

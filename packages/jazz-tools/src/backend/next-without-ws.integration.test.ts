@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { createJazz, memory } from "./index.js";
+import {
+  STREAM_RECORD_MESSAGE,
+  STREAM_RECORD_SESSION,
+  StreamRecordReader,
+  encodeStreamRecord,
+} from "../runtime/native-runtime/http-stream-socket.js";
 
 // #5055: next() on Vercel without the optional `ws` peer. Vercel's
 // upgradeWebSocket() needs it, so every sync socket used to get a 500,
@@ -64,6 +70,54 @@ it("answers sockets on Vercel with the HTTP stream marker when `ws` is missing, 
         /^jazz: next\(\) on Vercel (needs|could not load) the ws package.*Without it, sync sockets can't open: clients sync over the HTTP stream instead\.$/s,
       ),
     ]);
+  } finally {
+    await jazz.close();
+  }
+});
+
+it("tells a send to a stream session that ended why, not that it reached another instance", async () => {
+  const jazz = await createJazz({ app, permissions, store: memory() }).ready();
+  try {
+    const { POST } = jazz.next();
+    const streamUrl = `http://app.test/jazz/apps/${jazz.appId}/stream`;
+    const opened = await POST(new Request(streamUrl, { method: "POST" }));
+    const reader = opened.body!.getReader();
+    const records = new StreamRecordReader();
+    let session: { id: string; key: string } | undefined;
+    while (!session) {
+      const { value } = await reader.read();
+      for (const record of records.push(value!)) {
+        if (record.kind === STREAM_RECORD_SESSION)
+          session = JSON.parse(new TextDecoder().decode(record.payload));
+      }
+    }
+    const send = (key: string) =>
+      POST(
+        new Request(`${streamUrl}/${session!.id}`, {
+          method: "POST",
+          headers: { "x-jazz-stream-key": key },
+          body: encodeStreamRecord(
+            STREAM_RECORD_MESSAGE,
+            new TextEncoder().encode("not a prelude"),
+          ) as BodyInit,
+        }),
+      );
+    // A prelude no one is admitted with ends the session (during its send).
+    await send(session.key);
+    const again = await send(session.key);
+    expect(again.status).toBe(410);
+    expect(await again.text()).toBe("stream session ended: not signed in");
+    // Only to its own client.
+    expect((await send("c29tZW9uZSBlbHNl")).status).toBe(403);
+    // An id this instance never served is still "unknown".
+    const unknown = await POST(
+      new Request(`${streamUrl}/${crypto.randomUUID()}`, {
+        method: "POST",
+        body: new Uint8Array(),
+      }),
+    );
+    expect(unknown.status).toBe(404);
+    await reader.cancel();
   } finally {
     await jazz.close();
   }
