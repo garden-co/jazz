@@ -491,11 +491,11 @@ async function openSession(
     fetch: jazzAppFetch,
     store: memoryAccountStore(),
     client: loadLocalFirst,
+    // These tests write offline and read the local tiers: local-first from the start.
+    localFirst: "now",
     ...config,
   });
   cleanup.trackTransport({ stop: () => session.close() });
-  // Sessions start thin; these tests write offline and read the local tiers.
-  await session.db.upgradeToLocalFirst(loadLocalFirst);
   return { db: session.db, author: session.getSnapshot().user!.accountId };
 }
 

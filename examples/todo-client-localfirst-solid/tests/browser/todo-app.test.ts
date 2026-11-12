@@ -39,6 +39,7 @@ describe("Solid Todo App E2E", () => {
       driver: { type: "persistent", dbName: crypto.randomUUID() },
       store: memoryAccountStore(),
       client: loadLocalFirst,
+      localFirst: "now",
       ...config,
     };
     const storageNamespace =

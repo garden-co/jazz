@@ -38,10 +38,9 @@ async function openDb(serverUrl: string | null = null): Promise<Db> {
     store: memoryAccountStore(),
     driver: { type: "memory" },
     client: loadLocalFirst,
+    localFirst: "now",
   });
   sessions.push(session);
-  // With a server the session starts on the thin client: open the local-first one now.
-  await session.db.upgradeToLocalFirst(loadLocalFirst);
   return session.db;
 }
 

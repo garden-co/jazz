@@ -21,6 +21,7 @@ export function App() {
         initial: "device",
         // The local-first client: files stay readable offline.
         client: () => import("jazz-tools/local-first"),
+        localFirst: "now",
       }}
       loading={<Opening />}
     >

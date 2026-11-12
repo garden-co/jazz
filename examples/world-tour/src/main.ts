@@ -13,7 +13,11 @@ createApp({
         // The app's backend serves Jazz on this origin, under `/jazz` (the default).
         // Every visitor gets a device account. Band membership, not a login,
         // decides what they can see and edit.
-        config: { initial: "device", client: () => import("jazz-tools/local-first") },
+        config: {
+          initial: "device",
+          client: () => import("jazz-tools/local-first"),
+          localFirst: "now",
+        },
       },
       { default: () => h(App), loading: () => h("p", { class: "loading" }, "Loading the tour…") },
     ),

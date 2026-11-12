@@ -12,6 +12,7 @@ export function sessionConfig({ appId, ...overrides }: AppConfig = {}): JazzClie
   return {
     env: "dev",
     client: () => import("jazz-tools/local-first"),
+    localFirst: "now",
     ...overrides,
     ...(appId === undefined ? {} : { scope: appId }),
     initial: "device",

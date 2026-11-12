@@ -78,6 +78,7 @@ describe("React Todo App E2E", () => {
       store: config.store ?? memoryAccountStore(),
       // These tests are about the local-first client (IndexedDB, sync between replicas).
       client: loadLocalFirst,
+      localFirst: "now" as const,
     };
     const storageNamespace =
       resolvedConfig.driver?.type === "persistent" ? resolvedConfig.driver.dbName : undefined;

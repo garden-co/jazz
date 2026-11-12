@@ -117,7 +117,7 @@ describe("React Todo App core browser canary", () => {
 
     await act(async () => {
       r.render(
-        <App config={{ appId, ...dbConfig, store, client: loadLocalFirst }}>
+        <App config={{ appId, ...dbConfig, store, client: loadLocalFirst, localFirst: "now" }}>
           {onEdgeSettled && <TodosEdgeReadinessProbe onSettled={onEdgeSettled} />}
         </App>,
       );

@@ -66,6 +66,7 @@ describe("Vanilla TS Todo App E2E", () => {
       appId: SCOPE,
       store: memoryAccountStore(),
       client: loadLocalFirst,
+      localFirst: "now",
       driver: { type: "persistent", dbName: crypto.randomUUID() },
       ...config,
     });

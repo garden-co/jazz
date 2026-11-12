@@ -164,6 +164,8 @@ it("negotiates persistent browser workers and renders the owner, join-request, m
       store: memoryAccountStore(),
       driver: { type: "persistent", dbName: `band-chat-owner-${crypto.randomUUID()}` },
       client: () => import("jazz-tools/local-first"),
+      // The persistent worker must open on first mount (see the regression above).
+      localFirst: "now",
     },
     "owner",
   );
@@ -186,6 +188,8 @@ it("negotiates persistent browser workers and renders the owner, join-request, m
       store: memoryAccountStore(),
       driver: { type: "persistent", dbName: `band-chat-guest-${crypto.randomUUID()}` },
       client: () => import("jazz-tools/local-first"),
+      // The persistent worker must open on first mount (see the regression above).
+      localFirst: "now",
     },
     "guest",
     { join: roomId },

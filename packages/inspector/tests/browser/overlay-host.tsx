@@ -37,21 +37,6 @@ const SERVER_URL = (() => {
 
 function HostInner({ secondaryReady }: { secondaryReady: boolean }) {
   const { db } = useJazzClient();
-  // The host shares its local-first runtime (its SharedWorker) with the
-  // overlay: open it now rather than waiting for the background upgrade.
-  const [localFirst, setLocalFirst] = useState(() => db.isLocalFirst());
-  const [upgradeError, setUpgradeError] = useState<string>();
-  useEffect(() => {
-    if (localFirst) return;
-    let current = true;
-    db.upgradeToLocalFirst(loadLocalFirst).then(
-      () => current && setLocalFirst(db.isLocalFirst()),
-      (error: unknown) => current && setUpgradeError(String(error)),
-    );
-    return () => {
-      current = false;
-    };
-  }, [db, localFirst]);
   // A real query: creates the host client (so getRuntimeSchema resolves) and
   // registers a public subscription the overlay's Subscriptions tab should display.
   const { data: readinessTodos = [] } = useAll(
@@ -62,15 +47,13 @@ function HostInner({ secondaryReady }: { secondaryReady: boolean }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
-    if (!secondaryReady || !primaryReady || !localFirst) return;
+    if (!secondaryReady || !primaryReady) return;
     const iframeWindow = iframeRef.current?.contentWindow;
     if (!iframeWindow) return;
     // The real host-side installer: publishes the handle + pushes subscriptions.
     return installInspectorHost(db, iframeWindow, window.location.origin);
-  }, [db, primaryReady, secondaryReady, localFirst]);
+  }, [db, primaryReady, secondaryReady]);
 
-  if (upgradeError) return <p id="host-status">Local-first upgrade failed: {upgradeError}</p>;
-  if (!localFirst) return <p id="host-status">Opening local-first runtime...</p>;
   if (!secondaryReady) return <p id="host-status">Starting secondary runtime...</p>;
   if (!primaryReady) return <p id="host-status">Loading primary runtime data...</p>;
 
@@ -108,6 +91,8 @@ function HostApp() {
     initial: "device",
     store: stores.primary,
     client: loadLocalFirst,
+    // The host shares its local-first runtime (its SharedWorker) with the overlay.
+    localFirst: "now",
     // devMode must be on at subscribe time for subscription traces to register.
     // Under the jazz dev plugin the provider defaults it on automatically, but
     // this fixture runs under the inspector's own vite server (no plugin flag),

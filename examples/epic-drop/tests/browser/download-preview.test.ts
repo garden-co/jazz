@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createJazzClient, type Db } from "jazz-tools";
+import { createJazzClient, type Db, type JazzSession } from "jazz-tools";
 import { memoryAccountStore } from "../../../testing/accounts.js";
 import { app } from "../../schema.js";
 import { hexDump, readFileBlob, readFileRange } from "../../src/large-values.js";
 import { createInvite, inviteLink, parseInviteHash, redeemInvite } from "../../src/sharing.js";
 import { SCOPE, SERVER_URL } from "./test-constants.js";
 
-const sessions: Array<{ close(): Promise<void> }> = [];
+const sessions: JazzSession<unknown>[] = [];
 
 afterEach(async () => {
   await Promise.all(sessions.splice(0).map((session) => session.close()));

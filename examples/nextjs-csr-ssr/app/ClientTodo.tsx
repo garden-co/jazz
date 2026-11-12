@@ -13,6 +13,8 @@ export default function ClientTodo() {
         // Each browser starts on its own device account, with local data.
         initial: "device",
         client: () => import("jazz-tools/local-first"),
+        // Local-first from the first visit, so "Saved locally" means on this device.
+        localFirst: "now",
       }}
       loading={<p>Loading account…</p>}
       error={(state) => <p role="alert">{state.error?.message ?? "Jazz couldn’t start."}</p>}

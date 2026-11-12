@@ -13,6 +13,8 @@ export function sessionConfig({ appId, ...rest }: SessionOverrides = {}): JazzCl
     env: "dev",
     // The local-first client: IndexedDB persistence, works offline.
     client: () => import("jazz-tools/local-first"),
+    // Open it straight away, first visit included.
+    localFirst: "now",
     ...overrides,
     // Start as a device account: no login UI, no auth server.
     initial: "device",
