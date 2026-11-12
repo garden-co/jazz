@@ -553,18 +553,90 @@ describe("browser session against the app's backend", () => {
 
     auth.valid.delete("alice:1");
     await jazz.revokeUser("alice");
+    await expect
+      .poll(() => session.getSnapshot().status, { timeout: 15_000, interval: 50 })
+      .toBe("signed-out");
+  }, 60_000);
+
+  // E6 as reported (Hono + Better Auth, a local-first client on a shared
+  // device): the backend deletes the user's auth sessions and calls
+  // revokeUser. The open, visible tab used to stay ready for ~30s, showing
+  // her rows and taking writes that never synced, then signed out and wiped
+  // them. It signs out at the second signed-out answer, a moment later, and
+  // until then its link reads offline: auth, not connected.
+  it("signs a revoked local-first tab out at the second signed-out answer (E6)", async () => {
+    const auth = tokenAuth("alice:1");
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: auth.authenticate,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const served = await listen(jazz);
+    cookies(served.origin, "alice:1");
+    vi.stubGlobal("document", { visibilityState: "visible" });
+    // Every "who is signed in" answer, as the browser would see it.
+    const answers: Array<{ at: number; status: number }> = [];
+    const cookieFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await cookieFetch(input, init);
+      if (String(input instanceof Request ? input.url : input).includes("backend-user"))
+        answers.push({ at: Date.now(), status: response.status });
+      return response;
+    }) as typeof fetch;
+    cleanups.push(async () => void (globalThis.fetch = cookieFetch));
+    const onSignedOut = vi.fn(() => "sign-out" as const);
+    const session = await createJazzClient({
+      serverUrl: `${served.origin}/jazz`,
+      store: memoryStore(),
+      driver: { type: "memory" },
+      initial: "device",
+      clearOnSignOut: true,
+      onSignedOut,
+      client: async () => ({ createClient: createLocalFirstDb }),
+    });
+    cleanups.push(() => session.close());
+    await session.reauthenticate();
+    expect(session.getSnapshot().account?.identity.subject).toBe("alice");
+    await expect
+      .poll(() => isThinDb(session.getSnapshot().client!.db), { timeout: 15_000 })
+      .toBe(false);
+    const client = session.getSnapshot().client!;
+    const owner = client.session!.user!;
+    await client.db.insert(app.todos, { title: "private", owner }).wait({ tier: "global" });
+    const links: string[] = [];
+    const stop = client.db.onSyncStatusChange(({ link }) =>
+      links.push(link.state === "offline" ? `offline:${link.reason}` : link.state),
+    );
+    cleanups.push(async () => stop());
+
+    // The app's backend deletes her auth sessions, then ends her sync sessions.
+    auth.valid.delete("alice:1");
+    const before = answers.length;
+    expect(await jazz.revokeUser("alice")).toBe(1);
     const revokedAt = Date.now();
     await expect
-      .poll(() => session.getSnapshot().status, {
-        timeout: 70_000,
-        interval: 250,
-      })
+      .poll(() => session.getSnapshot().status, { timeout: 15_000, interval: 20 })
       .toBe("signed-out");
-    // The refusal reaches the watch within the re-check; it confirms after
-    // its grace for a cookie the app is refreshing (30s), then once more.
-    // Slow by design: it waits out that grace, with room for a loaded runner.
-    expect(Date.now() - revokedAt).toBeLessThan(50_000);
-  }, 90_000);
+    const signedOutAt = Date.now();
+    stop();
+
+    // Two signed-out answers, spaced by the confirmation wait (2s), then
+    // the sign-out: not a third and fourth one ~30s later.
+    const after = answers.slice(before);
+    expect(after.map((answer) => answer.status)).toEqual([401, 401]);
+    expect(after[1]!.at - after[0]!.at).toBeGreaterThanOrEqual(1_900);
+    expect(signedOutAt - revokedAt).toBeLessThan(10_000);
+    expect(onSignedOut).toHaveBeenCalledOnce();
+    // Until then the tab showed the auth loss, never connected again.
+    expect(links).toContain("offline:auth");
+    expect(links.slice(links.indexOf("offline:auth"))).not.toContain("connected");
+    // And no late check runs after: it stays signed out.
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(answers.slice(before)).toHaveLength(2);
+    expect(session.getSnapshot().status).toBe("signed-out");
+  }, 60_000);
 
   // Node, Deno, a CLI: no cookie carries the backend's session on the sync
   // connection, so a backend sign-in would report ready and never sync.
