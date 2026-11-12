@@ -161,7 +161,7 @@
   },
   "publishConfig": {
     "access": "public",
-    "tag": "alpha"
+    "tag": "latest"
   },
   "scripts": {
     "build": "pnpm build:runtime && pnpm build:test && pnpm typecheck:react-native && pnpm build:svelte && pnpm build:solid",

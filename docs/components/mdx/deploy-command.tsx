@@ -16,7 +16,7 @@ export function DeployCommand() {
   const adminSecret = app?.adminSecret ?? "<your-admin-secret>";
 
   const code = [
-    "pnpm dlx jazz-tools@alpha deploy \\",
+    "pnpm dlx jazz-tools deploy \\",
     `  ${appId} \\`,
     `  --server-url https://v2.sync.jazz.tools/ \\`,
     `  --admin-secret ${adminSecret}`,
