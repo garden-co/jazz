@@ -201,6 +201,7 @@ You can also query and write to the database right from your frontend. It is pro
   <Tab value="Effect">
     ```ts title="todos.ts"
     import { Effect, Stream } from "effect";
+    import { createJazzClient } from "jazz-tools/client";
     import { Jazz } from "jazz-tools/effect";
     import { app } from "./schema";
 
@@ -213,8 +214,9 @@ You can also query and write to the database right from your frontend. It is pro
         .pipe(Stream.runForEach((todos) => Effect.log(todos)));
     });
 
-    // Same config as createJazzClient(): asks /jazz who is signed in, with your session cookie
-    program.pipe(Effect.provide(Jazz.layer()), Effect.runPromise);
+    // Asks /jazz who is signed in, with your session cookie
+    const session = await createJazzClient({ serverUrl: "/jazz" });
+    program.pipe(Effect.provide(Jazz.layerDb(session.db)), Effect.runPromise);
     ```
 
   </Tab>

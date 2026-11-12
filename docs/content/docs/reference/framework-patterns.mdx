@@ -11,16 +11,16 @@ full details.
 
 ## API equivalents
 
-| Concept            | React / Expo                | Vue                         | Svelte                            | Solid                       |
-| ------------------ | --------------------------- | --------------------------- | --------------------------------- | --------------------------- |
-| Provider           | `<JazzProvider>`            | `<JazzProvider>`            | `<JazzProvider>`                  | `<JazzProvider>`            |
-| Jazz session       | `useJazzSession()`          | `useJazzSession()`          | `getJazzSession()`                | `useJazzSession()`          |
-| Query subscription | `useAll(query)`             | `useAll(query)`             | `new QuerySubscription(query)`    | `useAll(() => ({ query }))` |
-| Single-row query   | `useOne(query)`             | `useOne(query)`             | `new QuerySubscriptionOne(query)` | `useOne(() => ({ query }))` |
-| DB access          | `useAll(query).db`          | `useAll(query).db`          | `subscription.db`                 | `useAll(...).db`            |
-| Write-only DB      | `useDb()`                   | `useDb()`                   | `getDb()`                         | `useDb()`                   |
-| Session            | `useSession()`              | `useSession()`              | `getSession().current`            | `useSession()`              |
-| Client without UI  | `createJazzClient(config)`  | `createJazzClient(config)`  | `createJazzClient(config)`        | `createJazzClient(config)`  |
+| Concept            | React / Expo               | Vue                        | Svelte                            | Solid                       |
+| ------------------ | -------------------------- | -------------------------- | --------------------------------- | --------------------------- |
+| Provider           | `<JazzProvider>`           | `<JazzProvider>`           | `<JazzProvider>`                  | `<JazzProvider>`            |
+| Jazz session       | `useJazzSession()`         | `useJazzSession()`         | `getJazzSession()`                | `useJazzSession()`          |
+| Query subscription | `useAll(query)`            | `useAll(query)`            | `new QuerySubscription(query)`    | `useAll(() => ({ query }))` |
+| Single-row query   | `useOne(query)`            | `useOne(query)`            | `new QuerySubscriptionOne(query)` | `useOne(() => ({ query }))` |
+| DB access          | `useAll(query).db`         | `useAll(query).db`         | `subscription.db`                 | `useAll(...).db`            |
+| Write-only DB      | `useDb()`                  | `useDb()`                  | `getDb()`                         | `useDb()`                   |
+| Permission session | `useSession()`             | `useSession()`             | `getSession().current`            | `useSession()`              |
+| Client without UI  | `createJazzClient(config)` | `createJazzClient(config)` | `createJazzClient(config)`        | `createJazzClient(config)`  |
 
 ## Provider setup
 
@@ -188,7 +188,17 @@ Get a handle to the database for inserts, updates, and deletes. See [Writing Dat
 
 ## Session/user identity
 
-Access the current user's session. See [How Auth Works](/docs/setup/auth/backend#the-session) for details on authentication modes and identity linking.
+Two things are called a session, and they answer different questions:
+
+- **Who is signed in on this device:** the Jazz session, from `useJazzSession()` (Svelte:
+  `getJazzSession()`). Its `user` is `{ accountId, kind, identity, claims }`, with `kind`
+  `"device"` for a device account (a guest) and `"backend"` for a user your backend signed in, or
+  `null`. It also carries the operations: `refresh()`, `signOut()`, `createDeviceAccount()` and the
+  rest.
+- **What your permissions see:** `useSession()` (Svelte: `getSession()`), the read-only session a
+  query or write runs with, whose `user` is the account ID your policies compare.
+
+See [How Auth Works](/docs/setup/auth/backend#the-session) for details on authentication modes and identity linking.
 
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
   <Tab value="React">
