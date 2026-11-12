@@ -7,11 +7,28 @@ As you develop your Jazz application, you might find yourself needing to test fu
 
 ## Testing a standalone Jazz DB
 
-If your application uses a Jazz `Db` instance directly, you can simply create a test database using the regular `createDb` function
-exposed by the `jazz-tools` package.
+If your application uses a Jazz `Db` directly, you can open a session that keeps Jazz on this device
+only (`serverUrl: null`) and use its `session.db`. It signs in as a
+[device account](/docs/setup/auth/local-first), so it needs no backend:
 
-Databases created this way are easy to set up and pretty lightweight. You can even create an in-memory Db (with `driver: { type: "memory" }`)
-so that results do not persist across test runs.
+```typescript
+import { createJazzClient } from "jazz-tools/client";
+
+let saved: string | null = null;
+const session = await createJazzClient({
+  serverUrl: null,
+  initial: "device",
+  client: () => import("jazz-tools/local-first"),
+  driver: { type: "memory" }, // nothing persists across test runs
+  // Outside a browser there is no default place to keep the device account's key.
+  store: { read: async () => saved, update: async (change) => void (saved = change(saved)) },
+});
+const db = session.db;
+// ...
+await session.close();
+```
+
+Sessions like this are easy to set up and pretty lightweight.
 
 Keep in mind this approach is limited, though. Db instances that are not connected to a server cannot enforce permissions.
 
@@ -89,15 +106,15 @@ The returned `PolicyTestApp` provides:
 
 - `testApp.seed(fn)`&hairsp;—&hairsp;run setup writes as an admin, bypassing policy checks, and wait for them to reach the server
 - `testApp.as(session)`&hairsp;—&hairsp;create a `TestDb` client scoped to a specific session
-- `testApp.accountFor(session)`&hairsp;—&hairsp;get the account a session acts for, for example to seed rows a local-first guest owns
-- `testApp.sessionFor(session)`&hairsp;—&hairsp;get the session `as()` acts with, including a local-first guest's derived `user_id`
+- `testApp.accountFor(session)`&hairsp;—&hairsp;get the account a session acts for, for example to seed rows a guest (device account) owns
+- `testApp.sessionFor(session)`&hairsp;—&hairsp;get the session `as()` acts with, including a guest's derived `user_id`
 - `testDb.expectAllowed(fn)`&hairsp;—&hairsp;check that a write can be staged locally, then roll it back; this does not prove that the server will accept it
 - `testDb.expectDenied(fn)`&hairsp;—&hairsp;wait for the server to reject a write because of a policy
 - `testApp.shutdown()`&hairsp;—&hairsp;stop the local client and server
 
-To test as a local-first guest, pass `authMode: "local-first"` and leave out `issuer` and
-`account_id`, with empty `claims`. The test app derives a local-first key from `user_id` and acts
-exactly like a real local-first client with that key, including its own account. The guest's
+To test as a guest (a device account), pass `authMode: "local-first"` and leave out `issuer` and
+`account_id`, with empty `claims`. The test app derives a device account key from `user_id` and acts
+exactly like a real device account with that key, including its own account. The guest's
 session uses the subject derived from that key, not the `user_id` you passed:
 `testApp.sessionFor(session)` returns the session it acts with. A session with an explicit external
 `issuer` is still used as given: it acts as that issuer's user for its `account_id`.
@@ -143,11 +160,11 @@ import { app } from "../schema.js";
 const testJazz: TestJazz = await startTestJazz({ app, permissions });
 ```
 
-- **Guests** (anonymous or local-first clients) connect to `testJazz.url`.
+- **Guests** (anonymous clients, or device accounts) connect to `testJazz.url`.
 - **Signed-in users** call `await testJazz.as(userId, claims)`. Each user gets their own origin,
   which stands in for their browser's session cookie, and your permissions see `userId` and
   `claims` as the signed-in user. Pass its `serverUrl` to `createJazzClient` and call
-  `loginWithBackend()`, as below.
+  `refresh()`, as below.
 - **Clients that send `Authorization: Bearer`** (React Native, Node, a CLI) use
   `testJazz.bearer(userId, claims)` as their token against `testJazz.url`, for example
   `bearer: () => token` on `createJazzClient`.
@@ -165,14 +182,14 @@ async function clientAs(userId: string) {
     serverUrl: (await testJazz.as(userId)).serverUrl,
     store: { read: async () => saved, update: async (change) => void (saved = change(saved)) },
   });
-  await session.loginWithBackend();
+  await session.refresh(); // ask the backend who is signed in
   return session;
 }
 
 const alice = await clientAs("alice");
 const bob = await clientAs("bob");
 
-const aliceDb = alice.getSnapshot().client!.db;
+const aliceDb = alice.db;
 await aliceDb.insert(app.todos, { title: "Buy milk", done: false }).wait({ tier: "global" });
 
 await Promise.all([alice.close(), bob.close()]); // before testJazz.stop()
@@ -205,7 +222,9 @@ it("signs in the user authenticate names", async () => {
     // In tests, the user is named in a header instead of your session cookie.
     authenticate: (request) => {
       const userId = request.headers.get("x-test-user");
-      return userId ? { userId, claims: { role: "admin" } } : null;
+      return userId
+        ? { userId, claims: { role: "admin" }, expiresAt: Math.floor(Date.now() / 1000) + 3600 }
+        : null;
     },
   });
   await jazz.ready(); // jazz.appId is known once the store is open
@@ -280,7 +299,7 @@ async function clientAs(testJazz: TestJazz, userId: string) {
     serverUrl: (await testJazz.as(userId)).serverUrl,
     store: { read: async () => saved, update: async (change) => void (saved = change(saved)) },
   });
-  await session.loginWithBackend();
+  await session.refresh(); // ask the backend who is signed in
   return session;
 }
 
@@ -323,7 +342,7 @@ it("lets old-schema clients write rows new-schema clients can read", async () =>
     permissions: allowAll(oldApp),
   });
   const alice = await clientAs(testJazz, "alice");
-  const oldDb = alice.getSnapshot().client!.db;
+  const oldDb = alice.db;
 
   await testJazz.redeploy({
     app: newApp,
@@ -331,7 +350,7 @@ it("lets old-schema clients write rows new-schema clients can read", async () =>
     migration,
   });
   const bob = await clientAs(testJazz, "bob");
-  const newDb = bob.getSnapshot().client!.db;
+  const newDb = bob.db;
 
   const created = await oldDb
     .insert(oldApp.todos, { title: "written through old schema", done: false })

@@ -6,7 +6,8 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
-import { createAccountManager, createDb, type Db } from "jazz-tools";
+import { createJazzClient, type JazzSession } from "jazz-tools";
+import { memoryAccountStore } from "../../../../../testing/accounts.js";
 import { App } from "../../src/App.js";
 import { app } from "../../schema.js";
 import { SCOPE, serverUrl } from "./test-constants.js";
@@ -54,19 +55,16 @@ function buttonByText(root: ParentNode, text: string) {
 describe("StagePlan board", () => {
   let root: Root | undefined;
   let container: HTMLDivElement | undefined;
-  let crewDb: Db | undefined;
+  let crewSession: JazzSession<unknown> | undefined;
 
   afterEach(async () => {
     await act(async () => root?.unmount());
     container?.remove();
-    await crewDb?.shutdown();
+    await crewSession?.close();
     window.location.hash = "";
   });
 
   it("runs the stage-prep flow and syncs it to a crew member", async () => {
-    const accounts = await createAccountManager({ appId: SCOPE, serverUrl: serverUrl() });
-    const chiefAccount = accounts.createLocalFirst();
-
     window.location.hash = "#/";
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -77,7 +75,7 @@ describe("StagePlan board", () => {
           config={{
             appId: SCOPE,
             serverUrl: serverUrl(),
-            account: chiefAccount,
+            store: memoryAccountStore(),
             driver: { type: "persistent", dbName: crypto.randomUUID() },
           }}
         />,
@@ -148,13 +146,15 @@ describe("StagePlan board", () => {
     );
     const [, showId, code] = inviteInput.value.split("#/join/")[1].match(/^([^/]+)\/(.+)$/)!;
 
-    const crewAccount = accounts.createLocalFirst();
-    crewDb = await createDb({
-      appId: SCOPE,
+    const session = await createJazzClient({
+      scope: SCOPE,
       serverUrl: serverUrl(),
-      account: crewAccount,
+      store: memoryAccountStore(),
+      initial: "device",
       driver: { type: "memory" },
     });
+    crewSession = session;
+    const crewDb = session.db;
     const crewId = crewDb.getAuthState().session?.user;
     if (!crewId) throw new Error("crew client has no session");
     const profile = await crewDb
@@ -170,7 +170,7 @@ describe("StagePlan board", () => {
       })
       .wait({ tier: "global" });
 
-    const crewTasks = async () => crewDb!.all(app.tasks.where({ showId }), { tier: "remote" });
+    const crewTasks = async () => crewDb.all(app.tasks.where({ showId }), { tier: "remote" });
     await expect.poll(async () => (await crewTasks()).length, { timeout: 15000 }).toBe(9);
 
     // The chief's crew list picks up the new member live.

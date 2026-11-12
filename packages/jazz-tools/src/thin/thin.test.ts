@@ -6,13 +6,19 @@ import type { Db } from "../runtime/db.js";
 import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
+import { createAccountManagerWithMinter } from "../accounts/account-manager-core.js";
+import type { AccountManagerConfig } from "../accounts/create-account-manager.js";
 import {
-  createAccountManager,
   createClient,
+  mintLocalFirstTokenInJs,
   prefetchThinQueries,
   upgradeToLocalFirst,
 } from "./index.js";
 import { ThinRuntime } from "./thin-runtime.js";
+
+/** The account manager the thin entry used to export: it signs in JavaScript. */
+const createAccountManager = (config: AccountManagerConfig) =>
+  createAccountManagerWithMinter(config, mintLocalFirstTokenInJs);
 import { decodeThinResponse, isThinResponse } from "./wire.js";
 import { JazzClient } from "../runtime/client.js";
 import type { Session } from "../runtime/context.js";
@@ -588,9 +594,23 @@ describe("thin client", () => {
       db.update(app.notes, theirs.id, { done: true }).wait({ tier: "global" }),
     ).rejects.toThrow();
     await expect(db.waitForSync({ timeoutMs: 5_000 })).resolves.toBeUndefined();
+    // The sync status counts it and names it as the last error.
+    expect(db.getSyncStatus()).toMatchObject({
+      pendingUploads: 0,
+      oldestPendingAt: null,
+      rejected: 1,
+      lastError: { kind: "rejected", at: expect.any(Number) },
+    });
 
-    await db.insert(app.notes, { text: "mine", done: false }).wait({ tier: "global" });
+    // A write waiting for its answer says since when.
+    const before = Date.now();
+    const mine = db.insert(app.notes, { text: "mine", done: false });
+    const waiting = db.getSyncStatus();
+    expect(waiting.pendingUploads).toBe(1);
+    expect(waiting.oldestPendingAt).toBeGreaterThanOrEqual(before);
+    await mine.wait({ tier: "global" });
     await expect(db.waitForSync({ timeoutMs: 5_000 })).resolves.toBeUndefined();
+    expect(db.getSyncStatus()).toMatchObject({ oldestPendingAt: null, rejected: 1 });
   }, 60_000);
 
   it("fails reads and writes once the server can't serve its schema, instead of hanging", async () => {

@@ -42,7 +42,11 @@ export {
   type BackendCredential,
   type JazzUser,
   type LocalFirstGuest,
-  acceptLocalFirstAuth,
+  acceptDeviceAccounts,
   type VercelStoreOptions,
   type WsLikeSocket,
+  type InspectEvent,
+  type InspectGrant,
+  type InspectHook,
+  type InspectorOptions,
 } from "./create-jazz.js";

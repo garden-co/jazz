@@ -76,7 +76,23 @@ describe("fromJWT", () => {
     expect(await authenticate(request(token))).toEqual({
       userId: "user_01",
       claims: { role: "admin", permissions: ["posts:write"], org_id: "org_1" },
+      expiresAt: expect.any(Number),
     });
+  });
+
+  it("says the token holds until its exp plus the clock tolerance it accepts", async () => {
+    serveJwks();
+    const exp = Math.floor(Date.now() / 1000) + 300;
+    const token = await sign({}, { expires: exp });
+    const standard = fromJWT({ jwksUrl: jwksUrl(), issuer: ISSUER, audience: AUDIENCE });
+    expect((await standard(request(token)))?.expiresAt).toBe(exp + 60);
+    const strict = fromJWT({
+      jwksUrl: jwksUrl(),
+      issuer: ISSUER,
+      audience: AUDIENCE,
+      clockToleranceSeconds: 0,
+    });
+    expect((await strict(request(token)))?.expiresAt).toBe(exp);
   });
 
   it("verifies with a static public key and shapes claims on request", async () => {
@@ -90,6 +106,7 @@ describe("fromJWT", () => {
     expect(await authenticate(request(token))).toEqual({
       userId: "user_01",
       claims: { role: "member" },
+      expiresAt: expect.any(Number),
     });
   });
 

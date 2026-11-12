@@ -366,6 +366,15 @@ In the browser, tabs that sync through a shared worker may not yet see this: a t
 can keep waiting after the worker's link was refused. Treat `authority-changed` in a multi-tab app as
 best effort for now.
 
+In the browser, `offline` can also have the reason `held-by-another-tab`, with `retrying: true`.
+When a guest signs up in one tab, another tab may still hold the account's local store as the
+guest. The signed-up tab shows `connecting` and joins once that tab follows or closes. If that
+hasn't happened after 30 seconds (the other tab may be frozen in the background), the link reports
+`held-by-another-tab`, and waits fail with a `StoreHeldByAnotherTabError` (check with
+`isStoreHeldByAnotherTabError`), so the app can ask the user to close or reload the other tab. The
+tab keeps trying and joins as soon as it can. Writes made meanwhile stay in that tab's memory until
+then, so a reload before it joins loses them.
+
 A brief drop shows as `connecting`, not `offline`, so a status badge doesn't flicker. `synced` is
 `true` when nothing waits for upload and the link is `connected` (or `local-only`).
 
@@ -427,7 +436,7 @@ This includes mutations you did not wait for and mutations whose wait finished b
 rejection arrived.
 
 An event with code `outcome_unknown` is not a rejection: the thin client's connection ended for
-good before the server answered (after `reauthenticate()` signed in someone else, `disconnect()` or
+good before the server answered (after `refresh()` signed in someone else, `disconnect()` or
 `close()`), and the write may have been applied. Read the row again before you revert or retry it.
 An ordinary dropped socket doesn't cause this, since the thin client resends unanswered writes when
 it reconnects.

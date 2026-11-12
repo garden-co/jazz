@@ -1,5 +1,5 @@
 import { Cause, Context, Effect, Exit, Layer, Option, Queue, Stream } from "effect";
-import type { AccountDbConfig } from "../accounts/context.js";
+import { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
 import type { AuthState } from "../runtime/auth-state.js";
 import type { SyncStatus } from "../runtime/sync-status.js";
 import type {
@@ -22,7 +22,6 @@ import type {
   UpdateOptions,
 } from "../runtime/db.js";
 import { limitQueryToOne } from "../runtime/db.js";
-import { createDb } from "../runtime/default-create-db.js";
 import { JazzError, JazzWriteRejected, toJazzError, toWriteError } from "./errors.js";
 
 /**
@@ -200,7 +199,10 @@ export interface JazzLayerOptions {
  *   yield* jazz.update(app.todos, todo.id, { done: true }, { wait: "global" });
  * });
  *
- * program.pipe(Effect.provide(Jazz.layer(config)), Effect.runPromise);
+ * program.pipe(
+ *   Effect.provide(Jazz.layer({ serverUrl: "/jazz", initial: "device" })),
+ *   Effect.runPromise,
+ * );
  * ```
  */
 export class Jazz extends Context.Service<Jazz, JazzDb>()("jazz-tools/effect/Jazz") {
@@ -211,21 +213,42 @@ export class Jazz extends Context.Service<Jazz, JazzDb>()("jazz-tools/effect/Jaz
   static readonly layerDb = (db: Db): Layer.Layer<Jazz> => Layer.succeed(Jazz, makeJazzDb(db));
 
   /**
-   * Open a Jazz database for the layer's lifetime and shut it down when the
-   * layer's scope closes.
+   * Open a Jazz session (`createJazzClient(config)`) for the layer's lifetime,
+   * provide its Db, and close the session when the layer's scope closes.
+   * Opening fails while no one is signed in: pass `initial: "device"` for a
+   * device account, or sign in first. The layer keeps the Db it opened with;
+   * for an app whose user signs in and out, provide `Jazz.layerDb(session.db)`
+   * from a session you own instead.
    */
   static readonly layer = (
-    config: AccountDbConfig,
+    config: JazzClientConfig,
     options?: JazzLayerOptions,
   ): Layer.Layer<Jazz, JazzError> =>
     Layer.effect(
       Jazz,
       Effect.map(
         Effect.acquireRelease(
-          Effect.tryPromise({ try: () => createDb(config), catch: toJazzError("open") }),
-          (db) => Effect.ignore(Effect.tryPromise(() => db.shutdown(options?.shutdown))),
+          Effect.tryPromise({
+            try: async () => {
+              const session = await createJazzClient(config);
+              try {
+                return { session, db: session.db };
+              } catch (error) {
+                await session.close();
+                throw error;
+              }
+            },
+            catch: toJazzError("open"),
+          }),
+          ({ session, db }) =>
+            Effect.ignore(
+              Effect.tryPromise(async () => {
+                if (options?.shutdown) await db.shutdown(options.shutdown);
+                await session.close();
+              }),
+            ),
         ),
-        makeJazzDb,
+        ({ db }) => makeJazzDb(db),
       ),
     );
 }

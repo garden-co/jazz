@@ -16,6 +16,21 @@ export class AccountAuthError extends Error {
 }
 
 /**
+ * `linkDeviceAccount()` was called without a device account to link: the
+ * session is signed out, or its account came from your backend.
+ */
+export const LINK_NEEDS_GUEST_MESSAGE =
+  "local_first_account_required: linkDeviceAccount() links this device's device account (a guest) to the user your backend signed in, and there is no device account to link: the session is signed out, or its account came from your backend. Call refresh() to open the backend user's account instead. To keep what a device account wrote, link while it is signed in.";
+
+/**
+ * `linkDeviceAccount()` was called with a device account whose key this
+ * client no longer holds: it signed out meanwhile, or the handle comes from
+ * another client.
+ */
+export const LINK_GUEST_KEY_MISSING_MESSAGE =
+  "local_first_account_required: this device account's key isn't held by this client any more (it signed out, or comes from another Jazz client), so it can't prove itself to link. Link from the client where it is signed in, or call refresh() instead.";
+
+/**
  * The app's backend vouches to the core's registry for an identity it
  * verified itself, with its backend secret: resolve its account
  * (`resolve`), create it on first sign-in (`login-or-register`), or found a

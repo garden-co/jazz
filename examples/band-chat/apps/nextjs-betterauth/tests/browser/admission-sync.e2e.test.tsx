@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createAccountManager, createDb, type Db } from "jazz-tools";
+import { createJazzClient, type Db, type JazzClientConfig } from "jazz-tools";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
 import {
   TestCleanup,
@@ -8,11 +8,14 @@ import {
 } from "../../../../../../packages/jazz-tools/tests/browser/support";
 import {
   getJazzServerInfo,
-  signInWithJazzApp,
+  jazzAppFetch,
+  jazzAppUserUrl,
   startJazzApp,
+  type JazzServerInfo,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server";
 import permissions from "../../permissions";
 import { app } from "../../schema";
+import { memoryAccountStore } from "../../../../../testing/accounts";
 
 const cleanup = new TestCleanup();
 afterEach(async () => cleanup.cleanup());
@@ -33,7 +36,8 @@ interface Live<T> {
  * a streamed attachment. The guest's dashboard has its room list and
  * memberships subscribed when it asks to join; the creator admits it
  * (membership insert + request delete in one transaction); the guest opens the
- * room; then both sides post, each post also bumping the room's activity.
+ * room; then both sides post, and the guest's room list follows the room's
+ * newest message.
  */
 describe("BandChat admission with open subscriptions", () => {
   it("keeps room history and the room list live for an admitted guest", async () => {
@@ -72,7 +76,16 @@ describe("BandChat admission with open subscriptions", () => {
     await attachment.wait({ tier: "global" });
 
     // What the guest's dashboard has open before it asks to join.
-    const guestRooms = live(guest.db, app.rooms.select("*", "$createdBy", "$createdAt"));
+    // BandChat's room list: every room with its newest message.
+    const guestRooms = live<{ id: string; messagesViaRoom: { text: string }[] }>(
+      guest.db,
+      app.rooms.select("*", "$createdBy", "$createdAt").include({
+        messagesViaRoom: app.messages
+          .select("senderId", "text", "$createdAt")
+          .orderBy("$createdAt", "desc")
+          .limit(1),
+      }),
+    );
     const guestMemberships = live(guest.db, app.roomMembers.where({ memberAuthor: guest.author }));
 
     const request = await guest.db
@@ -133,9 +146,11 @@ describe("BandChat admission with open subscriptions", () => {
       guestHistory,
     );
     await until(
-      async () => guestRooms.rows.find((row) => row.id === room.id)?.lastActivityAt != null,
+      async () =>
+        guestRooms.rows.find((row) => row.id === room.id)?.messagesViaRoom[0]?.text ===
+        "In. I'll bring the spare snare too.",
       15_000,
-      "guest's room list follows the room's activity",
+      "guest's room list shows the reply as the room's newest message",
       guestRooms,
       guestMemberships,
       guestHistory,
@@ -176,13 +191,11 @@ function texts(history: Live<{ text: string }>) {
   return history.rows.map((message) => message.text);
 }
 
-/** Composer's send: the message and the room's activity commit together. */
+/** Composer's send: only the message; the room list reads it as the newest. */
 async function post(member: Member, roomId: string, text: string) {
-  const posting = await member.db.transaction((tx) => {
-    tx.insert(app.messages, { roomId, senderId: member.profileId, text });
-    tx.update(app.rooms, roomId, { lastActivityAt: new Date() });
-  });
-  await posting.wait({ tier: "global" });
+  await member.db
+    .insert(app.messages, { roomId, senderId: member.profileId, text })
+    .wait({ tier: "global" });
 }
 
 function live<T extends { id: string }>(db: Db, query: Parameters<Db["subscribe"]>[0]): Live<T> {
@@ -199,21 +212,37 @@ function live<T extends { id: string }>(db: Db, query: Parameters<Db["subscribe"
   return state;
 }
 
-async function openMember(
-  server: Awaited<ReturnType<typeof startJazzApp>>,
+const loadLocalFirst = () => import("jazz-tools/local-first");
+
+/**
+ * Sign `userId` in on their own origin of the app backend, and open their
+ * local-first client: a session of its own (its own account store), closed
+ * with the test's cleanup.
+ */
+async function openSession(
+  server: JazzServerInfo,
   userId: string,
-): Promise<Member> {
-  const { serverUrl, account } = await signInWithJazzApp(createAccountManager, server, userId);
-  const db = cleanup.track(
-    await createDb({
-      appId: server.appId,
-      serverUrl,
-      account,
-      driver: { type: "persistent", dbName: uniqueDbName(`band-chat-${userId}`) },
-    }),
-  );
+  config: Partial<JazzClientConfig>,
+) {
+  const session = await createJazzClient({
+    serverUrl: await jazzAppUserUrl(server, userId),
+    fetch: jazzAppFetch,
+    store: memoryAccountStore(),
+    client: loadLocalFirst,
+    // These tests write offline and read the local tiers: local-first from the start.
+    localFirst: "now",
+    ...config,
+  });
+  cleanup.trackTransport({ stop: () => session.close() });
+  return { db: session.db, author: session.getSnapshot().user!.accountId };
+}
+
+async function openMember(server: JazzServerInfo, userId: string): Promise<Member> {
+  const { db, author } = await openSession(server, userId, {
+    driver: { type: "persistent", dbName: uniqueDbName(`band-chat-${userId}`) },
+  });
   const profile = await db
-    .insert(app.profiles, { author: account.id, displayName: userId })
+    .insert(app.profiles, { author, displayName: userId })
     .wait({ tier: "global" });
-  return { db, author: account.id, profileId: profile.id };
+  return { db, author, profileId: profile.id };
 }

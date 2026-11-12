@@ -12,8 +12,7 @@ const loadLocalFirst = () => import("jazz-tools/local-first");
 export function JazzProvider({ children }: { children: React.ReactNode }) {
   return (
     <Jazz
-      serverUrl="/jazz"
-      client={loadLocalFirst}
+      config={{ serverUrl: "/jazz", client: loadLocalFirst }}
       // Signed out, the app renders its own sign-in screen without Jazz.
       signedOut={children}
       loading={<StatusScreen message="Opening MusicAgent…" />}

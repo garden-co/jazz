@@ -2,7 +2,7 @@
 
 import { useCallback, useMemo } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useAll, useJazzAuth, useSession } from "jazz-tools/react";
+import { useAll, useJazzSession, useSession } from "jazz-tools/react";
 import {
   AppShell,
   Avatar,
@@ -38,7 +38,7 @@ export function BandBookApp({
   setupError?: { message: string; retry: () => void } | null;
 }) {
   const me = useSession()?.user ?? null;
-  const { reauthenticate } = useJazzAuth();
+  const { refresh } = useJazzSession();
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
@@ -118,7 +118,7 @@ export function BandBookApp({
               // Revokes the Better Auth session, then Jazz follows the backend.
               onClick: async () => {
                 await authClient.signOut();
-                await reauthenticate();
+                await refresh();
               },
             },
           ]}

@@ -1,7 +1,7 @@
 import { Effect, Layer, Option } from "effect";
-import { createAccountManager } from "jazz-tools";
+import { createJazzClient } from "jazz-tools";
 import { Jazz } from "jazz-tools/effect";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { app } from "../schema.js";
 import {
   canCreateTodo,
@@ -13,12 +13,13 @@ import {
   whereOperatorExamples,
 } from "../src/docs-snippets.js";
 
-/** A local-first account on an in-memory database, with no server. */
-async function localJazzLayer(appId: string): Promise<Layer.Layer<Jazz, unknown>> {
+/** A device account on an in-memory database, with no server. */
+async function openLocalSession() {
   let stored: string | null = null;
-  const accounts = await createAccountManager({
-    appId,
-    serverUrl: "http://127.0.0.1:1",
+  return createJazzClient({
+    serverUrl: null,
+    driver: { type: "memory" },
+    client: () => import("jazz-tools/local-first"),
     store: {
       read: async () => stored,
       update: async (transform) => {
@@ -26,7 +27,18 @@ async function localJazzLayer(appId: string): Promise<Layer.Layer<Jazz, unknown>
       },
     },
   });
-  return Jazz.layer({ appId, account: accounts.createLocalFirst(), driver: { type: "memory" } });
+}
+
+const sessions: Array<{ close(): Promise<void> }> = [];
+afterEach(async () => {
+  for (const session of sessions.splice(0)) await session.close();
+});
+
+/** Jazz on a session's Db, which the test closes. */
+async function localJazzLayer(): Promise<Layer.Layer<Jazz>> {
+  const session = await openLocalSession();
+  sessions.push(session);
+  return Jazz.layerDb(session.db);
 }
 
 const todo = (title: string, done = false) =>
@@ -52,7 +64,7 @@ describe("Effect docs snippets", { timeout: 30_000 }, () => {
       const afterMilk = yield* Jazz.use((jazz) => jazz.one(app.todos.where({ id: milk.id })));
 
       return { open, page, operators, committedId, restored, advice, afterMilk };
-    }).pipe(Effect.provide(await localJazzLayer("effect-docs-snippets")), Effect.runPromise);
+    }).pipe(Effect.provide(await localJazzLayer()), Effect.runPromise);
 
     expect(result.open.map((row) => row.title)).toEqual(["buy milk"]);
     expect(result.page).toHaveLength(1);

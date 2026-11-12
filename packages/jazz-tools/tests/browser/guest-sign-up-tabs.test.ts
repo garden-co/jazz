@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from "vitest";
 import { deploy } from "../../src/dev/catalogue.js";
-import { createJazzClient } from "../../src/session/create-jazz-session.js";
+import { openBrowserSessionCore as createJazzClient } from "../../src/session/create-jazz-session.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
 import { isThinDb } from "../../src/runtime/local-first-upgrade.js";
 import { uniqueDbName, waitForCondition } from "./support.js";
@@ -13,6 +13,7 @@ import {
   getJazzServerInfo,
   jazzAppFetch,
   jazzAppVisitor,
+  signOutOfJazzApp,
   signUpAtJazzApp,
   startJazzApp,
 } from "./testing-server.js";
@@ -35,7 +36,11 @@ afterEach(async () => {
  * writes `guest-1`, then signs up here while the other tab doesn't hear of it
  * yet (its backend requests are held), so it stays the guest.
  */
-async function signUpWhileAnotherTabIsTheGuest(name: string, clearOnSignOut: boolean) {
+async function signUpWhileAnotherTabIsTheGuest(
+  name: string,
+  clearOnSignOut: boolean,
+  options: { thin?: boolean } = {},
+) {
   const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(uniqueDbName(name));
   await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
   const backend = await startJazzApp(
@@ -58,19 +63,20 @@ async function signUpWhileAnotherTabIsTheGuest(name: string, clearOnSignOut: boo
   const signingUp = await createJazzClient({
     serverUrl: visitorUrl,
     fetch: jazzAppFetch,
-    initial: "local-first",
+    initial: "device",
     clearOnSignOut,
-    client: async () => ({ createClient: createLocalFirstDb }),
+    ...(options.thin ? {} : { client: async () => ({ createClient: createLocalFirstDb }) }),
   });
   cleanups.push(() => signingUp.close());
-  await waitForCondition(
-    async () => {
-      const client = signingUp.getSnapshot().client;
-      return !!client && !isThinDb(client.db);
-    },
-    30_000,
-    "The tab should upgrade to local-first",
-  );
+  if (!options.thin)
+    await waitForCondition(
+      async () => {
+        const client = signingUp.getSnapshot().client;
+        return !!client && !isThinDb(client.db);
+      },
+      30_000,
+      "The tab should upgrade to local-first",
+    );
   const other = await openSessionTab("other", visitorUrl, { clearOnSignOut });
   cleanups.push(() => other.close());
   const guest = signingUp.getSnapshot().account!.id;
@@ -91,7 +97,7 @@ async function signUpWhileAnotherTabIsTheGuest(name: string, clearOnSignOut: boo
   });
   const db = signingUp.getSnapshot().client!.db;
   const titles = async () => (await db.all(app.tasks)).map((task) => task.title).sort();
-  return { signingUp, other, guest, db, titles };
+  return { backend, visitorUrl, signingUp, other, guest, db, titles };
 }
 
 /**
@@ -188,4 +194,32 @@ it("lets the tab that signed up in once the other guest tab crashes", async () =
     10_000,
     "The tab that signed up should connect",
   );
+}, 120_000);
+
+// #4992: on a shared device (clearOnSignOut), the user who signed up in one
+// tab signs out there before the other tab heard of the sign-up. The other
+// tab still holds the guest, which is the user's account now: it must sign
+// out too, wiping its replica, not stay open as them until it reloads.
+it("signs the other guest tab out when the user signs up and out in this one (clearOnSignOut)", async () => {
+  // This tab stays thin: a local-first one would share the other tab's
+  // replica, which the other tab holds as the guest until it follows.
+  const { backend, visitorUrl, signingUp, other, guest } = await signUpWhileAnotherTabIsTheGuest(
+    "guest-sign-up-sign-out-tabs",
+    true,
+    { thin: true },
+  );
+  await signOutOfJazzApp(backend, visitorUrl);
+  await signingUp.reauthenticate();
+  expect(signingUp.getSnapshot().status).toBe("signed-out");
+  expect(await other.state()).toMatchObject({ status: "ready", account: guest });
+
+  // The other tab hears of it (the account store's storage event, the
+  // sign-out's broadcast) once its backend requests go on.
+  await other.holdBackend(false);
+  await waitForCondition(
+    async () => (await other.state()).status === "signed-out",
+    15_000,
+    "The other tab should sign out of the account the guest became",
+  );
+  expect((await other.state()).account).toBeUndefined();
 }, 120_000);

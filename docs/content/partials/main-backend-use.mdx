@@ -1,18 +1,18 @@
 ## Connect the browser
 
-The browser talks to `/jazz` on the same origin by default, so there's no `serverUrl` to set, and your
-app's own session cookie is all it needs. It needs no Jazz API key or token:
+The browser talks to `/jazz` on the same origin by default and signs in with your app's own
+session cookie:
 
 ```tsx title="App.tsx"
-<JazzProvider signedOut={<SignIn />}>
+<JazzProvider config={{ serverUrl: "/jazz" }} signedOut={<SignIn />}>
   <App />
 </JazzProvider>
 ```
 
 The client asks your backend who is signed in: `authenticate` answers, and the client gets the
 account, identity and claims as plain data. It asks again when the app starts, when the page regains
-focus and when another tab signs in or out. After your own sign-in or sign-out, call
-`reauthenticate()` from `useJazzAuth()`. Every sync connection asks `authenticate` again, so a
+focus and when another tab signs in or out. Your backend decides who is signed in; after your own
+sign-in or sign-out, call `refresh()` from `useJazzSession()` and the session follows its answer. Every sync connection asks `authenticate` again, so a
 sign-out on the server or changed claims apply without client code. See
 [How Auth Works in Jazz](/docs/setup/auth/backend#in-the-browser).
 
@@ -33,6 +33,11 @@ await jazz.db.insert(app.auditLog, { event: "invoice.paid" });
 `await jazz.forReqUser(request)` runs your `authenticate` and returns a database with that user's
 policies and authorship. It's the default for anything a user triggers: route handlers, server
 actions, server components. Concurrent requests stay isolated.
+
+<Callout type="info" title="One handle per request">
+  Call `jazz.forReqUser(request)` in each request that needs it. Don't keep the handle it returns in
+  module-level state: it belongs to that request's user.
+</Callout>
 
 ```ts title="app/api/todos/route.ts"
 import { jazz } from "@/jazz.server";
@@ -81,7 +86,7 @@ const account = await jazz.createAccountFor(user.userId);
 ```
 
 Once a user has an account, a guest can no longer link to them, so don't call `createAccountFor` in
-a sign-up flow whose browser may hold a local-first guest. To tell the error apart, use
+a sign-up flow whose browser may hold a guest's device account. To tell the error apart, use
 `isNoJazzAccountError(error)` from `jazz-tools/backend`.
 
 A browser whose user no longer has an account on the core, for example after a reset dev store or

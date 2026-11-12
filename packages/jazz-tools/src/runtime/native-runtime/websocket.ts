@@ -1,5 +1,5 @@
 import { inProcessWebSocketFor } from "../in-process-transport.js";
-import { sameOriginWebSocketConstructor } from "./http-stream-socket.js";
+import { httpStreamFallbackWebSocket } from "./http-stream-socket.js";
 import { Utf8Decoder } from "../utf8.js";
 import { httpUrlToWs } from "../url.js";
 import { mapAuthReason } from "../auth-state.js";
@@ -42,6 +42,27 @@ export class PreHelloWireError extends Error {
  */
 export function isReconnectLaterWireError(error: WireError): boolean {
   return error.retry === "later" && (error.code === "not_ready" || error.code === "backpressure");
+}
+
+/** How the app's backend starts the message of a planned re-authentication. */
+export const REAUTHENTICATE_WIRE_MESSAGE_PREFIX = "reauthenticate:";
+
+/**
+ * Whether the server ended an admitted session because the expiry its app's
+ * auth gave it is near, asking the client to connect again so the app's
+ * `authenticate` decides with the client's current credential. It is an
+ * `auth_failed` error with `after_resume` retry whose message starts with
+ * {@link REAUTHENTICATE_WIRE_MESSAGE_PREFIX}: the core sends the same code
+ * and retry for other refusals (a session that no longer matches), which
+ * stay refusals. A client that doesn't know it treats it as a refused
+ * credential and asks its backend again.
+ */
+export function isReauthenticateWireError(error: WireError): boolean {
+  return (
+    error.code === "auth_failed" &&
+    error.retry === "after_resume" &&
+    error.message.startsWith(REAUTHENTICATE_WIRE_MESSAGE_PREFIX)
+  );
 }
 
 /**
@@ -333,11 +354,13 @@ export class WebSocketCarrier {
         this.close();
       });
     });
-    this.socket.addEventListener("error", () => {
+    this.socket.addEventListener("error", (event) => {
       this.reportTerminal({
         code: "websocket_error",
         retry: "later",
-        message: "websocket transport error",
+        // A native socket's error event says nothing; the HTTP stream and a
+        // backend client's failed upgrade hand an Error that does.
+        message: event instanceof Error ? event.message : "websocket transport error",
       });
     });
     this.socket.addEventListener("close", (event) => {
@@ -752,7 +775,7 @@ export async function bytesFromWebSocketMessage(data: unknown): Promise<Uint8Arr
  * can't upgrade WebSockets (see `http-stream-socket.ts`). */
 function defaultWebSocketConstructor(url: string): WebSocketConstructor {
   const native = browserWebSocketConstructor();
-  return isSameOriginEndpoint(url) ? sameOriginWebSocketConstructor(native) : native;
+  return isSameOriginEndpoint(url) ? httpStreamFallbackWebSocket(native) : native;
 }
 
 function isSameOriginEndpoint(url: string): boolean {

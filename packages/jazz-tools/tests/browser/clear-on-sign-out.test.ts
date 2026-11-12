@@ -1,7 +1,7 @@
 import { afterEach, expect, it } from "vitest";
 import { schema } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
-import { createJazzClient } from "../../src/session/create-jazz-session.js";
+import { openBrowserSessionCore as createJazzClient } from "../../src/session/create-jazz-session.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
 import { resolveDefaultPersistentDbName } from "../../src/runtime/db.js";
 import { isThinDb } from "../../src/runtime/local-first-upgrade.js";
@@ -38,7 +38,10 @@ async function vfsPath(physicalName: string): Promise<string> {
   const digest = new Uint8Array(
     await crypto.subtle.digest("SHA-256", new TextEncoder().encode(physicalName)),
   );
-  const hex = [...digest.slice(0, 16)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  const hex = digest
+    .slice(0, 16)
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
   return `/jazz-${hex}.sqlite`;
 }
 
