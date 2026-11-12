@@ -66,7 +66,11 @@ client has now:
 - **Their claims changed** (say their role): the new connection carries the new claims, so your
   policies see them from then on.
 - **No one, or someone else:** the connection is refused, and the browser asks your backend who is
-  signed in. Once a second answer agrees, it signs the user out.
+  signed in. In a tab that is in view, a second answer about two seconds later confirms it, and
+  Jazz signs the user out (after `onSignedOut`). A tab in the background waits until it is in view
+  again. Writes made in between don't sync. At the sign-out, a thin client drops them, and a
+  local-first one keeps them on the device for that user's next sign-in (with `clearOnSignOut`,
+  it wipes them). Either way, Jazz logs how many there were.
 
 So a sign-out on another device, a ban or a changed role reaches an open connection within
 `sessionTtlSeconds` at the latest. To end a user's open connections at once, call
