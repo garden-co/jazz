@@ -150,8 +150,10 @@ Sometimes access isn't determined by ownership or a parent relationship, but by 
 
 The callback form `(todo) => ...` gives you access to the current row, so you can correlate it with rows in other tables.
 
-A column you correlate on must be declared as a relation with `s.rel` in your schema. Correlating on
-a plain UUID column fails validation with `JoinNotRefCompatible`.
+One correlation links the two rows: the one on the other table's `id`, if there is one. It must
+follow a relation, either `id` against a column declared with `s.rel` to that table, or two columns
+that are relations to the same table; otherwise validation fails with `JoinNotRefCompatible`.
+Further correlations, such as `authUserId: row.authUserId`, only need comparable column types.
 
 To match the `userId` your `authenticate` returned (for example an `assignee` text column holding
 your auth's user ids), compare with `session.identity.subject`: `session.user` is the Jazz account,

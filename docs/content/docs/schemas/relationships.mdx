@@ -23,9 +23,9 @@ const schema = {
 ```
 
 A UUID column without an `s.rel` stays an ordinary UUID column: queries can't include through it
-and policies can't follow it. In particular, `exists` rules that correlate across tables need the
-column declared with `s.rel`; a plain `s.uuid()` column fails validation with
-`JoinNotRefCompatible`.
+and policies can't follow it. In particular, the correlation that links the two rows of an `exists` rule must follow a
+relation; a plain `s.uuid()` column there fails validation with `JoinNotRefCompatible` (see
+[Share-based access](/docs/schemas/policies#share-based-access)).
 
 ## Optional and many
 
