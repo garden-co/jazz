@@ -845,4 +845,11 @@ describe("payload enum decoding", () => {
       expect(() => unwrapValue(value, payloadType)).toThrow("Invalid payload enum result");
     },
   );
+
+  it("keeps payload enums positional when no column type is available", () => {
+    expect(unwrapValue(encoded)).toEqual({ type: "message", values: ["hello", 3] });
+    expect(unwrapValue({ type: "Row", value: { values: [encoded] } })).toEqual([
+      { type: "message", values: ["hello", 3] },
+    ]);
+  });
 });

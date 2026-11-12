@@ -299,10 +299,15 @@ export function unwrapValue(v: WasmValue, columnType?: ColumnType, columnName?: 
     case "Null":
       return null;
     case "Enum": {
-      const entry =
-        columnType?.type === "EnumPayload"
-          ? columnType.cases.find((candidate) => candidate.name === v.value.case)
-          : undefined;
+      if (columnType?.type !== "EnumPayload") {
+        // Untyped paths (generic Row/Array fallbacks, direct runtime callers) have no
+        // field names to decode against; keep the case and values positionally.
+        return {
+          type: v.value.case,
+          values: v.value.values.map((entry) => unwrapValue(entry)),
+        };
+      }
+      const entry = columnType.cases.find((candidate) => candidate.name === v.value.case);
       if (!entry || entry.fields.length !== v.value.values.length)
         throw new Error("Invalid payload enum result");
       return {
