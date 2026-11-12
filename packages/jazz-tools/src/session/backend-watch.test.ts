@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle, type AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
-import { watchBackendUser, type BackendUser } from "./backend-watch.js";
+import { browserSingleFlight, watchBackendUser, type BackendUser } from "./backend-watch.js";
 import { followUser } from "./follow-user.js";
 import { createJazzSessionOwner } from "./state.js";
 
@@ -21,6 +21,7 @@ async function setup(
     noBackend?: boolean;
     clearOnSignOut?: boolean;
     visible?: boolean;
+    onSignedOut?: () => "sign-out" | "keep" | void | Promise<"sign-out" | "keep" | void>;
     forgotten?: (account: AccountHandle) => Promise<boolean>;
   } = {},
 ) {
@@ -95,6 +96,7 @@ async function setup(
       reconnectBackoffMs: 20,
       refusedConfirmMs: 30,
       notFoundRetryMs: 10,
+      onSignedOut: options.onSignedOut,
       forgotten: options.forgotten,
     },
   );
@@ -210,6 +212,22 @@ it("signs out a guest another tab linked at once on reauthenticate", async () =>
   await t.session.close();
 });
 
+it("never lets onSignedOut keep a guest another tab linked to someone else", async () => {
+  const onSignedOut = vi.fn(() => "keep" as const);
+  const t = await setup(guest, {
+    clearOnSignOut: true,
+    forgotten: async (account) => account === guest,
+    onSignedOut,
+  });
+  await settle();
+  await t.watch.reauthenticate();
+  expect(onSignedOut).not.toHaveBeenCalled();
+  expect(t.session.getSnapshot().status).toBe("signed-out");
+  expect(t.events).toEqual(["wipe:guest", "close:guest"]);
+  t.watch.stop();
+  await t.session.close();
+});
+
 it("doesn't sign out, or wipe with clearOnSignOut, on one signed-out answer", async () => {
   const t = await setup(user("alice"), { clearOnSignOut: true });
   t.signIn(user("alice"));
@@ -229,6 +247,127 @@ it("doesn't sign out, or wipe with clearOnSignOut, on one signed-out answer", as
   t.watch.stop();
   await t.session.close();
 });
+
+it("asks the app's onSignedOut before a confirmed sign-out, and keeps the user when it says so", async () => {
+  let decision: "sign-out" | "keep" = "keep";
+  const onSignedOut = vi.fn(() => decision);
+  const t = await setup(user("alice"), { clearOnSignOut: true, onSignedOut });
+  t.signIn(user("alice"));
+  await settle();
+  // The backend says no one (a session the app's auth lost): confirmed, and
+  // the app keeps the user, say because it refreshes its session itself.
+  t.signIn(null);
+  t.focus();
+  await settle(30);
+  expect(onSignedOut).toHaveBeenCalledOnce();
+  expect(t.session.getSnapshot()).toMatchObject({ status: "ready" });
+  expect(t.events).toEqual([]);
+  // One signed-out answer that the second one doesn't confirm never asks.
+  t.signIn(user("alice"));
+  t.probe.mockResolvedValueOnce(null);
+  t.focus();
+  await settle(30);
+  expect(onSignedOut).toHaveBeenCalledOnce();
+  // The next confirmed answer asks again; this time the app lets go.
+  t.signIn(null);
+  decision = "sign-out";
+  t.focus();
+  await settle(30);
+  expect(onSignedOut).toHaveBeenCalledTimes(2);
+  expect(t.session.getSnapshot().status).toBe("signed-out");
+  expect(t.events).toEqual(["wipe:alice", "close:alice"]);
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("signs out when the app's onSignedOut throws or answers nothing", async () => {
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    for (const onSignedOut of [
+      () => {
+        throw new Error("hook failed");
+      },
+      async () => undefined,
+    ]) {
+      const t = await setup(user("alice"), { onSignedOut });
+      t.signIn(user("alice"));
+      await settle();
+      t.signIn(null);
+      t.focus();
+      await settle(30);
+      expect(t.session.getSnapshot().status).toBe("signed-out");
+      t.watch.stop();
+      await t.session.close();
+    }
+    expect(error).toHaveBeenCalledWith(
+      "Jazz: onSignedOut threw, so the session signs out.",
+      expect.any(Error),
+    );
+  } finally {
+    error.mockRestore();
+  }
+});
+
+it(
+  "lets a browser's windows ask the backend one at a time, sharing a fresh answer",
+  { timeout: 20_000 },
+  async () => {
+    // Two windows of one browser: one lock manager, one broadcast channel name.
+    const queue: Array<() => Promise<unknown>> = [];
+    let running: Promise<unknown> | undefined;
+    const locks = {
+      request: (_name: string, run: () => Promise<unknown>) =>
+        new Promise((resolve, reject) => {
+          queue.push(() => run().then(resolve, reject));
+          const pump = (): void => {
+            if (running || !queue.length) return;
+            running = queue.shift()!().finally(() => {
+              running = undefined;
+              pump();
+            });
+          };
+          pump();
+        }),
+    };
+    const stored = new Map<string, string>();
+    vi.stubGlobal("navigator", { locks });
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => stored.get(key) ?? null,
+      setItem: (key: string, value: string) => void stored.set(key, value),
+      removeItem: (key: string) => void stored.delete(key),
+    });
+    try {
+      const windowA = browserSingleFlight("jazz-account:test:probe")!;
+      const windowB = browserSingleFlight("jazz-account:test:probe")!;
+      let inFlight = 0;
+      let most = 0;
+      let probes = 0;
+      const probe = async () => {
+        probes += 1;
+        inFlight += 1;
+        most = Math.max(most, inFlight);
+        await settle(20);
+        inFlight -= 1;
+        return { subject: "alice", n: probes };
+      };
+      // Both wake at once: one probe, the other window takes its answer.
+      const [a, b] = await Promise.all([windowA(probe), windowB(probe)]);
+      expect(most).toBe(1);
+      expect(probes).toBe(1);
+      expect(a).toEqual({ subject: "alice", n: 1 });
+      expect(b).toEqual(a);
+      // A later ask is a fresh probe, not the old answer.
+      await settle(5);
+      expect(await windowB(probe)).toEqual({ subject: "alice", n: 2 });
+      // Who is signed in doesn't stay on the device: the answer is gone soon.
+      expect(stored.size).toBe(1);
+      await new Promise((resolve) => setTimeout(resolve, 10_050));
+      expect(stored.size).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  },
+);
 
 it("follows the backend at once on reauthenticate, and only reconnects on a refusal", async () => {
   const t = await setup(user("alice"));

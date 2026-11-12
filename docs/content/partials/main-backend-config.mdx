@@ -2,7 +2,8 @@
   the versions your code imports (so rolling back your application also returns to the schema and
   permissions of that version).
 - `authenticate(request)` reads your own session (a cookie, a header) and returns
-  `{ userId, claims? }`, or `null` when signed out. Jazz uses it for every operation that needs
+  `{ userId, expiresAt, claims? }` (`expiresAt`: when that session expires, in Unix seconds), or
+  `null` when signed out. Jazz uses it for every operation that needs
   authentication: sign-ins, sync connections and `forReqUser`.
   If your provider issues JWTs, [`fromJWT()`](/docs/setup/auth/custom#tokens-from-your-identity-provider)
   is a ready-made `authenticate`. See [How Auth Works in Jazz](/docs/setup/auth/backend).

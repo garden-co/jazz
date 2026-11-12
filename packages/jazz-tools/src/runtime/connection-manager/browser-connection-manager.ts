@@ -531,6 +531,10 @@ export class BrowserConnectionManager extends ConnectionManager {
     await this.storageReset;
   }
 
+  override isUsable(): boolean {
+    return !this.shutdownStarted && !this.storageReset && !this.storageResetError;
+  }
+
   override async openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort> {
     await waitForInspectorOpening(this.connectionReady ?? Promise.resolve(), signal);
     if (!this.connection) throw new Error("Shared browser runtime is not connected");

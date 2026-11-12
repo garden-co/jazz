@@ -5,6 +5,9 @@ import { switchJazzSessionUser, type JazzSession } from "./state.js";
 const LOCAL_FIRST_ISSUER = "urn:jazz:local-first";
 const SYSTEM_ISSUER = "urn:jazz:system";
 
+/** What an app's `onSignedOut` hook decides (see `watchBackendUser`). */
+export type SignedOutDecision = "sign-out" | "keep";
+
 export interface BackendWatchEvents {
   /** Call `check` when the page or app comes back to the foreground. */
   onFocus(check: () => void): () => void;
@@ -12,6 +15,15 @@ export interface BackendWatchEvents {
   crossTab?: { post(): void; listen(check: () => void): () => void };
   /** Whether the page or app is in the foreground now (its cookies are fresh). */
   isVisible?(): boolean;
+  /**
+   * Run `probe` so that the windows of one browser ask the backend one at a
+   * time, never at once, and a window waiting its turn takes the answer of a
+   * probe that started after it asked instead of asking again. Several
+   * windows asking at once (on focus after a laptop wakes) each carry the
+   * session cookie, and auth middleware on the route may refresh it once per
+   * request: with single-use refresh tokens, all but one refresh fail.
+   */
+  singleFlight?<T>(probe: () => Promise<T>): Promise<T>;
 }
 
 /**
@@ -138,6 +150,16 @@ export function watchBackendUser<Client>(
      * to a minute. Default 2s.
      */
     retryMs?: number;
+    /**
+     * Called when your backend says no one is signed in any more (confirmed
+     * by a second answer a moment later), before the session signs the
+     * user out. Return `"keep"` to stay signed in for now (your app refreshed
+     * its session itself, or redirects to sign-in first): the session asks
+     * your backend again on the next focus, refusal or `reauthenticate()`.
+     * Return `"sign-out"` (or nothing) to sign out. A hook that throws signs
+     * out.
+     */
+    onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
     /**
      * Whether this device forgot a guest's account: another tab linked it
      * to a user (their sign-up) under `clearOnSignOut`, so it is theirs now.
@@ -416,6 +438,8 @@ export function watchBackendUser<Client>(
       return attempt(session.loginWithBackend());
     }
     signedOutLink = undefined;
+    // A guest that is someone else's account now: the app can't keep it.
+    let forgottenGuest = false;
     if (!backendUser) {
       // A guest another tab linked to a user, who has signed out since: the
       // account is theirs, so it signs out here too (and, with
@@ -424,6 +448,7 @@ export function watchBackendUser<Client>(
       const forgotten = await options.forgotten(startedWith).catch(() => false);
       if (!forgotten) return;
       if (quiet(asked)) return busy();
+      forgottenGuest = true;
     }
     if (refused) {
       // Never sign out on a refusal alone (the cookie may be stale), but a
@@ -444,7 +469,21 @@ export function watchBackendUser<Client>(
     // The app moved on meanwhile (signed out itself, continued as a guest,
     // signed someone in): that account is not the one this answer was about.
     if (session.getSnapshot().account !== startedWith) return busy();
+    if (!forgottenGuest) {
+      if ((await askSignedOut()) === "keep" || quiet(asked)) return;
+      if (session.getSnapshot().account !== startedWith) return busy();
+    }
     return attempt(session.logout());
+  }
+  /** The app's `onSignedOut` decision; a hook that fails signs out. */
+  async function askSignedOut(): Promise<SignedOutDecision> {
+    if (!options.onSignedOut) return "sign-out";
+    try {
+      return (await options.onSignedOut()) === "keep" ? "keep" : "sign-out";
+    } catch (cause) {
+      console.error("Jazz: onSignedOut threw, so the session signs out.", cause);
+      return "sign-out";
+    }
   }
   /** Run `run` once the session is no longer mid-transition (or now). */
   function whenSettled(run: () => void) {
@@ -640,6 +679,76 @@ export function browserBackendWatchEvents(channelName: string): BackendWatchEven
     },
     crossTab,
     isVisible: () => typeof document === "undefined" || document.visibilityState === "visible",
+    singleFlight: browserSingleFlight(`${channelName}:probe`),
+  };
+}
+
+/**
+ * How long a shared answer stays in `localStorage`: long enough for the
+ * windows queued behind the lock, so who is signed in isn't kept on the
+ * device past that (a sign-out with `clearOnSignOut` leaves nothing behind).
+ */
+const SHARED_ANSWER_MS = 10_000;
+
+/**
+ * {@link BackendWatchEvents.singleFlight} for the windows of one browser: a
+ * Web Lock takes turns, and the answer is left in `localStorage` before the
+ * lock is let go, so the window that takes it next reads it at once. The
+ * answer is removed again after {@link SHARED_ANSWER_MS}. Where either is
+ * missing, every probe runs on its own.
+ */
+export function browserSingleFlight(
+  name: string,
+): (<T>(probe: () => Promise<T>) => Promise<T>) | undefined {
+  const locks = globalThis.navigator?.locks;
+  const storage = (() => {
+    try {
+      return globalThis.localStorage ?? undefined;
+    } catch {
+      return undefined;
+    }
+  })();
+  if (!locks || !storage) return undefined;
+  const forget = (stored?: string) => {
+    try {
+      if (stored === undefined || storage.getItem(name) === stored) storage.removeItem(name);
+    } catch {
+      // Storage off: nothing was kept.
+    }
+  };
+  const read = (): { startedAt: number; value: unknown } | undefined => {
+    try {
+      const stored = storage.getItem(name);
+      if (!stored) return undefined;
+      const answer = JSON.parse(stored) as { startedAt: number; value: unknown };
+      if (Date.now() - answer.startedAt > SHARED_ANSWER_MS) {
+        forget(stored);
+        return undefined;
+      }
+      return answer;
+    } catch {
+      return undefined;
+    }
+  };
+  return <T>(probe: () => Promise<T>) => {
+    const askedAt = Date.now();
+    return locks.request(name, async () => {
+      // Another window's probe started after this one asked: its answer is
+      // as fresh as this window's own would be.
+      const latest = read();
+      if (latest && latest.startedAt >= askedAt) return latest.value as T;
+      const startedAt = Date.now();
+      const value = await probe();
+      try {
+        const stored = JSON.stringify({ startedAt, value });
+        storage.setItem(name, stored);
+        const expire = setTimeout(() => forget(stored), SHARED_ANSWER_MS);
+        (expire as unknown as { unref?: () => void }).unref?.();
+      } catch {
+        // Storage full or off: this window's answer is its own.
+      }
+      return value;
+    }) as Promise<T>;
   };
 }
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { createJazzSessionOwner } from "./state.js";
 import { createJazzAppOwner } from "./app.js";
@@ -416,18 +416,18 @@ describe("shared Jazz application lifecycle", () => {
     expect(app.getSnapshot().status).toBe("signed-out");
     await app.dispose();
   });
-  it("repeats logout after an unknown shutdown failure without reopening the account", async () => {
+  it("still signs out after an unknown shutdown failure, without reopening the account", async () => {
     const f = await setup();
     const app = createJazzAppOwner({}, async () => f.session);
     await tick();
     await app.sessionActions.createLocalFirst();
     f.failUnknownShutdown(true);
-    await expect(app.logout()).rejects.toThrow("unknown shutdown failure");
-    expect(f.session.getSnapshot()).toMatchObject({ status: "error", recovery: "action" });
-    expect(app.getSnapshot()).toMatchObject({ status: "error", recovery: "action" });
-    f.failUnknownShutdown(false);
-    await app.retry();
-    expect(app.getSnapshot().status).toBe("signed-out");
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    await app.logout();
+    error.mockRestore();
+    // The user asked to leave: signed out, with the failure logged.
+    expect(f.session.getSnapshot().status).toBe("signed-out");
+    expect(app.getSnapshot()).toMatchObject({ status: "signed-out", error: undefined });
     expect(f.events.filter((event) => event === "open:local")).toHaveLength(1);
     await app.dispose();
   });
