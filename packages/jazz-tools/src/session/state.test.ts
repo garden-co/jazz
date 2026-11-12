@@ -8,6 +8,10 @@ import {
 } from "./state.js";
 import type { JWTAuth } from "../accounts/enrollment.js";
 import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
+import {
+  isStoreHeldByAnotherTabError,
+  StoreHeldByAnotherTabError,
+} from "../runtime/store-held-by-another-tab-error.js";
 import { markThinDb } from "../runtime/local-first-upgrade.js";
 const handle = (id: string) =>
   Object.freeze({ id, identity: { issuer: "test", subject: id } }) as AccountHandle;
@@ -606,6 +610,89 @@ describe("Jazz session: failures that leave a client usable (K2)", () => {
     // Tried again once the worker is back, it signs out.
     await session.logout();
     expect(session.getSnapshot().status).toBe("signed-out");
+  });
+
+  // #5139: another tab holds the store as the guest this user signed up from,
+  // and didn't let go within the patience. The sign-out reports that, rather
+  // than a configuration error, and works once the other tab is gone.
+  it("stays ready with the client when another tab holds the store past the wipe's patience", async () => {
+    const { session, client, db, enrollment, old } = await wipingSetup();
+    const failure = new StoreHeldByAnotherTabError();
+    db.deleteClientStorage.mockRejectedValueOnce(failure);
+    await expect(session.logout()).rejects.toSatisfy(isStoreHeldByAnotherTabError);
+    expect(enrollment.logout).not.toHaveBeenCalled();
+    expect(client.shutdown).not.toHaveBeenCalled();
+    expect(session.getSnapshot()).toMatchObject({
+      status: "ready",
+      account: old,
+      client,
+      error: failure,
+      recovery: "action",
+    });
+    await session.logout();
+    expect(db.deleteClientStorage).toHaveBeenCalledTimes(2);
+    expect(session.getSnapshot().status).toBe("signed-out");
+  });
+
+  it("hands a clearOnSignOut sign-out to the host's wipe, which closes the client itself", async () => {
+    const old = handle("old");
+    const accounts = new AccountManager(
+      {
+        createLocalFirst: vi.fn(() => old),
+        restoreLocalFirst: vi.fn(() => old),
+        logout: vi.fn(),
+        loginWithBackend: vi.fn(async () => handle("next")),
+        linkWithBackend: vi.fn(async (_account: AccountHandle) => handle("next")),
+      },
+      old,
+    );
+    const db = { deleteClientStorage: vi.fn(async () => {}), markReplaced: vi.fn() };
+    const client = { db, shutdown: vi.fn(async () => {}) };
+    const wipeSignedOut = vi.fn(async (_client: typeof client, _account: AccountHandle) => {});
+    const session = await createJazzSessionOwner({
+      accounts,
+      clearOnSignOut: true,
+      openClient: async () => client,
+      wipeSignedOut,
+    });
+    await session.logout();
+    expect(wipeSignedOut).toHaveBeenCalledWith(client, old);
+    expect(db.deleteClientStorage).not.toHaveBeenCalled();
+    expect(db.markReplaced).toHaveBeenCalledWith("signed-out");
+    expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+    expect(session.getSnapshot().error).toBeUndefined();
+  });
+
+  it("signs out with the wipe's failure as its error when the host's wipe fails", async () => {
+    const old = handle("old");
+    const accounts = new AccountManager(
+      {
+        createLocalFirst: vi.fn(() => old),
+        restoreLocalFirst: vi.fn(() => old),
+        logout: vi.fn(),
+        loginWithBackend: vi.fn(async () => handle("next")),
+        linkWithBackend: vi.fn(async (_account: AccountHandle) => handle("next")),
+      },
+      old,
+    );
+    // The client is closed by then: the failure is the wipe's, after teardown.
+    const db = { isUsable: () => false, markReplaced: vi.fn() };
+    const client = { db, shutdown: vi.fn(async () => {}) };
+    const failure = new Error("the wipe's open failed");
+    const session = await createJazzSessionOwner({
+      accounts,
+      clearOnSignOut: true,
+      openClient: async () => client,
+      wipeSignedOut: async () => {
+        throw failure;
+      },
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    await session.logout();
+    error.mockRestore();
+    expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+    expect(session.getSnapshot().error?.message).toContain("couldn't finish wiping");
+    expect(session.getSnapshot().error?.cause).toBe(failure);
   });
 
   it("stays ready with the client when a sign-in's teardown fails before it began", async () => {
