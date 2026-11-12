@@ -1,23 +1,18 @@
 <!-- #region auth-external-svelte -->
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import { createAccountManager, type DbConfig } from "jazz-tools";
-  import { JazzSvelteProvider, accountState } from "jazz-tools/svelte";
-  let { accounts, config, children }: {
-    accounts: Awaited<ReturnType<typeof createAccountManager>>;
-    config: Omit<DbConfig, "account">;
-    children: Snippet;
-  } = $props();
-  // Keep this app-owned manager stable for the lifetime of the login screen.
-  const selection = $derived(accountState(accounts));
-  // Login starts outside a context. Before linking, await the old context's
-  // shutdown({ waitForSync: true }), then call accounts.linkWithBackend outside it.
-  function signIn() { void accounts.loginWithBackend().catch(() => {}); }
+  import { JazzProvider, sessionState, type JazzClient, type JazzSession } from "jazz-tools/svelte";
+  // A session you opened with await createJazzClient({ serverUrl: "/jazz" }).
+  let { session, children }: { session: JazzSession<JazzClient>; children: Snippet } = $props();
+  const state = $derived(sessionState(session));
+  // After your own sign-in has set its session cookie, ask your backend who is signed in.
+  function signIn() { void state.refresh().catch(() => {}); }
 </script>
-{#if $selection.account}
-  <JazzSvelteProvider config={{ ...config, account: $selection.account }}>{@render children()}</JazzSvelteProvider>
-{:else}
-  <button disabled={!!$selection.pending} onclick={signIn}>Sign in</button>
-  {#if $selection.error}<p role="alert">{$selection.error.message}</p>{/if}
-{/if}
+<JazzProvider {session}>
+  {@render children()}
+  {#snippet signedOut()}
+    <button disabled={!!$state.pending} onclick={signIn}>Sign in</button>
+    {#if $state.error}<p role="alert">{$state.error.message}</p>{/if}
+  {/snippet}
+</JazzProvider>
 <!-- #endregion auth-external-svelte -->

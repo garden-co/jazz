@@ -1,6 +1,4 @@
 import { todoCrudTest } from "../../../../testing/todo-app-scenarios.js";
-import { createAccountManager } from "jazz-tools";
-import { prepareTestAccount } from "../../../../testing/accounts.js";
 /**
  * E2E browser tests for the React todo app.
  *
@@ -13,7 +11,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
 import { SCOPE, SERVER_URL } from "./test-constants.js";
-import type { DbConfig } from "jazz-tools";
+import type { AccountStore } from "jazz-tools";
+import { createJazzClient, type JazzClient, type JazzSession } from "jazz-tools/react";
+import { sessionConfig, type SessionOverrides } from "../../src/account.js";
+import { memoryAccountStore } from "./memory-account-store.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -44,43 +45,44 @@ describe("React Todo App E2E", () => {
     root: Root;
     container: HTMLDivElement;
     storageNamespace: string | undefined;
+    session: JazzSession<JazzClient> | undefined;
   }> = [];
 
-  /** Mount the real App. Returns the container element. */
+  /**
+   * Mount the real App on its own device account (a fresh one unless `store`
+   * holds one), or on the device account `deviceKey` restores.
+   */
   async function mountApp(
     config: {
-      account?: DbConfig["account"];
       appId?: string;
       serverUrl?: string;
-      secret?: string;
-      adminSecret?: string;
-      driver?: DbConfig["driver"];
+      deviceKey?: string;
+      store?: AccountStore;
+      driver?: SessionOverrides["driver"];
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
     document.body.appendChild(el);
     const r = createRoot(el);
-    const { secret, adminSecret: _adminSecret, ...overrides } = config;
-    const account =
-      overrides.account ??
-      (await prepareTestAccount(
-        createAccountManager,
-        overrides.appId ?? "test-app",
-        overrides.serverUrl ?? SERVER_URL,
-        secret,
-      ));
-    const resolvedConfig = {
-      appId: config.appId ?? "test-app",
-      driver: { type: "persistent" as const, dbName: crypto.randomUUID() },
+    const { deviceKey, ...overrides } = config;
+    const resolvedConfig: SessionOverrides = {
+      appId: "test-app",
+      store: memoryAccountStore(),
+      driver: { type: "persistent", dbName: crypto.randomUUID() },
       ...overrides,
-      account,
     };
+    // A fixed device key: open signed out, then restore that account.
+    let session: JazzSession<JazzClient> | undefined;
+    if (deviceKey !== undefined) {
+      session = await createJazzClient(sessionConfig({ ...resolvedConfig, initial: "signed-out" }));
+      await session.restoreDeviceAccount(deviceKey);
+    }
     const storageNamespace =
       resolvedConfig.driver?.type === "persistent" ? resolvedConfig.driver.dbName : undefined;
-    mounts.push({ root: r, container: el, storageNamespace });
+    mounts.push({ root: r, container: el, storageNamespace, session });
 
     await act(async () => {
-      r.render(<App config={resolvedConfig} />);
+      r.render(session ? <App session={session} /> : <App config={resolvedConfig} />);
     });
 
     // Wait for JazzProvider to initialize and TodoList to render
@@ -97,8 +99,10 @@ describe("React Todo App E2E", () => {
   async function unmountApp(el: HTMLDivElement): Promise<void> {
     const idx = mounts.findIndex((m) => m.container === el);
     if (idx === -1) return;
-    const { root, storageNamespace } = mounts[idx];
+    const { root, storageNamespace, session } = mounts[idx];
     await act(async () => root.unmount());
+    // The provider doesn't close a session it was given.
+    await session?.close();
     el.remove();
     mounts.splice(idx, 1);
 
@@ -141,10 +145,11 @@ describe("React Todo App E2E", () => {
 
   it("persists todos across app unmount and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
-    const account = await prepareTestAccount(createAccountManager, "test-app", SERVER_URL);
+    // One store: the second mount reopens the same device account.
+    const store = memoryAccountStore();
 
     // First session: mount app, add a todo via the form
-    const el1 = await mountApp({ account, driver: { type: "persistent", dbName } });
+    const el1 = await mountApp({ store, driver: { type: "persistent", dbName } });
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
     const form1 = input1.closest("form")!;
 
@@ -163,7 +168,7 @@ describe("React Todo App E2E", () => {
     await unmountApp(el1);
 
     // Second session: remount with same dbName — IndexedDB data should load
-    const el2 = await mountApp({ account, driver: { type: "persistent", dbName } });
+    const el2 = await mountApp({ store, driver: { type: "persistent", dbName } });
 
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,
@@ -182,12 +187,12 @@ describe("React Todo App E2E", () => {
     const el1 = await mountApp({
       appId: SCOPE,
       serverUrl,
-      secret: "jazz-auth-v1:Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
+      deviceKey: "jazz-auth-v1:Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
     });
     const el2 = await mountApp({
       appId: SCOPE,
       serverUrl,
-      secret: "jazz-auth-v1:VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg",
+      deviceKey: "jazz-auth-v1:VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg",
     });
 
     // Let both app instances finish server/event-stream setup before mutating.
@@ -225,13 +230,13 @@ describe("React Todo App E2E", () => {
     const el1 = await mountApp({
       appId: SCOPE,
       serverUrl,
-      secret: "jazz-auth-v1:disAKUpEX273joMo4f1NTW-tDTpc4bzPy_l5tvNLXnc",
+      deviceKey: "jazz-auth-v1:disAKUpEX273joMo4f1NTW-tDTpc4bzPy_l5tvNLXnc",
       driver: { type: "memory" },
     });
     const el2 = await mountApp({
       appId: SCOPE,
       serverUrl,
-      secret: "jazz-auth-v1:TqNBXTv_Mv7HBp3FZ6KtHJwBWvnkI7YcOlrS57d3eEs",
+      deviceKey: "jazz-auth-v1:TqNBXTv_Mv7HBp3FZ6KtHJwBWvnkI7YcOlrS57d3eEs",
       driver: { type: "memory" },
     });
 
