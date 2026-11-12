@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
+import { fetchFor } from "../runtime/in-process-transport.js";
 import { createJazz, vercel, vercelBlob } from "./index.js";
 import {
   defaultCoreName,
@@ -95,6 +96,8 @@ function fakeVercel(core: { appId: string; url: string }) {
     failing: false,
     /** The next `slowStarts` starts haven't run yet when the function looks. */
     slowStarts: 0,
+    /** Called when a start brings the core up. */
+    onStart: undefined as (() => void) | undefined,
   };
   const files = new Map<string, Buffer>([["/data/app-id", Buffer.from(`${core.appId}\n`)]]);
   const handle = (): SandboxHandle => ({
@@ -137,6 +140,7 @@ function fakeVercel(core: { appId: string; url: string }) {
         return;
       }
       state.failing = false;
+      state.onStart?.();
       if (!state.running || newerVersion(version, state.running)) state.running = version;
     },
     writeFiles: async (written) => {
@@ -343,6 +347,66 @@ describe("vercel() store", () => {
       createJazz({ app, permissions, store: vercel({ sdk: fake.sdk }) }).ready(),
     ).rejects.toThrow(/preview deployment's OIDC token is for .*environment:production/);
     expect(fake.calls).toEqual([]);
+  }, 60_000);
+
+  it("sends a request Vercel's router refused again once the core is back", async () => {
+    // Vercel's router in front of the Sandbox's port: while the core is down
+    // it answers itself, with its error header.
+    const router = { down: false, served: 0 };
+    const server = createServer((request, response) => {
+      if (router.down) {
+        response.writeHead(502, { "x-vercel-error": "SANDBOX_NOT_LISTENING" });
+        return response.end("SANDBOX_NOT_LISTENING");
+      }
+      if (request.url !== "/health") router.served++;
+      response.end("ok");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => server.close(resolve)));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const appId = randomUUID();
+    const fake = fakeVercel({ appId, url });
+    // A start brings the core back up.
+    fake.state.onStart = () => {
+      router.down = false;
+    };
+    const credential = oidcToken(await startIssuer());
+    const opened = await openVercelCore({
+      options: { sdk: fake.sdk, backendCredential: () => credential, name: "jazz-test" },
+      openRemote: ({ url: base }) =>
+        ({
+          serverUrl: base,
+          async handle(method: string, path: string) {
+            const response = await fetch(`${base}${path}`, { method });
+            const headers: string[][] = [];
+            response.headers.forEach((value, name) => headers.push([name, value]));
+            return {
+              status: response.status,
+              headers,
+              body: new Uint8Array(await response.arrayBuffer()),
+            };
+          },
+          close: async () => {},
+        }) as never,
+      version: "1.2.3",
+      env: { VERCEL_ENV: "production" },
+    });
+    cleanups.push(() => opened.close());
+
+    // The core stops while the Sandbox still runs, inside the window in
+    // which this instance trusts it without a check.
+    router.down = true;
+    const starts = fake.calls.filter((call) => call.startsWith("start")).length;
+    const answer = await opened.handle("GET", "/apps/x/schemas", [], new Uint8Array());
+    expect(answer.status).toBe(200);
+    expect(fake.calls.filter((call) => call.startsWith("start")).length).toBe(starts + 1);
+    expect(router.served).toBe(1);
+
+    // The backend's own requests (in-process) are sent again too.
+    router.down = true;
+    const response = await fetchFor(opened.serverUrl)(`${opened.serverUrl}/apps/x/schemas`);
+    expect(response.status).toBe(200);
+    expect(router.served).toBe(2);
   }, 60_000);
 
   it("stops the Sandbox of a core that can't start, and holds off retrying", async () => {

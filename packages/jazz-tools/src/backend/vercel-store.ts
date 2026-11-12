@@ -163,6 +163,11 @@ const MIN_LEFT_MS = 30_000;
 const NOT_LISTENING_RECYCLE_MS = 12_000;
 // How long a wake is trusted before the next request checks again.
 const ENSURE_FRESH_MS = 10_000;
+/**
+ * Vercel's router sets this on an answer it gave itself (the Sandbox isn't
+ * listening, or is stopping): the request never reached the core.
+ */
+const ROUTER_ERROR_HEADER = "x-vercel-error";
 const KEEPALIVE_MS = 30_000;
 
 // After a start that can't succeed, requests fail fast for this long
@@ -423,7 +428,12 @@ function coreOptions(
   };
 }
 
-let warnedNoBlobStore = false;
+/**
+ * Said once per process: a Next.js server bundles each route on its own, so
+ * a module-level flag would say it once per route that opens Jazz.
+ */
+const WARNED_NO_BLOB_STORE = Symbol.for("jazz-tools.vercel.warnedNoBlobStore");
+const warnedOnce = globalThis as { [WARNED_NO_BLOB_STORE]?: true };
 
 /**
  * Where a `vercel()` core keeps large values: as asked, or by default the
@@ -435,8 +445,8 @@ export function resolveCoreBlobs(
   warn: (message: string) => void = console.warn,
 ): VercelS3 | VercelBlob | undefined {
   const blobs = options.blobs ?? (connectedBlobStore(env) ? vercelBlob() : undefined);
-  if (blobs === undefined && !warnedNoBlobStore) {
-    warnedNoBlobStore = true;
+  if (blobs === undefined && !warnedOnce[WARNED_NO_BLOB_STORE]) {
+    warnedOnce[WARNED_NO_BLOB_STORE] = true;
     warn(
       "vercel(): no Blob store is connected to this project, so large values stay in the core's SQLite file. Connect one (Storage tab in the Vercel dashboard) and they go there from then on.",
     );
@@ -928,19 +938,30 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   let lastActivity = Date.now();
   let sockets = 0;
   let failed: { at: number; error: CoreStartError } | undefined;
+  /**
+   * The core `live` names stopped answering (Vercel's router refused a
+   * request, or a socket to it failed): the next `ensure` wakes it, health
+   * check included, instead of trusting it for `ENSURE_FRESH_MS`.
+   */
+  let suspect = false;
+  const distrust = () => {
+    suspect = true;
+  };
 
   const ensure = (): Promise<NonNullable<typeof live>> => {
     lastActivity = Date.now();
-    if (live && Date.now() - live.checkedAt < ENSURE_FRESH_MS) return Promise.resolve(live);
+    if (live && !suspect && Date.now() - live.checkedAt < ENSURE_FRESH_MS)
+      return Promise.resolve(live);
     if (failed && Date.now() - failed.at < START_FAILURE_HOLD_MS)
       return Promise.reject(failed.error);
     pending ??= (async () => {
       try {
-        if (live && (await getRunning())) {
+        if (live && !suspect && (await getRunning())) {
           live.checkedAt = Date.now();
           return live;
         }
         const { sbx, base } = await wake();
+        suspect = false;
         const coreAppId =
           live?.base === base
             ? live.appId
@@ -1010,10 +1031,19 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     fetch: async (input, init) => {
       const request = new Request(input, init);
       const url = new URL(request.url);
-      const inner = (await ensure()).core.serverUrl;
-      return fetchFor(inner)(new Request(`${inner}${url.pathname}${url.search}`, request));
+      const send = async (sent: Request) => {
+        const inner = (await ensure()).core.serverUrl;
+        return fetchFor(inner)(new Request(`${inner}${url.pathname}${url.search}`, sent));
+      };
+      const again = request.clone();
+      const response = await send(request);
+      if (!response.headers.has(ROUTER_ERROR_HEADER)) return response;
+      // Refused before it reached the core: wake it and send it again.
+      distrust();
+      void response.body?.cancel().catch(() => {});
+      return send(again);
     },
-    WebSocket: wakingWebSocket(async () => (await ensure()).core.serverUrl),
+    WebSocket: wakingWebSocket(async () => (await ensure()).core.serverUrl, distrust),
   });
 
   return {
@@ -1022,6 +1052,12 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     adminSecret: first.core.adminSecret,
     backendSecret: first.core.backendSecret,
     async handle(method, path, headers, body, access) {
+      const response = await (await ensure()).core.handle(method, path, headers, body, access);
+      if (!response.headers.some(([name]) => name!.toLowerCase() === ROUTER_ERROR_HEADER))
+        return response;
+      // Refused before it reached the core (a core stopping or restarting
+      // while this instance still trusted it): wake it and send it again.
+      distrust();
       return (await ensure()).core.handle(method, path, headers, body, access);
     },
     openSocket(headers, onEvent, access) {
@@ -1041,6 +1077,9 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
               headers,
               (error, event) => {
                 if (error || event.kind === "close") done();
+                // A dropped connection to the core: the client reconnects,
+                // and its next session finds the core awake again.
+                if (event.kind === "close" && event.code === 1006) distrust();
                 onEvent(error, event);
               },
               access,
@@ -1088,7 +1127,10 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
 }
 
 /** A WebSocket that wakes the core, then connects to wherever it now runs. */
-function wakingWebSocket(resolveOrigin: () => Promise<string>): WebSocketConstructor {
+function wakingWebSocket(
+  resolveOrigin: () => Promise<string>,
+  onDropped: () => void,
+): WebSocketConstructor {
   return class WakingSocket implements BrowserWebSocket {
     binaryType: "arraybuffer" | "blob" = "arraybuffer";
     readyState = 0;
@@ -1110,7 +1152,10 @@ function wakingWebSocket(resolveOrigin: () => Promise<string>): WebSocketConstru
           });
           socket.addEventListener("message", (event) => this.emit("message", { data: event.data }));
           socket.addEventListener("error", (event) => this.emit("error", event));
-          socket.addEventListener("close", (event) => this.finish(event.code, event.reason));
+          socket.addEventListener("close", (event) => {
+            if (event.code === 1006) onDropped();
+            this.finish(event.code, event.reason);
+          });
         },
         (error: unknown) => {
           this.emit("error", error);
