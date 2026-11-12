@@ -7,7 +7,7 @@ import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js"
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { createAccountManager } from "../accounts/create-account-manager.js";
-import { createJazzClient } from "./create-jazz-session.js";
+import { openBrowserSessionCore as createJazzClient } from "./create-jazz-session.js";
 
 // A host without cookies (Node, a CLI) whose user the app's backend signs in
 // with the app's own token: `bearer` on createJazzClient.
@@ -33,7 +33,7 @@ function authenticate(request: Request) {
   const header = request.headers.get("authorization");
   seen.push(header);
   const match = /^Bearer token-(\w+)$/.exec(header ?? "");
-  return match ? { userId: match[1]! } : null;
+  return match ? { userId: match[1]!, expiresAt: Math.floor(Date.now() / 1000) + 3600 } : null;
 }
 
 async function serve() {

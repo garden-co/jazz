@@ -1,2 +1,2 @@
 /** @internal Framework attachment API. */
-export { attachJazzSessionConsumer, type JazzSessionConsumer } from "./state.js";
+export { attachSessionCoreConsumer, type SessionCoreConsumer } from "./state.js";

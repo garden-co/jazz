@@ -3,7 +3,10 @@ import { schema as s } from "../schema-namespace.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { createJazzClient, type BrowserJazzSession } from "./create-jazz-session.js";
+import {
+  openBrowserSessionCore as createJazzClient,
+  type BrowserJazzSession,
+} from "./create-jazz-session.js";
 
 const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
 
@@ -59,12 +62,12 @@ describe("device-only browser session (serverUrl: null)", () => {
   it("keeps account-manager options out of the client's config", async () => {
     const session = await openDeviceOnly(memoryStore(), {
       fetch: (input, init) => fetch(input, init),
-      linkGuestOnSignUp: false,
+      linkDeviceAccountOnSignUp: false,
     });
     const config = session.getSnapshot().client!.db.getConfig();
     expect(config).not.toHaveProperty("fetch");
     expect(config).not.toHaveProperty("store");
-    expect(config).not.toHaveProperty("linkGuestOnSignUp");
+    expect(config).not.toHaveProperty("linkDeviceAccountOnSignUp");
   }, 60_000);
 
   it("reopens the same account from its store", async () => {

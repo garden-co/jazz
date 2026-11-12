@@ -12,7 +12,10 @@ import { LOCAL_FIRST_JWT_ISSUER, parseJwtPayload } from "../runtime/client-sessi
 import { verifyLocalFirstToken } from "../runtime/local-first-token.js";
 import { endpointScope } from "../runtime/client-scope.js";
 import { PostcardWriter } from "../runtime/native-runtime/native-codec.js";
-import { encodeWebSocketFrameBatch } from "../runtime/native-runtime/websocket.js";
+import {
+  encodeWebSocketFrameBatch,
+  REAUTHENTICATE_WIRE_MESSAGE_PREFIX,
+} from "../runtime/native-runtime/websocket.js";
 import type {
   BrowserWebSocket,
   WebSocketConstructor,
@@ -38,7 +41,7 @@ import { DeploymentError, type PublishedTableLens } from "../dev/catalogue-api.j
 import type { WasmSchema } from "../drivers/types.js";
 import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
-import type { JazzSession } from "../session/state.js";
+import type { SessionCore } from "../session/state.js";
 import {
   backendDbAttributedTo,
   backendDbForSession,
@@ -84,14 +87,12 @@ export {
   type VercelBlobStore,
 } from "./blobs.js";
 import {
-  isOutsideRequestScope,
-  isSameAdmission,
-  RECHECK_FAILURES_BEFORE_END,
-  recheckEvery,
-  recheckFailedWarning,
-  type RecheckEnd,
-  type RecheckFailures,
-} from "./session-recheck.js";
+  AuthenticateExpiresAtError,
+  reauthenticateAt,
+  sessionDeadline,
+  startTimer,
+  withCheckedExpiry,
+} from "./session-expiry.js";
 import { NoJazzAccountError } from "./no-account-error.js";
 import { RequestAuthenticationError } from "./request-auth.js";
 import { optionalPeerImportError } from "./optional-peer.js";
@@ -283,7 +284,7 @@ declare const localFirstGuestBrand: unique symbol;
 /**
  * `authenticate`'s answer for a request from a local-first guest: an account
  * a browser made on its own, before (or without) signing in. Return
- * {@link acceptLocalFirstAuth} for the requests you let guests make; any other
+ * {@link acceptDeviceAccounts} for the requests you let guests make; any other
  * answer refuses a guest.
  */
 export interface LocalFirstGuest {
@@ -295,14 +296,14 @@ export interface LocalFirstGuest {
  * a bundler may load this module more than once (Next dev evaluates it per
  * route), and a shared Jazz must still recognise a marker made by another copy.
  */
-const LOCAL_FIRST_GUEST_BRAND = Symbol.for("jazz-tools.acceptLocalFirstAuth.guest");
+const LOCAL_FIRST_GUEST_BRAND = Symbol.for("jazz-tools.acceptDeviceAccounts.guest");
 
 const LOCAL_FIRST_GUEST = Object.freeze({
   [LOCAL_FIRST_GUEST_BRAND]: true,
   kind: "jazz:local-first-guest",
 }) as unknown as LocalFirstGuest;
 
-/** Whether `answer` is {@link acceptLocalFirstAuth}'s marker, from any copy of this module. */
+/** Whether `answer` is {@link acceptDeviceAccounts}'s marker, from any copy of this module. */
 function isLocalFirstGuest(answer: unknown): answer is LocalFirstGuest {
   return (
     typeof answer === "object" &&
@@ -321,7 +322,7 @@ function checkedUser(answer: unknown): JazzUser {
   if (typeof answer === "object" && answer !== null && typeof userId === "string" && userId !== "")
     return answer as JazzUser;
   throw new TypeError(
-    `createJazz: authenticate must return { userId: string }, acceptLocalFirstAuth(request) or null; it returned ${describeAnswer(answer)}`,
+    `createJazz: authenticate must return { userId: string, expiresAt: number }, acceptDeviceAccounts(request) or null; it returned ${describeAnswer(answer)}`,
   );
 }
 
@@ -342,30 +343,37 @@ function withoutCredentials(request: Request): Request {
 }
 
 /**
- * Let this request through as a local-first guest, when it comes from one.
- * Guests are refused unless `authenticate` returns this: a guest has no user
- * in your auth, so only your permissions stand between it and your data.
+ * Let this request through as a device account, when it comes from one: an
+ * account whose key lives on the user's device, with no user in your auth.
+ * It's how your app lets people in as guests, and a local-first friendly way
+ * to sign in at all. Device accounts are refused unless `authenticate`
+ * returns this, since only your permissions stand between them and your
+ * data.
  *
  * ```ts
  * authenticate: async (request) => {
  *   const session = await auth.api.getSession({ headers: request.headers });
- *   return session ? { userId: session.user.id } : acceptLocalFirstAuth(request);
+ *   if (!session) return acceptDeviceAccounts(request);
+ *   return {
+ *     userId: session.user.id,
+ *     expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
+ *   };
  * },
  * ```
  *
- * An app with no sign-in of its own, where every browser is a guest, passes
- * it as is: `authenticate: acceptLocalFirstAuth`.
+ * An app with no sign-in of its own, where every browser has a device
+ * account, passes it as is: `authenticate: acceptDeviceAccounts`.
  *
- * For a request that is not a guest's, it means the same as `null`: no one
- * is signed in.
+ * For a request that is not a device account's, it means the same as `null`:
+ * no one is signed in.
  *
- * A guest's request may also carry a user's cookie: someone signed in (or
- * up) on that browser, and the guest still uploads its writes before it
- * links to them. Jazz then asks `authenticate` about the request without its
- * cookies and `Authorization` header, so the guest is let in as it would be
- * on its own.
+ * A device account's request may also carry a user's cookie: someone signed
+ * in (or up) on that browser, and the device account still uploads its
+ * writes before it links to them. Jazz then asks `authenticate` about the
+ * request without its cookies and `Authorization` header, so the device
+ * account is let in as it would be on its own.
  */
-export function acceptLocalFirstAuth(_request: Request): LocalFirstGuest {
+export function acceptDeviceAccounts(_request: Request): LocalFirstGuest {
   return LOCAL_FIRST_GUEST;
 }
 
@@ -377,6 +385,22 @@ export interface JazzUser {
   claims?: Record<string, unknown>;
 }
 
+/**
+ * The user `authenticate` names, and until when that answer holds.
+ */
+export interface AuthenticatedUser extends JazzUser {
+  /**
+   * When this answer stops holding, as Unix time in seconds: your app
+   * session's expiry, or its token's `exp`. Required. Shortly before then
+   * an open sync session asks its client to connect again, and
+   * `authenticate` decides again on that new request, with the client's
+   * current cookies or token. Return the expiry of the session the user is
+   * signed in with (the one a sign-out ends), not of a short-lived access
+   * token your auth refreshes on its own.
+   */
+  expiresAt: number;
+}
+
 export interface CreateJazzOptions {
   app: BackendSchemaInput;
   permissions: CompiledPermissionsMap;
@@ -386,32 +410,40 @@ export interface CreateJazzOptions {
    * header). Return null for a signed-out request. Jazz calls it when a
    * browser signs in or opens a sync session, and in `forReqUser`.
    *
-   * Decide from `request` alone. Jazz also calls it again later for each
-   * open sync session (every `recheckSeconds`), from a timer: outside your
-   * framework's request scope, with the request that opened the session and
-   * its cookies from then. Helpers that read the current request from
-   * context throw there; in Next.js that is `cookies()`, `headers()` and the
-   * auth helpers built on them (AuthKit's `withAuth()`, NextAuth's `auth()`,
-   * Clerk's `auth()`). Pass `request.headers` to your auth library instead,
-   * as in the example below. A cookie your auth rotates (a short-lived
-   * access token) is the opening one on a re-check: read the user from the
-   * longer-lived session it belongs to.
+   * Return when the answer stops holding as `expiresAt` (Unix seconds),
+   * which is required: an open sync session asks its client to connect again
+   * shortly before then, and Jazz calls `authenticate` again on that new
+   * request, with the client's current cookies. Jazz only ever calls it
+   * while handling a request, so your framework's request helpers work.
+   *
+   * Only read and verify the session here; never refresh it. Keep auth
+   * middleware that refreshes sessions off Jazz's routes (`basePath`): a
+   * browser with several windows reaching it at once can race a single-use
+   * refresh token and lose the session.
    *
    * ```ts
    * authenticate: async (request) => {
    *   const session = await auth.api.getSession({ headers: request.headers });
-   *   return session ? { userId: session.user.id } : null;
+   *   if (!session) return null;
+   *   return {
+   *     userId: session.user.id,
+   *     expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
+   *   };
    * },
    * ```
    *
    * Local-first guests are refused unless it returns
-   * `acceptLocalFirstAuth(request)` for them; an app with no sign-in passes
-   * `authenticate: acceptLocalFirstAuth`. Without `authenticate`, only
+   * `acceptDeviceAccounts(request)` for them; an app with no sign-in passes
+   * `authenticate: acceptDeviceAccounts`. Without `authenticate`, only
    * backend code reaches the data.
    */
   authenticate?: (
     request: Request,
-  ) => JazzUser | LocalFirstGuest | null | Promise<JazzUser | LocalFirstGuest | null>;
+  ) =>
+    | AuthenticatedUser
+    | LocalFirstGuest
+    | null
+    | Promise<AuthenticatedUser | LocalFirstGuest | null>;
   /** The path Jazz is mounted under. Defaults to `/jazz`. */
   basePath?: string;
   /**
@@ -427,32 +459,25 @@ export interface CreateJazzOptions {
    */
   publicUrl?: string | string[];
   /**
-   * How long a browser's sync session lasts before `authenticate` is asked
-   * again (the client reconnects on its own). Defaults to one hour.
+   * The longest a sync session lasts before its client connects again and
+   * `authenticate` decides anew on that new request. Defaults to one hour.
+   * A signed-in user's session ends sooner if the `expiresAt` `authenticate`
+   * returned comes first; a local-first guest is let in anew each time. So
+   * a sign-out elsewhere, a ban or a changed role reaches an open session
+   * within this long, or at once with `jazz.revokeUser(userId)`.
    */
   sessionTtlSeconds?: number;
   /**
-   * How often `authenticate` is asked again for each open sync session of a
-   * signed-in user. When it no longer names that user (they signed out, in
-   * another tab or anywhere else, or their session expired or was revoked),
-   * the session ends as signed out. When it names them with other claims
-   * (a role changed), the session ends too and the client reconnects with
-   * the new claims, so this bounds how long a claims change takes to reach
-   * an open session. Defaults to 60 seconds; 0 turns it off, and changes
-   * then wait for the session to end (`sessionTtlSeconds`).
-   *
-   * A re-check calls `authenticate` from a timer, outside your framework's
-   * request scope, with the request that opened the session (see
-   * `authenticate`). One that throws a request-scope error (Next.js's
-   * "called outside a request scope") ends the session at once, as a
-   * refusal does, with an error logged. Other errors are logged and asked
-   * again next time, and 3 in a row end the session, so an `authenticate`
-   * that can't answer there fails closed.
+   * Removed. Sessions no longer re-check `authenticate` from a timer: each
+   * lasts until the `expiresAt` `authenticate` returns, then its client
+   * connects again and `authenticate` decides on that new request. To end a
+   * user's open sessions now (they signed out elsewhere, or were banned),
+   * call `jazz.revokeUser(userId)`.
    */
-  recheckSeconds?: number;
+  recheckSeconds?: never;
   /**
-   * What happens to a local-first guest's key once the guest links to a
-   * signed-in user (`linkWithBackend()`):
+   * What happens to a device account's key once it links to a signed-in
+   * user (`linkDeviceAccount()`):
    * - `"keep"` (the default): the key stays an identity of the account, so
    *   the device can still sign in as the guest (e.g. offline) alongside
    *   the linked user.
@@ -603,14 +628,24 @@ export interface Jazz {
    * Create the Jazz account of `userId` (the id your `authenticate` returns
    * for them), or return the one they have. Jazz never creates accounts on
    * its own on the backend: a user gets one when they sign in from a client,
-   * when a local-first guest links to them (`linkWithBackend`, so the
-   * guest's data becomes theirs), or here. Call it for a user who never
+   * when a device account links to them (`linkDeviceAccount()`, so its data
+   * becomes theirs), or here. Call it for a user who never
    * opens a client (a webhook, an import, an API-only user) or to seed data
    * before their first visit. A user with an account can no longer link a
    * guest, so don't call it in a sign-up flow whose browser may hold one.
    * Returns the account id.
    */
   createAccountFor(userId: string): Promise<string>;
+  /**
+   * End `userId`'s open sync sessions on this backend instance now, as
+   * refused: each client asks your backend who is signed in, and signs out
+   * if `authenticate` no longer names that user (or reconnects if it still
+   * does). Call it from your sign-out handler or your auth provider's
+   * session-revoked webhook, so a sign-out reaches open sessions before
+   * their `expiresAt`. Sessions served by other instances end at their
+   * `expiresAt`. Returns how many sessions it ended.
+   */
+  revokeUser(userId: string): Promise<number>;
   /**
    * The backend's own database (backend permissions), with every write
    * stamped as the request's signed-in user: for server actions that do what
@@ -1295,6 +1330,10 @@ interface JazzSettings {
 }
 
 function jazzSettings(options: CreateJazzOptions): JazzSettings {
+  if ((options as { recheckSeconds?: unknown }).recheckSeconds !== undefined)
+    throw new Error(
+      "createJazz: recheckSeconds was removed. A sync session now lasts until the expiresAt your authenticate returns, and then authenticates again on its client's new connection; to end a user's sessions at once, call jazz.revokeUser(userId).",
+    );
   const basePath = (options.basePath ?? DEFAULT_BASE_PATH).replace(/\/+$/, "");
   const publicUrls = [options.publicUrl ?? []].flat().map((value) => {
     try {
@@ -1384,7 +1423,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   async function backendSession(
     next: CreateJazzOptions,
     published?: string,
-  ): Promise<{ session: JazzSession<JazzClient>; client: JazzClient }> {
+  ): Promise<{ session: SessionCore<JazzClient>; client: JazzClient }> {
     pin = published ?? (await publish(next));
     const session = await openJazzSession({
       appId,
@@ -1402,7 +1441,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     return { session, client: opened.client };
   }
 
-  let session: JazzSession<JazzClient>;
+  let session: SessionCore<JazzClient>;
   let backend: JazzClient;
   try {
     ({ session, client: backend } = await backendSession(options));
@@ -1429,7 +1468,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       const published = await publish(next);
       if (published !== pin) {
         const previousPin = pin;
-        let fresh: { session: JazzSession<JazzClient>; client: JazzClient };
+        let fresh: { session: SessionCore<JazzClient>; client: JazzClient };
         try {
           fresh = await backendSession(next, published);
         } catch (error) {
@@ -1453,7 +1492,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    * writes); a close of this Jazz closes those left.
    */
   const retiring = new Set<() => Promise<void>>();
-  function retire(old: JazzSession<JazzClient>): void {
+  function retire(old: SessionCore<JazzClient>): void {
     let closed: Promise<void> | undefined;
     const closeOld = (): Promise<void> => {
       clearTimeout(timer);
@@ -1467,15 +1506,46 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     retiring.add(closeOld);
   }
 
+  // An `authenticate` that returns expired answers, or none at all, is a
+  // bug in the app: said once per process.
+  let warnedExpiredAnswer = false;
+  function warnExpiredAnswer() {
+    if (warnedExpiredAnswer) return;
+    warnedExpiredAnswer = true;
+    console.error(
+      "createJazz: authenticate named a user with an expiresAt in the past, so Jazz treats them as signed out. Return the expiry of the session the user is signed in with (the one a sign-out ends), in Unix seconds, not of a short-lived access token.",
+    );
+  }
+  let warnedMissingExpiry = false;
+  function warnMissingExpiry(error: Error) {
+    if (warnedMissingExpiry) return;
+    warnedMissingExpiry = true;
+    console.error(error.message);
+  }
+
   /**
    * Who sent `request`: a scoped backend client's user, or the user the
    * app's own `authenticate` names. A trusted backend client has no user.
    */
-  async function authenticate(request: Request): Promise<JazzUser | null> {
+  async function authenticate(
+    request: Request,
+  ): Promise<(JazzUser & { expiresAt: number }) | null> {
     const client = await backendClients.resolve(request);
-    if (client !== null) return client !== "refused" && client.kind === "user" ? client.user : null;
+    if (client !== null)
+      return client !== "refused" && client.kind === "user"
+        ? { ...client.user, expiresAt: client.expiresAt }
+        : null;
     const answer = await askAuthenticate(request);
-    return answer === null || isLocalFirstGuest(answer) ? null : checkedUser(answer);
+    if (answer === null || isLocalFirstGuest(answer)) return null;
+    const user = withCheckedExpiry(checkedUser(answer));
+    // An answer that has already expired names no one, here and in every
+    // other place that asks (who is signed in, sign-in, forReqUser), so a
+    // client can't be told it is signed in while its sync is refused.
+    if (user.expiresAt * 1000 <= Date.now()) {
+      warnExpiredAnswer();
+      return null;
+    }
+    return user;
   }
 
   async function askAuthenticate(request: Request): Promise<JazzUser | LocalFirstGuest | null> {
@@ -1483,7 +1553,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     return (await options.authenticate(request)) ?? null;
   }
 
-  /** Whether the app lets `request` in as a local-first guest (`acceptLocalFirstAuth`). */
+  /** Whether the app lets `request` in as a device account (`acceptDeviceAccounts`). */
   let warnedGuestsOff = false;
   async function acceptsGuest(request: Request): Promise<boolean> {
     const answer = await askAuthenticate(request);
@@ -1498,7 +1568,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     if (!warnedGuestsOff) {
       warnedGuestsOff = true;
       console.warn(
-        "createJazz: refused a local-first guest. To let guests sync, return acceptLocalFirstAuth(request) from authenticate for them.",
+        "createJazz: refused a local-first guest. To let guests sync, return acceptDeviceAccounts(request) from authenticate for them.",
       );
     }
     return false;
@@ -1827,15 +1897,13 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
      */
     deliver(data: Uint8Array): Promise<boolean>;
     close(): void;
+    /** End the session as refused (`jazz.revokeUser`). */
+    revoke(reason: string): void;
     /** The user the session was admitted as, once it is. */
     readonly userId: string | undefined;
     /** Whether a trusted backend client opened it. */
     readonly trusted: boolean;
   }
-
-  // What a failed re-check means is explained once per process; each
-  // session then says only what happened to it.
-  let explainedRecheckFailure = false;
 
   /** The sessions this instance serves, for the Inspector's `sessions`. */
   const liveSessions = new Set<{
@@ -1857,20 +1925,25 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     let ended = false;
     let userId: string | undefined;
     let trusted = false;
-    let recheck: (() => void) | undefined;
     // A session that never sends its prelude ends too.
-    let expiry: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+    let stopExpiry: (() => void) | undefined = startTimer(() => {
       onEvent(null, { kind: "close", code: 1008, reason: "no sign-in in time" });
       end();
     }, PRELUDE_DEADLINE_MS);
-    (expiry as unknown as { unref?: () => void }).unref?.();
     const end = () => {
       if (ended) return;
       ended = true;
       liveSessions.delete(live);
-      if (expiry) clearTimeout(expiry);
-      recheck?.();
+      stopExpiry?.();
       socket?.close();
+    };
+    // Ask the client to connect again, so the app's auth decides on a new
+    // request: a planned reconnect the client doesn't show as an outage.
+    const reauthenticate = () => {
+      if (ended) return;
+      onEvent(null, { kind: "message", data: reauthenticateBatch() });
+      onEvent(null, { kind: "close", code: 1008, reason: "reauthenticate" });
+      end();
     };
     const admit = async (prelude: Uint8Array): Promise<boolean> => {
       const admitted = await admitPrelude(request, prelude);
@@ -1889,71 +1962,44 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       }
       userId = admitted.userId;
       trusted = admitted.trusted;
-      if (expiry) clearTimeout(expiry);
-      // A backend client's session ends with its token, so it reconnects
-      // with a fresh one.
-      const ttl = Math.min(
-        (options.sessionTtlSeconds ?? 3600) * 1000,
-        admitted.expiresAt === undefined ? Infinity : admitted.expiresAt * 1000 - Date.now(),
-      );
-      expiry = setTimeout(end, Math.max(ttl, 0));
-      (expiry as unknown as { unref?: () => void }).unref?.();
-      const every = (options.recheckSeconds ?? 60) * 1000;
-      // The socket's request carries the cookies it opened with, so a
-      // refusal may only mean they expired. The client reconnects with fresh
-      // ones; if no one is signed in, that admission fails as an auth
-      // failure (above), and otherwise it carries the user's claims now.
-      const authenticateAgain = () => {
-        if (ended) return;
-        onEvent(null, { kind: "close", code: 1008, reason: "authenticate again" });
-        end();
-      };
-      // A re-check whose `authenticate` throws ends the session at once
-      // when it can't run outside a request (Next.js's `cookies()`), and
-      // after enough failures in a row otherwise: either would keep the
-      // session open past a sign-out, silently.
-      let warnedFailure = false;
-      const failures: RecheckFailures = {
-        endAfter: RECHECK_FAILURES_BEFORE_END,
-        endsAtOnce: isOutsideRequestScope,
-        failed: (error) => {
-          if (!explainedRecheckFailure) {
-            explainedRecheckFailure = true;
-            (isOutsideRequestScope(error) ? console.error : console.warn)(
-              recheckFailedWarning(error),
-            );
-          }
-          if (!warnedFailure && !isOutsideRequestScope(error)) {
-            warnedFailure = true;
-            console.warn("createJazz: a sync session's re-check failed; asking again.", error);
-          }
-        },
-      };
-      const recheckEnded = (end: RecheckEnd) => {
-        authenticateAgain();
-        if (end.kind !== "failed") return;
-        if (isOutsideRequestScope(end.error))
-          console.error(
-            "createJazz: ended a sync session: authenticate can't run outside a request scope; the client reconnects.",
-          );
-        else
-          console.warn(
-            `createJazz: ended a sync session after ${end.inARow} failed re-checks in a row; the client reconnects.`,
-            end.error,
-          );
-      };
-      const admittedUser = admitted.user;
-      if (admittedUser && every > 0) {
-        // Signed out, someone else, or the same user with other claims.
-        recheck = recheckEvery(
-          every,
-          async () => isSameAdmission(admittedUser, await authenticate(request)),
-          recheckEnded,
-          failures,
+      stopExpiry?.();
+      const admittedAt = Date.now();
+      if (admitted.user) {
+        // A signed-in user's session holds until the expiry `authenticate`
+        // gave it, and at most `sessionTtlSeconds`. Shortly before, the
+        // client is asked to connect again, so `authenticate` decides on its
+        // new request with current cookies.
+        const at = reauthenticateAt(
+          admittedAt,
+          sessionDeadline(admittedAt, admitted.user.expiresAt, options.sessionTtlSeconds),
         );
-      } else if (admitted.guest && every > 0) {
-        // The app may stop letting guests in (or this one): ask again, as for users.
-        recheck = recheckEvery(every, () => acceptsGuest(request), recheckEnded, failures);
+        if (at === null) {
+          // `authenticate` named the user with an answer already expired.
+          warnExpiredAnswer();
+          onEvent(null, {
+            kind: "message",
+            data: authFailedBatch(
+              "session expired: authenticate returned an expiresAt in the past",
+            ),
+          });
+          onEvent(null, { kind: "close", code: 1008, reason: "session expired" });
+          end();
+          return false;
+        }
+        stopExpiry = startTimer(reauthenticate, at - admittedAt);
+      } else if (admitted.guest) {
+        // A guest's key is its credential; the app lets it in anew each
+        // `sessionTtlSeconds`, the same way.
+        const ttl = (options.sessionTtlSeconds ?? 3600) * 1000;
+        stopExpiry = startTimer(reauthenticate, ttl);
+      } else {
+        // A backend client's session ends with its token, so it reconnects
+        // with a fresh one.
+        const ttl = Math.min(
+          (options.sessionTtlSeconds ?? 3600) * 1000,
+          admitted.expiresAt === undefined ? Infinity : admitted.expiresAt * 1000 - admittedAt,
+        );
+        stopExpiry = startTimer(end, ttl);
       }
       socket = core.openSocket(headerPairs(request.headers), onEvent, admitted.access);
       return socket.send(admitted.prelude);
@@ -2008,7 +2054,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
                 onEvent(null, { kind: "close", code: 1008, reason: "sign-in refused" });
               } else {
                 // The core is unreachable or failed (5xx), or the app's own
-                // `authenticate` threw: the client tries again later.
+                // `authenticate` threw: the client tries again later. An
+                // `authenticate` without `expiresAt` fails the same way every
+                // time: say why, once.
+                if (error instanceof AuthenticateExpiresAtError) warnMissingExpiry(error);
                 onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
               }
               end();
@@ -2025,6 +2074,14 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       },
       deliver,
       close: end,
+      revoke(reason) {
+        if (ended) return;
+        // A refusal the client doesn't retry: its session asks the backend
+        // who is signed in, and signs out if no one is.
+        onEvent(null, { kind: "message", data: authFailedBatch(`session revoked: ${reason}`) });
+        onEvent(null, { kind: "close", code: 1008, reason: "session revoked" });
+        end();
+      },
       get userId() {
         return userId;
       },
@@ -2050,12 +2107,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   ): Promise<{
     prelude: Uint8Array;
     userId: string | undefined;
-    /** The user (with the claims) `authenticate` named for a vouched session. */
-    user?: JazzUser;
+    /** The user (with the claims) `authenticate` named for a vouched session, and until when. */
+    user?: JazzUser & { expiresAt: number };
     access: BackendAccess;
     trusted: boolean;
     expiresAt?: number;
-    /** A local-first guest, let in by `acceptLocalFirstAuth`. */
+    /** A local-first guest, let in by `acceptDeviceAccounts`. */
     guest?: true;
   } | null> {
     let parsed: Record<string, unknown>;
@@ -2928,6 +2985,17 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         throw new Error("createAccountFor: pass the user's id, as your authenticate names it");
       return accountOf(userId);
     },
+    async revokeUser(userId) {
+      if (typeof userId !== "string" || userId === "")
+        throw new Error("revokeUser: pass the user's id, as your authenticate names it");
+      let ended = 0;
+      for (const { session } of [...liveSessions]) {
+        if (session.trusted || session.userId !== userId) continue;
+        session.revoke("revokeUser");
+        ended += 1;
+      }
+      return ended;
+    },
     close() {
       closing ??= (async () => {
         // Every client connection ends, so the host's own shutdown (which
@@ -3594,6 +3662,7 @@ function facade(entry: Entry): Jazz {
     withAttribution: async (request) => (await use()).withAttribution(request),
     accountFor: async (request) => (await use()).accountFor(request),
     createAccountFor: async (userId) => (await use()).createAccountFor(userId),
+    revokeUser: async (userId) => (await use()).revokeUser(userId),
     linkIdentity: async (link) => (await use()).linkIdentity(link),
     async ready() {
       await use();
@@ -3633,6 +3702,23 @@ function refusalCode(error: unknown): string {
 }
 
 /** A WireFrame::Error batch with code AuthFailed and retry Never. */
+/**
+ * The error a session sends its client when the expiry its app's auth gave
+ * it is near: `auth_failed` with `after_resume` retry, which a client takes
+ * as "connect again now" (`isReauthenticateWireError`). A client that
+ * doesn't know it takes it as a refused credential and asks its backend.
+ */
+function reauthenticateBatch(): Buffer {
+  const frame = new PostcardWriter();
+  frame.u64(1); // WireFrame::Error
+  frame.u64(3); // WireErrorCode::AuthFailed
+  frame.u64(2); // WireRetry::AfterResume
+  frame.string(
+    `${REAUTHENTICATE_WIRE_MESSAGE_PREFIX} the session reached the expiry authenticate gave it`,
+  );
+  return Buffer.from(encodeWebSocketFrameBatch([frame.finish()]));
+}
+
 function authFailedBatch(message: string): Buffer {
   const frame = new PostcardWriter();
   frame.u64(1); // WireFrame::Error

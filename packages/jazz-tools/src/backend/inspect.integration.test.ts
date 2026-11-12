@@ -50,7 +50,7 @@ afterEach(async () => {
 
 function authenticate(request: Request) {
   const userId = request.headers.get("x-test-user");
-  return userId ? { userId } : null;
+  return userId ? { userId, expiresAt: Math.floor(Date.now() / 1000) + 3600 } : null;
 }
 
 /** The test's inspect hook: staff are named by a header, writers by another. */

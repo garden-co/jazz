@@ -1,11 +1,15 @@
-import { type ParentProps } from "solid-js";
-import type { DbConfig } from "jazz-tools";
+import { type JSX, type ParentProps } from "solid-js";
 import { JazzProvider } from "jazz-tools/solid";
 
-// Prepare a handle outside this context with createAccountManager.
-export function AuthJwt(props: ParentProps<{ config: DbConfig }>) {
+// Your backend names the user (its authenticate reads your session cookie).
+// In `signedOut`, call useJazzSession().refresh() after your own sign-in.
+export function AuthJwt(props: ParentProps<{ signedOut: JSX.Element }>) {
   return (
-    <JazzProvider config={props.config} fallback={<p>Loading...</p>}>
+    <JazzProvider
+      config={{ serverUrl: "/jazz" }}
+      signedOut={props.signedOut}
+      loading={<p>Loading...</p>}
+    >
       {props.children}
     </JazzProvider>
   );

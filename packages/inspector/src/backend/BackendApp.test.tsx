@@ -53,7 +53,7 @@ async function backend() {
     store: memory(),
     authenticate: (request) => {
       const userId = request.headers.get("x-test-user");
-      return userId ? { userId } : null;
+      return userId ? { userId, expiresAt: Math.floor(Date.now() / 1000) + 3600 } : null;
     },
     inspect: staff,
     inspector: { audit: () => {} },

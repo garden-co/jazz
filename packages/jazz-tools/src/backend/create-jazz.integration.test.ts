@@ -27,7 +27,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import {
-  acceptLocalFirstAuth,
+  acceptDeviceAccounts,
   createJazz,
   createJazzClient,
   files,
@@ -69,7 +69,35 @@ afterEach(async () => {
 /** The test app's own auth: the user named in a header, else a local-first guest. */
 function authenticate(request: Request) {
   const userId = request.headers.get("x-test-user");
-  return userId ? { userId } : acceptLocalFirstAuth(request);
+  return userId ? { userId, expiresAt: inAnHour() } : acceptDeviceAccounts(request);
+}
+
+/** An `expiresAt` an hour from now, in Unix seconds. */
+function inAnHour() {
+  return Math.floor(Date.now() / 1000) + 3600;
+}
+
+/** An `expiresAt` `seconds` from now, in Unix seconds (fractional is fine). */
+function inSeconds(seconds: number) {
+  return Date.now() / 1000 + seconds;
+}
+
+/** Sample `read()` every 10 ms while `during` runs; resolves with every distinct value seen. */
+async function watchWhile<T>(read: () => T, during: Promise<unknown>): Promise<T[]> {
+  const seen: T[] = [];
+  const note = () => {
+    const value = read();
+    if (!seen.some((other) => JSON.stringify(other) === JSON.stringify(value))) seen.push(value);
+  };
+  const timer = setInterval(note, 10);
+  try {
+    note();
+    await during;
+  } finally {
+    clearInterval(timer);
+  }
+  note();
+  return seen;
 }
 
 const requestPaths: string[] = [];
@@ -161,7 +189,7 @@ async function userSession(appId: string, origin: string, userId: string) {
     driver: { type: "memory" },
   });
   cleanups.push(() => session.close());
-  await session.loginWithBackend();
+  await session.refresh();
   const { client, status, error } = session.getSnapshot();
   if (status !== "ready") throw error ?? new Error(status);
   return client!;
@@ -407,7 +435,9 @@ describe("createJazz", () => {
       store: memory(),
       authenticate: (request) => {
         if (request.headers.has("x-fail")) throw failure;
-        return request.headers.get("x-test-user") ? { userId: "alice" } : null;
+        return request.headers.get("x-test-user")
+          ? { userId: "alice", expiresAt: inAnHour() }
+          : null;
       },
     }).ready();
     cleanups.push(() => jazz.close());
@@ -726,70 +756,81 @@ describe("createJazz", () => {
     expect(await socketFrom(origin)).toBe("admitted");
   }, 60_000);
 
-  it("ends a user's open sync session once authenticate no longer names them", async () => {
-    const signedOut = new Set<string>();
-    const jazz = await createJazz({
-      app,
-      permissions,
-      store: memory(),
-      authenticate: (request) => {
-        const userId = request.headers.get("x-test-user");
-        return userId && !signedOut.has(userId) ? { userId } : null;
-      },
-      recheckSeconds: 0.05,
-    }).ready();
-    const appId = jazz.appId;
-    cleanups.push(() => jazz.close());
-    let upgrades = 0;
-    const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
-    const alice = await userSession(appId, origin, "alice");
-    await alice.db
-      .insert(app.todos, { title: "signed in", owner: alice.session!.user! })
-      .wait({ tier: "global" });
-
-    // Checks that still name her leave her session open.
-    const opened = upgrades;
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(upgrades).toBe(opened);
-
-    // She signs out elsewhere: the session ends, and the client's reconnects
-    // are refused.
-    signedOut.add("alice");
-    await expect.poll(() => upgrades, { timeout: 5_000, interval: 50 }).toBeGreaterThan(opened);
-    // A refused reconnect is an auth failure, so the client stops retrying
-    // and its session can ask the backend whether anyone is signed in.
-    await expect
-      .poll(() => alice.db.getSyncStatus().link, { timeout: 10_000, interval: 50 })
-      .toMatchObject({ state: "offline", reason: "auth" });
-    const refused = upgrades;
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-    expect(upgrades).toBe(refused);
-  }, 30_000);
-
-  it("ends a session whose re-check can't run outside a request, so a sign-out still reaches it", async () => {
-    // An authenticate built on a request-scoped helper (Next.js's cookies(),
-    // AuthKit's withAuth()): it answers while a request is handled, and
-    // throws as Next.js does when a re-check asks again about a request it
-    // already answered for.
-    const signedOut = new Set<string>();
+  it("re-authenticates an open session on a new request at its expiresAt, unseen by the client", async () => {
+    // Each answer holds for 6 s, so the session is asked to connect again
+    // after 5 s. Every call must be for a new request: nothing replays one.
     const answered = new WeakSet<Request>();
+    let calls = 0;
     const jazz = await createJazz({
       app,
       permissions,
       store: memory(),
       authenticate: (request) => {
-        if (answered.has(request)) throw new Error("`cookies` was called outside a request scope.");
+        if (answered.has(request)) throw new Error("authenticate called again for one request");
         answered.add(request);
+        calls += 1;
         const userId = request.headers.get("x-test-user");
-        return userId && !signedOut.has(userId) ? { userId } : null;
+        return userId ? { userId, expiresAt: inSeconds(6) } : null;
       },
-      recheckSeconds: 0.2,
     }).ready();
     cleanups.push(() => jazz.close());
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    cleanups.push(async () => error.mockRestore());
-    const logged = (text: string) =>
-      error.mock.calls.map(([message]) => String(message)).filter((m) => m.includes(text));
+    let upgrades = 0;
+    const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
+    const alice = await userSession(jazz.appId, origin, "alice");
+    const owner = alice.session!.user!;
+    await alice.db.insert(app.todos, { title: "before", owner }).wait({ tier: "global" });
+    const opened = upgrades;
+    const callsBefore = calls;
+
+    // Across the swap the app sees a connected link, and nothing else.
+    const statuses = await watchWhile(
+      () => alice.db.getSyncStatus().link,
+      expect
+        .poll(() => upgrades > opened && calls > callsBefore, { timeout: 15_000, interval: 20 })
+        .toBe(true),
+    );
+    await alice.db.insert(app.todos, { title: "after", owner }).wait({ tier: "global" });
+    const titles = (await alice.db.all(app.todos, { tier: "remote" })).map((todo) => todo.title);
+    expect(titles.sort()).toEqual(["after", "before"]);
+    expect(statuses).toEqual([{ state: "connected" }]);
+  }, 30_000);
+
+  it("keeps a session that expires in 30 days open until its sessionTtlSeconds cap", async () => {
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        const userId = request.headers.get("x-test-user");
+        return userId ? { userId, expiresAt: inSeconds(30 * 24 * 3600) } : null;
+      },
+    }).ready();
+    cleanups.push(() => jazz.close());
+    let upgrades = 0;
+    const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
+    const alice = await userSession(jazz.appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "long session", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    // Capped at sessionTtlSeconds (an hour), not re-authenticated at once.
+    const opened = upgrades;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(upgrades).toBe(opened);
+    expect(alice.db.getSyncStatus().link).toEqual({ state: "connected" });
+  }, 30_000);
+
+  it("ends a session at its expiresAt once authenticate no longer names the user", async () => {
+    const signedOut = new Set<string>();
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        const userId = request.headers.get("x-test-user");
+        return userId && !signedOut.has(userId) ? { userId, expiresAt: inSeconds(6) } : null;
+      },
+    }).ready();
+    cleanups.push(() => jazz.close());
     let upgrades = 0;
     const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
     const alice = await userSession(jazz.appId, origin, "alice");
@@ -797,81 +838,46 @@ describe("createJazz", () => {
       .insert(app.todos, { title: "signed in", owner: alice.session!.user! })
       .wait({ tier: "global" });
 
-    // Her first re-check throws: the session ends at once, the contract is
-    // explained, and the client reconnects and is admitted afresh.
-    const opened = upgrades;
-    await expect.poll(() => upgrades, { timeout: 5_000, interval: 20 }).toBeGreaterThan(opened);
-    const [explained] = logged("authenticate threw while re-checking an open sync session");
-    expect(explained).toContain("request-scope error");
-    expect(explained).toContain(
-      "https://jazz.tools/docs/setup/auth/backend#re-checking-open-connections",
-    );
-    expect(logged("can't run outside a request scope").length).toBeGreaterThanOrEqual(1);
-    await expect
-      .poll(() => alice.db.getSyncStatus().link, { timeout: 10_000, interval: 20 })
-      .toEqual({ state: "connected" });
-
-    // She signs out elsewhere: the next session that ends can't come back.
+    // She signs out elsewhere: the re-authentication is refused, as an auth
+    // failure, so the client stops retrying and its session asks the backend
+    // who is signed in.
     signedOut.add("alice");
     await expect
-      .poll(() => alice.db.getSyncStatus().link, { timeout: 10_000, interval: 50 })
+      .poll(() => alice.db.getSyncStatus().link, { timeout: 15_000, interval: 50 })
       .toMatchObject({ state: "offline", reason: "auth" });
     const refused = upgrades;
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     expect(upgrades).toBe(refused);
-    // The contract is explained once per process, not per session.
-    expect(logged("authenticate threw while re-checking")).toHaveLength(1);
   }, 30_000);
 
-  it("rides out a re-check failure, and ends the session after three in a row", async () => {
-    let outage = false;
+  it("ends a user's open sessions at once on revokeUser", async () => {
+    const signedOut = new Set<string>();
     const jazz = await createJazz({
       app,
       permissions,
       store: memory(),
       authenticate: (request) => {
-        if (outage) throw new Error("auth database down");
         const userId = request.headers.get("x-test-user");
-        return userId ? { userId } : null;
+        return userId && !signedOut.has(userId) ? { userId, expiresAt: inAnHour() } : null;
       },
-      recheckSeconds: 0.2,
     }).ready();
     cleanups.push(() => jazz.close());
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    cleanups.push(async () => warn.mockRestore());
-    const logged = (text: string) =>
-      warn.mock.calls.map(([message]) => String(message)).filter((m) => m.includes(text));
-    let upgrades = 0;
-    const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
+    const origin = await serve(jazz, { sockets: true });
     const alice = await userSession(jazz.appId, origin, "alice");
     await alice.db
       .insert(app.todos, { title: "signed in", owner: alice.session!.user! })
       .wait({ tier: "global" });
-    const opened = upgrades;
-    expect(opened).toBeGreaterThan(0);
 
-    // One failed re-check, then answers again: the session stays open.
-    outage = true;
-    await expect.poll(() => logged("re-check failed").length, { timeout: 5_000 }).toBe(1);
-    outage = false;
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-    expect(upgrades).toBe(opened);
-    expect(logged("ended a sync session")).toHaveLength(0);
-
-    // A longer outage ends it after three; the client reconnects once it's over.
-    outage = true;
+    signedOut.add("alice");
+    expect(await jazz.revokeUser("bob")).toBe(0);
+    expect(await jazz.revokeUser("alice")).toBe(1);
     await expect
-      .poll(() => logged("ended a sync session after 3 failed re-checks in a row").length, {
-        timeout: 5_000,
-      })
-      .toBe(1);
-    // Warned once per session, even after it recovered once.
-    expect(logged("re-check failed")).toHaveLength(1);
-    outage = false;
-    await expect.poll(() => upgrades, { timeout: 10_000, interval: 50 }).toBeGreaterThan(opened);
+      .poll(() => alice.db.getSyncStatus().link, { timeout: 5_000, interval: 20 })
+      .toMatchObject({ state: "offline", reason: "auth" });
+    await expect(jazz.revokeUser("")).rejects.toThrow(/pass the user's id/);
   }, 30_000);
 
-  it("ends a user's open sync session once their claims change, so policies see the new ones", async () => {
+  it("picks up a user's changed claims when the session re-authenticates", async () => {
     // Anyone reads their own todos; only an admin (a claim) may create one.
     const byRole = s.definePermissions(app, ({ policy, session }) => {
       policy.todos.allowRead.where({ owner: session.user });
@@ -886,9 +892,10 @@ describe("createJazz", () => {
       store: memory(),
       authenticate: (request) => {
         const userId = request.headers.get("x-test-user");
-        return userId ? { userId, claims: { role: roles.get(userId) ?? "none" } } : null;
+        return userId
+          ? { userId, claims: { role: roles.get(userId) ?? "none" }, expiresAt: inSeconds(6) }
+          : null;
       },
-      recheckSeconds: 0.05,
     }).ready();
     cleanups.push(() => jazz.close());
     let upgrades = 0;
@@ -902,7 +909,7 @@ describe("createJazz", () => {
       driver: { type: "memory" },
     });
     cleanups.push(() => session.close());
-    await session.loginWithBackend();
+    await session.refresh();
     const alice = session.getSnapshot().client!;
     const owner = alice.session!.user!;
     const outcome = (write: { wait(options: { tier: "global" }): Promise<unknown> }) =>
@@ -914,32 +921,89 @@ describe("createJazz", () => {
       "accepted",
     );
 
-    // Checks that name her with the same claims leave her session open.
-    const opened = upgrades;
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(upgrades).toBe(opened);
-
-    // The app demotes her: her open session ends, and the client reconnects
-    // with the claims authenticate names now, as forReqUser already sees.
+    // The app demotes her: her next session carries the claims authenticate
+    // names now.
     roles.set("alice", "viewer");
-    const scoped = await jazz.forReqUser(
-      new Request(`${origin}/`, { headers: { "x-test-user": "alice" } }),
-    );
-    expect(await outcome(scoped.insert(app.todos, { title: "forReqUser", owner }))).toBe(
-      "permission_denied",
-    );
-    await expect.poll(() => upgrades, { timeout: 5_000, interval: 50 }).toBeGreaterThan(opened);
+    const opened = upgrades;
+    await expect.poll(() => upgrades, { timeout: 15_000, interval: 50 }).toBeGreaterThan(opened);
     await expect
       .poll(() => alice.db.getSyncStatus().link, { timeout: 10_000, interval: 50 })
       .toEqual({ state: "connected" });
     expect(await outcome(alice.db.insert(app.todos, { title: "after demotion", owner }))).toBe(
       "permission_denied",
     );
-    // Still signed in: one reconnect, not a loop.
-    const reconnected = upgrades;
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(upgrades).toBe(reconnected);
   }, 60_000);
+
+  it("refuses an authenticate answer without a valid expiresAt, explicitly", async () => {
+    let answer: unknown = { userId: "alice" };
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: () => answer as never,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const request = () => new Request("http://app.test/");
+    await expect(jazz.forReqUser(request())).rejects.toThrow(
+      /authenticate must return expiresAt with the user.*It returned none/,
+    );
+    answer = { userId: "alice", expiresAt: Date.now() + 60_000 };
+    await expect(jazz.forReqUser(request())).rejects.toThrow(/looks like milliseconds/);
+    answer = { userId: "alice", expiresAt: Number.NaN };
+    await expect(jazz.forReqUser(request())).rejects.toThrow(/It returned NaN/);
+    // A valid answer passes the check: alice just has no account yet.
+    answer = { userId: "alice", expiresAt: inAnHour() };
+    await expect(jazz.forReqUser(request())).rejects.toThrow(/has no Jazz account yet/);
+  });
+
+  it("refuses a sync session whose authenticate answer has already expired", async () => {
+    let expired = false;
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        const userId = request.headers.get("x-test-user");
+        return userId ? { userId, expiresAt: expired ? inSeconds(-60) : inAnHour() } : null;
+      },
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    cleanups.push(async () => error.mockRestore());
+    const origin = await serve(jazz, { sockets: true });
+    const alice = await userSession(jazz.appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "signed in", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    expired = true;
+    expect(await jazz.revokeUser("alice")).toBe(1);
+    await expect
+      .poll(() => alice.db.getSyncStatus().link, { timeout: 5_000, interval: 20 })
+      .toMatchObject({ state: "offline", reason: "auth" });
+    // A reconnect is refused too, and the cause is logged once for the app.
+    await alice.db.reconnect().catch(() => undefined);
+    await expect
+      .poll(
+        () =>
+          error.mock.calls.filter(([message]) =>
+            String(message).includes("authenticate named a user with an expiresAt in the past"),
+          ).length,
+        { timeout: 5_000 },
+      )
+      .toBe(1);
+  }, 30_000);
+
+  it("refuses recheckSeconds, which was removed, with a pointer to expiresAt", () => {
+    expect(() =>
+      createJazz({
+        app,
+        permissions,
+        store: memory(),
+        authenticate,
+        recheckSeconds: 60,
+      } as never),
+    ).toThrow(/recheckSeconds was removed.*expiresAt.*revokeUser/);
+  });
 
   it("answers the client's socket probe as it answers the socket, origin check included", async () => {
     const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
@@ -962,7 +1026,7 @@ describe("createJazz", () => {
       store: memory(),
       authenticate: (request) => {
         const userId = request.headers.get("x-test-user");
-        return userId ? { userId } : null;
+        return userId ? { userId, expiresAt: inAnHour() } : null;
       },
     });
     cleanups.push(() => jazz.close());
@@ -973,7 +1037,7 @@ describe("createJazz", () => {
       permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
     });
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
@@ -1000,7 +1064,7 @@ describe("createJazz", () => {
       // The documented setup: the session cookie's user, else a guest.
       authenticate: (request) => {
         const user = /(?:^|; )sid=([^;]+)/.exec(request.headers.get("cookie") ?? "")?.[1];
-        return user ? { userId: user } : acceptLocalFirstAuth(request);
+        return user ? { userId: user, expiresAt: inAnHour() } : acceptDeviceAccounts(request);
       },
     });
     cleanups.push(() => jazz.close());
@@ -1020,7 +1084,7 @@ describe("createJazz", () => {
       permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
     });
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
@@ -1032,29 +1096,36 @@ describe("createJazz", () => {
     ]);
   }, 30_000);
 
-  it("ends a guest's open sync session once authenticate stops accepting guests", async () => {
+  it("lets a guest in anew each sessionTtlSeconds, and not once guests are off", async () => {
     let guestsWelcome = true;
     const jazz = await createJazz({
       app,
       permissions,
       store: memory(),
       authenticate: (request) => (guestsWelcome ? authenticate(request) : null),
-      recheckSeconds: 0.05,
+      sessionTtlSeconds: 1,
     });
     cleanups.push(() => jazz.close());
-    const origin = await serve(jazz, { sockets: true });
+    let upgrades = 0;
+    const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
     const guestSession = await createJazzClient({
       app,
       permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
     });
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
     await guest.db
       .insert(app.todos, { title: "synced", owner: guest.session!.user! })
       .wait({ tier: "global" });
+    const opened = upgrades;
+    const statuses = await watchWhile(
+      () => guest.db.getSyncStatus().link,
+      expect.poll(() => upgrades, { timeout: 10_000, interval: 20 }).toBeGreaterThan(opened),
+    );
+    expect(statuses).toEqual([{ state: "connected" }]);
 
     guestsWelcome = false;
     await expect
@@ -1065,7 +1136,7 @@ describe("createJazz", () => {
   // A bundler may evaluate jazz-tools/backend more than once (Next dev, per
   // route): createJazz then returns the Jazz the first copy opened for the
   // store, with the later copy's options, so its guest marker must count.
-  it("lets guests in through acceptLocalFirstAuth from another copy of the module", async () => {
+  it("lets guests in through acceptDeviceAccounts from another copy of the module", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-two-copies-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const first = createJazz({ app, permissions, store: sqlite({ path: dir }), authenticate });
@@ -1073,9 +1144,9 @@ describe("createJazz", () => {
 
     vi.resetModules();
     const copy = (await import("./index.js")) as typeof import("./index.js");
-    expect(copy.acceptLocalFirstAuth).not.toBe(acceptLocalFirstAuth);
-    expect(copy.acceptLocalFirstAuth(new Request("http://app/"))).not.toBe(
-      acceptLocalFirstAuth(new Request("http://app/")),
+    expect(copy.acceptDeviceAccounts).not.toBe(acceptDeviceAccounts);
+    expect(copy.acceptDeviceAccounts(new Request("http://app/"))).not.toBe(
+      acceptDeviceAccounts(new Request("http://app/")),
     );
     const jazz = copy.createJazz({
       app,
@@ -1083,7 +1154,7 @@ describe("createJazz", () => {
       store: copy.sqlite({ path: dir }),
       authenticate: (request) => {
         const userId = request.headers.get("x-test-user");
-        return userId ? { userId } : copy.acceptLocalFirstAuth(request);
+        return userId ? { userId, expiresAt: inAnHour() } : copy.acceptDeviceAccounts(request);
       },
     });
     expect(jazz).toBe(first);
@@ -1103,7 +1174,7 @@ describe("createJazz", () => {
       permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
     });
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
@@ -1135,7 +1206,7 @@ describe("createJazz", () => {
     ] as const) {
       answer = wrong;
       await expect(jazz.accountFor(request())).rejects.toThrow(
-        /^createJazz: authenticate must return \{ userId: string \}, acceptLocalFirstAuth\(request\) or null/,
+        /^createJazz: authenticate must return \{ userId: string, expiresAt: number \}, acceptDeviceAccounts\(request\) or null/,
       );
       await expect(jazz.accountFor(request())).rejects.toThrow(shown);
       const response = await fetch(`${origin}/jazz/apps/${jazz.appId}/accounts/backend-user`, {
@@ -1145,7 +1216,7 @@ describe("createJazz", () => {
       expect(await response.text()).not.toMatch(/422|subject/);
     }
     // A user and no one still work as before.
-    answer = { userId: "alice" };
+    answer = { userId: "alice", expiresAt: inAnHour() };
     await expect(jazz.accountFor(request())).resolves.toBeNull();
     answer = undefined;
     await expect(jazz.accountFor(request())).resolves.toBeNull();
@@ -1186,7 +1257,7 @@ describe("createJazz", () => {
       driver: { type: "memory" },
     });
     cleanups.push(() => session.close());
-    await session.loginWithBackend();
+    await session.refresh();
     const firstAccount = session.getSnapshot().client!.session!.user!;
     await session
       .getSnapshot()
@@ -1215,7 +1286,7 @@ describe("createJazz", () => {
       driver: { type: "memory" },
     });
     cleanups.push(() => again.close());
-    await again.loginWithBackend();
+    await again.refresh();
     const account = again.getSnapshot().client!.session!.user!;
     expect(account).not.toBe(firstAccount);
     await expect(second.accountFor(asAlice)).resolves.toBe(account);
@@ -1224,39 +1295,6 @@ describe("createJazz", () => {
       .client!.db.insert(app.todos, { title: "after the reset", owner: account })
       .wait({ tier: "global" });
   }, 60_000);
-
-  it("reconnects a user whose socket's cookies expired but who is still signed in", async () => {
-    // Requests seen before `expiredBefore` carry cookies that have since expired.
-    const firstSeen = new WeakMap<Request, number>();
-    let expiredBefore = 0;
-    const jazz = await createJazz({
-      app,
-      permissions,
-      store: memory(),
-      authenticate: (request) => {
-        if (!firstSeen.has(request)) firstSeen.set(request, Date.now());
-        return firstSeen.get(request)! < expiredBefore ? null : authenticate(request);
-      },
-      recheckSeconds: 0.05,
-    }).ready();
-    const appId = jazz.appId;
-    cleanups.push(() => jazz.close());
-    let upgrades = 0;
-    const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
-    const alice = await userSession(appId, origin, "alice");
-    await alice.db
-      .insert(app.todos, { title: "before", owner: alice.session!.user! })
-      .wait({ tier: "global" });
-    const opened = upgrades;
-    expiredBefore = Date.now() + 1;
-    // The re-check on the old socket fails; the client reconnects with fresh
-    // cookies and keeps syncing.
-    await expect.poll(() => upgrades, { timeout: 5_000, interval: 50 }).toBeGreaterThan(opened);
-    await alice.db
-      .insert(app.todos, { title: "after", owner: alice.session!.user! })
-      .wait({ tier: "global" });
-    expect(alice.db.getSyncStatus().link).toEqual({ state: "connected" });
-  }, 30_000);
 
   it("links a second identity to the same account", async () => {
     const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
@@ -1316,7 +1354,7 @@ describe("createJazz", () => {
         permissions,
         serverUrl: `${origin}/jazz`,
         driver: { type: "memory" },
-        initial: "local-first",
+        initial: "device",
       });
       cleanups.push(() => session.close());
       const guest = session.getSnapshot().client!;
@@ -1333,7 +1371,7 @@ describe("createJazz", () => {
 
       // The app's sign-up created "alice"; the backend now names her.
       signInAs(origin, "alice");
-      await session.linkWithBackend();
+      await session.linkDeviceAccount();
       const alice = session.getSnapshot().client!;
       expect(alice.session!.user!).toBe(account);
       expect(alice.session!.identity).toEqual({
@@ -1920,7 +1958,7 @@ describe("createJazz", () => {
         driver: { type: "memory" },
       });
       cleanups.push(() => session.close());
-      await session.loginWithBackend();
+      await session.refresh();
       const alice = session.getSnapshot().client!;
 
       const data = new Uint8Array(24 * 1024 * 1024);
@@ -2388,7 +2426,7 @@ describe("createJazz", () => {
       permissions,
       serverUrl: `${guestOrigin}/jazz`,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
     });
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
@@ -2788,7 +2826,7 @@ describe("createJazz", () => {
         permissions,
         serverUrl: `${origin}/jazz`,
         driver: { type: "memory" },
-        initial: "local-first",
+        initial: "device",
       });
       cleanups.push(() => session.close());
       return session.getSnapshot().client!;

@@ -44,6 +44,27 @@ export function isReconnectLaterWireError(error: WireError): boolean {
   return error.retry === "later" && (error.code === "not_ready" || error.code === "backpressure");
 }
 
+/** How the app's backend starts the message of a planned re-authentication. */
+export const REAUTHENTICATE_WIRE_MESSAGE_PREFIX = "reauthenticate:";
+
+/**
+ * Whether the server ended an admitted session because the expiry its app's
+ * auth gave it is near, asking the client to connect again so the app's
+ * `authenticate` decides with the client's current credential. It is an
+ * `auth_failed` error with `after_resume` retry whose message starts with
+ * {@link REAUTHENTICATE_WIRE_MESSAGE_PREFIX}: the core sends the same code
+ * and retry for other refusals (a session that no longer matches), which
+ * stay refusals. A client that doesn't know it treats it as a refused
+ * credential and asks its backend again.
+ */
+export function isReauthenticateWireError(error: WireError): boolean {
+  return (
+    error.code === "auth_failed" &&
+    error.retry === "after_resume" &&
+    error.message.startsWith(REAUTHENTICATE_WIRE_MESSAGE_PREFIX)
+  );
+}
+
 /**
  * Whether the carrier itself ended the link because the socket went away:
  * closed, failed, or silent past {@link HEARTBEAT_SILENCE_MS}. These are

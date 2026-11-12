@@ -34,7 +34,11 @@ export const jazz = createJazz({
   store: vercel(),
   authenticate: async (request) => {
     const session = await getSession(request); // your own auth
-    return session ? { userId: session.user.id } : null;
+    if (!session) return null;
+    return {
+      userId: session.user.id,
+      expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
+    };
   },
 });
 ```

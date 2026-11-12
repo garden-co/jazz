@@ -1,19 +1,18 @@
 <!-- #region provider-svelte -->
 <script lang="ts">
-  import type { DbConfig } from "jazz-tools";
-  import { JazzSvelteProvider } from 'jazz-tools/svelte';
+  import { JazzProvider, type JazzClientConfig } from 'jazz-tools/svelte';
   import TodoList from './TodoList.svelte';
 
-  let { config }: { config: DbConfig } = $props();
+  let { config }: { config: JazzClientConfig } = $props();
 </script>
 
-<JazzSvelteProvider {config}>
+<JazzProvider {config}>
   {#snippet children()}
     <h1>Todos</h1>
     <TodoList />
   {/snippet}
-  {#snippet fallback()}
+  {#snippet loading()}
     <p>Loading...</p>
   {/snippet}
-</JazzSvelteProvider>
+</JazzProvider>
 <!-- #endregion provider-svelte -->

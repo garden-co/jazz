@@ -21,7 +21,10 @@ after the first load:
 
     function Root() {
       return (
-        <JazzProvider client={() => import("jazz-tools/local-first")} signedOut={<SignIn />}>
+        <JazzProvider
+          config={{ serverUrl: "/jazz", client: () => import("jazz-tools/local-first") }}
+          signedOut={<SignIn />}
+        >
           <App />
         </JazzProvider>
       );
@@ -34,7 +37,7 @@ after the first load:
       ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts
     </include>
 
-    The background upgrade to the local-first client keeps the same `Db`: its live queries, listeners and writes carry on. `db.isLocalFirst()` tells whether it has happened yet, and `await db.upgradeToLocalFirst(loader)` waits for it. If the app took the `Db` offline with `disconnect()`, it stays offline. In the browser, a local-first `Db` is offline for every tab of the app, so at the upgrade that also takes the app's other local-first tabs offline. Signing in, signing out and switching accounts do give the session a new `Db`. The old one then ends its live queries with a `DbReplacedError` (from `"jazz-tools"`) and throws it on writes. Follow the session to pick up the new one, and read the current `Db` for each write:
+    The background upgrade to the local-first client keeps the same `Db`: its live queries, listeners and writes carry on. `db.isLocalFirst()` tells whether it has happened yet, and `await db.upgradeToLocalFirst(loader)` waits for it. If the app took the `Db` offline with `disconnect()`, it stays offline. In the browser, a local-first `Db` is offline for every tab of the app, so at the upgrade that also takes the app's other local-first tabs offline. Signing in, signing out and switching accounts do give the session a new `Db`. The old one then ends its live queries with a `DbReplacedError` (from `"jazz-tools"`) and throws it on writes. Follow the session to pick up the new one, and read `session.db` again for each write (it throws while no one is signed in):
 
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/main.ts#follow-session-ts
@@ -42,7 +45,7 @@ after the first load:
 
     ```ts
     const stop = followDb(session, (db) => db.subscribe(app.todos, renderTodos));
-    session.getSnapshot().client!.db.insert(app.todos, { title: "Buy milk", done: false });
+    session.db.insert(app.todos, { title: "Buy milk", done: false });
     ```
 
     The framework providers do this for you.
@@ -55,6 +58,13 @@ offline on later visits. Loading the page itself offline is up to your app: cach
 including Jazz's Wasm and worker files, with a service worker of your own. If a background upgrade fails, the app stays on the thin client and
 logs a warning. That tab then has no offline use, and it doesn't retry the upgrade until the
 page reloads.
+
+To open the local-first client straight away for every account, first visit included, pass
+`localFirst: "now"` next to `client` (the default is `"background"`: start thin, upgrade after the
+first load). Use it when the app must work offline from the first render, or when it uses
+`db.transaction`, which only the local-first client has. Otherwise keep the default, which renders
+sooner. With `"now"`, a loader that fails makes the session fail (`status: "error"`) instead of
+running thin, and `"now"` without `client` is refused.
 
 The `import()` stays in your code, so the Wasm engine (%bundle.wasm% gzipped, %bundle.wasmRaw% uncompressed)
 downloads only when the client upgrades. After the first render, local storage keeps filling for a
@@ -78,6 +88,7 @@ The local-first client also takes:
 | Option           | Default                    | What it does                                                                      |
 | :--------------- | :------------------------- | :-------------------------------------------------------------------------------- |
 | `driver`         | `{ type: "persistent" }`   | Where the replica lives: IndexedDB, or `{ type: "memory" }` for nothing on disk   |
+| `localFirst`     | `"background"`             | `"now"` opens local-first from the first render instead of upgrading after it     |
 | `dbName`         | derived from your endpoint | Logical base name of the local database; Jazz keeps one per endpoint and account  |
 | `runtimeSources` | found automatically        | Where to load the Wasm and worker from; see [Wasm and workers](#wasm-and-workers) |
 | `logLevel`       | `"warn"`                   | Wasm log level, for debugging                                                     |
@@ -106,7 +117,7 @@ What stays on the device:
 
 ### Eviction
 
-`{ type: "persistent" }` writes to [IndexedDB](https://developer.mozilla.org/docs/Web/API/IndexedDB_API). By default browsers treat this as **best-effort** storage&hairsp;—&hairsp;under disk pressure, or after long inactivity, the browser can clear it without warning. For a local-first app that means a returning user can find their identity (the local-first secret) and any data owned only by that user wiped.
+`{ type: "persistent" }` writes to [IndexedDB](https://developer.mozilla.org/docs/Web/API/IndexedDB_API). By default browsers treat this as **best-effort** storage&hairsp;—&hairsp;under disk pressure, or after long inactivity, the browser can clear it without warning. For a local-first app that means a returning user can find their identity (the device account key) and any data owned only by that user wiped.
 
 The trade-offs are:
 
@@ -124,13 +135,14 @@ if (navigator.storage?.persist) {
 }
 ```
 
-Check `navigator.storage.persisted()` on subsequent loads to see whether the grant is still in effect. Pair this with the [backup and restore](/docs/setup/auth/local-first#backing-up-and-restoring-the-secret) flow so the local-first secret can be recovered if storage is ever cleared.
+Check `navigator.storage.persisted()` on subsequent loads to see whether the grant is still in effect. Pair this with the [backup and restore](/docs/setup/auth/local-first#backing-up-and-restoring-the-key) flow so the device account key can be recovered if storage is ever cleared.
 
 ## Offline and guests
 
 Reads and writes keep working offline and sync when the connection returns. A signed-out visitor
-can also start as a [local-first guest](/docs/setup/auth/local-first): an account created on the
-device, which keeps its data when the visitor signs up later.
+can also start as a guest on a [device account](/docs/setup/auth/local-first)
+(`initial: "device"`): an account whose key is created on the device, which works offline and keeps
+its data when the visitor signs up later.
 
 ## Wasm and workers
 

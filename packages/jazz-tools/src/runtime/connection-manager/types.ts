@@ -379,6 +379,15 @@ export abstract class ConnectionManager {
 
   abstract deleteClientStorage(): Promise<void>;
 
+  /**
+   * Whether this connection can still serve its Db: no storage reset took
+   * its client away. A Db whose sign-out failed before its teardown began
+   * keeps serving, and its session keeps it.
+   */
+  isUsable(): boolean {
+    return true;
+  }
+
   protected async shutdownClient(): Promise<void> {
     try {
       await this.client?.shutdown();

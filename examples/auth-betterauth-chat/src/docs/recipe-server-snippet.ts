@@ -15,7 +15,12 @@ export const jazz = createJazz({
   // The Better Auth session cookie decides who the user is.
   authenticate: async (request) => {
     const session = await auth.api.getSession({ headers: request.headers });
-    return session ? { userId: session.user.id } : null;
+    return session
+      ? {
+          userId: session.user.id,
+          expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
+        }
+      : null;
   },
 });
 // #endregion betterauth-server

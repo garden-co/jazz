@@ -4,7 +4,7 @@ import { renderToString } from "react-dom/server";
 import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
-import { ConfiguredJazzAppProvider, useJazzAuth, type JazzAuthState } from "./app.js";
+import { JazzSessionProvider, useJazzSession, type UseJazzSessionResult } from "./session.js";
 import { useJazzClient } from "./provider.js";
 import { makeFakeAccount, makeFakeClient } from "./test-utils.js";
 
@@ -35,17 +35,17 @@ function fixture() {
   );
   return { factory, client, enrollment, backend };
 }
-let current: JazzAuthState;
+let current: UseJazzSessionResult;
 function Status() {
-  current = useJazzAuth();
+  current = useJazzSession();
   return <p>{current.status}</p>;
 }
 it("does not create a host during SSR or an abandoned Suspense render", async () => {
   const { factory } = fixture();
   const tree = (
-    <ConfiguredJazzAppProvider config={{}} createJazzClient={factory} loading={<Status />}>
+    <JazzSessionProvider config={{}} openCore={factory} loading={<Status />}>
       <p>data</p>
-    </ConfiguredJazzAppProvider>
+    </JazzSessionProvider>
   );
   expect(renderToString(tree)).toContain("starting");
   expect(factory).not.toHaveBeenCalled();
@@ -89,22 +89,22 @@ it("retains one StrictMode owner and detaches passive queries before logout", as
   });
   const view = render(
     <StrictMode>
-      <ConfiguredJazzAppProvider
+      <JazzSessionProvider
         config={{}}
-        createJazzClient={factory}
+        openCore={factory}
         loading={<Status />}
         signedOut={<Status />}
         error={<Status />}
       >
         <Query />
-      </ConfiguredJazzAppProvider>
+      </JazzSessionProvider>
     </StrictMode>,
   );
   await waitFor(() => expect(view.container.textContent).toBe("ready"));
   expect(factory).toHaveBeenCalledOnce();
   let logout!: Promise<void>;
   act(() => {
-    logout = current.logout();
+    logout = current.signOut();
   });
   await act(async () => {
     await logout;
@@ -117,20 +117,20 @@ it("retains one StrictMode owner and detaches passive queries before logout", as
 it("keeps auth fallback mounted to acknowledge a backend-driven sign-out", async () => {
   const { factory, client, backend } = fixture();
   const view = render(
-    <ConfiguredJazzAppProvider
+    <JazzSessionProvider
       config={{}}
-      createJazzClient={factory}
+      openCore={factory}
       loading={<Status />}
       signedOut={<Status />}
       error={<Status />}
     >
       <Status />
-    </ConfiguredJazzAppProvider>,
+    </JazzSessionProvider>,
   );
   await waitFor(() => expect(view.container.textContent).toBe("ready"));
   backend.signedIn = false;
   await act(async () => {
-    await current.reauthenticate();
+    await current.refresh();
   });
   await waitFor(() => expect(view.container.textContent).toBe("signed-out"));
   expect(client.shutdown).toHaveBeenCalled();
@@ -140,9 +140,9 @@ it("logs a startup failure even when the app renders no error UI", async () => {
   onTestFinished(() => consoleError.mockRestore());
   const create = vi.fn().mockRejectedValueOnce(new Error("no native relay"));
   const view = render(
-    <ConfiguredJazzAppProvider config={{}} createJazzClient={create}>
+    <JazzSessionProvider config={{}} openCore={create}>
       <Status />
-    </ConfiguredJazzAppProvider>,
+    </JazzSessionProvider>,
   );
   await waitFor(() =>
     expect(consoleError).toHaveBeenCalledWith(
@@ -156,16 +156,16 @@ it("exposes safe retry in custom initialization error UI", async () => {
   const { factory } = fixture();
   const create = vi.fn().mockRejectedValueOnce(new Error("offline")).mockImplementation(factory);
   const view = render(
-    <ConfiguredJazzAppProvider
+    <JazzSessionProvider
       config={{}}
-      createJazzClient={create}
+      openCore={create}
       loading={<Status />}
       error={(state) => (
         <button onClick={() => void state.retry()}>Retry {state.error?.message}</button>
       )}
     >
       <Status />
-    </ConfiguredJazzAppProvider>,
+    </JazzSessionProvider>,
   );
   await waitFor(() => expect(view.container.textContent).toBe("Retry offline"));
   await act(async () => {
@@ -183,9 +183,9 @@ it("retains its mounted owner while Suspense hides and restores the data tree", 
   }
   const tree = (hidden: boolean) => (
     <Suspense fallback={<p>suspended</p>}>
-      <ConfiguredJazzAppProvider config={{}} createJazzClient={factory} loading={<Status />}>
+      <JazzSessionProvider config={{}} openCore={factory} loading={<Status />}>
         <Data hidden={hidden} />
-      </ConfiguredJazzAppProvider>
+      </JazzSessionProvider>
     </Suspense>
   );
   const view = render(tree(false));
@@ -221,9 +221,9 @@ it("waits for passive queries while outer Suspense cannot commit", async () => {
   }
   const tree = (blocked: boolean) => (
     <Suspense fallback="suspended">
-      <ConfiguredJazzAppProvider config={{}} createJazzClient={factory} loading={<Status />}>
+      <JazzSessionProvider config={{}} openCore={factory} loading={<Status />}>
         <Query />
-      </ConfiguredJazzAppProvider>
+      </JazzSessionProvider>
       <Block blocked={blocked} />
     </Suspense>
   );
@@ -233,7 +233,7 @@ it("waits for passive queries while outer Suspense cannot commit", async () => {
   expect(active).toBe(1);
   let logout!: Promise<void>;
   act(() => {
-    logout = current.logout();
+    logout = current.signOut();
   });
   await act(async () => {
     for (let i = 0; i < 60; i++) await Promise.resolve();

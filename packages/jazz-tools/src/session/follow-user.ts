@@ -1,15 +1,20 @@
 import { AccountAuthError, requestBackendUser } from "../accounts/registry-client.js";
-import type { AccountIdentity } from "../accounts/state.js";
+import type { AccountHandle, AccountIdentity } from "../accounts/state.js";
 import type { SyncStatus } from "../runtime/sync-status.js";
-import { watchBackendUser, type BackendUser, type BackendWatchEvents } from "./backend-watch.js";
-import type { JazzSession } from "./state.js";
+import {
+  watchBackendUser,
+  type BackendUser,
+  type BackendWatchEvents,
+  type SignedOutDecision,
+} from "./backend-watch.js";
+import type { SessionCore } from "./state.js";
 
 /**
  * A Jazz session that follows the user your backend names. Jazz asks your
  * backend (its `authenticate`) who is signed in on start, on focus and when
  * another tab signs in or out.
  */
-export interface UserFollowingSession<Client> extends JazzSession<Client> {
+export interface UserFollowingSession<Client> extends SessionCore<Client> {
   /**
    * Your auth changed: call this after your own sign-in, sign-out or account
    * switch, once your session cookie (or bearer) is fresh. Jazz asks your
@@ -40,10 +45,19 @@ export function followUser(options: {
   registry: string;
   events: BackendWatchEvents;
   fetch?: typeof fetch;
-  /** See `linkGuestOnSignUp` on `createJazzClient`. Default true. */
+  /** See `linkDeviceAccountOnSignUp` on `createJazzClient`. Default true. */
   linkGuest?: boolean;
+  /** See `forgotten` on `watchBackendUser`. */
+  forgotten?: (account: AccountHandle) => Promise<boolean>;
+  /**
+   * Call `changed` when another tab changes this device's accounts (a
+   * `storage` event), so a guest it forgot asks the backend at once.
+   */
+  watchAccounts?: (changed: () => void) => () => void;
+  /** See `onSignedOut` on `createJazzClient`. */
+  onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
 }) {
-  return <Client>(session: JazzSession<Client>) => decorate(session, options);
+  return <Client>(session: SessionCore<Client>) => decorate(session, options);
 }
 
 // Each following session's first backend answer (see `firstBackendAnswer`).
@@ -60,7 +74,7 @@ const firstAnswers = new WeakMap<object, Promise<void>>();
  * a failed or timed-out check (the auth request deadline) opens signed out as
  * before. Never rejects.
  */
-export async function firstBackendAnswer(session: JazzSession<unknown>): Promise<void> {
+export async function firstBackendAnswer(session: SessionCore<unknown>): Promise<void> {
   if (session.getSnapshot().status !== "signed-out") return;
   await firstAnswers.get(session);
 }
@@ -69,25 +83,32 @@ export async function firstBackendAnswer(session: JazzSession<unknown>): Promise
  * @internal Settles once a `followUser` session's watch has followed the
  * backend's first answer (or failed to ask), whatever the session opened as.
  */
-export function backendAnswered(session: JazzSession<unknown>): Promise<void> {
+export function backendAnswered(session: SessionCore<unknown>): Promise<void> {
   return firstAnswers.get(session) ?? Promise.resolve();
 }
 
 function decorate<Client>(
-  session: JazzSession<Client>,
+  session: SessionCore<Client>,
   options: {
     registry: string;
     events: BackendWatchEvents;
     fetch?: typeof fetch;
     linkGuest?: boolean;
+    forgotten?: (account: AccountHandle) => Promise<boolean>;
+    watchAccounts?: (changed: () => void) => () => void;
+    onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
   },
 ): Pick<UserFollowingSession<Client>, "reauthenticate" | "linkWithBackend" | "close"> {
+  const probe = () => signedInIdentity(options.registry, options.fetch);
+  const singleFlight = options.events.singleFlight;
   const watch = watchBackendUser(
     session,
-    () => signedInIdentity(options.registry, options.fetch),
+    singleFlight ? () => singleFlight(probe) : probe,
     options.events,
     {
       linkGuest: options.linkGuest,
+      forgotten: options.forgotten,
+      onSignedOut: options.onSignedOut,
       reconnect: () =>
         void (session.getSnapshot().client as ObservedClient | undefined)?.db
           ?.reconnect?.()
@@ -111,6 +132,20 @@ function decorate<Client>(
   };
   const unsubscribe = session.subscribe(followClient);
   followClient();
+  // Another tab forgot this guest (it linked it, and may have signed that
+  // user out since): ask the backend now rather than on the next focus.
+  const { forgotten } = options;
+  const stopAccounts = forgotten
+    ? options.watchAccounts?.(() => {
+        const account = session.getSnapshot().account;
+        if (account?.identity.issuer !== "urn:jazz:local-first") return;
+        void forgotten(account)
+          .then((gone) => {
+            if (gone && session.getSnapshot().account === account) return watch.reauthenticate();
+          })
+          .catch(() => {});
+      })
+    : undefined;
   const close = session.close;
   const link = session.linkWithBackend;
   return {
@@ -128,6 +163,7 @@ function decorate<Client>(
       watch.stop();
       unsubscribe();
       stopStatus?.();
+      stopAccounts?.();
       return close();
     },
   };
