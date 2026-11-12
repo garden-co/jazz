@@ -38,6 +38,10 @@
   font-size: 12px;
 }
 
+.viewAsInvalid {
+  border-color: #b3423a;
+}
+
 .page {
   padding: 20px;
   overflow: auto;
