@@ -84,12 +84,15 @@ async function open(
 }
 
 /**
- * A 1 MiB text value streamed in 64 KiB parts, held after the first part
- * (once the server has it) until `release()`.
+ * A 5 MiB text value (an adopter's file upload) streamed in 64 KiB parts,
+ * held after the first part (once the server has it) until `release()`.
+ * In the reported failure the upload started about 100 ms after load and the
+ * background upgrade closed the thin runtime about 300 ms later, mid-upload;
+ * the gate puts the upgrade at that point every time instead of by timing.
  */
 function gatedStream() {
-  const parts = Array.from({ length: 16 }, (_, index) =>
-    String.fromCharCode(97 + index).repeat(64 * 1024),
+  const parts = Array.from({ length: 80 }, (_, index) =>
+    String.fromCharCode(97 + (index % 26)).repeat(64 * 1024),
   );
   let release!: () => void;
   const gate = new Promise<void>((resolve) => (release = resolve));
