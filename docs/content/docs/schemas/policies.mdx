@@ -146,6 +146,11 @@ Sometimes access isn't determined by ownership or a parent relationship, but by 
 
 The callback form `(todo) => ...` gives you access to the current row, so you can correlate it with rows in other tables.
 
+A `where(...)` key can also reach one hop through a relation, qualified with the relation's name:
+`policy.docs.allowRead.where({ "author.uid": session.identity.subject })` reads `uid` on the
+row `author` leads to. The name of the table a relation leads to works too, when only one of the
+table's relations leads there.
+
 A column you correlate on must be declared as a relation with `s.rel` in your schema. Correlating on
 a plain UUID column fails validation with `JoinNotRefCompatible`.
 

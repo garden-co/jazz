@@ -1357,10 +1357,11 @@ function buildGatherSeedState(
 }
 
 /**
- * Adds a filter per entry of `where` to `into`. A column qualified with another
- * table name is resolved through the single direct relation from `outputTable`
- * to that table, joined once per qualifying table. Returns whether any column
- * was qualified.
+ * Adds a filter per entry of `where` to `into`. A column qualified with the
+ * name of a relation from `outputTable` (`"author.name"`) is resolved through
+ * that relation; one qualified with another table's name (`"users.name"`)
+ * through the single direct relation from `outputTable` to that table. Each
+ * qualifier is joined once. Returns whether any column was qualified.
  */
 function collectQualifiedWhere(
   where: Record<string, unknown>,
@@ -1374,9 +1375,13 @@ function collectQualifiedWhere(
   const { joins, filters } = into;
   const qualifiedRelationByPrefix = new Map<string, Relation>();
   const qualifiedScopeByPrefix = new Map<string, string>();
-  const ambiguous = (prefix: string) =>
+  const relations = relationsByTable.get(outputTable) ?? [];
+  const listed = (candidates: Relation[]) =>
+    candidates.map((relation) => `"${relation.name}" (to "${relation.toTable}")`).join(", ");
+  const ambiguous = (prefix: string, bare: string, candidates: Relation[]) =>
     new Error(
-      `${errors.subject} table "${prefix}" is ambiguous from "${outputTable}"; use an ${errors.alternative} instead.`,
+      `${errors.subject} table "${prefix}" is ambiguous from "${outputTable}": relations ${listed(candidates)} all lead there. ` +
+        `Qualify the column with a relation's name instead (${candidates.map((relation) => `"${relation.name}.${bare}"`).join(" or ")}), or use an ${errors.alternative}.`,
     );
   let hasQualifiedFilters = false;
 
@@ -1386,18 +1391,36 @@ function collectQualifiedWhere(
     }
 
     const [prefix, bare] = splitQualifiedColumn(column);
+    // The table's own name qualifies its own columns, even when one of its
+    // relations has that name too.
     if (!prefix || prefix === outputTable) {
       filters.push({ column: bare, raw, scope: baseScope });
       continue;
     }
 
     hasQualifiedFilters = true;
-    const candidates = (relationsByTable.get(outputTable) ?? []).filter(
-      (relation) => relation.toTable === prefix,
+    // A relation's name qualifies through that relation. A relation named
+    // after the table it leads to is resolved as that table is, as before
+    // relation names qualified keys: through the one relation that leads
+    // there, or the one whose column is `bare`.
+    const viaTable = relations.filter((relation) => relation.toTable === prefix);
+    const named = relations.find(
+      (relation) => relation.name === prefix && relation.toTable !== prefix,
     );
+    if (named && viaTable.length > 0) {
+      const others = viaTable.map((relation) => `"${relation.name}"`).join(", ");
+      throw new Error(
+        `${errors.subject} column "${prefix}.${bare}": "${prefix}" names both the relation "${named.name}" (to "${named.toTable}") and the table "${prefix}", which ${viaTable.length === 1 ? `relation ${others} leads` : `relations ${others} lead`} to. ` +
+          `Rename the relation, or use an ${errors.alternative}.`,
+      );
+    }
+    const candidates = named ? [named] : viaTable;
     if (candidates.length === 0) {
       throw new Error(
-        `${errors.subject} column "${prefix}.${bare}" does not match a direct relation from "${outputTable}".`,
+        `${errors.subject} column "${prefix}.${bare}": "${prefix}" is neither a relation of "${outputTable}" nor a table that one of its relations leads to. ` +
+          (relations.length === 0
+            ? `"${outputTable}" declares no relations; declare one with s.rel(...).`
+            : `Its relations are ${listed(relations)}.`),
       );
     }
     const matching =
@@ -1406,11 +1429,12 @@ function collectQualifiedWhere(
         : candidates.filter((relation) =>
             relation.type === "forward" ? relation.fromColumn === bare : relation.toColumn === bare,
           );
-    if (matching.length !== 1) throw ambiguous(prefix);
+    if (matching.length !== 1) throw ambiguous(prefix, bare, candidates);
     const relation = matching[0]!;
 
     const existingRelation = qualifiedRelationByPrefix.get(prefix);
-    if (existingRelation && existingRelation.name !== relation.name) throw ambiguous(prefix);
+    if (existingRelation && existingRelation.name !== relation.name)
+      throw ambiguous(prefix, bare, candidates);
     qualifiedRelationByPrefix.set(prefix, relation);
 
     let scope = qualifiedScopeByPrefix.get(prefix);
