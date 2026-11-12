@@ -8,7 +8,7 @@ import { ANONYMOUS_JWT_ISSUER, LOCAL_FIRST_JWT_ISSUER } from "../runtime/client-
 import type { Session } from "../runtime/context.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
-import { deploy } from "../dev/catalogue.js";
+import { deployApp } from "../dev/catalogue.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../dev/dev-server.js";
 
 type PolicyTestAppSchema = { wasmSchema: WasmSchema };
@@ -287,12 +287,13 @@ export async function createPolicyTestApp(
     adminSecret,
   });
 
-  // Published as createJazz publishes it; the backend link is pinned to it.
-  const { bundle } = await deploy({
+  // Published as createJazz publishes it, with every schema version and
+  // migration the app ships; the backend link is pinned to it.
+  const { bundle } = await deployApp({
     appId: server.appId,
     serverUrl: server.url,
     adminSecret,
-    schema: app,
+    app,
     permissions,
   });
 
