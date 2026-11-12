@@ -75,81 +75,96 @@ export const REPLACED = {
 
 // The stubs. Each entry point re-exports the ones it exported in alpha.60.
 /** @deprecated Removed in alpha.61, and throws when used: use useJazzSession() (Svelte: getJazzSession()): the session, who is signed in, and its operations. */
-export const useJazzAuth: RemovedApi = removed("useJazzAuth", REPLACED.useJazzAuth);
+export const useJazzAuth: RemovedApi = /*#__PURE__*/ removed("useJazzAuth", REPLACED.useJazzAuth);
 /** @deprecated Removed in alpha.61, and throws when used: use useJazzSession() (Svelte: getJazzSession()): the session, who is signed in, and its operations. */
-export const useJazzSessionOwner: RemovedApi = removed(
+export const useJazzSessionOwner: RemovedApi = /*#__PURE__*/ removed(
   "useJazzSessionOwner",
   REPLACED.useJazzSessionOwner,
 );
 /** @deprecated Removed in alpha.61, and throws when used: use useJazzSession() (Svelte: getJazzSession()): the session, who is signed in, and its operations. */
-export const useAccountState: RemovedApi = removed("useAccountState", REPLACED.useAccountState);
+export const useAccountState: RemovedApi = /*#__PURE__*/ removed(
+  "useAccountState",
+  REPLACED.useAccountState,
+);
 /** @deprecated Removed in alpha.61, and throws when used: use useJazzSession() (the session's snapshot is reactive). */
-export const createAccountState: RemovedApi = removed(
+export const createAccountState: RemovedApi = /*#__PURE__*/ removed(
   "createAccountState",
   REPLACED.createAccountState,
 );
 /** @deprecated Removed in alpha.61, and throws when used: use useJazzSession(). */
-export const createJazzSessionState: RemovedApi = removed(
+export const createJazzSessionState: RemovedApi = /*#__PURE__*/ removed(
   "createJazzSessionState",
   REPLACED.createJazzSessionState,
 );
 /** @deprecated Removed in alpha.61, and throws when used: use getJazzSession(). */
-export const accountState: RemovedApi = removed("accountState", REPLACED.accountState);
+export const accountState: RemovedApi = /*#__PURE__*/ removed(
+  "accountState",
+  REPLACED.accountState,
+);
 /** @deprecated Removed in alpha.61, and throws when used: use createJazzClient(config) (the session signs in itself: initial: "device", createDeviceAccount(), or your backend's user). */
-export const createAccountManager: RemovedApi = removed(
+export const createAccountManager: RemovedApi = /*#__PURE__*/ removed(
   "createAccountManager",
   REPLACED.createAccountManager,
 );
 /** @deprecated Removed in alpha.61, and throws when used: use createJazzClient(config) (the session signs in itself: initial: "device", createDeviceAccount(), or your backend's user). */
-export const AccountManager: RemovedApi = removed("AccountManager", REPLACED.AccountManager);
+export const AccountManager: RemovedApi = /*#__PURE__*/ removed(
+  "AccountManager",
+  REPLACED.AccountManager,
+);
 /** @deprecated Removed in alpha.61, and throws when used: use createJazzClient(config), then session.db. */
-export const createDb: RemovedApi = removed("createDb", REPLACED.createDb);
+export const createDb: RemovedApi = /*#__PURE__*/ removed("createDb", REPLACED.createDb);
 /** @deprecated Removed in alpha.61, and throws when used: use createJazzClient(config), or <JazzProvider config={…}>. */
-export const createJazzApp: RemovedApi = removed("createJazzApp", REPLACED.createJazzApp);
+export const createJazzApp: RemovedApi = /*#__PURE__*/ removed(
+  "createJazzApp",
+  REPLACED.createJazzApp,
+);
 /** @deprecated Removed in alpha.61, and throws when used: use session.exportDeviceKey(). */
-export const exportLocalFirstSecret: RemovedApi = removed(
+export const exportLocalFirstSecret: RemovedApi = /*#__PURE__*/ removed(
   "exportLocalFirstSecret",
   REPLACED.exportLocalFirstSecret,
 );
 /** @deprecated Removed in alpha.61, and throws when used: use device accounts on the session: createDeviceAccount(), exportDeviceKey() and restoreDeviceAccount(key). */
-export const useLocalFirstAuth: RemovedApi = removed(
+export const useLocalFirstAuth: RemovedApi = /*#__PURE__*/ removed(
   "useLocalFirstAuth",
   REPLACED.useLocalFirstAuth,
 );
 /** @deprecated Removed in alpha.61, and throws when used: use device accounts on the session: createDeviceAccount(), exportDeviceKey() and restoreDeviceAccount(key). */
-export const createUseLocalFirstAuth: RemovedApi = removed(
+export const createUseLocalFirstAuth: RemovedApi = /*#__PURE__*/ removed(
   "createUseLocalFirstAuth",
   REPLACED.createUseLocalFirstAuth,
 );
 /** @deprecated Removed in alpha.61, and throws when used: use device accounts on the session: createDeviceAccount(), exportDeviceKey() and restoreDeviceAccount(key). */
-export const LocalFirstAuth: RemovedApi = removed("LocalFirstAuth", REPLACED.LocalFirstAuth);
+export const LocalFirstAuth: RemovedApi = /*#__PURE__*/ removed(
+  "LocalFirstAuth",
+  REPLACED.LocalFirstAuth,
+);
 /** @deprecated Removed in alpha.61, and throws when used: use device accounts on the session: createDeviceAccount(), exportDeviceKey() and restoreDeviceAccount(key). */
-export const BrowserAuthSecretStore: RemovedApi = removed(
+export const BrowserAuthSecretStore: RemovedApi = /*#__PURE__*/ removed(
   "BrowserAuthSecretStore",
   REPLACED.BrowserAuthSecretStore,
 );
 /** @deprecated Removed in alpha.61, and throws when used: use device accounts on the session: createDeviceAccount(), exportDeviceKey() and restoreDeviceAccount(key). */
-export const ExpoAuthSecretStore: RemovedApi = removed(
+export const ExpoAuthSecretStore: RemovedApi = /*#__PURE__*/ removed(
   "ExpoAuthSecretStore",
   REPLACED.ExpoAuthSecretStore,
 );
 /** @deprecated Removed in alpha.61, and throws when used: use device accounts on the session: createDeviceAccount(), exportDeviceKey() and restoreDeviceAccount(key). */
-export const expoAuthSecretStore: RemovedApi = removed(
+export const expoAuthSecretStore: RemovedApi = /*#__PURE__*/ removed(
   "expoAuthSecretStore",
   REPLACED.expoAuthSecretStore,
 );
 /** @deprecated Removed in alpha.61, and throws when used: use <JazzProvider session={session}>. */
-export const JazzSessionProvider: RemovedApi = removed(
+export const JazzSessionProvider: RemovedApi = /*#__PURE__*/ removed(
   "JazzSessionProvider",
   REPLACED.JazzSessionProvider,
 );
 /** @deprecated Removed in alpha.61, and throws when used: use <JazzProvider config={…}>, or <JazzSvelteClientProvider client> for a client you opened yourself. */
-export const JazzSvelteProvider: RemovedApi = removed(
+export const JazzSvelteProvider: RemovedApi = /*#__PURE__*/ removed(
   "JazzSvelteProvider",
   REPLACED.JazzSvelteProvider,
 );
 /** @deprecated Removed in alpha.61, and throws when used: use acceptDeviceAccounts. */
-export const acceptLocalFirstAuth: RemovedApi = removed(
+export const acceptLocalFirstAuth: RemovedApi = /*#__PURE__*/ removed(
   "acceptLocalFirstAuth",
   REPLACED.acceptLocalFirstAuth,
 );

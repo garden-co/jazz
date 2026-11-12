@@ -286,7 +286,11 @@ const BACKEND_SESSION_OPTIONS = {
  */
 export async function createJazzClient(input: JazzClientConfig): Promise<BackendClientSession> {
   // Credentials a backend client must not carry keep their own message.
-  if (input && typeof input === "object") refuseClientCredentials(input);
+  if (input && typeof input === "object") {
+    refuseClientCredentials(input);
+    // Its own hint: a backend client's socket comes from its credential.
+    if (Object.hasOwn(input, "webSocket")) throw new Error("Use credential instead of webSocket");
+  }
   refuseInvalidSessionConfig(input, BACKEND_SESSION_OPTIONS);
   if (input.initial !== undefined && input.initial !== "device")
     throw new Error('createJazzClient: initial is "device" or left out');

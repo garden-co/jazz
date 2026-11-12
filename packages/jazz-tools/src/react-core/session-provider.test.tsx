@@ -137,7 +137,11 @@ it("keeps auth fallback mounted to acknowledge a backend-driven sign-out", async
   expect(client.shutdown).toHaveBeenCalled();
 });
 it("renders nothing once its session is closed, or the closed view", async () => {
-  for (const closed of [undefined, <p>Session closed</p>]) {
+  for (const closed of [
+    undefined,
+    <p>Session closed</p>,
+    (state: UseJazzSessionResult) => <p>Session {state.status}</p>,
+  ]) {
     const { factory } = fixture();
     const session = ownJazzSession({}, factory, { start: false });
     await startJazzSession(session as JazzSession<unknown>);

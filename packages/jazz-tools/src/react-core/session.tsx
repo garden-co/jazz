@@ -52,7 +52,7 @@ export type JazzSessionViewProps<Client = CoreJazzClient> = {
    * default. To start over, give the provider a new session (or a new React
    * key for `config`).
    */
-  closed?: ReactNode;
+  closed?: ReactNode | ((state: UseJazzSessionResult<Client>) => ReactNode);
 };
 
 /** The two ways to give `<JazzProvider>` its session. */
@@ -165,7 +165,7 @@ function JazzSessionView<Client extends CoreJazzClient>({
       ) : state.status === "error" ? (
         render(error)
       ) : state.status === "closed" ? (
-        closed
+        render(closed)
       ) : (
         render(loading)
       )}

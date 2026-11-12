@@ -32,14 +32,15 @@ export const LINK_GUEST_KEY_MISSING_MESSAGE =
 
 /**
  * What `createJazz` answers a sign-in or `backend-user` request with when the
- * app's `authenticate` named a user without a valid `expiresAt`. The backend
+ * app's `authenticate` named a user without a valid `expiresAt` (none, not a
+ * finite number, or in milliseconds). The backend
  * logs the detail; the response carries only this code.
  */
 export const AUTHENTICATE_EXPIRES_AT_MISSING = "authenticate_expires_at_missing";
 
 /** What a client says on {@link AUTHENTICATE_EXPIRES_AT_MISSING}: the fix is in the backend. */
 export const AUTHENTICATE_EXPIRES_AT_MISSING_MESSAGE =
-  "authenticate_expires_at_missing: your backend's authenticate (createJazz) named a user without expiresAt, so Jazz can't tell how long that sign-in holds and can't sign them in. Return expiresAt with the user: when the answer stops holding, as Unix time in seconds (your session's expiry, or its token's exp). Your backend's log says what it returned. See https://jazz.tools/docs/setup/auth/backend#when-a-session-expires";
+  "authenticate_expires_at_missing: your backend's authenticate (createJazz) named a user without a valid expiresAt (none, not a number, or in milliseconds), so Jazz can't tell how long that sign-in holds and can't sign them in. Return expiresAt with the user: when the answer stops holding, as Unix time in seconds (your session's expiry, or its token's exp). Your backend's log says what it returned. See https://jazz.tools/docs/setup/auth/backend#when-a-session-expires";
 
 /**
  * The app's backend vouches to the core's registry for an identity it

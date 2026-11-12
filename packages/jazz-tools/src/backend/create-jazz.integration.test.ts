@@ -958,11 +958,12 @@ describe("createJazz", () => {
   });
 
   it("tells the browser by a stable code that authenticate returned no expiresAt, and the client names the fix", async () => {
+    let answer: unknown = { userId: "alice", internal: "secret-session-detail" };
     const jazz = await createJazz({
       app,
       permissions,
       store: memory(),
-      authenticate: () => ({ userId: "alice", internal: "secret-session-detail" }) as never,
+      authenticate: () => answer as never,
     }).ready();
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: false });
@@ -990,8 +991,15 @@ describe("createJazz", () => {
       );
       expect(error).toMatchObject({ code: "authenticate_expires_at_missing", status: 500 });
       expect(error?.message).toMatch(
-        /^authenticate_expires_at_missing: your backend's authenticate \(createJazz\) named a user without expiresAt.*Return expiresAt with the user/,
+        /^authenticate_expires_at_missing: your backend's authenticate \(createJazz\) named a user without a valid expiresAt \(none, not a number, or in milliseconds\).*Return expiresAt with the user/,
       );
+    }
+    // An expiresAt in milliseconds (or not a number) is the same mistake, by the same code.
+    for (const expiresAt of [Date.now() + 60_000, "tomorrow"]) {
+      answer = { userId: "alice", expiresAt };
+      const wrong = await fetch(`${registry}/backend-user`, { method: "POST" });
+      expect(wrong.status).toBe(500);
+      expect(await wrong.text()).toBe("authenticate_expires_at_missing");
     }
     // And it says so on the console, once, for the session's background checks.
     expect(

@@ -15,7 +15,10 @@ export { useSyncStatus } from "./use-sync-status.js";
 export type { DurabilityTier, QueryBuilder, QueryOptions, TableProxy } from "../runtime/index.js";
 
 export {
-  JazzSessionProvider,
+  // The provider a host binding builds its `<JazzProvider>` on (it takes the
+  // host's `openCore`). Not alpha.60's `JazzSessionProvider`, whose name the
+  // bindings keep as a removed-API stub.
+  JazzSessionProvider as JazzHostSessionProvider,
   useJazzSession,
   reportJazzStartupFailure,
   type JazzSessionSourceProps,

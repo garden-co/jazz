@@ -124,3 +124,18 @@ it("extends the window.__jazz Jazz installed, from any copy of Jazz on the page"
   expect(installed[Symbol.for("jazz-tools.window-jazz") as never]).toBe(true);
   unlist();
 });
+
+it("extends a window.__jazz an older Jazz copy set before the ownership mark existed", () => {
+  const window = page();
+  // alpha.60's handle: version 1, no mark.
+  const older = { version: 1, status: () => null, pending: () => 0 };
+  (window as { __jazz?: unknown }).__jazz = older;
+  const unlist = registerPageDb(fakeDb(syncStatus(CONNECTED, uploadStatusFromCount(0))), "a");
+  expect(window.__jazz).toBe(older);
+  expect(window.__jazz!.listLiveStorageNamespaces()).toEqual([]);
+  expect(older[Symbol.for("jazz-tools.window-jazz") as never]).toBe(true);
+  unlist();
+  // An object that only looks a little like it is still the app's.
+  (window as { __jazz?: unknown }).__jazz = { version: 1 };
+  expect(() => ensureWindowJazz(window)).toThrow(WindowJazzConflictError);
+});

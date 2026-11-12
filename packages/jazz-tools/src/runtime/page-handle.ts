@@ -193,17 +193,29 @@ export class WindowJazzConflictError extends Error {
 export function refuseWindowJazzConflict(page: Window): void {
   const existing = page.__jazz as unknown;
   if (existing === undefined) return;
-  if (existing && typeof existing === "object" && JAZZ_PAGE_HANDLE in existing) return;
+  if (isJazzPageHandle(existing)) return;
   throw new WindowJazzConflictError(existing);
+}
+
+/**
+ * Jazz's own `window.__jazz`: marked by this or a later copy of jazz-tools,
+ * or, from a copy before the mark (alpha.60 and earlier), the version-1
+ * handle shape, which it extends as before.
+ */
+function isJazzPageHandle(value: unknown): value is Record<string | symbol, unknown> {
+  if (!value || typeof value !== "object") return false;
+  if (JAZZ_PAGE_HANDLE in value) return true;
+  const legacy = value as { version?: unknown; status?: unknown };
+  return legacy.version === 1 && typeof legacy.status === "function";
 }
 
 /** Install `window.__jazz` (storage and sync status), extending the one Jazz installed. */
 export function ensureWindowJazz(page: Window): WindowJazzClientApi & JazzPageHandle {
   refuseWindowJazzConflict(page);
   const existing = page.__jazz as unknown;
-  const host = (existing as Record<string | symbol, unknown> | undefined) ?? {
-    [JAZZ_PAGE_HANDLE]: true,
-  };
+  const host = (existing as Record<string | symbol, unknown> | undefined) ?? {};
+  // An older copy's handle gets the mark too, for copies after this one.
+  host[JAZZ_PAGE_HANDLE] = true;
   const api = Object.assign(host, handle(), {
     async clearStorage(namespace?: string): Promise<void> {
       await resolveStorageTarget(page, namespace).deleteClientStorage();
