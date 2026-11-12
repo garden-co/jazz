@@ -113,6 +113,17 @@ impl TransactionJournal {
 pub(crate) trait TransactionConnection {
     fn transaction_open(&self) -> bool;
     fn transaction_sql(&self, sql: &str) -> impl std::future::Future<Output = Result<(), Error>>;
+    async fn begin_savepoint(&self, name: &str) -> Result<(), Error> {
+        self.transaction_sql(&format!("SAVEPOINT {name}")).await
+    }
+    async fn end_savepoint(&self, name: &str, keep: bool) -> Result<(), Error> {
+        let sql = if keep {
+            format!("RELEASE {name}")
+        } else {
+            format!("ROLLBACK TO {name}; RELEASE {name}")
+        };
+        self.transaction_sql(&sql).await
+    }
     fn journal(&self) -> Option<&TransactionJournal> {
         None
     }
@@ -166,7 +177,7 @@ pub(crate) async fn begin_savepoint<C: TransactionConnection + ?Sized>(
     conn: &C,
     name: &str,
 ) -> Result<(), Error> {
-    conn.transaction_sql(&format!("SAVEPOINT {name}")).await?;
+    conn.begin_savepoint(name).await?;
     if let Some(journal) = conn.journal() {
         journal.begin();
     }
@@ -208,12 +219,7 @@ pub(crate) async fn end_savepoint<C: TransactionConnection + ?Sized>(
     name: &str,
     keep: bool,
 ) -> Result<(), Error> {
-    let sql = if keep {
-        format!("RELEASE {name}")
-    } else {
-        format!("ROLLBACK TO {name}; RELEASE {name}")
-    };
-    let result = conn.transaction_sql(&sql).await;
+    let result = conn.end_savepoint(name, keep).await;
     finish_savepoint(conn, keep, result)
 }
 

@@ -51,9 +51,27 @@ pub(crate) async fn admit<S: jazz_sql::Sql>(conn: &mut S) -> Result<(), Error>
 where
     S::Error: std::fmt::Display,
 {
+    admit_with_provider_tables(conn, &[]).await
+}
+
+/// A host may reserve table namespaces beside Jazz. Exclusions apply only to
+/// initial admission; Jazz's own stamp is always checked and never excluded.
+pub(crate) async fn admit_with_provider_tables<S: jazz_sql::Sql>(
+    conn: &mut S,
+    prefixes: &[&str],
+) -> Result<(), Error>
+where
+    S::Error: std::fmt::Display,
+{
+    if prefixes.iter().any(|prefix| {
+        let prefix = prefix.to_ascii_lowercase();
+        prefix.is_empty() || STAMP_TABLE.starts_with(&prefix) || prefix.starts_with("_jazz")
+    }) {
+        return Err(unsupported("provider table namespace overlaps Jazz"));
+    }
     // A damaged header fails here (`file is not a database`), as a storage
     // error, before any write.
-    let tables: Vec<String> = conn
+    let mut tables: Vec<String> = conn
         .query_rows(
             // Durable Object SQLite keeps its own `_cf_*` tables in the file.
             "SELECT name FROM sqlite_master WHERE type = 'table' \
@@ -63,6 +81,9 @@ where
         )
         .await
         .map_err(storage)?;
+    if !prefixes.is_empty() {
+        tables.retain(|name| !prefixes.iter().any(|prefix| name.starts_with(prefix)));
+    }
     if tables.is_empty() {
         conn.execute(
             &format!("CREATE TABLE {STAMP_TABLE} (version INTEGER NOT NULL)"),
@@ -122,4 +143,76 @@ pub fn refuse_groove_store(dir: &Path) -> Result<(), Error> {
         )));
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "native"))]
+mod shared_file_tests {
+    use super::*;
+
+    /// Alice opens a provider-owned file; only the declared namespace is exempt
+    /// from empty-file admission. This low-level test targets the format stamp,
+    /// which is deliberately not exposed through row APIs.
+    #[test]
+    fn provider_tables_do_not_hide_foreign_or_unstamped_jazz_tables() {
+        for foreign in ["foreign_table", "_jazz_meta"] {
+            let db = rusqlite::Connection::open_in_memory().unwrap();
+            db.execute_batch(&format!(
+                "CREATE TABLE _provider_metadata (v); CREATE TABLE {foreign} (v)"
+            ))
+            .unwrap();
+            let result = jazz_sql::inline(admit_with_provider_tables(
+                &mut jazz_sql::native::Native(&db),
+                &["_provider_"],
+            ));
+            assert!(result.is_err());
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name = '_jazz_format'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+        }
+    }
+
+    /// Alice's provider metadata survives initialization and Bob cannot use an
+    /// exclusion to admit an unsupported Jazz encoding. Direct SQL is necessary
+    /// here to construct a future-version stamp that no public writer emits.
+    #[test]
+    fn shared_files_keep_format_validation() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE _provider_metadata (v); INSERT INTO _provider_metadata VALUES (7)",
+        )
+        .unwrap();
+        jazz_sql::inline(admit_with_provider_tables(
+            &mut jazz_sql::native::Native(&db),
+            &["_provider_"],
+        ))
+        .unwrap();
+        assert_eq!(
+            db.query_row("SELECT v FROM _provider_metadata", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+        assert!(
+            jazz_sql::inline(admit_with_provider_tables(
+                &mut jazz_sql::native::Native(&db),
+                &["_jazz_"]
+            ))
+            .is_err()
+        );
+        db.execute("UPDATE _jazz_format SET version = 999", [])
+            .unwrap();
+        assert!(
+            jazz_sql::inline(admit_with_provider_tables(
+                &mut jazz_sql::native::Native(&db),
+                &["_provider_"]
+            ))
+            .is_err()
+        );
+    }
 }

@@ -26,10 +26,11 @@ pub struct WorkerRows {
     pub rows: Vec<Vec<WorkerCell>>,
 }
 
-/// One exclusively owned SQLite worker. Commands must run in submission order,
-/// even when their waiter is dropped. State is published before each reply.
-/// `request_close` must order shutdown after admitted commands without waiting
-/// for the caller; the host keeps its runtime alive until `close` completes.
+/// SQL execution for one Jazz owner. A provider may own the connection or lease
+/// transactions on a shared database. Admitted commands must finish in order,
+/// even when their waiter is dropped; state is published before each reply.
+/// Closing drains/releases Jazz's storage resources. Shared providers leave
+/// final database closure to their host, which keeps the runtime alive.
 pub trait WorkerSql {
     fn query<'a>(
         &'a self,
@@ -42,6 +43,25 @@ pub trait WorkerSql {
         params: &'a [Param<'a>],
     ) -> LocalBoxFuture<'a, Result<usize, Error>>;
     fn execute_script<'a>(&'a self, sql: &'a str) -> LocalBoxFuture<'a, Result<(), Error>>;
+    /// Provider transaction boundaries. Defaults use SQLite savepoints; shared
+    /// providers can acquire their own transaction lease at the outer boundary.
+    fn begin_savepoint<'a>(&'a self, name: &'a str) -> LocalBoxFuture<'a, Result<(), Error>> {
+        Box::pin(async move { self.execute_script(&format!("SAVEPOINT {name}")).await })
+    }
+    fn end_savepoint<'a>(
+        &'a self,
+        name: &'a str,
+        keep: bool,
+    ) -> LocalBoxFuture<'a, Result<(), Error>> {
+        Box::pin(async move {
+            let sql = if keep {
+                format!("RELEASE {name}")
+            } else {
+                format!("ROLLBACK TO {name}; RELEASE {name}")
+            };
+            self.execute_script(&sql).await
+        })
+    }
     fn transaction_open(&self) -> bool;
     fn parameter_limit(&self) -> Result<usize, Error>;
     fn request_close(&self);
@@ -56,6 +76,7 @@ enum Backend {
 
 pub(crate) struct DbConnection {
     backend: Backend,
+    pub(crate) provider_table_prefixes: Vec<String>,
     pub(crate) journal: TransactionJournal,
     chunks: RefCell<Option<Arc<crate::large::Chunks>>>,
     cleanup: RefCell<Vec<String>>,
@@ -81,6 +102,7 @@ impl DbConnection {
     fn from_backend(backend: Backend) -> Self {
         Self {
             backend,
+            provider_table_prefixes: Vec::new(),
             journal: Default::default(),
             chunks: Default::default(),
             cleanup: Default::default(),
@@ -165,6 +187,23 @@ impl DbConnection {
         self.observed(before, result.is_err());
         result
     }
+    async fn end_savepoint_raw(&self, name: &str, keep: bool) -> Result<(), Error> {
+        let before = self.transaction_open();
+        let result = match &self.backend {
+            #[cfg(feature = "native")]
+            Backend::Native(native) => {
+                let sql = if keep {
+                    format!("RELEASE {name}")
+                } else {
+                    format!("ROLLBACK TO {name}; RELEASE {name}")
+                };
+                native.sql().execute_script(&sql).await.map_err(Error::from)
+            }
+            Backend::Worker(worker) => worker.end_savepoint(name, keep).await,
+        };
+        self.observed(before, result.is_err());
+        result
+    }
     pub(crate) async fn settle(&self) -> Result<(), Error> {
         if self.poisoned.get() {
             return Err(Error::new(
@@ -179,9 +218,7 @@ impl DbConnection {
             };
             // Keep the entry until the worker has replied. Cancellation cannot
             // let another operation skip a cleanup command already in flight.
-            let result = self
-                .raw_script(&format!("ROLLBACK TO {name}; RELEASE {name}"))
-                .await;
+            let result = self.end_savepoint_raw(&name, false).await;
             if let Err(error) = crate::values::finish_savepoint(self, false, result) {
                 self.poisoned.set(true);
                 return Err(error);
@@ -241,6 +278,22 @@ impl TransactionConnection for DbConnection {
     async fn transaction_sql(&self, sql: &str) -> Result<(), Error> {
         self.settle().await?;
         self.raw_script(sql).await
+    }
+    async fn begin_savepoint(&self, name: &str) -> Result<(), Error> {
+        self.settle().await?;
+        match &self.backend {
+            #[cfg(feature = "native")]
+            Backend::Native(native) => native
+                .sql()
+                .execute_script(&format!("SAVEPOINT {name}"))
+                .await
+                .map_err(Error::from),
+            Backend::Worker(worker) => worker.begin_savepoint(name).await,
+        }
+    }
+    async fn end_savepoint(&self, name: &str, keep: bool) -> Result<(), Error> {
+        self.settle().await?;
+        self.end_savepoint_raw(name, keep).await
     }
     fn journal(&self) -> Option<&TransactionJournal> {
         Some(&self.journal)

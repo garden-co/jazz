@@ -740,6 +740,22 @@ impl Names {
     /// the current schema's in its order.
     pub(crate) async fn mint(&self, conn: &DbConnection, schema: &Schema) -> Result<(), Error> {
         for table in schema.tables.values() {
+            if conn.provider_table_prefixes.iter().any(|prefix| {
+                table
+                    .stored
+                    .to_ascii_lowercase()
+                    .starts_with(&prefix.to_ascii_lowercase())
+            }) {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    format!(
+                        "Table {} uses a storage-provider-reserved namespace",
+                        table.stored
+                    ),
+                ));
+            }
+        }
+        for table in schema.tables.values() {
             for column in &table.columns {
                 if let Some(variants) = &column.variants {
                     let variants: Vec<&str> = variants.iter().map(String::as_str).collect();

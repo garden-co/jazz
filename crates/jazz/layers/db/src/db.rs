@@ -913,7 +913,11 @@ impl Stamp {
 const STATEMENT_CACHE_CAPACITY: usize = 512;
 
 /// The application tables a store holds, by their stored columns.
-async fn stored_schema<S: jazz_sql::Sql>(conn: &mut S, jazz: &JazzSchema) -> Result<Schema, Error>
+async fn stored_schema<S: jazz_sql::Sql>(
+    conn: &mut S,
+    jazz: &JazzSchema,
+    provider_prefixes: &[String],
+) -> Result<Schema, Error>
 where
     S::Error: std::fmt::Display,
 {
@@ -927,7 +931,10 @@ where
         .map_err(crate::values::provider_error)?;
     let mut tables = BTreeMap::new();
     for name in names {
-        if name.starts_with("_jazz")
+        if provider_prefixes
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+            || name.starts_with("_jazz")
             || name.starts_with("_cf_")
             || name.starts_with("sqlite_")
             || name.ends_with("__h")
@@ -1567,13 +1574,27 @@ impl Db {
         })
         .await?;
         conn.observe_transactions(&chunks)?;
-        let fresh: i64 = conn.sql()
-            // Durable Object SQLite keeps its own `_cf_*` tables in the file.
-            .query_one("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_jazz\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'", &[], |r| r.get(0)).await
-            .map_err(storage)?;
+        let fresh = if conn.provider_table_prefixes.is_empty() {
+            let count: i64 = conn.sql().query_one(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_jazz\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
+                &[], |row| row.get(0),
+            ).await.map_err(storage)?;
+            count == 0
+        } else {
+            let existing: Vec<String> = conn.sql().query_rows(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_jazz\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'",
+            &[], |row| row.get(0),
+        ).await.map_err(storage)?;
+            !existing.iter().any(|name| {
+                !conn
+                    .provider_table_prefixes
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+            })
+        };
         // A reopened store keeps every column earlier schemas added; bring
         // it up to this schema without touching what is already there.
-        let physical = if fresh == 0 {
+        let physical = if fresh {
             execute_script(&mut conn.sql(), &schema.ddl()).await?;
             let mut physical = Schema {
                 tables: BTreeMap::new(),
@@ -1592,7 +1613,12 @@ impl Db {
             // store's union grew: the opening schema is not always the
             // newest (a server core reopens under its genesis while later
             // versions' tables and columns take writes, #4769).
-            let mut physical = stored_schema(&mut conn.sql(), &config.schema).await?;
+            let mut physical = stored_schema(
+                &mut conn.sql(),
+                &config.schema,
+                &conn.provider_table_prefixes,
+            )
+            .await?;
             let mut ddl = String::new();
             for (version, earlier) in &admitted {
                 if *version == config.schema.version_id() {
