@@ -879,7 +879,11 @@ describe("NativeRuntimeAdapter server transport", () => {
         timeout: 15_000,
       });
       expect(sockets.length).toBeGreaterThan(1);
-      expect(terminal).not.toHaveBeenCalled();
+      // The refusal is reported once, as an outage that keeps retrying.
+      expect(terminal).toHaveBeenCalledWith(expect.objectContaining({ message: refusal }), {
+        retrying: true,
+      });
+      expect(terminal).not.toHaveBeenCalledWith(expect.anything(), { retrying: false });
     } finally {
       refuse = false;
       await runtime.close();
