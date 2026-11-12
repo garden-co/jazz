@@ -43,9 +43,11 @@ document and written back in canonical form only where someone edits it.
 
 ## Connecting the editor
 
-`markdownSync` calls `onChange` with the document's Markdown after each local edit. Write that
-whole value with `db.update`: each write is one version, and the server merges it with whatever
-other people wrote meanwhile. When the merged value comes back, `applyMarkdown` turns it into the
+`markdownSync` calls `onChange` with the document's Markdown after each local edit, and the value
+it was edited from. Write it with `db.update`, passing that value as `editedFrom`: each write is one
+version, and the server merges it with whatever other people wrote meanwhile. A merged value can
+reach the local store before the editor shows it; a keystroke in between is then merged over it
+locally instead of undoing it. When the merged value comes back, `applyMarkdown` turns it into the
 smallest ProseMirror change, so the local cursor and undo history stay where they were.
 
 <include cwd lang="tsx" meta='title="SongSheet.tsx"'>
@@ -92,8 +94,15 @@ as comments.
   ../examples/band-book/apps/nextjs-betterauth/src/components/use-sheet-presence.ts#rich-text-presence
 </include>
 
-Presence rows are written a few times a second and keep their history like any row. Throttle the
-writes, and skip them when only a merged value arrived: presence is stored by its text, so it
+Presence rows are written a few times a second, and their past positions are worth nothing, so
+declare the table latest-only with `.history("latest")`: Jazz then keeps only each row's latest
+version instead of every one. Such a table can't be read through `history`, at a snapshot or in a
+serializable transaction, and can't use `branchBy` or text-merging columns. Switching an existing
+table to latest-only stops history queries on it and deletes each row's earlier versions the next
+time that row is written, so the first deployment that does it must pass
+`allowDroppingHistory: true` to `createJazz` (see
+[Latest-only tables](/docs/schemas/defining-tables#latest-only-tables)). Throttle the writes, and skip them when only a merged
+value arrived: presence is stored by its text, so it
 still finds its place. Refresh the row on an interval while the editor is open and delete it on
 close. Treat a row as gone when this client has not seen it refreshed for a while (timed by this
 client's clock, so a wrong clock elsewhere hides nobody), and delete your own rows left behind by a

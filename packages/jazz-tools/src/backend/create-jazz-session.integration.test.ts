@@ -4,10 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
-import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
+import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import type { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
-import { createJazzSession } from "./index.js";
+import { createJazzClient } from "./index.js";
+import {
+  backendDbAttributedTo,
+  backendDbForSession,
+  openJazzSession,
+} from "./create-jazz-session.js";
+import { accountRegistryUrl } from "../accounts/context.js";
+import { readAccountAssignment, requestVouchedAccount } from "../accounts/registry-client.js";
 
 const app = s.defineApp(
   {
@@ -27,77 +34,58 @@ const permissions = s.definePermissions(app, ({ policy }) => {
   policy.notes.allowDelete.never();
 });
 
+/** A user the app's backend signed in, and the session it acts as them with. */
+async function appUser(
+  server: { url: string },
+  appId: string,
+  backendSecret: string,
+  name: string,
+) {
+  const identity = { issuer: "https://app.session.test", subject: `${name}-${randomUUID()}` };
+  const response = await requestVouchedAccount(
+    accountRegistryUrl(server.url, appId),
+    "login-or-register",
+    identity,
+    backendSecret,
+  );
+  const account = readAccountAssignment(response, identity);
+  return {
+    author: { account, identity },
+    session: {
+      account_id: account,
+      issuer: identity.issuer,
+      user_id: identity.subject,
+      claims: {},
+      authMode: "external" as const,
+    },
+  };
+}
+
 describe("Node shared backend session", () => {
-  it("explicitly enrolls concurrent request identities without changing backend authority", async () => {
-    const issuer = await startTestJwtIssuer();
-    const appId = randomUUID();
-    const auth = {
-      jwksUrl: issuer.jwksUrl,
-      jwtIssuer: issuer.issuer,
-      jwtAudience: issuer.audience,
-    };
-    const server = await startLocalJazzServer({ appId });
-    const owner = await createJazzSession({
-      appId,
-      serverUrl: server.url,
+  it("never opens a public client as the backend", async () => {
+    const base = {
+      appId: randomUUID(),
+      serverUrl: "http://127.0.0.1:1",
       app,
       permissions,
-      ...auth,
-      driver: { type: "memory" },
-      initial: { backendSecret: server.backendSecret },
-    });
-    try {
-      await deploy({
-        serverUrl: server.url,
-        appId,
-        adminSecret: server.adminSecret,
-        schema: resolveSchemaSource(app),
-        permissions,
-      });
-      const original = owner.getSnapshot();
-      const backend = original.client!;
-      const tokens = await Promise.all([
-        await issuer.jwtForUser("reader-a"),
-        await issuer.jwtForUser("reader-b"),
-      ]);
-      const requests = tokens.map((token) => ({ headers: { authorization: `Bearer ${token}` } }));
-      await expect(backend.forRequest(requests[0]!)).rejects.toMatchObject({
-        code: "identity_not_assigned",
-      });
-      const scopes = await Promise.all(
-        requests.map((request) => backend.forRequest(request, { account: "login-or-register" })),
+      driver: { type: "memory" as const },
+    };
+    await expect(
+      createJazzClient({ ...base, initial: { backendSecret: "secret" } } as never),
+    ).rejects.toThrow('initial is "device" or left out');
+    for (const key of ["backendSecret", "adminSecret"]) {
+      await expect(createJazzClient({ ...base, [key]: "secret" } as never)).rejects.toThrow(
+        `${key} is not a createJazzClient option`,
       );
-      const rows = await Promise.all(
-        scopes.map((db, index) =>
-          db.insert(app.posts, { text: `request-${index}` }).wait({ tier: "global" }),
-        ),
-      );
-      const authors = await Promise.all(
-        rows.map((row) => backend.db.one(app.posts.select("$createdBy").where({ id: row.id }))),
-      );
-      expect(authors[0]).toMatchObject({
-        $createdBy: { identity: { issuer: issuer.issuer, subject: "reader-a" } },
-      });
-      expect(authors[1]).toMatchObject({
-        $createdBy: { identity: { issuer: issuer.issuer, subject: "reader-b" } },
-      });
-      expect(authors[0]!.$createdBy.account).not.toBe(authors[1]!.$createdBy.account);
-      await expect(backend.forRequest(requests[0]!)).resolves.toBeDefined();
-      expect(owner.getSnapshot()).toBe(original);
-      expect(backend.session?.user?.account).toBe("00000000-0000-0000-0000-000000000000");
-    } finally {
-      await owner.close();
-      await server.stop();
-      await issuer.stop();
     }
-  }, 30_000);
+  });
 
   it("rejects invalid service admission before publishing a client", async () => {
     const appId = randomUUID();
     const server = await startLocalJazzServer({ appId, backendSecret: "expected-service-secret" });
     try {
       await expect(
-        createJazzSession({
+        openJazzSession({
           appId,
           serverUrl: server.url,
           app,
@@ -111,11 +99,36 @@ describe("Node shared backend session", () => {
     }
   });
 
-  it("retains the memory node clock when a failed transition reopens its previous handle", async () => {
+  it("the main backend's own client acts for a user through jazz.forReqUser, not forUser", async () => {
+    const appId = randomUUID();
+    const backendSecret = "for-user-service-secret";
+    const server = await startLocalJazzServer({ appId, backendSecret });
+    try {
+      const owner = await openJazzSession({
+        appId,
+        serverUrl: server.url,
+        app,
+        permissions,
+        driver: { type: "memory" },
+        initial: { backendSecret },
+      });
+      try {
+        await expect(owner.getSnapshot().client!.forUser("alice")).rejects.toThrow(
+          /only on a trusted backend client.*jazz\.forReqUser/,
+        );
+      } finally {
+        await owner.close();
+      }
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("retains the memory node clock when retry reopens the backend's client", async () => {
     const appId = randomUUID();
     const backendSecret = "clock-service-secret";
     const server = await startLocalJazzServer({ appId, backendSecret });
-    const owner = await createJazzSession({
+    const owner = await openJazzSession({
       appId,
       serverUrl: server.url,
       app,
@@ -133,9 +146,7 @@ describe("Node shared backend session", () => {
         ).client.getRuntime();
       const floor = 1n << 62n;
       native(previous.client).seedForegroundTxTimeHighWater(floor);
-      await expect(owner.becomeBackend({ backendSecret: "wrong-clock-secret" })).rejects.toThrow(
-        "401",
-      );
+      await owner.retry();
       const restored = owner.getSnapshot();
       expect(restored.status).toBe("ready");
       expect(restored.account).toBe(previous.account);
@@ -147,200 +158,79 @@ describe("Node shared backend session", () => {
     }
   });
 
-  it("keeps the original backend usable after a real sync authentication failure", async () => {
-    const appId = randomUUID();
-    const backendSecret = "recoverable-service-secret";
-    let server = await startLocalJazzServer({ appId, backendSecret });
-    const owner = await createJazzSession({
-      appId,
-      serverUrl: server.url,
-      app,
-      permissions,
-      driver: { type: "memory" },
-      initial: { backendSecret },
-    });
-    try {
-      const backend = owner.getSnapshot().client!;
-      const originalAccount = owner.getSnapshot().account;
-      await backend.db.disconnect();
-      await backend.db
-        .insert(app.posts, { text: "pending before auth failure" })
-        .wait({ tier: "local" });
-      const port = server.port;
-      await server.stop();
-      server = await startLocalJazzServer({ appId, port, backendSecret: "rotated-service-secret" });
-      await backend.db.reconnect();
-      await expect(
-        owner.becomeBackend({ backendSecret: "rotated-service-secret" }),
-      ).rejects.toThrow(/sync/i);
-      expect(owner.getSnapshot().status).toBe("ready");
-      expect(owner.getSnapshot().account).toBe(originalAccount);
-      expect(owner.getSnapshot().client).toBe(backend);
-      await backend.db
-        .insert(app.posts, { text: "usable after auth failure" })
-        .wait({ tier: "local" });
-    } finally {
-      // Authentication remains rejected; explicitly close without a sync wait.
-      await owner.getSnapshot().client?.db.shutdown();
-      await owner.close();
-      await server.stop();
-    }
-  }, 30_000);
-
-  it("keeps unsynced scoped writes fenced until reconnect allows transition", async () => {
-    const appId = randomUUID();
-    const backendSecret = "pending-service-secret";
-    const server = await startLocalJazzServer({ appId, backendSecret });
-    const owner = await createJazzSession({
-      appId,
-      serverUrl: server.url,
-      app,
-      permissions,
-      driver: { type: "memory" },
-      initial: { backendSecret },
-    });
-    const user = await createJazzSession({
-      appId,
-      serverUrl: server.url,
-      app,
-      permissions,
-      driver: { type: "memory" },
-      initial: "local-first",
-    });
-    try {
-      await deploy({
-        serverUrl: server.url,
-        appId,
-        adminSecret: server.adminSecret,
-        schema: resolveSchemaSource(app),
-        permissions,
-      });
-      const backend = owner.getSnapshot().client!;
-      const scoped = await backend.forAccount(user.getSnapshot().account!);
-      await backend.db.disconnect();
-      const row = await scoped.insert(app.posts, { text: "pending scope" }).wait({ tier: "local" });
-      let finished = false;
-      const transition = owner.becomeBackend({ backendSecret }).finally(() => {
-        finished = true;
-      });
-      await vi.waitFor(() => expect(owner.getSnapshot().status).toBe("transitioning"));
-      await new Promise((resolve) => setTimeout(resolve, 25));
-      expect(finished).toBe(false);
-      await expect(scoped.shutdown({ waitForSync: true })).rejects.toThrow(/sync|shut/i);
-      expect(() => scoped.insert(app.posts, { text: "race" })).toThrow(/shut|closed/);
-      await backend.db.reconnect();
-      await transition;
-      expect(owner.getSnapshot().account?.identity.issuer).toBe("urn:jazz:system");
-      expect(
-        await owner
-          .getSnapshot()
-          .client!.db.one(app.posts.where({ id: row.id }), { tier: "remote" }),
-      ).toMatchObject({ text: "pending scope" });
-    } finally {
-      await owner.close();
-      await user.close();
-      await server.stop();
-    }
-  }, 30_000);
-
   it("preserves SYSTEM provenance, refuses becoming a guest, and isolates user scopes", async () => {
     const appId = randomUUID();
     const backendSecret = "session-service-secret";
     const adminSecret = "session-publication-secret";
     const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
-    const session = await createJazzSession({
+    const { bundle } = await deploy({
+      serverUrl: server.url,
+      appId,
+      adminSecret,
+      schema: resolveSchemaSource(app),
+      permissions,
+    });
+    const session = await openJazzSession({
       appId,
       serverUrl: server.url,
       app,
       permissions,
+      bundle,
       driver: { type: "memory" },
+      initial: { backendSecret },
     });
     try {
-      await deploy({
-        serverUrl: server.url,
-        appId,
-        adminSecret,
-        schema: resolveSchemaSource(app),
-        permissions,
-      });
-      await session.becomeBackend({ backendSecret });
+      // A public session has no way to become the backend after it opened.
+      expect("becomeBackend" in session).toBe(false);
       const first = session.getSnapshot();
       expect(first.status).toBe("ready");
       expect(first.account?.id).toBe("00000000-0000-0000-0000-000000000000");
       expect(first.account?.identity.issuer).toBe("urn:jazz:system");
       expect(JSON.stringify(first.account)).not.toContain(backendSecret);
       const backend = first.client!;
-      expect(backend.session?.user).toEqual({
-        account: first.account!.id,
-        identity: first.account!.identity,
-      });
+      expect(backend.session?.user).toBe(first.account!.id);
+      expect(backend.session?.identity).toEqual(first.account!.identity);
       const initial = await backend.db
         .insert(app.notes, { text: "service" })
         .wait({ tier: "global" });
       expect(
         await backend.db.one(app.notes.select("$createdBy").where({ id: initial.id })),
-      ).toMatchObject({ $createdBy: backend.session?.user });
+      ).toMatchObject({
+        $createdBy: { account: backend.session?.user, identity: backend.session?.identity },
+      });
 
       // Its core admits no guests: becoming one is refused, and the backend stays.
       await expect(session.createLocalFirst()).rejects.toThrow("not supported");
       expect(session.getSnapshot().client).toBe(backend);
-      const guest = await createJazzSession({
-        appId,
-        serverUrl: server.url,
-        app,
-        permissions,
-        driver: { type: "memory" },
-        initial: "local-first",
-      });
-      const user = guest.getSnapshot();
-      await guest.close();
+      const user = await appUser(server, appId, backendSecret, "user");
 
-      await session.becomeBackend({ backendSecret });
-      await expect(backend.forAccount(user.account!)).rejects.toThrow(/closed|shut down/);
-      expect(() => backend.db.insert(app.notes, { text: "stale service" })).toThrow(
-        /closed|shut down/,
-      );
-      const current = session.getSnapshot().client!;
-      const scoped = await current.forAccount(user.account!);
+      const current = backend;
+      const scoped = backendDbForSession(current, user.session);
       await expect(async () => {
         await scoped.insert(app.notes, { text: "denied scoped user" }).wait({ tier: "global" });
       }).rejects.toThrow(/permission|denied|policy/i);
-      const other = await createJazzSession({
-        appId,
-        serverUrl: server.url,
-        app,
-        permissions,
-        driver: { type: "memory" },
-        initial: "local-first",
-      });
-      try {
-        const otherAccount = other.getSnapshot().account!;
-        const otherScope = await current.forAccount(otherAccount);
-        const rows = await Promise.all([
-          scoped.insert(app.posts, { text: "first scope" }).wait({ tier: "global" }),
-          otherScope.insert(app.posts, { text: "second scope" }).wait({ tier: "global" }),
-        ]);
-        for (const [index, expected] of [user.account!, otherAccount].entries()) {
-          expect(
-            await current.db.one(app.posts.select("$createdBy").where({ id: rows[index]!.id })),
-          ).toMatchObject({ $createdBy: { account: expected.id, identity: expected.identity } });
-        }
-      } finally {
-        await other.close();
+      const other = await appUser(server, appId, backendSecret, "other");
+      const otherScope = backendDbForSession(current, other.session);
+      const rows = await Promise.all([
+        scoped.insert(app.posts, { text: "first scope" }).wait({ tier: "global" }),
+        otherScope.insert(app.posts, { text: "second scope" }).wait({ tier: "global" }),
+      ]);
+      for (const [index, expected] of [user, other].entries()) {
+        expect(
+          await current.db.one(app.posts.select("$createdBy").where({ id: rows[index]!.id })),
+        ).toMatchObject({ $createdBy: expected.author });
       }
-      const attributed = await current.withAttribution(user.account!);
+      const attributed = backendDbAttributedTo(current, user.session);
       const row = await attributed
         .insert(app.notes, { text: "attributed service" })
         .wait({ tier: "global" });
       expect(
         await current.db.one(app.notes.select("$createdBy").where({ id: row.id })),
-      ).toMatchObject({
-        $createdBy: { account: user.account!.id, identity: user.account!.identity },
-      });
+      ).toMatchObject({ $createdBy: user.author });
       expect(session.getSnapshot().account?.identity.issuer).toBe("urn:jazz:system");
       await session.close();
       expect(() => scoped.insert(app.notes, { text: "closed scope" })).toThrow(/closed|shut down/);
-      await expect(current.forAccount(user.account!)).rejects.toThrow(/closed|shut down/);
+      expect(() => backendDbForSession(current, user.session)).toThrow(/closed|shut down/);
     } finally {
       await session.close();
       await server.stop();
@@ -351,21 +241,7 @@ describe("Node shared backend session", () => {
     const backendSecret = "attributed-tx-service-secret";
     const adminSecret = "attributed-tx-publication-secret";
     const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
-    const session = await createJazzSession({
-      appId,
-      serverUrl: server.url,
-      app,
-      permissions,
-      driver: { type: "memory" },
-    });
-    const user = await createJazzSession({
-      appId,
-      serverUrl: server.url,
-      app,
-      permissions,
-      driver: { type: "memory" },
-      initial: "local-first",
-    });
+    let session: Awaited<ReturnType<typeof openJazzSession>> | undefined;
     try {
       await deploy({
         serverUrl: server.url,
@@ -374,11 +250,18 @@ describe("Node shared backend session", () => {
         schema: resolveSchemaSource(app),
         permissions,
       });
-      await session.becomeBackend({ backendSecret });
+      session = await openJazzSession({
+        appId,
+        serverUrl: server.url,
+        app,
+        permissions,
+        driver: { type: "memory" },
+        initial: { backendSecret },
+      });
       const backend = session.getSnapshot().client!;
-      const account = user.getSnapshot().account!;
+      const user = await appUser(server, appId, backendSecret, "user");
       const note = await backend.db.insert(app.notes, { text: "invite" }).wait({ tier: "global" });
-      const attributed = await backend.withAttribution(account);
+      const attributed = backendDbAttributedTo(backend, user.session);
 
       const serializable = await attributed.serializableTransaction(async (tx) => {
         const read = await tx.one(app.notes.where({ id: note.id }));
@@ -403,7 +286,7 @@ describe("Node shared backend session", () => {
       await admitted.wait();
       expect(
         await backend.db.one(app.notes.select("$createdBy").where({ id: admitted.value })),
-      ).toMatchObject({ $createdBy: { account: account.id, identity: account.identity } });
+      ).toMatchObject({ $createdBy: user.author });
 
       await expect(
         attributed.serializableTransaction(async (tx) => {
@@ -416,12 +299,11 @@ describe("Node shared backend session", () => {
 
       for (const id of [serializable.value.id, mergeable.value.id]) {
         expect(await backend.db.one(app.posts.select("$createdBy").where({ id }))).toMatchObject({
-          $createdBy: { account: account.id, identity: account.identity },
+          $createdBy: user.author,
         });
       }
     } finally {
-      await user.close();
-      await session.close();
+      await session?.close();
       await server.stop();
     }
   }, 30_000);
@@ -431,7 +313,7 @@ describe("Node shared backend session", () => {
     const dataDir = await mkdtemp(join(tmpdir(), "jazz-outage-"));
     let server = await startLocalJazzServer({ appId, backendSecret, dataDir });
     const open = () =>
-      createJazzSession({
+      openJazzSession({
         appId,
         serverUrl: server.url,
         app,

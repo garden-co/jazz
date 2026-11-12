@@ -128,11 +128,7 @@ fn policy_metrics_schema() -> Schema {
                         .with_insert(PolicyExpr::True)
                         .with_select(PolicyExpr::eq_session(
                             "owner_id",
-                            vec![
-                                "user".to_owned(),
-                                "identity".to_owned(),
-                                "subject".to_owned(),
-                            ],
+                            vec!["identity".to_owned(), "subject".to_owned()],
                         ))
                         .with_delete(PolicyExpr::True),
                 ),
@@ -393,7 +389,7 @@ impl ObservedSubscription {
                         );
                     }
                 }
-                SubscriptionStreamItem::Rejected { reason } => {
+                SubscriptionStreamItem::Rejected { reason, .. } => {
                     panic!("{label}: subscription rejected: {reason:?}")
                 }
             }
@@ -418,7 +414,7 @@ impl ObservedSubscription {
             match tokio::time::timeout(deadline - now, self.stream.next()).await {
                 Err(_) => return,
                 Ok(None) => panic!("{label}: subscription stream closed"),
-                Ok(Some(SubscriptionStreamItem::Rejected { reason })) => {
+                Ok(Some(SubscriptionStreamItem::Rejected { reason, .. })) => {
                     panic!("{label}: subscription rejected: {reason:?}")
                 }
                 Ok(Some(SubscriptionStreamItem::Delta(delta))) => {

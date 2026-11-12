@@ -40,8 +40,12 @@ env:
   JAZZ_RN_CARGO_NDK_VERSION: 4.1.2
 
 jobs:
+  # The server binary Jazz Cloud runs. npm's jazz-tools ships no native
+  # binary: "Publish jazz-tools alpha" attaches these to the GitHub release
+  # with SHA256SUMS, and Jazz Cloud's images (and its preview image, from
+  # this artifact) take it from there. Keep the artifact names.
   build-linux:
-    name: Build CLI Linux (${{ matrix.arch }})
+    name: Build server Linux (${{ matrix.arch }})
     runs-on: blacksmith-4vcpu-ubuntu-2404
     env:
       CARGO_ZIGBUILD_CACHE_DIR: /tmp/cargo-zigbuild-cache
@@ -75,16 +79,16 @@ jobs:
         with:
           tool: cargo-zigbuild@0.20.1
 
-      - name: Build CLI binary
+      - name: Build server binary
         run: cargo zigbuild -p jazz-cli --bin jazz-tools --features otel --profile release-server --target ${{ matrix.target }}
 
       - name: Stage artifact
         run: |
           mkdir -p dist debug-symbols
           # The release-server profile keeps line tables for Jazz's crates.
-          # npm ships the binary without them; the unstripped copy (same GNU
-          # build ID) is kept as a separate artifact for offline symbolization
-          # of heap and CPU profiles.
+          # The stripped binary is checked below; the unstripped copy (same
+          # GNU build ID) is kept as a separate artifact for offline
+          # symbolization of heap and CPU profiles.
           cp target/${{ matrix.target }}/release-server/jazz-tools debug-symbols/${{ matrix.output }}
           zig objcopy --strip-debug debug-symbols/${{ matrix.output }} dist/${{ matrix.output }}
           ls -l debug-symbols/${{ matrix.output }} dist/${{ matrix.output }}
@@ -95,7 +99,6 @@ jobs:
           path: dist/${{ matrix.output }}
           if-no-files-found: error
 
-      # Named outside the `jazz-tools-*` pattern the package job downloads.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: debug-symbols-${{ matrix.output }}
@@ -103,7 +106,7 @@ jobs:
           if-no-files-found: error
 
   check-linux-heap-profile:
-    name: Check heap profiling in the Linux CLI (${{ matrix.arch }})
+    name: Check heap profiling in the Linux server (${{ matrix.arch }})
     needs: build-linux
     runs-on: ${{ matrix.os }}
     strategy:
@@ -123,7 +126,7 @@ jobs:
           name: ${{ matrix.artifact }}
           path: dist
 
-      - name: Check heap profiling in the shipped binary
+      - name: Check heap profiling in the server binary
         run: |
           set -euo pipefail
           chmod +x ./dist/${{ matrix.artifact }}
@@ -151,44 +154,6 @@ jobs:
             grep --quiet --text 'jazz_server' profile.pb
             grep --quiet --text '__rust_begin_short_backtrace' profile.pb
           done
-
-  build-macos:
-    name: Build CLI macOS (${{ matrix.arch }})
-    runs-on: blacksmith-6vcpu-macos-15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            arch: arm64
-            output: jazz-tools-darwin-arm64
-          - target: x86_64-apple-darwin
-            arch: x64
-            output: jazz-tools-darwin-x64
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ inputs.ref }}
-
-      - uses: ./.github/actions/setup-build
-        with:
-          rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
-          setup-node: "false"
-
-      - name: Build CLI binary
-        run: cargo build -p jazz-cli --bin jazz-tools --features otel --release --target ${{ matrix.target }}
-
-      - name: Stage artifact
-        run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/jazz-tools dist/${{ matrix.output }}
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ${{ matrix.output }}
-          path: dist/${{ matrix.output }}
-          if-no-files-found: error
 
   build-wasm:
     name: Build jazz-wasm
@@ -365,7 +330,6 @@ jobs:
     needs:
       - build-linux
       - check-linux-heap-profile
-      - build-macos
       - build-wasm
       - build-napi
 
@@ -377,12 +341,6 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           rust-toolchain: ""
-
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          pattern: jazz-tools-*
-          path: dist
-          merge-multiple: true
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
@@ -463,24 +421,6 @@ jobs:
           test -f packages/jazz-tools/dist/backend/index.js
           test -f packages/jazz-tools/dist/react/index.js
           test -f packages/jazz-tools/dist/permissions/index.js
-
-      - name: Stage CLI binaries into jazz-tools npm package
-        run: |
-          mkdir -p packages/jazz-tools/bin/native
-          for bin in \
-            jazz-tools-darwin-arm64 \
-            jazz-tools-darwin-x64 \
-            jazz-tools-linux-arm64 \
-            jazz-tools-linux-x64; do
-            SOURCE="dist/${bin}"
-            test -f "${SOURCE}" || { echo "Missing release native binary ${bin}"; exit 1; }
-            cp "${SOURCE}" packages/jazz-tools/bin/native/
-          done
-          chmod 755 \
-            packages/jazz-tools/bin/native/jazz-tools-darwin-arm64 \
-            packages/jazz-tools/bin/native/jazz-tools-darwin-x64 \
-            packages/jazz-tools/bin/native/jazz-tools-linux-arm64 \
-            packages/jazz-tools/bin/native/jazz-tools-linux-x64
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -719,6 +659,11 @@ jobs:
 
       - name: Generate iOS host from the packed package
         run: pnpm --dir "$JAZZ_RN_CONSUMER_FIXTURE" exec expo prebuild --platform ios --clean --no-install
+
+      - name: Evaluate JazzRn.podspec against each React Native architecture signal
+        run: node --test --test-name-pattern='JazzRn.podspec accepts' dev/gates/test/jazz-rn-packaging.test.mjs
+        env:
+          JAZZ_RN_REQUIRE_RUBY: "1"
 
       - name: Install the packed native pod
         run: pod install

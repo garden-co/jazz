@@ -117,8 +117,8 @@ versioned native encodings.
 Derived aggregate results have no originating write and omit author metadata;
 they do not manufacture a system author or expose a nullable author record.
 
-Accountless anonymous readers have no admitted account (`session.user.account`
-is null). Policy bindings for `user` and `user.account` are absent until an
+Accountless anonymous readers have no admitted account (`session.user`
+is null). The policy binding for `user` is absent until an
 account is admitted, so ownership checks fail closed; explicit anonymous-access policies remain
 available. An accountless ordinary principal cannot author new persisted rows.
 Rust interns the entire author structure, including account and both principal
@@ -236,13 +236,16 @@ bindings update together; upstream renewal reconnects with the new bearer.
 ## Durable policy-binding directory
 
 The directory retains the existing typed provider-claim node encoding. It
-stores the exact author identity plus a native record with `derived_v1: U8` presence mask and
+stores the exact author identity plus a native record with `derived_v2: U8` presence mask and
 `claims_v1: Array<Record>` typed provider-claim nodes, omitting the canonical
 identity-derived entries (`user` and its structured paths, `authMode`, and the
 namespaced `iss`/`sub`). Writing omits an entry only when it equals the value derived from the
-stored identity; other portable scalar bindings remain stored verbatim. The mask bits 0–7 correspond to `\0claims:iss`,
-`\0claims:sub`, `authMode`, `user`, `user.account`, `user.identity`,
-`user.identity.issuer`, and `user.identity.subject`. Reading rejects entries stored both explicitly and in the mask and reconstructs only the mask-selected entries from that
+stored identity; other portable scalar bindings remain stored verbatim. Mask bits follow the canonical UTF-8 order of the
+derived entries present for the identity: `\0claims:iss`, `\0claims:sub`,
+`authMode`, `identity`, `identity.issuer`, `identity.subject`, and (only for an
+accounted identity) `user`, as bits 0–6. `derived_v2` replaced `derived_v1`
+when `session.user` became the account; a `derived_v1` record fails the
+descriptor check rather than decoding under the old names. Reading rejects entries stored both explicitly and in the mask and reconstructs only the mask-selected entries from that
 identity before producing the policy-binding key. Partial internal bindings
 therefore remain exact; missing claims are never implicitly added. Provider
 claims named `user` remain separately namespaced and are retained.
@@ -254,9 +257,12 @@ This introduces no generic record-valued durable key or migration-lens default.
 
 ## Backend account selection and request scopes
 
-The Node `jazz-tools/backend` factory composes the shared session owner with
-`initial: { backendSecret }` and `session.becomeBackend({ backendSecret })`.
-Application/schema, driver and server URL are configured once. Admission sends
+`createJazz` (`jazz-tools/backend`) opens its own session as the backend: an
+internal session owner selects the backend account once, at start, with the
+core's backend secret. No public session can select or switch to a backend
+account; the public Node `createJazzClient` refuses a backend secret and
+serves only backend clients (`credential`). Application/schema, driver and
+server URL are configured once. Admission sends
 `POST /apps/{app}/backend/admit` with `X-Jazz-Backend-Secret`; the configured server's existing
 backend-secret validation must succeed before the host issues an opaque handle.
 A reachable server is required, including for memory-driver initialization.
@@ -285,18 +291,15 @@ Copied handles and SYSTEM identity objects confer no authority. Ordinary JWT
 registration, login, linking, and token extraction cannot mint or use backend
 handles. Logout fences late admissions and invalidates all issued handles.
 
-The ready backend client's `db` already carries backend authority. Public
-`forRequest` verifies the original bearer and resolves its active account
-through the core registry before creating an immutable policy scope. External
-JWT claims cannot choose an account. Request resolution defaults to strict login;
-`forRequest(request, { account: "login-or-register" })` explicitly opts that
-request into atomic external enrollment after bearer verification. It creates
-no separate runtime and does not change the backend's selected account.
-Local-first founding remains the key-bound exception, unaffected by this option.
-`forAccount` requires an opaque admitted user handle and re-verifies its proof.
-These operations do not switch the shared owner to serve concurrent requests.
-`withAttribution(account)` and `withAttributionForRequest(request)` retain
-backend permissions with verified user authorship. Raw session objects and
+The backend's `db` already carries backend authority. `jazz.forReqUser(request)`
+asks the app's `authenticate` who the request's user is, resolves (or creates)
+that user's account through the core registry, and creates an immutable policy
+scope; the backend does not verify external JWTs itself (an app can use
+`fromJWT` as its `authenticate`). External JWT claims cannot choose an account.
+It creates no separate runtime and does not change the backend's selected
+account. These operations do not switch the shared owner to serve concurrent
+requests. `jazz.withAttribution(request)` retains backend permissions with that
+user's authorship. Raw session objects and
 arbitrary issuer/subject arguments are not public impersonation capabilities.
 
 Backend selection follows the same detach, sync, shutdown, retry and logout
@@ -353,11 +356,34 @@ intent).
 
 ## Shared client session lifecycle
 
-The high-level TypeScript `createJazzSession` composes the account manager and
+The high-level TypeScript `createJazzClient` composes the account manager and
 one immutable-handle-bound client. Host adapters prepare credentials/storage and
 open clients; framework adapters observe the shared snapshot and acknowledge
 consumer detachment. Rust remains the registry/authorization authority. The
-session API introduces no storage or wire format.
+session API introduces no wire format; its one stored record is the account
+selection below.
+
+The client-side account selection store (`jazz-account-selection-v1`, local
+helper preferences rather than a database codec) keeps every local-first root
+and at most one selection: a root index (`selected`) or, for a user the app's
+backend signed in, `backendUser` (`jazz-backend-user-v1`: account UUID,
+identity and the claims `authenticate` returned at sign-in, never a credential
+or bearer). A reload reopens that selection before any network request, so a
+device with a remembered account never founds a fresh guest and opens offline;
+the backend still states the identity on every connection. The following
+session's first answer confirms it: another user switches, a confirmed
+signed-out answer signs out (and clears the record), and different claims sign
+the same user in again. Readers without `backendUser` ignore it and drop it on
+their next write; stores without one keep their exact earlier bytes.
+
+Following the backend never publishes a contradicting transient: a switch from
+one backend user to another is one transition (`transitioning` from the first
+user to `ready` as the next, the first torn down as on logout, `clearOnSignOut`
+included; a failed sign-in ends signed out, never back on the first). A
+sign-out confirmation signs out only the account its check started with. A
+404 from the backend-user route is retried with backoff and stops the watch
+only after three in a row over three backoff intervals; a stopped watch
+rejects every later `reauthenticate`.
 
 A transition publishes no usable client, waits for registered framework consumers
 to detach, and gracefully shuts down the old client with `waitForSync: true`.

@@ -59,6 +59,7 @@ fn schema() -> JazzSchema {
             composite_indexes: Vec::new(),
             policies: allow_all_policies(),
             branch_by: Vec::new(),
+            history: Default::default(),
         },
     )]))
 }
@@ -688,18 +689,20 @@ fn large_values_merge_edits_at_both_ends() {
     // The merged value is stored as a local write's would be: chunked.
     let stored = net.core.stored_bytes_for_test("docs", row, "body").unwrap();
     assert!(stored < 64 * 1024, "{stored} bytes stored inline");
-    // Bob's write as sent is kept, chunked too: the seed, alice's version,
-    // the merge and bob's value as sent each hold a tree.
+    // Bob's write as sent is kept, chunked too. Each whole write was stored
+    // as the splice that makes it, and the merge as a splice of the held
+    // value, so the seed, alice's version, the merge and bob's value as
+    // sent all share the seed's tree.
     assert_eq!(net.core.as_sent_versions_for_test().unwrap(), 1);
     let (_, roots) = net.core.large_value_nodes_for_test().unwrap();
-    assert_eq!(roots, 4);
+    assert_eq!(roots, 1);
     // Bob's next write is built on the merge, settled: his value as sent
     // goes, and with it its tree's reference.
     let next = net.edit(1, row, &[("body", "short")]);
     net.settle(1, next);
     assert_eq!(net.core.as_sent_versions_for_test().unwrap(), 0);
     let (_, roots) = net.core.large_value_nodes_for_test().unwrap();
-    assert_eq!(roots, 3);
+    assert_eq!(roots, 1);
 }
 
 #[test]
@@ -858,4 +861,36 @@ fn a_chain_that_clears_then_writes_lands_its_last_write() {
     net.settle(0, clear);
     net.settle(0, fresh);
     net.assert_summary_everywhere(row, Some("Fresh."));
+}
+
+/// Past its work budget a merge stops and the later write stands as sent,
+/// as for overlapping replacements: the earlier write's concurrent edit
+/// leaves the current text. The authority's host is told which column of
+/// which row, so it can say so.
+#[test]
+fn a_merge_past_its_budget_is_reported_to_the_host() {
+    let mut net = Net::new(2);
+    let row = net.seed(0, &[("body", "The cat sat.")]);
+    net.core.set_merge_budget_for_test(1);
+    net.offline(0);
+    net.offline(1);
+    let alice = net.edit(0, row, &[("body", "The black cat sat.")]);
+    let bob = net.edit(1, row, &[("body", "The cat slept.")]);
+    net.online(0);
+    net.settle(0, alice);
+    assert_eq!(net.core.take_merge_fallbacks(), (Vec::new(), 0));
+    net.online(1);
+    net.settle(1, bob);
+    net.assert_everywhere(row, "body", "The cat slept.");
+    let (fallbacks, dropped) = net.core.take_merge_fallbacks();
+    assert_eq!(dropped, 0);
+    assert_eq!(fallbacks.len(), 1, "{fallbacks:?}");
+    assert!(fallbacks[0].table.starts_with("docs"), "{fallbacks:?}");
+    assert_eq!(fallbacks[0].row, row);
+    assert!(fallbacks[0].column.starts_with("body"), "{fallbacks:?}");
+    assert_eq!(
+        net.core.take_merge_fallbacks(),
+        (Vec::new(), 0),
+        "taken once"
+    );
 }

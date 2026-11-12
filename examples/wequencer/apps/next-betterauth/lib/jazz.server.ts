@@ -30,14 +30,19 @@ export function jazz(): Promise<Jazz> {
     permissions,
     store: config.remote
       ? remote({ ...config.remote, appId: config.appId })
-      : sqlite({ path: config.dataPath!, appId: config.appId }),
+      : sqlite({ path: config.dataPath! }),
     // Better Auth's session cookie decides who the bandmate is.
     authenticate: async (request) => {
       const { auth } = await import("@/lib/auth");
       const session = await auth.api.getSession({ headers: request.headers });
-      return session ? { userId: session.user.id } : null;
+      return session
+        ? {
+            userId: session.user.id,
+            expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
+          }
+        : null;
     },
-  }));
+  }).ready());
   // A failed start must not poison every later request.
   pending.catch(() => {
     if (globalThis.__wequencerJazz === pending) globalThis.__wequencerJazz = undefined;

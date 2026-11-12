@@ -58,8 +58,8 @@ authenticate: async (request) => {
 
 `useWorkOSSession` asks `/api/auth/session` who is signed in, for the UI. `JazzProvider` starts
 signed out and asks the backend itself, so the identity always comes from `authenticate`;
-the app calls `reauthenticate()` when the WorkOS user changes and after sign-out, which clears the
-cookie and redirects to the WorkOS logout URL.
+the app calls `refresh()` (from `useJazzSession()`) when the WorkOS user changes and after
+sign-out, which clears the cookie and redirects to the WorkOS logout URL.
 
-Ownership policies compare `$createdBy.account` with `session.user.account`. The WorkOS user id is
-available under `session.user.identity.subject`.
+Ownership policies compare `$createdBy.account` with `session.user`. The WorkOS user id is
+available under `session.identity.subject`.

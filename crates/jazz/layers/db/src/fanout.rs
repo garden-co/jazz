@@ -527,6 +527,7 @@ impl Inner {
         let compiled = self
             .read_ctx(prepared, policy.as_ref(), &claims, read)
             .compile_query(&prepared.query, read.include_deleted)?;
+        self.refuse_latest_only_cut(&compiled, read)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
         Ok((compiled, used))
     }
@@ -808,12 +809,13 @@ impl Inner {
             .collect();
         for (gid, group) in groups {
             let mut group = group.borrow_mut();
-            // A schema the current one governs (a sync session's) takes the
-            // policies of whichever schema is current now.
+            // A sync session's schema is renamed for the new version and
+            // keeps whoever governs it: its bundle's policies when it is
+            // pinned to one, else whichever schema is current now.
             if reset
                 && let Some(pinned) = &group.prepared.schema
-                && pinned.policies_from.is_some()
-                && let Some(governed) = self.governed(pinned.jazz.version_id())
+                && let Some(policies) = &pinned.policies_from
+                && let Some(governed) = self.regoverned(pinned.jazz.version_id(), policies)
             {
                 group.prepared.schema = Some(governed);
             }
@@ -1142,7 +1144,10 @@ impl Inner {
                             {
                                 Sql::Text(bytes) | Sql::Blob(bytes)
                                     if bytes.len()
-                                        > jazz_types::large_values::INLINE_VALUE_MAX_BYTES =>
+                                        > root.column(&by.column).map_or(
+                                            jazz_types::large_values::INLINE_VALUE_MAX_BYTES,
+                                            crate::large::inline_max,
+                                        ) =>
                                 {
                                     return None;
                                 }
@@ -1298,6 +1303,8 @@ impl Inner {
                 self.read_keys(group);
             }
             Err(error) => group.push(SubscriptionEvent::Rejected {
+                code: error.code,
+                message: error.message.clone(),
                 reason: error.to_string(),
             }),
         }
@@ -1419,6 +1426,8 @@ impl Inner {
                 Some(Err(error)) if crate::large::is_missing(&error) => {}
                 Some(Err(error)) => {
                     group.push(SubscriptionEvent::Rejected {
+                        code: error.code,
+                        message: error.message.clone(),
                         reason: error.to_string(),
                     });
                     return false;
@@ -1434,6 +1443,8 @@ impl Inner {
             }
             Err(error) => {
                 let event = SubscriptionEvent::Rejected {
+                    code: error.code,
+                    message: error.message.clone(),
                     reason: error.to_string(),
                 };
                 group.push(event);

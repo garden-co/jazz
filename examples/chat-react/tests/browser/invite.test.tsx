@@ -8,7 +8,8 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_SERVER_URL, APP_ID, testAccount } from "./test-constants.js";
+import { TEST_SERVER_URL, SCOPE } from "./test-constants.js";
+import { memoryAccountStore } from "../../../testing/accounts.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -48,7 +49,7 @@ describe("Invite Flow E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      account?: import("jazz-tools").AccountHandle;
+      store?: ReturnType<typeof memoryAccountStore>;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -59,9 +60,9 @@ describe("Invite Flow E2E", () => {
     const appId =
       config.appId ?? `test-invite-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-    const account = config.account ?? (await testAccount(crypto.randomUUID(), appId));
+    const store = config.store ?? memoryAccountStore();
 
-    r.render(<App config={{ account, appId, dbName: crypto.randomUUID(), ...config }} />);
+    r.render(<App config={{ store, appId, dbName: crypto.randomUUID(), ...config }} />);
 
     await waitFor(
       () =>
@@ -113,9 +114,9 @@ describe("Invite Flow E2E", () => {
 
     // --- User A: create private chat and generate invite --------------------
     const aliceContainer = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
-      account: await testAccount(`invite-user-a-${Date.now()}`),
+      store: memoryAccountStore(),
     });
 
     await waitFor(
@@ -260,9 +261,9 @@ describe("Invite Flow E2E", () => {
     }
 
     const bobContainer = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
-      account: await testAccount(`invite-user-b-${Date.now()}`),
+      store: memoryAccountStore(),
     });
 
     // User B should see the secret message after joining via invite

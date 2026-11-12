@@ -2,12 +2,12 @@ import { textAnchorsFrom, type TextAnchors } from "../runtime/text-anchors.js";
 import { createHash, randomUUID } from "node:crypto";
 import { clientScope } from "../runtime/client-scope.js";
 import { admitBackendSecret } from "./admission.js";
+import { describeFailedUpgrade } from "./upgrade-status.js";
 import {
   credentialedTransport,
   type BackendClientCredential,
 } from "../runtime/credentialed-transport.js";
 import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
-import type { BackendRequestOptions } from "./request-auth.js";
 import {
   NapiDb,
   captureTextAnchor,
@@ -17,12 +17,7 @@ import {
 } from "jazz-napi";
 import { mintLocalFirstTokenFromSeed } from "../runtime/local-first-token.js";
 import { accountRegistryUrl, createAccountDbWithRuntimeSource } from "../accounts/context.js";
-import {
-  accountRegistry,
-  accountToken,
-  getBackendAuth,
-  type BackendAuth,
-} from "../accounts/enrollment.js";
+import { accountRegistry, getBackendAuth, type BackendAuth } from "../accounts/enrollment.js";
 import { prepareAccountManager, type AccountStore } from "../accounts/persistence.js";
 import type { AccountHandle } from "../accounts/state.js";
 import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
@@ -30,10 +25,11 @@ import { resolveSchemaSource } from "../schema-source.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
-import { JazzClient as RuntimeClient, type RequestLike } from "../runtime/client.js";
+import { JazzClient as RuntimeClient } from "../runtime/client.js";
 import { resolveClientInternalSessionSync } from "../runtime/client-session.js";
 import type { AppContext, PublicSession, Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
+import { NoJazzAccountError } from "./no-account-error.js";
 import {
   getTrustedReservedSession,
   setTrustedReservedSession,
@@ -42,7 +38,12 @@ import { selfSignedClientProofFromConfig } from "../runtime/default-runtime-sour
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
-import { createJazzSessionOwner, type JazzSession } from "../session/state.js";
+import { createJazzSessionOwner, type SessionCore } from "../session/state.js";
+import {
+  createStartedJazzSession,
+  refuseRemovedSessionOptions,
+  type JazzSession,
+} from "../session/jazz-session.js";
 import {
   createJazzClientFromDb,
   type JazzClient as SharedJazzClient,
@@ -57,7 +58,7 @@ import { randomNodeUuidBytes } from "../runtime/runtime-entropy.js";
 import { deterministicBytes } from "../runtime/deterministic-bytes.js";
 import { formatUuidAt } from "../runtime/hex.js";
 
-export type JazzSessionConfig = Omit<
+export type JazzClientConfig = Omit<
   BackendContextConfig,
   | "app"
   | "permissions"
@@ -77,7 +78,8 @@ export type JazzSessionConfig = Omit<
   permissions: NonNullable<BackendContextConfig["permissions"]>;
   serverUrl: string;
   store?: AccountStore;
-  initial?: "local-first" | BackendAuth;
+  /** Start as a device account (a guest of the main backend). */
+  initial?: "device";
   /**
    * For a backend client (a machine that syncs through an app's main backend,
    * not a browser): its workload's OIDC token, or a function that returns a
@@ -91,22 +93,49 @@ export type JazzSessionConfig = Omit<
   credential?: BackendClientCredential;
 };
 
+/** @internal `createJazz`'s own session config: it may admit itself with the core's backend secret. */
+type OpenJazzSessionConfig = Omit<JazzClientConfig, "initial"> & {
+  /** `"local-first"`: the session core's name for a device account. */
+  initial?: "local-first" | BackendAuth;
+};
+
 export interface JazzClient extends SharedJazzClient {
   flush(): void;
-  /** Verify a request and retain its immutable user policy context. Backend clients only. */
-  forRequest(request: RequestLike, options?: BackendRequestOptions): Promise<Db>;
-  /** Use an admitted account without switching the shared session. Backend clients only. */
-  forAccount(account: AccountHandle): Promise<Db>;
-  /** Keep backend permissions while recording verified user provenance. */
-  withAttribution(account: AccountHandle): Promise<Db>;
-  withAttributionForRequest(request: RequestLike): Promise<Db>;
+  /**
+   * The database as `userId`, on a trusted backend client (one the main
+   * backend trusts with `trustWorkload(..., as: "backend")`): what the main
+   * backend's `jazz.forReqUser(request)` gives for a request of theirs.
+   * `userId` is the id the main backend's `authenticate` names the user by.
+   * Writes carry the user's identity and are checked against their
+   * permissions.
+   *
+   * `claims` are the session claims those permissions see, and only these:
+   * the main backend's `authenticate` is not asked (there is no request of
+   * the user's), so a policy that reads claims sees what you pass, `{}` when
+   * you pass none. A trusted machine already has backend authority, so this
+   * grants it nothing it lacks.
+   *
+   * Throws a {@link NoJazzAccountError} (`code: "no_account"`) for a user
+   * who has no account yet: the main backend's `jazz.createAccountFor`
+   * creates one, and an `Error` with `status: 403` for a user whose identity
+   * was revoked. Any other client throws: a scoped machine already acts as
+   * its own user, and the main backend itself uses `jazz.forReqUser`.
+   */
+  forUser(userId: string, options?: { claims?: Record<string, unknown> }): Promise<Db>;
 }
+
+const notTrusted = (where: string) => () =>
+  Promise.reject(
+    new Error(
+      `forUser() is only on a trusted backend client (trustWorkload as "backend"); ${where}`,
+    ),
+  );
 
 function uuidBytes(uuid: string): Uint8Array {
   return Uint8Array.from(Buffer.from(uuid.replaceAll("-", ""), "hex"));
 }
 
-function backendNodeId(config: JazzSessionConfig): string {
+function backendNodeId(config: OpenJazzSessionConfig): string {
   if (config.driver.type === "memory") return randomUUID();
   // Preserve the existing persistent backend node identity across this API migration.
   return formatUuidAt(
@@ -133,7 +162,7 @@ class NodeUserRuntimeSource extends RuntimeSource {
     // Native writes already cross the local durability boundary when committed.
   }
   constructor(
-    private readonly host: JazzSessionConfig & { webSocket?: WebSocketConstructor },
+    private readonly host: OpenJazzSessionConfig & { webSocket?: WebSocketConstructor },
     private readonly account: AccountHandle,
   ) {
     super();
@@ -209,36 +238,192 @@ function memoryAccountStore(): AccountStore {
   };
 }
 
+/** How a backend client's session closes (see {@link BackendClientSession}). */
+export interface BackendClientCloseOptions {
+  /**
+   * How long to wait for the writes this client holds to reach the server
+   * first. Default `CLOSE_WAITS_FOR_UPLOADS_MS` (10 s); `0` closes at once.
+   */
+  timeoutMs?: number;
+}
+
+/** A backend client's session: its `close()` uploads the writes it holds first. */
+export interface BackendClientSession extends Omit<JazzSession<JazzClient>, "close"> {
+  /**
+   * Upload the writes this client holds, for up to `timeoutMs`, then close.
+   * With the memory driver, writes that didn't reach the server are lost:
+   * then it rejects, saying how many, once closed (unless `timeoutMs` is 0,
+   * which accepts that). A persistent driver keeps them for the next open,
+   * and it says so on the console instead.
+   */
+  close(options?: BackendClientCloseOptions): Promise<void>;
+}
+
 /**
- * Own one Node client through the shared session lifecycle. Backend admission
- * requires the configured core URL. Supply an AccountStore to retain local roots
- * across process restarts; service secrets are never persisted there.
+ * A Node client that syncs through an app's main backend (`createJazz`) as
+ * a backend client, with `credential`, or as a device account (a guest).
+ * Supply an AccountStore to keep device accounts across process restarts.
  */
-export async function createJazzSession(
-  input: JazzSessionConfig,
-): Promise<JazzSession<JazzClient>> {
+export async function createJazzClient(input: JazzClientConfig): Promise<BackendClientSession> {
+  refuseRemovedSessionOptions(input);
+  if (input.initial !== undefined && input.initial !== "device")
+    throw new Error('createJazzClient: initial is "device" or left out');
+  // The session core's name for a device account.
+  const initial = input.initial === "device" ? ("local-first" as const) : undefined;
+  let core!: SessionCore<JazzClient>;
+  const session = await createStartedJazzSession({ ...input, initial }, async (config) => {
+    core = await openJazzSession(config);
+    return core;
+  });
+  const keeps = input.driver.type !== "memory";
+  const close = async (options?: BackendClientCloseOptions) => {
+    await closeAfterUploads(core, keeps, options);
+    await session.close();
+  };
+  // The session's own members (and its `db` getter), with this close.
+  return Object.freeze(
+    Object.create(session, { close: { value: close, enumerable: true } }),
+  ) as BackendClientSession;
+}
+
+/** How long a backend client's `close()` waits for its writes to reach the server. */
+export const CLOSE_WAITS_FOR_UPLOADS_MS = 10_000;
+
+/**
+ * A backend client's `close()`: its writes live only in this process (or
+ * its driver) until the server accepts them, and a script's last act is
+ * usually to close, so it uploads them first, the way a local-first client
+ * shuts down. Writes the server rejects are reported as they always are
+ * (`db.onMutationError`, their `wait()`). It stops waiting at the deadline,
+ * or at once when the server refused this client or the app disconnected
+ * it, and closes either way.
+ */
+async function closeAfterUploads(
+  session: SessionCore<JazzClient>,
+  keeps: boolean,
+  options: BackendClientCloseOptions = {},
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? CLOSE_WAITS_FOR_UPLOADS_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new Error("close(): timeoutMs is a number of milliseconds, 0 or more");
+  }
+  const db = session.getSnapshot().client?.db;
+  let left: { pending: number; why: unknown } | undefined;
+  if (db && timeoutMs > 0) {
+    const uploaded = db.shutdown({ waitForSync: true }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const deadline = Date.now() + timeoutMs;
+    const gaveUp = new Promise<string>((resolve) => {
+      timer = setInterval(() => {
+        const refused = authError(db);
+        const link = syncLink(db);
+        if (refused) resolve(`the server refused this client (${refused})`);
+        else if (link?.state === "offline" && !link.retrying) {
+          resolve(`this client is offline (${link.reason})`);
+        } else if (Date.now() >= deadline) {
+          resolve(`the server didn't accept them within ${timeoutMs / 1000}s`);
+        }
+      }, 50);
+    });
+    const outcome = await Promise.race([uploaded.then((error) => ({ error })), gaveUp]);
+    clearInterval(timer);
+    if (typeof outcome === "string") {
+      left = { pending: pendingUploads(db), why: outcome };
+      db.abortGracefulShutdown();
+      await uploaded;
+    } else if (outcome.error !== undefined) {
+      left = { pending: pendingUploads(db), why: outcome.error };
+    }
+  } else if (db) {
+    left = { pending: pendingUploads(db), why: "close() was asked not to wait" };
+  }
+  const notUploaded = left && left.pending > 0 ? left : undefined;
+  const lost =
+    notUploaded && !keeps ? lostOnClose(notUploaded.pending, notUploaded.why) : undefined;
+  try {
+    await session.close();
+  } catch (error) {
+    if (lost)
+      throw new Error(`createJazzClient: close() failed after: ${lost.message}`, { cause: error });
+    throw error;
+  }
+  if (!notUploaded) return;
+  if (keeps) {
+    console.warn(
+      `createJazzClient: closed with ${notUploaded.pending} write${notUploaded.pending === 1 ? "" : "s"} not uploaded yet (${reasonOf(notUploaded.why)}); this client's driver keeps them and uploads them when it opens again.`,
+    );
+  } else if (timeoutMs > 0) {
+    throw lost;
+  } else {
+    console.warn(lost!.message);
+  }
+}
+
+function authError(db: Db): string | undefined {
+  try {
+    return db.getAuthState().error;
+  } catch {
+    return undefined;
+  }
+}
+
+function syncLink(db: Db) {
+  try {
+    return db.getSyncStatus().link;
+  } catch {
+    return undefined;
+  }
+}
+
+function reasonOf(why: unknown): string {
+  return why instanceof Error ? why.message : String(why);
+}
+
+function pendingUploads(db: Db | undefined): number {
+  try {
+    return db?.getSyncStatus().pendingUploads ?? 0;
+  } catch {
+    // A db already shutting down has nothing left to upload.
+    return 0;
+  }
+}
+
+function lostOnClose(pending: number, why: unknown): Error {
+  return new Error(
+    `createJazzClient: closed with ${pending} write${pending === 1 ? "" : "s"} the server never accepted, which are lost: ${reasonOf(why)}. Await \`db.waitForSync()\` before close() to handle this yourself.`,
+    why instanceof Error ? { cause: why } : undefined,
+  );
+}
+
+/**
+ * @internal The session `createJazz` opens on its own core, admitted with the
+ * core's backend secret (`initial: { backendSecret }`).
+ */
+export async function openJazzSession(
+  input: OpenJazzSessionConfig,
+): Promise<SessionCore<JazzClient>> {
   if (Object.hasOwn(input, "webSocket")) throw new Error("Use credential instead of webSocket");
   if (input.credential !== undefined && input.initial !== undefined) {
-    throw new Error(
-      "createJazzSession: a backend client's credential decides how it opens; leave out initial",
-    );
+    throw new Error("A backend client's credential decides how it opens; leave out initial");
   }
   const transport =
     input.credential === undefined
       ? undefined
-      : credentialedTransport(input.serverUrl, input.credential);
-  const config: JazzSessionConfig & { webSocket?: WebSocketConstructor } = {
+      : credentialedTransport(input.serverUrl, input.credential, globalThis, describeFailedUpgrade);
+  const config: OpenJazzSessionConfig & { webSocket?: WebSocketConstructor } = {
     ...input,
     webSocket: transport?.WebSocket,
   };
   for (const key of ["backendSecret", "jwtToken", "cookieSession", "adminSecret"]) {
-    if (Object.hasOwn(config, key))
-      throw new Error(`Use session account actions instead of ${key}`);
+    if (Object.hasOwn(config, key)) throw new Error(`${key} is not a createJazzClient option`);
   }
-  if (!config.app) throw new Error("Node createJazzSession requires app");
+  if (!config.app) throw new Error("Node createJazzClient requires app");
   if (config.permissions == null) {
     throw new Error(
-      "createJazzSession requires an explicit permissions bundle. Pass {} to deny all access.",
+      "createJazzClient requires an explicit permissions bundle. Pass {} to deny all access.",
     );
   }
   const registry = accountRegistryUrl(config.serverUrl, clientScope(config));
@@ -282,7 +467,8 @@ export async function createJazzSession(
   }
   const session = await createJazzSessionOwner({
     accounts,
-    initial,
+    initial: typeof initial === "object" ? undefined : initial,
+    backend: typeof initial === "object" ? initial : undefined,
     openClient: async (account) => {
       const backend = getBackendAuth(account, registry);
       if (!backend) {
@@ -308,18 +494,7 @@ export async function createJazzSession(
           flush() {
             source.flush();
           },
-          async forRequest(): Promise<Db> {
-            throw new Error("Request scopes require a backend account");
-          },
-          async forAccount(): Promise<Db> {
-            throw new Error("Account scopes require a backend account");
-          },
-          async withAttribution(): Promise<Db> {
-            throw new Error("Attribution requires a backend account");
-          },
-          async withAttributionForRequest(): Promise<Db> {
-            throw new Error("Attribution requires a backend account");
-          },
+          forUser: notTrusted("this client acts as its own user"),
         });
       }
       let memoryClock: BackendNodeClock | undefined;
@@ -366,6 +541,7 @@ export async function createJazzSession(
         if (closed) throw new Error("Backend client is closed");
         getBackendAuth(account, registry);
       };
+      const userSessionUrl = `${registry.slice(0, -"/accounts".length)}/backend/user-session`;
       const backendClient = attachSubscriptionStore(
         {
           db,
@@ -373,47 +549,54 @@ export async function createJazzSession(
             assertActive();
             context.flush();
           },
+          // Only a trusted machine: the main backend's own client acts for a
+          // user through `jazz.forReqUser`.
+          forUser: !transport
+            ? notTrusted("on the main backend, use jazz.forReqUser(request)")
+            : async (userId: string, options?: { claims?: Record<string, unknown> }) => {
+                assertActive();
+                if (typeof userId !== "string" || userId === "")
+                  throw new Error(
+                    "forUser: pass the user's id, as the main backend's authenticate names it",
+                  );
+                const response = await transport.fetch(userSessionUrl, {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ userId }),
+                });
+                if (response.status === 404) {
+                  const body = (await response.json().catch(() => null)) as {
+                    code?: unknown;
+                  } | null;
+                  if (body?.code === "no_account") throw new NoJazzAccountError(userId, "forUser");
+                }
+                if (!response.ok) {
+                  const reason =
+                    response.status === 403
+                      ? ` (identity_not_authorized: ${userId} was revoked)`
+                      : "";
+                  throw Object.assign(
+                    new Error(`forUser: the main backend answered ${response.status}${reason}`),
+                    { status: response.status },
+                  );
+                }
+                const { account, issuer } = (await response.json().catch(() => ({}))) as {
+                  account?: unknown;
+                  issuer?: unknown;
+                };
+                if (typeof account !== "string" || typeof issuer !== "string")
+                  throw new Error("forUser: the main backend's answer names no account");
+                assertActive();
+                return context.forSession({
+                  account_id: account,
+                  issuer,
+                  user_id: userId,
+                  claims: { ...options?.claims },
+                  authMode: "external",
+                });
+              },
           get session(): PublicSession | null {
             return client.session;
-          },
-          async forRequest(request: RequestLike, options?: BackendRequestOptions) {
-            assertActive();
-            const scoped = await context.forRequest(request, undefined, options);
-            assertActive();
-            return scoped;
-          },
-          async forAccount(requestAccount: AccountHandle) {
-            assertActive();
-            if (accountRegistry(requestAccount) !== registry)
-              throw new Error("Account application mismatch");
-            if (getBackendAuth(requestAccount, registry))
-              throw new Error("Request scopes require a user account");
-            const token = await accountToken(requestAccount, registry);
-            // Re-verify bearer and core liveness through the same request admission path.
-            const scoped = await context.forRequest({
-              headers: { authorization: `Bearer ${token}` },
-            });
-            assertActive();
-            return scoped;
-          },
-          async withAttribution(requestAccount: AccountHandle) {
-            assertActive();
-            if (accountRegistry(requestAccount) !== registry)
-              throw new Error("Account application mismatch");
-            if (getBackendAuth(requestAccount, registry))
-              throw new Error("Attribution requires a user account");
-            const token = await accountToken(requestAccount, registry);
-            const scoped = await context.withAttributionForRequest({
-              headers: { authorization: `Bearer ${token}` },
-            });
-            assertActive();
-            return scoped;
-          },
-          async withAttributionForRequest(request: RequestLike) {
-            assertActive();
-            const scoped = await context.withAttributionForRequest(request);
-            assertActive();
-            return scoped;
           },
           async shutdown(options?: { waitForSync?: boolean }) {
             await client.shutdown(options);
@@ -441,15 +624,15 @@ export async function createJazzSession(
       owned.getSnapshot().account?.identity.issuer === "urn:jazz:system"
         ? Promise.reject(
             new Error(
-              `${operation}() on a backend session is not supported yet: open a session at the app's /jazz endpoint for a local-first guest`,
+              `${operation}() on a backend session is not supported yet: open a session at the app's /jazz endpoint for a device account`,
             ),
           )
         : switchTo(...args);
   const owned = session;
-  const guarded: JazzSession<JazzClient> = Object.freeze({
+  const guarded: SessionCore<JazzClient> = Object.freeze({
     ...owned,
-    createLocalFirst: refuseGuest("createLocalFirst", owned.createLocalFirst),
-    restoreLocalFirst: refuseGuest("restoreLocalFirst", owned.restoreLocalFirst),
+    createLocalFirst: refuseGuest("createDeviceAccount", owned.createLocalFirst),
+    restoreLocalFirst: refuseGuest("restoreDeviceAccount", owned.restoreLocalFirst),
   });
   if (signInAsUser) {
     try {
@@ -459,7 +642,7 @@ export async function createJazzSession(
       // Only a refusal means the credential isn't trusted; an outage stays itself.
       if ((error as { status?: number }).status !== 401) throw error;
       throw new Error(
-        "createJazzSession: the main backend trusts this backend client's credential neither as a trusted machine nor as a user (see trustWorkload in its backendClients)",
+        "createJazzClient: the main backend trusts this backend client's credential neither as a trusted machine nor as a user (see trustWorkload in its backendClients)",
         { cause: error },
       );
     }

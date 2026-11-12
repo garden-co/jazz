@@ -4,14 +4,14 @@ import type { DbConfig } from "../../src/runtime/db.js";
 import type { JazzClient } from "../../src/vue/create-jazz-client.js";
 
 const mocks = vi.hoisted(() => ({
-  createJazzClient: vi.fn(),
+  openJazzClient: vi.fn(),
 }));
 
 vi.mock("../../src/vue/create-jazz-client.js", () => ({
-  createJazzClient: mocks.createJazzClient,
+  openJazzClient: mocks.openJazzClient,
 }));
 
-import { JazzClientProvider, JazzProvider } from "../../src/vue/provider.js";
+import { JazzClientProvider, LegacyJazzProvider as JazzProvider } from "../../src/vue/provider.js";
 
 function deferred() {
   let resolve!: () => void;
@@ -42,7 +42,7 @@ afterEach(() => {
   for (const app of apps.splice(0)) {
     app.unmount();
   }
-  mocks.createJazzClient.mockReset();
+  mocks.openJazzClient.mockReset();
   document.body.innerHTML = "";
 });
 
@@ -50,7 +50,7 @@ describe("Vue Jazz providers", () => {
   it("JazzProvider renders the SSR fallback first, then starts its client after mount", async () => {
     const client = fakeClient();
     const creation = deferred();
-    mocks.createJazzClient.mockImplementation(async () => {
+    mocks.openJazzClient.mockImplementation(async () => {
       await creation.promise;
       return client;
     });
@@ -75,7 +75,7 @@ describe("Vue Jazz providers", () => {
 
     expect(element.innerHTML).toBe('<p id="loading">loading</p>');
     await settle();
-    expect(mocks.createJazzClient).toHaveBeenCalledWith(config);
+    expect(mocks.openJazzClient).toHaveBeenCalledWith(config);
 
     creation.resolve();
     await vi.waitFor(() => expect(element.querySelector("#ready")).not.toBeNull());
@@ -87,7 +87,7 @@ describe("Vue Jazz providers", () => {
     const creation = new Promise<JazzClient>((resolve) => {
       resolveClient = resolve;
     });
-    mocks.createJazzClient.mockReturnValue(creation);
+    mocks.openJazzClient.mockReturnValue(creation);
     const config = ref<DbConfig>({ appId: "loading", driver: { type: "memory" } });
     const root = defineComponent(
       () => () =>
@@ -107,21 +107,21 @@ describe("Vue Jazz providers", () => {
     apps.push(app);
     app.mount(element);
     await settle();
-    expect(mocks.createJazzClient).toHaveBeenCalledOnce();
+    expect(mocks.openJazzClient).toHaveBeenCalledOnce();
 
     config.value = { driver: { type: "memory" }, appId: "loading" };
     await settle();
-    expect(mocks.createJazzClient).toHaveBeenCalledOnce();
+    expect(mocks.openJazzClient).toHaveBeenCalledOnce();
 
     resolveClient(first);
     await vi.waitFor(() => expect(element.querySelector("#ready")).not.toBeNull());
-    expect(mocks.createJazzClient).toHaveBeenCalledOnce();
+    expect(mocks.openJazzClient).toHaveBeenCalledOnce();
     expect(first.shutdown).not.toHaveBeenCalled();
   });
 
   it("does not flicker or recreate an equivalent config after the client is ready", async () => {
     const client = fakeClient();
-    mocks.createJazzClient.mockResolvedValue(client);
+    mocks.openJazzClient.mockResolvedValue(client);
     const config = ref<DbConfig>({ appId: "ready", driver: { type: "memory" } });
     const root = defineComponent(
       () => () =>
@@ -141,14 +141,14 @@ describe("Vue Jazz providers", () => {
     apps.push(app);
     app.mount(element);
     await vi.waitFor(() => expect(element.querySelector("#ready")).not.toBeNull());
-    expect(mocks.createJazzClient).toHaveBeenCalledOnce();
+    expect(mocks.openJazzClient).toHaveBeenCalledOnce();
 
     config.value = { driver: { type: "memory" }, appId: "ready" };
     await nextTick();
     expect(element.querySelector("#ready")).not.toBeNull();
     expect(element.querySelector("#loading")).toBeNull();
     await settle();
-    expect(mocks.createJazzClient).toHaveBeenCalledOnce();
+    expect(mocks.openJazzClient).toHaveBeenCalledOnce();
     expect(client.shutdown).not.toHaveBeenCalled();
   });
 
@@ -186,7 +186,7 @@ describe("Vue Jazz providers", () => {
     const shutdown = deferred();
     const first = fakeClient(vi.fn(() => shutdown.promise));
     const second = fakeClient();
-    mocks.createJazzClient.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    mocks.openJazzClient.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
     const config = ref<DbConfig>({ appId: "first", driver: { type: "memory" } });
     const root = defineComponent(
       () => () =>
@@ -211,12 +211,12 @@ describe("Vue Jazz providers", () => {
     await settle();
 
     expect(first.shutdown).toHaveBeenCalledOnce();
-    expect(mocks.createJazzClient).toHaveBeenCalledOnce();
+    expect(mocks.openJazzClient).toHaveBeenCalledOnce();
     expect(element.querySelector("#loading")).not.toBeNull();
 
     shutdown.resolve();
     await vi.waitFor(() => {
-      expect(mocks.createJazzClient).toHaveBeenNthCalledWith(2, config.value);
+      expect(mocks.openJazzClient).toHaveBeenNthCalledWith(2, config.value);
       expect(element.querySelector("#ready")).not.toBeNull();
     });
 
@@ -232,7 +232,7 @@ describe("Vue Jazz providers", () => {
       resolveClient = resolve;
     });
     const client = fakeClient();
-    mocks.createJazzClient.mockReturnValue(clientCreatedAfterUnmount);
+    mocks.openJazzClient.mockReturnValue(clientCreatedAfterUnmount);
     const config: DbConfig = { appId: "slow", driver: { type: "memory" } };
     const root = defineComponent(
       () => () =>
@@ -245,7 +245,7 @@ describe("Vue Jazz providers", () => {
     apps.push(app);
     app.mount(element);
     await settle();
-    expect(mocks.createJazzClient).toHaveBeenCalledOnce();
+    expect(mocks.openJazzClient).toHaveBeenCalledOnce();
 
     app.unmount();
     apps.splice(apps.indexOf(app), 1);

@@ -14,7 +14,7 @@ import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
 import { deploy as deployProject } from "../dev/catalogue-project.js";
-import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
+import { deploy, startLocalJazzServer } from "../testing/index.js";
 import {
   createPersistentNapiNativeRuntimeAdapter,
   loadNapiModule,
@@ -760,7 +760,6 @@ describe("NAPI integration", () => {
     let context: {
       asBackend(): Db;
       forSession(session: Session): Db;
-      forRequest(request: Request): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
 
@@ -768,7 +767,7 @@ describe("NAPI integration", () => {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
       const todoServerProject = await loadTodoServerProject();
-      await deploy({
+      const { bundle } = await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
@@ -780,6 +779,7 @@ describe("NAPI integration", () => {
 
       runtimeData = await createTempRuntimeData("jazz-napi-session-runtime-");
       context = createJazzContext({
+        bundle,
         appId,
         app: { wasmSchema: todoServerSchema },
         permissions: todoServerProject.permissions ?? {},
@@ -1168,7 +1168,6 @@ describe("NAPI integration", () => {
     const memberId = "00000000-0000-4000-8000-000000000001";
     const corporationId = randomUUID();
     const templateId = randomUUID();
-    const jwtIssuer = await startTestJwtIssuer();
     const server = await startLocalJazzServer({
       appId,
       backendSecret,
@@ -1179,7 +1178,6 @@ describe("NAPI integration", () => {
     let context: {
       asBackend(): Db;
       forSession(session: Session): Db;
-      forRequest(request: Request): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -1194,9 +1192,6 @@ describe("NAPI integration", () => {
         serverUrl: server.url,
         backendSecret,
         adminSecret,
-        jwksUrl: jwtIssuer.jwksUrl,
-        jwtIssuer: jwtIssuer.issuer,
-        jwtAudience: jwtIssuer.audience,
         env: "test",
       });
       await settleAsyncSyncWork();
@@ -1334,7 +1329,6 @@ describe("NAPI integration", () => {
       }
       await settleAsyncSyncWork();
       await server.stop();
-      await jwtIssuer.stop();
     }
   }, 60_000);
 
@@ -1390,11 +1384,9 @@ describe("NAPI integration", () => {
     const memberId = "00000000-0000-4000-8000-000000000001";
     const corporationId = randomUUID();
     const schemaDir = await createPolicyGraphPerfSchemaDir();
-    const jwtIssuer = await startTestJwtIssuer();
     let server: Awaited<ReturnType<typeof startLocalJazzServer>> | null = null;
     let context: {
       asBackend(): Db;
-      forRequest(request: Request): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -1422,9 +1414,6 @@ describe("NAPI integration", () => {
         serverUrl: server.url,
         backendSecret,
         adminSecret,
-        jwksUrl: jwtIssuer.jwksUrl,
-        jwtIssuer: jwtIssuer.issuer,
-        jwtAudience: jwtIssuer.audience,
         env: "test",
       });
       await settleAsyncSyncWork();
@@ -1517,9 +1506,6 @@ describe("NAPI integration", () => {
         serverUrl: server.url,
         backendSecret,
         adminSecret,
-        jwksUrl: jwtIssuer.jwksUrl,
-        jwtIssuer: jwtIssuer.issuer,
-        jwtAudience: jwtIssuer.audience,
         env: "test",
       });
       await settleAsyncSyncWork();
@@ -1553,7 +1539,6 @@ describe("NAPI integration", () => {
       if (server) {
         await server.stop();
       }
-      await jwtIssuer.stop();
       await rm(schemaDir, { recursive: true, force: true });
       await rm(dataDir, { recursive: true, force: true });
     }
@@ -1693,7 +1678,7 @@ describe("NAPI integration", () => {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
       const todoServerProject = await loadTodoServerProject();
-      await deploy({
+      const { bundle } = await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
@@ -1705,6 +1690,7 @@ describe("NAPI integration", () => {
 
       runtimeData = await createTempRuntimeData("jazz-napi-null-update-runtime-");
       context = createJazzContext({
+        bundle,
         appId,
         app: { wasmSchema: todoServerSchema },
         permissions: todoServerProject.permissions ?? {},
@@ -1782,7 +1768,7 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
-      await deploy({
+      const { bundle } = await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
@@ -1792,6 +1778,7 @@ describe("NAPI integration", () => {
 
       writerRuntimeData = await createTempRuntimeData("jazz-napi-sync-writer-");
       writerContext = createJazzContext({
+        bundle,
         appId,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},
@@ -1802,6 +1789,7 @@ describe("NAPI integration", () => {
       });
       readerRuntimeData = await createTempRuntimeData("jazz-napi-sync-reader-");
       readerContext = createJazzContext({
+        bundle,
         appId,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},
@@ -1852,6 +1840,7 @@ describe("NAPI integration", () => {
       await cleanupTempRuntimeData(readerRuntimeData);
       readerRuntimeData = await createTempRuntimeData("jazz-napi-sync-reader-reopen-");
       readerContext = createJazzContext({
+        bundle,
         appId,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},

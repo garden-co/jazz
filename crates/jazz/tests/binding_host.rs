@@ -1388,7 +1388,7 @@ fn a_tabs_remote_reads_and_global_waits_stay_pending_when_its_worker_has_no_serv
     let mut stream = tab.subscribe(&query, &remote, None, None).unwrap();
     still_pending(&links, pin!(tab.next_event(&mut stream)));
     let write = tab.insert("notes", &title("tab's"), &none()).unwrap();
-    let mut global = tab.wait_for_write(&write, "global").unwrap();
+    let mut global = tab.wait_for_write(&write, "global", None).unwrap();
     still_pending(&links, global.as_mut());
 
     let local = tab
@@ -1558,4 +1558,194 @@ fn a_remote_subscription_never_lists_pending_local_versions() {
         .unwrap();
     assert_eq!(rows_in(&drive(&links, read).unwrap()), 2);
     assert_eq!(titles(&server), ["changed", "pending"]);
+}
+
+/// The React Native relay's shape: a non-durable foreground served by the
+/// relay's own durable store, which syncs with the server; every binding's
+/// host ticks only when asked, and is listening before anything opens.
+fn device_chain_subscribes_to_a_large_value(file: Option<&std::path::Path>) {
+    let server = authority();
+    let large = "w".repeat(300 * 1024);
+    server.insert("notes", &title(&large), &none()).unwrap();
+    let node = 0xd8;
+    let relay = match file {
+        Some(path) => {
+            let db = block_on(Db::open_at(
+                DbConfig::new(schema(), identity(node)),
+                path,
+                jazz::db::FileOptions::default(),
+            ))
+            .unwrap();
+            Binding::new(db, identity(node), false)
+        }
+        None => open(node),
+    };
+    let tab = open(0xd9);
+    let flags: Vec<(&Binding, Rc<Cell<bool>>)> = [&relay, &tab, &server]
+        .into_iter()
+        .map(|binding| {
+            let asked = Rc::new(Cell::new(false));
+            let flag = Rc::clone(&asked);
+            *binding.hooks.schedule_tick.borrow_mut() = Some(Box::new(move || flag.set(true)));
+            (binding, asked)
+        })
+        .collect();
+    relay.set_remote_link_hint("live").unwrap();
+    let up = relay.connect_upstream();
+    let down = server
+        .accept_subscriber(relay.author(), Default::default())
+        .unwrap();
+    tab.set_non_durable_client();
+    let tab_up = tab.connect_upstream();
+    let tab_down = relay
+        .accept_subscriber(relay.author(), Default::default())
+        .unwrap();
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+    let query = postcard::to_allocvec(&Query::from("notes").select(["title"])).unwrap();
+    let mut stream = tab
+        .subscribe(&query, &json!({ "tier": "local-first" }), None, None)
+        .unwrap();
+    for (binding, asked) in &flags {
+        if asked.replace(false) {
+            block_on(binding.tick()).unwrap();
+        }
+    }
+    let mut seen = Vec::new();
+    for _ in 0..6 {
+        let event = binding_host::event_chunk(drive_on_demand(&links, tab.next_event(&mut stream)))
+            .unwrap();
+        if let EventChunk::Delta { delta, .. } = event {
+            let (added, _) = jazz::binding_codec::decode_subscription_delta_rows(&delta).unwrap();
+            seen.extend(
+                added
+                    .iter()
+                    .flat_map(|batch| &batch.rows)
+                    .map(|row| row.cells["title"].clone()),
+            );
+        }
+        if !seen.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(seen, [Value::String(large)]);
+}
+
+/// A foreground subscribed through an in-memory relay receives a row whose
+/// large value the relay fetches from the server, when every host ticks
+/// only when asked (#4829).
+#[test]
+fn a_foreground_over_a_memory_relay_subscribes_to_a_large_value_on_demand() {
+    device_chain_subscribes_to_a_large_value(None);
+}
+
+/// The same through a SQLite file relay, as React Native's relay stores it.
+#[test]
+fn a_foreground_over_a_file_relay_subscribes_to_a_large_value_on_demand() {
+    let dir = tempfile::tempdir().unwrap();
+    device_chain_subscribes_to_a_large_value(Some(&dir.path().join("relay.sqlite")));
+}
+
+/// A tab's `local` wait still open when its worker refuses the write
+/// fails with the refusal and claims it, so a listener the binding tells
+/// later (on its next task, unless claimed by then) hears it once, from
+/// the wait. The tab builds a second update on its first while the worker
+/// already knows the server refused the first: the worker refuses the
+/// second before storing it. The first, whose local wait resolved, stays
+/// unclaimed for the listener.
+#[test]
+fn a_tabs_local_wait_the_worker_refuses_claims_the_refusal() {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    // Notes may be inserted and read, never changed.
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        jazz::tools::TablePolicies::new()
+                            .with_select(jazz::tools::PolicyExpr::True)
+                            .with_insert(jazz::tools::PolicyExpr::True),
+                    ),
+            )
+            .build(),
+    );
+    let open = |node: u8| {
+        let identity = identity(node);
+        let db = block_on(Db::open(DbConfig::new(schema.clone(), identity))).unwrap();
+        Binding::new(db, identity, false)
+    };
+    let server = {
+        let identity = DbIdentity {
+            node: NodeUuid::from_bytes([0xed; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let db = block_on(Db::open_history_complete(DbConfig::new(
+            schema.clone(),
+            identity,
+        )))
+        .unwrap();
+        Binding::new(db, identity, true)
+    };
+    let worker = open(0xe0);
+    worker.set_remote_link_hint("live").unwrap();
+    let up = worker.connect_upstream();
+    let down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xe1));
+    let told = Rc::new(RefCell::new(Vec::new()));
+    let heard = Rc::clone(&told);
+    *tab.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, _, _, claim| {
+        heard
+            .borrow_mut()
+            .push((tx_id.clone(), claim.map(|claim| claim.get())));
+        true
+    }));
+    let server_link = [(&up, &down)];
+    let tab_link = [(&tab_up, &tab_down)];
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+
+    let write = tab.insert("notes", &title("kept"), &none()).unwrap();
+    drive(&links, tab.wait_for(write.seq, "global").unwrap()).unwrap();
+    let row = *write.row_id.0.as_bytes();
+
+    // The first update reaches the worker: its local wait resolves.
+    let first = tab.update("notes", &row, &title("first"), &none()).unwrap();
+    let first_claim = Rc::new(Cell::new(false));
+    tab.hooks.track(&first, &first_claim);
+    let wait = tab
+        .wait_for_write(&first, "local", Some(Rc::clone(&first_claim)))
+        .unwrap();
+    drive(&tab_link, wait).unwrap();
+    // The second is built on it, its local wait open.
+    let second = tab
+        .update("notes", &row, &title("second"), &none())
+        .unwrap();
+    let second_claim = Rc::new(Cell::new(false));
+    tab.hooks.track(&second, &second_claim);
+    let mut wait = tab
+        .wait_for_write(&second, "local", Some(Rc::clone(&second_claim)))
+        .unwrap();
+    // The server refuses the first; only the worker hears it.
+    pump(&server_link);
+    // The worker refuses the second, and tells the tab of both.
+    let error = drive(&tab_link, wait.as_mut()).unwrap_err();
+    pump(&links);
+
+    assert!(
+        format!("{error:?}").contains("built on a write"),
+        "{error:?}"
+    );
+    assert!(
+        second_claim.get(),
+        "the wait that failed with the refusal claims it"
+    );
+    assert!(
+        !first_claim.get(),
+        "the refusal of the write whose wait resolved is the listener's"
+    );
+    let told = told.borrow();
+    assert!(told.iter().any(|(id, _)| *id == first.tx_id), "{told:?}");
+    assert_eq!(titles(&tab), ["kept"]);
 }

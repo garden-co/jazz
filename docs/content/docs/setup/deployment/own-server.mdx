@@ -1,23 +1,121 @@
 ---
 title: Your Own Server
-description: "Run Jazz inside your own Node server, VM or container, with the data in SQLite on its disk."
+description: "Learn how to run Jazz in your own Node server, VM or container, with the data in SQLite on its disk."
 ---
 
-On your own machine, Jazz is part of your backend's process. Mount it as on
-[Backend](/docs/setup/backend) and give it a directory:
+On your own machine, Jazz is part of your backend's process, with the data in a directory on its
+disk.
+
+This page sets up your **main backend**: the backend that runs `createJazz`, serves sync to your
+browsers and apps, and decides who each user is. Other trusted machines reach Jazz through it as
+[backend clients](/docs/setup/backend-client).
+
+<include>../../../partials/install-alpha.mdx</include>
+
+## Create Jazz once
 
 ```ts title="jazz.server.ts"
 import { createJazz, sqlite } from "jazz-tools/backend";
-import { app, permissions } from "./schema";
+import { app } from "./schema";
+import permissions from "./permissions";
 
-export const jazz = await createJazz({
-  appId: "my-app",
+export const jazz = createJazz({
   app,
   permissions,
   store: sqlite({ path: process.env.JAZZ_DATA_DIR ?? "./data/jazz" }),
   authenticate: async (request) => /* your session */ null,
 });
 ```
+
+<include>../../../partials/main-backend-config.mdx</include>
+
+The examples on this page are ES modules and use top-level `await`, so the backend package needs
+`"type": "module"` (or `.mts` files). In a CommonJS package, such as an Expo app's, a default import
+like `permissions` arrives as `{ default }`, and `createJazz` fails with "permissions.ts defines
+permissions for unknown table(s): default". Run the backend from its own ESM package instead.
+
+### Large values
+
+Large values, such as files and long streams, are stored in chunks. Rows and the chunk index always
+stay in SQLite. By default `sqlite()` keeps the chunks as files in `<path>/blobs`. Choose where they
+go with `blobs`:
+
+```ts
+import { files, s3, sqlite } from "jazz-tools/backend";
+
+sqlite({ path: "./data/jazz" }); // chunks in ./data/jazz/blobs
+sqlite({ path: "./data/jazz", blobs: files({ dir: "/mnt/blobs" }) }); // a directory of your choice
+sqlite({ path: "./data/jazz", blobs: s3() }); // an S3-compatible bucket
+sqlite({ path: "./data/jazz", blobs: "sqlite" }); // inside the SQLite database (not recommended)
+```
+
+`"sqlite"` works, but the database file grows with every large value.
+
+`s3()` works with AWS S3, Cloudflare R2 and MinIO. All its options are optional:
+
+| Option     | Default            | What it does                                 |
+| :--------- | :----------------- | :------------------------------------------- |
+| `bucket`   | `S3_BUCKET_NAME`   | The bucket                                   |
+| `region`   | `AWS_REGION`       | The bucket's region; `auto` for R2           |
+| `endpoint` | AWS                | Another S3-compatible endpoint, such as R2's |
+| `prefix`   | `jazz/<store id>/` | Prepended to every object name               |
+
+```ts
+// Cloudflare R2
+s3({
+  bucket: "my-app",
+  region: "auto",
+  endpoint: "https://<account>.r2.cloudflarestorage.com",
+});
+```
+
+The backend reads its credentials from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, or from
+`AWS_ROLE_ARN` with `AWS_WEB_IDENTITY_TOKEN_FILE`. Each chunk is uploaded with its SHA-256, so the
+bucket rejects a corrupted upload. One bucket can serve many apps and environments: each data
+directory keeps its objects under its own prefix, claims that prefix the first time it uses it, and
+deletes the chunks it no longer needs. Another data directory is refused on a prefix that is
+already claimed.
+
+The data directory records its choice in `<path>/blob-store`. You can move an existing directory
+from `"sqlite"` to `files()` or `s3()` later; any other switch is not supported yet and refuses to
+start, so treat it as a one-way choice. A blob directory belongs to exactly one data directory, so two data directories can't share
+one. To copy a data directory, give the copy its own blob directory or prefix and delete its
+`store-id` and `blob-store` files before it first starts, or it claims the original's.
+
+History keeps every version of a row, so deleting rows doesn't free their large values, and there
+is no way to erase them yet. Expect blob storage to only grow.
+
+<include>../../../partials/main-backend-mount.mdx</include>
+
+### A separate frontend dev server
+
+When the frontend runs on its own dev server (Vite, say) and the backend on another port, proxy
+`/jazz` and your auth routes to the backend so the browser stays on one origin, with WebSockets
+on:
+
+```ts title="vite.config.ts"
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  server: {
+    proxy: {
+      "/jazz": { target: "http://localhost:3000", ws: true },
+      "/api/auth": { target: "http://localhost:3000" },
+    },
+  },
+});
+```
+
+With Better Auth, add the dev server's origin to `trustedOrigins`, or sign-in answers
+`403 INVALID_ORIGIN` (see [Better Auth](/docs/setup/auth/better-auth#behind-a-dev-server-proxy)).
+
+Keep `ws: true` on: a proxy that leaves the WebSocket upgrade hanging costs about 20 seconds on
+every page load before the client falls back to an HTTP stream.
+
+In production, serve the built frontend from the same origin as the backend (or put both behind
+one proxy that passes WebSocket upgrades through).
+
+## Deploy it
 
 That's the whole deployment:
 
@@ -26,10 +124,13 @@ That's the whole deployment:
   declares. If they can't be applied (a schema with no migration path), the process refuses to start
   instead of serving with the wrong rules.
 - **No secrets to manage.** Browsers hold no Jazz credential: your `authenticate` function
-  decides who each request is (see [Your Backend Decides](/docs/setup/auth/backend)).
+  decides who each request is (see [How Auth Works in Jazz](/docs/setup/auth/backend)).
 
 Keep the data directory on a durable disk (a Docker volume, an attached block device), and run one
-process per directory.
+process per directory: a second process on the same directory is refused (`<path>/jazz.lock`). `sqlite()` refuses to start on serverless hosts with no
+lasting disk (Vercel, AWS Lambda, Netlify); on Vercel, use [`vercel()`](/docs/setup/deployment/vercel).
+Jazz creates the directory's files readable by every user on the machine (mode 0644), so on a shared
+host restrict the directory itself to the service's user (for example `chmod 700`).
 
 ```dockerfile title="Dockerfile"
 FROM node:22-slim
@@ -41,77 +142,82 @@ VOLUME /data
 CMD ["node", "dist/server.js"]
 ```
 
+On shutdown, close Jazz so writes still in flight reach the store and open sockets end cleanly:
+
+```ts title="server.ts"
+process.on("SIGTERM", () => {
+  void jazz.close().then(() => server.close());
+});
+```
+
+### Proxies, paths and origins
+
+These `createJazz` options cover a backend behind a proxy or on a non-default path:
+
+| Option            | Default            | What it does                                                                                                                                              |
+| :---------------- | :----------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `basePath`        | `"/jazz"`          | The path Jazz is served under. Mount your routes with `jazz.basePath`, and pass the same path as `serverUrl` in the browser                               |
+| `publicUrl`       | the request's host | The URL (or URLs) browsers reach Jazz at, when a proxy changes the host or path. Recommended in production; list your dev URL too if it uses this backend |
+| `allowedOrigins`  | the backend's own  | Other browser origins that may sync and sign in                                                                                                           |
+| `upgradesSockets` | `false`            | Set when your host upgrades sockets itself and passes them to `jazz.acceptSocket` (Bun, Deno, your own `ws`); `attach()` and Vercel set it on their own   |
+
+A proxy in front of your backend must pass WebSocket upgrades through to `/jazz`. Pages on another
+origin can't sign in with your app's cookie yet, even with `allowedOrigins`; serve the page and
+`/jazz` from the same origin for now.
+
+<include>../../../partials/main-backend-use.mdx</include>
+
 ## Data on another machine
 
 When the data should live apart from your app servers (several app instances sharing one database,
-serverless functions, an existing Jazz Cloud app), run the core elsewhere and point `createJazz` at
-it with `remote()`:
+serverless functions, an existing Jazz Cloud app), keep it in [Jazz Cloud](/docs/setup/deployment/jazz-cloud)
+and point `createJazz` at it with `remote()`:
 
 ```ts title="jazz.server.ts"
 import { createJazz, remote } from "jazz-tools/backend";
-import { app, permissions } from "./schema";
+import { app } from "./schema";
+import permissions from "./permissions";
 
-export const jazz = await createJazz({
-  appId: "my-app",
+export const jazz = createJazz({
   app,
   permissions,
   store: remote({
-    url: process.env.JAZZ_SERVER_URL!, // your sync server, or https://v2.sync.jazz.tools
-    secret: process.env.JAZZ_ADMIN_SECRET!,
+    appId: process.env.JAZZ_APP_ID!,
+    url: process.env.JAZZ_SERVER_URL!,
+    secret: process.env.JAZZ_ADMIN_SECRET!, // the app's admin secret
   }),
   authenticate: async (request) => /* your session */ null,
 });
 ```
 
 Everything else stays the same. Browsers still sync with your backend under `/jazz` and never see
-the core's address or secrets. Your backend applies its schema, migrations and permissions to the
-core on start, and tells the core who each user is; the core does no auth of its own and trusts
-only the holder of the secrets. Keep them server-side, like a database password.
+the core's address or secret. Your backend sends its schema, migrations and permissions to the core
+on start, and tells the core who each user is; the core does no auth of its own and trusts only the
+holder of the app's admin secret. Keep it server-side, like a database password.
 
-## Standalone sync server
+Jazz always runs inside a backend like this one. There is no separate Jazz server to install or
+run.
 
-The CLI runs the same core on its own port, for `remote()` or for apps that predate `createJazz`:
+## Coming from the alpha.59 server
 
-<include cwd lang="bash" meta='title="Terminal"'>
-  ../examples/docs/todo-server-rs/docs/self-host-cli.sh#setup-self-host-cli
-</include>
+Alpha.59 ran Jazz as its own process (`jazz-tools server`), and clients connected to its port
+(`:1625/` by default). In alpha.60 that process is gone:
 
-`jazz-tools@alpha server <APP_ID>` currently supports:
-
-| Option                                  | Purpose                                                                                                                                         | Environment variable          | Default                   |
-| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------- |
-| `<APP_ID>` (positional)                 | App namespace identifier (required)                                                                                                             | -                             | -                         |
-| `-p, --port <PORT>`                     | Listen port                                                                                                                                     | -                             | `1625`                    |
-| `-d, --data-dir <DATA_DIR>`             | Persistent storage directory                                                                                                                    | -                             | `./data`                  |
-| `--in-memory`                           | Use in-memory storage instead of files; data is lost when the process exits                                                                     | -                             | off                       |
-| `--jwks-url <JWKS_URL>`                 | JWKS endpoint for external JWT validation                                                                                                       | `JAZZ_JWKS_URL`               | unset                     |
-| `--jwt-public-key <JWT_PUBLIC_KEY>`     | Single JWK JSON object or PEM public key for external JWT validation. Accepts inline contents or a path to a key file.                          | `JAZZ_JWT_PUBLIC_KEY`         | unset                     |
-| `--auth-cookie-name <AUTH_COOKIE_NAME>` | Cookie name to read for browser authentication during WebSocket upgrades                                                                        | `JAZZ_AUTH_COOKIE_NAME`       | unset                     |
-| `--allow-local-first-auth`              | Allow local-first auth (`Authorization: Bearer <self-signed Jazz JWT>`)                                                                         | `JAZZ_ALLOW_LOCAL_FIRST_AUTH` | see `NODE_ENV` note below |
-| `--backend-secret <BACKEND_SECRET>`     | Enable backend session impersonation                                                                                                            | `JAZZ_BACKEND_SECRET`         | unset                     |
-| `--admin-secret <ADMIN_SECRET>`         | Required for `deploy` and schema catalogue reads. In development mode, structural schema auto-sync works without it.                            | `JAZZ_ADMIN_SECRET`           | unset                     |
-| `--shutdown-timeout-secs <SECONDS>`     | Graceful shutdown network-drain timeout in seconds                                                                                              | `JAZZ_SHUTDOWN_TIMEOUT_SECS`  | `30`                      |
-| `--diagnostics-listen <ADDR>`           | Address of a listener serving `/debug/pprof/heap`, e.g. `0.0.0.0:6060`. Non-loopback addresses require `--diagnostics-token`.                   | `JAZZ_DIAGNOSTICS_LISTEN`     | unset                     |
-| `--diagnostics-token <TOKEN>`           | Bearer token the diagnostics listener requires (`Authorization: Bearer <TOKEN>`); a read-only scrape credential separate from the admin secret. | `JAZZ_DIAGNOSTICS_TOKEN`      | unset                     |
-
-Local-first auth is disabled by default when `NODE_ENV` is `production` (case-insensitive) and enabled otherwise, including when `NODE_ENV` is unset. Enable it in production with `--allow-local-first-auth` or `JAZZ_ALLOW_LOCAL_FIRST_AUTH=true`. External JWT auth requires either `--jwks-url` or `--jwt-public-key`, but not both.
-The server runs Core directly. It owns the account registry, permission checks,
-and durable write confirmation. Browser workers and native local relays remain
-client-side persistence components.
-
-Cookie-based WebSocket auth is enabled with `--auth-cookie-name` or `JAZZ_AUTH_COOKIE_NAME`. When no
-explicit auth credential is supplied, the sync server reads that named cookie and validates the JWT
-it contains. If your app uses a separate application session cookie, resolve it in your own app server
-and obtain an admitted account handle from its JWT. Pass that handle to `await client.forAccount(account)`;
-`forRequest` accepts bearer headers and does not parse application session cookies.
-
-If you prefer to start the database server programmatically, you can use `startLocalJazzServer` from `jazz-tools/dev`.
-It expects similar arguments as the CLI.
-
-See [Monitoring](/docs/operating/monitoring) for heap profiling and diagnostics.
+- **Clients sync with your backend under `/jazz`**, on your app's own origin, instead of with a
+  separate Jazz server.
+- **`--jwks-url` and the other JWT flags move into `authenticate`.** Pass the same values to
+  [`fromJWT()`](/docs/setup/auth/custom#tokens-from-your-identity-provider).
+- **`jazz-tools deploy` is gone.** Your backend applies its schema, migrations and permissions
+  each time it starts.
+- **Move the data directory with the import tool** (see
+  [Upgrading from alpha.59](/docs/operating/backups-and-upgrades#self-hosted-alpha59-servers)).
+  The import keeps large values inside `jazz.sqlite`. On its first start your backend moves them
+  to `blobs/`, or wherever `blobs` points, without logging anything. Run the import's `verify`
+  before that first start.
 
 ## Coming next
 
 - systemd recipe
-- TLS, reverse proxies, data dir on durable disks
+- TLS and data dir on durable disks (reverse proxies work today with `publicUrl`; see
+  [Proxies, paths and origins](#proxies-paths-and-origins))
 - Backups and upgrades (see [Operating Jazz](/docs/operating/backups-and-upgrades))

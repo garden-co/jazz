@@ -6,7 +6,8 @@
 //!
 //! Also: the rows a self-referential read policy rests on (members of a
 //! band read the band's members) ship in time linear in the band, not
-//! exponential in the policy's nesting depth.
+//! exponential in the policy's nesting depth, nor do those of a policy whose
+//! EXISTS arms branch.
 
 use crate::common;
 
@@ -25,7 +26,7 @@ use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSch
 
 use common::{allow_all_policies, compile_schema, exists, outer_eq, session_eq};
 
-const ME: [&str; 3] = ["user", "identity", "subject"];
+const ME: [&str; 2] = ["identity", "subject"];
 
 /// Members read and post a room's messages.
 fn schema() -> JazzSchema {
@@ -336,4 +337,100 @@ fn ship_a_band_roster() {
     pump(&server, &[&ada]);
 
     assert_eq!(local(&ada, "members").len(), usize::from(MEMBERS) + 1);
+}
+
+/// Each arm of a read policy consults the row's own table, so the support of
+/// a row branches at every depth (DEFAULT_INHERITS_DEPTH). Rebuilding that
+/// support per arm made its size arms^depth, and each read row walked all of
+/// it, whatever the data held.
+///
+/// ```
+/// notes ─┬─ EXISTS notes (owner)   ─┬─ EXISTS notes (owner)   ─ ...
+///        ├─ EXISTS notes (editor)   ├─ ...
+///        ├─ EXISTS notes (viewer)   │
+///        └─ EXISTS notes (auditor)  └─ ...
+/// ```
+#[test]
+fn a_read_policy_with_branching_exists_arms_ships_its_support_in_linear_time() {
+    // Exponential, this is about 350,000 policy checks per row read; shared,
+    // a few dozen. Own thread, so a regression fails instead of hanging.
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        read_notes_through_branching_arms();
+        let _ = done.send(());
+    });
+    match finished.recv_timeout(std::time::Duration::from_secs(60)) {
+        Ok(()) => {}
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("reading rows under a branching EXISTS policy did not finish in 60 s")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("reading rows under a branching EXISTS policy failed (see its panic above)")
+        }
+    }
+}
+
+fn read_notes_through_branching_arms() {
+    let schema = || {
+        let arm =
+            |column: &str| exists("notes", vec![outer_eq("id", "id"), session_eq(column, &ME)]);
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column("owner", ColumnType::Text)
+                        .column("editor", ColumnType::Text)
+                        .column("viewer", ColumnType::Text)
+                        .column("auditor", ColumnType::Text)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::or(vec![
+                                    arm("owner"),
+                                    arm("editor"),
+                                    arm("viewer"),
+                                    arm("auditor"),
+                                ]))
+                                .with_insert(PolicyExpr::True)
+                                .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                                .with_delete(PolicyExpr::True),
+                        ),
+                )
+                .build(),
+        )
+    };
+    const NOTES: u8 = 6;
+    let server = open(schema(), 0, AuthorSubject::SYSTEM);
+    for (n, reader) in (0..NOTES).map(|n| (n, n % 4)) {
+        let role = |slot: u8| subject(if slot == reader { 0 } else { 1 });
+        seed(
+            &server,
+            "notes",
+            id(3, n),
+            cells(&[
+                ("owner", role(0)),
+                ("editor", role(1)),
+                ("viewer", role(2)),
+                ("auditor", role(3)),
+            ]),
+        );
+    }
+    // Nobody's note: its support must not reach ada.
+    seed(
+        &server,
+        "notes",
+        id(3, NOTES),
+        cells(&[
+            ("owner", subject(1)),
+            ("editor", subject(1)),
+            ("viewer", subject(1)),
+            ("auditor", subject(1)),
+        ]),
+    );
+    let ada = open(schema(), 1, user(0));
+    let _link = connect(&server, &ada, user(0));
+    let notes = ada.prepare_query(&Query::from("notes")).unwrap();
+    let _live = block_on(ada.subscribe(&notes, ReadOpts::default())).unwrap();
+    pump(&server, &[&ada]);
+
+    assert_eq!(local(&ada, "notes").len(), usize::from(NOTES));
 }

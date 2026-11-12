@@ -1,5 +1,6 @@
 import type { BackendAuth } from "./enrollment.js";
 import { createListeners, toError } from "../runtime/util.js";
+import { AccountAuthError, LINK_NEEDS_GUEST_MESSAGE } from "./registry-client.js";
 /** Framework-independent account selection. Credentials live in handles, never snapshots. */
 export interface AccountIdentity {
   readonly issuer: string;
@@ -16,7 +17,7 @@ export interface AccountHandle {
   readonly claims?: Readonly<Record<string, unknown>>;
 }
 
-export type AccountOperation = "becomeBackend" | "loginWithBackend" | "linkWithBackend";
+export type AccountOperation = "loginWithBackend" | "linkWithBackend";
 export interface AccountSnapshot {
   readonly account: AccountHandle | undefined;
   readonly pending: AccountOperation | undefined;
@@ -35,7 +36,8 @@ export interface AccountEnrollment<Auth> {
   createLocalFirst(): AccountHandle;
   restoreLocalFirst?(secret: string): AccountHandle;
   logout?(): void;
-  becomeBackend?(auth: BackendAuth): Promise<AccountHandle>;
+  /** The Node backend host only: admit this process with the core's backend secret. */
+  admitBackend?(auth: BackendAuth): Promise<AccountHandle>;
   loginWithBackend?(): Promise<AccountHandle>;
   /** Link the selected local-first guest to the user the backend names. */
   linkWithBackend?(account: AccountHandle): Promise<AccountHandle>;
@@ -46,6 +48,25 @@ export class AccountOperationSuperseded extends Error {
     super("Account selection changed while this operation was pending");
     this.name = "AccountOperationSuperseded";
   }
+}
+
+const backendAdmitters = new WeakMap<
+  AccountManager<unknown>,
+  (auth: BackendAuth) => Promise<AccountHandle>
+>();
+
+/**
+ * @internal Select the backend account `createJazz` opens its own session
+ * with, once when the session starts. Not reachable from the package's
+ * exports: no public session or manager can switch to a backend account.
+ */
+export function admitBackendAccount(
+  manager: AccountManager<unknown>,
+  auth: BackendAuth,
+): Promise<AccountHandle> {
+  const admit = backendAdmitters.get(manager);
+  if (!admit) return Promise.reject(new Error("Unknown account manager"));
+  return admit(auth);
 }
 
 /** Shared state machine. Each SSR request must own its own instance. */
@@ -66,6 +87,15 @@ export class AccountManager<Auth> {
     initialAccount?: AccountHandle,
     private readonly selectionDurability?: AccountSelectionDurability,
   ) {
+    backendAdmitters.set(this as AccountManager<unknown>, async (auth) => {
+      if (!this.enrollment.admitBackend)
+        throw new Error("Backend accounts are unavailable on this host");
+      const generation = ++this.generation;
+      const account = await this.enrollment.admitBackend(auth);
+      if (generation !== this.generation) throw new AccountOperationSuperseded();
+      this.publish({ account, pending: undefined, error: undefined });
+      return account;
+    });
     if (initialAccount)
       this.snapshot = Object.freeze({
         account: initialAccount,
@@ -128,18 +158,15 @@ export class AccountManager<Auth> {
   linkWithBackend(): Promise<AccountHandle> {
     const account = this.snapshot.account;
     return this.run("linkWithBackend", () => {
-      if (!account) throw new Error("Linking requires a logged-in account");
+      if (!account)
+        throw new AccountAuthError(
+          "local_first_account_required",
+          undefined,
+          LINK_NEEDS_GUEST_MESSAGE,
+        );
       if (!this.enrollment.linkWithBackend)
         throw new Error("Backend sign-in is unavailable on this host");
       return this.enrollment.linkWithBackend(account);
-    });
-  }
-
-  becomeBackend(auth: BackendAuth): Promise<AccountHandle> {
-    return this.run("becomeBackend", () => {
-      if (!this.enrollment.becomeBackend)
-        throw new Error("Backend accounts are unavailable on this host");
-      return this.enrollment.becomeBackend(auth);
     });
   }
 

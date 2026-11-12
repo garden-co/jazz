@@ -7,7 +7,6 @@ import { Center } from "@astryxdesign/core/Center";
 import { jazzTheme } from "@garden-co/design/jazz";
 import { JazzProvider } from "jazz-tools/react";
 import type { ReactNode } from "react";
-import { jazzAppId } from "@/src/lib/config";
 import { Console } from "./console";
 import { Loading } from "./loading";
 import { SignIn } from "./sign-in";
@@ -16,8 +15,7 @@ export function Providers({ children }: { children: ReactNode }) {
   return (
     <Theme theme={jazzTheme} mode="system">
       <JazzProvider
-        appId={jazzAppId}
-        serverUrl="/jazz"
+        config={{ serverUrl: "/jazz" }}
         signedOut={<SignIn />}
         loading={<Loading />}
         error={(state) => (

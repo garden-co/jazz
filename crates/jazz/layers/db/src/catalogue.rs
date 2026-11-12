@@ -12,7 +12,9 @@
 //!   its public content hash. `n` is the admitted version it compiles to;
 //!   `NULL` until it is admitted (a schema published without a lens).
 //!   Several hashes can compile to one version (defaults and indexes do not
-//!   change it); the store records the one it admitted. `published_at` is
+//!   change it); `n` is set on the first one admitted as that version, and
+//!   another one admitted later keeps its row with `n` `NULL` (a bundle may
+//!   select it: see [`crate::db::Db::publish_bundle`]). `published_at` is
 //!   set on the store that published it (an authority), `NULL` elsewhere.
 //! - `_jazz_lenses`: the published migrations, by (source, target) hash,
 //!   with their forward transform. A replica keeps none: its upstream sends
@@ -380,22 +382,40 @@ pub(crate) fn put(conn: &Connection, put: &CataloguePut) -> Result<(), Error> {
     if !put.bundles.is_empty() {
         conn.execute_batch(BUNDLES_DDL).map_err(storage)?;
     }
+    // Bundles are ordered by `published_at`: a new bundle is stamped after
+    // every earlier one, even within the same millisecond or behind a clock
+    // that stepped back, so the newest bundle is the last one published.
+    let mut last: Option<i64> = if put.bundles.is_empty() {
+        None
+    } else {
+        conn.query_row("SELECT max(published_at) FROM _jazz_bundles", [], |r| {
+            r.get(0)
+        })
+        .map_err(storage)?
+    };
     for (schema, permissions, published_at) in &put.bundles {
         let def = canonical_json(&without_defaults(permissions))?;
         let id = bundle_hash(schema, &def);
-        conn.prepare_cached(
-            "INSERT INTO _jazz_bundles (id, hash, published_at, def) VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT (id) DO NOTHING",
-        )
-        .and_then(|mut statement| {
-            statement.execute(params![
-                id.as_bytes().to_vec(),
-                schema.as_bytes().to_vec(),
-                *published_at as i64,
-                def
-            ])
-        })
-        .map_err(storage)?;
+        let at = last.map_or(*published_at as i64, |last| {
+            (*published_at as i64).max(last + 1)
+        });
+        let inserted = conn
+            .prepare_cached(
+                "INSERT INTO _jazz_bundles (id, hash, published_at, def) VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .and_then(|mut statement| {
+                statement.execute(params![
+                    id.as_bytes().to_vec(),
+                    schema.as_bytes().to_vec(),
+                    at,
+                    def
+                ])
+            })
+            .map_err(storage)?;
+        if inserted > 0 {
+            last = Some(at);
+        }
     }
     Ok(())
 }
@@ -624,6 +644,52 @@ pub(crate) fn record_admitted(conn: &Connection, n: i64, schema: &JazzSchema) ->
     .and_then(|mut statement| statement.execute(params![hash.as_bytes().to_vec(), n, def]))
     .map_err(storage)?;
     Ok(())
+}
+
+/// Record `schema` (structural), another hash of version `schema` compiles
+/// to that the store admitted already (defaults and indexes do not change
+/// the version): its definition is kept, so a bundle selecting it resolves
+/// on any later open, but `n` stays with the hash first admitted as that
+/// version. A definition already kept is left as it is.
+pub(crate) fn record_equivalent(conn: &Connection, schema: &JazzSchema) -> Result<(), Error> {
+    if schema.public_schema().is_empty() && !schema.tables().is_empty() {
+        return Ok(());
+    }
+    let (hash, def) = structural_def(schema.public_schema())?;
+    conn.prepare_cached(
+        "INSERT INTO _jazz_schemas (hash, n, published_at, def) VALUES (?1, NULL, NULL, ?2) \
+         ON CONFLICT (hash) DO NOTHING",
+    )
+    .and_then(|mut statement| statement.execute(params![hash.as_bytes().to_vec(), def]))
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// The structural schema the catalogue keeps as `hash`, if any, checked to
+/// hash to its key.
+pub(crate) fn schema(conn: &Connection, hash: &SchemaHash) -> Result<Option<PublicSchema>, Error> {
+    if !exists(conn)? {
+        return Ok(None);
+    }
+    let def: Option<String> = conn
+        .cached_row(
+            "SELECT def FROM _jazz_schemas WHERE hash = ?1",
+            [hash.as_bytes().to_vec()],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    let Some(def) = def else {
+        return Ok(None);
+    };
+    let schema: PublicSchema = decode(&def, format_args!("schema {hash} in _jazz_schemas"))?;
+    if SchemaHash::compute(&schema) != *hash {
+        return Err(Error::new(
+            ErrorCode::Storage,
+            format!("schema {hash} in _jazz_schemas does not hash to its key"),
+        ));
+    }
+    Ok(Some(schema))
 }
 
 /// The admitted versions' schemas, in admission order, each checked to

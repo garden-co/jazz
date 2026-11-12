@@ -8,7 +8,6 @@
 // Wake handling is adapted from garden-co/infra's v2 sync proxy (ADR 0004).
 
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import type { JazzCoreSocketEvent } from "jazz-napi";
 import {
   connectedBlobStore,
@@ -29,6 +28,7 @@ import type {
   BrowserWebSocket,
   WebSocketConstructor,
 } from "../runtime/native-runtime/websocket.js";
+import { optionalPeerImportError } from "./optional-peer.js";
 
 export const VERCEL_CORE_PORT = 1625;
 
@@ -36,15 +36,15 @@ export interface VercelStoreOptions {
   /**
    * Sandbox name. Defaults to `jazz-<VERCEL_PROJECT_ID>-production` for
    * production and `jazz-<VERCEL_PROJECT_ID>-preview-<branch>-<hash>` for
-   * each Git branch's previews.
+   * each Git branch's previews. Required for a preview deployment without
+   * a Git branch (from the CLI outside a Git checkout, or through the API).
    */
   name?: string;
   /**
-   * The core's app id. Defaults to one the core generates on its Drive at
-   * first start and keeps. Set it only to keep the id of
-   * an existing app.
+   * Not an option: the core generates its app id on its Drive at first
+   * start and keeps it there.
    */
-  appId?: string;
+  appId?: never;
   /** Sandbox region. Defaults to `iad1`. Fixed when the Sandbox is created. */
   region?: string;
   /**
@@ -70,10 +70,14 @@ export interface VercelStoreOptions {
    */
   idleMs?: number;
   /**
-   * Where the core's server binary comes from: an npm tarball of
-   * `jazz-tools`. Defaults to the registry's tarball of the installed version.
+   * Where the core comes from: an npm tarball of
+   * `@garden-co/jazz-napi-linux-x64-gnu`, the Node addon the Sandbox runs
+   * it with. Defaults to the registry's tarball of the installed version
+   * (for a release candidate, the tarball attached to its GitHub release);
+   * set it for a build that is neither. A download that fails is reported
+   * by the function.
    */
-  serverTarballUrl?: string;
+  coreTarballUrl?: string;
   /** Vercel credentials for scripts outside a Vercel function. Defaults to the function's OIDC token. */
   credentials?: { token: string; teamId: string; projectId: string };
   /**
@@ -112,7 +116,7 @@ export interface SandboxHandle {
 
 /** The shape `createJazz` drives a core through (see `Core` in create-jazz.ts). */
 export interface VercelCore {
-  /** The app id the core runs as (see `VercelStoreOptions.appId`). */
+  /** The app id the core runs as, kept on its Drive. */
   readonly appId: string;
   readonly serverUrl: string;
   readonly adminSecret: string;
@@ -160,6 +164,13 @@ const NOT_LISTENING_RECYCLE_MS = 12_000;
 // How long a wake is trusted before the next request checks again.
 const ENSURE_FRESH_MS = 10_000;
 const KEEPALIVE_MS = 30_000;
+
+// After a start that can't succeed, requests fail fast for this long
+// instead of each waking the Sandbox into the same failure.
+const START_FAILURE_HOLD_MS = 30_000;
+
+/** A core start that gave up (the start script said why); retrying won't help. */
+class CoreStartError extends Error {}
 
 const isWakeConflict = (error: unknown) => /\b409\b|already attached|conflict/i.test(String(error));
 
@@ -213,14 +224,46 @@ export function newerVersion(a: string, b: string): boolean {
 }
 
 /**
- * Start the core: install the server binary for `version` on the Drive,
- * generate the app id once, and run the newest server version
+ * Writes the tarball at argv[1] to stdout (the Sandbox image has node but
+ * no curl). On failure it says why on stderr, and writes to the file at
+ * argv[2] whether retrying can help: a 4xx is permanent, except 408, 425
+ * and 429; those, a 5xx and a network error are transient.
+ *
+ * @internal
+ */
+export const DOWNLOAD_CORE =
+  "const [url, kindFile] = process.argv.slice(1);" +
+  " const fail = (kind, why) => { require('node:fs').writeFileSync(kindFile, kind); console.error(why); process.exit(1); };" +
+  " fetch(url).then(async (r) => {" +
+  " if (!r.ok) return fail(r.status >= 400 && r.status < 500 && ![408, 425, 429].includes(r.status) ? 'permanent' : 'transient', 'HTTP ' + r.status);" +
+  " process.stdout.write(Buffer.from(await r.arrayBuffer()));" +
+  " }).catch((e) => fail('transient', e.message + (e.cause ? ': ' + (e.cause.code || e.cause.message) : '')));";
+
+/** The addon's file in its npm tarball. */
+const CORE_ADDON = "package/jazz-napi.linux-x64-gnu.node";
+
+/**
+ * Runs the core in the Sandbox's Node: `node -e` with the addon, the app id
+ * and the core's options, in that order. Node owns the process's signals: a
+ * SIGTERM asks the core to drain, and the process exits once it has. The addon's path stays in the
+ * process's command line, which is how a later start recognises it.
+ *
+ * @internal
+ */
+export const CORE_LAUNCHER =
+  "const [addon, appId, options] = process.argv.slice(1);" +
+  " const core = require(addon).serveCore({ ...JSON.parse(options), appId });" +
+  " for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => core.stop());" +
+  " core.closed().then(() => process.exit(0), (error) => { console.error(error); process.exit(1); });";
+
+/**
+ * Start the core: install the core addon for `version` on the Drive,
+ * generate the app id once, and run the newest core version
  * this Drive has seen, so an instance from an older deployment never
  * downgrades data a newer one already wrote. A different running version is
  * stopped first; the same one is left alone.
  */
 export function startScript(
-  appId: string | undefined,
   version: string,
   tarballUrl: string,
   trust: TrustedWorkload,
@@ -233,6 +276,9 @@ export function startScript(
   return `#!/bin/bash
 # Written by jazz-tools' vercel() store for each server start.
 set -euo pipefail
+# The function names each start by its script's file name, and trusts only
+# an error file that names one of its own starts (never a stale one).
+start_id=$(basename "$0" .sh)
 rm -f "$0"
 data=${q(`${root}/data`)}
 run=${q(`${root}/tmp`)}
@@ -245,59 +291,75 @@ newer() {
 }
 version=${q(version)}
 trust=${q(trustLine)}
+# A start that gives up says why in this version's error file, which the
+# function reads and reports instead of waiting for a server that won't
+# come: "<start id> permanent: …" when retrying can't help (the function then stops
+# the Sandbox), "<start id> transient: …" when a later start may succeed.
+error_file="$run/jazz-$version.error"
+rm -f "$error_file"
+fail() {
+  echo "jazz: $2" >&2
+  printf '%s %s: %s\\n' "$start_id" "$1" "$2" > "$error_file"
+  exit 1
+}
+trap 'fail transient "the start script failed at line $LINENO"' ERR
 # The first start pins the workload this core trusts; a start for another
 # workload never retargets it.
 pinned=$(cat "$data/trust" 2>/dev/null || true)
 if [ -n "$pinned" ] && [ "$pinned" != "$trust" ]; then
-  echo "jazz: this core trusts $pinned; not retargeting it to $trust (to re-pin after a rename, delete $data/trust)" >&2
-  exit 1
+  fail permanent "this core trusts $pinned; not retargeting it to $trust (to re-pin after a rename, delete $data/trust)"
 fi
 [ -n "$pinned" ] || { printf '%s\\n' "$trust" > "$data/trust.tmp" && mv "$data/trust.tmp" "$data/trust"; }
 highest=$(cat "$data/version" 2>/dev/null || true)
 if [ -n "$highest" ] && newer "$highest" "$version"; then
-  # A newer deployment owns this Drive: run its server, never ours.
-  if [ ! -x "$data/bin/jazz-tools-$highest" ]; then
-    echo "jazz: $highest owns this Drive but its server is missing; not starting $version" >&2
-    exit 1
+  # A newer deployment owns this Drive: run its core, never ours.
+  if [ ! -s "$data/bin/jazz-napi-$highest.node" ]; then
+    fail permanent "$highest owns this Drive but its core is missing; not starting $version"
   fi
   version=$highest
 fi
-bin=$data/bin/jazz-tools-$version
-# Fetch before stopping anything, so a failed download leaves the old server up.
-if [ ! -x "$bin" ]; then
+addon=$data/bin/jazz-napi-$version.node
+# Fetch before stopping anything, so a failed download leaves the old core up.
+if [ ! -s "$addon" ]; then
   mkdir -p "$data/bin"
-  # The Sandbox image has node but no curl.
-  node -e 'fetch(process.argv[1]).then(async (r) => { if (!r.ok) throw new Error(r.status); process.stdout.write(Buffer.from(await r.arrayBuffer())); })' ${q(tarballUrl)} \\
-    | tar xz -O package/bin/native/jazz-tools-linux-x64 > "$bin.tmp"
-  chmod 755 "$bin.tmp" && mv "$bin.tmp" "$bin"
+  url=${q(tarballUrl)}
+  rm -f "$run/download.kind"
+  if ! node -e ${q(DOWNLOAD_CORE)} "$url" "$run/download.kind" 2>"$run/download.err" \\
+    | tar xz -O ${CORE_ADDON} 2>>"$run/download.err" > "$addon.tmp"; then
+    rm -f "$addon.tmp"
+    # No kind: the download arrived but isn't the core's tarball.
+    fail "$(cat "$run/download.kind" 2>/dev/null || echo permanent)" "could not download the core for $version from $url ($(head -c 300 "$run/download.err" | tr '\\n' ' ')); set vercel({ coreTarballUrl }) to a tarball of @garden-co/jazz-napi-linux-x64-gnu for this version"
+  fi
+  [ -s "$addon.tmp" ] || fail permanent "the core download for $version from $url was empty"
+  mv "$addon.tmp" "$addon"
 fi
 # The pid file may be stale (a resumed snapshot): trust it only if that
-# process runs one of our server binaries.
+# process runs one of our cores.
 pid=$(cat "$run/jazz.pid" 2>/dev/null || true)
-if [ -n "$pid" ] && [[ "$(tr '\\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" == *"$data/bin/jazz-tools-"* ]]; then
+cmdline=$(tr '\\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+if [ -n "$pid" ] && [[ "$cmdline" == *"$data/bin/jazz-napi-"* ]]; then
   [ "$(cat "$run/jazz.version" 2>/dev/null)" = "$version" ] && exit 0
   kill -TERM "$pid" 2>/dev/null || true
   for _ in $(seq 150); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
   kill -KILL "$pid" 2>/dev/null || true
 fi
 if [ ! -s "$data/app-id" ]; then
-  app_id=${appId ? q(appId) : "$(cat /proc/sys/kernel/random/uuid)"}
+  app_id=$(cat /proc/sys/kernel/random/uuid)
   printf '%s\\n' "$app_id" > "$data/app-id.tmp" && mv "$data/app-id.tmp" "$data/app-id"
 fi
 app_id=$(cat "$data/app-id")
 export NODE_ENV=production
 mkdir -p "$data/store"
 printf '%s\\n' "$version" > "$data/version.tmp" && mv "$data/version.tmp" "$data/version"
-# Older servers are never started again (see above).
-find "$data/bin" -name 'jazz-tools-*' ! -name "jazz-tools-$version" -delete
+# Older cores are never started again (see above).
+find "$data/bin" -name 'jazz-napi-*' ! -name "jazz-napi-$version.node" -delete
 printf '%s\\n' "$version" > "$run/jazz.version"
 echo $$ > "$run/jazz.pid"
 exec 9>&-
 # The core admits only the deploying function's own workload.${blobsSetup(blobs, q)}
-exec "$bin" server "$app_id" --port ${VERCEL_CORE_PORT} --data-dir "$data/store" ${blobsFlags(blobs, q)} \\
-  --trusted-workload-issuer ${q(trust.issuer)} \\
-  --trusted-workload-audience ${q(trust.audience)} \\
-  --trusted-workload-subject ${q(trust.subject)}
+exec node -e ${q(CORE_LAUNCHER)} "$addon" "$app_id" ${q(
+    JSON.stringify(coreOptions(`${root}/data/store`, trust, blobs)),
+  )}
 `;
 }
 
@@ -318,19 +380,47 @@ function blobsSetup(blobs: VercelS3 | VercelBlob | undefined, q: (s: string) => 
 export S3_BUCKET_NAME=${q(blobs.bucket)} AWS_REGION=${q(blobs.region)} AWS_ROLE_ARN=${q(blobs.roleArn)}`;
 }
 
-function blobsFlags(blobs: VercelS3 | VercelBlob | undefined, q: (s: string) => string): string {
-  if (!blobs) return "--blobs sqlite";
-  if ("storeId" in blobs) {
-    return [
-      `--blobs vercel-blob --vercel-blob-token-from-workload --vercel-blob-store-id ${q(blobs.storeId)}`,
-      ...(blobs.prefix === undefined ? [] : [`--vercel-blob-prefix ${q(blobs.prefix)}`]),
-    ].join(" ");
-  }
-  return [
-    "--blobs s3 --s3-role-from-workload",
-    ...(blobs.endpoint === undefined ? [] : [`--s3-endpoint ${q(blobs.endpoint)}`]),
-    ...(blobs.prefix === undefined ? [] : [`--s3-prefix ${q(blobs.prefix)}`]),
-  ].join(" ");
+/**
+ * The Vercel environment (`production`, `preview` or a custom one's slug)
+ * whose functions this core trusts, from the token's subject.
+ */
+export function environmentOf(trust: TrustedWorkload): string | undefined {
+  return /:environment:([^:]+)$/.exec(trust.subject)?.[1];
+}
+
+/** The core's options, but its app id, which the Drive keeps. */
+function coreOptions(
+  dataDir: string,
+  trust: TrustedWorkload,
+  blobs: VercelS3 | VercelBlob | undefined,
+): Record<string, unknown> {
+  // A bucket or Blob store is claimed for the core's environment: one
+  // environment's OIDC token reaches the whole store, so preview and
+  // production never share one.
+  const environment = environmentOf(trust);
+  const claim = environment === undefined ? {} : { environment };
+  return {
+    port: VERCEL_CORE_PORT,
+    dataDir,
+    blobs: !blobs
+      ? { kind: "sqlite" }
+      : "storeId" in blobs
+        ? {
+            kind: "vercel-blob",
+            tokenFromWorkload: true,
+            storeId: blobs.storeId,
+            ...claim,
+            ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
+          }
+        : {
+            kind: "s3",
+            roleFromWorkload: true,
+            ...claim,
+            ...(blobs.endpoint === undefined ? {} : { endpoint: blobs.endpoint }),
+            ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
+          },
+    trustedWorkload: { issuer: trust.issuer, audience: trust.audience, subject: trust.subject },
+  };
 }
 
 let warnedNoBlobStore = false;
@@ -355,6 +445,41 @@ export function resolveCoreBlobs(
   if (blobs.kind === "vercel-blob") return resolveVercelBlob(blobs, env);
   return resolveVercelS3(blobs, options.region ?? "iad1", env);
 }
+
+/**
+ * Refuse a Blob store that another environment claimed, so a preview
+ * deployment given production's store (an API- or CLI-created store is
+ * connected to every environment) fails at start and says why. The core
+ * checks the same claim, but only at its first large value, since no token
+ * reaches it before a request does, and then it only retries in the
+ * background while writes are acknowledged. A store nobody claimed yet, or
+ * a read that fails, is left to the core's own check.
+ */
+export async function refuseOtherEnvironmentsBlobStore(
+  storeId: string,
+  environment: string | undefined,
+  token: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  if (environment === undefined) return;
+  const id = storeId.replace(/^store_/, "").toLowerCase();
+  const response = await fetchImpl(
+    `https://${id}.private.blob.vercel-storage.com/${BLOB_ENVIRONMENT_MARKER}?cache=0`,
+    { headers: { authorization: `Bearer ${token}` } },
+  ).catch(() => undefined);
+  if (!response?.ok) return;
+  const claimed = (await response.text().catch(() => "")).trim();
+  if (claimed && claimed !== environment) {
+    throw new Error(
+      `vercel(): Blob store ${storeId} serves the ${claimed} environment, not ${environment}; ` +
+        "connect a separate Blob store to each environment (a store connected through the API or " +
+        "CLI is connected to all of them)",
+    );
+  }
+}
+
+/** Where a core claims a bucket or Blob store for its environment (jazz-server's `ENVIRONMENT_OBJECT`). */
+const BLOB_ENVIRONMENT_MARKER = ".jazz-environment";
 
 /** The workload an OIDC token names: whoever holds such a token is trusted. */
 export function workloadOf(token: string): TrustedWorkload {
@@ -394,9 +519,10 @@ async function functionOidcToken(): Promise<string> {
   let fetched: string | undefined;
   let failure: unknown;
   try {
-    const { getVercelOidcToken } = (await import(
-      /* @vite-ignore */ "@vercel/functions/oidc" as string
-    )) as { getVercelOidcToken(): Promise<string> };
+    // A literal inside `try`, like `importSandboxSdk`'s.
+    const { getVercelOidcToken } = (await import(/* @vite-ignore */ "@vercel/functions/oidc")) as {
+      getVercelOidcToken(): Promise<string>;
+    };
     fetched = await getVercelOidcToken();
   } catch (error) {
     failure = error;
@@ -457,8 +583,16 @@ export function defaultCoreName(project: string, env: Record<string, string | un
   // Project ids are mixed case with an underscore; names stay [a-z0-9-].
   const safe = (part: string) => part.toLowerCase().replace(/[^a-z0-9]+/g, "-");
   if (target !== "preview") return `jazz-${safe(project)}-${safe(target)}`;
-  // CLI deploys have no branch; they share one preview core.
-  const branch = env.VERCEL_GIT_COMMIT_REF ?? "cli";
+  // Deploys from the CLI outside a Git checkout, or through the API, have an
+  // empty branch. They'd all share one core, so ask for a name instead.
+  const branch = env.VERCEL_GIT_COMMIT_REF;
+  if (!branch) {
+    throw new Error(
+      "vercel(): this preview deployment has no Git branch (VERCEL_GIT_COMMIT_REF is empty, " +
+        "as for deploys from the CLI outside a Git checkout or through the API); " +
+        "pass vercel({ name }) to choose its core",
+    );
+  }
   const slug = branch
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
@@ -468,11 +602,33 @@ export function defaultCoreName(project: string, env: Record<string, string | un
   return `jazz-${safe(project)}-preview-${slug}-${hash}`;
 }
 
+/**
+ * The core addon's tarball for a jazz-tools version: npm's for a published
+ * version, the GitHub release asset for a release candidate (rc builds are
+ * attached to their release and never reach npm).
+ */
+export function defaultCoreTarballUrl(version: string): string {
+  const name = "jazz-napi-linux-x64-gnu";
+  if (/^2\.0\.0-alpha\.[0-9]+-rc\.[0-9]+$/.test(version)) {
+    return `https://github.com/garden-co/jazz/releases/download/v${version}/garden-co-${name}-${version}.tgz`;
+  }
+  return `https://registry.npmjs.org/@garden-co/${name}/-/${name}-${version}.tgz`;
+}
+
+/**
+ * The installed jazz-tools version, as a JSON import of the package's own
+ * `package.json` export. Bundlers (webpack, Turbopack) inline it, and Node
+ * loads it as a module. Neither reads a path at runtime, unlike `readFile`
+ * of a URL resolved against `import.meta.url` (webpack rewrites that URL
+ * into one `fs` refuses) or `createRequire` from `import.meta.url`
+ * (bundlers bake the build machine's path into it, so a deployed function
+ * can't find it).
+ */
 async function installedVersion(): Promise<string> {
-  const packageJson = JSON.parse(
-    await readFile(new URL("../../package.json", import.meta.url), "utf8"),
-  ) as { version: string };
-  return packageJson.version;
+  const packageJson = (await import("jazz-tools/package.json", { with: { type: "json" } })) as {
+    default: { version: string };
+  };
+  return packageJson.default.version;
 }
 
 export interface OpenVercelCoreOptions {
@@ -481,21 +637,32 @@ export interface OpenVercelCoreOptions {
   sdk?: SandboxSdk;
   version?: string;
   env?: Record<string, string | undefined>;
+  /** Reads the Blob store's environment claim (tests). */
+  fetch?: typeof fetch;
+}
+
+/**
+ * `@vercel/sandbox`, an optional peer dependency. The import is a literal
+ * inside `try`: bundlers (Turbopack, webpack) then bundle the package when
+ * it's installed, and turn a missing one into an error at runtime instead
+ * of failing every route that imports jazz-tools (an app on `sqlite()`
+ * never needs it). A `.catch()` on the import isn't enough for that.
+ */
+async function importSandboxSdk(): Promise<SandboxSdk> {
+  try {
+    return (await import(/* @vite-ignore */ "@vercel/sandbox")) as unknown as SandboxSdk;
+  } catch (error) {
+    throw optionalPeerImportError("vercel()", "@vercel/sandbox", error);
+  }
 }
 
 export async function openVercelCore(params: OpenVercelCoreOptions): Promise<VercelCore> {
   const { options, openRemote } = params;
-  const appId = options.appId;
+  refuseVercelAppId(options);
   const env = params.env ?? process.env;
-  const sdk =
-    params.sdk ??
-    options.sdk ??
-    ((await import(/* @vite-ignore */ "@vercel/sandbox" as string).catch(() => {
-      throw new Error("vercel() needs the @vercel/sandbox package: npm install @vercel/sandbox");
-    })) as SandboxSdk);
+  const sdk = params.sdk ?? options.sdk ?? (await importSandboxSdk());
   const version = params.version ?? (await installedVersion());
-  const tarballUrl =
-    options.serverTarballUrl ?? `https://registry.npmjs.org/jazz-tools/-/jazz-tools-${version}.tgz`;
+  const tarballUrl = options.coreTarballUrl ?? defaultCoreTarballUrl(version);
   const project = options.credentials?.projectId ?? env.VERCEL_PROJECT_ID;
   if (!options.name && !project) {
     throw new Error(
@@ -508,24 +675,82 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   const backendCredential = options.backendCredential ?? functionOidcToken;
   // The core trusts the workload this function's token names, so every
   // instance of this project and environment reaches it, and nothing else.
-  const trust = workloadOf(await backendCredential());
+  const token = await backendCredential();
+  const trust = workloadOf(token);
   // Skipped for a `backendCredential` of your own, which names whatever
   // workload you chose.
   if (!options.backendCredential) refuseOtherEnvironment(trust, env);
   const trustLine = `${trust.issuer} ${trust.audience} ${trust.subject}`;
   const blobs = resolveCoreBlobs(options, env);
-  const script = Buffer.from(startScript(appId, version, tarballUrl, trust, blobs));
+  if (blobs && environmentOf(trust) === undefined) {
+    console.warn(
+      `vercel(): the core's workload ${trust.subject} names no Vercel environment, so its blob store is not claimed for one; make sure no other environment uses that store`,
+    );
+  }
+  // Read while the core wakes; refused before anything is served.
+  const storeChecked =
+    blobs && "storeId" in blobs
+      ? refuseOtherEnvironmentsBlobStore(blobs.storeId, environmentOf(trust), token, params.fetch)
+      : undefined;
+  void storeChecked?.catch(() => {});
+  const script = Buffer.from(startScript(version, tarballUrl, trust, blobs));
 
+  /** This instance's recent starts, by id (its script's file name). */
+  const starts: string[] = [];
   const startServer = async (sbx: SandboxHandle) => {
     // A fresh path each time: bash reads a script as it runs, so one that is
     // running must never be rewritten.
-    const path = `/tmp/jazz-start-${randomUUID()}.sh`;
+    const id = `jazz-start-${randomUUID()}`;
+    starts.push(id);
+    if (starts.length > 20) starts.shift();
+    const path = `/tmp/${id}.sh`;
     await sbx.writeFiles([{ path, content: script }]);
     await sbx.runCommand({
       cmd: "bash",
       args: ["-lc", `exec bash ${path} >>/data/server.log 2>&1`],
       detached: true,
     });
+  };
+
+  /**
+   * Why this version's last start in `sbx` gave up, if it was one of this
+   * instance's starts (see `fail` in the start script); a file left by an
+   * earlier session or another instance is never read as this one's. A
+   * permanent cause never comes up on its own; a transient one may on the
+   * next start.
+   */
+  const startError = async (sbx: SandboxHandle) => {
+    const text = (
+      await sbx.readFileToBuffer({ path: `/tmp/jazz-${version}.error` }).catch(() => null)
+    )
+      ?.toString("utf8")
+      .trim();
+    const match = text ? /^(\S+) (permanent|transient): (.*)$/s.exec(text) : null;
+    if (!match || !starts.includes(match[1]!)) return undefined;
+    return { permanent: match[2] === "permanent", why: match[3]! };
+  };
+
+  /**
+   * Stop the Sandbox rather than keep it awake retrying a start that can't
+   * succeed. Other instances may be watching the same Sandbox: only the
+   * session this one saw fail is stopped, never a newer one, and never one
+   * where another version's core is running or starting (an older
+   * deployment's, still in use).
+   */
+  const giveUp = async (sbx: SandboxHandle, why: string): Promise<never> => {
+    const watched = sbx.currentSession().startedAt.getTime();
+    const now = await getRunning();
+    const other = now ? await runningVersion(now) : undefined;
+    if (
+      now &&
+      now.currentSession().startedAt.getTime() === watched &&
+      (!other || other === version)
+    ) {
+      await now.stop().catch(() => {});
+    }
+    throw new CoreStartError(
+      `vercel(): core ${name} could not start: ${why} (log: /data/server.log)`,
+    );
   };
 
   /** The server version running in `sbx`, if any. */
@@ -591,6 +816,8 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     const healthFails: Record<string, number> = {};
     let recycled = false;
     let restarted = false;
+    /** The last transient start failure, for the error if the wake times out. */
+    let lastTransient: string | undefined;
     let sbx = await getRunning();
     for (;;) {
       while (!sbx) {
@@ -623,6 +850,9 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       const healthT0 = performance.now();
       while (!ok && sbx && performance.now() < deadline) {
         ok = await healthy(base, 5_000, healthFails);
+        const failure = ok ? undefined : await startError(sbx);
+        if (failure?.permanent) await giveUp(sbx, failure.why);
+        if (failure) lastTransient = failure.why;
         const notListening = Object.keys(healthFails).some((k) =>
           k.includes("SANDBOX_NOT_LISTENING"),
         );
@@ -666,12 +896,26 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           if (now && !newerVersion(version, now) && (await healthy(base, 1_000, healthFails))) {
             return { sbx, base };
           }
+          // The older core stays up for the deployments still using it.
+          const failure = await startError(sbx);
+          if (failure?.permanent) {
+            throw new CoreStartError(
+              `vercel(): core ${name} could not start ${version}: ${failure.why}`,
+            );
+          }
+          if (failure) {
+            // A later start may succeed: try again.
+            lastTransient = failure.why;
+            await startServer(sbx);
+            await sleep(1_000);
+          }
           await sleep(250);
         }
       }
       if (performance.now() > deadline) {
         throw new Error(
-          `vercel(): core ${name} did not become healthy in ${since(t0)} ms (${JSON.stringify(healthFails)})`,
+          `vercel(): core ${name} did not become healthy in ${since(t0)} ms (${JSON.stringify(healthFails)})` +
+            (lastTransient ? `; its last start failed: ${lastTransient}` : ""),
         );
       }
     }
@@ -683,10 +927,13 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   let pending: Promise<NonNullable<typeof live>> | undefined;
   let lastActivity = Date.now();
   let sockets = 0;
+  let failed: { at: number; error: CoreStartError } | undefined;
 
   const ensure = (): Promise<NonNullable<typeof live>> => {
     lastActivity = Date.now();
     if (live && Date.now() - live.checkedAt < ENSURE_FRESH_MS) return Promise.resolve(live);
+    if (failed && Date.now() - failed.at < START_FAILURE_HOLD_MS)
+      return Promise.reject(failed.error);
     pending ??= (async () => {
       try {
         if (live && (await getRunning())) {
@@ -699,9 +946,6 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
             ? live.appId
             : (await sbx.readFileToBuffer({ path: "/data/app-id" }))?.toString("utf8").trim();
         if (!coreAppId) throw new Error(`vercel(): core ${name} has no app id on its Drive`);
-        if (appId && coreAppId !== appId) {
-          throw new Error(`vercel(): core ${name} belongs to app ${coreAppId}, not ${appId}`);
-        }
         await refuseForeignPin(sbx);
         if (live?.base === base) {
           live.sbx = sbx;
@@ -717,7 +961,11 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           checkedAt: Date.now(),
         };
         if (replaced) void replaced.close().catch(() => {});
+        failed = undefined;
         return live;
+      } catch (error) {
+        if (error instanceof CoreStartError) failed = { at: Date.now(), error };
+        throw error;
       } finally {
         pending = undefined;
       }
@@ -743,7 +991,16 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   }, KEEPALIVE_MS);
   (keepalive as { unref?: () => void }).unref?.();
 
-  const first = await ensure();
+  const ensured = ensure();
+  let first: Awaited<typeof ensured>;
+  try {
+    [first] = await Promise.all([ensured, storeChecked]);
+  } catch (error) {
+    clearInterval(keepalive);
+    // The wake may still be under way: close the core it comes up with.
+    void ensured.then(({ core }) => core.close()).catch(() => {});
+    throw error;
+  }
   // Clients in this process (the backend's own session) reach the core through
   // an in-process origin, so each of their requests and reconnects wakes it;
   // they go on through the current remote core's own in-process origin, which
@@ -889,4 +1146,13 @@ function wakingWebSocket(resolveOrigin: () => Promise<string>): WebSocketConstru
       this.emit("close", { code, reason });
     }
   };
+}
+
+/** The core keeps its own app id; one passed from JavaScript is refused, not ignored. */
+export function refuseVercelAppId(options: object): void {
+  if ("appId" in options) {
+    throw new Error(
+      "vercel(): appId is not an option: the core keeps its own app id on its Drive.",
+    );
+  }
 }

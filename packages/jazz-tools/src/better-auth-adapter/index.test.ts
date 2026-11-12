@@ -5,7 +5,6 @@ import { createLocalJWKSet, jwtVerify } from "jose";
 import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
 import {
   startLocalJazzServer,
-  startTestJwtIssuer,
   deploy as deployFixture,
   type LocalJazzServerHandle,
 } from "../testing/index.js";
@@ -16,6 +15,8 @@ import {
   wasmSchema as wasmSchemaExample,
 } from "./fixtures/schema.js";
 import { jazzAdapter } from "./index.js";
+import { accountRegistryUrl } from "../accounts/context.js";
+import { readAccountAssignment, requestVouchedAccount } from "../accounts/registry-client.js";
 
 const atomicAdapterOptions = {
   user: {
@@ -50,6 +51,27 @@ type AtomicUser = {
   transitionStatus: string;
 };
 
+/** A signed-in app user's session, with the account the core assigns them. */
+async function appUserSession(
+  server: { url: string; appId: string; backendSecret: string },
+  userId: string,
+) {
+  const identity = { issuer: "https://app.example", subject: userId };
+  const assignment = await requestVouchedAccount(
+    accountRegistryUrl(server.url, server.appId),
+    "login-or-register",
+    identity,
+    server.backendSecret,
+  );
+  return {
+    issuer: identity.issuer,
+    user_id: userId,
+    account_id: readAccountAssignment(assignment, identity),
+    claims: {},
+    authMode: "external" as const,
+  };
+}
+
 describe("jazzAdapter", () => {
   describe("generated auth-table permissions", () => {
     it("denies client CRUD for every generated Better Auth table", () => {
@@ -68,11 +90,11 @@ describe("jazzAdapter", () => {
   });
 
   it("rejects ordinary-session reads and writes to Better Auth tables", async () => {
-    const jwtIssuer = await startTestJwtIssuer();
     const server = await startLocalJazzServer({
       allowLocalFirstAuth: true,
     });
-    await deployFixture({
+    // Published as createJazz publishes it; the backend link is pinned to it.
+    const { bundle } = await deployFixture({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
@@ -86,9 +108,7 @@ describe("jazzAdapter", () => {
       driver: { type: "memory" },
       serverUrl: server.url,
       backendSecret: server.backendSecret,
-      jwksUrl: jwtIssuer.jwksUrl,
-      jwtIssuer: jwtIssuer.issuer,
-      jwtAudience: jwtIssuer.audience,
+      bundle,
     });
 
     try {
@@ -106,12 +126,8 @@ describe("jazzAdapter", () => {
         },
       });
 
-      const token = await jwtIssuer.jwtForUser("ordinary-session-user");
-      const sessionDb = await context.forRequest(
-        { headers: { authorization: `Bearer ${token}` } },
-        undefined,
-        { account: "login-or-register" },
-      );
+      // An app user the backend vouches for, as createJazz's authenticate would.
+      const sessionDb = context.forSession(await appUserSession(server, "ordinary-session-user"));
 
       await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "remote" })).resolves.toEqual(
         [],
@@ -130,14 +146,13 @@ describe("jazzAdapter", () => {
     } finally {
       await context.shutdown();
       await server.stop();
-      await jwtIssuer.stop();
     }
   }, 30_000);
 
   it("applies generated deny-all policies to a verified external session", async () => {
-    const jwtIssuer = await startTestJwtIssuer();
     const server = await startLocalJazzServer();
-    await deployFixture({
+    // Published as createJazz publishes it; the backend link is pinned to it.
+    const { bundle } = await deployFixture({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
@@ -151,9 +166,7 @@ describe("jazzAdapter", () => {
       driver: { type: "memory" },
       serverUrl: server.url,
       backendSecret: server.backendSecret,
-      jwksUrl: jwtIssuer.jwksUrl,
-      jwtIssuer: jwtIssuer.issuer,
-      jwtAudience: jwtIssuer.audience,
+      bundle,
     });
 
     try {
@@ -219,12 +232,8 @@ describe("jazzAdapter", () => {
         })
         .wait({ tier: "global" });
 
-      const token = await jwtIssuer.jwtForUser("external-policy-user");
-      const sessionDb = await context.forRequest(
-        { headers: { authorization: `Bearer ${token}` } },
-        undefined,
-        { account: "login-or-register" },
-      );
+      // An app user the backend vouches for, as createJazz's authenticate would.
+      const sessionDb = context.forSession(await appUserSession(server, "external-policy-user"));
       await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "remote" })).resolves.toEqual(
         [],
       );
@@ -271,7 +280,6 @@ describe("jazzAdapter", () => {
     } finally {
       await context.shutdown();
       await server.stop();
-      await jwtIssuer.stop();
     }
   }, 30_000);
 

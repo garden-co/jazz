@@ -1,5 +1,5 @@
 import * as React from "react";
-import { JazzSessionProvider, type JazzSessionConfig } from "jazz-tools/expo";
+import { JazzProvider, type JazzClientConfig } from "jazz-tools/expo";
 import {
   ActivityIndicator,
   Platform,
@@ -54,7 +54,7 @@ const styles = StyleSheet.create({
   },
 });
 
-const defaultFallback = (
+const defaultLoading = (
   <SafeAreaView style={styles.container}>
     <View style={styles.loadingContainer}>
       <ActivityIndicator size="small" />
@@ -64,16 +64,16 @@ const defaultFallback = (
 );
 
 type AppProps = {
-  config?: JazzSessionConfig;
-  fallback?: React.ReactNode;
+  config?: JazzClientConfig;
+  loading?: React.ReactNode;
 };
 
 // #region context-setup-expo
-export default function App({ config, fallback }: AppProps = {}) {
+export default function App({ config, loading }: AppProps = {}) {
   return (
-    <JazzSessionProvider
-      config={config ?? { serverUrl, initial: "local-first" }}
-      fallback={fallback ?? defaultFallback}
+    <JazzProvider
+      config={config ?? { serverUrl, initial: "device" }}
+      loading={loading ?? defaultLoading}
     >
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="dark-content" />
@@ -82,7 +82,7 @@ export default function App({ config, fallback }: AppProps = {}) {
           <TodoList />
         </View>
       </SafeAreaView>
-    </JazzSessionProvider>
+    </JazzProvider>
   );
 }
 // #endregion context-setup-expo

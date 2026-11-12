@@ -953,6 +953,9 @@ pub struct Table {
     pub provenance: Vec<Column>,
     /// How provenance is stored: authors as interned codes.
     pub stored_provenance: Vec<Column>,
+    /// Whether this schema keeps only each row's latest version (SPEC 4
+    /// §4.9). Only the owner's schema decides what a store prunes.
+    pub latest_only: bool,
 }
 
 /// Provenance as read. Timestamps are Unix ms (u64, as in Jazz). Authors
@@ -1206,6 +1209,10 @@ pub struct Schema {
     /// the current schema's policies, compiled under its names (tables
     /// match by stored name; see [`crate::compile::Ctx`]).
     pub policies_from: Option<std::rc::Rc<Schema>>,
+    /// The published bundle whose policies this schema carries, when it
+    /// is one's governing schema (see [`crate::catalogue`]): what a schema
+    /// governed by it keeps through a reset, whatever is current.
+    pub bundle: Option<crate::catalogue::BundleId>,
     /// Tables and columns are named by their stored names, as writes travel
     /// on the wire (see [`Schema::stored_view`]).
     pub stored_names: bool,
@@ -1292,6 +1299,7 @@ impl Schema {
                     branch_key_names: Vec::new(),
                     provenance: provenance_columns(),
                     stored_provenance: stored_provenance_columns(),
+                    latest_only: table.history == jazz_model::schema::HistoryRetention::Latest,
                 },
             );
         }
@@ -1300,6 +1308,7 @@ impl Schema {
             jazz: jazz.clone(),
             version: jazz.version_id(),
             policies_from: None,
+            bundle: None,
             stored_names: false,
         }
     }
@@ -1432,6 +1441,7 @@ impl Schema {
             jazz: current.jazz.clone(),
             version: current.version,
             policies_from: None,
+            bundle: None,
             stored_names: true,
         }
         .with_policies_of(current.clone())
@@ -1575,6 +1585,7 @@ impl Table {
             branch_key_names: Vec::new(),
             provenance: provenance_columns(),
             stored_provenance: stored_provenance_columns(),
+            latest_only: false,
         }
     }
 

@@ -1,6 +1,7 @@
 import { getTrustedReservedSession } from "../runtime/db-internal-session.js";
 import { resolveClientInternalSessionSync } from "../runtime/client-session.js";
 import type { DbConfig } from "../runtime/db.js";
+import { clientScope } from "../runtime/client-scope.js";
 import type { Session } from "../runtime/context.js";
 import { assertAccountConfig } from "../accounts/config-capability.js";
 import type { NativeForegroundFactory } from "./native-foreground-db.js";
@@ -33,7 +34,7 @@ export function beginNativeAccountSession(
   return factory.beginAccountSession(
     JSON.stringify({
       registry: config.accountRegistryAuthority,
-      app_id: config.appId,
+      app_id: clientScope(config),
       env: config.env ?? "dev",
       account_id: config.accountId,
       issuer: session.issuer,
@@ -70,6 +71,6 @@ export function resolveNativeSession(config: DbConfig) {
 function requireBearer(bearer: string | undefined): string {
   if (bearer) return bearer;
   throw new Error(
-    "A React Native user signed in through the app's backend syncs with the app's bearer: pass `bearer` to createAccountManager",
+    "A React Native user signed in through the app's backend syncs with the app's bearer: pass `bearer` to createJazzClient",
   );
 }

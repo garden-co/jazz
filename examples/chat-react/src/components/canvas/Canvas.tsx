@@ -1,5 +1,5 @@
 import { type PointerEvent, useEffect, useMemo, useRef, useState } from "react";
-import { useDb, useAll, useSession } from "jazz-tools/react";
+import { useAll, useSession } from "jazz-tools/react";
 import { Eraser, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Toggle } from "@/components/ui/toggle";
@@ -27,9 +27,8 @@ export function CollaborativeCanvas({
   showControls?: boolean;
   className?: string;
 }) {
-  const db = useDb();
   const session = useSession();
-  const userId = session?.user.account ?? null;
+  const userId = session?.user ?? null;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRefs = useRef<Map<string, HTMLCanvasElement | null>>(new Map());
   const drawingRef = useRef(false);
@@ -40,7 +39,7 @@ export function CollaborativeCanvas({
   const myColor = userId ? colorFromUserId(userId) : "#000000";
 
   // Subscribe to the canvas row so it's present in the local runtime for FK checks
-  const { data: canvasRows = [] } = useAll(app.canvases.where({ id: canvasId }));
+  const { data: canvasRows = [], db } = useAll(app.canvases.where({ id: canvasId }));
   const canvasReady = canvasRows.length > 0;
 
   const { data: profiles = [] } = useAll(app.profiles);

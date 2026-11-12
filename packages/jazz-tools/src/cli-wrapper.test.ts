@@ -177,14 +177,26 @@ export default s.definePermissions(app, ({ policy }) => {
   );
 
   it.each([
-    ["--rust-bin followed by --help", ["--rust-bin", "--help"]],
-    ["--rust-bin with no following value", ["--rust-bin"]],
-    ["--rust-bin with an empty value", ["--rust-bin", ""]],
-  ])("rejects %s before routing to native Rust", async (_description, args) => {
-    const result = await runWrapper(args);
+    ["server", "`jazz-tools server` was removed", "createJazz"],
+    ["create", "`jazz-tools create` was removed", "npm create jazz"],
+    [
+      "migrate-alpha59",
+      "moved to `jazz-alpha59-alpha60-import`",
+      "github.com/garden-co/jazz/releases",
+    ],
+  ])("explains what replaced the removed %s command", async (command, removed, replacement) => {
+    const result = await runWrapper([command, "my-app"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(removed);
+    expect(result.stderr).toContain(replacement);
+  });
+
+  it("rejects an --env-file with no value before routing", async () => {
+    const result = await runWrapper(["--env-file"]);
 
     expect(result.status).toBe(1);
     expect(result.stdout).toBe("");
-    expect(result.stderr).toContain("Missing value for --rust-bin.");
+    expect(result.stderr).toContain("Missing value for --env-file.");
   });
 });

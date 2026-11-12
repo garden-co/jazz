@@ -9,34 +9,105 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import type { JazzSession, JazzSessionActions, JazzSessionSnapshot } from "../session/state.js";
-import { attachJazzSessionConsumer } from "../session/consumer.js";
+import {
+  attachJazzSessionConsumer,
+  jazzSessionActions,
+  ownJazzSession,
+  startJazzSession,
+  type JazzSession,
+  type JazzSessionSnapshot,
+} from "../session/jazz-session.js";
+import type { SessionCore } from "../session/state.js";
 import { JazzClientProvider, type CoreJazzClient } from "./provider.js";
-import { toError } from "../runtime/util.js";
 
+/** `useJazzSession()`: the session's state, and its operations. */
 export type UseJazzSessionResult<Client = CoreJazzClient> = JazzSessionSnapshot<Client> &
-  JazzSessionActions;
+  Omit<JazzSession<Client>, "getSnapshot" | "subscribe" | "db">;
 const SessionContext = createContext<UseJazzSessionResult<any> | null>(null);
 
-/** The active account lifecycle, available in both the data UI and signed-out fallback. */
+/**
+ * Who is signed in and what the session is doing, with its operations
+ * (`createDeviceAccount`, `refresh`, `signOut`, ...). Available everywhere
+ * under `<JazzProvider>`, including its `signedOut`, `loading` and `error`
+ * views. Operations reject on failure; the failure also shows in `error`.
+ */
 export function useJazzSession<Client = CoreJazzClient>(): UseJazzSessionResult<Client> {
   const value = useContext(SessionContext);
-  if (!value) throw new Error("useJazzSession must be used within <JazzSessionProvider>");
+  if (!value) throw new Error("useJazzSession must be used within <JazzProvider>");
   return value;
 }
 
-export type JazzSessionProviderProps<Client extends CoreJazzClient = CoreJazzClient> = {
-  session: JazzSession<Client>;
-  fallback?: ReactNode;
+/** What `<JazzProvider>` shows for each session status. */
+export type JazzSessionViewProps<Client = CoreJazzClient> = {
   children: ReactNode;
+  /** Shown while no one is signed in. */
+  signedOut?: ReactNode;
+  /** Shown while the session starts or switches users. */
+  loading?: ReactNode | ((state: UseJazzSessionResult<Client>) => ReactNode);
+  /** Shown when there is no usable client (`status: "error"`). */
+  error?: ReactNode | ((state: UseJazzSessionResult<Client>) => ReactNode);
 };
 
-/** Supplies an externally owned session. Unmounting releases its view, not its client. */
-export function JazzSessionProvider<Client extends CoreJazzClient>({
+/** The two ways to give `<JazzProvider>` its session. */
+export type JazzSessionSourceProps<Config, Client> =
+  | {
+      /**
+       * Open and own a session with this configuration. It's captured at
+       * mount: use a React key to replace it.
+       */
+      config: Config;
+      session?: never;
+    }
+  | {
+      /** Show a session you own (from `createJazzClient`); unmounting doesn't close it. */
+      session: JazzSession<Client>;
+      config?: never;
+    };
+
+/** @internal A host's `<JazzProvider>`: its config type, session core and default views. */
+export function JazzSessionProvider<Config, Client extends CoreJazzClient>(
+  props: JazzSessionSourceProps<Config, Client> &
+    JazzSessionViewProps<Client> & {
+      openCore: (config: Config) => Promise<SessionCore<Client>>;
+    },
+) {
+  const { config, session: external, openCore, ...view } = props;
+  if (external) return <JazzSessionView session={external} {...view} />;
+  return <OwnedJazzSession config={config as Config} openCore={openCore} {...view} />;
+}
+
+function OwnedJazzSession<Config, Client extends CoreJazzClient>({
+  config,
+  openCore,
+  ...view
+}: JazzSessionViewProps<Client> & {
+  config: Config;
+  openCore: (config: Config) => Promise<SessionCore<Client>>;
+}) {
+  // An inert session: nothing starts during render (or SSR).
+  const [session] = useState(() => ownJazzSession(config, openCore, { start: false }));
+  const closing = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => {
+    clearTimeout(closing.current);
+    void startJazzSession(session as JazzSession<unknown>).catch(reportJazzStartupFailure);
+    return () => {
+      // A real unmount closes after descendant consumers release their leases.
+      // StrictMode's immediate replay cancels this and keeps the same session.
+      closing.current = setTimeout(() => {
+        void session.close().catch(() => {});
+      }, 0);
+    };
+  }, [session]);
+  return <JazzSessionView session={session} {...view} />;
+}
+
+function JazzSessionView<Client extends CoreJazzClient>({
   session,
-  fallback = null,
   children,
-}: JazzSessionProviderProps<Client>) {
+  signedOut = null,
+  loading = null,
+  error = null,
+}: JazzSessionViewProps<Client> & { session: JazzSession<Client> }) {
   const snapshot = useSyncExternalStore(
     session.subscribe,
     session.getSnapshot,
@@ -44,14 +115,13 @@ export function JazzSessionProvider<Client extends CoreJazzClient>({
   );
   const consumer = useMemo(
     () => ({
-      lease: undefined as ReturnType<typeof attachJazzSessionConsumer> | undefined,
+      lease: undefined as ReturnType<typeof attachJazzSessionConsumer<Client>> | undefined,
       epoch: 0,
     }),
     [session],
   );
   useLayoutEffect(() => {
-    // Suspense hides and replays layout effects without removing passive query
-    // subscriptions. Keep the same lease until a real passive cleanup commits.
+    // Suspense hides layout effects while passive query subscriptions remain live.
     consumer.lease ??= attachJazzSessionConsumer(session);
   }, [session, consumer]);
   useEffect(() => {
@@ -68,139 +138,35 @@ export function JazzSessionProvider<Client extends CoreJazzClient>({
     };
   }, [consumer]);
   useEffect(() => {
-    // The fallback is committed and removed query subscriptions have detached.
+    // The previous view is committed and its query subscriptions detached.
     consumer.lease?.acknowledge(snapshot);
   }, [consumer, snapshot]);
-  const value = useMemo(() => ({ ...session, ...snapshot }), [session, snapshot]);
+  const actions = useMemo(() => jazzSessionActions(session), [session]);
+  const state = useMemo<UseJazzSessionResult<Client>>(
+    () => ({ ...snapshot, ...actions }),
+    [snapshot, actions],
+  );
+  const render = (view: JazzSessionViewProps<Client>["loading"]) =>
+    typeof view === "function" ? view(state) : view;
   return (
-    <SessionContext.Provider value={value}>
-      {snapshot.status === "ready" && snapshot.client ? (
-        <JazzClientProvider client={snapshot.client}>{children}</JazzClientProvider>
+    <SessionContext.Provider value={state}>
+      {state.status === "ready" && state.client ? (
+        <JazzClientProvider client={state.client}>{children}</JazzClientProvider>
+      ) : state.status === "signed-out" ? (
+        signedOut
+      ) : state.status === "error" ? (
+        render(error)
       ) : (
-        fallback
+        render(loading)
       )}
     </SessionContext.Provider>
   );
 }
 
-export type ConfiguredJazzSessionProviderProps<Config> = {
-  /** Captured at mount. Use a React key to replace an application's configuration. */
-  config: Config;
-  fallback?: ReactNode;
-  children: ReactNode;
-};
-
-/** Host adapters supply a factory; no host initialization occurs during render or SSR. */
-export function ConfiguredJazzSessionProvider<Config, Client extends CoreJazzClient>({
-  config,
-  createJazzSession,
-  fallback = null,
-  children,
-}: ConfiguredJazzSessionProviderProps<Config> & {
-  createJazzSession: (config: Config) => Promise<JazzSession<Client>>;
-}) {
-  const { session, error, retry: start } = useJazzSessionOwner(config, createJazzSession);
-  const startup = useMemo<UseJazzSessionResult<Client>>(() => {
-    const unavailable = async () => {
-      throw new Error("Jazz session is not ready; retry initialization first");
-    };
-    return {
-      status: error ? "error" : "transitioning",
-      ...(error ? { error } : {}),
-      createLocalFirst: unavailable,
-      restoreLocalFirst: unavailable,
-      becomeBackend: unavailable,
-      loginWithBackend: unavailable,
-      linkWithBackend: unavailable,
-      logout: unavailable,
-      close: unavailable,
-      retry: start,
-    };
-  }, [error, start]);
-  if (session)
-    return (
-      <JazzSessionProvider session={session} fallback={fallback}>
-        {children}
-      </JazzSessionProvider>
-    );
-  return <SessionContext.Provider value={startup}>{fallback}</SessionContext.Provider>;
-}
-
-/** A host adapter's session exports, with its client type and session factory filled in. */
-export function createJazzSessionBindings<Config, Client extends CoreJazzClient>(
-  createJazzSession: (config: Config) => Promise<JazzSession<Client>>,
-) {
-  return {
-    useJazzSession: (): UseJazzSessionResult<Client> => useJazzSession<Client>(),
-    JazzSessionProvider: (
-      props: JazzSessionProviderProps<Client> | ConfiguredJazzSessionProviderProps<Config>,
-    ) =>
-      "session" in props ? (
-        <JazzSessionProvider {...props} />
-      ) : (
-        <ConfiguredJazzSessionProvider {...props} createJazzSession={createJazzSession} />
-      ),
-    /** Capture configuration once and retain the owner across authentication UI transitions. */
-    useJazzSessionOwner: (config: Config) => useJazzSessionOwner(config, createJazzSession),
-  };
-}
-
-/** Own a session while keeping application authentication coordination mounted across transitions.
- * Configuration is captured at mount; use a React key to replace it.
+/**
+ * A provider's own start keeps its failure in state for the app's `error`
+ * view, which may render nothing. Log it too, so a blank screen still says why.
  */
-export function useJazzSessionOwner<Config, Client extends CoreJazzClient>(
-  config: Config,
-  createJazzSession: (config: Config) => Promise<JazzSession<Client>>,
-): JazzSessionOwnerResult<Client> {
-  const initial = useRef({ config, createJazzSession }).current;
-  const owner = useRef<{
-    active: boolean;
-    promise?: Promise<void>;
-    session?: JazzSession<Client>;
-    closeTimer?: ReturnType<typeof setTimeout>;
-  }>({ active: true }).current;
-  const [session, setSession] = useState<JazzSession<Client>>();
-  const [error, setError] = useState<Error>();
-  const start = useMemo(
-    () => () => {
-      if (owner.promise) return owner.promise;
-      setError(undefined);
-      owner.promise = Promise.resolve()
-        .then(() => initial.createJazzSession(initial.config))
-        .then(
-          async (created) => {
-            owner.session = created;
-            if (owner.active) setSession(created);
-            else await created.close();
-          },
-          (reason: unknown) => {
-            const failure = toError(reason);
-            owner.promise = undefined;
-            if (owner.active) setError(failure);
-            throw failure;
-          },
-        );
-      return owner.promise;
-    },
-    [initial, owner],
-  );
-  useEffect(() => {
-    owner.active = true;
-    clearTimeout(owner.closeTimer);
-    void start().catch(() => {});
-    return () => {
-      // StrictMode's immediate effect replay retains this same owner. A real
-      // unmount closes only after the consumer's complete cleanup commit.
-      owner.closeTimer = setTimeout(() => {
-        owner.active = false;
-        void owner.session?.close().catch(() => {});
-      }, 0);
-    };
-  }, [owner, start]);
-  return { session, error, retry: start };
+export function reportJazzStartupFailure(error: unknown) {
+  console.error("Jazz could not start:", error);
 }
-export type JazzSessionOwnerResult<Client> = {
-  session?: JazzSession<Client>;
-  error?: Error;
-  retry(): Promise<void>;
-};

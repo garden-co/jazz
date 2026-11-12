@@ -51,3 +51,19 @@ export async function createNativeAccountTestSession(
     throw error;
   }
 }
+
+/** The account-handle client the public session API opens internally, for device acceptance only. */
+export { openJazzClient, type OpenJazzClientConfig } from "../react-native/create-jazz-client.js";
+
+/**
+ * Expo's account manager, for the device acceptance harness only: apps sign
+ * in through the session (`createJazzClient` / `<JazzProvider>` from
+ * `jazz-tools/expo`). Loaded lazily so this module stays free of Expo's
+ * native packages until a harness asks for it.
+ */
+export async function createExpoAccountManager(
+  config: import("../expo/create-account-manager.js").AccountManagerConfig,
+) {
+  const { createAccountManager } = await import("../expo/create-account-manager.js");
+  return createAccountManager(config);
+}

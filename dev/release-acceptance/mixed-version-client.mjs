@@ -14,7 +14,14 @@ if (!project || !stateDir) throw new Error("usage: mixed-version-client.mjs <pro
 mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 const require = createRequire(join(project, "package.json"));
 const { schema: s } = await import(pathToFileURL(require.resolve("jazz-tools")));
-const { createJazzSession } = await import(pathToFileURL(require.resolve("jazz-tools/backend")));
+const backendModule = await import(pathToFileURL(require.resolve("jazz-tools/backend")));
+// alpha.61 renamed local-first guests to device accounts and moved the
+// account handle off the session snapshot; older releases keep the old names.
+const deviceAccounts = typeof backendModule.acceptDeviceAccounts === "function";
+const deviceInitial = deviceAccounts ? "device" : "local-first";
+const accountIdOf = (snap) => (deviceAccounts ? snap.user?.accountId : snap.account?.id);
+// Releases before alpha.60 call it createJazzSession.
+const createJazzClient = backendModule.createJazzClient ?? backendModule.createJazzSession;
 const version = JSON.parse(
   readFileSync(join(project, "node_modules", "jazz-tools", "package.json"), "utf8"),
 ).version;
@@ -74,19 +81,19 @@ async function waitFor(check, label, ms) {
 
 const ops = {
   async open({ name, appId, serverUrl }) {
-    session = await createJazzSession({
+    session = await createJazzClient({
       appId,
       serverUrl,
       app,
       permissions,
       driver: { type: "persistent", dataPath: join(stateDir, name) },
       store: accountStore(name),
-      initial: "local-first",
+      initial: deviceInitial,
     });
     const snap = session.getSnapshot();
     if (!snap.client) throw new Error(snap.error?.message ?? `session status ${snap.status}`);
     db = snap.client.db;
-    return { version, account: snap.account?.id };
+    return { version, account: accountIdOf(snap) };
   },
   async insert({ values, wait }) {
     const write = db.insert(app.docs, values);

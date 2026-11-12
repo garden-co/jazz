@@ -70,8 +70,9 @@ Every video uses the same stage, so they look alike and stay that way.
   frame at 30 fps: each frame shows each device's latest screen and replays
   the logged changes. Recording the stage live instead competed with the apps
   for the CPU and dropped motion to a few frames a second.
-- **WebGL** runs in software only for World Tour's globe
-  (`stage: { webgl: true }`), because it slows every page down.
+- **WebGL** runs in software only when a storyboard asks for it
+  (`stage: { webgl: true }`), because it slows every page down, canvas 2D
+  included. No walkthrough needs it now: World Tour's globe is canvas 2D.
 - **Poster.** The `{ poster: true }` beat picks the poster frame; without one,
   the poster is the last frame.
 

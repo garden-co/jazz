@@ -1,3 +1,4 @@
+import "./abort-signal.js";
 import { clientScope } from "../runtime/client-scope.js";
 import { installNativeRuntimeEntropy } from "../runtime/runtime-entropy.js";
 import type { RuntimeClientContext } from "../runtime/runtime-source.js";
@@ -37,6 +38,7 @@ import {
   type NativeForegroundFactory,
   type NativeForegroundModule,
 } from "./native-foreground-db.js";
+import { importNativeRelay } from "./native-relay.js";
 
 /**
  * Opaque authority supplied by trusted native platform admission.  It is
@@ -90,7 +92,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         if (this.pendingCapability || this.admittedCapability) return;
         assertAccountConfig(config);
         const session = resolveNativeSession(config);
-        const module = await import("jazz-rn/relay");
+        const module = await importNativeRelay();
         const factory = module.installNativeForegroundRuntime();
         if (factory.accountSecret) installNativeRuntimeEntropy(factory.accountSecret);
         const bearer = config.cookieSession
@@ -123,7 +125,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         // Capture before the first await: caller-owned bytes must never select
         // a different scope after native identity preflight.
         const capability = new Uint8Array(config.nativeRelay.capability);
-        const foreground = await import("jazz-rn/relay");
+        const foreground = await importNativeRelay();
         this.foregroundFactory = foreground.installNativeForegroundRuntime();
         if (this.foregroundFactory.accountSecret)
           installNativeRuntimeEntropy(this.foregroundFactory.accountSecret);
@@ -219,7 +221,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         this.admittedCapability = attachNativeAccountSchema(
           this.foregroundFactory!,
           pending,
-          serializeSchemaSource(context.schema),
+          serializeSchemaSource(context.schema, context.migrations),
         );
       } finally {
         this.pendingCapability = null;
@@ -257,7 +259,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
           false,
           {
             slowQueryLog: {
-              appId: context.config.appId,
+              appId: clientScope(context.config),
               thresholdMs: context.config.slowQueryThresholdMs,
             },
           },

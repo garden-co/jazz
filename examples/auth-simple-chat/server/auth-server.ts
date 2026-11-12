@@ -3,7 +3,6 @@ import type { Request, Response } from "express";
 import { randomUUID } from "node:crypto";
 import { createServer, type Server as HttpServer } from "node:http";
 import type { Jazz } from "jazz-tools/backend";
-import { DEFAULT_APP_ID } from "../constants.ts";
 import { app as schema } from "../schema.ts";
 import permissions from "../permissions.ts";
 import { findUser, createUser, type User } from "./users.ts";
@@ -11,13 +10,12 @@ import { findUser, createUser, type User } from "./users.ts";
 // This is a workaround to resolve correctly NAPI modules in the monorepo
 // Real-world apps should just `import { createJazz } from "jazz-tools/backend"`
 import { createRequire } from "node:module";
-const { createJazz, memory, sqlite } = createRequire(import.meta.url)(
+const { acceptDeviceAccounts, createJazz, memory, sqlite } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
 export interface AuthServerOptions {
   port?: number;
-  appId?: string;
   /** Keep Jazz's data in this directory; in memory when omitted. */
   dataDir?: string;
 }
@@ -53,15 +51,20 @@ export async function startAuthServer(options: AuthServerOptions = {}): Promise<
 
   // 2. Jazz runs inside this server. `authenticate` reads the same cookie,
   // so the browser never holds a Jazz credential; the role becomes a claim.
-  const jazz = await createJazz({
+  const jazz = createJazz({
     app: schema,
     permissions,
-    store: options.dataDir
-      ? sqlite({ path: options.dataDir, appId: options.appId ?? DEFAULT_APP_ID })
-      : memory({ appId: options.appId ?? DEFAULT_APP_ID }),
+    store: options.dataDir ? sqlite({ path: options.dataDir }) : memory(),
     authenticate: (request) => {
       const user = userFromCookie(request.headers.get("cookie"));
-      return user ? { userId: user.userId, claims: { role: user.role } } : null;
+      // This demo's sessions never expire: an open connection asks again hourly.
+      return user
+        ? {
+            userId: user.userId,
+            claims: { role: user.role },
+            expiresAt: Math.floor(Date.now() / 1000) + 3600,
+          }
+        : acceptDeviceAccounts(request);
     },
   });
 

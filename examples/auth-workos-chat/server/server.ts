@@ -2,7 +2,7 @@ import express from "express";
 import type { Request, Response } from "express";
 import { createServer } from "node:http";
 import { WorkOS } from "@workos-inc/node";
-import { APP_ID, WORKOS_CLIENT_ID } from "../constants.js";
+import { WORKOS_CLIENT_ID } from "../constants.js";
 import { app as schema } from "../schema.js";
 import permissions from "../permissions.js";
 
@@ -43,18 +43,35 @@ async function readSession(sealed: string | undefined) {
   const current = (await refreshed.get(sealed)) ?? sealed;
   const session = workos.userManagement.loadSealedSession({ sessionData: current, cookiePassword });
   const result = await session.authenticate();
-  if (result.authenticated) return { user: result.user, role: result.role, sealed: current };
-  if (!refreshed.has(sealed))
+  if (result.authenticated)
+    return {
+      user: result.user,
+      role: result.role,
+      sealed: current,
+      expiresAt: expOf(result.accessToken),
+    };
+  if (!refreshed.has(sealed)) {
     refreshed.set(
       sealed,
       session.refresh().then((next) => (next.authenticated && next.sealedSession) || null),
     );
+    // Long enough for the requests racing on this stale seal; then forget it.
+    setTimeout(() => refreshed.delete(sealed), 5 * 60_000).unref();
+  }
   const fresh = await refreshed.get(sealed);
   if (!fresh) return null;
   const again = await workos.userManagement
     .loadSealedSession({ sessionData: fresh, cookiePassword })
     .authenticate();
-  return again.authenticated ? { user: again.user, role: again.role, sealed: fresh } : null;
+  return again.authenticated
+    ? { user: again.user, role: again.role, sealed: fresh, expiresAt: expOf(again.accessToken) }
+    : null;
+}
+
+/** When a WorkOS access token expires (its `exp`, Unix seconds). */
+function expOf(accessToken: string): number {
+  const payload = JSON.parse(Buffer.from(accessToken.split(".")[1]!, "base64url").toString());
+  return payload.exp as number;
 }
 // #endregion workos-session
 
@@ -65,13 +82,19 @@ function setCookie(res: Response, sealed: string) {
 // #region workos-jazz-server
 // Jazz runs inside this server; `authenticate` reads the AuthKit cookie, and
 // the organization role becomes the claim the chat permissions check.
-const jazz = await createJazz({
+const jazz = createJazz({
   app: schema,
   permissions,
-  store: sqlite({ path: ".jazz", appId: APP_ID }),
+  store: sqlite({ path: ".jazz" }),
   authenticate: async (request) => {
     const session = await readSession(readCookie(request.headers.get("cookie")));
-    return session ? { userId: session.user.id, claims: { role: session.role ?? "" } } : null;
+    return session
+      ? {
+          userId: session.user.id,
+          claims: { role: session.role ?? "" },
+          expiresAt: session.expiresAt,
+        }
+      : null;
   },
 });
 // #endregion workos-jazz-server

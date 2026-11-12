@@ -1,7 +1,7 @@
 import { batch, createEffect, onCleanup, type Accessor } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
 import { applyDelta, applyDeltaToRows } from "../reconcile-array.js";
-import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
+import type { Db, QueryBuilder, QueryOptions } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { useJazzClient } from "./provider.js";
@@ -11,7 +11,11 @@ export type UseAllResult<T extends { id: string }> = {
   data: T[] | undefined;
   isLoading: boolean;
   error: Error | null;
+  /** The {@link Db} handle for writes, so components don't need a separate `useDb()`. */
+  readonly db: Db;
 };
+
+type UseAllState<T extends { id: string }> = Omit<UseAllResult<T>, "db">;
 
 export function useAll<T extends { id: string }>(
   args: Accessor<{
@@ -21,7 +25,7 @@ export function useAll<T extends { id: string }>(
 ): UseAllResult<T> {
   const client = useJazzClient();
   const store = getSubscriptionStore(client);
-  const [state, setState] = createStore<UseAllResult<T>>({
+  const [state, setState] = createStore<UseAllState<T>>({
     data: undefined,
     isLoading: false,
     error: null,
@@ -97,5 +101,17 @@ export function useAll<T extends { id: string }>(
     }
   });
 
-  return state;
+  const db = client.db as Db;
+  return {
+    get data() {
+      return state.data;
+    },
+    get isLoading() {
+      return state.isLoading;
+    },
+    get error() {
+      return state.error;
+    },
+    db,
+  };
 }

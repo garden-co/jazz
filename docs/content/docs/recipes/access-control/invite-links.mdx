@@ -1,6 +1,6 @@
 ---
 title: "Invite links"
-description: Let users share a URL that grants another user access to a private resource without knowing their identity in advance.
+description: "Build share links that grant access to a private resource without knowing the recipient in advance."
 reviewedAt: "9712a744f"
 ---
 
@@ -19,7 +19,7 @@ and write run under different credentials.
 
 ## Schema
 
-Keep invite codes in their own table, not on the resource row. Jazz permissions are row-level, so a
+Keep invite codes in their own table, not on the resource row. Jazz permissions apply to whole rows, so a
 `joinCode` on the chat would be visible to every chat member. This table has no client read rule;
 only the backend checks its code. The members table records which invite each user used to join, so
 you can audit or revoke individual memberships later.
@@ -33,14 +33,14 @@ you can audit or revoke individual memberships later.
 A user can read a chat once they have a membership row. A chat creator can bootstrap their own
 membership and create or revoke invite links, but no client can write a membership for somebody
 else. The only way for an invitee to join is the server route below. The server has a
-[backend identity](/docs/setup/backend/trusted#backend-identity-pattern) and inserts the row
+[backend identity](/docs/setup/deployment/own-server#trusted-backend-use) and inserts the row
 on their behalf after validating the join code.
 
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-permissions
 </include>
 
-See [Permissions](/docs/schemas/policies) for more on `exists.where`, `allOf`, and `anyOf`, and [Session identity and authorship](/docs/setup/auth/sessions#session-identity-and-authorship) for how the backend stamps the user as the row's author while keeping backend permissions.
+See [Declarative Permissions](/docs/schemas/policies) for more on `exists.where`, `allOf`, and `anyOf`, and [Acting for a user in your backend](/docs/setup/auth/backend#acting-for-a-user-in-your-backend) for how the backend stamps the user as the row's author while keeping backend permissions.
 
 ## Generating a link
 
@@ -71,9 +71,9 @@ link or retrying after a transient error won't create duplicate rows.
 
 The route reads and writes as the backend: the invitee has no read access to the chat until they're
 a member, and the `chatMembers.allowInsert` rule only admits the chat's creator, so they can't
-insert their own membership directly. The ready backend client verifies the bearer with `await client.withAttributionForRequest(request)`,
-which keeps backend permissions while stamping the membership's edit metadata to the verified
-caller. An opaque admitted account handle can instead be passed to `await client.withAttribution(account)`.
+insert their own membership directly. `await jazz.withAttribution(request)` asks your
+`authenticate` who the caller is, then keeps backend permissions while stamping the membership's
+edit metadata to that user.
 
 The transaction is what makes redemption correct under concurrency. A multi-use invite stays in
 the table, so it is deliberately replayable by anyone holding the link. A single-use invite is
@@ -82,11 +82,14 @@ cannot both succeed. If the authority rejects the transaction because another re
 race, report that failure to the client and let it retry only if that remains appropriate for your
 UI.
 
-The `client` referenced below is the ready backend Jazz client for your app&hairsp;—&hairsp;see [Backend context setup](/docs/setup/backend/trusted#backend-context-setup) for how to create one.
+The `jazz` referenced below is your app's Jazz, from `createJazz`&hairsp;—&hairsp;see [Backend](/docs/setup/backend) for how to create one.
 
 <include cwd lang="ts" meta='title="api/invite/redeem.ts"'>
   ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-redeem-route
 </include>
+
+Inside a transaction, `tx.insert(...)` returns the new row itself, not the `{ value, wait }` that
+`db.insert(...)` returns outside one: the write is confirmed when the transaction commits.
 
 <Accordions type="single">
 <Accordion title="Single-use, expiring, or role-scoped codes">

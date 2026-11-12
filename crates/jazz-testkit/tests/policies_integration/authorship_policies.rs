@@ -1003,17 +1003,18 @@ async fn provenance_columns_expose_user_principals_and_insert_timestamps_inner()
     server.shutdown().await;
 }
 
-/// A backend explicitly acting as Alice must enforce her read permissions
-/// before merging updates, both ordinarily and inside a transaction.
-/// Its underlying SYSTEM identity must not grant access to Bob's hidden note.
+/// A backend explicitly acting as Alice evaluates no policy for her writes:
+/// it stages her update of Bob's note, ordinarily and inside a transaction,
+/// even though it holds everything the read policy reads, and the server
+/// refuses both. Its underlying SYSTEM identity does not grant her access.
 #[tokio::test]
-async fn backend_session_updates_enforce_local_read_permissions() {
+async fn backend_session_updates_leave_read_permissions_to_the_server() {
     tokio::task::LocalSet::new()
-        .run_until(backend_session_updates_enforce_local_read_permissions_inner())
+        .run_until(backend_session_updates_leave_read_permissions_to_the_server_inner())
         .await;
 }
 
-async fn backend_session_updates_enforce_local_read_permissions_inner() {
+async fn backend_session_updates_leave_read_permissions_to_the_server_inner() {
     let owner_policy = pe::eq("owner", pe::session(vec!["claims", "sub"]));
     let schema = SchemaBuilder::new()
         .table(
@@ -1029,40 +1030,56 @@ async fn backend_session_updates_enforce_local_read_permissions_inner() {
                 })),
         )
         .build();
-    let backend = JazzClient::test_client(schema).await;
-    let (note_id, _, _) = backend
+    let server = JazzServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await
+        .expect("start test server");
+    let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
+    let (note_id, _, insert) = backend
         .insert(
             "notes",
             jazz::row_input!("title" => "Bob's note", "owner" => super::BOB_ID),
         )
         .expect("backend creates Bob's note");
+    wait_for_global_txs(&backend, &[insert.expect("insert transaction")]).await;
     let mut session = Session::new("urn:jazz:test", super::ALICE_ID);
     session.account_id = Some(jazz::account_registry::AccountId(uuid::Uuid::from_u128(
         0xa11ce,
     )));
     let alice = backend.for_session(session);
     let patch = vec![("title".to_owned(), Value::Text("Alice's edit".to_owned()))];
-    let error = alice
+    let refused = |error: String| assert!(error.contains("authorization_denied"), "{error}");
+    let update = alice
         .update("notes", note_id, patch.clone())
-        .expect_err("explicit Alice session cannot merge Bob's hidden note");
-    assert!(error.to_string().contains("read policy denied"), "{error}");
-    let transaction = alice.begin_transaction().expect("begin Alice transaction");
-    let error = transaction
-        .update("notes", note_id, patch)
-        .expect_err("transaction retains explicit Alice session permissions");
-    assert!(error.to_string().contains("read policy denied"), "{error}");
-    transaction.rollback().expect("rollback Alice transaction");
-    let rows = backend
-        .query(
-            Query::from("notes").select(["title"]),
-            jazz::tools::ReadTier::LocalFirst,
-        )
-        .await
-        .map(jazz::tools::test_support::ordinary_rows)
-        .expect("backend reads unchanged note");
-    assert_eq!(
-        rows,
-        vec![(note_id, vec![Value::Text("Bob's note".to_owned())])]
+        .expect("the backend stages Alice's update")
+        .expect("ordinary mutation has a transaction");
+    refused(
+        backend
+            .wait_for_transaction(update, jazz::tools::DurabilityTier::GlobalServer)
+            .await
+            .expect_err("the server refuses Alice's update of Bob's note")
+            .to_string(),
     );
+    let transaction = alice.begin_transaction().expect("begin Alice transaction");
+    transaction
+        .update("notes", note_id, patch)
+        .expect("the backend stages Alice's update in a transaction");
+    let committed = transaction.commit().expect("commit Alice transaction");
+    refused(
+        backend
+            .wait_for_transaction(committed, jazz::tools::DurabilityTier::GlobalServer)
+            .await
+            .expect_err("the server refuses the transaction as Alice")
+            .to_string(),
+    );
+    wait_for_rows(
+        &backend,
+        Query::from("notes").select(["title"]),
+        "the backend reverts Alice's refused edits",
+        |rows| (rows == [(note_id, vec![Value::Text("Bob's note".to_owned())])]).then_some(()),
+    )
+    .await;
     backend.shutdown().await.expect("shutdown backend");
+    server.shutdown().await;
 }

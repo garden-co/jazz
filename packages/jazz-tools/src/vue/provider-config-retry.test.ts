@@ -4,9 +4,9 @@ import { createApp, h, nextTick, shallowRef } from "vue";
 import type { AccountDbConfig } from "../accounts/context.js";
 import { makeFakeAccount } from "../react-core/test-utils.js";
 
-const mocks = vi.hoisted(() => ({ createJazzClient: vi.fn() }));
-vi.mock("./create-jazz-client.js", () => ({ createJazzClient: mocks.createJazzClient }));
-import { JazzProvider } from "./provider.js";
+const mocks = vi.hoisted(() => ({ openJazzClient: vi.fn() }));
+vi.mock("./create-jazz-client.js", () => ({ openJazzClient: mocks.openJazzClient }));
+import { LegacyJazzProvider as JazzProvider } from "./provider.js";
 
 function client() {
   return {
@@ -27,7 +27,7 @@ function deferred<T>() {
 }
 
 const cleanups: (() => void)[] = [];
-beforeEach(() => mocks.createJazzClient.mockReset());
+beforeEach(() => mocks.openJazzClient.mockReset());
 afterEach(() => cleanups.splice(0).forEach((cleanup) => cleanup()));
 
 function mount() {
@@ -41,7 +41,7 @@ function mount() {
     render: () =>
       h(
         JazzProvider,
-        { config: config.value, autoAttachDevTools: false },
+        { config: config.value },
         {
           default: () => h("p", "ready"),
           fallback: () => h("p", "loading"),
@@ -63,19 +63,19 @@ function mount() {
 
 it("retries an equivalent config after initialization fails", async () => {
   const failure = new Error("temporary storage failure");
-  mocks.createJazzClient.mockRejectedValueOnce(failure).mockResolvedValue(client());
+  mocks.openJazzClient.mockRejectedValueOnce(failure).mockResolvedValue(client());
   const { config, errors, element } = mount();
   await vi.waitFor(() => expect(errors).toEqual([failure]));
   config.value = { account: config.value.account, driver: { type: "memory" }, appId: "retry" };
   await vi.waitFor(() => expect(element.textContent).toBe("ready"));
-  expect(mocks.createJazzClient).toHaveBeenCalledTimes(2);
+  expect(mocks.openJazzClient).toHaveBeenCalledTimes(2);
 });
 
 it("retries an equivalent replacement after handover shutdown fails", async () => {
   const first = client();
   const failure = new Error("temporary shutdown failure");
   first.shutdown.mockRejectedValueOnce(failure);
-  mocks.createJazzClient.mockResolvedValueOnce(first).mockResolvedValue(client());
+  mocks.openJazzClient.mockResolvedValueOnce(first).mockResolvedValue(client());
   const { config, errors, element } = mount();
   await vi.waitFor(() => expect(element.textContent).toBe("ready"));
   config.value = {
@@ -84,23 +84,23 @@ it("retries an equivalent replacement after handover shutdown fails", async () =
     driver: { type: "memory" },
   };
   await vi.waitFor(() => expect(errors).toEqual([failure]));
-  expect(mocks.createJazzClient).toHaveBeenCalledTimes(1);
+  expect(mocks.openJazzClient).toHaveBeenCalledTimes(1);
   config.value = {
     account: config.value.account,
     driver: { type: "memory" },
     appId: "replacement",
   };
   await vi.waitFor(() => expect(element.textContent).toBe("ready"));
-  expect(mocks.createJazzClient).toHaveBeenCalledTimes(2);
+  expect(mocks.openJazzClient).toHaveBeenCalledTimes(2);
 });
 
 it("a stale failure preserves the newer pending and ready config identity", async () => {
   const first = deferred<ReturnType<typeof client>>();
   const second = deferred<ReturnType<typeof client>>();
   const ready = client();
-  mocks.createJazzClient.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  mocks.openJazzClient.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
   const { config, errors, element } = mount();
-  await vi.waitFor(() => expect(mocks.createJazzClient).toHaveBeenCalledTimes(1));
+  await vi.waitFor(() => expect(mocks.openJazzClient).toHaveBeenCalledTimes(1));
   config.value = {
     account: config.value.account,
     appId: "replacement",
@@ -108,7 +108,7 @@ it("a stale failure preserves the newer pending and ready config identity", asyn
   };
   await nextTick();
   first.reject(new Error("stale initialization failure"));
-  await vi.waitFor(() => expect(mocks.createJazzClient).toHaveBeenCalledTimes(2));
+  await vi.waitFor(() => expect(mocks.openJazzClient).toHaveBeenCalledTimes(2));
   config.value = {
     account: config.value.account,
     driver: { type: "memory" },
@@ -123,7 +123,7 @@ it("a stale failure preserves the newer pending and ready config identity", asyn
     driver: { type: "memory" },
   };
   await nextTick();
-  expect(mocks.createJazzClient).toHaveBeenCalledTimes(2);
+  expect(mocks.openJazzClient).toHaveBeenCalledTimes(2);
   expect(ready.shutdown).not.toHaveBeenCalled();
   expect(errors).toEqual([]);
 });

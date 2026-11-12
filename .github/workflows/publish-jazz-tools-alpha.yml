@@ -414,9 +414,10 @@ jobs:
     permissions:
       actions: read
       contents: write
+      # npm trusted publishing: each `npm publish` exchanges this job's OIDC
+      # token for a short-lived publish credential. There is no NPM_TOKEN.
       id-token: write
     env:
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       RELEASE_MODE: ${{ inputs.mode || github.event.inputs.mode || 'publish' }}
 
     steps:
@@ -525,14 +526,6 @@ jobs:
           name: pkg-create-jazz
           path: packages/create-jazz
 
-      - name: Restore executable permissions on CLI binaries
-        run: |
-          chmod 755 \
-            packages/jazz-tools/bin/native/jazz-tools-darwin-arm64 \
-            packages/jazz-tools/bin/native/jazz-tools-darwin-x64 \
-            packages/jazz-tools/bin/native/jazz-tools-linux-arm64 \
-            packages/jazz-tools/bin/native/jazz-tools-linux-x64
-
       - name: Show release mode
         run: |
           case "${RELEASE_MODE}" in
@@ -608,7 +601,7 @@ jobs:
 
       - name: Guard alpha-only lock-stepped publish versions
         run: |
-          EXPECTED_VERSION="${{ github.event.inputs.version || '' }}" node -e 'const fs=require("fs");const path=require("path");const expected=process.env.EXPECTED_VERSION;const alphaVersion=/^2\.0\.0-alpha\.[0-9A-Za-z.-]+$/;const tools=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));const wasm=JSON.parse(fs.readFileSync("crates/jazz-wasm/package.json","utf8"));const napi=JSON.parse(fs.readFileSync("crates/jazz-napi/package.json","utf8"));const rn=JSON.parse(fs.readFileSync("crates/jazz-rn/package.json","utf8"));const createJazz=JSON.parse(fs.readFileSync("packages/create-jazz/package.json","utf8"));if(expected){if(!alphaVersion.test(expected)){throw new Error(`Version override must match 2.0.0-alpha.*, got ${expected}`);}if(tools.version!==expected){throw new Error(`Version override mismatch: expected ${expected}, got ${tools.version}`);}}for(const pkg of [tools,wasm,napi,rn,createJazz]){if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}const tag=pkg.publishConfig&&pkg.publishConfig.tag;if(tag&&tag!=="alpha"&&pkg.name!=="create-jazz"){throw new Error(`${pkg.name} publishConfig.tag must be alpha, got ${tag}`);}}if(!(tools.version===wasm.version&&tools.version===napi.version&&tools.version===rn.version&&napi.version===createJazz.version)){throw new Error(`Versions diverged: tools=${tools.version} wasm=${wasm.version} napi=${napi.version} rn=${rn.version} create-jazz=${createJazz.version}`);}for(const [name,version] of Object.entries(napi.optionalDependencies||{})){if(version!==napi.version){throw new Error(`napi optional dep ${name} is ${version}, expected ${napi.version}`);}}for(const entry of fs.readdirSync("crates/jazz-napi/npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const pkgPath=path.join("crates/jazz-napi/npm",entry.name,"package.json");const pkg=JSON.parse(fs.readFileSync(pkgPath,"utf8"));if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}if(pkg.version!==napi.version){throw new Error(`${pkg.name} version ${pkg.version} must match jazz-napi ${napi.version}`);}}console.log(`Alpha-only publish guard passed at ${tools.version}`);'
+          EXPECTED_VERSION="${{ github.event.inputs.version || '' }}" node -e 'const fs=require("fs");const path=require("path");const expected=process.env.EXPECTED_VERSION;const alphaVersion=/^2\.0\.0-alpha\.[0-9A-Za-z.-]+$/;const tools=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));const wasm=JSON.parse(fs.readFileSync("crates/jazz-wasm/package.json","utf8"));const napi=JSON.parse(fs.readFileSync("crates/jazz-napi/package.json","utf8"));const rn=JSON.parse(fs.readFileSync("crates/jazz-rn/package.json","utf8"));const createJazz=JSON.parse(fs.readFileSync("packages/create-jazz/package.json","utf8"));if(expected){if(!alphaVersion.test(expected)){throw new Error(`Version override must match 2.0.0-alpha.*, got ${expected}`);}if(tools.version!==expected){throw new Error(`Version override mismatch: expected ${expected}, got ${tools.version}`);}}for(const pkg of [tools,wasm,napi,rn,createJazz]){if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}const tag=pkg.publishConfig&&pkg.publishConfig.tag;if(tag&&tag!=="latest"){throw new Error(`${pkg.name} publishConfig.tag must be latest, got ${tag}`);}}if(!(tools.version===wasm.version&&tools.version===napi.version&&tools.version===rn.version&&napi.version===createJazz.version)){throw new Error(`Versions diverged: tools=${tools.version} wasm=${wasm.version} napi=${napi.version} rn=${rn.version} create-jazz=${createJazz.version}`);}for(const [name,version] of Object.entries(napi.optionalDependencies||{})){if(version!==napi.version){throw new Error(`napi optional dep ${name} is ${version}, expected ${napi.version}`);}}for(const entry of fs.readdirSync("crates/jazz-napi/npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const pkgPath=path.join("crates/jazz-napi/npm",entry.name,"package.json");const pkg=JSON.parse(fs.readFileSync(pkgPath,"utf8"));if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}if(pkg.version!==napi.version){throw new Error(`${pkg.name} version ${pkg.version} must match jazz-napi ${napi.version}`);}}console.log(`Alpha-only publish guard passed at ${tools.version}`);'
 
       - name: Verify immutable release source snapshot
         run: |
@@ -684,6 +677,8 @@ jobs:
           tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);for(const field of ["dependencies","optionalDependencies","peerDependencies"]){for(const [name,version] of Object.entries(p[field]||{})){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`${field}.${name} uses workspace protocol (${version}) in packed manifest`);}}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
           # The inspector overlay's embedded build must be bundled into jazz-tools.
           tar -tf "${TARBALL}" | grep -q "package/dist/dev/inspector-overlay/embedded/embedded.html"
+          # So must the Inspector that createJazz serves at <basePath>/inspect/.
+          tar -tf "${TARBALL}" | grep -q "package/dist/dev/inspector-overlay/embedded/backend.html"
 
       - name: Verify packed create-jazz manifest
         run: |
@@ -694,44 +689,31 @@ jobs:
           tar -tf "${TARBALL}" | grep -q "package/bin/create-jazz.js"
           tar -tf "${TARBALL}" | grep -q "package/dist/index.js"
 
-      - name: Verify packed jazz-tools native binaries and runtime bootstrap
+      # Trusted publishing needs npm 11.5.1 or newer; the Node in .nvmrc
+      # bundles it. Fail before the first upload rather than mid-release.
+      - name: Require npm with trusted publishing
+        if: env.RELEASE_MODE == 'publish'
         run: |
-          TMP_DIR=$(mktemp -d)
-          EXTRACT_DIR=$(mktemp -d)
-          pnpm --filter jazz-tools pack --pack-destination "${TMP_DIR}"
-          TARBALL=$(ls "${TMP_DIR}"/jazz-tools-*.tgz | head -n 1)
-          tar -xzf "${TARBALL}" -C "${EXTRACT_DIR}"
-          for bin in \
-            jazz-tools-darwin-arm64 \
-            jazz-tools-darwin-x64 \
-            jazz-tools-linux-arm64 \
-            jazz-tools-linux-x64; do
-            FILE="${EXTRACT_DIR}/package/bin/native/${bin}"
-            test -f "${FILE}" || { echo "Missing packed native binary ${bin}"; exit 1; }
-          done
+          node -e 'const [a,b,c]=process.argv[1].split(".").map(Number);if(a<11||(a===11&&(b<5||(b===5&&c<1)))){console.error(`::error::npm ${process.argv[1]} cannot use trusted publishing; 11.5.1 or newer is required`);process.exit(1);}console.log(`npm ${process.argv[1]} supports trusted publishing`);' "$(npm --version)"
 
-          case "$(uname -m)" in
-            x86_64) HOST_LINUX_BIN="jazz-tools-linux-x64" ;;
-            aarch64|arm64) HOST_LINUX_BIN="jazz-tools-linux-arm64" ;;
-            *)
-              echo "Unsupported linux runner architecture: $(uname -m)"
-              exit 1
-              ;;
-          esac
+      # Every package publishes straight to `latest` (npm's OIDC credentials
+      # can't move dist-tags afterwards), so refuse a re-run of an older
+      # version before it would move `latest` back.
+      - name: Refuse to move latest back
+        if: env.RELEASE_MODE == 'publish'
+        run: node dev/artifacts/latest-guard.mjs
 
-          node packages/jazz-tools/scripts/verify-packed-runtime-bootstrap.mjs "${EXTRACT_DIR}/package"
-
-      - name: Publish jazz-wasm (alpha tag)
+      - name: Publish jazz-wasm
         if: env.RELEASE_MODE == 'publish'
         run: |
           WASM_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("crates/jazz-wasm/package.json","utf8")).version')
           if npm view "jazz-wasm@${WASM_VERSION}" version >/dev/null 2>&1; then
             echo "jazz-wasm@${WASM_VERSION} already exists on npm; skipping publish."
           else
-            pnpm --filter jazz-wasm publish --tag alpha --access public --no-git-checks
+            pnpm --filter jazz-wasm publish --tag latest --access public --no-git-checks
           fi
 
-      - name: Publish jazz-napi (alpha tag)
+      - name: Publish jazz-napi
         if: env.RELEASE_MODE == 'publish'
         run: |
           NAPI_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("crates/jazz-napi/package.json","utf8")).version')
@@ -740,41 +722,107 @@ jobs:
             if npm view "${pkg_name}@${NAPI_VERSION}" version >/dev/null 2>&1; then
               echo "${pkg_name}@${NAPI_VERSION} already exists on npm; skipping publish."
             else
-              npm publish "${pkg_dir}" --tag alpha --access public
+              npm publish "${pkg_dir}" --tag latest --access public
             fi
           done
 
           if npm view "jazz-napi@${NAPI_VERSION}" version >/dev/null 2>&1; then
             echo "jazz-napi@${NAPI_VERSION} already exists on npm; skipping publish."
           else
-            pnpm --filter jazz-napi publish --tag alpha --access public --no-git-checks
+            pnpm --filter jazz-napi publish --tag latest --access public --no-git-checks
           fi
 
-      - name: Publish jazz-rn (alpha tag)
+      - name: Publish jazz-rn
         if: env.RELEASE_MODE == 'publish'
         run: node dev/artifacts/publish-rn-packages.mjs
 
-      - name: Publish jazz-tools (alpha tag)
+      - name: Publish jazz-tools
         if: env.RELEASE_MODE == 'publish'
         run: |
           TOOLS_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
           if npm view "jazz-tools@${TOOLS_VERSION}" version >/dev/null 2>&1; then
             echo "jazz-tools@${TOOLS_VERSION} already exists on npm; skipping publish."
           else
-            pnpm --filter jazz-tools publish --tag alpha --access public --no-git-checks
+            pnpm --filter jazz-tools publish --tag latest --access public --no-git-checks
           fi
 
-      - name: Publish create-jazz (alpha tag, promote latest)
+      - name: Publish create-jazz
         if: env.RELEASE_MODE == 'publish'
         run: |
           CREATE_JAZZ_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
           if npm view "create-jazz@${CREATE_JAZZ_VERSION}" version >/dev/null 2>&1; then
             echo "create-jazz@${CREATE_JAZZ_VERSION} already exists on npm; skipping publish."
           else
-            pnpm --filter create-jazz publish --tag alpha --access public --no-git-checks
+            pnpm --filter create-jazz publish --tag latest --access public --no-git-checks
           fi
 
-          npm dist-tag add "create-jazz@${CREATE_JAZZ_VERSION}" latest
+  # Jazz Cloud's images run the Linux server binary from the GitHub release:
+  # npm's jazz-tools carries no native binary. Attach both builds with their
+  # SHA256SUMS to the version's draft; "GitHub release" refuses to publish
+  # without them. Only "GitHub release" creates the draft (with its notes),
+  # so the two never race to create two: without one, this job fails and is
+  # re-run once the draft exists. A published release's assets are never
+  # replaced.
+  attach-server-binaries:
+    name: Attach server binaries to the GitHub release
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs:
+      - release-push-gate
+      - resolve-preview-artifacts
+      - publish-npm
+    if: >-
+      always() &&
+      needs.publish-npm.result == 'success' &&
+      (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
+        with:
+          pattern: jazz-tools-linux-*
+          merge-multiple: true
+          path: dist
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
+          pattern: jazz-tools-linux-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          test -s jazz-tools-linux-x64
+          test -s jazz-tools-linux-arm64
+          sha256sum jazz-tools-linux-x64 jazz-tools-linux-arm64 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
+          TAG="v${VERSION}"
+          if ! is_draft=$(gh release view "${TAG}" --json isDraft --jq .isDraft 2>/dev/null); then
+            echo "::error::No draft for ${TAG}. Create it with \"GitHub release\" (publish: false, with the notes), then re-run this job."
+            exit 1
+          fi
+          if [ "${is_draft}" != true ]; then
+            echo "::error::${TAG} is published; its server binaries are never replaced."
+            exit 1
+          fi
+          gh release upload "${TAG}" dist/jazz-tools-linux-x64 dist/jazz-tools-linux-arm64 dist/SHA256SUMS --clobber
 
   # Read-only check that the Inspector Vercel token can see its project. It runs
   # in candidate dry-runs too, so a broken token shows up before anything

@@ -7,7 +7,7 @@ export const LOCAL_APP_ID = "00000000-0000-0000-0000-00000000a1b0";
 /** @param {Record<string, string | undefined>} env */
 export function readConfig(env = process.env) {
   const production = env.NODE_ENV === "production";
-  const appId = env.NEXT_PUBLIC_JAZZ_APP_ID || (production ? undefined : LOCAL_APP_ID);
+  const appId = env.JAZZ_APP_ID || (production ? undefined : LOCAL_APP_ID);
   const betterAuthSecret =
     env.BETTER_AUTH_SECRET || (production ? undefined : "record-player-development-secret");
   /**
@@ -22,7 +22,7 @@ export function readConfig(env = process.env) {
       }
     : undefined;
   const missing = [
-    !appId && "NEXT_PUBLIC_JAZZ_APP_ID",
+    !appId && "JAZZ_APP_ID",
     !betterAuthSecret && "BETTER_AUTH_SECRET",
     remote && !remote.secret && "JAZZ_ADMIN_SECRET",
   ].filter(Boolean);

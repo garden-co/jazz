@@ -155,6 +155,13 @@ object or a method that accepts it. Its exact top-level fields are:
 }
 ```
 
+Beside its `tables`, the schema JSON may carry `migrations`: the app's
+`ClientMigrations` bundle, its earlier schema versions and the lenses between
+them. The relay and every foreground open along it, as every other client does
+(SPEC 10.7), so their stores name each column after the version that
+introduced it, where the server keeps it. A private session attaches the same
+schema JSON (native relay ABI 5).
+
 Unknown fields at the top level, scope, or identity level fail closed. Rust
 parses the schema JSON, serializes it to its normalized JSON spelling, builds
 the `JazzSchema`, validates scope and the non-`SYSTEM` author, and validates
@@ -172,8 +179,8 @@ On success the ABI returns exactly 32 random bytes: the opaque admission
 capability. The trusted platform layer owns its lifetime and may hand that
 opaque value to foreground JavaScript only for relay lifecycle commands. It
 never logs, derives storage names from, or decodes the capability. A second
-admission for the same scope with different SQLite path, schema, durable
-identity, or claims fails before minting a capability, including when no relay
+admission for the same scope with different SQLite path, schema, schema
+history, durable identity, or claims fails before minting a capability, including when no relay
 alias has yet been opened.
 
 Auth switching is ordered: revoke every capability for the old authenticated
@@ -221,7 +228,9 @@ compatibility path is part of the released contract. ABI 2 (alpha.58) adds
 coded operation errors (response 25) as answers to existing commands, and
 ABI 3 (alpha.60) adds their optional reason name; see §19.6 ("Coded operation
 errors"). ABI 4 (alpha.60) ends each subscription delta with its updated rows'
-splices (`updated_splices`, SPEC 18). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
+splices (`updated_splices`, SPEC 18). ABI 5 (alpha.61) attaches the app's
+migrations beside its schema's tables (see "Trusted platform admission
+codec"). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
 the current version.
 
 The ABI stays coarse and binary:

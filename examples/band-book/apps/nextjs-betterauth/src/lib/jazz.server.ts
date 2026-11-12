@@ -32,14 +32,19 @@ export function jazz(): Promise<Jazz> {
     store: sync
       ? // assertBuildConfiguration checked that the admin secret is set.
         remote({ url: sync.url, appId: config.appId, secret: sync.adminSecret! })
-      : sqlite({ path: config.dataPath, appId: config.appId }),
+      : sqlite({ path: config.dataPath }),
     // Better Auth's session cookie decides who the band member is.
     authenticate: async (request) => {
       const { auth } = await import("./auth");
       const session = await auth.api.getSession({ headers: request.headers });
-      return session ? { userId: session.user.id } : null;
+      return session
+        ? {
+            userId: session.user.id,
+            expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
+          }
+        : null;
     },
-  }));
+  }).ready());
   // A failed start must not poison every later request.
   pending.catch(() => {
     if (globalThis.__bandBookJazz === pending) globalThis.__bandBookJazz = undefined;

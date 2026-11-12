@@ -3,15 +3,21 @@ import React, { useEffect } from "react";
 import { act, render, waitFor } from "@testing-library/react";
 import { expect, it } from "vitest";
 import { schema } from "../../src/schema-namespace.js";
+import { useAll, useOne, useDb, useSession, type Db } from "../../src/react-native/index.js";
+import { JazzDbProvider } from "../../src/react-core/provider.js";
 import {
-  JazzProvider,
-  useAll,
-  useOne,
-  useDb,
-  useSession,
-  type Db,
-  type DbConfig,
-} from "../../src/react-native/index.js";
+  openJazzClient,
+  type OpenJazzClientConfig as DbConfig,
+} from "../../src/react-native/create-jazz-client.js";
+
+/** A client opened straight from a Db config, as the hooks see it under a session. */
+function JazzProvider(props: {
+  config: DbConfig;
+  fallback?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return <JazzDbProvider {...props} openJazzClient={openJazzClient as never} />;
+}
 import type { QueryBuilder, QueryOptions } from "../../src/runtime/db.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
@@ -57,7 +63,9 @@ function Probe({
               ? "disabled"
               : (one.data?.title ?? "empty")}
       </output>
-      <output data-testid="session">{JSON.stringify(session?.user)}</output>
+      <output data-testid="session">
+        {JSON.stringify({ user: session?.user, identity: session?.identity })}
+      </output>
     </>
   );
 }
@@ -149,7 +157,7 @@ it("preserves equivalent provider config and isolates a replacement native ident
       expect(mounted.getByTestId("one").textContent).toBe("second scope");
       expect(mounted.getByTestId("session").textContent).toBe(
         JSON.stringify({
-          account: secondConfig.account.id,
+          user: secondConfig.account.id,
           identity: secondConfig.account.identity,
         }),
       );

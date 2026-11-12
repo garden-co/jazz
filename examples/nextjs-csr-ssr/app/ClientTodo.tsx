@@ -1,35 +1,24 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { app } from "../schema";
-import { createAccountManager, type AccountHandle } from "jazz-tools";
 import { JazzProvider, useAll, useDb } from "jazz-tools/react";
 
-// This app's backend serves Jazz on its own origin (`/jazz`).
-const jazzUrl = () => `${location.origin}/jazz`;
-
 export default function ClientTodo() {
-  const [account, setAccount] = useState<AccountHandle>();
-  const [error, setError] = useState<string>();
-  useEffect(() => {
-    let cancelled = false;
-    void createAccountManager({ serverUrl: jazzUrl() })
-      .then((accounts) => {
-        if (!cancelled) setAccount(accounts.getLoggedIn() ?? accounts.createLocalFirst());
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) setError(error instanceof Error ? error.message : String(error));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  if (error) return <p role="alert">{error}</p>;
-  if (!account) return <p>Loading account…</p>;
-
   return (
-    <JazzProvider config={{ serverUrl: jazzUrl(), account }}>
+    <JazzProvider
+      config={{
+        // This app's backend serves Jazz on its own origin (`/jazz`).
+        serverUrl: "/jazz",
+        // Each browser starts on its own device account, with local data.
+        initial: "device",
+        client: () => import("jazz-tools/local-first"),
+        // Local-first from the first visit, so "Saved locally" means on this device.
+        localFirst: "now",
+      }}
+      loading={<p>Loading account…</p>}
+      error={(state) => <p role="alert">{state.error?.message ?? "Jazz couldn’t start."}</p>}
+    >
       <TodoForm />
       <TodoList />
     </JazzProvider>

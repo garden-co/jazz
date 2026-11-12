@@ -19,7 +19,7 @@ export type SecretName = keyof typeof LOCAL_SECRETS;
 export interface ConfigEnv {
   NODE_ENV?: string;
   NEXT_PUBLIC_APP_ORIGIN?: string;
-  NEXT_PUBLIC_JAZZ_APP_ID?: string;
+  JAZZ_APP_ID?: string;
 }
 
 export interface ResolvedConfig {
@@ -40,7 +40,7 @@ export function resolveConfig(env: ConfigEnv): ResolvedConfig {
   return {
     appOrigin,
     isLocalOrigin: !production && loopback,
-    jazzAppId: env.NEXT_PUBLIC_JAZZ_APP_ID || LOCAL_APP_ID,
+    jazzAppId: env.JAZZ_APP_ID || LOCAL_APP_ID,
   };
 }
 
@@ -62,7 +62,7 @@ export function resolveSecret(
 const config = resolveConfig({
   NODE_ENV: process.env.NODE_ENV,
   NEXT_PUBLIC_APP_ORIGIN: process.env.NEXT_PUBLIC_APP_ORIGIN,
-  NEXT_PUBLIC_JAZZ_APP_ID: process.env.NEXT_PUBLIC_JAZZ_APP_ID,
+  JAZZ_APP_ID: process.env.JAZZ_APP_ID,
 });
 
 export const { appOrigin, isLocalOrigin, jazzAppId } = config;

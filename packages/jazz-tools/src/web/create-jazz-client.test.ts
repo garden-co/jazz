@@ -73,7 +73,7 @@ vi.mock("../subscriptions-orchestrator.js", () => ({
   trackPromise: mocks.trackPromise,
 }));
 
-import { createJazzClient, type JazzClientConfig } from "./create-jazz-client.js";
+import { openJazzClient, type OpenJazzClientConfig } from "./create-jazz-client.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { setDbInternalSession } from "../runtime/db-internal-session.js";
 
@@ -122,7 +122,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
   });
 
   it("AGC-01: initialises orchestrator and shuts down cleanly", async () => {
-    const config: JazzClientConfig = {
+    const config: OpenJazzClientConfig = {
       ...(await enrolledAccountConfig("solid-unit-1")),
     };
     const session: Session = {
@@ -135,7 +135,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
 
     mocks.createDb.mockResolvedValue(db);
 
-    const client = await createJazzClient(config);
+    const client = await openJazzClient(config);
 
     expect(mocks.trackPromise).toHaveBeenCalledTimes(1);
     expect(mocks.createDb).toHaveBeenCalledWith(config);
@@ -173,7 +173,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     db.shutdown.mockRejectedValueOnce(dbError);
     mocks.createDb.mockResolvedValue(db);
 
-    const client = await createJazzClient(await enrolledAccountConfig("shutdown-failure"));
+    const client = await openJazzClient(await enrolledAccountConfig("shutdown-failure"));
     const manager = mocks.orchestratorInstances[0]!;
     manager.shutdown.mockRejectedValueOnce(managerError);
 
@@ -183,19 +183,19 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
   });
 
   it("AGC-02: rejects when db creation fails", async () => {
-    const config: JazzClientConfig = {
+    const config: OpenJazzClientConfig = {
       ...(await enrolledAccountConfig("solid-unit-2")),
     };
     const dbError = new Error("createDb failed");
 
     mocks.createDb.mockRejectedValue(dbError);
 
-    await expect(createJazzClient(config)).rejects.toBe(dbError);
+    await expect(openJazzClient(config)).rejects.toBe(dbError);
     expect(mocks.orchestratorInstances).toHaveLength(0);
   });
 
   it("AGC-03: rejects when orchestrator init fails", async () => {
-    const config: JazzClientConfig = {
+    const config: OpenJazzClientConfig = {
       ...(await enrolledAccountConfig("solid-unit-3")),
     };
     const initError = new Error("orchestrator init failed");
@@ -204,13 +204,13 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     mocks.createDb.mockResolvedValue(db);
     mocks.setInitError(initError);
 
-    await expect(createJazzClient(config)).rejects.toBe(initError);
+    await expect(openJazzClient(config)).rejects.toBe(initError);
     expect(mocks.orchestratorInstances).toHaveLength(1);
     expect(mocks.orchestratorInstances[0]!.init).toHaveBeenCalledTimes(1);
   });
 
   it("AGC-04: forwards runtimeSources through framework client creation", async () => {
-    const config: JazzClientConfig = {
+    const config: OpenJazzClientConfig = {
       ...(await enrolledAccountConfig("solid-unit-4")),
       runtimeSources: {
         baseUrl: "/assets/jazz/",
@@ -221,20 +221,20 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
 
     mocks.createDb.mockResolvedValue(db);
 
-    await createJazzClient(config);
+    await openJazzClient(config);
 
     expect(mocks.createDb).toHaveBeenCalledWith(config);
   });
 
   it("AGC-05: collapses same-identity clients onto one runtime", async () => {
-    const config: JazzClientConfig = {
+    const config: OpenJazzClientConfig = {
       ...(await enrolledAccountConfig("web-client-dedup-shared")),
       serverUrl: "https://jazz.example.com",
     };
     mocks.createDb.mockResolvedValue(createMockDb(config.appId, null, config));
 
-    const first = await createJazzClient(config);
-    const second = await createJazzClient({ ...config });
+    const first = await openJazzClient(config);
+    const second = await openJazzClient({ ...config });
 
     expect(mocks.createDb).toHaveBeenCalledTimes(1);
     expect(first.db).toBe(second.db);
@@ -254,12 +254,12 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
       createMockDb(config.appId, null, config),
     );
 
-    const first = await createJazzClient({
+    const first = await openJazzClient({
       ...(await enrolledAccountConfig("web-client-dedup-multi", "alice")),
-    } satisfies JazzClientConfig);
-    const second = await createJazzClient({
+    } satisfies OpenJazzClientConfig);
+    const second = await openJazzClient({
       ...(await enrolledAccountConfig("web-client-dedup-multi", "bob")),
-    } satisfies JazzClientConfig);
+    } satisfies OpenJazzClientConfig);
 
     expect(mocks.createDb).toHaveBeenCalledTimes(2);
     expect(first.db).not.toBe(second.db);
@@ -271,14 +271,14 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
   it("AGC-07: exposes window.__jazz.clearStorage for the only live namespace", async () => {
     (globalThis as { window?: unknown }).window = {} as unknown;
 
-    const config: JazzClientConfig = {
+    const config: OpenJazzClientConfig = {
       ...(await enrolledAccountConfig("web-client-unit-5")),
       driver: { type: "persistent", dbName: "alice-cache" },
     };
     const db = createMockDb(config.appId, null, config);
     mocks.createDb.mockResolvedValue(db);
 
-    const client = await createJazzClient(config);
+    const client = await openJazzClient(config);
 
     const api = (
       window as {
@@ -302,11 +302,11 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
   it("AGC-08: requires a namespace when multiple live contexts exist", async () => {
     (globalThis as { window?: unknown }).window = {} as unknown;
 
-    const aliceConfig: JazzClientConfig = {
+    const aliceConfig: OpenJazzClientConfig = {
       ...(await enrolledAccountConfig("web-client-unit-6-alice")),
       driver: { type: "persistent", dbName: "alice-cache" },
     };
-    const bobConfig: JazzClientConfig = {
+    const bobConfig: OpenJazzClientConfig = {
       ...(await enrolledAccountConfig("web-client-unit-6-bob")),
       driver: { type: "persistent", dbName: "bob-cache" },
     };
@@ -314,8 +314,8 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     const bobDb = createMockDb(bobConfig.appId, null, bobConfig);
     mocks.createDb.mockResolvedValueOnce(aliceDb).mockResolvedValueOnce(bobDb);
 
-    const aliceClient = await createJazzClient(aliceConfig);
-    const bobClient = await createJazzClient(bobConfig);
+    const aliceClient = await openJazzClient(aliceConfig);
+    const bobClient = await openJazzClient(bobConfig);
 
     const api = (
       window as {

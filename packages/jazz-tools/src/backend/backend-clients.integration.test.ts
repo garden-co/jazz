@@ -1,11 +1,26 @@
 import { randomUUID } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { exportJWK, generateKeyPair, SignJWT, type JWTPayload } from "jose";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { startLocalJazzServer } from "../dev/dev-server.js";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
-import { createJazz, createJazzSession, memory, trustWorkload, type Jazz } from "./index.js";
-import { backendDbForSession } from "./create-jazz-session.js";
+import {
+  createJazz,
+  createJazzClient,
+  isNoJazzAccountError,
+  memory,
+  remote,
+  trustWorkload,
+  type Jazz,
+} from "./index.js";
+import {
+  encodeWebSocketFrameBatch,
+  encodeWireClientHello,
+} from "../runtime/native-runtime/websocket.js";
 
 const app = s.defineApp(
   {
@@ -14,8 +29,8 @@ const app = s.defineApp(
   { migrations: "none" },
 );
 const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user.account });
-  policy.todos.allowInsert.where({ owner: session.user.account });
+  policy.todos.allowRead.where({ owner: session.user });
+  policy.todos.allowInsert.where({ owner: session.user });
   policy.todos.allowUpdate.never();
   policy.todos.allowDelete.never();
 });
@@ -79,7 +94,7 @@ afterAll(() => new Promise((resolve) => issuerServer.close(resolve)));
 /** The app's own auth: the user named in a header. */
 function authenticate(request: Request) {
   const userId = request.headers.get("x-test-user");
-  return userId ? { userId } : null;
+  return userId ? { userId, expiresAt: Math.floor(Date.now() / 1000) + 3600 } : null;
 }
 
 async function serve(jazz: Jazz): Promise<string> {
@@ -97,16 +112,15 @@ async function serve(jazz: Jazz): Promise<string> {
 }
 
 async function appWith(backendClients: Parameters<typeof createJazz>[0]["backendClients"]) {
-  const appId = randomUUID();
   const jazz = await createJazz({
     app,
     permissions,
-    store: memory({ appId }),
+    store: memory(),
     authenticate,
     backendClients,
-  });
+  }).ready();
   cleanups.push(() => jazz.close());
-  return { appId, jazz, origin: await serve(jazz) };
+  return { appId: jazz.appId, jazz, origin: await serve(jazz) };
 }
 
 const signIn = (origin: string, appId: string, headers: Record<string, string>) =>
@@ -147,7 +161,7 @@ describe("scoped backend clients", () => {
     const signedIn = await signIn(origin, appId, { authorization: `Bearer ${good}` });
     expect(signedIn.status).toBe(200);
     expect(await signedIn.json()).toMatchObject({
-      identity: { issuer: `jazz:app:${appId}`, subject: "machine:worker" },
+      identity: { issuer: "jazz:backend", subject: "machine:worker" },
       claims: { machine: true },
     });
 
@@ -194,7 +208,7 @@ describe("scoped backend clients", () => {
   it("sync with the user's permissions", async () => {
     const { appId, jazz, origin } = await appWith([scoped({ sub: "worker" })]);
     let tokens = 0;
-    const session = await createJazzSession({
+    const session = await createJazzClient({
       appId,
       app,
       permissions,
@@ -207,9 +221,9 @@ describe("scoped backend clients", () => {
     // It opened signed in as its user, without being asked to.
     const { client, status, error } = session.getSnapshot();
     if (status !== "ready") throw error ?? new Error(status);
-    const account = client!.session!.user!.account;
-    expect(client!.session!.user!.identity).toEqual({
-      issuer: `jazz:app:${appId}`,
+    const account = client!.session!.user!;
+    expect(client!.session!.identity).toEqual({
+      issuer: "jazz:backend",
       subject: "machine:worker",
     });
 
@@ -254,7 +268,7 @@ describe("trusted backend clients", () => {
       ).status,
     ).toBe(401);
 
-    const session = await createJazzSession({
+    const session = await createJazzClient({
       appId,
       app,
       permissions,
@@ -303,13 +317,13 @@ describe("trusted backend clients", () => {
       driver: { type: "memory" as const },
     };
     await expect(
-      createJazzSession({ ...base, credential: () => sign({ sub: "intruder" }) }),
+      createJazzClient({ ...base, credential: () => sign({ sub: "intruder" }) }),
     ).rejects.toThrow(/neither as a trusted machine nor as a user/);
     await expect(
-      createJazzSession({
+      createJazzClient({
         ...base,
         credential: () => sign({ sub: "ops" }),
-        initial: "local-first",
+        initial: "device",
       }),
     ).rejects.toThrow(/leave out initial/);
   });
@@ -334,28 +348,27 @@ describe("trusted backend clients", () => {
     const { appId, jazz, origin } = await appWith([
       trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
     ]);
-    const alice = await jazz.accountFor(
-      new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
-    );
+    const alice = await jazz.createAccountFor("alice");
     // A prelude stating alice's session is admitted on the machine's token.
     const socket = new WebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
       headers: { authorization: `Bearer ${await sign({ sub: "ops" })}` },
     } as never);
-    socket.addEventListener("open", () =>
+    socket.addEventListener("open", () => {
       socket.send(
         JSON.stringify({
           peer_identity: "x",
           backend_secret: "stand-in",
           backend_session: {
-            issuer: `jazz:app:${appId}`,
+            issuer: "jazz:backend",
             user_id: "alice",
             account_id: alice,
             claims: {},
             authMode: "external",
           },
         }),
-      ),
-    );
+      );
+      socket.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
+    });
     const answered = await new Promise<string>((resolve) => {
       socket.addEventListener("message", () => resolve("message"));
       socket.addEventListener("close", (event) => resolve(`closed ${event.code}`));
@@ -364,7 +377,7 @@ describe("trusted backend clients", () => {
     expect(answered).toBe("message");
     // Through its client: a write as alice carries her identity and is
     // checked against her policies.
-    const session = await createJazzSession({
+    const session = await createJazzClient({
       appId,
       app,
       permissions,
@@ -374,13 +387,7 @@ describe("trusted backend clients", () => {
     });
     cleanups.push(() => session.close());
     const { client } = session.getSnapshot();
-    const asAlice = backendDbForSession(client!, {
-      issuer: `jazz:app:${appId}`,
-      user_id: "alice",
-      account_id: alice!,
-      claims: {},
-      authMode: "external",
-    });
+    const asAlice = await client!.forUser("alice");
     const row = await asAlice
       .insert(app.todos, { title: "as alice", owner: alice! })
       .wait({ tier: "global" });
@@ -400,7 +407,7 @@ describe("trusted backend clients", () => {
         JSON.stringify({
           peer_identity: "x",
           backend_secret: "stand-in",
-          backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
+          backend_session: { issuer: "jazz:backend", user_id: "alice" },
         }),
       ),
     );
@@ -409,6 +416,135 @@ describe("trusted backend clients", () => {
     );
     expect(code).toBe(1008);
   });
+
+  it("acts for a user with no account only once one is created", async () => {
+    const { jazz, appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+    ]);
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      credential: () => sign({ sub: "ops" }),
+    });
+    cleanups.push(() => session.close());
+    const { client } = session.getSnapshot();
+    const refusal = await client!.forUser("bob").catch((error: unknown) => error);
+    expect(isNoJazzAccountError(refusal)).toBe(true);
+    expect((refusal as Error).message).toMatch(/^forUser: user "bob" has no Jazz account yet/);
+    // The lookup made none.
+    expect(
+      await jazz.accountFor(new Request("http://app/x", { headers: { "x-test-user": "bob" } })),
+    ).toBeNull();
+    const bob = await jazz.createAccountFor("bob");
+    const asBob = await client!.forUser("bob");
+    const row = await asBob
+      .insert(app.todos, { title: "as bob", owner: bob })
+      .wait({ tier: "global" });
+    const [written] = await jazz.db.all(app.todos.where({ id: row.id }).select("$createdBy"));
+    expect(written?.$createdBy).toMatchObject({
+      account: bob,
+      identity: { issuer: "jazz:backend", subject: "bob" },
+    });
+    await expect(client!.forUser("")).rejects.toThrow(/pass the user's id/);
+  });
+
+  it("gives a user's session to its trusted machines only", async () => {
+    const { jazz, appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+      scoped({ sub: "worker" }),
+    ]);
+    await jazz.createAccountFor("alice");
+    const ask = (headers: Record<string, string>) =>
+      fetch(`${origin}/jazz/apps/${appId}/backend/user-session`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify({ userId: "alice" }),
+      });
+    const answer = await ask({ authorization: `Bearer ${await sign({ sub: "ops" })}` });
+    expect(answer.status).toBe(200);
+    expect(answer.headers.get("cache-control")).toBe("no-store");
+    expect(await answer.json()).toEqual({
+      account: await jazz.createAccountFor("alice"),
+      issuer: "jazz:backend",
+    });
+    // Only a POST with a user's id.
+    const ops = { authorization: `Bearer ${await sign({ sub: "ops" })}` };
+    const url = `${origin}/jazz/apps/${appId}/backend/user-session`;
+    expect((await fetch(url, { headers: ops })).status).toBe(405);
+    for (const body of ["not json", JSON.stringify({}), JSON.stringify({ userId: "" })]) {
+      expect((await fetch(url, { method: "POST", headers: ops, body })).status).toBe(400);
+    }
+    // A scoped machine, a browser with the app's own session, and no one.
+    expect((await ask({ authorization: `Bearer ${await sign({ sub: "worker" })}` })).status).toBe(
+      401,
+    );
+    expect((await ask({ "x-test-user": "alice" })).status).toBe(404);
+    expect((await ask({})).status).toBe(404);
+
+    // A scoped machine's client acts as its own user, never another.
+    const worker = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      credential: () => sign({ sub: "worker" }),
+    });
+    cleanups.push(() => worker.close());
+    await expect(worker.getSnapshot().client!.forUser("alice")).rejects.toThrow(
+      /only on a trusted backend client/,
+    );
+  });
+
+  it("refuses to act for a user whose identity was revoked", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: remote({ url: core.url, appId, secret: core.adminSecret }),
+      authenticate,
+      backendClients: [
+        trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+      ],
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz);
+    const alice = { issuer: "jazz:backend", subject: "alice" };
+    const admin = (operation: string, body: unknown) =>
+      fetch(`${core.url}/apps/${appId}/admin/accounts/${operation}`, {
+        method: "POST",
+        headers: { "X-Jazz-Admin-Secret": core.adminSecret, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    expect((await admin("login-or-register", { identity: alice })).status).toBe(200);
+    expect((await admin("revoke", { approver: alice, target: alice })).status).toBe(204);
+
+    const answer = await fetch(`${origin}/jazz/apps/${appId}/backend/user-session`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${await sign({ sub: "ops" })}` },
+      body: JSON.stringify({ userId: "alice" }),
+    });
+    expect(answer.status).toBe(403);
+    expect(await answer.json()).toEqual({ code: "identity_not_authorized" });
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      credential: () => sign({ sub: "ops" }),
+    });
+    cleanups.push(() => session.close());
+    await expect(session.getSnapshot().client!.forUser("alice")).rejects.toMatchObject({
+      status: 403,
+      message: expect.stringMatching(/identity_not_authorized/),
+    });
+  }, 60_000);
 
   it("a key outage is a 503, never read as a refusal", async () => {
     const { appId, origin } = await appWith([
@@ -438,4 +574,96 @@ describe("trusted backend clients", () => {
     );
     expect(code).toBe(1008);
   });
+});
+
+describe("a backend client's close()", () => {
+  it("uploads the writes it holds first", async () => {
+    const { jazz, appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "importer" }, as: "backend" }),
+    ]);
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      credential: () => sign({ sub: "importer" }),
+    });
+    const { client } = session.getSnapshot();
+    const owner = randomUUID();
+    // A script's import: writes, none waited for, then close() and exit.
+    for (let i = 0; i < 200; i++) client!.db.insert(app.todos, { title: `row ${i}`, owner });
+    await session.close();
+    expect(await jazz.db.all(app.todos.where({ owner }))).toHaveLength(200);
+  }, 60_000);
+
+  it("closes a guest the backend refused, saying the writes it couldn't upload are lost", async () => {
+    const { appId, origin } = await appWith([]);
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "device",
+    });
+    const { client } = session.getSnapshot();
+    const me = client!.session!.user!;
+    client!.db.insert(app.todos, { title: "kept nowhere", owner: me });
+    const started = Date.now();
+    await expect(session.close()).rejects.toThrow(
+      /closed with 1 write the server never accepted, which are lost/,
+    );
+    // Refused for good: no point waiting out the deadline.
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(session.getSnapshot().status).toBe("closed");
+  }, 30_000);
+
+  it("closes at once with timeoutMs 0, warning about the writes it drops", async () => {
+    const { appId, origin } = await appWith([]);
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "device",
+    });
+    const { client } = session.getSnapshot();
+    client!.db.insert(app.todos, { title: "dropped", owner: client!.session!.user! });
+    await expect(session.close({ timeoutMs: -1 })).rejects.toThrow(/timeoutMs/);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await session.close({ timeoutMs: 0 });
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/1 write the server never accepted/));
+    } finally {
+      warn.mockRestore();
+    }
+    expect(session.getSnapshot().status).toBe("closed");
+  }, 30_000);
+
+  it("only warns when its persistent driver keeps the writes it couldn't upload", async () => {
+    const { appId, origin } = await appWith([]);
+    const dataPath = join(mkdtempSync(join(tmpdir(), "jazz-client-close-")), "client.db");
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "persistent", dataPath },
+      initial: "device",
+    });
+    const { client } = session.getSnapshot();
+    client!.db.insert(app.todos, { title: "kept on disk", owner: client!.session!.user! });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await session.close();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringMatching(/1 write not uploaded yet .*driver keeps them/),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+    expect(session.getSnapshot().status).toBe("closed");
+  }, 30_000);
 });

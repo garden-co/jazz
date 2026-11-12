@@ -1,5 +1,6 @@
 import {
   mkdtemp,
+  copyFile,
   mkdir,
   writeFile,
   readFile,
@@ -55,8 +56,12 @@ ${commonjs ? "module.exports = migration;" : "export default migration;"}`;
   await writeFile(file, source);
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     if (url.endsWith("/migrations/graph"))
-      return Response.json({ activeSchemaHash: fromHash, schemas: [fromHash], migrations: [] });
-    expect(url.endsWith("/admin/deploy")).toBe(true);
+      return Response.json({
+        latestBundleSchemaHash: fromHash,
+        schemas: [fromHash],
+        migrations: [],
+      });
+    expect(url.endsWith("/admin/bundles")).toBe(true);
     const body = JSON.parse(String(init?.body));
     expect(body.migrations).toHaveLength(1);
     expect(body.migrations[0]).toMatchObject({ fromHash, toHash });
@@ -88,14 +93,14 @@ it.each(["file", "directory"])(
     await rename(path, `${path}-real`);
     await symlink(`${path}-real`, path, kind === "file" ? "file" : "dir");
     await expect(deploy({ ...options, schemaDir: root })).rejects.toThrow("symlink or junction");
-    expect(fetchMock.mock.calls.every(([url]) => !url.endsWith("/deploy"))).toBe(true);
+    expect(fetchMock.mock.calls.every(([url]) => !url.endsWith("/bundles"))).toBe(true);
   },
 );
 it("rejects a migration witness that differs from its historical snapshot", async () => {
   const { root, file, source, fetchMock } = await fixture();
   await writeFile(file, source.replace("title:s.string()", "title:s.string(),extra:s.string()"));
   await expect(deploy({ ...options, schemaDir: root })).rejects.toThrow();
-  expect(fetchMock.mock.calls.every(([url]) => !url.endsWith("/deploy"))).toBe(true);
+  expect(fetchMock.mock.calls.every(([url]) => !url.endsWith("/bundles"))).toBe(true);
 });
 
 it("keeps concurrent migration bundles isolated across module realms", async () => {
@@ -252,12 +257,54 @@ it("moves migrations written with pre-SHA-256 schema hashes to legacy/", async (
     ),
   ).toBe(true);
   expect((await importMigrations(migrationsDir)).migrations).toEqual([]);
-  // Validating again finds nothing more to move.
+  // Validating again finds nothing more to move (the retirement's
+  // `migrations create` reminder comes with the moves).
   expect((await validateProject({ schemaDir: root })).warnings).toEqual(
     result.warnings.filter(
-      (warning) => !warning.includes("Moved") && !warning.includes("Renamed snapshot"),
+      (warning) =>
+        !warning.includes("Moved") &&
+        !warning.includes("Renamed snapshot") &&
+        !warning.includes("migrations create"),
     ),
   );
+});
+
+it("says a migration from the newest snapshot is needed when none is for schema.ts", async () => {
+  const { root, legacyName, snapshot } = await legacyFixture();
+  await expect(validateProject({ schemaDir: root, check: true })).rejects.toThrow(
+    `Then run \`jazz-tools migrations create\`: no snapshot is for schema.ts, so the app needs a migration from ${snapshot}.`,
+  );
+  const { warnings } = await validateProject({ schemaDir: root });
+  const moved = warnings.find((warning) => warning.startsWith(`Moved ${legacyName}`));
+  expect(moved).not.toContain("The app runs on schema.ts as it is");
+  expect(warnings.filter((warning) => warning.includes("migrations create"))).toEqual([
+    `Run \`jazz-tools migrations create\` before the app starts: no snapshot is for schema.ts, so the app needs a migration from ${snapshot}, the newest snapshot.`,
+  ]);
+});
+
+it("says a migration is needed when the legacy migration is already in legacy/", async () => {
+  const { root, migrationsDir, legacyName, snapshot } = await legacyFixture();
+  await mkdir(join(migrationsDir, "legacy"), { recursive: true });
+  await copyFile(join(migrationsDir, legacyName), join(migrationsDir, "legacy", legacyName));
+  const { warnings } = await validateProject({ schemaDir: root });
+  expect(warnings.some((warning) => warning.startsWith(`Removed ${legacyName}`))).toBe(true);
+  expect(warnings.some((warning) => warning.includes(`needs a migration from ${snapshot}`))).toBe(
+    true,
+  );
+});
+
+it("keeps the newest committed snapshot, not one without a timestamp", async () => {
+  const { root, migrationsDir, snapshots, snapshot } = await legacyFixture();
+  const other = s.defineApp({ notes: s.table({ other: s.string() }, {}) }, { migrations: "none" });
+  // Listed as a snapshot, but not a committed name: it sorts after the
+  // timestamped ones, so a plain sort would keep it.
+  const handNamed = `${short(await computeSchemaHash(other.wasmSchema))}.json`;
+  expect(handNamed > snapshot).toBe(true);
+  await writeFile(join(snapshots, handNamed), JSON.stringify(other.wasmSchema));
+  const { warnings } = await validateProject({ schemaDir: root });
+  expect(await readdir(snapshots)).toEqual([snapshot]);
+  expect(await readdir(join(migrationsDir, "legacy", "snapshots"))).toEqual([handNamed]);
+  expect(warnings.some((warning) => warning.includes(`migration from ${snapshot}`))).toBe(true);
 });
 
 it("keeps a current migration beside a legacy one", async () => {
@@ -338,6 +385,77 @@ it("checks without moving or renaming anything, failing while legacy files remai
   await validateProject({ schemaDir: root, check: true });
 });
 
+it("moves a migration in alpha.59's DSL to legacy/ without loading it", async () => {
+  const { root, migrationsDir, legacyName, hashes } = await legacyFixture();
+  // As the alpha.59 CLI wrote it: \`s.defineMigration\` and \`s.add\` are gone.
+  await writeFile(
+    join(migrationsDir, legacyName),
+    `import { schema as s } from ${JSON.stringify(indexPath)};
+export default s.defineMigration({
+  migrate: { notes: { body: s.add.string({ default: "" }) } },
+  fromHash: "${short(hashes.oldFrom)}",
+  toHash: "${short(hashes.oldTo)}",
+  from: { notes: s.table({ title: s.string() }, {}) },
+  to: { notes: s.table({ body: s.string() }, {}) },
+});
+`,
+  );
+  await validateProject({ schemaDir: root });
+  expect(existsSync(join(migrationsDir, legacyName))).toBe(false);
+  expect(existsSync(join(migrationsDir, "legacy", legacyName))).toBe(true);
+  await validateProject({ schemaDir: root, check: true });
+});
+
+/** An alpha.59 project whose snapshots hold its old schema and the one
+ * schema.ts has now, both named by BLAKE3 hash, with the legacy migration
+ * between them. */
+async function legacyFixtureWithCurrentSnapshot() {
+  const project = await legacyFixture();
+  const after = s.defineApp({ notes: s.table({ body: s.string() }, {}) }, { migrations: "none" });
+  const currentLegacy = `20260925T000001-${short(project.hashes.oldTo)}.json`;
+  await writeFile(join(project.snapshots, currentLegacy), JSON.stringify(after.wasmSchema));
+  return {
+    ...project,
+    currentLegacy,
+    currentSnapshot: `20260925T000001-${short(project.hashes.toHash)}.json`,
+  };
+}
+
+it("moves the snapshots only legacy migrations led from to legacy/snapshots/", async () => {
+  const { root, migrationsDir, snapshots, legacySnapshot, currentSnapshot, legacyName } =
+    await legacyFixtureWithCurrentSnapshot();
+  const { warnings } = await validateProject({ schemaDir: root });
+  expect(existsSync(join(migrationsDir, "legacy", legacyName))).toBe(true);
+  // Only schema.ts's snapshot stays, so the history has one root.
+  expect(await readdir(snapshots)).toEqual([currentSnapshot]);
+  expect(await readdir(join(migrationsDir, "legacy", "snapshots"))).toEqual([legacySnapshot]);
+  expect(warnings.some((warning) => warning.startsWith(`Moved snapshot ${legacySnapshot}`))).toBe(
+    true,
+  );
+  expect((await importMigrations(migrationsDir)).schemas).toHaveLength(1);
+  expect(warnings.find((warning) => warning.startsWith(`Moved ${legacyName}`))).toContain(
+    "The app runs on schema.ts as it is",
+  );
+  await validateProject({ schemaDir: root, check: true });
+});
+
+it("lists the snapshots it would move when checking", async () => {
+  const { root, legacySnapshot, currentLegacy, currentSnapshot } =
+    await legacyFixtureWithCurrentSnapshot();
+  await expect(validateProject({ schemaDir: root, check: true })).rejects.toThrow(
+    `move snapshot ${legacySnapshot} to legacy/snapshots/; rename snapshot ${currentLegacy} to ${currentSnapshot}`,
+  );
+});
+
+it("keeps a snapshot a current migration leads from", async () => {
+  const { root, file, snapshots, snapshot, currentSnapshot } =
+    await legacyFixtureWithCurrentSnapshot();
+  const { source } = await fixture();
+  await writeFile(file, source);
+  await validateProject({ schemaDir: root });
+  expect((await readdir(snapshots)).sort()).toEqual([snapshot, currentSnapshot].sort());
+});
+
 it("refuses to publish legacy migrations and points at validate", async () => {
   const { root, legacyName, fetchMock } = await legacyFixture();
   await expect(deploy({ ...options, schemaDir: root })).rejects.toThrow(
@@ -351,8 +469,8 @@ it("publishes the current schema once validate moved the legacy migrations", asy
   await validateProject({ schemaDir: root });
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     if (url.endsWith("/migrations/graph"))
-      return Response.json({ activeSchemaHash: null, schemas: [], migrations: [] });
-    expect(url.endsWith("/admin/deploy")).toBe(true);
+      return Response.json({ latestBundleSchemaHash: null, schemas: [], migrations: [] });
+    expect(url.endsWith("/admin/bundles")).toBe(true);
     const body = JSON.parse(String(init?.body));
     expect(body.migrations).toEqual([]);
     return Response.json({

@@ -14,8 +14,13 @@ buildscript {
   }
 }
 
+// Read this library project's property, not the root project's: from React
+// Native 0.82 the root plugin (com.facebook.react.rootproject) forces
+// newArchEnabled=true on every subproject because the legacy architecture no
+// longer exists, even when gradle.properties omits it. On 0.81 the subproject
+// inherits the root gradle.properties value.
 def isNewArchitectureEnabled() {
-  return rootProject.hasProperty("newArchEnabled") && rootProject.getProperty("newArchEnabled") == "true"
+  return project.findProperty("newArchEnabled")?.toString() == "true"
 }
 
 apply plugin: "com.android.library"
@@ -25,8 +30,9 @@ if (isNewArchitectureEnabled()) {
   apply plugin: "com.facebook.react"
 } else {
   throw new GradleException(
-    "jazz-rn requires the React Native New Architecture. Enable newArchEnabled=true " +
-      "(Expo: add the jazz-rn config plugin, then run expo prebuild)."
+    "jazz-rn requires the React Native New Architecture, and this build uses the legacy " +
+      "architecture. Expo SDK 54: remove `newArchEnabled: false` from your app config and run " +
+      "expo prebuild again. Bare React Native 0.81: set newArchEnabled=true in gradle.properties."
   )
 }
 

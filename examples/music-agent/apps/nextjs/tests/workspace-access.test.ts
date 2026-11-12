@@ -76,13 +76,10 @@ async function signIn(email: string, name: string) {
   const { backendJazzClient } = await import("../src/lib/backend-jazz-client");
   const jazz = await backendJazzClient();
   const session = await auth.api.getSession({ headers: new Headers({ cookie }) });
-  const account = await jazz.accountFor(
-    new Request(`${origin}/api/bootstrap`, { headers: { cookie } }),
-  );
-  if (!account) throw new Error(`the app's Jazz resolves no account for ${email}`);
-
-  const { createJazzSession } = await import("jazz-tools/backend");
-  const browser = await createJazzSession({
+  // The browser's sign-in gives the user their Jazz account; the app's Jazz
+  // then resolves the same account for their session.
+  const { createJazzClient } = await import("jazz-tools/backend");
+  const browser = await createJazzClient({
     appId: server.appId,
     app,
     permissions,
@@ -90,11 +87,15 @@ async function signIn(email: string, name: string) {
     driver: { type: "memory" },
   });
   closers.push(() => browser.close());
-  await browser.loginWithBackend();
-  const { client, status, error } = browser.getSnapshot();
+  await browser.refresh();
+  const { user, status, error } = browser.getSnapshot();
   if (status !== "ready") throw error ?? new Error(status);
-  expect(client!.session!.user!.account).toBe(account);
-  return { db: client!.db, accountId: account, userId: session!.user.id };
+  const account = await jazz.accountFor(
+    new Request(`${origin}/api/bootstrap`, { headers: { cookie } }),
+  );
+  if (!account) throw new Error(`the app's Jazz resolves no account for ${email}`);
+  expect(user?.accountId).toBe(account);
+  return { db: browser.db, accountId: account, userId: session!.user.id };
 }
 let userId: string;
 let otherUserId: string;
@@ -103,7 +104,7 @@ beforeAll(async () => {
   // The app's Jazz fronts this test server with remote().
   process.env.JAZZ_SERVER_URL = server.url;
   process.env.JAZZ_ADMIN_SECRET = server.adminSecret;
-  process.env.NEXT_PUBLIC_JAZZ_APP_ID = server.appId;
+  process.env.JAZZ_APP_ID = server.appId;
   process.env.BACKEND_SECRET = server.backendSecret;
   process.env.BETTER_AUTH_SECRET = "music-agent-test-better-auth-secret-0123456789";
   process.env.MUSIC_AGENT_PROVIDER = "scripted";

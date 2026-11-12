@@ -1,5 +1,9 @@
 //! Public-API document sharing fixture, adapted from Tobias Lins's #2996.
 //! Query-only timing with a separate reopen/first-read receipt. See the example README.
+//! The song sheet text merge cases live in [`text_merge`].
+pub mod contention;
+pub mod text_merge;
+
 use std::{collections::BTreeMap, path::Path, time::Instant};
 
 use jazz::db::{
@@ -60,8 +64,7 @@ pub fn schema(policy: Policy) -> JazzSchema {
 }
 
 pub fn schema_with_composite_indexes(policy: Policy, composite_indexes: bool) -> JazzSchema {
-    let account =
-        |column: &str| PolicyExpr::eq_session(column, vec!["user".into(), "account".into()]);
+    let account = |column: &str| PolicyExpr::eq_session(column, vec!["user".into()]);
     let orgs = TableSchemaBuilder::new("orgs")
         .column("member_id", ColumnType::Uuid)
         .column("name", ColumnType::Text)

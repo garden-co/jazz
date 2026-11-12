@@ -30,10 +30,18 @@ import type {
   TxId,
 } from "../runtime/client.js";
 import { parseSnapshotRef, type SnapshotRef } from "../runtime/snapshot-ref.js";
+import {
+  CONNECTED,
+  CONNECTING,
+  offlineLink,
+  type LinkStatus,
+  type UploadStatus,
+} from "../runtime/sync-status.js";
 import { streamingChunks } from "../runtime/streaming-source.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import { writeRow } from "../runtime/write-row.js";
-import { formatUuid } from "../runtime/hex.js";
+import { bytesToHex, formatUuid } from "../runtime/hex.js";
+import { RuntimeClosedError } from "../runtime/runtime-closed-error.js";
 import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import type { Session } from "../runtime/context.js";
 import {
@@ -70,6 +78,7 @@ import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import {
   WebSocketCarrier,
   peerIdentityForWebSocketAuth,
+  isReauthenticateWireError,
   wireAuthFailureReason,
   type WebSocketConstructor,
   type WireError,
@@ -78,6 +87,9 @@ import {
   FEATURE_THIN_RESULTS,
   decodeThinResponse,
   encodeThinRequest,
+  MAX_THIN_MESSAGE_BYTES,
+  ThinAssembler,
+  thinWireFrames,
   isThinResponse,
   type ThinBody,
   type ThinOp,
@@ -88,6 +100,8 @@ export interface ThinRuntimeOptions {
   WebSocket?: WebSocketConstructor;
   /** Delays between reconnect attempts, in ms; the last one repeats. */
   reconnectDelaysMs?: readonly number[];
+  /** How long connecting may keep failing before the link reports an outage. */
+  outageReportMs?: number;
   /**
    * The canonical author this client acts as, with its account. The server
    * admits a public session only for the account its credential is assigned to.
@@ -108,9 +122,24 @@ export class ThinRemoteError extends Error {
 
 /** The connection ended before the server answered. A write may or may not have committed. */
 export class ThinConnectionLostError extends Error {
-  constructor(message = "the connection to the Jazz server ended before it answered") {
-    super(message);
+  constructor(
+    message = "the connection to the Jazz server ended before it answered",
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
     this.name = "ThinConnectionLostError";
+  }
+}
+
+/**
+ * The request never reached the server: a write didn't commit. The thin
+ * runtime ended it before a connection could carry it (it closed, or its Db
+ * handed over to the local-first one).
+ */
+export class ThinRequestNotSentError extends Error {
+  constructor(message = "the request never reached the Jazz server", options?: ErrorOptions) {
+    super(message, options);
+    this.name = "ThinRequestNotSentError";
   }
 }
 
@@ -135,7 +164,24 @@ type OneShot = {
   resolve(body: ThinBody): void;
   reject(error: Error): void;
   sent: boolean;
+  /** A write: its fate is unknown once its connection ends unanswered. */
+  write?: boolean;
+  /** A write under a `writeKey`: sent again on the next connection when its
+   * connection ends unanswered, since the server answers a resend with the
+   * first one's outcome instead of writing again. */
+  resendable?: boolean;
+  /** Sent once and waiting to go out again (see `resendable`). */
+  resending?: boolean;
 };
+
+/** Standalone writes the server dedups by their `writeKey` (SPEC 8 §8.14). */
+const RESENDABLE_WRITES = new Set<ThinOp["type"]>([
+  "insert",
+  "update",
+  "upsert",
+  "delete",
+  "restore",
+]);
 
 type LiveQuery = {
   /** The runtime query as the client gave it, for {@link ThinRuntime.liveQueryJsons}. */
@@ -161,6 +207,8 @@ type OpenTransaction = {
   begin: OneShot;
   /** The connection it was begun on ended, and the server abandoned it. */
   lost: boolean;
+  /** The rows its staged writes touched. */
+  rows: WrittenRow[];
 };
 
 type Write = {
@@ -169,7 +217,24 @@ type Write = {
   observed: boolean;
   /** The server confirmed it. */
   committed: boolean;
+  /** It settled: committed, rejected, or given up with its fate unknown. */
+  answered: boolean;
+  /** The server answered that it committed (set before {@link Write.done} settles). */
+  confirmed: boolean;
+  /** The rows it wrote on the main branch, for {@link ThinRuntime.handOffWrittenRows}. */
+  rows: readonly WrittenRow[];
+  /** When it was made, in Unix ms. */
+  madeAt: number;
 };
+
+/** A row a thin write touched. */
+export type WrittenRow = { table: string; id: string };
+
+/**
+ * How long the connection may keep failing before the link reports an
+ * outage, as the core link does: a short blip never shows as offline.
+ */
+const OUTAGE_REPORT_MS = 7_500;
 
 /** Committed writes kept for later waits on them. */
 const RETAINED_WRITES = 1024;
@@ -181,20 +246,46 @@ export class ThinRuntime implements Runtime {
   private readonly reconnectDelaysMs: readonly number[];
   private author: string | undefined;
   private carrier?: WebSocketCarrier;
+  /** Joins the current connection's split responses. */
+  private parts = new ThinAssembler();
   private url?: string;
   private authJson?: string;
   /** Requests and live queries go out only once the schema is bound. */
   private bound = false;
+  /** A planned re-authentication is reconnecting a bound connection (see `lost`). */
+  private reauthenticating = false;
   private wanted = false;
   private closed = false;
   private attempt = 0;
+  /** Why this runtime stopped for good (a server that can't serve it). */
+  private failure: Error | undefined;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
+  /** The server refused the credential: nothing reconnects until `updateAuth`. */
+  private refused = false;
+  /** The connection ended for good (`fatal`, `close`). */
+  private stopped = false;
+  /** When connecting started failing; cleared once connected or refused. */
+  private failingSince?: number;
+  private outagePublished = false;
+  private readonly outageReportMs: number;
   private nextRequestId = 1;
   private readonly oneShots = new Map<number, OneShot>();
   private nextHandle = 1;
   private readonly liveQueries = new Map<number, LiveQuery>();
   private readonly liveByRequest = new Map<number, number>();
   private readonly writes = new Map<string, Write>();
+  /** This runtime's writer node: with {@link nextWriteSeq}, each write's
+   * `writeKey`. The server commits the write under a node it derives from
+   * this one and the session's author, so one node serves every identity
+   * the runtime writes as. */
+  private readonly writerNode = bytesToHex(runtimeRandomBytes(16));
+  private nextWriteSeq = 1;
+  /** Writes the server has not answered yet. */
+  private unanswered = 0;
+  /** Writes the server rejected, and the latest rejection. */
+  private rejected = 0;
+  private lastRejection: UploadStatus["lastRejection"] = null;
+  private readonly syncStatusListeners = new Set<() => void>();
   private readonly transactions = new Map<OpenTransactionId, OpenTransaction>();
   private mutationErrorCallback?: (event: MutationErrorEvent) => void;
   private authFailureCallback?: (reason: string) => void;
@@ -204,20 +295,34 @@ export class ThinRuntime implements Runtime {
     this.schemaBytes = encodeSchema(schema);
     this.WebSocketImpl = options.WebSocket;
     this.reconnectDelaysMs = options.reconnectDelaysMs ?? DEFAULT_RECONNECT_DELAYS_MS;
+    this.outageReportMs = options.outageReportMs ?? OUTAGE_REPORT_MS;
     this.author = options.author;
   }
 
   // ---- connection -------------------------------------------------------
 
   connect(url: string, authJson: string): void {
+    const changed =
+      (this.url !== undefined && url !== this.url) ||
+      (this.authJson !== undefined && authJson !== this.authJson);
     this.url = url;
     this.authJson = authJson;
     this.wanted = true;
+    // Another server or credential, as for `updateAuth`: the connection
+    // bound to the old one goes, and a sent write waiting to go out again
+    // ends with its fate unknown instead of being made as someone else.
+    if (changed) this.dropConnection(new ThinConnectionLostError());
+    // An explicit connect (a reconnect after a refusal or a terminal error)
+    // starts over, as the core link does.
+    if (!this.closed) this.stopped = false;
+    this.failure = undefined;
+    this.setRefused(false);
     this.open();
   }
 
   async disconnect(options?: { rejectWaiters?: boolean }): Promise<void> {
     this.wanted = false;
+    this.clearOutage();
     this.dropConnection(
       options?.rejectWaiters === false ? undefined : new ThinConnectionLostError(),
     );
@@ -225,10 +330,14 @@ export class ThinRuntime implements Runtime {
 
   updateAuth(authJson: string): void {
     this.authJson = authJson;
+    this.setRefused(false);
+    // The new credential may name another user (a cookie session names
+    // none here), as whom a sent write must not be made: one that may have
+    // been made ends with its fate unknown, as it did before resends.
+    this.dropConnection(new ThinConnectionLostError());
     if (!this.wanted) return;
     // The server binds a connection to the credential it opened with: a new
     // one takes a new connection.
-    this.dropConnection(new ThinConnectionLostError());
     this.open();
   }
 
@@ -254,7 +363,20 @@ export class ThinRuntime implements Runtime {
   close(): void {
     this.closed = true;
     this.wanted = false;
-    this.dropConnection(new ThinConnectionLostError("the thin runtime is closed"));
+    this.stop();
+    const closed = new ThinConnectionLostError("the thin runtime is closed", {
+      cause: new RuntimeClosedError("the thin runtime is closed"),
+    });
+    this.dropConnection(closed);
+    // Nothing connects again: a request not sent yet ends too (a write
+    // waiting to go out again with its fate unknown), so a read the app made
+    // while the server was down asks the Db's successor instead.
+    this.endWaitingRequests(
+      closed,
+      new ThinRequestNotSentError("the thin runtime closed before sending the request", {
+        cause: closed.cause,
+      }),
+    );
     for (const live of this.liveQueries.values()) live.callback = undefined;
     this.liveQueries.clear();
   }
@@ -262,6 +384,8 @@ export class ThinRuntime implements Runtime {
   private open(): void {
     if (this.closed || !this.url || this.authJson === undefined || this.carrier) return;
     clearTimeout(this.reconnectTimer);
+    this.failingSince ??= Date.now();
+    this.parts.reset();
     const carrier = new WebSocketCarrier({
       endpointUrl: this.url,
       peerIdentity: peerIdentityForWebSocketAuth(
@@ -271,7 +395,12 @@ export class ThinRuntime implements Runtime {
       features: FEATURE_THIN_RESULTS,
       authJson: this.authJson,
       WebSocket: this.WebSocketImpl,
-      onFrame: (frame) => this.receive(frame),
+      onFrame: (frame) => this.receive(carrier, frame),
+      // The server's planned re-authentication arrives as an error on an open
+      // connection, ahead of its close: handle it as the connection's end.
+      onError: (error) => {
+        if (isReauthenticateWireError(error)) this.lost(carrier, error);
+      },
       onTerminal: (error) => this.lost(carrier, error),
     });
     this.carrier = carrier;
@@ -303,6 +432,11 @@ export class ThinRuntime implements Runtime {
         }
         this.attempt = 0;
         this.bound = true;
+        this.reauthenticating = false;
+        this.refused = false;
+        this.stopped = false;
+        this.clearOutage();
+        this.notifySyncStatus();
         for (const live of this.liveQueries.values()) if (live.callback) this.openLive(live);
         for (const [requestId, oneShot] of this.oneShots) {
           if (!oneShot.sent) this.transmit(requestId, oneShot);
@@ -311,18 +445,79 @@ export class ThinRuntime implements Runtime {
       // A connection that ends before the answer is retried as a whole.
       reject: () => undefined,
     });
-    void carrier.send(encodeThinRequest(id, { type: "schema", schema: this.schemaBytes }));
+    this.sendFrame(
+      carrier,
+      encodeThinRequest(id, { type: "schema", schema: this.schemaBytes }),
+      (bytes) => {
+        this.oneShots.delete(id);
+        this.fatal(tooLarge("schema", bytes));
+      },
+    );
+  }
+
+  /** Send `frame`, in parts when it is over a wire frame; `tooLarge`
+   * instead past what one request takes. */
+  private sendFrame(
+    carrier: WebSocketCarrier | undefined,
+    frame: Uint8Array,
+    refused: (bytes: number) => void,
+  ): boolean {
+    const frames = thinWireFrames(frame);
+    if (frames === null) {
+      refused(frame.byteLength);
+      return false;
+    }
+    // Parts of one frame go back to back.
+    void carrier?.sendBatch(frames);
+    return true;
   }
 
   private lost(carrier: WebSocketCarrier, error: WireError): void {
     if (this.carrier !== carrier) return;
-    this.dropConnection(new ThinConnectionLostError(`${error.code}: ${error.message}`));
+    const lostError = new ThinConnectionLostError(`${error.code}: ${error.message}`);
+    const wasBound = this.bound;
+    // A planned swap that ends any other way is reported as that ending.
+    this.reauthenticating = false;
+    if (isReauthenticateWireError(error) && wasBound) {
+      // The session reached the expiry the app's auth gave it: connect again
+      // at once so `authenticate` decides with the current credential. The
+      // app keeps seeing a connected link meanwhile; unanswered writes go
+      // out again on the new connection.
+      this.reauthenticating = true;
+      this.dropConnection(lostError, true);
+      this.open();
+      return;
+    }
     const authFailure = wireAuthFailureReason(error);
     if (authFailure) {
+      // Refused before the drop publishes, so the link never reads
+      // "connecting" in between.
+      this.clearOutage();
+      this.refused = true;
+      // Writes left unanswered wait for the renewed credential's connection.
+      this.dropConnection(lostError, this.wanted && !this.closed && error.retry !== "never");
+      this.notifySyncStatus();
       // Nothing reconnects until the credential is renewed (`updateAuth`).
       this.authFailureCallback?.(authFailure);
       return;
     }
+    if (error.retry === "never") {
+      // Stopped for good, as `fatal`: only an explicit connect starts over,
+      // and requests waiting for a connection end now.
+      this.fatal(lostError);
+      return;
+    }
+    this.dropConnection(lostError, this.wanted && !this.closed);
+    // An attempt that fails past the window reports the outage.
+    if (
+      !this.stopped &&
+      !this.outagePublished &&
+      this.failingSince !== undefined &&
+      Date.now() - this.failingSince >= this.outageReportMs
+    ) {
+      this.outagePublished = true;
+    }
+    this.notifySyncStatus();
     if (!this.wanted || this.closed || error.retry === "never") return;
     const delays = this.reconnectDelaysMs;
     const delay = delays[Math.min(this.attempt, delays.length - 1)] ?? 1_000;
@@ -330,12 +525,22 @@ export class ThinRuntime implements Runtime {
     this.reconnectTimer = setTimeout(() => this.open(), delay);
   }
 
-  /** Close the connection; requests already sent fail with `error`, live queries reopen later. */
-  private dropConnection(error: Error | undefined): void {
+  /** Close the connection; requests already sent fail with `error`, live queries reopen later.
+   * With `resend`, a write under a `writeKey` the connection left unanswered
+   * waits for the next connection instead, and goes out again in order. */
+  private dropConnection(
+    error: Error | undefined,
+    resend = false,
+    /** What a sent write ends with, when not `error`: it may have committed. */
+    sentWriteError: Error | undefined = error,
+  ): void {
     clearTimeout(this.reconnectTimer);
     const carrier = this.carrier;
     this.carrier = undefined;
-    this.bound = false;
+    if (this.bound) {
+      this.bound = false;
+      this.notifySyncStatus();
+    }
     carrier?.close();
     for (const live of this.liveQueries.values()) {
       if (live.requestId !== undefined) this.liveByRequest.delete(live.requestId);
@@ -360,18 +565,75 @@ export class ThinRuntime implements Runtime {
         oneShot.reject(new ThinTransactionLostError(transaction));
         continue;
       }
-      // Requests not sent yet wait for the next connection.
-      if (!oneShot.sent) continue;
+      // Requests not sent yet wait for the next connection, and so does a
+      // write sent once, unless this drop ends its resends.
+      if (!oneShot.sent && !(oneShot.resending && !resend)) continue;
+      if (oneShot.sent && resend && oneShot.resendable) {
+        oneShot.sent = false;
+        oneShot.resending = true;
+        continue;
+      }
       this.oneShots.delete(id);
-      if (error) oneShot.reject(error);
+      if (error) oneShot.reject(oneShot.write ? (sentWriteError ?? error) : error);
+      // A sent write is never sent again after an explicit disconnect: it may
+      // have committed, so it ends with its fate unknown. (A sent read is
+      // dropped unanswered, as before.)
+      else if (oneShot.write) oneShot.reject(new ThinConnectionLostError());
     }
   }
 
   private fatal(error: Error): void {
     this.wanted = false;
-    this.dropConnection(error);
+    this.failure = error;
+    this.stop();
+    // A write the server may have taken ends with its fate unknown, not as
+    // the server's rejection of it.
+    this.dropConnection(error, false, unknownOutcome(error));
+    // Requests not sent yet would wait for a connection that never comes.
+    this.endWaitingRequests(error);
     for (const live of this.liveQueries.values()) live.callback?.(error);
   }
+
+  /**
+   * End every request still waiting for a connection. A write sent once and
+   * waiting to go out again ends with its fate unknown, as it may have
+   * committed; one never sent with {@link ThinRequestNotSentError}, as it
+   * certainly didn't. Any other request ends with `notSent`.
+   */
+  private endWaitingRequests(error: Error, notSent: Error = error): void {
+    for (const [id, oneShot] of this.oneShots) {
+      this.oneShots.delete(id);
+      if (oneShot.resending) oneShot.reject(unknownOutcome(error));
+      else if (oneShot.write && !(notSent instanceof ThinRequestNotSentError))
+        oneShot.reject(
+          new ThinRequestNotSentError(`the request never reached the server: ${error.message}`, {
+            cause: error,
+          }),
+        );
+      else oneShot.reject(notSent);
+    }
+  }
+
+  /**
+   * @internal Its Db handed over to a successor: end the reads (outside a
+   * transaction) not sent yet, and any made from now on, with
+   * {@link RuntimeClosedError} as their cause,
+   * so each asks the successor instead of waiting for this runtime's server.
+   * Writes stay, to upload once it answers.
+   */
+  endUnsentReads(): void {
+    // A read that reaches this runtime later (it was still on its way when
+    // the Db handed over) ends the same way.
+    this.handedOver = true;
+    for (const [id, oneShot] of this.oneShots) {
+      if (oneShot.sent || !endsAtHandOver(oneShot.op)) continue;
+      this.oneShots.delete(id);
+      oneShot.reject(handedOver());
+    }
+  }
+
+  /** Set by {@link endUnsentReads}. */
+  private handedOver = false;
 
   // ---- requests ---------------------------------------------------------
 
@@ -384,7 +646,13 @@ export class ThinRuntime implements Runtime {
     op: ThinOp,
     id = this.nextRequestId++,
   ): { answer: Promise<ThinBody>; oneShot?: OneShot } {
-    if (this.closed) return { answer: Promise.reject(new Error("the thin runtime is closed")) };
+    if (this.closed)
+      return {
+        answer: Promise.reject(new RuntimeClosedError("the thin runtime is closed")),
+      };
+    // Handed over first: the successor serves a read even after a failure here.
+    if (this.handedOver && endsAtHandOver(op)) return { answer: Promise.reject(handedOver()) };
+    if (this.failure) return { answer: Promise.reject(this.failure) };
     let oneShot: OneShot | undefined;
     const answer = new Promise<ThinBody>((resolve, reject) => {
       oneShot = { op, resolve, reject, sent: false };
@@ -398,13 +666,39 @@ export class ThinRuntime implements Runtime {
   }
 
   private transmit(id: number, oneShot: OneShot): void {
-    oneShot.sent = true;
-    void this.carrier?.send(encodeThinRequest(id, oneShot.op));
+    const sent = this.sendFrame(this.carrier, encodeThinRequest(id, oneShot.op), (bytes) => {
+      // Refused here: the server would refuse it.
+      this.oneShots.delete(id);
+      oneShot.reject(tooLarge(oneShot.op.type, bytes));
+    });
+    if (sent) oneShot.sent = true;
   }
 
-  private receive(frame: Uint8Array): void {
-    if (!isThinResponse(frame)) return;
-    const { id, body } = decodeThinResponse(frame);
+  private receive(carrier: WebSocketCarrier, piece: Uint8Array): void {
+    if (this.carrier !== carrier) return;
+    let response: ReturnType<typeof decodeThinResponse>;
+    try {
+      let frame = piece;
+      if (ThinAssembler.isPart(piece)) {
+        const joined = this.parts.push(piece);
+        if (joined === undefined) return;
+        frame = joined;
+      } else if (this.parts.joining) {
+        throw new Error("a thin frame arrived inside a split one");
+      }
+      if (!isThinResponse(frame)) return;
+      response = decodeThinResponse(frame);
+    } catch (error) {
+      // The server broke the framing: start over on a new connection.
+      this.parts.reset();
+      this.lost(carrier, {
+        code: "MalformedFrame",
+        retry: "later",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    const { id, body } = response;
     const handle = this.liveByRequest.get(id);
     if (handle !== undefined) {
       this.receiveLive(handle, id, body);
@@ -427,7 +721,11 @@ export class ThinRuntime implements Runtime {
    */
   private refuseOtherSession(sessionJson: string | null | undefined, operation: string): void {
     if (sessionJson == null) return;
-    type SessionJson = { issuer?: string; user_id?: string; account_id?: string };
+    type SessionJson = {
+      issuer?: string;
+      user_id?: string;
+      account_id?: string;
+    };
     // A session, or a write context naming one.
     const parsed = JSON.parse(sessionJson) as SessionJson & {
       session?: SessionJson;
@@ -531,7 +829,10 @@ export class ThinRuntime implements Runtime {
     if (live.requestId === undefined) return;
     this.liveByRequest.delete(live.requestId);
     if (this.bound) {
-      void this.request({ type: "unsubscribe", subscription: live.requestId }).catch(() => {
+      void this.request({
+        type: "unsubscribe",
+        subscription: live.requestId,
+      }).catch(() => {
         // The connection ended: the server closed the live query with it.
       });
     }
@@ -543,12 +844,18 @@ export class ThinRuntime implements Runtime {
     if (handle === undefined) return;
     live.requestId = id;
     this.liveByRequest.set(id, handle);
-    void this.carrier?.send(
-      encodeThinRequest(id, {
-        type: "subscribe",
-        query: live.query,
-        options: live.options,
-      }),
+    this.sendFrame(
+      this.carrier,
+      encodeThinRequest(id, { type: "subscribe", query: live.query, options: live.options }),
+      (bytes) => {
+        this.liveByRequest.delete(id);
+        live.requestId = undefined;
+        this.receiveLive(handle, id, {
+          type: "error",
+          code: "TooLarge",
+          message: tooLarge("subscribe", bytes).message,
+        });
+      },
     );
   }
 
@@ -664,7 +971,10 @@ export class ThinRuntime implements Runtime {
       table,
       row: parseUuid(objectId),
       cells: encodeCellsForRow(definition, values, table),
-      options: { branch: context.branchView?.head, updatedAtMs: context.updatedAtMs },
+      options: {
+        branch: context.branchView?.head,
+        updatedAtMs: context.updatedAtMs,
+      },
     });
     const row = writeRow(table, objectId, definition.columns, values);
     return { id: row.id, values: row.values, ...receipt };
@@ -680,7 +990,9 @@ export class ThinRuntime implements Runtime {
     const context = this.writeTarget(writeContext, "Update");
     // Branch views have no partial-value coordinate space yet (#2087).
     if (context.branchView) {
-      throw new Error("Typed large-value updates are not supported in branch views.");
+      throw new Error(
+        "Partial-value updates (applyDiffs, editedFrom) are not yet supported in branch views.",
+      );
     }
     return this.mutate(context, {
       type: "updateLargeValues",
@@ -775,19 +1087,25 @@ export class ThinRuntime implements Runtime {
       void this.request({ type: "abortStream", stream }).catch(() => undefined);
       throw error;
     }
+    const written: WrittenRow[] = context.branchView ? [] : [{ table, id: formatUuid(row) }];
     if (transaction) {
       // The value is staged in the transaction; its commit reports a
       // refusal of the row write.
+      transaction.rows.push(...written);
       const staged = this.request({ type: "finishStream", stream });
       transaction.requests.push(staged);
       transaction.staged = true;
       await staged;
-      return { id: formatUuid(row), kind: "staged", openTransactionId: context.transaction! };
+      return {
+        id: formatUuid(row),
+        kind: "staged",
+        openTransactionId: context.transaction!,
+      };
     }
     return {
       id: formatUuid(row),
       kind: "committed",
-      txId: this.write({ type: "finishStream", stream }),
+      txId: this.write({ type: "finishStream", stream }, written),
     };
   }
 
@@ -816,6 +1134,7 @@ export class ThinRuntime implements Runtime {
       staged: false,
       begin: begin!,
       lost: false,
+      rows: [],
     });
     return id;
   }
@@ -837,7 +1156,7 @@ export class ThinRuntime implements Runtime {
     // A staged write the server refused outright fails the commit; one its
     // row's state refused is the commit's own rejection, from the server.
     return Promise.all(transaction.requests).then(
-      () => this.write({ type: "commit", transaction: id }),
+      () => this.write({ type: "commit", transaction: id }, transaction.rows),
       (error: unknown) => {
         void this.request({ type: "rollback", transaction: id }).catch(() => undefined);
         throw error;
@@ -884,8 +1203,10 @@ export class ThinRuntime implements Runtime {
     op: Extract<ThinOp, { transaction?: string }>,
   ): MutationResult {
     const id = context.transaction;
-    if (!id) return { kind: "committed", txId: this.write(op) };
+    const row = writtenRow(context, op);
+    if (!id) return { kind: "committed", txId: this.write(op, row ? [row] : []) };
     const transaction = this.openTransaction(id, context.operation);
+    if (row) transaction.rows.push(row);
     const staged = this.request({ ...op, transaction: id } as ThinOp);
     staged.catch(() => undefined);
     transaction.requests.push(staged);
@@ -914,9 +1235,93 @@ export class ThinRuntime implements Runtime {
     return Promise.race([
       write.done,
       new Promise<never>((_, reject) =>
-        signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        }),
       ),
     ]);
+  }
+
+  private writtenRowsReader: ((rows: readonly WrittenRow[]) => Promise<void>) | undefined;
+
+  /**
+   * @internal Hand the rows this runtime writes to `read`, which reads them
+   * into the local-first client taking over: from now on each write's rows
+   * once the server confirms it, before that write's waits resolve. `read`
+   * must give up on its own (offline, a timeout); a failure is ignored.
+   * Returns the rows of the writes the server already confirmed, for the
+   * caller to read.
+   */
+  handOffWrittenRows(read: (rows: readonly WrittenRow[]) => Promise<void>): readonly WrittenRow[] {
+    this.writtenRowsReader = read;
+    return [...this.writes.values()]
+      .filter((write) => write.confirmed)
+      .flatMap((write) => write.rows);
+  }
+
+  /** The upstream link as the app sees it (see `linkStatusFromUpstream`). */
+  upstreamLinkStatus(): LinkStatus {
+    if (this.stopped) return offlineLink("stopped");
+    if (this.refused) return offlineLink("auth");
+    if (this.bound || this.reauthenticating) return CONNECTED;
+    return this.outagePublished ? offlineLink("network") : CONNECTING;
+  }
+
+  private setRefused(refused: boolean): void {
+    if (this.refused === refused) return;
+    this.refused = refused;
+    this.notifySyncStatus();
+  }
+
+  private clearOutage(): void {
+    this.failingSince = undefined;
+    this.outagePublished = false;
+  }
+
+  private stop(): void {
+    this.clearOutage();
+    if (this.stopped) return;
+    this.stopped = true;
+    this.notifySyncStatus();
+  }
+
+  /** @internal Stop handing rows to `read` (its upgrade failed), unless another reader took over. */
+  stopHandingOffWrittenRows(read: (rows: readonly WrittenRow[]) => Promise<void>): void {
+    if (this.writtenRowsReader === read) this.writtenRowsReader = undefined;
+  }
+
+  /** How many writes still wait for the server's answer. */
+  pendingUploadCount(): number {
+    return this.unanswered;
+  }
+
+  /** The writes waiting for the server's answer, and what it rejected, for the sync status. */
+  uploadStatus(): UploadStatus {
+    let oldestPendingAt: number | null = null;
+    for (const write of this.writes.values()) {
+      if (write.answered) continue;
+      if (oldestPendingAt === null || write.madeAt < oldestPendingAt)
+        oldestPendingAt = write.madeAt;
+    }
+    return {
+      pending: this.unanswered,
+      oldestPendingAt,
+      rejected: this.rejected,
+      lastRejection: this.lastRejection,
+    };
+  }
+
+  /** Observe changes of {@link pendingUploadCount} and {@link upstreamLinkStatus}. */
+  onSyncStatusChange(listener: () => void, signal: AbortSignal): void {
+    if (signal.aborted) return;
+    this.syncStatusListeners.add(listener);
+    signal.addEventListener("abort", () => this.syncStatusListeners.delete(listener), {
+      once: true,
+    });
+  }
+
+  private notifySyncStatus(): void {
+    for (const listener of [...this.syncStatusListeners]) listener();
   }
 
   /** Every write made so far has been answered. Every write is global once answered. */
@@ -924,7 +1329,23 @@ export class ThinRuntime implements Runtime {
     _tier?: string,
     options: { throughOutage?: boolean; signal?: AbortSignal } = {},
   ): Promise<void> {
-    const answered = Promise.allSettled([...this.writes.values()].map((write) => write.done));
+    // Only writes still waiting for their answer, like a local-first client:
+    // a rejection the app already had doesn't fail every later wait.
+    const dones = [...this.writes.values()]
+      .filter((write) => !write.answered)
+      .map((write) => write.done);
+    // Waiting for sync fails on the server's rejection. A write whose
+    // connection ended unanswered is not rejected, and the shutdown drain
+    // only waits for every write to be answered.
+    const answered = options.throughOutage
+      ? Promise.all(
+          dones.map((done) =>
+            done.catch((error: unknown) => {
+              if (error instanceof ThinRemoteError) throw error;
+            }),
+          ),
+        )
+      : Promise.allSettled(dones);
     const signal = options.signal;
     if (!signal) {
       await answered;
@@ -934,20 +1355,55 @@ export class ThinRuntime implements Runtime {
     await Promise.race([
       answered,
       new Promise<never>((_, reject) =>
-        signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        }),
       ),
     ]);
   }
 
-  private write(op: ThinOp): TxId {
+  private write(op: ThinOp, rows: readonly WrittenRow[] = []): TxId {
     const txId = `thin:${this.nextRequestId}` as TxId;
-    const write: Write = { observed: false, committed: false, done: Promise.resolve() };
-    write.done = this.request(op).then(
-      (body) => {
+    const write: Write = {
+      observed: false,
+      committed: false,
+      answered: false,
+      confirmed: false,
+      rows,
+      madeAt: Date.now(),
+      done: Promise.resolve(),
+    };
+    // A standalone write goes under this runtime's next write id, so it can
+    // be sent again after a lost answer. Ids follow the order writes are
+    // made in, which is the order they reach the server, resent or not.
+    const resendable = RESENDABLE_WRITES.has(op.type) && "options" in op;
+    const sent = resendable
+      ? {
+          ...op,
+          options: { ...op.options, writeKey: { node: this.writerNode, seq: this.nextWriteSeq++ } },
+        }
+      : op;
+    const { answer, oneShot } = this.requestWith(sent as ThinOp);
+    if (oneShot) {
+      oneShot.write = true;
+      oneShot.resendable = resendable;
+    }
+    write.done = answer.then(
+      async (body) => {
         if (body.type !== "written") throw new Error(`unexpected answer to a write: ${body.type}`);
+        write.confirmed = true;
+        // Once handed off, a committed write's rows reach the local-first
+        // client before its waits resolve, so its local reads show them.
+        const read = this.writtenRowsReader;
+        if (read && rows.length > 0) await read(rows).catch(() => undefined);
       },
       (error: unknown) => {
         const failure = error instanceof Error ? error : new Error(String(error));
+        // The sync status counts a rejection whether or not a wait takes it.
+        if (failure instanceof ThinRemoteError) {
+          this.rejected++;
+          this.lastRejection = { code: failure.code, message: failure.message, at: Date.now() };
+        }
         // A failure no wait observes is reported once, like a local-first
         // client's rejected write.
         queueMicrotask(() => {
@@ -956,7 +1412,12 @@ export class ThinRuntime implements Runtime {
           // connection ended unanswered may have committed: its fate is
           // unknown, not rejected.
           const rejected = failure instanceof ThinRemoteError;
-          const code = rejected ? failure.code : "outcome_unknown";
+          // Never sent: it certainly didn't commit.
+          const code = rejected
+            ? failure.code
+            : failure instanceof ThinRequestNotSentError
+              ? "not_sent"
+              : "outcome_unknown";
           this.mutationErrorCallback?.({
             code,
             reason: failure.message,
@@ -965,7 +1426,12 @@ export class ThinRuntime implements Runtime {
               kind: "mergeable",
               sealed: true,
               latestSettlement: rejected
-                ? { kind: "rejected", transactionId: txId, code, reason: failure.message }
+                ? {
+                    kind: "rejected",
+                    transactionId: txId,
+                    code,
+                    reason: failure.message,
+                  }
                 : { kind: "missing", transactionId: txId },
             },
           });
@@ -975,6 +1441,15 @@ export class ThinRuntime implements Runtime {
     );
     // An unobserved failure is reported above, not as an unhandled rejection.
     write.done.catch(() => undefined);
+    this.unanswered++;
+    this.notifySyncStatus();
+    void write.done
+      .catch(() => undefined)
+      .then(() => {
+        write.answered = true;
+        this.unanswered--;
+        this.notifySyncStatus();
+      });
     write.done.then(
       () => (write.committed = true),
       () => undefined,
@@ -1011,6 +1486,22 @@ type WriteTarget = {
   updatedAtMs: number;
 };
 
+/**
+ * The main-branch row `op` writes, if any, to hand off. Not a delete: a read
+ * of a deleted row brings nothing back.
+ */
+function writtenRow(
+  context: WriteTarget,
+  op: Extract<ThinOp, { transaction?: string }>,
+): WrittenRow | undefined {
+  if (context.branchView || op.type === "delete") return undefined;
+  if (op.type === "insert") {
+    const rowId = (op.options as { rowId?: Uint8Array }).rowId;
+    return rowId ? { table: op.table, id: formatUuid(rowId) } : undefined;
+  }
+  return "row" in op && op.row ? { table: op.table, id: formatUuid(op.row) } : undefined;
+}
+
 /** Write options for a write through a branch view. */
 function viewOptions(context: WriteTarget): object {
   return {
@@ -1039,4 +1530,38 @@ function uuidv7(): Uint8Array {
 function transactionOf(op: ThinOp): OpenTransactionId | undefined {
   const transaction = (op as { transaction?: unknown }).transaction;
   return typeof transaction === "string" ? (transaction as OpenTransactionId) : undefined;
+}
+
+/** The local refusal of a request past what one takes. */
+function tooLarge(op: string, bytes: number): ThinRemoteError {
+  return new ThinRemoteError(
+    "TooLarge",
+    `this ${op} is ${bytes} bytes, more than the ${MAX_THIN_MESSAGE_BYTES} a thin client ` +
+      `sends in one request: write values that large with insertStreaming or updateStreaming`,
+  );
+}
+
+/**
+ * A request its Db's successor serves instead once the Db hands over: a read
+ * outside a transaction (`Db.all` asks the successor again). Writes stay, to
+ * upload, and so does a snapshot capture, which has no such retry.
+ */
+function endsAtHandOver(op: ThinOp): boolean {
+  return op.type === "query" && transactionOf(op) === undefined;
+}
+
+function handedOver(): ThinRequestNotSentError {
+  return new ThinRequestNotSentError("the Db handed over to its local-first successor", {
+    cause: new RuntimeClosedError("the thin runtime handed over"),
+  });
+}
+
+/** The error for a write that may have committed before `cause` ended it. */
+function unknownOutcome(cause: Error): ThinConnectionLostError {
+  return cause instanceof ThinConnectionLostError
+    ? cause
+    : new ThinConnectionLostError(
+        `the connection ended before the server answered: ${cause.message}`,
+        { cause },
+      );
 }

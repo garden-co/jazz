@@ -171,6 +171,37 @@ impl JazzCore {
         headers: Vec<Vec<String>>,
         on_event: Function<'_, JazzCoreSocketEvent, ()>,
     ) -> napi::Result<JazzCoreSocket> {
+        let peer = self
+            .server
+            .open_socket_with(&pairs(&headers))
+            .map_err(|refused| napi::Error::from_reason(refused.to_string()))?;
+        self.carry(peer, on_event)
+    }
+
+    /// Start a sync session for a client in this process. Unlike
+    /// `openSocket` it has no handshake deadline: the client's Hello waits on
+    /// this event loop, which synchronous work can hold for seconds.
+    #[napi(
+        js_name = "openInProcessSocket",
+        ts_args_type = "onEvent: (err: Error | null, event: JazzCoreSocketEvent) => void"
+    )]
+    pub fn open_in_process_socket(
+        &self,
+        on_event: Function<'_, JazzCoreSocketEvent, ()>,
+    ) -> napi::Result<JazzCoreSocket> {
+        let peer = self
+            .server
+            .open_in_process_socket()
+            .map_err(|refused| napi::Error::from_reason(refused.to_string()))?;
+        self.carry(peer, on_event)
+    }
+
+    /// Hand `peer`'s messages for the client to `on_event`, and, last, its close.
+    fn carry(
+        &self,
+        mut peer: jazz_server::EmbeddedSocketPeer,
+        on_event: Function<'_, JazzCoreSocketEvent, ()>,
+    ) -> napi::Result<JazzCoreSocket> {
         let callback: ThreadsafeFunction<
             JazzCoreSocketEvent,
             (),
@@ -181,10 +212,6 @@ impl JazzCore {
             .build_threadsafe_function::<JazzCoreSocketEvent>()
             .callee_handled::<true>()
             .build()?;
-        let mut peer = self
-            .server
-            .open_socket_with(&pairs(&headers))
-            .map_err(|refused| napi::Error::from_reason(refused.to_string()))?;
         let sender = peer.sender();
         self.server.runtime().spawn(async move {
             loop {
@@ -250,6 +277,19 @@ impl JazzCoreSocket {
         peer.as_ref().is_some_and(|peer| peer.send(data.to_vec()))
     }
 
+    /// `send`, resolving once the session has read enough of the messages
+    /// before it. A host that awaits it before reading more from its client
+    /// holds a fast client back instead of queueing all it sends.
+    #[napi(js_name = "sendWithRoom")]
+    pub async fn send_with_room(&self, data: Uint8Array) -> bool {
+        let bytes = data.to_vec();
+        let peer = self.peer.lock().expect("socket lock").clone();
+        match peer {
+            Some(peer) => peer.send_with_room(bytes).await,
+            None => false,
+        }
+    }
+
     /// The client's socket closed.
     #[napi]
     pub fn close(&self) {
@@ -268,8 +308,9 @@ impl JazzCoreSocket {
 fn lock_data_dir(dir: &std::path::Path) -> napi::Result<std::fs::File> {
     jazz_server::lock_data_dir(dir).map_err(|error| match error {
         jazz_server::DataDirLockError::Held(holder) => napi::Error::from_reason(format!(
-            "sqlite(): {} is already open{}. One core per directory: create Jazz once and reuse it \
-             (cache it on globalThis across hot reloads), and give each process its own directory or use remote().",
+            "sqlite(): {} is already open{}. createJazz shares one core per directory within a process, \
+             so another process holds it (a second dev server, a build worker that used Jazz, a replica on \
+             the same volume): give each process its own directory, or use remote().",
             dir.display(),
             if holder.is_empty() {
                 String::new()

@@ -7,7 +7,8 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_SERVER_URL, APP_ID, testAccount } from "./test-constants.js";
+import { TEST_SERVER_URL, SCOPE } from "./test-constants.js";
+import { memoryAccountStore } from "../../../testing/accounts.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -48,7 +49,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      account?: import("jazz-tools").AccountHandle;
+      store?: ReturnType<typeof memoryAccountStore>;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -59,9 +60,9 @@ describe("ChatHeader + ChatSettings E2E", () => {
     const appId =
       config.appId ?? `test-settings-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-    const account = config.account ?? (await testAccount(crypto.randomUUID(), appId));
+    const store = config.store ?? memoryAccountStore();
 
-    r.render(<App config={{ account, appId, dbName: crypto.randomUUID(), ...config }} />);
+    r.render(<App config={{ store, appId, dbName: crypto.randomUUID(), ...config }} />);
 
     await waitFor(
       () =>
@@ -291,9 +292,9 @@ describe("ChatHeader + ChatSettings E2E", () => {
 
     // --- Alice: create a public chat -----------------------------------------
     const aliceContainer = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
-      account: await testAccount(`settings-alice-${Date.now()}`),
+      store: memoryAccountStore(),
     });
 
     await waitFor(
@@ -313,9 +314,9 @@ describe("ChatHeader + ChatSettings E2E", () => {
     window.location.hash = chatHash;
 
     const bobContainer = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
-      account: await testAccount(`settings-bob-${Date.now()}`),
+      store: memoryAccountStore(),
     });
 
     // Wait for Bob to see the chat

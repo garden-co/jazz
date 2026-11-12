@@ -72,7 +72,7 @@ async fn fresh_subscription_first_delivery_reduces_from_empty_to_initial_view() 
                 .expect("subscription stream stays open");
             let delta = match item {
                 SubscriptionStreamItem::Delta(delta) => delta,
-                SubscriptionStreamItem::Rejected { reason } => {
+                SubscriptionStreamItem::Rejected { reason, .. } => {
                     panic!("initial subscription rejected: {reason:?}")
                 }
             };
@@ -132,7 +132,7 @@ async fn fresh_empty_subscription_waits_for_and_reports_the_settled_empty_view()
                 .expect("subscription stream stays open");
             let delta = match item {
                 SubscriptionStreamItem::Delta(delta) => delta,
-                SubscriptionStreamItem::Rejected { reason } => {
+                SubscriptionStreamItem::Rejected { reason, .. } => {
                     panic!("empty subscription rejected: {reason:?}")
                 }
             };

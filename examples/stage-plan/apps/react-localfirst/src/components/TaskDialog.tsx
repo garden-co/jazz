@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { Avatar } from "@astryxdesign/core/Avatar";
 import { Button } from "@astryxdesign/core/Button";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
@@ -76,13 +76,15 @@ function TaskDetail({
   crew: CrewMember[];
   onClose: () => void;
 }) {
-  const db = useDb();
   const me = useMe();
   const [title, setTitle] = useState(task.title);
   const [notes, setNotes] = useState(task.notes ?? "");
+  // The notes as they were when you started typing: the save is an edit of
+  // them, so a crewmate's edit that arrived meanwhile is merged, not undone.
+  const [notesBase, setNotesBase] = useState<string | null>(task.notes ?? null);
   const [comment, setComment] = useState("");
   const [canDelete, setCanDelete] = useState(false);
-  const { data: comments = [] } = useAll(
+  const { data: comments = [], db } = useAll(
     app.comments
       .where({ taskId: task.id })
       .select("*", "$createdAt")
@@ -118,7 +120,7 @@ function TaskDetail({
   };
   const commitNotes = () => {
     setFocused(null);
-    if (notes !== (task.notes ?? "")) updateTaskNotes(db, task, notes);
+    if (notes !== (notesBase ?? "")) updateTaskNotes(db, task, notes, notesBase);
   };
 
   const crewOptions = [
@@ -180,7 +182,10 @@ function TaskDetail({
               isOptional
               value={notes}
               onChange={setNotes}
-              onFocus={() => setFocused("notes")}
+              onFocus={() => {
+                setNotesBase(task.notes ?? null);
+                setFocused("notes");
+              }}
               onBlur={commitNotes}
               rows={3}
             />

@@ -4,12 +4,11 @@ import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
 import JazzProvider from "./JazzProvider.svelte";
-import type { JazzAuthState } from "./auth-state.js";
+import type { JazzSessionState } from "./session-state.js";
 import AuthStatus from "../../tests/svelte/AuthStatus.svelte";
 import UserApp from "../../tests/svelte/UserApp.svelte";
 const factory = vi.hoisted(() => vi.fn());
-vi.mock("../session/create-jazz-session.js", () => ({ createJazzSession: factory }));
-vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
+vi.mock("../session/create-jazz-session.js", () => ({ openBrowserSessionCore: factory }));
 const settle = async () => {
   for (let i = 0; i < 30; i++) {
     await tick();
@@ -52,7 +51,7 @@ it("owns startup retry and keeps the hook context across fallback and ready chil
   });
   factory.mockRejectedValueOnce(new Error("startup failed")).mockResolvedValue(owner);
   const target = document.createElement("div");
-  let observedAuth!: JazzAuthState;
+  let observedAuth!: JazzSessionState;
   const status = createRawSnippet(() => ({
     render: () => "<div></div>",
     setup: (element) => {
@@ -60,7 +59,7 @@ it("owns startup retry and keeps the hook context across fallback and ready chil
         target: element,
         context: getAllContexts(),
         props: {
-          onAuth: (auth: JazzAuthState) => {
+          onAuth: (auth: JazzSessionState) => {
             observedAuth = auth;
           },
         },
@@ -74,8 +73,7 @@ it("owns startup retry and keeps the hook context across fallback and ready chil
   component = mount(JazzProvider, {
     target,
     props: {
-      appId: "test",
-      autoAttachDevTools: false,
+      config: { scope: "test" },
       children: status,
       signedOut: createRawSnippet(() => ({ render: () => "<p>SIGN IN</p>" })),
     },
@@ -92,15 +90,13 @@ it("owns startup retry and keeps the hook context across fallback and ready chil
   await settle();
   expect(target.textContent).toBe("SIGN IN");
   expect(events).toEqual(["detached", "shutdown"]);
-  const actions = observedAuth.sessionActions;
-  await actions.createLocalFirst();
+  const { createDeviceAccount } = observedAuth;
+  await createDeviceAccount();
   await settle();
   expect(target.textContent).toContain("ready");
-  expect(observedAuth.sessionActions).toBe(actions);
   failLogout = true;
-  await expect(observedAuth.logout()).resolves.toBeUndefined();
+  await expect(observedAuth.signOut()).rejects.toThrow("logout failed");
   await settle();
-  expect(target.textContent).toContain("logout failed");
   await unmount(component);
   component = undefined;
   await settle();
@@ -119,7 +115,7 @@ it("renders custom startup loading and error snippets with the provider retry", 
   component = mount(JazzProvider, {
     target,
     props: {
-      appId: "test",
+      config: { scope: "test" },
       children: createRawSnippet(() => ({ render: () => "<p>PRIVATE</p>" })),
       loading: createRawSnippet(() => ({ render: () => "<p>CUSTOM LOADING</p>" })),
       error: createRawSnippet((error, action) => {
@@ -141,7 +137,7 @@ it("renders custom startup loading and error snippets with the provider retry", 
   await settle();
 });
 
-it("follows the backend on reauthenticate and never mounts private children signed out", async () => {
+it("follows the backend on refresh and never mounts private children signed out", async () => {
   const events: string[] = [];
   // Who the app's backend names (null: no one).
   let backendUser: string | null = null;
@@ -175,13 +171,13 @@ it("follows the backend on reauthenticate and never mounts private children sign
     }),
   });
   factory.mockResolvedValue(owner);
-  let auth!: JazzAuthState;
+  let auth!: JazzSessionState;
   let mounts = 0;
   const target = document.createElement("div");
   component = mount(UserApp, {
     target,
     props: {
-      onAuth: (value: JazzAuthState) => (auth = value),
+      onAuth: (value: JazzSessionState) => (auth = value),
       children: createRawSnippet(() => ({
         render: () => {
           mounts++;
@@ -198,17 +194,17 @@ it("follows the backend on reauthenticate and never mounts private children sign
   expect(factory).toHaveBeenCalledWith(expect.objectContaining({ initial: "signed-out" }));
   expect(mounts).toBe(0);
   backendUser = "a";
-  await auth.reauthenticate();
+  await auth.refresh();
   await settle();
   expect(target.textContent).toBe("PRIVATE");
   backendUser = "b";
-  await auth.reauthenticate();
+  await auth.refresh();
   await settle();
   expect(target.textContent).toBe("PRIVATE");
   expect(owner.getSnapshot().account?.identity.subject).toBe("b");
   expect(events.slice(0, 2)).toEqual(["detached", "shutdown"]);
   backendUser = null;
-  await auth.reauthenticate();
+  await auth.refresh();
   await settle();
   expect(target.textContent).toContain("SIGN IN");
 });

@@ -25,7 +25,7 @@ import { getTrustedReservedSession, setTrustedReservedSession } from "./db-inter
 import { isRenewableAuthFailure, mapAuthReason } from "./auth-state.js";
 import { httpUrlToWs } from "./url.js";
 import type { RemoteLinkState } from "./remote-link-state.js";
-import type { LinkStatus } from "./sync-status.js";
+import type { LinkFailure, LinkStatus, UploadStatus } from "./sync-status.js";
 import { toError } from "./util.js";
 import { parseUuidBytes } from "./hex.js";
 
@@ -159,6 +159,11 @@ export type AuthUpdate =
  */
 export interface Runtime {
   /**
+   * @internal The Db handed over to a successor: end reads not sent yet with
+   * a `RuntimeClosedError` cause, so they ask the successor instead.
+   */
+  endUnsentReads?(): void;
+  /**
    * Wait until every write committed so far reaches `tier`. `throughOutage`
    * keeps the wait pending through outages until a terminal failure.
    */
@@ -188,9 +193,11 @@ export interface Runtime {
   setRemoteLinkHint?(state: RemoteLinkState): void;
   /** @internal The upstream link as the app sees it. */
   upstreamLinkStatus?(): LinkStatus;
-  /** @internal How many local commits still wait for the server's verdict. */
-  pendingUploadCount?(): number;
-  /** @internal Observe changes of the link status or the pending count. */
+  /** @internal This client's uploads: pending, since when, and refusals. */
+  uploadStatus?(): UploadStatus;
+  /** @internal The latest link failure this client saw, if any. */
+  lastLinkFailure?(): LinkFailure | null;
+  /** @internal Observe changes of the link status or the upload status. */
   onSyncStatusChange?(listener: () => void, signal: AbortSignal): void;
   /** @internal Construct a provisional row without staging or accepting a write. */
   previewInsert?(table: string, values: InsertValues, objectId?: string): Row;
@@ -366,6 +373,8 @@ export interface AuthConfig {
   admin_secret?: string;
   /** Opaque session payload forwarded by a backend proxy. */
   backend_session?: unknown;
+  /** The published permissions bundle the session is pinned to. */
+  bundle?: string;
 }
 
 /**
@@ -1937,7 +1946,9 @@ export class JazzClient {
     branch?: BranchView,
   ): MutationResult {
     if (branch) {
-      throw new Error("Partial-value updates are not yet supported in branch views.");
+      throw new Error(
+        "Partial-value updates (applyDiffs, editedFrom) are not yet supported in branch views.",
+      );
     }
     const writeContext = this.writeContext(session, attribution, openTransactionId, { updatedAt });
     if (!this.runtime.updateLargeValues) {

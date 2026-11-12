@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createClientConfigKey } from "../runtime/client-config-key.js";
 import type { AccountDbConfig } from "../accounts/context.js";
-import { JazzProvider } from "./provider.js";
+import { JazzDbProvider } from "./provider.js";
 import { makeFakeAccount, makeFakeClient } from "./test-utils.js";
 
 const registry = vi.hoisted(() => {
@@ -52,29 +52,29 @@ beforeEach(() => {
   registry.releaseClient.mockClear();
 });
 
-describe("JazzProvider client acquisition lifecycle", () => {
+describe("JazzDbProvider client acquisition lifecycle", () => {
   it("renders its fallback on the server without acquiring or retaining a client", () => {
-    const createJazzClient = vi.fn(async () =>
+    const openJazzClient = vi.fn(async () =>
       makeFakeClient({ authMode: "local-first", userId: "server", claims: {} }),
     );
 
     const html = renderToStaticMarkup(
-      <JazzProvider
+      <JazzDbProvider
         config={{
           appId: "app-1",
           serverUrl: "https://jazz.example.com",
           account: makeFakeAccount(),
         }}
-        createJazzClient={createJazzClient}
+        openJazzClient={openJazzClient}
         fallback={<p id="loading">loading</p>}
       >
         <p>ready</p>
-      </JazzProvider>,
+      </JazzDbProvider>,
     );
 
     expect(html).toBe('<p id="loading">loading</p>');
     expect(registry.acquireClient).not.toHaveBeenCalled();
-    expect(createJazzClient).not.toHaveBeenCalled();
+    expect(openJazzClient).not.toHaveBeenCalled();
     expect(registry.entries.size).toBe(0);
   });
 
@@ -89,22 +89,22 @@ describe("JazzProvider client acquisition lifecycle", () => {
       serverUrl: "https://jazz.example.com",
       account: makeFakeAccount(),
     };
-    const createJazzClient = vi.fn(async () =>
+    const openJazzClient = vi.fn(async () =>
       makeFakeClient({ authMode: "local-first", userId: "browser", claims: {} }),
     );
-    const initialKey = createClientConfigKey("react", initialConfig, [createJazzClient]);
-    const replacementKey = createClientConfigKey("react", replacementConfig, [createJazzClient]);
+    const initialKey = createClientConfigKey("react", initialConfig, [openJazzClient]);
+    const replacementKey = createClientConfigKey("react", replacementConfig, [openJazzClient]);
 
     let result!: RenderResult;
     await act(async () => {
       result = render(
-        <JazzProvider
+        <JazzDbProvider
           config={initialConfig}
-          createJazzClient={createJazzClient}
+          openJazzClient={openJazzClient}
           fallback={<p>loading</p>}
         >
           <p>ready</p>
-        </JazzProvider>,
+        </JazzDbProvider>,
       );
       await Promise.resolve();
     });
@@ -116,13 +116,13 @@ describe("JazzProvider client acquisition lifecycle", () => {
 
     await act(async () => {
       result.rerender(
-        <JazzProvider
+        <JazzDbProvider
           config={replacementConfig}
-          createJazzClient={createJazzClient}
+          openJazzClient={openJazzClient}
           fallback={<p>loading</p>}
         >
           <p>ready</p>
-        </JazzProvider>,
+        </JazzDbProvider>,
       );
       await Promise.resolve();
       await Promise.resolve();
@@ -165,21 +165,21 @@ describe("JazzProvider client acquisition lifecycle", () => {
     const releaseGate = new Promise<void>((resolve) => {
       resolveRelease = resolve;
     });
-    const createJazzClient = vi.fn(async () =>
+    const openJazzClient = vi.fn(async () =>
       makeFakeClient({ authMode: "local-first", userId: "browser", claims: {} }),
     );
-    const initialKey = createClientConfigKey("react", initialConfig, [createJazzClient]);
+    const initialKey = createClientConfigKey("react", initialConfig, [openJazzClient]);
 
     let result!: RenderResult;
     await act(async () => {
       result = render(
-        <JazzProvider
+        <JazzDbProvider
           config={initialConfig}
-          createJazzClient={createJazzClient}
+          openJazzClient={openJazzClient}
           fallback={<p>loading</p>}
         >
           <p>ready</p>
-        </JazzProvider>,
+        </JazzDbProvider>,
       );
       await Promise.resolve();
     });
@@ -187,13 +187,13 @@ describe("JazzProvider client acquisition lifecycle", () => {
 
     await act(async () => {
       result.rerender(
-        <JazzProvider
+        <JazzDbProvider
           config={replacementConfig}
-          createJazzClient={createJazzClient}
+          openJazzClient={openJazzClient}
           fallback={<p>loading</p>}
         >
           <p>ready</p>
-        </JazzProvider>,
+        </JazzDbProvider>,
       );
       await Promise.resolve();
     });

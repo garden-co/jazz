@@ -1,27 +1,30 @@
 import { describe, expect, it } from "vitest";
-import { createJazzSession } from "jazz-tools/client";
+import { createJazzClient } from "jazz-tools/client";
 import { getRecoveryPhrase, restoreRecoveryPhrase } from "../../src/auth-snippets.js";
-import { APP_ID, SERVER_URL } from "./test-constants.js";
+import { memoryAccountStore } from "./memory-account-store.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 
-describe("account recovery snippets", () => {
-  it("restores the same account and identity after logout through the session", async () => {
-    const session = await createJazzSession({
-      appId: APP_ID,
+describe("device account recovery snippets", () => {
+  it("restores the same device account after sign-out through the session", async () => {
+    const session = await createJazzClient({
+      scope: SCOPE,
       serverUrl: SERVER_URL,
-      initial: "local-first",
+      initial: "device",
+      store: memoryAccountStore(),
     });
     try {
-      const original = session.getSnapshot().account!;
-      const phrase = getRecoveryPhrase(original);
-      await session.logout();
-      expect(session.getSnapshot().account).toBeUndefined();
+      const original = session.getSnapshot().user!;
+      expect(original.kind).toBe("device");
+      const phrase = getRecoveryPhrase(session);
+      await session.signOut();
+      expect(session.getSnapshot().user).toBeNull();
       await restoreRecoveryPhrase(session, phrase);
-      const restored = session.getSnapshot().account!;
-      expect(restored.id).toBe(original.id);
+      const restored = session.getSnapshot().user!;
+      expect(restored.accountId).toBe(original.accountId);
       expect(restored.identity).toEqual(original.identity);
       expect(session.getSnapshot().status).toBe("ready");
       expect(session.getSnapshot().client).toBeDefined();
-      expect(getRecoveryPhrase(restored)).toBe(phrase);
+      expect(getRecoveryPhrase(session)).toBe(phrase);
     } finally {
       await session.close();
     }

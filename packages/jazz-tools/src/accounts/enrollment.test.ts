@@ -1,5 +1,6 @@
 import { generateSecret, identityOf, verifyChallenge } from "../local-first-auth/index.js";
 import { generateAuthSecret } from "../runtime/auth-secret-store.js";
+import { admitBackendAccount } from "./state.js";
 import { describe, expect, it, vi } from "vitest";
 import {
   accountToken,
@@ -181,7 +182,9 @@ it("keeps backend authority opaque, scoped, and revocable", async () => {
     localFirst: { create: () => ({ accountId: id, identity, auth: token() }) },
     backend: { admitBackend: async () => ({ nodeId: id }) },
   });
-  const backend = await manager.becomeBackend({ backendSecret: "private-backend-credential" });
+  const backend = await admitBackendAccount(manager, {
+    backendSecret: "private-backend-credential",
+  });
   expect(backend.id).toBe("00000000-0000-0000-0000-000000000000");
   expect(backend.identity).toEqual({ issuer: "urn:jazz:system", subject: id });
   expect(JSON.stringify(manager.getSnapshot())).not.toContain("private-backend-credential");
@@ -194,7 +197,9 @@ it("keeps backend authority opaque, scoped, and revocable", async () => {
   await expect(accountToken(backend, registry)).rejects.toThrow(
     /backend_account_requires_backend_host/,
   );
-  await expect(manager.linkWithBackend()).rejects.toThrow(/local_first_account_required/);
+  await expect(manager.linkWithBackend()).rejects.toThrow(
+    /local_first_account_required: .*came from your backend.*refresh\(\)/,
+  );
   const invalidated = vi.fn();
   onAccountInvalidated(backend, invalidated);
   manager.createLocalFirst();
@@ -204,7 +209,7 @@ it("keeps backend authority opaque, scoped, and revocable", async () => {
 });
 
 it("rejects unsupported backend hosts and fences late backend admission on logout", async () => {
-  await expect(setup().becomeBackend({ backendSecret: "secret" })).rejects.toThrow(
+  await expect(admitBackendAccount(setup(), { backendSecret: "secret" })).rejects.toThrow(
     /backend_host_unavailable/,
   );
   let finish!: (value: { nodeId: string }) => void;
@@ -218,7 +223,7 @@ it("rejects unsupported backend hosts and fences late backend admission on logou
         }),
     },
   });
-  const pending = manager.becomeBackend({ backendSecret: "secret" });
+  const pending = admitBackendAccount(manager, { backendSecret: "secret" });
   manager.logout();
   finish({ nodeId: id });
   await expect(pending).rejects.toThrow(/account_logged_out/);
@@ -272,4 +277,27 @@ it("links a local-first guest by signing the backend's challenge, never with its
   await expect(manager.loginWithBackend()).rejects.toThrow("signed_out");
   expect(manager.getLoggedIn()).toBe(linked);
   expect(fetcher.mock.calls[2]?.[0]).toBe(`${registry}/backend-sign-in`);
+});
+
+it("says what to do when the backend refuses to link a guest, and keeps the guest", async () => {
+  const secret = generateSecret();
+  const guest = { issuer: "urn:jazz:local-first", subject: identityOf(secret).subject };
+  const guestToken = `e30.${btoa(JSON.stringify({ iss: guest.issuer, sub: guest.subject }))}.signature`;
+  const fetcher = vi.fn(async (input: unknown) =>
+    String(input).endsWith("/backend-link/challenge")
+      ? new Response(JSON.stringify({ challenge: "issued-for-alice.mac", expiresAt: 0 }))
+      : // The signed-in user already has an account of their own.
+        new Response("link_refused", { status: 409 }),
+  );
+  const manager = createAccountManagerWithRuntime({
+    registry,
+    fetch: fetcher as typeof fetch,
+    localFirst: { create: () => ({ accountId: id, identity: guest, auth: guestToken, secret }) },
+  });
+  const signedIn = manager.createLocalFirst();
+  const refusal = await manager.linkWithBackend().catch((error: unknown) => error);
+  // Apps still branch on the code; the message says what to do instead.
+  expect(refusal).toMatchObject({ name: "AccountAuthError", code: "link_refused", status: 409 });
+  expect((refusal as Error).message).toMatch(/already have an account.*refresh\(\)/);
+  expect(manager.getLoggedIn()).toBe(signedIn);
 });

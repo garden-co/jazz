@@ -494,9 +494,6 @@ pub enum Reason {
     /// A read needs large-value chunks this replica requested from
     /// upstream but has not received yet (code `NotObserved`).
     MissingChunks,
-    /// The server holds commits from an untrusted session until it has a
-    /// published permissions head to check them by (code `WriteRejected`).
-    PermissionsHeadMissing,
     /// The write was built on an unsettled write the authority rejected,
     /// so it is rejected too (code `WriteRejected`, SPEC 4 §4.6).
     PredecessorRejected,
@@ -511,7 +508,7 @@ pub enum Reason {
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 13] = [
+    pub const ALL: [Reason; 12] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -521,7 +518,6 @@ impl Reason {
         Reason::MissingRequired,
         Reason::BranchMove,
         Reason::MissingChunks,
-        Reason::PermissionsHeadMissing,
         Reason::PredecessorRejected,
         Reason::SchemaVersionNotDeployed,
         Reason::IdentityMismatch,
@@ -544,7 +540,6 @@ impl Reason {
             Reason::MissingRequired => "missing_required",
             Reason::BranchMove => "branch_move",
             Reason::MissingChunks => "missing_chunks",
-            Reason::PermissionsHeadMissing => "permissions_head_missing",
             Reason::PredecessorRejected => "predecessor_rejected",
             Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
             Reason::IdentityMismatch => "identity_mismatch",
@@ -596,6 +591,15 @@ pub enum ErrorCode {
     /// An existing local store was written with a storage format this build
     /// does not read.
     UnsupportedStorageCodecs,
+    /// The upstream serves another authority history than the one this
+    /// store mirrors (its namespace differs): the server's store was
+    /// recreated (a deleted data directory, a restarted in-memory server, a
+    /// new environment behind the same URL), or it is another app's. This
+    /// store's rows, watermarks and unsynced writes belong to the old
+    /// history, so the link stops: nothing syncs with that server until the
+    /// local store is reset (`deleteClientStorage()` in jazz-tools) or the
+    /// old server is back.
+    AuthorityChanged,
 }
 
 impl ErrorCode {
@@ -617,6 +621,7 @@ impl ErrorCode {
             ErrorCode::NotObserved => "not_observed",
             ErrorCode::HistoricalReadRequiresServer => "historical_read_requires_server",
             ErrorCode::UnsupportedStorageCodecs => "unsupported_storage_codecs",
+            ErrorCode::AuthorityChanged => "authority_changed",
         }
     }
 }

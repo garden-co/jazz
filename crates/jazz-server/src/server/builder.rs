@@ -254,18 +254,9 @@ impl ServerBuilder {
             store: Some(store),
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),
             #[cfg(test)]
-            runtime_catalogue_before_publication_hook: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            runtime_catalogue_after_permissions_read_hook: std::sync::Mutex::new(None),
-            #[cfg(test)]
             panic_during_shutdown_for_test: Default::default(),
             shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
         });
-
-        // Restore the durable administrative selection before serving snapshots.
-        super::runtime_catalogue::publish_runtime_catalogue(&state, &[], &[])
-            .await
-            .map_err(|error| format!("restore active schema before serving: {error}"))?;
 
         let app = routes::create_router(state.clone()).merge(profiling::admin_router(
             self.heap_profiler,
@@ -292,7 +283,6 @@ impl ServerBuilder {
             let local_durability_tiers =
                 std::collections::HashSet::from([self.local_durability_tier()]);
             StoredCatalogue::with_test_observability(
-                self.app_id,
                 initial_schema,
                 storage,
                 schema_branches,
@@ -301,7 +291,7 @@ impl ServerBuilder {
             .map_err(|error| format!("failed to read durable catalogue: {error}"))?
         };
         #[cfg(not(test))]
-        let store = StoredCatalogue::new(self.app_id, initial_schema, storage)
+        let store = StoredCatalogue::new(initial_schema, storage)
             .map_err(|error| format!("failed to read durable catalogue: {error}"))?;
 
         let latest_catalogue_schema = store
@@ -317,12 +307,7 @@ impl ServerBuilder {
     ) -> Result<Option<crate::server::ServerRuntimeHandle>, String> {
         let role = NodeRole::Core;
         if let Some(schema) = &self.core_server_shell_schema {
-            return Ok(Some(store.start_runtime(
-                schema.clone(),
-                role,
-                false,
-                false,
-            )?));
+            return Ok(Some(store.start_runtime(schema.clone(), role, false)?));
         }
 
         let (schema, dynamic) = match &self.schema_mode {
@@ -336,9 +321,8 @@ impl ServerBuilder {
             .map_err(|error| format!("failed to build server shell schema: {error}"))?;
         // The newest published schema may never have reached the shell store
         // (published without a lens, or its lens bridge failed). A dynamic
-        // server then reopens with the store's own current schema; startup
-        // re-applies the durable permissions head right after.
-        Ok(Some(store.start_runtime(schema, role, dynamic, dynamic)?))
+        // server then reopens with the store's own current schema.
+        Ok(Some(store.start_runtime(schema, role, dynamic)?))
     }
 
     /// The storage to open, and the blob-store record to write once it has
@@ -355,12 +339,12 @@ impl ServerBuilder {
                     // A bucket's default prefix is this store's own.
                     BlobStore::S3(options) if options.prefix.is_empty() => {
                         let mut options = options.clone();
-                        options.prefix = format!("jazz/{}/{}/", self.app_id, store_id(path)?);
+                        options.prefix = format!("jazz/{}/", store_id(path)?);
                         BlobStore::S3(options)
                     }
                     BlobStore::VercelBlob(options) if options.prefix.is_empty() => {
                         let mut options = options.clone();
-                        options.prefix = format!("jazz/{}/{}/", self.app_id, store_id(path)?);
+                        options.prefix = format!("jazz/{}/", store_id(path)?);
                         BlobStore::VercelBlob(options)
                     }
                     blobs => blobs.clone(),
@@ -775,8 +759,6 @@ mod tests {
     use super::*;
     use crate::server::catalogue::CatalogueStore;
     use jazz::tools::AppId;
-    use jazz::tools::public_schema::SchemaHash;
-    use jazz::tools::schema_lens::LensTransform;
 
     fn dynamic_bootstrap_schema() -> jazz::tools::public_schema::Schema {
         jazz::tools::public_schema::SchemaBuilder::new()
@@ -955,8 +937,9 @@ mod tests {
         }
     }
 
-    /// Without a prefix, each data dir gets its own under the app's, so two
-    /// stores sharing a bucket (preview and production) never share keys.
+    /// Without a prefix, each data dir gets its own (`jazz/<store id>/`,
+    /// naming no app), so two stores sharing a bucket (preview and
+    /// production) never share keys.
     #[tokio::test]
     async fn a_bucket_without_a_prefix_gets_one_per_data_dir() {
         let app = AppId::from_name("blob-store-prefix");
@@ -972,6 +955,7 @@ mod tests {
                 session_token: None,
             }),
             sts_endpoint: None,
+            environment: None,
         });
         let mut recorded = Vec::new();
         for _ in 0..2 {
@@ -990,7 +974,7 @@ mod tests {
             let marker = std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap();
             assert_eq!(
                 marker,
-                format!("s3 http://127.0.0.1:9 jazz/jazz/{app}/{}/\n", id.trim())
+                format!("s3 http://127.0.0.1:9 jazz/jazz/{}/\n", id.trim())
             );
             recorded.push(marker);
         }
@@ -1007,6 +991,7 @@ mod tests {
             credentials: crate::vercel_blob::VercelBlobCredentials::ReadWriteToken("t".to_owned()),
             api_url: "http://127.0.0.1:9".to_owned(),
             blob_url: Some("http://127.0.0.1:9".to_owned()),
+            environment: None,
         });
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         ServerBuilder::new(app)
@@ -1021,10 +1006,7 @@ mod tests {
             .await;
         let id = std::fs::read_to_string(data_dir.path().join(STORE_ID_FILE)).unwrap();
         let marker = std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap();
-        assert_eq!(
-            marker,
-            format!("vercel-blob abc/jazz/{app}/{}/\n", id.trim())
-        );
+        assert_eq!(marker, format!("vercel-blob abc/jazz/{}/\n", id.trim()));
     }
 
     #[tokio::test]
@@ -1043,6 +1025,7 @@ mod tests {
                     session_token: None,
                 }),
                 sts_endpoint: None,
+                environment: None,
             })
         };
         let start = |blobs: BlobStore| {
@@ -1304,87 +1287,6 @@ mod tests {
             restored_todos.branch_by,
             vec![jazz::tools::public_schema::ColumnName::new("workspace_id")]
         );
-    }
-
-    /// Alice activates a descendant schema and permissions, then restarts.
-    /// Startup must retain the selection and revision before serving snapshots.
-    #[tokio::test]
-    async fn authority_reopens_active_descendant_before_serving_snapshots() {
-        use jazz::tools::schema_lens::{Lens, LensOp};
-        use jazz::tools::{
-            ColumnType, PolicyExpr, SchemaBuilder, TableName, TablePolicies, TableSchema,
-        };
-
-        let dir = tempfile::tempdir().unwrap();
-        let app_id = AppId::from_name("authority-active-descendant");
-        let base = dynamic_bootstrap_schema();
-        let target = SchemaBuilder::new()
-            .table(TableSchema::builder("notes").column("content", ColumnType::Text))
-            .build();
-        let target_runtime = jazz::schema::JazzSchema::new(&target).unwrap();
-        let lens = Lens::new(
-            SchemaHash::compute(&base),
-            SchemaHash::compute(&target),
-            LensTransform::with_ops(vec![LensOp::RenameColumn {
-                table: "notes".into(),
-                old_name: "body".into(),
-                new_name: "content".into(),
-            }]),
-        );
-        let builder = || {
-            ServerBuilder::new(app_id).with_storage(StorageBackend::Persistent {
-                path: dir.path().to_path_buf(),
-            })
-        };
-        let core = builder().with_schema(base).build().await.unwrap();
-        core.state
-            .catalogue
-            .publish_schema(&core.state.catalogue_store, target.clone())
-            .unwrap();
-        core.state
-            .catalogue
-            .publish_lens(&core.state.catalogue_store, &lens)
-            .unwrap();
-        super::super::runtime_catalogue::publish_runtime_catalogue(
-            &core.state,
-            &[target.clone()],
-            &[lens],
-        )
-        .await
-        .unwrap();
-        let permissions = std::collections::HashMap::from([(
-            TableName::new("notes"),
-            TablePolicies::new().with_select(PolicyExpr::True),
-        )]);
-        let selection = super::super::runtime_catalogue::publish_permissions_and_runtime(
-            &core.state,
-            SchemaHash::compute(&target),
-            permissions.clone(),
-            None,
-        )
-        .await
-        .ok()
-        .expect("activate descendant");
-        core.shutdown().await;
-        drop(core);
-
-        // No HTTP publication or test-side activation after reopen.
-        let reopened = builder().build().await.unwrap();
-        let catalogue = reopened.state.runtime().unwrap().catalogue().await.unwrap();
-        let head = catalogue.head().unwrap();
-        assert_eq!(head.schema, SchemaHash::compute(&target));
-        assert_eq!(
-            catalogue.schema(&head.schema).unwrap().version,
-            Some(target_runtime.version_id())
-        );
-        assert_eq!(head.revision, selection.version);
-        assert!(selection.version > 0);
-        assert_eq!(
-            head.permissions[&TableName::new("notes")],
-            permissions[&TableName::new("notes")]
-        );
-        assert!(head.activated_seq.is_some());
-        reopened.shutdown().await;
     }
 
     #[tokio::test]

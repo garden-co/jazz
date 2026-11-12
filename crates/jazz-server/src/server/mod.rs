@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::sync::Mutex as StdMutex;
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::thread;
 
@@ -16,16 +14,18 @@ mod data_dir_corpus;
 #[cfg(feature = "embedded-server")]
 mod embedded;
 pub use crate::runtime::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
+pub mod alpha59_alpha60;
 pub(crate) mod deployment;
 mod permissions_validation;
 pub mod routes;
+#[cfg(any(test, feature = "embedded-server"))]
 pub(crate) mod runtime_catalogue;
 mod shutdown;
 #[cfg(feature = "embedded-server")]
 mod testing;
 
 pub use builder::{BlobStore, BuiltServer, ServerBuilder, StorageBackend};
-pub(crate) use catalogue::{ActiveSchemaSummary, ServerCatalogue, StoredCatalogue};
+pub(crate) use catalogue::{ServerCatalogue, StoredCatalogue};
 pub(crate) use catalogue_storage::CatalogueStorage;
 #[cfg(feature = "embedded-server")]
 pub use embedded::{
@@ -108,16 +108,9 @@ pub struct ServerState {
     /// The app's store: the one file (and thread) the catalogue, the account
     /// registry and, once started, the runtime share.
     pub(crate) store: Option<crate::runtime::AppStore>,
-    /// Serializes durable-catalogue reconciliation into the local runtime shell.
-    ///
-    /// Catalogue storage can advance while a previous bridge is in flight, but
-    /// bridge installs must reach the shell in the same order so an older head
-    /// cannot overwrite a newer one.
+    /// Serializes catalogue changes (deployments and in-process bridges)
+    /// into the local runtime shell, so they reach it in commit order.
     pub(crate) runtime_catalogue_publication: tokio::sync::Mutex<()>,
-    #[cfg(test)]
-    runtime_catalogue_before_publication_hook: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
-    #[cfg(test)]
-    runtime_catalogue_after_permissions_read_hook: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Tests: the shutdown finalizer panics.
     #[cfg(test)]
     panic_during_shutdown_for_test: std::sync::atomic::AtomicBool,
@@ -125,52 +118,6 @@ pub struct ServerState {
 }
 
 impl ServerState {
-    #[cfg(test)]
-    pub(crate) fn set_runtime_catalogue_before_publication_hook_for_test(
-        &self,
-        hook: Box<dyn FnOnce() + Send>,
-    ) {
-        *self
-            .runtime_catalogue_before_publication_hook
-            .lock()
-            .expect("runtime catalogue test hook lock") = Some(hook);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_runtime_catalogue_before_publication_hook_for_test(&self) {
-        let hook = self
-            .runtime_catalogue_before_publication_hook
-            .lock()
-            .expect("runtime catalogue test hook lock")
-            .take();
-        if let Some(hook) = hook {
-            hook();
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_runtime_catalogue_after_permissions_read_hook_for_test(
-        &self,
-        hook: Box<dyn FnOnce() + Send>,
-    ) {
-        *self
-            .runtime_catalogue_after_permissions_read_hook
-            .lock()
-            .expect("runtime catalogue test hook lock") = Some(hook);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_runtime_catalogue_after_permissions_read_hook_for_test(&self) {
-        let hook = self
-            .runtime_catalogue_after_permissions_read_hook
-            .lock()
-            .expect("runtime catalogue test hook lock")
-            .take();
-        if let Some(hook) = hook {
-            hook();
-        }
-    }
-
     /// Test-only observation of whether Core has installed a runtime shell.
     #[cfg(feature = "test")]
     #[doc(hidden)]
@@ -221,7 +168,7 @@ impl ServerState {
         if let Some(existing) = core_server_shell.clone() {
             return Ok(existing);
         }
-        let started = store.start_runtime(schema, crate::runtime::NodeRole::Core, false, true)?;
+        let started = store.start_runtime(schema, crate::runtime::NodeRole::Core, false)?;
         *core_server_shell = Some(started.clone());
         Ok(started)
     }

@@ -488,7 +488,7 @@ async fn public_subscription_stream_yields_delta_items_for_normal_changes() {
                             break;
                         }
                     }
-                    SubscriptionStreamItem::Rejected { reason } => {
+                    SubscriptionStreamItem::Rejected { reason, .. } => {
                         panic!("normal subscription was rejected: {reason:?}")
                     }
                 }
@@ -504,7 +504,7 @@ async fn next_delta(stream: &mut jazz::tools::SubscriptionStream) -> jazz::tools
         .expect("subscription stays open")
     {
         SubscriptionStreamItem::Delta(delta) => delta,
-        SubscriptionStreamItem::Rejected { reason } => {
+        SubscriptionStreamItem::Rejected { reason, .. } => {
             panic!("subscription was rejected: {reason:?}")
         }
     }

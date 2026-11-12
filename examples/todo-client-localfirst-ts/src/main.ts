@@ -1,6 +1,6 @@
-import { sessionConfig } from "./account.js";
-import { createJazzSession } from "jazz-tools/client";
-import { createDb, type DbConfig, type Db } from "jazz-tools";
+import { sessionConfig, type SessionOverrides } from "./account.js";
+import { createJazzClient } from "jazz-tools/client";
+import type { Db } from "jazz-tools";
 import { app, type Todo } from "../schema.js";
 
 function orderTodosWithDepth(todos: Todo[]): { todo: Todo; depth: number }[] {
@@ -45,23 +45,20 @@ function orderTodosWithDepth(todos: Todo[]): { todo: Todo; depth: number }[] {
 }
 
 // #region context-setup-ts-client
-async function openLocalFirst(config?: Partial<DbConfig>) {
-  const session = await createJazzSession(sessionConfig(config));
-  // Read the current client from session.getSnapshot(); close the session on teardown.
+async function openLocalFirst(config?: SessionOverrides) {
+  const session = await createJazzClient(sessionConfig(config));
+  // Read the signed-in user's Db from session.db; close the session on teardown.
   return session;
 }
 // #endregion context-setup-ts-client
 
 export async function startApp(
   container: HTMLElement,
-  config?: Partial<DbConfig>,
+  config?: SessionOverrides,
 ): Promise<{ db: Db; destroy: () => Promise<void> }> {
-  // Explicit fixed handles remain supported for advanced callers and replica tests.
-  const session = config?.account ? undefined : await openLocalFirst(config);
-  const db = config?.account
-    ? await createDb({ ...config, appId: config.appId!, account: config.account })
-    : session!.getSnapshot().client!.db;
-  let sessionUserId = db.getAuthState().session?.user.account ?? null;
+  const session = await openLocalFirst(config);
+  const db = session.db;
+  let sessionUserId = db.getAuthState().session?.user ?? null;
 
   // Build DOM
   const h1 = document.createElement("h1");
@@ -159,7 +156,7 @@ export async function startApp(
     list.replaceChildren(items);
   });
   const stopAuthSync = db.onAuthChanged(({ session }) => {
-    syncAuthState(session?.user.account ?? null);
+    syncAuthState(session?.user ?? null);
   });
 
   // Add todo form
@@ -208,8 +205,7 @@ export async function startApp(
     destroy: async () => {
       unsubscribe();
       stopAuthSync();
-      if (session) await session.close();
-      else await db.shutdown();
+      await session.close();
       container.innerHTML = "";
     },
   };

@@ -329,3 +329,423 @@ fn a_pinned_sessions_serializable_reads_validate_by_its_bundle() {
     )
     .expect("its reads still hold under its bundle");
 }
+
+/// A duplex that counts the row images the server ships.
+struct CountingPipe {
+    out: std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<jazz::db::SyncMessage>>>,
+    inbound: std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<jazz::db::SyncMessage>>>,
+    shipped: Option<std::rc::Rc<std::cell::Cell<usize>>>,
+}
+
+impl jazz::db::Transport for CountingPipe {
+    fn send(&mut self, message: jazz::db::SyncMessage) -> Result<(), jazz::db::TransportError> {
+        if let (Some(count), jazz::db::SyncMessage::Rows { images, .. }) = (&self.shipped, &message)
+        {
+            count.set(count.get() + images.len());
+        }
+        self.out.borrow_mut().push_back(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<jazz::db::SyncMessage> {
+        self.inbound.borrow_mut().pop_front()
+    }
+}
+
+/// (client side, server side, rows the server side shipped).
+fn counting_pipe() -> (
+    Box<dyn jazz::db::Transport>,
+    Box<dyn jazz::db::Transport>,
+    std::rc::Rc<std::cell::Cell<usize>>,
+) {
+    let up = std::rc::Rc::default();
+    let down = std::rc::Rc::default();
+    let shipped = std::rc::Rc::new(std::cell::Cell::new(0));
+    (
+        Box::new(CountingPipe {
+            out: std::rc::Rc::clone(&up),
+            inbound: std::rc::Rc::clone(&down),
+            shipped: None,
+        }),
+        Box::new(CountingPipe {
+            out: down,
+            inbound: up,
+            shipped: Some(std::rc::Rc::clone(&shipped)),
+        }),
+        shipped,
+    )
+}
+
+/// An authority with `rows` users and two published bundles: one that
+/// reads every user and one that reads none.
+fn server_with_users(rows: u8) -> (Db, BundleId, BundleId) {
+    let server = block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap();
+    server.set_authority();
+    for n in 0..rows {
+        server
+            .seed_settled_mergeable_for_bootstrap(
+                "users",
+                RowUuid::from_bytes([n + 1; 16]),
+                AuthorSubject::SYSTEM,
+                BTreeMap::from([("name".to_owned(), Value::String(format!("user {n}")))]),
+            )
+            .unwrap();
+    }
+    let open = block_on(server.publish_bundle(&users(PolicyExpr::True))).unwrap();
+    let closed = block_on(server.publish_bundle(&users(PolicyExpr::False))).unwrap();
+    (server, open, closed)
+}
+
+/// Reconnect `db`'s upstream to `server`, pinned to `bundle`: the rows
+/// the server shipped while `pump` ran.
+fn reconnect_pinned(
+    server: &Db,
+    db: &Db,
+    author: AuthorSubject,
+    bundle: BundleId,
+    upstream: &jazz::db::Upstream,
+) -> (usize, jazz::db::Upstream) {
+    reconnect_with(server, db, author, None, bundle, upstream)
+}
+
+/// Reconnect `db`'s upstream to `server` with `claims`, pinned to
+/// `bundle`: the rows the server shipped while `pump` ran.
+fn reconnect_with(
+    server: &Db,
+    db: &Db,
+    author: AuthorSubject,
+    claims: Option<BTreeMap<String, Value>>,
+    bundle: BundleId,
+    upstream: &jazz::db::Upstream,
+) -> (usize, jazz::db::Upstream) {
+    assert!(db.detach_connection(upstream));
+    let (client_side, server_side, shipped) = counting_pipe();
+    let upstream = block_on(db.connect_upstream(client_side));
+    server
+        .accept_pinned_subscriber(server_side, author, claims, Some(bundle))
+        .unwrap();
+    pump(server, &[db]);
+    (shipped.get(), upstream)
+}
+
+/// A pinned session that reconnects under the bundle it settled under
+/// resumes from where it settled: nothing that did not change ships again.
+#[test]
+fn a_pinned_session_resumes_under_the_same_bundle() {
+    let (server, open, _) = server_with_users(20);
+    let alice = AuthorSubject::for_test_bytes([0x55; 16]);
+    let db = client(1, alice);
+    let (client_side, server_side, shipped) = counting_pipe();
+    let upstream = block_on(db.connect_upstream(client_side));
+    server
+        .accept_pinned_subscriber(server_side, alice, None, Some(open))
+        .unwrap();
+    let prepared = db.prepare_query(&Query::from("users")).unwrap();
+    let _stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &[&db]);
+    assert_eq!(shipped.get(), 20, "the first opening ships every row");
+    assert_eq!(local(&db).len(), 20);
+
+    let (shipped, _upstream) = reconnect_pinned(&server, &db, alice, open, &upstream);
+    assert_eq!(
+        shipped, 0,
+        "a caught-up resume under the same bundle ships nothing"
+    );
+    assert_eq!(local(&db).len(), 20);
+}
+
+/// A result settled under one bundle is no resume point under another:
+/// the session opens fresh, so rows the new bundle reads arrive and rows
+/// it does not are dropped, though none of them changed.
+#[test]
+fn a_pinned_session_under_another_bundle_opens_fresh() {
+    let (server, open, closed) = server_with_users(5);
+    let alice = AuthorSubject::for_test_bytes([0x55; 16]);
+    let db = client(1, alice);
+    let (client_side, server_side, _) = counting_pipe();
+    let upstream = block_on(db.connect_upstream(client_side));
+    server
+        .accept_pinned_subscriber(server_side, alice, None, Some(closed))
+        .unwrap();
+    let prepared = db.prepare_query(&Query::from("users")).unwrap();
+    let _stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &[&db]);
+    assert_eq!(local(&db), [], "the closed bundle reads no user");
+
+    // Now under the bundle that reads every user: nothing changed since
+    // the last settle, yet every row is the session's to read.
+    let (shipped, upstream) = reconnect_pinned(&server, &db, alice, open, &upstream);
+    assert_eq!(shipped, 5);
+    assert_eq!(local(&db).len(), 5);
+
+    // And back: the rows the closed bundle hides leave the replica.
+    let (_, _upstream) = reconnect_pinned(&server, &db, alice, closed, &upstream);
+    assert_eq!(local(&db), []);
+}
+
+/// Claims are part of what a session's reads are evaluated under: under
+/// a bundle whose policy reads a claim, a session that reconnects with the
+/// same claims resumes with the same rows, and one whose claim changed
+/// opens fresh, so the rows the new claim hides leave and the rows it
+/// reads arrive, though none of them changed.
+#[test]
+fn a_session_with_claims_resumes_only_with_the_same_claims() {
+    let server = block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap();
+    server.set_authority();
+    let teams = ["red", "red", "red", "blue", "blue"];
+    for (n, team) in teams.iter().enumerate() {
+        server
+            .seed_settled_mergeable_for_bootstrap(
+                "users",
+                RowUuid::from_bytes([n as u8 + 1; 16]),
+                AuthorSubject::SYSTEM,
+                BTreeMap::from([("name".to_owned(), Value::String((*team).to_owned()))]),
+            )
+            .unwrap();
+    }
+    let by_team = |team: &str| -> Vec<RowUuid> {
+        teams
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| **t == team)
+            .map(|(n, _)| RowUuid::from_bytes([n as u8 + 1; 16]))
+            .collect()
+    };
+    // The bundle reads the users named for the session's team claim.
+    let own_team =
+        block_on(server.publish_bundle(&users(common::session_eq("name", &["claims", "team"]))))
+            .unwrap();
+    let claims = |team: &str| {
+        Some(BTreeMap::from([(
+            jazz::query::provider_claim_key("team"),
+            Value::String(team.to_owned()),
+        )]))
+    };
+    let sorted = |mut rows: Vec<RowUuid>| {
+        rows.sort();
+        rows
+    };
+    let alice = AuthorSubject::for_test_bytes([0x55; 16]);
+    let db = client(1, alice);
+    let (client_side, server_side, shipped) = counting_pipe();
+    let upstream = block_on(db.connect_upstream(client_side));
+    server
+        .accept_pinned_subscriber(server_side, alice, claims("red"), Some(own_team))
+        .unwrap();
+    let prepared = db.prepare_query(&Query::from("users")).unwrap();
+    let _stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &[&db]);
+    assert_eq!(shipped.get(), 3, "the red team's rows ship");
+    assert_eq!(sorted(local(&db)), by_team("red"));
+
+    let (shipped, upstream) =
+        reconnect_with(&server, &db, alice, claims("red"), own_team, &upstream);
+    assert_eq!(shipped, 0, "the same claims resume: nothing ships again");
+    assert_eq!(sorted(local(&db)), by_team("red"));
+
+    let (shipped, upstream) =
+        reconnect_with(&server, &db, alice, claims("blue"), own_team, &upstream);
+    assert_eq!(shipped, 2, "another team opens fresh: its rows ship");
+    assert_eq!(
+        sorted(local(&db)),
+        by_team("blue"),
+        "and the red team's rows leave"
+    );
+
+    let (_, _upstream) = reconnect_with(&server, &db, alice, claims("red"), own_team, &upstream);
+    assert_eq!(sorted(local(&db)), by_team("red"), "and back again");
+}
+
+#[test]
+fn a_pinned_subscription_keeps_its_bundle_when_the_schema_changes() {
+    let (server, _row) = server_with_row(
+        block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap(),
+    );
+    let closed = block_on(server.publish_bundle(&users(PolicyExpr::False))).unwrap();
+    let bob = AuthorSubject::for_test_bytes([0x66; 16]);
+    let (on_closed, _b) = pinned(&server, 2, bob, closed);
+    pump(&server, &[&on_closed]);
+    assert_eq!(
+        local(&on_closed),
+        [],
+        "the closed bundle does not read the row"
+    );
+
+    // A new schema version re-runs every subscription. Bob's must still be
+    // governed by his bundle, not by the store's own schema, which reads
+    // everything.
+    let v2 = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("users")
+                .column("name", ColumnType::Text)
+                .policies(read_and_allow_all_writes(PolicyExpr::True)),
+        )
+        .table(
+            TableSchemaBuilder::new("notes")
+                .column("body", ColumnType::Text)
+                .policies(read_and_allow_all_writes(PolicyExpr::True)),
+        )
+        .build();
+    block_on(server.admit_schema_with_lenses(compile_schema(&v2), &[])).unwrap();
+    pump(&server, &[&on_closed]);
+    assert_eq!(
+        local(&on_closed),
+        [],
+        "still closed after the schema changed"
+    );
+}
+
+/// A write made under one bundle and uploaded after a stricter one is
+/// published is refused by the new bundle, and the refusal reaches the
+/// writer as a permission refusal: it does not vanish (alpha.60 adopter
+/// pass V3).
+#[test]
+fn an_offline_write_a_tightened_bundle_refuses_is_reported_as_denied() {
+    let (server, row) = server_with_row(
+        block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap(),
+    );
+    let open = block_on(server.publish_bundle(&users(PolicyExpr::True))).unwrap();
+    let alice = AuthorSubject::for_test_bytes([0x55; 16]);
+    let (db, keep) = pinned(&server, 1, alice, open);
+    db.track_upstream_rejections();
+    pump(&server, &[&db]);
+    assert_eq!(local(&db), [row]);
+
+    // Offline: the write stays local while a stricter bundle comes out.
+    let written = block_on(db.update(
+        "users",
+        row,
+        BTreeMap::from([("name".to_owned(), Value::String("eve".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    // A second offline write builds on the first.
+    let built_on = block_on(db.update(
+        "users",
+        row,
+        BTreeMap::from([("name".to_owned(), Value::String("eve 2".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let mut no_updates = users(PolicyExpr::True);
+    for table in no_updates.values_mut() {
+        table.policies.update.using = Some(PolicyExpr::False);
+    }
+    let strict = block_on(server.publish_bundle(&no_updates)).unwrap();
+    drop(keep);
+
+    // Back online, on the deployment that serves the stricter bundle.
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(db.connect_upstream(client_side));
+    server
+        .accept_pinned_subscriber(server_side, alice, None, Some(strict))
+        .unwrap();
+    pump(&server, &[&db]);
+
+    let rejections = db.take_upstream_rejections();
+    assert_eq!(
+        rejections.iter().map(|r| r.seq).collect::<Vec<_>>(),
+        [written.mergeable_tx_id(), built_on.mergeable_tx_id()],
+        "both refusals reach the writer"
+    );
+    assert!(
+        rejections[0].error.is_authorization_denied(),
+        "{}",
+        rejections[0].error
+    );
+    // The write built on the refused one says why that one was refused.
+    let message = &rejections[1].error.message;
+    assert!(
+        message.starts_with(
+            "the write was built on a write the authority rejected (permission denied: "
+        ) && !message.contains("authorization_denied"),
+        "{message}"
+    );
+    assert_eq!(local(&db), [row], "the row is back to the accepted version");
+}
+
+/// The same through a relay that holds the writer's store, as a browser
+/// worker does for its tabs: the refusal reaches the tab that wrote.
+#[test]
+fn an_offline_write_relayed_for_a_tab_is_reported_to_the_tab() {
+    let (server, row) = server_with_row(
+        block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap(),
+    );
+    let open = block_on(server.publish_bundle(&users(PolicyExpr::True))).unwrap();
+    let alice = AuthorSubject::for_test_bytes([0x55; 16]);
+    let edge = client(5, alice);
+    edge.track_upstream_rejections();
+    let (edge_up, server_side) = duplex();
+    let _edge_upstream = block_on(edge.connect_upstream(edge_up));
+    let session = server
+        .accept_pinned_subscriber(server_side, alice, None, Some(open))
+        .unwrap();
+    let tab = client(1, alice);
+    tab.track_upstream_rejections();
+    let (tab_side, edge_side) = duplex();
+    let _tab_upstream = block_on(tab.connect_upstream(tab_side));
+    edge.accept_subscriber(edge_side, alice).unwrap();
+    let prepared = tab.prepare_query(&Query::from("users")).unwrap();
+    let _stream = block_on(tab.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let pump_all = |server: &Db| {
+        for _ in 0..6 {
+            block_on(tab.tick()).unwrap();
+            block_on(edge.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+            block_on(edge.tick()).unwrap();
+        }
+        block_on(tab.tick()).unwrap();
+    };
+    pump_all(&server);
+    assert_eq!(local(&tab), [row]);
+
+    // A stricter deployment comes out, which ends the worker's session on
+    // the old bundle; the tab's write reaches the worker meanwhile.
+    let mut no_updates = users(PolicyExpr::True);
+    for table in no_updates.values_mut() {
+        table.policies.update.using = Some(PolicyExpr::False);
+    }
+    let strict = block_on(server.publish_bundle(&no_updates)).unwrap();
+    server.disconnect_subscriber(session);
+    let written = block_on(tab.update(
+        "users",
+        row,
+        BTreeMap::from([("name".to_owned(), Value::String("eve".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let built_on = block_on(tab.update(
+        "users",
+        row,
+        BTreeMap::from([("name".to_owned(), Value::String("eve 2".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump_all(&server);
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(edge.connect_upstream(client_side));
+    server
+        .accept_pinned_subscriber(server_side, alice, None, Some(strict))
+        .unwrap();
+    pump_all(&server);
+
+    let at_tab = tab.take_upstream_rejections();
+    let at_edge = edge.take_upstream_rejections();
+    assert_eq!(
+        at_tab.iter().map(|r| r.seq).collect::<Vec<_>>(),
+        [written.mergeable_tx_id(), built_on.mergeable_tx_id()],
+        "the refusals reach the tab (edge saw {at_edge:?})"
+    );
+    assert!(
+        at_tab[0].error.is_authorization_denied(),
+        "{}",
+        at_tab[0].error
+    );
+    let message = &at_tab[1].error.message;
+    assert!(
+        message.starts_with(
+            "the write was built on a write the authority rejected (permission denied: "
+        ) && !message.contains("authorization_denied"),
+        "{message}"
+    );
+}

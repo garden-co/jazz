@@ -16,6 +16,7 @@ import {
   LOCAL_ONLY,
   offlineLink,
   syncStatus,
+  NO_UPLOADS,
   type LinkStatus,
   type SyncStatus,
 } from "../sync-status.js";
@@ -49,9 +50,13 @@ function getPolicyStrippedSchema(schema: WasmSchema): WasmSchema {
 
 /** Readiness required by an operation, independent of read or write tiers.
  * `runtime` admits local work, including browser worker initialization.
+ * `upload` also waits out an explicit disconnect, but never for the server
+ * link itself: a write's Global wait holds through an outage or a credential
+ * refusal something renews, and only the runtime's wait decides when it
+ * ends (#3923).
  * `server` also waits for the configured server transport to be available.
  */
-export type ConnectionRequirement = "runtime" | "server";
+export type ConnectionRequirement = "runtime" | "upload" | "server";
 
 export interface ConnectionManagerClientInput {
   schemaKey: string;
@@ -249,8 +254,13 @@ export abstract class ConnectionManager {
   syncStatus(): SyncStatus {
     const link = this.linkStatus();
     // Without a server, local commits are never uploaded, so none wait.
-    if (link.state === "local-only") return syncStatus(link, 0);
-    return syncStatus(link, this.client?.getRuntime().pendingUploadCount?.() ?? 0);
+    if (link.state === "local-only") return syncStatus(link);
+    const runtime = this.client?.getRuntime();
+    return syncStatus(
+      link,
+      runtime?.uploadStatus?.() ?? NO_UPLOADS,
+      runtime?.lastLinkFailure?.() ?? null,
+    );
   }
 
   /** The upstream connection as the app sees it, including explicit disconnects. */
@@ -368,6 +378,15 @@ export abstract class ConnectionManager {
   }
 
   abstract deleteClientStorage(): Promise<void>;
+
+  /**
+   * Whether this connection can still serve its Db: no storage reset took
+   * its client away. A Db whose sign-out failed before its teardown began
+   * keeps serving, and its session keeps it.
+   */
+  isUsable(): boolean {
+    return true;
+  }
 
   protected async shutdownClient(): Promise<void> {
     try {

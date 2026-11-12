@@ -652,7 +652,7 @@ fn a_client_on_the_old_schema_syncs_with_a_server_on_the_new_one() {
 /// `notes(owner, body)`, readable by its owner; `owner_column` names `owner`.
 fn notes(owner_column: &str) -> JazzSchema {
     let policies: TablePolicies =
-        read_and_allow_all_writes(session_eq(owner_column, &["user", "identity", "subject"]));
+        read_and_allow_all_writes(session_eq(owner_column, &["identity", "subject"]));
     compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -1179,7 +1179,7 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
     pump(&server, &[&client]);
     let mut rejected = None;
     while let Some(event) = stream.try_next_event() {
-        if let jazz::db::SubscriptionEvent::Rejected { reason } = event {
+        if let jazz::db::SubscriptionEvent::Rejected { reason, .. } = event {
             rejected = Some(reason);
         }
     }
@@ -1197,7 +1197,7 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
     pump(&server, &[&client]);
     let mut rejected = None;
     while let Some(event) = stream.try_next_event() {
-        if let jazz::db::SubscriptionEvent::Rejected { reason } = event {
+        if let jazz::db::SubscriptionEvent::Rejected { reason, .. } = event {
             rejected = Some(reason);
         }
     }
@@ -1386,7 +1386,7 @@ fn a_write_naming_columns_the_server_does_not_store_is_refused() {
     pump(&server, &[&lensless]);
     let mut rejected = None;
     while let Some(event) = stream.try_next_event() {
-        if let SubscriptionEvent::Rejected { reason } = event {
+        if let SubscriptionEvent::Rejected { reason, .. } = event {
             rejected = Some(reason);
         }
     }

@@ -492,7 +492,7 @@ async fn next_menu_snapshot(
             .unwrap_or_else(|| panic!("{what}: subscription stream closed"));
         let delta = match item {
             SubscriptionStreamItem::Delta(delta) => delta,
-            SubscriptionStreamItem::Rejected { reason } => {
+            SubscriptionStreamItem::Rejected { reason, .. } => {
                 panic!("{what}: subscription rejected: {reason:?}")
             }
         };

@@ -1,0 +1,9 @@
+## Sign-in
+
+Both clients sign in the same way: they ask your main backend at `/jazz` who is signed in, with
+your app's own session cookie, and your backend's `authenticate` decides who that user is. The
+client asks on start, when the page regains focus and when another tab signs in or out. After your
+own sign-in or sign-out, call `refresh()` on the session (from `useJazzSession()` in React, Vue and
+Solid, `getJazzSession()` in Svelte) so the change shows at once. To let people in before they sign
+up, start them as guests on a [device account](/docs/setup/auth/local-first) (`initial: "device"`),
+a local-first friendly account whose key stays on the device. The browser never holds a Jazz key or token. See [How Auth Works](/docs/setup/auth/backend).

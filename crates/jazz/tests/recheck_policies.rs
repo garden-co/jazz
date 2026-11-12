@@ -26,7 +26,7 @@ use jazz::tools::{
 
 use common::{compile_schema, exists, outer_eq, session_eq};
 
-const ME: [&str; 3] = ["user", "identity", "subject"];
+const ME: [&str; 2] = ["identity", "subject"];
 
 fn me(column: &str) -> PolicyExpr {
     session_eq(column, &ME)

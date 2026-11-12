@@ -14,7 +14,7 @@ import { redeemInviteLink } from "@/src/lib/server-calls";
 export default function InvitePage({ params }: { params: Promise<{ token: string }> }) {
   const { token } = use(params);
   const session = useSession();
-  const account = session?.user.account;
+  const account = session?.user;
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   // Redeem once per token, even when StrictMode runs the effect twice.

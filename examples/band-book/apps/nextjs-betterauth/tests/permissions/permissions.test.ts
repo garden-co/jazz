@@ -179,10 +179,8 @@ describe("page grants", () => {
     await guest.expectDenied((db) => db.update(app.pages, harbour.id, { parentId: null }));
     await guest.expectDenied((db) => db.delete(app.pages, harbour.id));
     // The parent is outside the grant, so the guest cannot even read it. An
-    // update needs read access to the existing row and is refused on the spot.
-    expect(() => guest.update(app.pages, songs.id, { title: "Hijacked" })).toThrow(
-      /read policy denied UPDATE/,
-    );
+    // update needs read access to the existing row, so the server refuses it.
+    await guest.expectDenied((db) => db.update(app.pages, songs.id, { title: "Hijacked" }));
     const songsNow = await owner.all(app.pages.where({ id: songs.id }), remote);
     expect(songsNow.map((row) => [row.title, row.parentId])).toEqual([["Songs", null]]);
     // Deleting inside the grant is fine: access comes from above.

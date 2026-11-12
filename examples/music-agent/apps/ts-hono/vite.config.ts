@@ -6,19 +6,10 @@ import { defineConfig } from "vite";
 // one origin.
 const backend = "http://127.0.0.1:3001";
 
-/** The browser and the server name the same Jazz app; production must set it. */
-function jazzAppId(mode: string) {
-  const configured = process.env.VITE_JAZZ_APP_ID;
-  if (configured) return configured;
-  if (mode === "production") throw new Error("VITE_JAZZ_APP_ID must be configured in production");
-  return "00000000-0000-0000-0000-00000000a6e7";
-}
-
-export default defineConfig(({ mode }) => ({
+export default defineConfig({
   // jazz-wasm is wasm-bindgen output, which Vite's dependency pre-bundler cannot handle.
   optimizeDeps: { exclude: ["jazz-wasm"] },
   resolve: { alias: { "@": fileURLToPath(new URL(".", import.meta.url)) } },
-  define: { "import.meta.env.VITE_JAZZ_APP_ID": JSON.stringify(jazzAppId(mode)) },
   worker: { format: "es" },
   server: {
     host: "127.0.0.1",
@@ -29,4 +20,4 @@ export default defineConfig(({ mode }) => ({
       "/jazz": { target: backend, ws: true },
     },
   },
-}));
+});

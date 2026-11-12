@@ -1,6 +1,6 @@
 ---
 title: WorkOS
-description: "Use WorkOS AuthKit on your backend: keep its sealed session in a cookie, and let Jazz's authenticate read it."
+description: "Learn how to sign users in with WorkOS AuthKit and connect its session to Jazz."
 ---
 
 [WorkOS](https://workos.com/) AuthKit hosts the sign-in pages. Run its server-side flow in the
@@ -9,8 +9,11 @@ backend that hosts Jazz: the callback stores a sealed session cookie, and `authe
 ```ts title="server.ts"
 import { WorkOS } from "@workos-inc/node";
 import { createJazz, remote } from "jazz-tools/backend";
+import { decodeJwt } from "jose";
 
-const workos = new WorkOS(process.env.WORKOS_API_KEY, { clientId: WORKOS_CLIENT_ID });
+const workos = new WorkOS(process.env.WORKOS_API_KEY, {
+  clientId: WORKOS_CLIENT_ID,
+});
 const cookiePassword = process.env.WORKOS_COOKIE_PASSWORD!;
 
 // GET /auth/callback: exchange the code and set the `wos_session` cookie.
@@ -20,11 +23,10 @@ const { sealedSession } = await workos.userManagement.authenticateWithCode({
   session: { sealSession: true, cookiePassword },
 });
 
-export const jazz = await createJazz({
-  appId: "my-app",
+export const jazz = createJazz({
   app,
   permissions,
-  store: remote({ url, secret: adminSecret }),
+  store: remote({ appId, url, secret }),
   authenticate: async (request) => {
     const sessionData = readCookie(request, "wos_session");
     if (!sessionData) return null;
@@ -32,7 +34,12 @@ export const jazz = await createJazz({
       .loadSealedSession({ sessionData, cookiePassword })
       .authenticate();
     return session.authenticated
-      ? { userId: session.user.id, claims: { role: session.role ?? "" } }
+      ? {
+          userId: session.user.id,
+          claims: { role: session.role ?? "" },
+          // Re-authenticated with the cookie the client holds by then.
+          expiresAt: decodeJwt(session.accessToken).exp!,
+        }
       : null;
   },
 });
@@ -41,6 +48,19 @@ export const jazz = await createJazz({
 WorkOS access tokens inside the session are short-lived. Refresh an expired session once
 (`session.refresh()`) and write the new cookie on your next HTTP response; the example shows one
 way to share the refreshed session with sync sockets, which can't set cookies.
+
+If your backend receives WorkOS access tokens instead (for example, from a native app sending
+`Authorization: Bearer`), use `fromJWT`. Their `role`, `permissions` and `org_id` claims reach your
+policies as `session.claims`:
+
+```ts
+authenticate: fromJWT({
+  jwksUrl: `https://api.workos.com/sso/jwks/${WORKOS_CLIENT_ID}`,
+  issuer: `https://api.workos.com/user_management/${WORKOS_CLIENT_ID}`,
+  // WorkOS access tokens carry no `aud`; the issuer already names your client id.
+  audience: false,
+}),
+```
 
 ## Client
 

@@ -33,14 +33,19 @@ export function backendJazzClient(): Promise<Jazz> {
     permissions,
     store: url
       ? remote({ url, appId: jazzAppId, secret: requiredSecret("JAZZ_ADMIN_SECRET") })
-      : sqlite({ path: process.env.JAZZ_DATA_PATH || ".jazz", appId: jazzAppId }),
+      : sqlite({ path: process.env.JAZZ_DATA_PATH || ".jazz" }),
     // Better Auth's session cookie decides who the user is.
     authenticate: async (request) => {
       const { auth } = await import("./auth");
       const session = await auth.api.getSession({ headers: request.headers });
-      return session ? { userId: session.user.id } : null;
+      return session
+        ? {
+            userId: session.user.id,
+            expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
+          }
+        : null;
     },
-  }));
+  }).ready());
   // A failed start must not poison all later requests.
   pending.catch(() => {
     if (globalThis.__musicAgentJazz === pending) globalThis.__musicAgentJazz = undefined;

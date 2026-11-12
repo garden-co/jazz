@@ -4,15 +4,30 @@ require "fileutils"
 package = JSON.parse(File.read(File.join(__dir__, "package.json")))
 folly_compiler_flags = '-DFOLLY_NO_CONFIG -DFOLLY_MOBILE=1 -DFOLLY_USE_LIBCPP=1 -Wno-comma -Wno-shorten-64-to-32'
 
-# Expo records this in Podfile.properties.json rather than setting
-# RCT_NEW_ARCH_ENABLED=1. Bare React Native projects conventionally set the
-# environment variable. Accept either source of the same configuration.
-podfile_properties_path = File.join(Pod::Config.instance.installation_root, "Podfile.properties.json")
-podfile_properties = JSON.parse(File.read(podfile_properties_path)) if File.exist?(podfile_properties_path)
-new_arch_enabled = ENV['RCT_NEW_ARCH_ENABLED'] == '1' || podfile_properties&.fetch('newArchEnabled', nil) == 'true'
+# Ask React Native itself whether this pod install uses the New Architecture.
+# The Podfile requires react_native_pods.rb before autolinking evaluates this
+# podspec, so NewArchitectureHelper is already loaded. It is the same answer
+# use_react_native! acts on: always true from React Native 0.82 (the legacy
+# architecture no longer exists, and Expo SDK 55+ stops writing newArchEnabled
+# to Podfile.properties.json), and RCT_NEW_ARCH_ENABLED != "0" on 0.81 (which
+# Expo SDK 54's Podfile sets from Podfile.properties.json). Do not read
+# RCT_NEW_ARCH_ENABLED directly when the helper exists: use_react_native! only
+# sets it after autolinking has already evaluated this file.
+# Outside a React Native Podfile (pod spec lint, ad-hoc evaluation) fall back to
+# the explicit signals a host can give.
+new_arch_enabled =
+  if defined?(NewArchitectureHelper) && NewArchitectureHelper.respond_to?(:new_arch_enabled)
+    NewArchitectureHelper.new_arch_enabled == true
+  elsif ENV['RCT_NEW_ARCH_ENABLED'] == '1'
+    true
+  else
+    podfile_properties_path = File.join(Pod::Config.instance.installation_root, "Podfile.properties.json")
+    File.exist?(podfile_properties_path) &&
+      JSON.parse(File.read(podfile_properties_path)).fetch('newArchEnabled', nil) == 'true'
+  end
 
 if !new_arch_enabled then
-  raise Pod::Informative, "jazz-rn requires the React Native New Architecture. Enable it before pod install (Expo: add the jazz-rn config plugin, then run expo prebuild)."
+  raise Pod::Informative, "jazz-rn requires the React Native New Architecture, and this pod install uses the legacy architecture. Expo SDK 54: remove `newArchEnabled: false` from your app config and run expo prebuild again. Bare React Native 0.81: do not set RCT_NEW_ARCH_ENABLED=0."
 end
 
 Pod::Spec.new do |s|

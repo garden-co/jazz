@@ -30,10 +30,10 @@ const inspectorSaveApp = s.defineApp(
   { migrations: "none" },
 );
 const inspectorSavePermissions = s.definePermissions(inspectorSaveApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user.account });
-  policy.todos.allowInsert.where({ owner_id: session.user.account });
-  policy.todos.allowUpdate.where({ owner_id: session.user.account });
-  policy.todos.allowDelete.where({ owner_id: session.user.account });
+  policy.todos.allowRead.where({ owner_id: session.user });
+  policy.todos.allowInsert.where({ owner_id: session.user });
+  policy.todos.allowUpdate.where({ owner_id: session.user });
+  policy.todos.allowDelete.where({ owner_id: session.user });
 });
 
 // Keep the BYTEA regression independent of unrelated nullable JSON semantics
@@ -52,8 +52,8 @@ const inspectorByteaApp = s.defineApp(
   { migrations: "none" },
 );
 const inspectorByteaPermissions = s.definePermissions(inspectorByteaApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user.account });
-  policy.todos.allowInsert.where({ owner_id: session.user.account });
+  policy.todos.allowRead.where({ owner_id: session.user });
+  policy.todos.allowInsert.where({ owner_id: session.user });
 });
 
 let currentSchema = inspectorSaveApp.wasmSchema;

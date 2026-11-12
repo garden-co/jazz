@@ -1,29 +1,33 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { JazzProvider } from "jazz-tools/vue";
-import type { DbConfig } from "jazz-tools";
+import { JazzProvider, type JazzClientConfig } from "jazz-tools/vue";
+import type { AppConfig } from "./app-config.js";
 import { Toaster } from "vue-sonner";
 import TodoList from "./TodoList.vue";
 
-const props = defineProps<{ config?: Partial<DbConfig> }>();
+const props = defineProps<{ config?: AppConfig }>();
 // #region context-setup-vue
 // The app's backend serves Jazz on this origin (`/jazz`), so the client needs no URL.
 const config = computed(() => ({
   env: "dev" as const,
   ...props.config,
 }));
-// Explicit account overrides retain the caller-owned account path used by tests;
-// otherwise the app starts with a local-first guest account.
-const providerProps = computed(() =>
-  config.value.account
-    ? { config: config.value as DbConfig }
-    : { ...config.value, initial: "local-first" as const },
-);
+// The app starts as a device account (a guest whose key lives on this device).
+// Tests point the app at a sync server by its app id; a browser client takes
+// that as its `scope` (it names no app of its own).
+const sessionConfig = computed((): JazzClientConfig => {
+  const { appId, ...rest } = config.value;
+  return {
+    ...rest,
+    ...(appId === undefined ? {} : { scope: appId }),
+    initial: "device",
+  };
+});
 // #endregion context-setup-vue
 </script>
 
 <template>
-  <JazzProvider v-bind="providerProps" :key="JSON.stringify([config.appId, config.serverUrl])">
+  <JazzProvider :config="sessionConfig" :key="JSON.stringify([config.appId, config.serverUrl])">
     <h1>Todos</h1>
     <TodoList />
     <Toaster />

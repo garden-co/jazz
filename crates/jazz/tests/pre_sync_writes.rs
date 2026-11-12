@@ -190,7 +190,7 @@ fn some(value: &str) -> Option<Value> {
 fn rejection(stream: &mut jazz::db::SubscriptionStream) -> Option<String> {
     let mut rejected = None;
     while let Some(event) = stream.try_next_event() {
-        if let SubscriptionEvent::Rejected { reason } = event {
+        if let SubscriptionEvent::Rejected { reason, .. } = event {
             rejected.get_or_insert(reason);
         }
     }

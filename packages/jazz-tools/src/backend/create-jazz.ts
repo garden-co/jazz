@@ -1,9 +1,10 @@
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { verifyChallenge } from "../local-first-auth/server.js";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
+import type { Http2SecureServer, Http2Server } from "node:http2";
 import type { Duplex } from "node:stream";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
 import { registerInProcessTransport } from "../runtime/in-process-transport.js";
 import { accountAppId, localFirstAccountId } from "../accounts/local-first.js";
@@ -11,7 +12,10 @@ import { LOCAL_FIRST_JWT_ISSUER, parseJwtPayload } from "../runtime/client-sessi
 import { verifyLocalFirstToken } from "../runtime/local-first-token.js";
 import { endpointScope } from "../runtime/client-scope.js";
 import { PostcardWriter } from "../runtime/native-runtime/native-codec.js";
-import { encodeWebSocketFrameBatch } from "../runtime/native-runtime/websocket.js";
+import {
+  encodeWebSocketFrameBatch,
+  REAUTHENTICATE_WIRE_MESSAGE_PREFIX,
+} from "../runtime/native-runtime/websocket.js";
 import type {
   BrowserWebSocket,
   WebSocketConstructor,
@@ -37,11 +41,11 @@ import { DeploymentError, type PublishedTableLens } from "../dev/catalogue-api.j
 import type { WasmSchema } from "../drivers/types.js";
 import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
-import type { JazzSession } from "../session/state.js";
+import type { SessionCore } from "../session/state.js";
 import {
   backendDbAttributedTo,
   backendDbForSession,
-  createJazzSession,
+  openJazzSession,
   type JazzClient,
 } from "./create-jazz-session.js";
 import type { BackendSchemaInput } from "./create-jazz-context.js";
@@ -50,16 +54,30 @@ import {
   backendClientVerifier,
   type BackendClientTrust,
 } from "./backend-clients.js";
+import { BACKEND_USER_ISSUER } from "./backend-issuer.js";
+import { earlyDb, type EarlyDb } from "./early-db.js";
 import {
+  defaultCoreName,
   onVercelDeployment,
   onVercelHost,
   openVercelCore,
+  refuseVercelAppId,
   type VercelStoreOptions,
 } from "./vercel-store.js";
 
 export type { VercelStoreOptions } from "./vercel-store.js";
 
 import { files, type BlobStore } from "./blobs.js";
+import {
+  createInspector,
+  inspectorSettings,
+  newTokenSecret,
+  type InspectHook,
+  type InspectorOptions,
+} from "./inspect.js";
+import { createInspectorUi } from "./inspect-ui.js";
+import type { InspectSessionInfo } from "../inspect/protocol.js";
+export type { InspectEvent, InspectGrant, InspectHook, InspectorOptions } from "./inspect.js";
 export {
   files,
   s3,
@@ -68,16 +86,27 @@ export {
   type S3BlobStore,
   type VercelBlobStore,
 } from "./blobs.js";
+import {
+  AuthenticateExpiresAtError,
+  reauthenticateAt,
+  sessionDeadline,
+  startTimer,
+  withCheckedExpiry,
+} from "./session-expiry.js";
+import { NoJazzAccountError } from "./no-account-error.js";
+import { RequestAuthenticationError } from "./request-auth.js";
+import { optionalPeerImportError } from "./optional-peer.js";
+import { closingBeforeDeadline } from "./socket-deadline.js";
+import { vercelUpgradesSockets } from "./vercel-sockets.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
   | {
       readonly kind: "sqlite";
       readonly path: string;
-      readonly appId?: string;
       readonly blobs: BlobStore;
     }
-  | { readonly kind: "memory"; readonly appId?: string }
+  | { readonly kind: "memory" }
   | {
       readonly kind: "remote";
       readonly url: string;
@@ -85,25 +114,35 @@ export type JazzStore =
       readonly appId: string;
       /** This backend's credential for the core, asked for each request and socket. */
       readonly backendCredential: BackendCredential;
+      /** The app's secret, when `remote()` was given one: agent tokens are signed with a key derived from it. */
+      readonly secret?: string;
     }
   | {
       readonly kind: "vercel";
       readonly options: VercelStoreOptions;
-      /** What runs outside a Vercel deployment, e.g. under `next dev`. */
+      /**
+       * What runs outside a Vercel deployment, e.g. under `next dev`
+       * (default: `sqlite({ path: ".jazz/local" })`).
+       */
       readonly local: Extract<JazzStore, { kind: "sqlite" | "memory" }>;
     };
 
 /**
  * A SQLite core in this process, kept in the directory `path`. It generates
- * its app id on first start and keeps it beside its data; set `appId` only
- * to keep the id of an existing app. Large values' bytes go to `blobs`,
- * by default `files()` in `<path>/blobs`.
+ * its app id on first start and keeps it beside its data, in `<path>/app-id`
+ * (`jazz-alpha59-alpha60-import` writes an alpha.59 app's id there). Large
+ * values' bytes go to `blobs`, by default `files()` in `<path>/blobs`.
+ *
+ * Only one process can open `path` at a time (it holds `<path>/jazz.lock`
+ * while the core is open); a second one fails with "already open". It
+ * refuses to start on serverless hosts with no lasting disk (Vercel, AWS
+ * Lambda, Netlify): use `vercel()` or `remote()` there.
  */
 export function sqlite(options: {
   path: string;
-  appId?: string;
   blobs?: BlobStore;
 }): Extract<JazzStore, { kind: "sqlite" }> {
+  refuseStoreAppId("sqlite", options);
   const blobs = options.blobs ?? files();
   if (
     blobs !== "sqlite" &&
@@ -111,17 +150,25 @@ export function sqlite(options: {
   ) {
     throw new Error('sqlite(): blobs must be files(), s3() or "sqlite"');
   }
-  return {
-    kind: "sqlite",
-    path: options.path,
-    blobs,
-    ...(options.appId === undefined ? {} : { appId: options.appId }),
-  };
+  return { kind: "sqlite", path: options.path, blobs };
 }
 
-/** An in-memory core in this process: for tests and throwaway previews. */
-export function memory(options: { appId?: string } = {}): Extract<JazzStore, { kind: "memory" }> {
-  return { kind: "memory", ...(options.appId === undefined ? {} : { appId: options.appId }) };
+/**
+ * An in-memory core in this process: for tests and throwaway previews. Each
+ * one is its own store, with a new app id.
+ */
+export function memory(options?: { appId?: never }): Extract<JazzStore, { kind: "memory" }> {
+  refuseStoreAppId("memory", options);
+  return { kind: "memory" };
+}
+
+/** Stores keep their own app id; one passed from JavaScript is refused, not ignored. */
+function refuseStoreAppId(store: string, options: unknown): void {
+  if (typeof options === "object" && options !== null && "appId" in options) {
+    throw new Error(
+      `${store}(): appId is not an option: the store keeps its own app id. To keep an alpha.59 app's id, import its data with \`jazz-alpha59-alpha60-import import --app-id\`.`,
+    );
+  }
 }
 
 /**
@@ -149,10 +196,11 @@ export function remote(
     throw new Error("remote(): appId must name the app the core serves (it is empty)");
   }
   let backendCredential: BackendCredential;
+  let secret: string | undefined;
   if ("backendCredential" in options) {
     backendCredential = options.backendCredential;
   } else {
-    const secret = options.secret;
+    secret = options.secret;
     if (secret === undefined && "adminSecret" in options) {
       throw new Error(
         "remote(): `adminSecret` and `backendSecret` were replaced by one `secret`, the app's admin secret",
@@ -161,14 +209,26 @@ export function remote(
     if (typeof secret !== "string" || !secret.trim()) {
       throw new Error("remote(): secret must be the app's admin secret (it is empty)");
     }
-    backendCredential = () => secret;
+    const given = secret;
+    backendCredential = () => given;
   }
-  return { kind: "remote", url: options.url.replace(/\/+$/, ""), appId, backendCredential };
+  return {
+    kind: "remote",
+    url: options.url.replace(/\/+$/, ""),
+    appId,
+    backendCredential,
+    ...(secret === undefined ? {} : { secret }),
+  };
 }
 
 /**
- * A core in a persistent Vercel Sandbox in your own Vercel project, with its
- * data on a Drive: one for production and one per Git branch for previews.
+ * The store for apps deployed on Vercel. Use it in dev too: outside a
+ * production or preview deployment (`next dev`, `vercel dev`, tests) it runs
+ * `local`, by default `sqlite({ path: ".jazz/local" })`.
+ *
+ * Deployed, it runs a core in a persistent Vercel Sandbox in your own Vercel
+ * project, with its data on a Drive: one for production and one per Git
+ * branch for previews.
  * It is created on first use, wakes when a request needs it (about a second)
  * and stops after `idleMs` without requests or sockets. The function's Vercel
  * OIDC token is its only credential, so there are no secrets and no env vars:
@@ -177,21 +237,23 @@ export function remote(
  * environment refuses to start or retarget it. All previews share one
  * workload, so preview branches' cores are kept apart, not secured from each
  * other. Anyone with Sandbox access to the project controls its cores. The
- * token comes with each request (it can't be read at module scope), so call
- * `createJazz` lazily from a handler; work between requests uses the freshest
- * one seen, and open sockets outlive its expiry. A team or project rename (or
+ * token comes with each request (it can't be read at module scope), so the
+ * core opens on the first request, not when `createJazz` is called; work
+ * between requests uses the freshest one seen, and open sockets outlive its
+ * expiry. A team or project rename (or
  * a change of OIDC issuer mode) changes the workload: delete `/data/trust` in
  * the Sandbox to re-pin the core. Install `@vercel/sandbox` and
  * `@vercel/functions` next to `jazz-tools`. A deployment of a newer jazz-tools
  * restarts the core on its version, and an older deployment never moves it
- * back. Outside a production or preview deployment (`next dev`, `vercel dev`,
- * tests) it runs `local` instead: by default a SQLite core in `.jazz/local`.
- * Branch cores are not deleted when a branch merges yet: each keeps its
+ * back. Branch cores are not deleted when a branch merges yet: each keeps its
  * Sandbox and a Drive of up to `maxDriveBytes` until you remove them.
  */
 export function vercel(
   options: VercelStoreOptions & { local?: Extract<JazzStore, { kind: "sqlite" | "memory" }> } = {},
 ): JazzStore {
+  // Refused here, not on the first deployed request: in dev the local
+  // store runs and would never read it.
+  refuseVercelAppId(options);
   const { local, ...rest } = options;
   return { kind: "vercel", options: rest, local: local ?? sqlite({ path: ".jazz/local" }) };
 }
@@ -217,12 +279,126 @@ function blobOptions(blobs: BlobStore): {
   return { blobs: "files", ...(blobs.dir === undefined ? {} : { blobsDir: blobs.dir }) };
 }
 
+declare const localFirstGuestBrand: unique symbol;
+
+/**
+ * `authenticate`'s answer for a request from a local-first guest: an account
+ * a browser made on its own, before (or without) signing in. Return
+ * {@link acceptDeviceAccounts} for the requests you let guests make; any other
+ * answer refuses a guest.
+ */
+export interface LocalFirstGuest {
+  readonly [localFirstGuestBrand]: true;
+}
+
+/**
+ * The marker's brand, registered globally like `createJazz`'s store registry:
+ * a bundler may load this module more than once (Next dev evaluates it per
+ * route), and a shared Jazz must still recognise a marker made by another copy.
+ */
+const LOCAL_FIRST_GUEST_BRAND = Symbol.for("jazz-tools.acceptDeviceAccounts.guest");
+
+const LOCAL_FIRST_GUEST = Object.freeze({
+  [LOCAL_FIRST_GUEST_BRAND]: true,
+  kind: "jazz:local-first-guest",
+}) as unknown as LocalFirstGuest;
+
+/** Whether `answer` is {@link acceptDeviceAccounts}'s marker, from any copy of this module. */
+function isLocalFirstGuest(answer: unknown): answer is LocalFirstGuest {
+  return (
+    typeof answer === "object" &&
+    answer !== null &&
+    (answer as Record<symbol, unknown>)[LOCAL_FIRST_GUEST_BRAND] === true
+  );
+}
+
+/**
+ * `authenticate`'s answer, checked: a user must have a string `userId`. Any
+ * other answer is a bug in the app's `authenticate`, said so here rather than
+ * as a failure from the core about a missing identity.
+ */
+function checkedUser(answer: unknown): JazzUser {
+  const userId = (answer as { userId?: unknown } | null)?.userId;
+  if (typeof answer === "object" && answer !== null && typeof userId === "string" && userId !== "")
+    return answer as JazzUser;
+  throw new TypeError(
+    `createJazz: authenticate must return { userId: string, expiresAt: number }, acceptDeviceAccounts(request) or null; it returned ${describeAnswer(answer)}`,
+  );
+}
+
+function describeAnswer(answer: unknown): string {
+  if (typeof answer !== "object" || answer === null) return String(answer);
+  const keys = Reflect.ownKeys(answer).map(String);
+  const userId = (answer as { userId?: unknown }).userId;
+  const detail = "userId" in answer ? `, userId: ${JSON.stringify(userId) ?? String(userId)}` : "";
+  return `an object with keys [${keys.join(", ")}]${detail}`;
+}
+
+/** `request` without the credentials a browser sends with it (its cookies, an `Authorization` header). */
+function withoutCredentials(request: Request): Request {
+  const headers = new Headers(request.headers);
+  headers.delete("cookie");
+  headers.delete("authorization");
+  return new Request(request.url, { method: request.method, headers });
+}
+
+/**
+ * Let this request through as a device account, when it comes from one: an
+ * account whose key lives on the user's device, with no user in your auth.
+ * It's how your app lets people in as guests, and a local-first friendly way
+ * to sign in at all. Device accounts are refused unless `authenticate`
+ * returns this, since only your permissions stand between them and your
+ * data.
+ *
+ * ```ts
+ * authenticate: async (request) => {
+ *   const session = await auth.api.getSession({ headers: request.headers });
+ *   if (!session) return acceptDeviceAccounts(request);
+ *   return {
+ *     userId: session.user.id,
+ *     expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
+ *   };
+ * },
+ * ```
+ *
+ * An app with no sign-in of its own, where every browser has a device
+ * account, passes it as is: `authenticate: acceptDeviceAccounts`.
+ *
+ * For a request that is not a device account's, it means the same as `null`:
+ * no one is signed in.
+ *
+ * A device account's request may also carry a user's cookie: someone signed
+ * in (or up) on that browser, and the device account still uploads its
+ * writes before it links to them. Jazz then asks `authenticate` about the
+ * request without its cookies and `Authorization` header, so the device
+ * account is let in as it would be on its own.
+ */
+export function acceptDeviceAccounts(_request: Request): LocalFirstGuest {
+  return LOCAL_FIRST_GUEST;
+}
+
 /** Who the request's user is, as the app's own auth decides. */
 export interface JazzUser {
   /** Stable user id in your auth system. Becomes the identity's `sub`. */
   userId: string;
   /** Extra claims your permissions can read through `session.claims`. */
   claims?: Record<string, unknown>;
+}
+
+/**
+ * The user `authenticate` names, and until when that answer holds.
+ */
+export interface AuthenticatedUser extends JazzUser {
+  /**
+   * When this answer stops holding, as Unix time in seconds: your app
+   * session's expiry, or its token's `exp`. Required. Shortly before then
+   * an open sync session asks its client to connect again, and
+   * `authenticate` decides again on that new request, with the client's
+   * current cookies or token. Return the expiry of the session the user is
+   * signed in with (the one a sign-out ends), not of a short-lived access
+   * token your auth refreshes on its own.
+   */
+  expiresAt: number;
 }
 
 export interface CreateJazzOptions {
@@ -232,9 +408,42 @@ export interface CreateJazzOptions {
   /**
    * Decide who sent `request`, with your app's own session (a cookie, a
    * header). Return null for a signed-out request. Jazz calls it when a
-   * browser signs in or opens a sync session, and in `forRequest`.
+   * browser signs in or opens a sync session, and in `forReqUser`.
+   *
+   * Return when the answer stops holding as `expiresAt` (Unix seconds),
+   * which is required: an open sync session asks its client to connect again
+   * shortly before then, and Jazz calls `authenticate` again on that new
+   * request, with the client's current cookies. Jazz only ever calls it
+   * while handling a request, so your framework's request helpers work.
+   *
+   * Only read and verify the session here; never refresh it. Keep auth
+   * middleware that refreshes sessions off Jazz's routes (`basePath`): a
+   * browser with several windows reaching it at once can race a single-use
+   * refresh token and lose the session.
+   *
+   * ```ts
+   * authenticate: async (request) => {
+   *   const session = await auth.api.getSession({ headers: request.headers });
+   *   if (!session) return null;
+   *   return {
+   *     userId: session.user.id,
+   *     expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
+   *   };
+   * },
+   * ```
+   *
+   * Local-first guests are refused unless it returns
+   * `acceptDeviceAccounts(request)` for them; an app with no sign-in passes
+   * `authenticate: acceptDeviceAccounts`. Without `authenticate`, only
+   * backend code reaches the data.
    */
-  authenticate?: (request: Request) => JazzUser | null | Promise<JazzUser | null>;
+  authenticate?: (
+    request: Request,
+  ) =>
+    | AuthenticatedUser
+    | LocalFirstGuest
+    | null
+    | Promise<AuthenticatedUser | LocalFirstGuest | null>;
   /** The path Jazz is mounted under. Defaults to `/jazz`. */
   basePath?: string;
   /**
@@ -250,20 +459,25 @@ export interface CreateJazzOptions {
    */
   publicUrl?: string | string[];
   /**
-   * How long a browser's sync session lasts before `authenticate` is asked
-   * again (the client reconnects on its own). Defaults to one hour.
+   * The longest a sync session lasts before its client connects again and
+   * `authenticate` decides anew on that new request. Defaults to one hour.
+   * A signed-in user's session ends sooner if the `expiresAt` `authenticate`
+   * returned comes first; a local-first guest is let in anew each time. So
+   * a sign-out elsewhere, a ban or a changed role reaches an open session
+   * within this long, or at once with `jazz.revokeUser(userId)`.
    */
   sessionTtlSeconds?: number;
   /**
-   * How often `authenticate` is asked again for each open sync session of a
-   * signed-in user. When it no longer names that user (they signed out, in
-   * another tab or anywhere else, or their session expired or was revoked),
-   * the session ends as signed out. Defaults to 60 seconds; 0 turns it off.
+   * Removed. Sessions no longer re-check `authenticate` from a timer: each
+   * lasts until the `expiresAt` `authenticate` returns, then its client
+   * connects again and `authenticate` decides on that new request. To end a
+   * user's open sessions now (they signed out elsewhere, or were banned),
+   * call `jazz.revokeUser(userId)`.
    */
-  recheckSeconds?: number;
+  recheckSeconds?: never;
   /**
-   * What happens to a local-first guest's key once the guest links to a
-   * signed-in user (`linkWithBackend()`):
+   * What happens to a device account's key once it links to a signed-in
+   * user (`linkDeviceAccount()`):
    * - `"keep"` (the default): the key stays an identity of the account, so
    *   the device can still sign in as the guest (e.g. offline) alongside
    *   the linked user.
@@ -298,6 +512,43 @@ export interface CreateJazzOptions {
    * `authenticate`.
    */
   backendClients?: BackendClientTrust[];
+  /**
+   * Confirms that this deployment may switch tables it declares
+   * `.history("latest")` from full history: their past versions are dropped
+   * at each row's next write, for good. Without it, starting a backend whose
+   * schema makes that switch fails, naming the tables. Remove it again once
+   * the deployment is out.
+   */
+  allowDroppingHistory?: boolean;
+  /**
+   * Who may use the Inspector and agent debug access at `<basePath>/inspect`:
+   * return `{ by, write? }` for a request that may, null for one that may
+   * not.
+   *
+   * **This grants unlimited access.** Whoever it lets in reads every row of
+   * every table, with your permissions not checked, and with `write: true`
+   * changes any of them. They can also let agents in, with tokens that last
+   * up to a day. Grant it only to people who may see all of your users'
+   * data, and where you can, gate it with infrastructure that is separate
+   * from your users' sign-in (Vercel deployment protection, Cloudflare
+   * Access, a VPN or SSO proxy) rather than a flag on a user account, which
+   * one compromised account or one bug in your auth would hand out.
+   *
+   * Without it, only local development is let in: a request whose socket
+   * comes from this machine while NODE_ENV is "development". Only hosts that
+   * hand Jazz their Node request (`attach()`, `nodeHandler`) know the socket's
+   * address; on others (Next.js route handlers, Hono, Bun, Deno) the default
+   * is off, since a Host header proves nothing. A browser is let in only from
+   * a page on this machine (by its Origin). A dev proxy that forwards other
+   * machines' requests without `X-Forwarded-For` (Vite's `server.proxy`
+   * without `xfwd`, on a dev server started with `--host`) makes non-browser
+   * clients on those machines look local: pass an `inspect` hook when your
+   * dev server is reachable from other machines. Pass `() => null` to turn
+   * even the default off.
+   */
+  inspect?: InspectHook;
+  /** Redaction, auditing and agent token settings for {@link inspect}. */
+  inspector?: InspectorOptions;
 }
 
 /** A WebSocket as the `ws` package (and Vercel's `upgradeWebSocket`) hands it over. */
@@ -307,38 +558,94 @@ export interface WsLikeSocket {
   on(event: "message", listener: (data: unknown, isBinary?: boolean) => void): unknown;
   on(event: "close", listener: () => void): unknown;
   on(event: "error", listener: (error: unknown) => void): unknown;
+  /** Stop reading from the client until `resume` (the `ws` package has both). */
+  pause?(): void;
+  resume?(): void;
 }
 
 export interface Jazz {
+  /**
+   * The app id the store runs as. Known once the store has opened (on first
+   * use, or `await jazz.ready()`); reading it before throws.
+   */
   readonly appId: string;
   readonly basePath: string;
+  /**
+   * Open the store now, rather than on first use, and apply the app, schema
+   * and permissions: to fail at startup instead of on the first request, or
+   * to read `appId`. Resolves to this Jazz.
+   */
+  ready(): Promise<Jazz>;
   /** Answer one request under `basePath` (sync, sign-in, the HTTP stream). */
   handle(request: Request): Promise<Response>;
-  /** Route handlers for a Next.js catch-all route (`app/jazz/[...path]/route.ts`). */
+  /**
+   * Route handlers for a Next.js catch-all route:
+   *
+   * ```ts
+   * // app/jazz/[...path]/route.ts
+   * import { jazz } from "@/lib/jazz.server"; // export const jazz = createJazz({ ... })
+   *
+   * export const { GET, POST, DELETE } = jazz.next();
+   * ```
+   */
   next(): {
     GET(request: Request): Promise<Response>;
     POST(request: Request): Promise<Response>;
     DELETE(request: Request): Promise<Response>;
   };
   /**
-   * Accept sync sockets on a Node HTTP server (needs the `ws` package).
-   * Plain requests still go through `nodeHandler` or `handle`.
+   * Accept sync sockets on a Node HTTP server (needs the `ws` package),
+   * such as the one Hono's `serve()` returns. It doesn't open the store:
+   * that happens on the first socket or request, and while the store can't
+   * open (a remote core that is down) sockets and requests get a 503 the
+   * clients retry. Plain requests still go through `nodeHandler` or `handle`.
    */
-  attach(server: Server): Promise<void>;
+  attach(server: Server | Http2Server | Http2SecureServer): Promise<void>;
   /** Node `(req, res)` handler for requests under `basePath` (Express, Fastify's raw mode). */
   nodeHandler(req: IncomingMessage, res: ServerResponse, next?: () => void): void;
   /** Bridge an upgraded socket (the `ws` package's shape) to a sync session. */
   acceptSocket(request: Request, socket: WsLikeSocket): void;
-  /** The backend's own database, with backend permissions. */
-  readonly db: Db;
-  /** The database as the request's user, judged by your permissions. */
-  forRequest(request: Request): Promise<Db>;
   /**
-   * The Jazz account of the request's signed-in user (created on first use),
-   * or null when `authenticate` names no user. For API routes that act on
+   * The backend's own database, with backend permissions. It works before
+   * the store opens: writes return at once and apply as it opens, and reads
+   * wait for it.
+   */
+  readonly db: Db;
+  /**
+   * The database as the request's user, judged by your permissions. Throws
+   * a {@link NoJazzAccountError} (`code: "no_account"`) for a user who has no
+   * account yet (see {@link createAccountFor}).
+   */
+  forReqUser(request: Request): Promise<Db>;
+  /**
+   * The Jazz account of the request's signed-in user, or null when
+   * `authenticate` names no user or the user has no account yet. It never
+   * creates one (see {@link createAccountFor}). For API routes that act on
    * the user's data with the backend's own `db`.
    */
   accountFor(request: Request): Promise<string | null>;
+  /**
+   * Create the Jazz account of `userId` (the id your `authenticate` returns
+   * for them), or return the one they have. Jazz never creates accounts on
+   * its own on the backend: a user gets one when they sign in from a client,
+   * when a device account links to them (`linkDeviceAccount()`, so its data
+   * becomes theirs), or here. Call it for a user who never
+   * opens a client (a webhook, an import, an API-only user) or to seed data
+   * before their first visit. A user with an account can no longer link a
+   * guest, so don't call it in a sign-up flow whose browser may hold one.
+   * Returns the account id.
+   */
+  createAccountFor(userId: string): Promise<string>;
+  /**
+   * End `userId`'s open sync sessions on this backend instance now, as
+   * refused: each client asks your backend who is signed in, and signs out
+   * if `authenticate` no longer names that user (or reconnects if it still
+   * does). Call it from your sign-out handler or your auth provider's
+   * session-revoked webhook, so a sign-out reaches open sessions before
+   * their `expiresAt`. Sessions served by other instances end at their
+   * `expiresAt`. Returns how many sessions it ended.
+   */
+  revokeUser(userId: string): Promise<number>;
   /**
    * The backend's own database (backend permissions), with every write
    * stamped as the request's signed-in user: for server actions that do what
@@ -347,6 +654,9 @@ export interface Jazz {
    * **Your permissions are not checked.** It writes with the backend's full
    * authority; only the attribution is the user's. Check yourself that the
    * user may do what the action does, and keep it in server-only code.
+   *
+   * Throws a {@link NoJazzAccountError} (`code: "no_account"`) for a user
+   * who has no account yet (see {@link createAccountFor}).
    */
   withAttribution(request: Request): Promise<Db>;
   /**
@@ -368,6 +678,12 @@ const DEFAULT_BASE_PATH = "/jazz";
 const PRELUDE_DEADLINE_MS = 30_000;
 /** On createJazz's 426 for a socket path: this endpoint serves the HTTP stream. */
 const STREAM_AVAILABLE_HEADER = "x-jazz-stream";
+/** The answer for a socket path where this host can't upgrade sockets. */
+const useHttpStream = () =>
+  new Response("WebSocket upgrade not available here; use the HTTP stream", {
+    status: 426,
+    headers: { [STREAM_AVAILABLE_HEADER]: "1" },
+  });
 /** The stream session's key, on each send and close (see `openStream`). */
 const STREAM_KEY_HEADER = "x-jazz-stream-key";
 const PUBLIC_APP_ROUTES = /^\/apps\/[^/]+\/(schemas|schema\/[^/]+)$/;
@@ -393,6 +709,12 @@ const STAND_IN_SECRET = "stated-by-backend-credential";
 // never its cookies or its app session.
 const REMOTE_FORWARDED_HEADERS = ["accept", "content-type", "if-none-match"];
 const MAX_STREAM_MESSAGE_BYTES = 2 * 1024 * 1024;
+/**
+ * Bytes a session's client may have sent that the core has not taken yet.
+ * A transport that waits for the core stays well under it; past it, the
+ * client ignored flow control and its session ends.
+ */
+const MAX_WAITING_SESSION_BYTES = 32 * 1024 * 1024;
 
 interface CoreReply {
   status: number;
@@ -404,6 +726,13 @@ interface CoreReply {
 export interface CoreSocket {
   /** False once the session ended. */
   send(data: Uint8Array): boolean;
+  /**
+   * `send`, resolving once the session has read enough of the messages
+   * before it, so a host that awaits it holds a fast client back. A core
+   * without it takes `send`'s word. Don't call `send` while a
+   * `sendWithRoom` is pending: it can overtake the waiting message.
+   */
+  sendWithRoom?(data: Uint8Array): Promise<boolean>;
   close(): void;
 }
 
@@ -445,6 +774,12 @@ interface Core {
   ): CoreSocket;
   close(): Promise<void>;
 }
+
+/** What `inspector` is when createJazz isn't given one: one object, so the Inspector reads it once. */
+const NO_INSPECTOR_OPTIONS: InspectorOptions = Object.freeze({});
+
+/** The peer address of requests that came through a Node handler, where Jazz can know it. */
+const remoteAddresses = new WeakMap<Request, string>();
 
 function headerPairs(headers: Headers): string[][] {
   const pairs: string[][] = [];
@@ -516,7 +851,32 @@ function inProcessWebSocket(
 
     send(data: Uint8Array | string): void {
       if (this.readyState !== 1 || !this.session) throw new Error("socket is not open");
-      this.session.send(toBytes(data));
+      // Like a socket's own buffer: messages wait here, in order, until the
+      // core has room, so this client's pace is the core's.
+      this.outbox.push(toBytes(data));
+      void this.drain();
+    }
+
+    private readonly outbox: Uint8Array[] = [];
+    private draining = false;
+
+    private async drain(): Promise<void> {
+      if (this.draining) return;
+      this.draining = true;
+      try {
+        while (this.outbox.length > 0 && this.readyState === 1 && this.session) {
+          const data = this.outbox.shift()!;
+          const sent = this.session.sendWithRoom
+            ? await this.session.sendWithRoom(data)
+            : this.session.send(data);
+          if (!sent) break;
+        }
+      } catch (error) {
+        this.emit("error", error);
+        this.close();
+      } finally {
+        this.draining = false;
+      }
     }
 
     close(): void {
@@ -556,6 +916,7 @@ async function applyBundle(
     adminSecret: string;
     app: BackendSchemaInput;
     permissions: CompiledPermissionsMap;
+    allowDroppingHistory?: boolean;
   },
 ): Promise<string> {
   const declared = resolveSchemaSource(options.app);
@@ -570,10 +931,11 @@ async function applyBundle(
   schemas.set(targetSchemaHash, schema);
   const server = { appId: options.appId, serverUrl: origin, adminSecret: options.adminSecret };
   const graph = await fetchMigrationGraph(server);
+  const confirm = { ...server, allowDroppingHistory: options.allowDroppingHistory };
   // Published, never activated: this backend's sessions are pinned to its
   // bundle, so deployments of the app serve side by side and a rollback is
   // publishing the older bundle again.
-  const deployed = await deployArtifacts(server, graph, {
+  const deployed = await deployArtifacts(confirm, graph, {
     targetSchemaHash,
     schemas: [...schemas].map(([hash, schema]) => ({ hash, schema })),
     migrations: (shipped?.migrations ?? []).map((edge) => ({
@@ -582,7 +944,6 @@ async function applyBundle(
       forward: edge.forward as PublishedTableLens[],
     })),
     permissions: options.permissions,
-    activate: false,
   }).catch((error: unknown) => {
     // A core without `/bundles` predates per-deployment permissions; it
     // must not be handed a deployment it would activate for every backend.
@@ -594,6 +955,7 @@ async function applyBundle(
     }
     throw error;
   });
+  // An older core answers a publish without the bundle it made.
   if (!deployed.bundle) {
     throw new Error("createJazz: the core did not publish a permissions bundle; upgrade it");
   }
@@ -607,19 +969,24 @@ async function applyBundle(
  */
 export function pinnedSocket(socket: CoreSocket, bundle: () => string | undefined): CoreSocket {
   let first = true;
+  /** `data`, with the pin stamped into the prelude; null if it can't be. */
+  const pin = (data: Uint8Array): Uint8Array | null => {
+    if (!first) return data;
+    first = false;
+    const pinned = withBundle(data, bundle());
+    // A prelude the pin cannot be stamped into would open unpinned.
+    if (pinned === null) socket.close();
+    return pinned;
+  };
   return {
     send(data) {
-      if (first) {
-        first = false;
-        const pinned = withBundle(data, bundle());
-        // A prelude the pin cannot be stamped into would open unpinned.
-        if (pinned === null) {
-          socket.close();
-          return false;
-        }
-        data = pinned;
-      }
-      return socket.send(data);
+      const pinned = pin(data);
+      return pinned !== null && socket.send(pinned);
+    },
+    async sendWithRoom(data) {
+      const pinned = pin(data);
+      if (pinned === null) return false;
+      return socket.sendWithRoom ? socket.sendWithRoom(pinned) : socket.send(pinned);
     },
     close: () => socket.close(),
   };
@@ -653,10 +1020,7 @@ async function openInProcessCore(
   const adminSecret = randomBytes(32).toString("base64url");
   // The core holds `<path>/jazz.lock` with an OS lock while it's open.
   if (store.kind === "sqlite") refuseServerlessDisk(store.path);
-  const appId =
-    store.kind === "sqlite"
-      ? await keptAppId(store.path, store.appId)
-      : (store.appId ?? randomUUID());
+  const appId = store.kind === "sqlite" ? await keptAppId(store.path) : randomUUID();
   const core = await JazzCore.open({
     appId,
     backendSecret,
@@ -681,8 +1045,10 @@ async function openInProcessCore(
         ),
       );
     },
+    // This process's own clients: no handshake deadline, as a burst of
+    // synchronous writes right after one opens holds its Hello back.
     WebSocket: inProcessWebSocket((_url, onEvent) =>
-      pinnedSocket(core.openSocket([], onEvent), bundle),
+      pinnedSocket(core.openInProcessSocket(onEvent), bundle),
     ),
   });
   const opened: Core = {
@@ -702,10 +1068,10 @@ async function openInProcessCore(
 
 /**
  * The app id an in-process SQLite core keeps beside its data, in
- * `<path>/app-id`: `named` (or a new one) on first start, so the app's
- * identities stay the same across restarts without the app naming an id.
+ * `<path>/app-id`: a new one on first start, so the app's identities stay
+ * the same across restarts without the app naming an id.
  */
-async function keptAppId(dir: string, named: string | undefined): Promise<string> {
+async function keptAppId(dir: string): Promise<string> {
   const file = join(dir, "app-id");
   const kept = async (): Promise<string | undefined> => {
     try {
@@ -720,17 +1086,37 @@ async function keptAppId(dir: string, named: string | undefined): Promise<string
     await mkdir(dir, { recursive: true });
     // `wx`: two processes starting the same store at once agree on one id.
     try {
-      appId = named ?? randomUUID();
+      appId = randomUUID();
       await writeFile(file, `${appId}\n`, { flag: "wx" });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       appId = (await kept())!;
     }
   }
-  if (named !== undefined && named !== appId) {
-    throw new Error(`sqlite(): the store at ${dir} belongs to app ${appId}, not ${named}`);
-  }
   return appId;
+}
+
+/**
+ * The secret an in-process SQLite core's agent tokens are signed with, kept
+ * beside its data in `<path>/inspect-token-secret` (mode 0600) so tokens
+ * survive restarts. Deleting the file revokes every token.
+ */
+async function keptTokenSecret(dir: string): Promise<string> {
+  const file = join(dir, "inspect-token-secret");
+  try {
+    const kept = (await readFile(file, "utf8")).trim();
+    if (kept) return kept;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const secret = newTokenSecret();
+  try {
+    await writeFile(file, `${secret}\n`, { flag: "wx", mode: 0o600 });
+    return secret;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return (await readFile(file, "utf8")).trim();
+  }
 }
 
 /**
@@ -748,7 +1134,8 @@ function refuseServerlessDisk(dir: string): void {
   if (!host) return;
   throw new Error(
     `sqlite({ path: ${JSON.stringify(dir)} }) can't keep data on ${host}: its functions have no lasting disk. ` +
-      "Use remote({ url, appId, secret }) to a sync server or Jazz Cloud.",
+      (host === "Vercel" ? "Use vercel(), whose local store runs sqlite() in dev, or " : "Use ") +
+      "remote({ url, appId, secret }) to a sync server or Jazz Cloud.",
   );
 }
 
@@ -864,6 +1251,17 @@ function openRemoteCore(
           onEvent(null, { kind: "message", data });
         });
         ws.addEventListener("close", (event) => finish(event.code, event.reason));
+        // A socket that never connects (the core is down or restarting) can
+        // report only the error, and stay CONNECTING: without this, the link
+        // waits on it forever instead of retrying.
+        ws.addEventListener("error", () => {
+          finish(1006, "connection to the core failed");
+          try {
+            ws?.close();
+          } catch {
+            // Already closing.
+          }
+        });
       })
       // A failing credential hook, or a socket that can't even be created.
       .catch((error: unknown) =>
@@ -912,12 +1310,30 @@ function openRemoteCore(
 }
 
 /**
- * Run Jazz inside your backend. It applies the schema, migrations and
- * permissions your code declares to its core (in this process, or a remote
- * one), and serves sync on your own origin under `basePath`. There is no
- * separate deploy step: a rollback of your backend rolls Jazz back with it.
+ * A request `authenticate` names no user for: what an app answers with 401.
+ * (A throwing `authenticate` passes its own error through instead.)
  */
-export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
+function signedOut(operation: string): RequestAuthenticationError {
+  return new RequestAuthenticationError(`${operation}: the request has no signed-in user`, {
+    code: "signed_out",
+  });
+}
+
+/** How long `close()` waits for pending writes to reach the core. */
+const CLOSE_SYNC_TIMEOUT_MS = 10_000;
+
+/** What `createJazz` derives from its options, checked when it is called. */
+interface JazzSettings {
+  basePath: string;
+  publicUrls: string[];
+  allowedOrigins: Set<string>;
+}
+
+function jazzSettings(options: CreateJazzOptions): JazzSettings {
+  if ((options as { recheckSeconds?: unknown }).recheckSeconds !== undefined)
+    throw new Error(
+      "createJazz: recheckSeconds was removed. A sync session now lasts until the expiresAt your authenticate returns, and then authenticates again on its client's new connection; to end a user's sessions at once, call jazz.revokeUser(userId).",
+    );
   const basePath = (options.basePath ?? DEFAULT_BASE_PATH).replace(/\/+$/, "");
   const publicUrls = [options.publicUrl ?? []].flat().map((value) => {
     try {
@@ -950,11 +1366,35 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   );
   if ("appId" in options) {
     throw new Error(
-      "createJazz(): appId moved to the store: remote({ url, appId, secret }) names the app it serves, and sqlite(), memory() and vercel() keep their own id (pass appId to them only to keep an existing app's).",
+      "createJazz(): appId moved to the store: remote({ url, appId, secret }) names the app it serves, and sqlite(), memory() and vercel() keep their own id.",
     );
   }
-  const store =
-    options.store.kind === "vercel" && !onVercelDeployment() ? options.store.local : options.store;
+  return { basePath, publicUrls, allowedOrigins };
+}
+
+/** The store this process runs: `vercel()` outside a Vercel deployment runs its `local` store. */
+function runningStore(store: JazzStore): JazzStore {
+  return store.kind === "vercel" && !onVercelDeployment() ? store.local : store;
+}
+
+/** A Jazz with its store open: what a `createJazz` facade hands each call to. */
+interface OpenedJazz extends Omit<Jazz, "ready" | "db" | "attach"> {
+  readonly db: Db;
+  /** Take over a sync socket's upgrade request that an attached server received. */
+  upgrade(wss: SocketUpgrader, req: IncomingMessage, socket: Duplex, head: Buffer): void;
+  /** A server is attached: socket upgrades work on this host. */
+  markAttached(): void;
+  /** Apply a later `createJazz` call's app, permissions and options to this open store. */
+  reload(options: CreateJazzOptions): Promise<void>;
+}
+
+/**
+ * Open `store` and apply the schema, migrations and permissions `options`
+ * declare to its core.
+ */
+async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<OpenedJazz> {
+  let options = initial;
+  let { basePath, publicUrls, allowedOrigins } = jazzSettings(options);
   // The bundle this backend published: every socket to the core carries it,
   // and the core governs this backend's sessions by its permissions alone.
   let pin: string | undefined;
@@ -971,42 +1411,167 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
           })
         : await openInProcessCore(store, bundle);
   const appId = core.appId;
-  const issuer = `jazz:app:${appId}`;
+  const issuer = BACKEND_USER_ISSUER;
+  // An in-memory store's agent tokens last as long as its data: this process.
+  const memoryTokenSecret = newTokenSecret();
 
-  let session: JazzSession<JazzClient>;
-  try {
-    pin = await applyBundle(core.serverUrl, { ...options, appId, adminSecret: core.adminSecret });
-    session = await createJazzSession({
+  /** Publish `next`'s bundle: what it is pinned by. Publishing one already published changes nothing. */
+  const publish = (next: CreateJazzOptions) =>
+    applyBundle(core.serverUrl, { ...next, appId, adminSecret: core.adminSecret });
+
+  /** Publish `next`'s bundle and open the backend's own session on it. */
+  async function backendSession(
+    next: CreateJazzOptions,
+    published?: string,
+  ): Promise<{ session: SessionCore<JazzClient>; client: JazzClient }> {
+    pin = published ?? (await publish(next));
+    const session = await openJazzSession({
       appId,
-      app: options.app,
-      permissions: options.permissions,
+      app: next.app,
+      permissions: next.permissions,
       serverUrl: core.serverUrl,
       driver: { type: "memory" },
       initial: { backendSecret: core.backendSecret },
     });
+    const opened = session.getSnapshot();
+    if (opened.status !== "ready" || !opened.client) {
+      await session.close();
+      throw opened.error ?? new Error(`Jazz backend session did not open (${opened.status})`);
+    }
+    return { session, client: opened.client };
+  }
+
+  let session: SessionCore<JazzClient>;
+  let backend: JazzClient;
+  try {
+    ({ session, client: backend } = await backendSession(options));
   } catch (error) {
     await core.close();
-    throw error;
+    throw store.kind === "remote" ? unreachableCore(store.url, error) : error;
   }
-  const opened = session.getSnapshot();
-  if (opened.status !== "ready" || !opened.client) {
-    await session.close();
-    await core.close();
-    throw opened.error ?? new Error(`Jazz backend session did not open (${opened.status})`);
-  }
-  const backend = opened.client;
 
-  const backendClients = backendClientVerifier(options.backendClients ?? []);
+  let backendClients = backendClientVerifier(options.backendClients ?? []);
+
+  /**
+   * A later `createJazz` for this store (a dev server's hot reload): publish
+   * its bundle, move the backend's own database to it, and read its options
+   * from now on. Open sync sessions stay; the core reconnects those pinned
+   * to the old bundle.
+   */
+  async function reload(next: CreateJazzOptions): Promise<void> {
+    const settings = jazzSettings(next);
+    inspectorSettings(next.inspector ?? NO_INSPECTOR_OPTIONS);
+    // The same app and permissions (a reload of a module that imports them
+    // unchanged, or a hot reload that rebuilt equal ones): the bundle, and
+    // the backend's session with its writes and `forReqUser` dbs, stay.
+    if (next.app !== options.app || next.permissions !== options.permissions) {
+      const published = await publish(next);
+      if (published !== pin) {
+        const previousPin = pin;
+        let fresh: { session: SessionCore<JazzClient>; client: JazzClient };
+        try {
+          fresh = await backendSession(next, published);
+        } catch (error) {
+          pin = previousPin;
+          throw error;
+        }
+        retire(session);
+        ({ session, client: backend } = fresh);
+      }
+    }
+    options = next;
+    ({ basePath, publicUrls, allowedOrigins } = settings);
+    backendClients = backendClientVerifier(next.backendClients ?? []);
+    upgradesSockets = attached || (next.upgradesSockets ?? false);
+  }
+
+  /**
+   * Sessions a reload replaced. Each stays open for
+   * `RETIRED_SESSION_GRACE_MS`, so the writes it has in flight and the
+   * `forReqUser` dbs requests still hold finish, then closes (draining its
+   * writes); a close of this Jazz closes those left.
+   */
+  const retiring = new Set<() => Promise<void>>();
+  function retire(old: SessionCore<JazzClient>): void {
+    let closed: Promise<void> | undefined;
+    const closeOld = (): Promise<void> => {
+      clearTimeout(timer);
+      return (closed ??= old
+        .close()
+        .catch((error: unknown) => console.error("jazz: a retired session did not close", error))
+        .finally(() => retiring.delete(closeOld)));
+    };
+    const timer = setTimeout(closeOld, RETIRED_SESSION_GRACE_MS);
+    (timer as { unref?: () => void }).unref?.();
+    retiring.add(closeOld);
+  }
+
+  // An `authenticate` that returns expired answers, or none at all, is a
+  // bug in the app: said once per process.
+  let warnedExpiredAnswer = false;
+  function warnExpiredAnswer() {
+    if (warnedExpiredAnswer) return;
+    warnedExpiredAnswer = true;
+    console.error(
+      "createJazz: authenticate named a user with an expiresAt in the past, so Jazz treats them as signed out. Return the expiry of the session the user is signed in with (the one a sign-out ends), in Unix seconds, not of a short-lived access token.",
+    );
+  }
+  let warnedMissingExpiry = false;
+  function warnMissingExpiry(error: Error) {
+    if (warnedMissingExpiry) return;
+    warnedMissingExpiry = true;
+    console.error(error.message);
+  }
 
   /**
    * Who sent `request`: a scoped backend client's user, or the user the
    * app's own `authenticate` names. A trusted backend client has no user.
    */
-  async function authenticate(request: Request): Promise<JazzUser | null> {
+  async function authenticate(
+    request: Request,
+  ): Promise<(JazzUser & { expiresAt: number }) | null> {
     const client = await backendClients.resolve(request);
-    if (client !== null) return client !== "refused" && client.kind === "user" ? client.user : null;
+    if (client !== null)
+      return client !== "refused" && client.kind === "user"
+        ? { ...client.user, expiresAt: client.expiresAt }
+        : null;
+    const answer = await askAuthenticate(request);
+    if (answer === null || isLocalFirstGuest(answer)) return null;
+    const user = withCheckedExpiry(checkedUser(answer));
+    // An answer that has already expired names no one, here and in every
+    // other place that asks (who is signed in, sign-in, forReqUser), so a
+    // client can't be told it is signed in while its sync is refused.
+    if (user.expiresAt * 1000 <= Date.now()) {
+      warnExpiredAnswer();
+      return null;
+    }
+    return user;
+  }
+
+  async function askAuthenticate(request: Request): Promise<JazzUser | LocalFirstGuest | null> {
     if (!options.authenticate) return null;
     return (await options.authenticate(request)) ?? null;
+  }
+
+  /** Whether the app lets `request` in as a device account (`acceptDeviceAccounts`). */
+  let warnedGuestsOff = false;
+  async function acceptsGuest(request: Request): Promise<boolean> {
+    const answer = await askAuthenticate(request);
+    if (isLocalFirstGuest(answer)) return true;
+    // A user is signed in on this browser too: one who just signed up, whose
+    // guest still uploads its writes before it links to them. A guest is
+    // bound to its own key, never to that user, and whether the app lets
+    // guests in doesn't depend on who else is signed in: ask as the request
+    // would be without the user's credentials.
+    if (answer && isLocalFirstGuest(await askAuthenticate(withoutCredentials(request))))
+      return true;
+    if (!warnedGuestsOff) {
+      warnedGuestsOff = true;
+      console.warn(
+        "createJazz: refused a local-first guest. To let guests sync, return acceptDeviceAccounts(request) from authenticate for them.",
+      );
+    }
+    return false;
   }
 
   /** One admin account request to the core: this backend vouches for the identities. */
@@ -1027,6 +1592,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         new Error(`Jazz account ${operation} failed (${response.status}): ${text}`),
         {
           status: response.status,
+          code: text.trim(),
         },
       );
     }
@@ -1036,26 +1602,57 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
 
   const identity = (userId: string) => ({ issuer, subject: userId });
 
-  /** The user's session: their account, created on first sign-in. */
   // A user's account never changes once assigned (linking only adds
   // identities to an account), so the core is asked once per user for a
-  // while, not on every sign-in, socket and request.
+  // while, not on every sign-in, socket and request. Only assignments are
+  // cached: a user without an account may get one at any moment.
   const accounts = new Map<string, { account: string; until: number }>();
   const ACCOUNT_CACHE_LIMIT = 10_000;
-  async function accountOf(userId: string): Promise<string> {
-    const now = Date.now();
-    const cached = accounts.get(userId);
-    if (cached && cached.until > now) return cached.account;
-    const { account } = await adminAccounts("login-or-register", { identity: identity(userId) });
+  function remember(userId: string, account: string): string {
     if (accounts.size >= ACCOUNT_CACHE_LIMIT) {
       accounts.delete(accounts.keys().next().value!);
     }
-    accounts.set(userId, { account, until: now + (options.sessionTtlSeconds ?? 3600) * 1000 });
+    accounts.set(userId, {
+      account,
+      until: Date.now() + (options.sessionTtlSeconds ?? 3600) * 1000,
+    });
     return account;
   }
 
-  async function sessionFor(user: JazzUser): Promise<Session> {
-    const account = await accountOf(user.userId);
+  /**
+   * The user's account, or null while they have none. Never creates one:
+   * only a client's sign-in (`backend-sign-in`), a guest's link
+   * (`backend-link`) and `createAccountFor` do, so a local-first guest can
+   * still link to a user the backend has only looked up or acted for (V9).
+   */
+  async function existingAccountOf(userId: string): Promise<string | null> {
+    const cached = accounts.get(userId);
+    if (cached && cached.until > Date.now()) return cached.account;
+    try {
+      const { account } = await adminAccounts("resolve", { identity: identity(userId) });
+      return remember(userId, account);
+    } catch (error) {
+      // Only the core's own "no account for this identity" answer: any other
+      // 404 (an unknown app, a missing route) is a server error, not a user
+      // without an account.
+      const { status, code } = error as { status?: number; code?: string };
+      if (status === 404 && code === "identity_not_assigned") return null;
+      throw error;
+    }
+  }
+
+  /** The user's account, created if they have none (a sign-in, or `createAccountFor`). */
+  async function accountOf(userId: string): Promise<string> {
+    const cached = accounts.get(userId);
+    if (cached && cached.until > Date.now()) return cached.account;
+    const { account } = await adminAccounts("login-or-register", { identity: identity(userId) });
+    return remember(userId, account);
+  }
+
+  /** The user's session, on the account they already have. */
+  async function sessionFor(user: JazzUser, caller: string): Promise<Session> {
+    const account = await existingAccountOf(user.userId);
+    if (account === null) throw new NoJazzAccountError(user.userId, caller);
     return {
       account_id: account,
       issuer,
@@ -1087,6 +1684,33 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     const expiresAt = Math.floor(Date.now() / 1000) + (options.sessionTtlSeconds ?? 3600);
     return Response.json(
       { account, identity: identity(user.userId), claims: user.claims ?? {}, expiresAt },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
+  /**
+   * Who `request`'s user is, without changing anything: the user
+   * `authenticate` names, and whether the core already holds an account for
+   * them. A browser's session asks this to follow the backend; only a sign-in
+   * (`backend-sign-in`) or a link (`backend-link`) assigns an account, so a
+   * local-first guest whose user has none yet can still link to them.
+   */
+  async function backendUser(request: Request): Promise<Response> {
+    if (request.method !== "POST") return new Response(null, { status: 405 });
+    const user = await authenticate(request);
+    if (!user) return new Response("signed_out", { status: 401 });
+    let account: string | null;
+    try {
+      account = await existingAccountOf(user.userId);
+    } catch (error) {
+      // The core refuses this identity (it was revoked): say so, as the
+      // core does, rather than fail as a server error.
+      if ((error as { status?: number }).status === 403)
+        return new Response("identity_not_authorized", { status: 403 });
+      throw error;
+    }
+    return Response.json(
+      { account, identity: identity(user.userId), claims: user.claims ?? {} },
       { headers: { "Cache-Control": "no-store" } },
     );
   }
@@ -1202,17 +1826,29 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         } catch (error) {
           // Linking is idempotent for this guest and this user: when the user
           // already belongs to the guest's account (an earlier link went
-          // through, then perhaps its revoke failed), this link is done. A
+          // through, then perhaps its revoke failed, or another tab's link
+          // won the race and revoked the key since), this link is done. A
           // used challenge (the core refuses its nonce first) and a user of
           // another account are still refused.
-          if ((error as { status?: number }).status !== 409 || !(await userIs(account)))
-            throw error;
+          const status = (error as { status?: number }).status;
+          if ((status !== 409 && status !== 403) || !(await userIs(account))) throw error;
+          // Refused for a retired key: the link that won already retired it.
+          if (status === 403) guestRevoked = true;
         }
       }
-    } catch {
-      // The core's reason (e.g. the identity already belongs to another
-      // account, or the challenge was used) stays on the backend.
-      return new Response("link_refused", { status: 409 });
+    } catch (error) {
+      const status = (error as { status?: number }).status;
+      // Only the core's own refusals refuse the link for good: an invalid
+      // link intent (400), a retired or foreign identity (403), a user with
+      // no account to check (404), an identity of another account (409).
+      // Its reason stays on the backend.
+      if (status === 400 || status === 403 || status === 404 || status === 409)
+        return new Response("link_refused", { status: 409 });
+      // Anything else (the core down or failing, its credential check
+      // refusing this backend mid-rotation, a proxy's 408 or 429) may pass on
+      // a retry, so say so rather than strand the guest.
+      console.error("Jazz: linking a guest failed on the core", error);
+      return new Response("account_registry_unavailable", { status: 503 });
     }
     if (options.guestKeyAfterLink === "revoke" && !guestRevoked) {
       // The link already stands. If the revoke fails, the guest key stays
@@ -1254,16 +1890,32 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
    */
   interface ClientSession {
     send(data: Uint8Array): boolean;
+    /**
+     * `send`, resolving once the core has room for it (or with false once
+     * the session ended): a transport that awaits it before reading more
+     * from its client holds a fast client back.
+     */
+    deliver(data: Uint8Array): Promise<boolean>;
     close(): void;
+    /** End the session as refused (`jazz.revokeUser`). */
+    revoke(reason: string): void;
     /** The user the session was admitted as, once it is. */
     readonly userId: string | undefined;
     /** Whether a trusted backend client opened it. */
     readonly trusted: boolean;
   }
 
+  /** The sessions this instance serves, for the Inspector's `sessions`. */
+  const liveSessions = new Set<{
+    session: ClientSession;
+    transport: "socket" | "stream";
+    openedAt: number;
+  }>();
+
   function openClientSession(
     request: Request,
     onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
+    transport: "socket" | "stream",
   ): ClientSession {
     // The core socket opens once the prelude is admitted, with the access
     // that admission needs: a vouched user's session is the backend's, and
@@ -1273,19 +1925,25 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     let ended = false;
     let userId: string | undefined;
     let trusted = false;
-    let recheck: ReturnType<typeof setInterval> | undefined;
     // A session that never sends its prelude ends too.
-    let expiry: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+    let stopExpiry: (() => void) | undefined = startTimer(() => {
       onEvent(null, { kind: "close", code: 1008, reason: "no sign-in in time" });
       end();
     }, PRELUDE_DEADLINE_MS);
-    (expiry as unknown as { unref?: () => void }).unref?.();
     const end = () => {
       if (ended) return;
       ended = true;
-      if (expiry) clearTimeout(expiry);
-      if (recheck) clearInterval(recheck);
+      liveSessions.delete(live);
+      stopExpiry?.();
       socket?.close();
+    };
+    // Ask the client to connect again, so the app's auth decides on a new
+    // request: a planned reconnect the client doesn't show as an outage.
+    const reauthenticate = () => {
+      if (ended) return;
+      onEvent(null, { kind: "message", data: reauthenticateBatch() });
+      onEvent(null, { kind: "close", code: 1008, reason: "reauthenticate" });
+      end();
     };
     const admit = async (prelude: Uint8Array): Promise<boolean> => {
       const admitted = await admitPrelude(request, prelude);
@@ -1304,55 +1962,87 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       }
       userId = admitted.userId;
       trusted = admitted.trusted;
-      if (expiry) clearTimeout(expiry);
-      // A backend client's session ends with its token, so it reconnects
-      // with a fresh one.
-      const ttl = Math.min(
-        (options.sessionTtlSeconds ?? 3600) * 1000,
-        admitted.expiresAt === undefined ? Infinity : admitted.expiresAt * 1000 - Date.now(),
-      );
-      expiry = setTimeout(end, Math.max(ttl, 0));
-      (expiry as unknown as { unref?: () => void }).unref?.();
-      const every = (options.recheckSeconds ?? 60) * 1000;
-      if (userId !== undefined && every > 0) {
-        const admittedUser = userId;
-        let checking = false;
-        recheck = setInterval(() => {
-          if (checking || ended) return;
-          checking = true;
-          void Promise.resolve()
-            .then(() => authenticate(request))
-            .then(
-              (user) => {
-                if (ended || user?.userId === admittedUser) return;
-                // The socket's request carries the cookies it opened with, so
-                // this may only mean they expired. The client reconnects with
-                // fresh ones; if no one is signed in, that admission fails as
-                // an auth failure (above).
-                onEvent(null, { kind: "close", code: 1008, reason: "authenticate again" });
-                end();
-              },
-              // A failing `authenticate` (its database is down) is not a
-              // sign-out; the next check asks again.
-              () => {},
-            )
-            .finally(() => {
-              checking = false;
-            });
-        }, every);
-        (recheck as unknown as { unref?: () => void }).unref?.();
+      stopExpiry?.();
+      const admittedAt = Date.now();
+      if (admitted.user) {
+        // A signed-in user's session holds until the expiry `authenticate`
+        // gave it, and at most `sessionTtlSeconds`. Shortly before, the
+        // client is asked to connect again, so `authenticate` decides on its
+        // new request with current cookies.
+        const at = reauthenticateAt(
+          admittedAt,
+          sessionDeadline(admittedAt, admitted.user.expiresAt, options.sessionTtlSeconds),
+        );
+        if (at === null) {
+          // `authenticate` named the user with an answer already expired.
+          warnExpiredAnswer();
+          onEvent(null, {
+            kind: "message",
+            data: authFailedBatch(
+              "session expired: authenticate returned an expiresAt in the past",
+            ),
+          });
+          onEvent(null, { kind: "close", code: 1008, reason: "session expired" });
+          end();
+          return false;
+        }
+        stopExpiry = startTimer(reauthenticate, at - admittedAt);
+      } else if (admitted.guest) {
+        // A guest's key is its credential; the app lets it in anew each
+        // `sessionTtlSeconds`, the same way.
+        const ttl = (options.sessionTtlSeconds ?? 3600) * 1000;
+        stopExpiry = startTimer(reauthenticate, ttl);
+      } else {
+        // A backend client's session ends with its token, so it reconnects
+        // with a fresh one.
+        const ttl = Math.min(
+          (options.sessionTtlSeconds ?? 3600) * 1000,
+          admitted.expiresAt === undefined ? Infinity : admitted.expiresAt * 1000 - admittedAt,
+        );
+        stopExpiry = startTimer(end, ttl);
       }
       socket = core.openSocket(headerPairs(request.headers), onEvent, admitted.access);
       return socket.send(admitted.prelude);
     };
     // Messages after the prelude wait for its admission, in order.
     let chain: Promise<boolean> | undefined;
-    return {
-      send(data) {
-        if (ended) return false;
-        chain = chain
-          ? chain.then((ok) => ok && !ended && !!socket?.send(data))
-          : admit(data).catch((error: unknown) => {
+    // Bytes handed to `deliver` the core has not taken yet: a host that
+    // doesn't wait for it (a socket that can't pause) is cut off past the
+    // limit, as the core cuts off a peer that ignores flow control.
+    let waitingBytes = 0;
+    const deliver = (data: Uint8Array): Promise<boolean> => {
+      if (ended) return Promise.resolve(false);
+      if (waitingBytes + data.byteLength > MAX_WAITING_SESSION_BYTES) {
+        // 1013 (try again later): the client may come back and send at the
+        // pace this host takes.
+        onEvent(null, {
+          kind: "close",
+          code: 1013,
+          reason: "client sent faster than the server takes",
+        });
+        end();
+        return Promise.resolve(false);
+      }
+      waitingBytes += data.byteLength;
+      const taken = (ok: boolean) => {
+        waitingBytes -= data.byteLength;
+        return ok;
+      };
+      chain = chain
+        ? chain
+            .then(async (ok) => {
+              if (!ok || ended || !socket) return false;
+              return socket.sendWithRoom ? socket.sendWithRoom(data) : socket.send(data);
+            })
+            .catch(() => {
+              // A core that failed to take a message ends the session.
+              onEvent(null, { kind: "close", code: 1011, reason: "session failed" });
+              end();
+              return false;
+            })
+            .then(taken)
+        : admit(data)
+            .catch((error: unknown) => {
               if (!ended && isRefusal(error)) {
                 // The core refused this identity (revoked, local-first auth
                 // disabled, invalid): an auth failure the client must not
@@ -1364,15 +2054,34 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
                 onEvent(null, { kind: "close", code: 1008, reason: "sign-in refused" });
               } else {
                 // The core is unreachable or failed (5xx), or the app's own
-                // `authenticate` threw: the client tries again later.
+                // `authenticate` threw: the client tries again later. An
+                // `authenticate` without `expiresAt` fails the same way every
+                // time: say why, once.
+                if (error instanceof AuthenticateExpiresAtError) warnMissingExpiry(error);
                 onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
               }
               end();
               return false;
-            });
+            })
+            .then(taken);
+      return chain;
+    };
+    const clientSession: ClientSession = {
+      send(data) {
+        if (ended) return false;
+        void deliver(data);
         return true;
       },
+      deliver,
       close: end,
+      revoke(reason) {
+        if (ended) return;
+        // A refusal the client doesn't retry: its session asks the backend
+        // who is signed in, and signs out if no one is.
+        onEvent(null, { kind: "message", data: authFailedBatch(`session revoked: ${reason}`) });
+        onEvent(null, { kind: "close", code: 1008, reason: "session revoked" });
+        end();
+      },
       get userId() {
         return userId;
       },
@@ -1380,6 +2089,9 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         return trusted;
       },
     };
+    const live = { session: clientSession, transport, openedAt: Date.now() };
+    liveSessions.add(live);
+    return clientSession;
   }
 
   /**
@@ -1395,9 +2107,13 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
   ): Promise<{
     prelude: Uint8Array;
     userId: string | undefined;
+    /** The user (with the claims) `authenticate` named for a vouched session, and until when. */
+    user?: JazzUser & { expiresAt: number };
     access: BackendAccess;
     trusted: boolean;
     expiresAt?: number;
+    /** A local-first guest, let in by `acceptDeviceAccounts`. */
+    guest?: true;
   } | null> {
     let parsed: Record<string, unknown>;
     try {
@@ -1444,6 +2160,8 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       if (client) return null;
       const audience = guestAudience(request, token);
       if (!audience) return null;
+      // Guests are off unless the app's `authenticate` lets this one in.
+      if (!(await acceptsGuest(request))) return null;
       if (audience.endpoint === undefined) {
         // Its own token decides who it is; the backend's secret only vouches
         // for the bundle this socket is pinned to (see `pinnedSocket`).
@@ -1453,6 +2171,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
           userId: undefined,
           access: "session",
           trusted: false,
+          guest: true,
         };
       }
       // Signed for this endpoint, which the core can't know: vouch for it.
@@ -1468,6 +2187,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         userId: undefined,
         access: "backend",
         trusted: false,
+        guest: true,
       };
     }
     const stated = auth.backend_session as { user_id?: unknown } | undefined;
@@ -1477,11 +2197,21 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     }
     const user = await authenticate(request);
     if (!user || user.userId !== stated.user_id) return null;
-    const vouched = { backend_secret: core.backendSecret, backend_session: await sessionFor(user) };
+    // A browser states a user's session only once its sign-in (or link)
+    // gave them an account; this never makes one.
+    let session: Session;
+    try {
+      session = await sessionFor(user, "a sync session");
+    } catch (error) {
+      if (error instanceof NoJazzAccountError) return null;
+      throw error;
+    }
+    const vouched = { backend_secret: core.backendSecret, backend_session: session };
     const rewritten = { ...parsed, ...vouched, auth: { ...auth, ...vouched } };
     return {
       prelude: new TextEncoder().encode(JSON.stringify(rewritten)),
       userId: user.userId,
+      user,
       access: "backend",
       trusted: false,
       expiresAt: client?.expiresAt,
@@ -1490,7 +2220,12 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
 
   // HTTP stream sessions, by id, with the key that proves a request comes
   // from the client that opened them.
-  const streams = new Map<string, { session: ClientSession; key: Buffer }>();
+  const streams = new Map<
+    string,
+    { session: ClientSession; key: Buffer; end(code: number, reason: string): void }
+  >();
+  // Sockets accepted for clients, so close() can end them.
+  const clientSockets = new Set<WsLikeSocket>();
 
   function openStream(request: Request): Response {
     const id = randomUUID();
@@ -1520,18 +2255,22 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     });
     let socket: ClientSession;
     try {
-      socket = openClientSession(request, (error, event) => {
-        if (error) return end(1011, error.message);
-        if (event.kind === "message" && event.data) {
-          if (!closed) controller.enqueue(encodeStreamRecord(STREAM_RECORD_MESSAGE, event.data));
-        } else if (event.kind === "close") {
-          end(event.code ?? 1000, event.reason ?? "");
-        }
-      });
+      socket = openClientSession(
+        request,
+        (error, event) => {
+          if (error) return end(1011, error.message);
+          if (event.kind === "message" && event.data) {
+            if (!closed) controller.enqueue(encodeStreamRecord(STREAM_RECORD_MESSAGE, event.data));
+          } else if (event.kind === "close") {
+            end(event.code ?? 1000, event.reason ?? "");
+          }
+        },
+        "stream",
+      );
     } catch (error) {
       return new Response(error instanceof Error ? error.message : String(error), { status: 503 });
     }
-    streams.set(id, { session: socket, key });
+    streams.set(id, { session: socket, key, end });
     controller.enqueue(
       encodeStreamRecord(
         STREAM_RECORD_SESSION,
@@ -1580,22 +2319,59 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     return socket;
   }
 
+  /**
+   * Pass a send's records to the session as they arrive, each once the core
+   * has room for it: the body is not read ahead of the core, so a client
+   * sending faster than the core takes is held back by the request itself.
+   */
   async function streamSend(id: string, request: Request): Promise<Response> {
     const socket = await ownStream(id, request);
     if (socket instanceof Response) return socket;
-    const reader = new StreamRecordReader();
-    const records = reader.push(new Uint8Array(await request.arrayBuffer()));
-    if (reader.pending > 0) return new Response("truncated record", { status: 400 });
-    for (const record of records) {
-      if (
-        record.kind !== STREAM_RECORD_MESSAGE ||
-        record.payload.byteLength > MAX_STREAM_MESSAGE_BYTES
-      ) {
-        socket.close();
-        return new Response("invalid record", { status: 400 });
-      }
-      if (!socket.send(record.payload)) return new Response("session ended", { status: 410 });
+    // A send's records go in whole and in order: one send at a time.
+    if (sendingStreams.has(id)) {
+      return new Response("a send to this stream is in progress", { status: 409 });
     }
+    sendingStreams.add(id);
+    try {
+      return await passStreamRecords(socket, request);
+    } finally {
+      sendingStreams.delete(id);
+    }
+  }
+
+  /** Stream sessions with a send in progress. */
+  const sendingStreams = new Set<string>();
+
+  async function passStreamRecords(socket: ClientSession, request: Request): Promise<Response> {
+    const refuse = (reason: string) => {
+      socket.close();
+      return new Response(reason, { status: 400 });
+    };
+    const records = new StreamRecordReader();
+    const body = request.body?.getReader();
+    for (;;) {
+      const chunk = body ? await body.read() : { done: true as const, value: undefined };
+      if (chunk.done) break;
+      for (const record of records.push(chunk.value)) {
+        if (
+          record.kind !== STREAM_RECORD_MESSAGE ||
+          record.payload.byteLength > MAX_STREAM_MESSAGE_BYTES
+        ) {
+          void body?.cancel().catch(() => undefined);
+          return refuse("invalid record");
+        }
+        if (!(await socket.deliver(record.payload))) {
+          void body?.cancel().catch(() => undefined);
+          return new Response("session ended", { status: 410 });
+        }
+      }
+      // A record no message may be: refused before it is buffered.
+      if (records.pending > 5 + MAX_STREAM_MESSAGE_BYTES) {
+        void body?.cancel().catch(() => undefined);
+        return refuse("invalid record");
+      }
+    }
+    if (records.pending > 0) return refuse("truncated record");
     return new Response(null, { status: 204 });
   }
 
@@ -1611,23 +2387,46 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       ws.close(1008, "origin not allowed");
       return;
     }
+    // A paused socket reads no close handshake: resume it to close.
+    const close = (code: number, reason: string) => {
+      ws.resume?.();
+      ws.close(code, reason);
+    };
     let socket: ClientSession;
     try {
-      socket = openClientSession(request, (error, event) => {
-        if (error) return ws.close(1011, error.message);
-        if (event.kind === "message" && event.data) ws.send(event.data);
-        else if (event.kind === "close") {
-          ws.close(sendableCloseCode(event.code), event.reason ?? "");
-        }
-      });
+      socket = openClientSession(
+        request,
+        (error, event) => {
+          if (error) return close(1011, error.message);
+          if (event.kind === "message" && event.data) ws.send(event.data);
+          else if (event.kind === "close") {
+            close(sendableCloseCode(event.code), event.reason ?? "");
+          }
+        },
+        "socket",
+      );
     } catch (error) {
-      ws.close(1013, error instanceof Error ? error.message : String(error));
+      close(1013, error instanceof Error ? error.message : String(error));
       return;
     }
+    clientSockets.add(ws);
+    // Messages go to the core in order, each once it has room; the socket
+    // is not read while one waits, so a fast client is held back.
+    let waiting = 0;
     ws.on("message", (data) => {
-      if (!socket.send(toBytes(data))) ws.close(1000, "session ended");
+      waiting += 1;
+      ws.pause?.();
+      // `deliver` resolves false, never rejects, when the session fails.
+      void socket.deliver(toBytes(data)).then((ok) => {
+        waiting -= 1;
+        if (!ok) close(1000, "session ended");
+        else if (waiting === 0) ws.resume?.();
+      });
     });
-    ws.on("close", () => socket.close());
+    ws.on("close", () => {
+      clientSockets.delete(ws);
+      socket.close();
+    });
     ws.on("error", () => socket.close());
   }
 
@@ -1641,6 +2440,7 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
    */
   /** This process upgrades sockets for handle() and nodeHandler (set by attach()). */
   let upgradesSockets = options.upgradesSockets ?? false;
+  let attached = false;
 
   function originAllowed(request: Request): boolean {
     const origin = request.headers.get("origin");
@@ -1689,6 +2489,44 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       "backend",
     );
     return new Response(null, { status: response.status === 204 ? 204 : 502 });
+  }
+
+  /**
+   * A trusted backend client asks for a user's session, to act for them
+   * (`client.forUser`): the account `forReqUser` would act as for a request
+   * of theirs. Never creates an account (see `createAccountFor`). Anyone but
+   * a trusted machine gets what `admitBackendClient` gives them.
+   */
+  async function backendClientUserSession(request: Request): Promise<Response> {
+    const client = await backendClients.resolve(request);
+    if (client === null) return new Response("Not found", { status: 404 });
+    if (client === "refused" || client.kind !== "backend") {
+      return new Response("not a trusted backend client", { status: 401 });
+    }
+    if (request.method !== "POST") return new Response(null, { status: 405 });
+    let userId: unknown;
+    try {
+      ({ userId } = (await request.json()) as { userId?: unknown });
+    } catch {
+      return new Response("expected a JSON body", { status: 400 });
+    }
+    if (typeof userId !== "string" || userId === "") {
+      return new Response("userId must be a non-empty string", { status: 400 });
+    }
+    let account: string | null;
+    try {
+      account = await existingAccountOf(userId);
+    } catch (error) {
+      // The core refuses this identity (it was revoked): say so, as
+      // `backendUser` does, rather than fail as a server error.
+      if ((error as { status?: number }).status === 403)
+        return Response.json({ code: "identity_not_authorized" }, { status: 403 });
+      throw error;
+    }
+    const noStore = { "Cache-Control": "no-store" };
+    if (account === null)
+      return Response.json({ code: "no_account" }, { status: 404, headers: noStore });
+    return Response.json({ account, issuer }, { headers: noStore });
   }
 
   /**
@@ -1822,11 +2660,20 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     if (request.method !== "GET" && request.method !== "HEAD" && !originAllowed(request)) {
       return new Response("origin not allowed", { status: 403 });
     }
+    if (path === "/inspect" || path.startsWith("/inspect/")) {
+      return inspector.handle(request, path);
+    }
     if (/^\/apps\/[^/]+\/accounts\/backend-sign-in$/.test(path)) {
       return backendSignIn(request);
     }
+    if (/^\/apps\/[^/]+\/accounts\/backend-user$/.test(path)) {
+      return backendUser(request);
+    }
     if (/^\/apps\/[^/]+\/backend\/admit$/.test(path)) {
       return admitBackendClient(request);
+    }
+    if (/^\/apps\/[^/]+\/backend\/user-session$/.test(path)) {
+      return backendClientUserSession(request);
     }
     if (/^\/apps\/[^/]+\/accounts\/backend-link$/.test(path)) {
       return backendLink(request);
@@ -1852,14 +2699,15 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       // after a socket failed before it opened. Where this host upgrades
       // sockets (attach(), or Vercel), that failure was transient (a
       // restart, a draining instance) and the client should retry the
-      // socket. Only where it can't does the marker send it to the stream.
+      // socket. Only where it can't does the marker send it to the stream
+      // at once; the client also switches after several failed sockets in
+      // a row, when something in between doesn't pass upgrades on. It asks
+      // with a POST, so a page origin the socket was refused for is refused
+      // here too (403, above), and not taken for a proxy's doing.
       if (upgrades) {
         return new Response("Upgrade to a WebSocket", { status: 426 });
       }
-      return new Response("WebSocket upgrade not available here; use the HTTP stream", {
-        status: 426,
-        headers: { [STREAM_AVAILABLE_HEADER]: "1" },
-      });
+      return useHttpStream();
     }
     if (!PUBLIC_APP_ROUTES.test(path)) return new Response("Not found", { status: 404 });
     const url = new URL(request.url);
@@ -1884,28 +2732,47 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
 
   async function nextHandler(request: Request): Promise<Response> {
     const path = innerPath(request);
+    // On Vercel this handler upgrades sockets (below), once `ws` is
+    // installed; elsewhere (next dev) only if attach() runs on the same
+    // server. Where it can't, a socket gets the HTTP stream marker, as a
+    // plain request for the socket path does.
+    const onVercel = onVercelHost();
+    const vercelUpgrades = onVercel && (await vercelUpgradesSockets());
     if (
       request.method === "GET" &&
       path?.endsWith("/ws") &&
       request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
-      onVercelHost()
+      onVercel
     ) {
       if (!originAllowed(request)) return new Response("origin not allowed", { status: 403 });
-      const { upgradeWebSocket } = (await import(
-        /* @vite-ignore */ "@vercel/functions" as string
-      )) as {
+      if (!vercelUpgrades) return useHttpStream();
+      // An optional peer: a literal import inside `try`, so bundlers report
+      // a missing one at runtime, not on every route (see importSandboxSdk).
+      let vercelFunctions: {
         upgradeWebSocket(
           handler: (ws: WsLikeSocket) => void,
           options?: { maxPayload?: number },
         ): Response;
+        getDeadline?(): Date | undefined;
       };
-      return upgradeWebSocket((ws) => acceptSocket(request, ws), {
-        maxPayload: MAX_STREAM_MESSAGE_BYTES,
-      });
+      try {
+        vercelFunctions = (await import(
+          /* @vite-ignore */ "@vercel/functions"
+        )) as unknown as typeof vercelFunctions;
+      } catch (error) {
+        throw optionalPeerImportError("Jazz on Vercel", "@vercel/functions", error);
+      }
+      const { upgradeWebSocket } = vercelFunctions;
+      // The socket ends with this invocation, at the route's maxDuration:
+      // close it just before, so the client reconnects without a stall.
+      const deadline = vercelFunctions.getDeadline?.()?.getTime();
+      return upgradeWebSocket(
+        (ws) =>
+          acceptSocket(request, deadline === undefined ? ws : closingBeforeDeadline(ws, deadline)),
+        { maxPayload: MAX_STREAM_MESSAGE_BYTES },
+      );
     }
-    // On Vercel this handler upgrades sockets (above); elsewhere (next dev)
-    // only if attach() runs on the same server.
-    return handle(request, upgradesSockets || onVercelHost());
+    return handle(request, upgradesSockets || vercelUpgrades);
   }
 
   function nodeRequest(req: IncomingMessage): Request {
@@ -1916,19 +2783,62 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       for (const item of Array.isArray(value) ? value : [value]) headers.append(name, item);
     }
     const hasBody = req.method !== "GET" && req.method !== "HEAD";
-    return new Request(`http://${host}${req.url ?? "/"}`, {
+    // A body parser mounted before nodeHandler (express.json(), express.raw())
+    // has read the stream already: its buffer is the body, or nothing is.
+    const parsed = (req as { body?: unknown }).body;
+    // No bytes to read: what a parser made of nothing (`{}`) doesn't matter.
+    const empty =
+      req.headers["content-length"] === "0" ||
+      (req.headers["content-length"] === undefined &&
+        req.headers["transfer-encoding"] === undefined);
+    const json = /^application\/json\b/i.test(req.headers["content-type"] ?? "");
+    let body: BodyInit | undefined;
+    if (hasBody && req.readableEnded) {
+      if (parsed instanceof Uint8Array) {
+        body = parsed as BodyInit;
+      } else if (empty) {
+        body = undefined;
+      } else if (json && parsed !== null && typeof parsed === "object") {
+        // express.json()'s result: Jazz's JSON routes read it as JSON again
+        // (none signs its bytes), so it serves as the body.
+        body = JSON.stringify(parsed);
+        headers.delete("content-length");
+      } else {
+        throw new Error(
+          "jazz: the request body was already read by another handler; mount jazz.nodeHandler before body parsers such as express.json()",
+        );
+      }
+    } else if (hasBody) {
+      body = req as unknown as BodyInit;
+    }
+    const request = new Request(`http://${host}${req.url ?? "/"}`, {
       method: req.method,
       headers,
-      ...(hasBody ? { body: req as unknown as BodyInit, duplex: "half" } : {}),
+      ...(body === undefined ? {} : { body, duplex: "half" }),
     } as RequestInit);
+    const address = req.socket?.remoteAddress;
+    if (address) remoteAddresses.set(request, address);
+    return request;
   }
 
   function nodeHandler(req: IncomingMessage, res: ServerResponse, next?: () => void): void {
-    const request = nodeRequest(req);
-    if (innerPath(request) === null) {
+    // Only Jazz's own paths: a request for the app passes on untouched, its
+    // body unread, whatever read it before.
+    const pathname = requestPathname(req.url);
+    if (pathname === null || (pathname !== basePath && !pathname.startsWith(`${basePath}/`))) {
       if (next) return next();
       res.statusCode = 404;
       res.end();
+      return;
+    }
+    let request: Request;
+    try {
+      request = nodeRequest(req);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      // A code the client reports, so the browser doesn't fail silently.
+      res.statusCode = 500;
+      res.end("request_body_already_read");
       return;
     }
     void handle(request).then(
@@ -1955,71 +2865,826 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
     );
   }
 
-  async function attach(server: Server): Promise<void> {
-    const { WebSocketServer } = (await import("ws" as string)) as {
-      WebSocketServer: new (options: { noServer: true; maxPayload: number }) => {
-        handleUpgrade(
-          req: IncomingMessage,
-          socket: Duplex,
-          head: Buffer,
-          callback: (ws: WsLikeSocket) => void,
-        ): void;
-        close(): void;
-      };
-    };
-    const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_STREAM_MESSAGE_BYTES });
-    server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-      const request = nodeRequest(req);
-      const path = innerPath(request);
-      if (path === null || !/^\/apps\/[^/]+\/ws$/.test(path)) return;
-      if (!originAllowed(request)) {
-        socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
-        return;
-      }
-      wss.handleUpgrade(req, socket, head, (ws) => acceptSocket(request, ws));
-    });
-    // Only now, with `ws` loaded and the listener on: this server upgrades.
-    upgradesSockets = true;
-    server.on("close", () => wss.close());
+  function upgrade(wss: SocketUpgrader, req: IncomingMessage, socket: Duplex, head: Buffer): void {
+    let request: Request;
+    try {
+      request = nodeRequest(req);
+    } catch {
+      // A request no URL can be made of (a bad Host header).
+      socket.end(BAD_UPGRADE);
+      return;
+    }
+    const path = innerPath(request);
+    if (path === null || !SOCKET_PATH.test(path)) return void socket.end(BAD_UPGRADE);
+    if (!originAllowed(request)) {
+      socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => acceptSocket(request, ws));
   }
+
+  function markAttached(): void {
+    upgradesSockets = true;
+    attached = true;
+  }
+
+  // The Inspector follows `reload`: it reads the current options each time.
+  let keptSecret: Promise<string> | undefined;
+  let schemaOf: {
+    app: CreateJazzOptions["app"];
+    schema: ReturnType<typeof resolveSchemaSource>;
+  } | null = null;
+  const inspector = createInspector({
+    appId,
+    get basePath() {
+      return basePath;
+    },
+    get publicUrls() {
+      return publicUrls;
+    },
+    schema: () => {
+      if (schemaOf?.app !== options.app) {
+        schemaOf = { app: options.app, schema: resolveSchemaSource(options.app) };
+      }
+      return schemaOf.schema;
+    },
+    get permissions() {
+      return options.permissions;
+    },
+    db: () => backend.db,
+    dbAs: async (user) => backendDbForSession(backend, await sessionFor(user, "inspect `as`")),
+    sessions: () =>
+      [...liveSessions].map(
+        ({ session: live, transport, openedAt }): InspectSessionInfo => ({
+          userId: live.userId ?? null,
+          kind: live.trusted ? "backend-client" : live.userId === undefined ? "guest" : "user",
+          transport,
+          openedAt,
+        }),
+      ),
+    get hook() {
+      return options.inspect;
+    },
+    get options() {
+      return options.inspector ?? NO_INSPECTOR_OPTIONS;
+    },
+    tokenSecret: async () => {
+      const configured = options.inspector?.tokenSecret;
+      if (configured !== undefined) return configured;
+      if (store.kind === "remote") return store.secret ?? null;
+      if (store.kind === "sqlite") {
+        // Read once; a failed read is tried again on the next call.
+        keptSecret ??= keptTokenSecret(store.path).catch((error: unknown) => {
+          keptSecret = undefined;
+          throw error;
+        });
+        return keptSecret;
+      }
+      if (store.kind === "memory") return memoryTokenSecret;
+      // A Vercel core's only credential is the function's OIDC token: there
+      // is no shared secret to sign with.
+      return null;
+    },
+    remoteAddress: (request) => remoteAddresses.get(request),
+    serveUi: createInspectorUi(),
+  });
 
   let closing: Promise<void> | undefined;
   return {
     appId,
-    basePath,
+    get basePath() {
+      return basePath;
+    },
+    reload,
     handle: (request) => handle(request),
     next: () => ({ GET: nextHandler, POST: nextHandler, DELETE: nextHandler }),
-    attach,
+    upgrade,
+    markAttached,
     nodeHandler,
     acceptSocket,
     get db() {
       return backend.db;
     },
     linkIdentity,
-    async forRequest(request) {
+    async forReqUser(request) {
       const user = await authenticate(request);
-      if (!user) throw new Error("forRequest: the request has no signed-in user");
-      return backendDbForSession(backend, await sessionFor(user));
+      if (!user) throw signedOut("forReqUser");
+      return backendDbForSession(backend, await sessionFor(user, "forReqUser"));
     },
     async withAttribution(request) {
       const user = await authenticate(request);
-      if (!user) throw new Error("withAttribution: the request has no signed-in user");
-      return backendDbAttributedTo(backend, await sessionFor(user));
+      if (!user) throw signedOut("withAttribution");
+      return backendDbAttributedTo(backend, await sessionFor(user, "withAttribution"));
     },
     async accountFor(request) {
       const user = await authenticate(request);
-      return user ? ((await sessionFor(user)).account_id ?? null) : null;
+      return user ? await existingAccountOf(user.userId) : null;
+    },
+    async createAccountFor(userId) {
+      if (typeof userId !== "string" || userId === "")
+        throw new Error("createAccountFor: pass the user's id, as your authenticate names it");
+      return accountOf(userId);
+    },
+    async revokeUser(userId) {
+      if (typeof userId !== "string" || userId === "")
+        throw new Error("revokeUser: pass the user's id, as your authenticate names it");
+      let ended = 0;
+      for (const { session } of [...liveSessions]) {
+        if (session.trusted || session.userId !== userId) continue;
+        session.revoke("revokeUser");
+        ended += 1;
+      }
+      return ended;
     },
     close() {
       closing ??= (async () => {
-        for (const { session: stream } of streams.values()) stream.close();
+        // Every client connection ends, so the host's own shutdown (which
+        // waits for the connections it serves) can finish, and the clients
+        // reconnect to whichever instance serves next.
+        for (const stream of [...streams.values()]) {
+          stream.session.close();
+          stream.end(1012, "server shutting down");
+        }
         streams.clear();
+        for (const ws of [...clientSockets]) {
+          ws.resume?.();
+          ws.close(1012, "server shutting down");
+        }
+        clientSockets.clear();
+        await Promise.all([...retiring].map((close) => close()));
+        // Writes that resolved at the "local" tier may still be on their way
+        // to the core. Hand them over before closing it, so a close right
+        // after a write never loses it.
+        const timer = setTimeout(() => backend.db.abortGracefulShutdown(), CLOSE_SYNC_TIMEOUT_MS);
+        await backend
+          .shutdown({ waitForSync: true })
+          .catch((error: unknown) => {
+            console.warn("Jazz backend closed before every write reached the core.", error);
+          })
+          .finally(() => clearTimeout(timer));
         await session.close();
         await core.close();
       })();
       return closing;
     },
   };
+}
+
+/**
+ * Run Jazz inside your backend. It applies the schema, migrations and
+ * permissions your code declares to its core (in this process, or a remote
+ * one), and serves sync on your own origin under `basePath`. There is no
+ * separate deploy step: a rollback of your backend rolls Jazz back with it.
+ *
+ * It opens nothing when called, so a module can export it at its top level:
+ * the store opens on first use (a request, a `db` call, `ready()`). A process
+ * runs one Jazz per store (a `sqlite()` directory, a `vercel()` core): a
+ * later `createJazz` for it (a dev server's hot reload, another module
+ * graph) returns that same Jazz with the later
+ * call's app, permissions and options. Each `remote()` and `memory()` store
+ * is its own: a module that hot reloads keeps that Jazz across reloads
+ * itself, or closes it.
+ */
+export function createJazz(options: CreateJazzOptions): Jazz {
+  jazzSettings(options);
+  // Checked at startup, so a missing `ws` is in the logs before the first socket.
+  if (onVercelHost()) void vercelUpgradesSockets();
+  const store = runningStore(options.store);
+  const key = storeKey(store);
+  const entries = registry();
+  const shared = key === undefined ? undefined : entries.get(key);
+  if (shared && !shared.closing) {
+    adoptStore(shared, store);
+    shared.options = options;
+    return shared.jazz;
+  }
+  // A Jazz for this store still closing: the new one opens once it let go.
+  const entry = newEntry(options, store, key, shared?.released);
+  if (key !== undefined) entries.set(key, entry);
+  return entry.jazz;
+}
+
+/** One store's Jazz in this process, shared by every `createJazz` for it. */
+interface Entry {
+  key: string | undefined;
+  store: JazzStore;
+  /** The latest call's options: the ones the next use applies. */
+  options: CreateJazzOptions;
+  opening?: Promise<OpenedJazz>;
+  opened?: OpenedJazz;
+  /** The options `opened` runs with. */
+  applied?: CreateJazzOptions;
+  reloading?: Promise<void>;
+  /** The last open failed: the next try waits until `retryAt`. */
+  failure?: { error: unknown; retryAt: number; delayMs: number };
+  /** Set by `close()`: what it resolves with. */
+  closing?: Promise<void>;
+  /** Resolves once the store is closed, even after a `close()` that gave up waiting. */
+  released?: Promise<void>;
+  /** A previous Jazz for this store, closing: this one opens once it is released. */
+  after?: Promise<void>;
+  /** `attach()` ran: the Jazz it opens upgrades sockets. */
+  attached?: boolean;
+  jazz: Jazz;
+}
+
+/** How long a session a reload replaced stays open for the requests still using it. */
+const RETIRED_SESSION_GRACE_MS = 60_000;
+/** How long `close()` waits for a store still opening before it gives up on it. */
+export const CLOSE_WAITS_FOR_OPEN_MS = 30_000;
+/** A failed open is tried again after this, doubling up to `MAX_OPEN_RETRY_MS`. */
+const FIRST_OPEN_RETRY_MS = 1_000;
+const MAX_OPEN_RETRY_MS = 30_000;
+/** At most this many sockets wait for the store to open, each holding at most this much. */
+export const MAX_HELD_SOCKETS = 1_000;
+export const MAX_HELD_SOCKET_BYTES = 4 * 1024 * 1024;
+
+const REGISTRY = Symbol.for("jazz-tools.createJazz.stores");
+
+/**
+ * Open stores by key, on `globalThis` so that two copies of this module
+ * (a bundler's server and route chunks, a hot reload) share them.
+ */
+function registry(): Map<string, Entry> {
+  const scope = globalThis as { [REGISTRY]?: Map<string, Entry> };
+  return (scope[REGISTRY] ??= new Map());
+}
+
+/**
+ * The store's identity in this process: one Jazz runs per store, so a hot
+ * reload finds the one it opened. A `remote()` store has none: two
+ * backends (deployments, tests) may each run their own Jazz on one remote
+ * app, with their own permissions. Nor has a `memory()` store, a new,
+ * empty database each time. A module that hot reloads keeps such a Jazz
+ * across reloads itself (on `globalThis`), or closes it.
+ */
+function storeKey(store: JazzStore): string | undefined {
+  if (store.kind === "sqlite") return `sqlite:${resolve(store.path)}`;
+  if (store.kind === "vercel") {
+    const project = store.options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID;
+    let name = store.options.name;
+    try {
+      name ??= project ? defaultCoreName(project, process.env) : undefined;
+    } catch {
+      // A preview without a branch: its open reports that, not createJazz.
+    }
+    // Without a name the core is unknown: its open reports that.
+    return name ? `vercel:${name}` : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * What a store's settings are. The functions it holds (a credential hook)
+ * are not settings: the open store calls the latest call's. A Sandbox SDK
+ * is: another one is another setting.
+ */
+function storeSettings(store: JazzStore): string {
+  return JSON.stringify(store, (name, value: unknown) => {
+    if (name === "sdk" && value !== undefined) return `sdk#${identity(value as object)}`;
+    return typeof value === "function" ? "function" : value;
+  });
+}
+
+const identities = new WeakMap<object, number>();
+let lastIdentity = 0;
+function identity(value: object): number {
+  let id = identities.get(value);
+  if (id === undefined) identities.set(value, (id = ++lastIdentity));
+  return id;
+}
+
+/**
+ * The entry's store, its function settings (a credential hook) calling
+ * through to the latest `createJazz` call's, so a reload applies them.
+ */
+function liveStore(entry: Entry): JazzStore {
+  const through = <T extends object>(value: T, current: () => T | undefined): T => {
+    const out = { ...value } as Record<string, unknown>;
+    for (const [name, field] of Object.entries(value)) {
+      if (typeof field !== "function") continue;
+      out[name] = (...args: unknown[]) => {
+        const latest = (current() as Record<string, unknown> | undefined)?.[name];
+        return ((typeof latest === "function" ? latest : field) as (...a: unknown[]) => unknown)(
+          ...args,
+        );
+      };
+    }
+    return out as T;
+  };
+  const store = entry.store;
+  if (store.kind === "vercel") {
+    return {
+      ...store,
+      options: through(store.options, () =>
+        entry.store.kind === "vercel" ? entry.store.options : undefined,
+      ),
+    };
+  }
+  return through(store, () => entry.store);
+}
+
+/**
+ * A later `createJazz` for an entry's store. Before the store opens it takes
+ * the new settings; once open, settings that would need another core are
+ * refused, so a change never silently goes unapplied.
+ */
+function adoptStore(entry: Entry, store: JazzStore): void {
+  if (!entry.opening && !entry.opened) {
+    entry.store = store;
+    // A later call (a hot reload after a fix) tries the open again at once.
+    entry.failure = undefined;
+    return;
+  }
+  if (storeSettings(store) !== storeSettings(entry.store)) {
+    throw new Error(
+      `createJazz(): ${entry.key} is already open in this process with other store settings; restart the process to change them`,
+    );
+  }
+  // The same settings: its function settings are the latest call's now.
+  entry.store = store;
+}
+
+function newEntry(
+  options: CreateJazzOptions,
+  store: JazzStore,
+  key: string | undefined,
+  after?: Promise<void>,
+): Entry {
+  const entry = { key, store, options, after } as Entry;
+  entry.jazz = facade(entry);
+  return entry;
+}
+
+/**
+ * The entry's open Jazz, with the latest call's options applied. Once it is
+ * closing, only `draining` (the writes made before the close) still gets it.
+ */
+async function settled(entry: Entry, draining = false): Promise<OpenedJazz> {
+  for (;;) {
+    if (entry.closing && !draining) throw new Error("createJazz: this Jazz was closed");
+    const opened = await (entry.opening ?? openEntry(entry));
+    if (entry.closing && !draining) throw new Error("createJazz: this Jazz was closed");
+    if (entry.applied === entry.options) return opened;
+    await (entry.reloading ??= reloadEntry(entry, opened));
+  }
+}
+
+/**
+ * Open the entry's store. A failed open is not tried again at once: until
+ * its backoff has passed, every use fails with the same error, so a store
+ * that is down is not asked again on every request.
+ */
+function openEntry(entry: Entry): Promise<OpenedJazz> {
+  const failed = entry.failure;
+  if (failed && Date.now() < failed.retryAt) return Promise.reject(failed.error);
+  const options = entry.options;
+  const opening: Promise<OpenedJazz> = (async () => {
+    await entry.after;
+    return openJazz(options, liveStore(entry));
+  })().then(
+    (opened) => {
+      entry.failure = undefined;
+      if (entry.attached) opened.markAttached();
+      entry.opened = opened;
+      entry.applied = options;
+      drainOnSignal(entry);
+      return opened;
+    },
+    (error: unknown) => {
+      const delayMs = failed
+        ? Math.min(failed.delayMs * 2, MAX_OPEN_RETRY_MS)
+        : FIRST_OPEN_RETRY_MS;
+      entry.failure = { error, retryAt: Date.now() + delayMs, delayMs };
+      if (entry.opening === opening) entry.opening = undefined;
+      throw error;
+    },
+  );
+  entry.opening = opening;
+  return opening;
+}
+
+/** The signals a host stops a server with (a deploy, a rolling restart, Ctrl-C). */
+const SHUTDOWN_SIGNALS = ["SIGTERM", "SIGINT"] as const;
+/** Every open Jazz in this process, closed when the process is asked to stop. */
+const drained = new Set<Entry>();
+const onShutdownSignal = (signal: NodeJS.Signals) => void shutDownOnSignal(signal);
+
+/**
+ * Close every open Jazz when the process is asked to stop. A host's own
+ * shutdown (`next start`, an Effect runtime, `server.close()`) waits for the
+ * connections it serves, and Jazz's sync sockets and streams last until Jazz
+ * ends them: without this, the process lingers and keeps its store locked
+ * for as long as a browser stays connected. The clients reconnect to
+ * whichever instance serves next. With no other handler for the signal the
+ * process then stops as it would have; otherwise that handler decides.
+ */
+function drainOnSignal(entry: Entry): void {
+  if (typeof process === "undefined" || typeof process.on !== "function") return;
+  if (drained.size === 0) {
+    for (const signal of SHUTDOWN_SIGNALS) process.on(signal, onShutdownSignal);
+  }
+  drained.add(entry);
+}
+
+function undrain(entry: Entry): void {
+  if (!drained.delete(entry) || drained.size > 0) return;
+  for (const signal of SHUTDOWN_SIGNALS) process.off(signal, onShutdownSignal);
+}
+
+async function shutDownOnSignal(signal: NodeJS.Signals): Promise<void> {
+  for (const each of SHUTDOWN_SIGNALS) process.off(each, onShutdownSignal);
+  const open = [...drained];
+  drained.clear();
+  await Promise.allSettled(open.map((entry) => entry.jazz.close()));
+  // Nobody else asked to handle it: stop the way the signal would have.
+  if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+}
+
+/**
+ * Close the entry: apply the writes made before the close, then close its
+ * store. A store still opening is waited for at most
+ * `CLOSE_WAITS_FOR_OPEN_MS`; past that the writes still waiting fail and
+ * the store closes once it has opened. Until it has, a new `createJazz` for
+ * the store waits for it rather than finding the store held.
+ */
+async function closeEntry(entry: Entry, early: EarlyDb): Promise<void> {
+  let release!: () => void;
+  entry.released = new Promise<void>((resolve) => (release = resolve));
+  const stopped = (async () => {
+    await early.drain();
+    const opened = await entry.opening?.catch(() => undefined);
+    await entry.reloading?.catch(() => undefined);
+    await opened?.close();
+  })();
+  void stopped
+    .catch(() => undefined)
+    .finally(() => {
+      if (entry.key !== undefined && registry().get(entry.key) === entry) {
+        registry().delete(entry.key);
+      }
+      undrain(entry);
+      release();
+    });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const gaveUp = new Promise<true>((resolve) => {
+    timer = setTimeout(() => resolve(true), CLOSE_WAITS_FOR_OPEN_MS);
+  });
+  const late = await Promise.race([stopped.then(() => false), gaveUp]);
+  clearTimeout(timer);
+  if (!late) return;
+  early.abandon(new Error("createJazz: closed before its store opened"));
+  console.warn(
+    `jazz: close() gave up after ${CLOSE_WAITS_FOR_OPEN_MS / 1000}s waiting for ${entry.key ?? "its store"} to open; it closes once it has`,
+  );
+}
+
+async function reloadEntry(entry: Entry, opened: OpenedJazz): Promise<void> {
+  const options = entry.options;
+  try {
+    await opened.reload(options);
+    entry.applied = options;
+  } finally {
+    entry.reloading = undefined;
+  }
+}
+
+/** The entry's open Jazz when nothing is left to apply, without waiting. */
+function settledNow(entry: Entry): OpenedJazz | undefined {
+  return !entry.closing && entry.applied === entry.options ? entry.opened : undefined;
+}
+
+/**
+ * A socket handed over before the store opened: it keeps what arrives until
+ * the session takes it over, so no message is lost while it waits. Past
+ * `MAX_HELD_SOCKET_BYTES` held, it is closed (1013, try again later).
+ */
+function heldSocket(ws: WsLikeSocket): { socket: WsLikeSocket; refuse(reason: string): void } {
+  type Event = ["message", unknown, boolean | undefined] | ["close"] | ["error", unknown];
+  const held: Event[] = [];
+  let heldBytes = 0;
+  let listeners: {
+    message?: (data: unknown, isBinary?: boolean) => void;
+    close?: () => void;
+    error?: (error: unknown) => void;
+  } | null = null;
+  const deliver = (event: Event) => {
+    if (!listeners) {
+      if (event[0] === "message") {
+        heldBytes += byteLength(event[1]);
+        if (heldBytes > MAX_HELD_SOCKET_BYTES) {
+          held.length = 0;
+          ws.close(1013, "store still opening");
+          return;
+        }
+      }
+      return void held.push(event);
+    }
+    if (event[0] === "message") listeners.message?.(event[1], event[2]);
+    else if (event[0] === "close") listeners.close?.();
+    else listeners.error?.(event[1]);
+  };
+  ws.on("message", (data, isBinary) => deliver(["message", data, isBinary]));
+  ws.on("close", () => deliver(["close"]));
+  ws.on("error", (error) => deliver(["error", error]));
+  const socket: WsLikeSocket = {
+    send: (data) => ws.send(data),
+    close: (code, reason) => ws.close(code, reason),
+    pause: () => ws.pause?.(),
+    resume: () => ws.resume?.(),
+    on(event: "message" | "close" | "error", listener: (...args: never[]) => void) {
+      const first = listeners === null;
+      listeners ??= {};
+      (listeners as Record<string, unknown>)[event] = listener;
+      // The session adds its listeners in one go: replay once it has.
+      if (first) {
+        queueMicrotask(() => {
+          for (const event of held.splice(0)) deliver(event);
+        });
+      }
+      return socket;
+    },
+  } as WsLikeSocket;
+  return { socket, refuse: (reason) => ws.close(1011, reason) };
+}
+
+function byteLength(data: unknown): number {
+  if (typeof data === "string") return data.length * 3;
+  if (Array.isArray(data)) return data.reduce((sum: number, part) => sum + byteLength(part), 0);
+  const sized = data as { byteLength?: unknown } | null;
+  return typeof sized?.byteLength === "number" ? sized.byteLength : 0;
+}
+
+/**
+ * A remote core that could not be reached, named, instead of the bare
+ * `fetch failed` the request saw. The next use of this Jazz tries again.
+ */
+function unreachableCore(url: string, error: unknown): unknown {
+  const cause = (error as { cause?: { code?: unknown; message?: unknown } } | null)?.cause;
+  if (!(error instanceof TypeError) || !cause) return error;
+  const why = typeof cause.code === "string" ? cause.code : String(cause.message ?? error.message);
+  return new Error(
+    `createJazz: could not reach the Jazz core at ${url} (${why}); this Jazz tries again on its next use`,
+    { cause: error },
+  );
+}
+
+/** What `attach()` hands an upgrade to: the `ws` package's server, without one of its own. */
+interface SocketUpgrader {
+  handleUpgrade(
+    req: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+    callback: (ws: WsLikeSocket) => void,
+  ): void;
+  close(): void;
+}
+
+async function socketUpgrader(): Promise<SocketUpgrader> {
+  const { WebSocketServer } = (await import("ws" as string)) as {
+    WebSocketServer: new (options: { noServer: true; maxPayload: number }) => SocketUpgrader;
+  };
+  return new WebSocketServer({ noServer: true, maxPayload: MAX_STREAM_MESSAGE_BYTES });
+}
+
+/** A sync socket's path below `basePath`. */
+const SOCKET_PATH = /^\/apps\/[^/]+\/ws$/;
+
+/** Whether an upgrade's URL is a sync socket of this Jazz (`<basePath>/apps/<app>/ws`). */
+function isSocketUpgrade(url: string | undefined, basePath: string): boolean {
+  const pathname = requestPathname(url);
+  return (
+    pathname !== null &&
+    pathname.startsWith(`${basePath}/`) &&
+    SOCKET_PATH.test(pathname.slice(basePath.length))
+  );
+}
+
+/** A Node request's path, or null for one no URL can be made of: not Jazz's. */
+function requestPathname(url: string | undefined): string | null {
+  try {
+    return new URL(url ?? "/", "http://localhost").pathname;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether `server` is an HTTP/2 server that can't serve HTTP/1: one without
+ * upgrades (h2c, or TLS without `allowHTTP1`). Node keeps the options under
+ * a symbol; a server that hides them is taken as able.
+ */
+function http2Only(server: object): boolean {
+  const name = server.constructor?.name;
+  if (name === "Http2Server") return true;
+  if (name !== "Http2SecureServer") return false;
+  const key = Object.getOwnPropertySymbols(server).find(
+    (symbol) => symbol.description === "options",
+  );
+  const options = key
+    ? (server as Record<symbol, { allowHTTP1?: boolean } | undefined>)[key]
+    : undefined;
+  return options !== undefined && options.allowHTTP1 !== true;
+}
+
+/**
+ * What a 503 tells the client to wait: until the store is tried again. The
+ * reason stays in the backend's logs; it can name internal hosts.
+ */
+function retryAfterSeconds(entry: Entry): number {
+  const at = entry.failure?.retryAt;
+  return at === undefined ? 1 : Math.max(1, Math.ceil((at - Date.now()) / 1000));
+}
+
+const UNAVAILABLE_BODY = "Jazz is unavailable; try again shortly";
+
+/**
+ * The 503 a Jazz route answers while its store can't open, or after it
+ * closed. After a close it also closes the connection: a host shutting down
+ * (`next start` on SIGTERM) waits for its keep-alive connections, and a
+ * client re-opening its sync stream over one would keep it, and the
+ * process, alive. (A Fetch response can't tell an HTTP/2 host, which drops
+ * the header with a warning; nodeHandler leaves it off there.)
+ */
+function storeUnavailable(retryAfter: number, closed: boolean): Response {
+  return new Response(UNAVAILABLE_BODY, {
+    status: 503,
+    headers: {
+      "content-type": "text/plain",
+      "retry-after": String(retryAfter),
+      ...(closed ? { connection: "close" } : {}),
+    },
+  });
+}
+
+const storeUnavailableUpgrade = (retryAfter: number) =>
+  `HTTP/1.1 503 Service Unavailable\r\nRetry-After: ${retryAfter}\r\nConnection: close\r\n\r\n`;
+
+const BAD_UPGRADE = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
+
+/** The `Jazz` every `createJazz` for one store returns. */
+function facade(entry: Entry): Jazz {
+  const use = () => settled(entry);
+  const basePath = () => jazzSettings(entry.options).basePath;
+  // After close() its routes answer 503 as the host shuts down: no news.
+  const logUnavailable = (error: unknown) => {
+    if (!entry.closing) console.error("jazz: the store did not open", error);
+  };
+  /** The open Jazz, or the 503 a Jazz route answers while its store can't open. */
+  const useOr503 = async (): Promise<OpenedJazz | Response> => {
+    try {
+      return await use();
+    } catch (error) {
+      logUnavailable(error);
+      return storeUnavailable(retryAfterSeconds(entry), entry.closing !== undefined);
+    }
+  };
+  const handle = async (request: Request) => {
+    const opened = await useOr503();
+    return opened instanceof Response ? opened : opened.handle(request);
+  };
+  const nextHandler = async (request: Request) => {
+    const opened = await useOr503();
+    return opened instanceof Response ? opened : opened.next().GET(request);
+  };
+  // The writes made before a close still apply as it drains them.
+  const early = earlyDb(
+    async () => (await settled(entry, true)).db,
+    () => settledNow(entry)?.db,
+  );
+  const db = early.db;
+  let heldSockets = 0;
+  /** The servers `attach()` took the upgrades of: a second call changes nothing. */
+  const attachedTo = new WeakSet<object>();
+  const jazz = {
+    get basePath() {
+      return basePath();
+    },
+    handle,
+    next: () => ({ GET: nextHandler, POST: nextHandler, DELETE: nextHandler }),
+    async attach(server) {
+      // An HTTP/2 server without HTTP/1 never sees a WebSocket upgrade.
+      if (http2Only(server)) {
+        throw new Error(
+          "attach(): an HTTP/2 server has no WebSocket upgrades; pass an HTTP/1 server (or an HTTPS one with allowHTTP1), or serve Jazz with handle() alone, over its HTTP stream",
+        );
+      }
+      if (attachedTo.has(server)) return;
+      attachedTo.add(server);
+      const wss = await socketUpgrader();
+      // Upgrades work from now on, opened or not: the store opens on the
+      // first socket (or request), and one that can't open is refused with
+      // a 503 the client retries, instead of failing the host's startup.
+      entry.attached = true;
+      entry.opened?.markAttached();
+      const take = (opened: OpenedJazz, req: IncomingMessage, socket: Duplex, head: Buffer) => {
+        try {
+          opened.upgrade(wss, req, socket, head);
+        } catch (error) {
+          console.error("jazz: a socket upgrade failed", error);
+          socket.destroy();
+        }
+      };
+      const upgradeJazz = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+        const now = settledNow(entry);
+        if (now) return take(now, req, socket, head);
+        use().then(
+          (opened) => take(opened, req, socket, head),
+          (error: unknown) => {
+            logUnavailable(error);
+            socket.end(storeUnavailableUpgrade(retryAfterSeconds(entry)));
+          },
+        );
+      };
+      const events = server as unknown as NodeJS.EventEmitter;
+      // Jazz's own sync sockets go to Jazz alone: another upgrade listener
+      // on the server (a custom Next.js server adds one on its first
+      // request) would take the same socket too, and close it. The listener
+      // is there because Node only emits upgrades to a server that has one.
+      events.on("upgrade", () => undefined);
+      const emit = events.emit;
+      events.emit = function (
+        this: NodeJS.EventEmitter,
+        event: string | symbol,
+        ...args: unknown[]
+      ) {
+        if (event === "upgrade" && isSocketUpgrade((args[0] as IncomingMessage).url, basePath())) {
+          upgradeJazz(...(args as [IncomingMessage, Duplex, Buffer]));
+          return true;
+        }
+        return emit.call(this, event, ...args);
+      } as typeof events.emit;
+      events.on("close", () => wss.close());
+    },
+    nodeHandler(req, res, next) {
+      const now = settledNow(entry);
+      if (now) return now.nodeHandler(req, res, next);
+      const prefix = basePath();
+      const pathname = requestPathname(req.url);
+      // Requests Jazz doesn't serve pass on without opening the store.
+      if (pathname === null || (pathname !== prefix && !pathname.startsWith(`${prefix}/`))) {
+        if (next) return next();
+        res.statusCode = 404;
+        res.end();
+        return;
+      }
+      use().then(
+        (opened) => opened.nodeHandler(req, res, next),
+        (error: unknown) => {
+          logUnavailable(error);
+          res.statusCode = 503;
+          res.setHeader("retry-after", String(retryAfterSeconds(entry)));
+          // HTTP/2 has no Connection header (Node warns and drops it).
+          if (entry.closing && req.httpVersionMajor < 2) res.setHeader("connection", "close");
+          res.setHeader("content-type", "text/plain");
+          res.end(UNAVAILABLE_BODY);
+        },
+      );
+    },
+    acceptSocket(request, ws) {
+      const now = settledNow(entry);
+      if (now) return now.acceptSocket(request, ws);
+      if (heldSockets >= MAX_HELD_SOCKETS) return ws.close(1013, "store still opening");
+      heldSockets++;
+      const { socket, refuse } = heldSocket(ws);
+      use()
+        .then(
+          (opened) => opened.acceptSocket(request, socket),
+          (error: unknown) => {
+            logUnavailable(error);
+            refuse("store unavailable");
+          },
+        )
+        .finally(() => heldSockets--);
+    },
+    db,
+    forReqUser: async (request) => (await use()).forReqUser(request),
+    withAttribution: async (request) => (await use()).withAttribution(request),
+    accountFor: async (request) => (await use()).accountFor(request),
+    createAccountFor: async (userId) => (await use()).createAccountFor(userId),
+    revokeUser: async (userId) => (await use()).revokeUser(userId),
+    linkIdentity: async (link) => (await use()).linkIdentity(link),
+    async ready() {
+      await use();
+      return jazz;
+    },
+    close() {
+      return (entry.closing ??= closeEntry(entry, early));
+    },
+  } as Omit<Jazz, "appId"> as Jazz;
+  // Not enumerable, so printing or comparing a Jazz before it opens reads it not.
+  Object.defineProperty(jazz, "appId", {
+    get() {
+      const opened = entry.opened;
+      if (!opened) {
+        throw new Error(
+          "jazz.appId is known once the store has opened: `await jazz.ready()` first",
+        );
+      }
+      return opened.appId;
+    },
+  });
+  return jazz;
 }
 
 /** An account request the core answered with a 4xx: a refusal, not an outage. */
@@ -2037,6 +3702,23 @@ function refusalCode(error: unknown): string {
 }
 
 /** A WireFrame::Error batch with code AuthFailed and retry Never. */
+/**
+ * The error a session sends its client when the expiry its app's auth gave
+ * it is near: `auth_failed` with `after_resume` retry, which a client takes
+ * as "connect again now" (`isReauthenticateWireError`). A client that
+ * doesn't know it takes it as a refused credential and asks its backend.
+ */
+function reauthenticateBatch(): Buffer {
+  const frame = new PostcardWriter();
+  frame.u64(1); // WireFrame::Error
+  frame.u64(3); // WireErrorCode::AuthFailed
+  frame.u64(2); // WireRetry::AfterResume
+  frame.string(
+    `${REAUTHENTICATE_WIRE_MESSAGE_PREFIX} the session reached the expiry authenticate gave it`,
+  );
+  return Buffer.from(encodeWebSocketFrameBatch([frame.finish()]));
+}
+
 function authFailedBatch(message: string): Buffer {
   const frame = new PostcardWriter();
   frame.u64(1); // WireFrame::Error

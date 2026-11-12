@@ -128,7 +128,9 @@ pub(super) async fn ws_handler(
 
     ws.max_frame_size(WS_MAX_FRAME_BYTES)
         .max_message_size(WS_MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| handle_ws_connection(socket, state, headers, websocket_guard))
+        .on_upgrade(move |socket| {
+            handle_ws_connection(socket, state, headers, websocket_guard, Handshake::Network)
+        })
 }
 
 #[derive(Clone, Debug)]
@@ -455,7 +457,7 @@ async fn ws_admission(
             credential: WebSocketCredential::Backend,
             requested_link: RequestedWebSocketLink::OrdinarySession,
             // The backend's own link: the sessions it acts for (its
-            // `forRequest` reads and writes) are governed by its bundle.
+            // `forReqUser` reads and writes) are governed by its bundle.
             bundle,
         });
     }
@@ -607,12 +609,40 @@ fn ws_validate_session_identity(
     Ok(())
 }
 
+/// How long a new connection's peer may take to send its prelude and Hello.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Handshake {
+    /// A peer over the network: one that sends nothing within
+    /// [`WS_HANDSHAKE_READ_TIMEOUT`] is dropped, so stalled upgrades don't
+    /// hold connection slots.
+    Network,
+    /// A client in this process, carried by the embedding host: it cannot
+    /// be half-open, and its Hello waits on the host's event loop, which a
+    /// burst of synchronous work can hold for longer than a network
+    /// peer's handshake may take.
+    InProcess,
+}
+
+/// `read`, within the handshake deadline a network peer has.
+async fn within_handshake<T: Default>(
+    handshake: Handshake,
+    read: impl std::future::Future<Output = T>,
+) -> T {
+    match handshake {
+        Handshake::Network => tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, read)
+            .await
+            .unwrap_or_default(),
+        Handshake::InProcess => read.await,
+    }
+}
+
 async fn read_ws_auth_prelude<S: SyncSocket>(
     socket: &mut S,
     shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
     state: &ServerState,
+    handshake: Handshake,
 ) -> Option<Vec<u8>> {
-    tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, async {
+    within_handshake(handshake, async {
         tokio::select! {
             msg = socket.next() => match msg {
                 Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
@@ -628,15 +658,15 @@ async fn read_ws_auth_prelude<S: SyncSocket>(
         }
     })
     .await
-    .unwrap_or_default()
 }
 
 async fn read_ws_frame_batch<S: SyncSocket>(
     socket: &mut S,
     shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
     state: &ServerState,
+    handshake: Handshake,
 ) -> Option<Vec<u8>> {
-    tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, async {
+    within_handshake(handshake, async {
         tokio::select! {
             msg = socket.next() => match msg {
                 Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
@@ -651,7 +681,6 @@ async fn read_ws_frame_batch<S: SyncSocket>(
         }
     })
     .await
-    .unwrap_or_default()
 }
 
 pub(crate) async fn handle_ws_connection<S: SyncSocket>(
@@ -659,6 +688,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     state: Arc<ServerState>,
     request_headers: HeaderMap,
     _websocket_guard: ActiveWebSocketGuard,
+    handshake: Handshake,
 ) {
     let mut shutdown_rx = state.shutdown.subscribe();
     if state.shutdown.is_shutting_down() {
@@ -666,9 +696,24 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         return;
     }
 
-    let Some(auth_bytes) = read_ws_auth_prelude(&mut socket, &mut shutdown_rx, &state).await else {
+    let Some(auth_bytes) =
+        read_ws_auth_prelude(&mut socket, &mut shutdown_rx, &state, handshake).await
+    else {
         return;
     };
+    // Every client sends its Hello right behind the prelude, without waiting.
+    // Read it before answering anything: how an error frame is encoded is
+    // itself scoped to the wire version, so a client on another version is
+    // refused in its own layout before admission can reply in ours.
+    let Some(first) = read_ws_frame_batch(&mut socket, &mut shutdown_rx, &state, handshake).await
+    else {
+        return;
+    };
+    if let Some(refusal) = ws_foreign_version_refusal(&first) {
+        let _ = send_ws_encoded_frames(&mut socket, &[refusal]).await;
+        let _ = socket.close().await;
+        return;
+    }
     let prelude = match serde_json::from_slice::<WebSocketPrelude>(&auth_bytes)
         .map_err(|error| format!("invalid websocket prelude: {error}"))
     {
@@ -703,10 +748,6 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         admission.trust == CommitUnitTrust::Session,
     );
 
-    let Some(first) = read_ws_frame_batch(&mut socket, &mut shutdown_rx, &state).await else {
-        return;
-    };
-
     let remote_hello = match decode_ws_hello(&first) {
         Ok(hello) => hello,
         Err(error) => {
@@ -720,7 +761,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     // advertises thin results is answered with results, not sync.
     let negotiated = match negotiate_wire(
         &remote_hello,
-        current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS,
+        current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS | jazz::wire::FEATURE_HEARTBEAT,
     ) {
         Ok(negotiated) => negotiated,
         Err(error) => {
@@ -796,6 +837,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
             }
         };
     let thin = negotiated.features & jazz::wire::FEATURE_THIN_RESULTS != 0;
+    let mut thin_reader = ThinReader::default();
     // A thin connection is one session reading finished results: it holds
     // no replica to relay for tabs, so it is never a client relay. An admin
     // link is served as SYSTEM either way. `session_context` is for sync
@@ -843,11 +885,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     let session = match opened {
         Ok(session) => session,
         Err(error) => {
-            send_ws_error(
-                &mut socket,
-                WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
-            )
-            .await;
+            send_ws_error(&mut socket, session_open_wire_error(&error)).await;
             let _ = socket.close().await;
             return;
         }
@@ -935,16 +973,27 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     // Ping on a fixed cadence and drop the link once nothing at all has
     // arrived for the idle timeout; every WebSocket client answers pings.
     let mut last_inbound = tokio::time::Instant::now();
+    let heartbeat = negotiated.features & jazz::wire::FEATURE_HEARTBEAT != 0;
     let mut keepalive = tokio::time::interval_at(
         last_inbound + WS_KEEPALIVE_PING_INTERVAL,
         WS_KEEPALIVE_PING_INTERVAL,
     );
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // A sync batch read while its session's ingress budget was full: the
+    // socket is not read again until the owner has taken earlier frames.
+    let mut held: Option<(Vec<Vec<u8>>, WireAdmission)> = None;
+
     'connection: loop {
+        let stall_at = thin_reader.stall_deadline();
         tokio::select! {
             _ = &mut writer_terminal => break,
             _ = keepalive.tick() => {
+                // A connection waiting for room reads nothing, its peer's
+                // pongs included: that is not the peer going quiet.
+                if thin_reader.waiting() || held.is_some() {
+                    last_inbound = tokio::time::Instant::now();
+                }
                 if last_inbound.elapsed() >= WS_IDLE_TIMEOUT {
                     tracing::debug!("closing idle websocket: no inbound traffic within the idle timeout");
                     let _ = writer_tx.try_send(vec![Message::Close(Some(CloseFrame {
@@ -953,8 +1002,9 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     break;
                 }
                 // A full writer queue already proves the link is busy; the
-                // next tick pings again.
-                let _ = writer_tx.try_send(vec![Message::Ping(Default::default())]);
+                // next tick pings again. A client that cannot see pings (a
+                // browser) asked for a heartbeat frame it can see instead.
+                let _ = writer_tx.try_send(keepalive_beat(heartbeat));
             }
             _ = async {
                 if let Some(changes) = &mut account_changes { let _ = changes.changed().await; }
@@ -1020,7 +1070,38 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     }
                 }
             }
-            msg = socket_reader.next() => {
+            room = thin_reader.admitted() => {
+                if let Err(error) = thin_reader.grant(&core_server_shell, session, room) {
+                    queue_ws_error(&writer_tx, error);
+                    break 'connection;
+                }
+            }
+            _ = async {
+                match stall_at {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                queue_ws_error(&writer_tx, WireError::new(
+                    WireErrorCode::Backpressure, WireRetry::Later,
+                    "a split thin request stalled before its next part",
+                ));
+                break 'connection;
+            }
+            room = async {
+                match &mut held {
+                    Some((_, admission)) => admission.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let (frames, _) = held.take().expect("a held batch is waiting");
+                let received = room.and_then(|room| core_server_shell.receive_wire_frames(session, frames, room));
+                if let Err(error) = received {
+                    queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
+                    break 'connection;
+                }
+            }
+            msg = socket_reader.next(), if !thin_reader.waiting() && held.is_none() => {
                 last_inbound = tokio::time::Instant::now();
                 match msg {
                 Some(Ok(Message::Binary(bytes))) => {
@@ -1039,13 +1120,25 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                         }
                     };
                     if thin {
-                        if let Err(error) = receive_thin_frames(&core_server_shell, session, frames) {
+                        if let Err(error) = thin_reader.read(&core_server_shell, session, frames) {
                             queue_ws_error(&writer_tx, error);
                             break 'connection;
                         }
                         continue;
                     }
-                    if let Err(error) = core_server_shell.receive_wire_frames(session, frames) {
+                    let bytes = frames.iter().map(Vec::len).sum::<usize>();
+                    let received = match core_server_shell.try_admit_wire_frames(session, bytes) {
+                        Ok(Some(room)) => core_server_shell.receive_wire_frames(session, frames, room),
+                        Ok(None) => {
+                            let runtime = core_server_shell.clone();
+                            held = Some((frames, Box::pin(async move {
+                                runtime.admit_wire_frames(session, bytes).await
+                            })));
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = received {
                         queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
                         break 'connection;
                     }
@@ -1075,30 +1168,158 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     }
 }
 
-/// Hand a thin client's requests to the runtime. A thin connection carries
-/// nothing else after its `Hello`.
-fn receive_thin_frames(
-    runtime: &ServerRuntimeHandle,
-    session: ServerSession,
-    frames: Vec<Vec<u8>>,
-) -> Result<(), WireError> {
-    for frame in frames {
-        match jazz::wire::decode_frame(&frame) {
-            Ok(WireFrame::ThinRequest(request)) => runtime
-                .receive_thin_request(session, request, frame.len())
-                .map_err(|error| {
-                    WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error)
-                })?,
-            _ => {
-                return Err(WireError::new(
-                    WireErrorCode::MalformedFrame,
-                    WireRetry::Never,
-                    "a thin connection sends only thin requests",
-                ));
-            }
+/// How long a split thin request may go without its next part before its
+/// connection ends, so a stalled upload does not keep the server's room
+/// for splits. Every part but the last is full, so this is also the
+/// slowest a split may arrive (one wire frame per timeout).
+#[cfg(not(test))]
+const THIN_PART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+#[cfg(test)]
+const THIN_PART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The wait for room for a sync batch in its session's ingress budget.
+type WireAdmission = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<crate::runtime::WireIngress, String>> + Send>,
+>;
+
+type ThinAdmission = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<crate::runtime::ThinIngress, String>> + Send>,
+>;
+
+/// A thin connection's requests on their way to the runtime: each is
+/// admitted (`admit_thin_request`) before its bytes are kept, a split one
+/// at its first part. While a request waits for room the connection reads
+/// nothing more, but keeps answering, pinging and watching for shutdown:
+/// the wait is a future the connection loop polls beside its other work.
+#[derive(Default)]
+struct ThinReader {
+    /// Frames read and not yet handed on, oldest first, with their length.
+    queue: VecDeque<(WireFrame, usize)>,
+    assembler: jazz::thin::ThinAssembler,
+    /// The room of the split being joined.
+    joining: Option<crate::runtime::ThinIngress>,
+    /// Room granted for the frame at the head of `queue`.
+    granted: Option<crate::runtime::ThinIngress>,
+    /// The wait for that room.
+    admission: Option<ThinAdmission>,
+    /// When the split being joined must have sent its next part.
+    part_deadline: Option<tokio::time::Instant>,
+}
+
+fn thin_malformed(error: impl ToString) -> WireError {
+    WireError::new(
+        WireErrorCode::MalformedFrame,
+        WireRetry::Never,
+        error.to_string(),
+    )
+}
+
+fn thin_stopped(error: String) -> WireError {
+    WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error)
+}
+
+impl ThinReader {
+    /// Whether the connection waits for room, reading nothing meanwhile.
+    fn waiting(&self) -> bool {
+        self.admission.is_some()
+    }
+
+    /// The room being waited for (pending while there is no wait).
+    async fn admitted(&mut self) -> Result<crate::runtime::ThinIngress, String> {
+        match &mut self.admission {
+            Some(admission) => admission.await,
+            None => std::future::pending().await,
         }
     }
-    Ok(())
+
+    /// When a stalled split ends the connection: none while not joining.
+    fn stall_deadline(&self) -> Option<tokio::time::Instant> {
+        self.part_deadline.filter(|_| !self.waiting())
+    }
+
+    /// Take a batch read off the socket, handing on what has room.
+    fn read(
+        &mut self,
+        runtime: &ServerRuntimeHandle,
+        session: ServerSession,
+        frames: Vec<Vec<u8>>,
+    ) -> Result<(), WireError> {
+        for frame in frames {
+            let decoded = jazz::wire::decode_frame(&frame)
+                .map_err(|_| thin_malformed("a thin connection sends only thin requests"))?;
+            self.queue.push_back((decoded, frame.len()));
+        }
+        self.advance(runtime, session)
+    }
+
+    /// Room came for the frame at the head of the queue: go on.
+    fn grant(
+        &mut self,
+        runtime: &ServerRuntimeHandle,
+        session: ServerSession,
+        room: Result<crate::runtime::ThinIngress, String>,
+    ) -> Result<(), WireError> {
+        self.admission = None;
+        self.granted = Some(room.map_err(thin_stopped)?);
+        self.advance(runtime, session)
+    }
+
+    fn advance(
+        &mut self,
+        runtime: &ServerRuntimeHandle,
+        session: ServerSession,
+    ) -> Result<(), WireError> {
+        while let Some((frame, len)) = self.queue.front() {
+            // A request too large for one frame arrives in parts, back to back.
+            let needs = match frame {
+                WireFrame::ThinPart(part) if !self.assembler.is_joining() => {
+                    Some((part.total().map_err(thin_malformed)?, true))
+                }
+                WireFrame::ThinPart(_) => None,
+                _ if self.assembler.is_joining() => {
+                    return Err(thin_malformed("a thin frame arrived inside a split one"));
+                }
+                _ => Some((*len, false)),
+            };
+            if let Some((bytes, split)) = needs
+                && self.granted.is_none()
+            {
+                let runtime = runtime.clone();
+                self.admission = Some(Box::pin(async move {
+                    runtime.admit_thin_request(session, bytes, split).await
+                }));
+                return Ok(());
+            }
+            let (frame, _) = self.queue.pop_front().expect("a frame at the head");
+            let (frame, room) = match frame {
+                WireFrame::ThinPart(part) => {
+                    if !self.assembler.is_joining() {
+                        self.joining = self.granted.take();
+                    }
+                    let Some(joined) = self.assembler.push(part).map_err(thin_malformed)? else {
+                        self.part_deadline = Some(tokio::time::Instant::now() + THIN_PART_TIMEOUT);
+                        continue;
+                    };
+                    self.part_deadline = None;
+                    let room = self.joining.take().expect("a joined frame was admitted");
+                    let frame = jazz::wire::decode_postcard_frame(&joined)
+                        .map_err(|_| thin_malformed("a split thin frame does not decode"))?;
+                    (frame, room)
+                }
+                frame => (
+                    frame,
+                    self.granted.take().expect("a whole frame was admitted"),
+                ),
+            };
+            match frame {
+                WireFrame::ThinRequest(request) => runtime
+                    .receive_thin_request(session, request, room)
+                    .map_err(thin_stopped)?,
+                _ => return Err(thin_malformed("a thin connection sends only thin requests")),
+            }
+        }
+        Ok(())
+    }
 }
 
 // A cancelled socket task must not leave its writer owning the socket or queued catalogue.
@@ -1107,6 +1328,19 @@ impl Drop for SocketWriterGuard {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+/// One keepalive tick's messages: a ping, and for a client that negotiated
+/// [`jazz::wire::FEATURE_HEARTBEAT`] a heartbeat frame it can see.
+fn keepalive_beat(heartbeat: bool) -> Vec<Message> {
+    let mut beat = vec![Message::Ping(Default::default())];
+    if heartbeat {
+        let frame = encode_frame(&WireFrame::Heartbeat).expect("a unit frame encodes");
+        let batch = jazz::wire::encode_websocket_frame_batch(&[frame])
+            .expect("a one-byte frame fits a batch");
+        beat.push(Message::Binary(batch.into()));
+    }
+    beat
 }
 
 fn queue_ws_error(writer: &mpsc::Sender<Vec<Message>>, error: WireError) {
@@ -1142,6 +1376,45 @@ fn decode_ws_hello(bytes: &[u8]) -> Result<WireHello, WireError> {
         WireErrorCode::UnsupportedProtocolVersion => error,
         _ => not_hello(),
     })
+}
+
+/// The refusal for a client whose `Hello` advertises a wire version range
+/// without this server's, encoded so that client decodes it: an alpha.59
+/// client is told to upgrade instead of failing on a frame it cannot read.
+/// `None` when the first frame is not a `Hello` or speaks this version.
+fn ws_foreign_version_refusal(bytes: &[u8]) -> Option<Vec<u8>> {
+    let frame = match decode_ws_encoded_frame_batch(bytes) {
+        Ok(mut frames) if frames.len() == 1 => frames.remove(0),
+        Ok(_) => return None,
+        Err(_) => bytes.to_vec(),
+    };
+    let (min, max) = jazz::wire::wire_hello_version_range(&frame)?;
+    let ours = jazz::wire::WIRE_PROTOCOL_VERSION;
+    let message = if max < ours {
+        format!(
+            "this Jazz client speaks wire protocol {min}..={max}, older than this server's \
+             {ours}: upgrade the client to the server's Jazz release (a client from \
+             2.0.0-alpha.59 or earlier cannot connect to 2.0.0-alpha.60 or later)"
+        )
+    } else if min > ours {
+        format!(
+            "this Jazz client speaks wire protocol {min}..={max}, newer than this server's \
+             {ours}: upgrade the server to the client's Jazz release"
+        )
+    } else if min == ours && max == ours {
+        return None;
+    } else {
+        format!(
+            "this Jazz client advertises wire protocol {min}..={max}; this server speaks \
+             exactly {ours}: use the same Jazz release on client and server"
+        )
+    };
+    let error = WireError::new(
+        WireErrorCode::UnsupportedProtocolVersion,
+        WireRetry::Never,
+        message,
+    );
+    jazz::wire::encode_error_frame_for_peer(&error, max).ok()
 }
 
 #[cfg(test)]
@@ -1216,6 +1489,32 @@ async fn close_ws_for_shutdown<S: SyncSocket>(socket: &mut S) {
             reason: "server shutting down".into(),
         })))
         .await;
+}
+
+/// What a client is told when its session was not opened. A session this
+/// core refuses for who it is or how it connects (unpinned, another
+/// identity: [`jazz::db::ErrorCode::Protocol`]) stays refused, so the
+/// client must not retry it. One refused for the catalogue's state (a
+/// bundle not published or admitted here yet:
+/// [`jazz::db::ErrorCode::Schema`]) may open after a publish, and so may
+/// anything else.
+fn session_open_wire_error(error: &crate::runtime::SessionOpenError) -> WireError {
+    use crate::runtime::SessionOpenError;
+    match error {
+        // The store refused this session as asked: unpinned, pinned to a
+        // bundle it never published (a mistyped id, another app's), or to
+        // one whose schema it never admitted. A backend publishes its
+        // bundle before it opens sessions, so none of these clears by
+        // retrying, and the client reports it instead of backing off.
+        SessionOpenError::Refused(refusal) => WireError::new(
+            WireErrorCode::AuthFailed,
+            WireRetry::Never,
+            refusal.to_string(),
+        ),
+        SessionOpenError::Runtime(message) => {
+            WireError::new(WireErrorCode::Internal, WireRetry::Later, message.clone())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1381,15 +1680,16 @@ mod tests {
 
         assert_eq!(
             claims.get("user"),
-            Some(
-                &RowAuthor::from_persisted_subject(
+            Some(&CoreValue::Uuid(
+                RowAuthor::from_persisted_subject(
                     AuthorSubject::authenticated("https://issuer.example", "verified-subject")
                         .expect("authenticated author")
                         .with_account(account),
                 )
                 .expect("admitted row author")
-                .to_value()
-            )
+                .account_id()
+                .0
+            ))
         );
         assert_eq!(
             claims.get("\0claims:user"),
@@ -1504,11 +1804,7 @@ mod tests {
                     .column("owner", ColumnType::Text)
                     .policies(public_table_policies().with_select(PolicyExpr::eq_session(
                         "owner",
-                        vec![
-                            "user".to_owned(),
-                            "identity".to_owned(),
-                            "subject".to_owned(),
-                        ],
+                        vec!["identity".to_owned(), "subject".to_owned()],
                     ))),
             )
             .build();
@@ -1517,20 +1813,20 @@ mod tests {
     }
 
     async fn make_ws_convergence_test_state() -> Arc<ServerState> {
-        let schema = ws_public_schema_convert();
-        ServerBuilder::new(AppId::random())
+        let source = ws_public_schema_convert().public_schema().clone();
+        let state = ServerBuilder::new(AppId::random())
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
                 backend_secret: Some("backend-secret".to_owned()),
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .with_core_server_shell_schema(schema)
             .build()
             .await
             .expect("build websocket convergence test state")
-            .state
+            .state;
+        publish_source_bundle(&state, &source).await;
+        state
     }
 
     // Internal admission-boundary test: scoped-link selection is made before
@@ -2030,11 +2326,12 @@ mod tests {
         );
         assert_eq!(
             admission.claims.get("user"),
-            Some(
-                &RowAuthor::from_persisted_subject(identity)
+            Some(&CoreValue::Uuid(
+                RowAuthor::from_persisted_subject(identity)
                     .expect("admitted row author")
-                    .to_value()
-            )
+                    .account_id()
+                    .0
+            ))
         );
         assert!(!admission.claims.contains_key("\0claims:authMode"));
     }
@@ -2391,6 +2688,11 @@ mod tests {
         ws.send(WsMessage::Text(prelude.into()))
             .await
             .expect("send prelude");
+        ws.send(WsMessage::Binary(
+            ws_client_hello_batch_with_features(current_wire_features()).into(),
+        ))
+        .await
+        .expect("send hello");
         let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
             .expect("admission resolves")
@@ -2420,7 +2722,13 @@ mod tests {
             let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
                 .await
                 .expect("connect websocket");
-            let json = entry["json"].as_str().expect("fixture JSON").to_owned();
+            let mut json = entry["json"].as_str().expect("fixture JSON").to_owned();
+            // The backend pins every session it states to its bundle.
+            let mut parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            if !parsed["auth"]["backend_session"].is_null() {
+                parsed["bundle"] = serde_json::json!(current_bundle(addr, &state).await);
+                json = parsed.to_string();
+            }
             let message = if entry["writer"] == "typescript-native-runtime" {
                 WsMessage::Text(json.into())
             } else {
@@ -2434,6 +2742,45 @@ mod tests {
             };
             expect_ws_server_hello(&mut ws, features).await;
         }
+    }
+
+    /// A browser cannot see WebSocket pings, so a client that asks for it
+    /// gets a heartbeat it can see; its frame is the one byte the TypeScript
+    /// carrier drops before the runtime (`WIRE_FRAME_HEARTBEAT`).
+    #[test]
+    fn keepalive_sends_a_heartbeat_only_to_a_client_that_asked() {
+        let [Message::Ping(_)] = keepalive_beat(false).as_slice() else {
+            panic!("a client without the feature gets only the ping");
+        };
+        let beat = keepalive_beat(true);
+        let [Message::Ping(_), Message::Binary(batch)] = beat.as_slice() else {
+            panic!("a heartbeat client gets the ping and one batch");
+        };
+        let frames = decode_ws_frame_batch(batch).expect("a frame batch");
+        assert_eq!(frames, vec![WireFrame::Heartbeat]);
+    }
+
+    #[tokio::test]
+    async fn websocket_negotiates_the_heartbeat_a_browser_asks_for() {
+        assert_eq!(encode_frame(&WireFrame::Heartbeat).unwrap(), vec![7]);
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let entry = websocket_prelude_v1_fixture()["fixtures"]
+            .as_array()
+            .expect("fixture entries")
+            .iter()
+            .find(|entry| entry["name"] == "typescript_admin_default_link")
+            .expect("the TypeScript default-link fixture")
+            .clone();
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+            .await
+            .expect("connect websocket");
+        ws.send(WsMessage::Text(
+            entry["json"].as_str().unwrap().to_owned().into(),
+        ))
+        .await
+        .expect("send prelude");
+        expect_ws_server_hello(&mut ws, jazz::wire::FEATURE_HEARTBEAT).await;
     }
 
     #[tokio::test]
@@ -2803,7 +3150,69 @@ mod tests {
         identity: AuthorSubject,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
-        open_negotiated_ws_with_prelude(addr, state, ws_session_prelude(identity)).await
+        let bundle = current_bundle(addr, state).await;
+        open_negotiated_ws_with_prelude(addr, state, ws_pinned_session_prelude(identity, &bundle))
+            .await
+    }
+
+    /// Publish `source` with its own policies as a bundle, as createJazz
+    /// does on boot (`/bundles`, activating nothing); its hex id.
+    async fn publish_source_bundle(state: &Arc<ServerState>, source: &Schema) -> String {
+        use crate::server::deployment::{DeployRequest, DeploySchema, deploy};
+        let mut structural = source.clone();
+        for table in structural.values_mut() {
+            table.policies = TablePolicies::default();
+        }
+        let hash = jazz::tools::public_schema::SchemaHash::compute(&structural).to_string();
+        let permissions = source
+            .iter()
+            .map(|(name, table)| (name.clone(), table.policies.clone()))
+            .collect();
+        let response = deploy(
+            state.clone(),
+            DeployRequest {
+                target_schema_hash: hash.clone(),
+                schemas: vec![DeploySchema {
+                    hash,
+                    schema: structural,
+                }],
+                migrations: Vec::new(),
+                permissions,
+                allow_dropping_history: false,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("publish bundle: {}", error.body));
+        response.bundle
+    }
+
+    /// The bundle the store published last, which the backend pins its
+    /// sessions to (an empty schema's, when none was): every policy
+    /// session a core serves is pinned to one.
+    async fn current_bundle(_addr: std::net::SocketAddr, state: &Arc<ServerState>) -> String {
+        let latest = match state.runtime() {
+            Some(runtime) => runtime
+                .catalogue()
+                .await
+                .expect("catalogue rows")
+                .bundles
+                .into_iter()
+                .max_by_key(|bundle| bundle.published_at)
+                .map(|bundle| bundle.id.to_hex()),
+            None => None,
+        };
+        if let Some(bundle) = latest {
+            return bundle;
+        }
+        publish_source_bundle(state, &Schema::new()).await
+    }
+
+    /// A backend session prelude for `identity`, pinned to `bundle`.
+    fn ws_pinned_session_prelude(identity: AuthorSubject, bundle: &str) -> Vec<u8> {
+        let mut prelude: serde_json::Value =
+            serde_json::from_slice(&ws_session_prelude(identity)).unwrap();
+        prelude["bundle"] = serde_json::json!(bundle);
+        prelude.to_string().into_bytes()
     }
 
     async fn open_negotiated_ws_with_prelude(
@@ -3362,6 +3771,58 @@ mod tests {
         }
     }
 
+    /// An alpha.59 client (wire v3, where `WireFrame::Error` was tag 2) sends
+    /// its old JSON prelude, with a client JWT this server no longer admits,
+    /// and its v3 `Hello`. It is refused before admission, in a frame it
+    /// decodes, with an error that tells it to upgrade, instead of reading a
+    /// v6 error as a "semantic frame before server hello".
+    #[tokio::test]
+    async fn alpha_59_client_is_told_to_upgrade_in_its_own_wire_layout() {
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id)).await.unwrap();
+        let prelude = serde_json::json!({
+            "peer_identity": AuthorSubject::for_test_bytes([0x59; 16]).canonical(),
+            "jwt_token": "alpha.59-client-jwt",
+            "auth": { "jwt_token": "alpha.59-client-jwt", "sub": "alpha59" },
+            "sub": "alpha59",
+        })
+        .to_string();
+        ws.send(WsMessage::Text(prelude.into())).await.unwrap();
+        // packages/jazz-tools alpha.59 `encodeWireClientHello`: tag 0, min 3,
+        // max 3, features, role Client, no authority.
+        let mut hello = postcard::to_allocvec(&(0u32, 3u16, 3u16, 0b1_0101u64, 0u32)).unwrap();
+        hello.push(0); // Option::None
+        let batch = postcard::to_allocvec(&vec![hello]).unwrap();
+        ws.send(WsMessage::Binary(batch.into())).await.unwrap();
+
+        let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("refusal deadline")
+            .expect("response")
+            .expect("wire response");
+        let WsMessage::Binary(bytes) = response else {
+            panic!("expected a refusal frame batch, got {response:?}");
+        };
+        let frames: Vec<Vec<u8>> = postcard::from_bytes(&bytes).expect("v3 frame batch");
+        assert_eq!(frames.len(), 1);
+        // What alpha.59's `isWireError`/`decodeWireError` read: tag 2, then
+        // code, retry and message, and nothing after.
+        let ((tag, error), rest): ((u32, WireError), _) =
+            postcard::take_from_bytes(&frames[0]).expect("v3 error frame");
+        assert!(rest.is_empty(), "trailing bytes after the v3 error frame");
+        assert_eq!(tag, 2, "WireFrame::Error is tag 2 in wire v3");
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
+        assert!(
+            error.message.contains("upgrade the client")
+                && error.message.contains("2.0.0-alpha.59"),
+            "{}",
+            error.message
+        );
+        let _ = ws.close(None).await;
+    }
+
     #[tokio::test]
     async fn accountless_anonymous_proof_cannot_open_public_websocket() {
         let state = make_ws_test_state().await;
@@ -3373,6 +3834,11 @@ mod tests {
         ws.send(WsMessage::Binary(prelude.into()))
             .await
             .expect("send proof");
+        ws.send(WsMessage::Binary(
+            ws_client_hello_batch_with_features(current_wire_features()).into(),
+        ))
+        .await
+        .expect("send hello");
         let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
             .expect("admission resolves")
@@ -3506,6 +3972,7 @@ mod tests {
         let prelude = serde_json::json!({
             "peer_identity": identity.canonical(),
             "auth": { "jwt_token": alice, "backend_secret": JazzServer::BACKEND_SECRET },
+            "bundle": core.latest_bundle(),
         });
         ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
             .await
@@ -3653,6 +4120,7 @@ mod tests {
             &core,
             serde_json::json!({
                 "peer_identity": identity.canonical(),
+                "bundle": core.latest_bundle(),
                 "auth": { "jwt_token": token },
             }),
         )
@@ -3663,6 +4131,7 @@ mod tests {
             &core,
             serde_json::json!({
                 "peer_identity": identity.canonical(),
+                "bundle": core.latest_bundle(),
                 "auth": { "jwt_token": token },
                 "local_first_audience": endpoint,
             }),
@@ -3677,6 +4146,7 @@ mod tests {
             &core,
             serde_json::json!({
                 "peer_identity": identity.canonical(),
+                "bundle": core.latest_bundle(),
                 "auth": { "jwt_token": token, "backend_secret": JazzServer::BACKEND_SECRET },
                 "local_first_audience": endpoint,
             }),
@@ -3688,6 +4158,7 @@ mod tests {
             &core,
             serde_json::json!({
                 "peer_identity": identity.canonical(),
+                "bundle": core.latest_bundle(),
                 "auth": { "jwt_token": token, "backend_secret": JazzServer::BACKEND_SECRET },
                 "local_first_audience": "https://other.example.com/jazz",
             }),
@@ -3731,7 +4202,11 @@ mod tests {
         ))
         .await
         .expect("connect Alice");
-        let prelude = serde_json::json!({ "peer_identity": identity.canonical(), "auth": { "jwt_token": alice, "backend_secret": JazzServer::BACKEND_SECRET } });
+        let prelude = serde_json::json!({
+            "peer_identity": identity.canonical(),
+            "auth": { "jwt_token": alice, "backend_secret": JazzServer::BACKEND_SECRET },
+            "bundle": core.latest_bundle(),
+        });
         ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
             .await
             .expect("prelude");
@@ -3924,6 +4399,11 @@ mod tests {
             ws.send(WsMessage::Binary(prelude.into()))
                 .await
                 .expect("send forged SYSTEM claim");
+            ws.send(WsMessage::Binary(
+                ws_client_hello_batch_with_features(current_wire_features()).into(),
+            ))
+            .await
+            .expect("send hello");
             let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
                 .await
                 .expect("admission resolves")
@@ -4379,14 +4859,10 @@ mod tests {
         let addr = start_ws_test_server(state.clone()).await;
         let policies = public_table_policies().with_select(PolicyExpr::eq_session(
             "title",
-            vec![
-                "user".to_owned(),
-                "identity".to_owned(),
-                "subject".to_owned(),
-            ],
+            vec!["identity".to_owned(), "subject".to_owned()],
         ));
         let response = reqwest::Client::new()
-            .post(format!("http://{addr}/apps/{}/admin/deploy", state.app_id))
+            .post(format!("http://{addr}/apps/{}/admin/bundles", state.app_id))
             .header("X-Jazz-Admin-Secret", "admin-secret")
             .header("Content-Type", "application/json")
             .body(
@@ -4443,12 +4919,11 @@ mod tests {
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .with_core_server_shell_schema(schema.clone())
             .build()
             .await
             .expect("build websocket private docs test state")
             .state;
+        publish_source_bundle(&state, &schema.public_schema().clone()).await;
         let addr = start_ws_test_server(state.clone()).await;
         let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
         let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
@@ -4580,13 +5055,12 @@ mod tests {
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .with_core_server_shell_schema(ws_public_schema_convert())
             .with_max_websocket_connections(2)
             .build()
             .await
             .expect("build capped websocket server state")
             .state;
+        publish_source_bundle(&state, &ws_public_schema_convert().public_schema().clone()).await;
         let addr = start_ws_test_server(state.clone()).await;
 
         let first =
@@ -4637,12 +5111,15 @@ mod tests {
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .with_core_server_shell_schema(ws_public_schema_convert())
             .build()
             .await
             .expect("build first websocket server state")
             .state;
+        publish_source_bundle(
+            &state_a,
+            &ws_public_schema_convert().public_schema().clone(),
+        )
+        .await;
         let state_b = ServerBuilder::new(app_id)
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
@@ -4650,12 +5127,15 @@ mod tests {
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .with_core_server_shell_schema(ws_public_schema_convert())
             .build()
             .await
             .expect("build second websocket server state")
             .state;
+        publish_source_bundle(
+            &state_b,
+            &ws_public_schema_convert().public_schema().clone(),
+        )
+        .await;
         let addr_a = start_ws_test_server(state_a.clone()).await;
         let addr_b = start_ws_test_server(state_b.clone()).await;
         let identity = AuthorSubject::for_test_bytes([0x4a; 16]);
@@ -4914,11 +5394,7 @@ mod tests {
                     .column("owner", ColumnType::Text)
                     .policies(public_table_policies().with_select(PolicyExpr::eq_session(
                         "owner",
-                        vec![
-                            "user".to_owned(),
-                            "identity".to_owned(),
-                            "subject".to_owned(),
-                        ],
+                        vec!["identity".to_owned(), "subject".to_owned()],
                     ))),
             )
             .build()
@@ -4934,12 +5410,14 @@ mod tests {
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
-            .with_schema(Schema::new())
-            .with_core_server_shell_schema(schema.clone())
             .build()
             .await
             .expect("build thin test state")
             .state;
+        // A createJazz app's store: its backend publishes the deployment
+        // as a bundle and pins its sessions to it.
+        drop(schema);
+        publish_source_bundle(&state, &source).await;
         (state, source)
     }
 
@@ -4948,10 +5426,11 @@ mod tests {
         state: &Arc<ServerState>,
         identity: AuthorSubject,
     ) -> TestWs {
+        let bundle = current_bundle(addr, state).await;
         open_negotiated_ws_with_prelude_and_features(
             addr,
             state,
-            ws_session_prelude(identity),
+            ws_pinned_session_prelude(identity, &bundle),
             jazz::wire::FEATURE_THIN_RESULTS,
         )
         .await
@@ -4960,10 +5439,13 @@ mod tests {
     async fn send_thin(ws: &mut TestWs, id: u64, op: jazz::thin::ThinOp) {
         let frame = encode_frame(&WireFrame::ThinRequest(jazz::thin::ThinRequest { id, op }))
             .expect("encode thin request");
-        let batch = postcard::to_allocvec(&vec![frame]).expect("encode thin batch");
-        ws.send(WsMessage::Binary(batch.into()))
-            .await
-            .expect("send thin request");
+        // A request over one frame goes in parts, a message each.
+        for frame in jazz::thin::thin_wire_frames(frame).expect("a thin request in bounds") {
+            let batch = postcard::to_allocvec(&vec![frame]).expect("encode thin batch");
+            ws.send(WsMessage::Binary(batch.into()))
+                .await
+                .expect("send thin request");
+        }
     }
 
     /// Thin responses until `done` holds for the ones so far.
@@ -4972,15 +5454,28 @@ mod tests {
         done: impl Fn(&[jazz::thin::ThinResponse]) -> bool,
     ) -> Vec<jazz::thin::ThinResponse> {
         let mut responses = Vec::new();
+        let mut parts = jazz::thin::ThinAssembler::default();
         let start = tokio::time::Instant::now();
-        while !done(&responses) {
-            let remaining = WS_PUMP_DEADLINE.saturating_sub(start.elapsed());
+        // Values of many MiB take seconds to write and read in a debug build.
+        let deadline = WS_PUMP_DEADLINE * 6;
+        while !done(&responses) || parts.is_joining() {
+            let remaining = deadline.saturating_sub(start.elapsed());
             let message = tokio::time::timeout(remaining, ws.next())
                 .await
-                .unwrap_or_else(|_| panic!("thin responses so far: {responses:?}"))
+                .unwrap_or_else(|_| {
+                    let ids: Vec<u64> = responses.iter().map(|r| r.id).collect();
+                    panic!("thin responses so far: {ids:?}")
+                })
                 .expect("websocket open")
                 .expect("websocket message");
             for frame in decode_ws_message(&message) {
+                let frame = match frame {
+                    WireFrame::ThinPart(part) => match parts.push(part).expect("in bounds") {
+                        Some(joined) => jazz::wire::decode_postcard_frame(&joined).unwrap(),
+                        None => continue,
+                    },
+                    frame => frame,
+                };
                 match frame {
                     WireFrame::ThinResponse(response) => responses.push(response),
                     other => panic!("a thin connection received {other:?}"),
@@ -5134,14 +5629,14 @@ mod tests {
         );
     }
 
-    /// Publish the docs schema as a bundle whose docs read by `select`
-    /// (createJazz's `/bundles`); its hex id.
-    async fn publish_docs_bundle(
+    /// Publish the docs schema with `select` as its read policy, as a
+    /// backend publishes its bundle on boot: the answer's status and body.
+    async fn post_docs_bundle(
         addr: std::net::SocketAddr,
         state: &Arc<ServerState>,
         schema: &Schema,
         select: PolicyExpr,
-    ) -> String {
+    ) -> (reqwest::StatusCode, serde_json::Value) {
         let hash = jazz::tools::public_schema::SchemaHash::compute(schema).to_string();
         let response = reqwest::Client::new()
             .post(format!("http://{addr}/apps/{}/admin/bundles", state.app_id))
@@ -5161,6 +5656,18 @@ mod tests {
             .expect("publish bundle");
         let status = response.status();
         let body: serde_json::Value = response.json().await.expect("bundle response");
+        (status, body)
+    }
+
+    /// Publish the docs schema as a bundle whose docs read by `select`
+    /// (createJazz's `/bundles`); its hex id.
+    async fn publish_docs_bundle(
+        addr: std::net::SocketAddr,
+        state: &Arc<ServerState>,
+        schema: &Schema,
+        select: PolicyExpr,
+    ) -> String {
+        let (status, body) = post_docs_bundle(addr, state, schema, select).await;
         assert_eq!(status, reqwest::StatusCode::OK, "{body}");
         body["bundle"].as_str().expect("bundle id").to_owned()
     }
@@ -5195,11 +5702,6 @@ mod tests {
         // one none.
         let open = publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await;
         let closed = publish_docs_bundle(addr, &state, &schema, PolicyExpr::False).await;
-        // As after a restart over these bundles, the store waits for a
-        // permissions head; sessions pinned to a published bundle are
-        // served regardless.
-        let runtime = state.runtime_for_client().expect("runtime");
-        runtime.await_permissions_for_test().await;
         let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
         let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
         let features = jazz::wire::FEATURE_THIN_RESULTS;
@@ -5248,28 +5750,274 @@ mod tests {
 
         // Once bundles are published, an unpinned user session is refused,
         // as a sync session is, and so is a pin to a bundle never published.
-        let refused = thin_refusal(addr, &state, pinned_thin_prelude(bob, None)).await;
-        assert!(refused.contains("served through createJazz"), "{refused}");
-        let unknown = "cd".repeat(32);
-        let refused = thin_refusal(addr, &state, pinned_thin_prelude(bob, Some(&unknown))).await;
+        // Both are refused for good, so the client reports them.
+        let thin = jazz::wire::FEATURE_THIN_RESULTS;
+        let refused = thin_refusal(addr, &state, pinned_thin_prelude(bob, None), thin).await;
         assert!(
-            refused.contains("is not published on this store"),
-            "{refused}"
+            refused.message.contains("served through createJazz"),
+            "{refused:?}"
         );
+        assert_eq!(
+            (refused.code, refused.retry),
+            (WireErrorCode::AuthFailed, WireRetry::Never)
+        );
+        let unknown = "cd".repeat(32);
+        let unknown_pin = || pinned_thin_prelude(bob, Some(&unknown));
+        // A sync session pinned to it is refused the same way.
+        for features in [thin, 0] {
+            let refused = thin_refusal(addr, &state, unknown_pin(), features).await;
+            assert!(
+                refused.message.contains("is not published on this store"),
+                "{refused:?}"
+            );
+            assert_eq!(
+                (refused.code, refused.retry),
+                (WireErrorCode::AuthFailed, WireRetry::Never),
+                "a pin to an unknown bundle is refused for good (features {features})"
+            );
+        }
     }
 
-    /// The error a thin connection opening with `prelude` is refused with.
+    /// A bundle test's store: no schema until its backend publishes one.
+    async fn bundle_test_state() -> Arc<ServerState> {
+        ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build bundle test state")
+            .state
+    }
+
+    /// The next error frame `ws` receives, skipping anything else (a sync
+    /// session's catalogue, a thin session's answers), or `None` when
+    /// none comes within `wait`.
+    async fn next_wire_error(ws: &mut TestWs, wait: Duration) -> Option<WireError> {
+        tokio::time::timeout(wait, async {
+            loop {
+                let message = ws.next().await?.ok()?;
+                let WsMessage::Binary(bytes) = &message else {
+                    continue;
+                };
+                let Ok(encoded) = postcard::from_bytes::<Vec<Vec<u8>>>(bytes) else {
+                    continue;
+                };
+                for frame in encoded {
+                    if let Ok(WireFrame::Error(error)) = decode_frame(&frame) {
+                        return Some(error);
+                    }
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_new_bundle_ends_the_sessions_pinned_to_other_bundles() {
+        let schema = private_docs_public_schema();
+        let state = bundle_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let first = publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+        let mut sync_ws = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(alice, Some(&first)),
+            0,
+        )
+        .await;
+        let mut thin_ws = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(bob, Some(&first)),
+            jazz::wire::FEATURE_THIN_RESULTS,
+        )
+        .await;
+        bind_thin_schema(&mut thin_ws, &schema).await;
+        // An unpinned SYSTEM link (an admin's, the system's own) is pinned
+        // to no bundle, so no permissions change ends it.
+        let system_ws = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            ws_prelude(AuthorSubject::SYSTEM),
+            0,
+        )
+        .await;
+
+        // A publish ends sessions in the job that commits it, before it
+        // answers, so the runtime's session count right after a publish is
+        // exact: no close can still be on its way.
+        let runtime = state.runtime().expect("runtime");
+        let open = runtime.open_sessions_for_test().await;
+        assert_eq!(open, 3, "the sync, thin and system sessions");
+
+        // Publishing it again (a cold start, a deployment running beside
+        // one that published the same permissions) ends no one.
+        assert_eq!(
+            publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await,
+            first
+        );
+        assert_eq!(
+            runtime.open_sessions_for_test().await,
+            open,
+            "republishing the same bundle leaves its sessions alone"
+        );
+
+        // New permissions: both sessions are asked to reconnect, so their
+        // backend pins them again.
+        let second = publish_docs_bundle(addr, &state, &schema, PolicyExpr::False).await;
+        assert_ne!(second, first);
+        assert_eq!(
+            runtime.open_sessions_for_test().await,
+            open - 2,
+            "exactly the two pinned sessions end; the unpinned SYSTEM link stays"
+        );
+        // The first error each one receives names the new bundle, so the
+        // republish above sent none.
+        for (ws, kind) in [(&mut sync_ws, "sync"), (&mut thin_ws, "thin")] {
+            let error = next_wire_error(ws, Duration::from_secs(5))
+                .await
+                .unwrap_or_else(|| panic!("the {kind} session pinned to the old bundle ends"));
+            assert!(error.asks_reconnect_later(), "{kind}: {error:?}");
+            assert!(error.message.contains(&second), "{kind}: {error:?}");
+        }
+
+        // A session pinned to the old bundle may open again: a deployment
+        // still serving it pins its own sessions as before.
+        let mut again = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(bob, Some(&first)),
+            jazz::wire::FEATURE_THIN_RESULTS,
+        )
+        .await;
+        bind_thin_schema(&mut again, &schema).await;
+        assert!(thin_titles(&mut again, 1, None).await.is_empty());
+
+        // Rolling back to a bundle this store already has ends no one, on
+        // either bundle: sessions on the newer one end only when the
+        // deployments serving it are deleted.
+        let mut on_second = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(alice, Some(&second)),
+            jazz::wire::FEATURE_THIN_RESULTS,
+        )
+        .await;
+        bind_thin_schema(&mut on_second, &schema).await;
+        let open = runtime.open_sessions_for_test().await;
+        assert_eq!(open, 3, "the system link and two thin sessions");
+        assert_eq!(
+            publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await,
+            first
+        );
+        assert_eq!(
+            runtime.open_sessions_for_test().await,
+            open,
+            "a rollback ends no session on either bundle, nor the system link"
+        );
+        // Both thin sessions still answer.
+        assert!(thin_titles(&mut again, 2, None).await.is_empty());
+        assert!(thin_titles(&mut on_second, 1, None).await.is_empty());
+        drop(system_ws);
+    }
+
+    /// A publish whose commit succeeds but whose next step fails (here the
+    /// catalogue reload) still ended the sessions on other bundles, and a
+    /// retry, which finds nothing to change, leaves them ended.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_new_bundle_that_fails_after_its_commit_still_ends_other_sessions() {
+        let schema = private_docs_public_schema();
+        let state = bundle_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let first = publish_docs_bundle(addr, &state, &schema, PolicyExpr::True).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(alice, Some(&first)),
+            jazz::wire::FEATURE_THIN_RESULTS,
+        )
+        .await;
+        bind_thin_schema(&mut ws, &schema).await;
+        let runtime = state.runtime().expect("runtime");
+        assert_eq!(runtime.open_sessions_for_test().await, 1);
+
+        runtime.fail_next_catalogue_reload_for_test().await;
+        let (status, body) = post_docs_bundle(addr, &state, &schema, PolicyExpr::False).await;
+        assert_eq!(
+            status,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "the injected failure fails the deploy: {body}"
+        );
+        assert_eq!(
+            runtime.open_sessions_for_test().await,
+            0,
+            "the commit ended the session on the other bundle anyway"
+        );
+        let error = next_wire_error(&mut ws, Duration::from_secs(5))
+            .await
+            .expect("the session was told to reconnect");
+        assert!(error.asks_reconnect_later(), "{error:?}");
+
+        // The retry finds the bundle published and changes nothing.
+        let version = jazz::schema::JazzSchema::new(&schema)
+            .expect("docs schema")
+            .version_id();
+        assert!(
+            !runtime
+                .runtime_catalogue_contains_schema(version)
+                .await
+                .unwrap(),
+            "the failed reload left the runtime's catalogue behind"
+        );
+        let (status, body) = post_docs_bundle(addr, &state, &schema, PolicyExpr::False).await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        assert_eq!(body["changed"], false, "{body}");
+        let second = body["bundle"].as_str().expect("bundle id").to_owned();
+        assert_ne!(second, first);
+        assert_eq!(runtime.open_sessions_for_test().await, 0);
+        // The retry brought the runtime's catalogue up to date, and the new
+        // bundle serves.
+        assert!(
+            runtime
+                .runtime_catalogue_contains_schema(version)
+                .await
+                .unwrap(),
+            "the retry reloads the runtime's catalogue"
+        );
+        let mut on_second = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            pinned_thin_prelude(alice, Some(&second)),
+            jazz::wire::FEATURE_THIN_RESULTS,
+        )
+        .await;
+        bind_thin_schema(&mut on_second, &schema).await;
+        assert!(thin_titles(&mut on_second, 1, None).await.is_empty());
+    }
+
+    /// The error a connection opening with `prelude` and negotiating
+    /// `features` (thin or sync) is refused with.
     async fn thin_refusal(
         addr: std::net::SocketAddr,
         state: &Arc<ServerState>,
         prelude: Vec<u8>,
-    ) -> String {
+        features: u64,
+    ) -> WireError {
         let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
             .await
             .expect("connect websocket");
         ws.send(WsMessage::Binary(prelude.into())).await.unwrap();
         ws.send(WsMessage::Binary(
-            ws_client_hello_batch_with_features(jazz::wire::FEATURE_THIN_RESULTS).into(),
+            ws_client_hello_batch_with_features(features).into(),
         ))
         .await
         .unwrap();
@@ -5279,20 +6027,18 @@ mod tests {
             .expect("a frame")
             .expect("a message");
         match decode_ws_message(&message).as_slice() {
-            [WireFrame::Error(error)] => error.message.clone(),
+            [WireFrame::Error(error)] => error.clone(),
             frames => panic!("expected a refusal, got {frames:?}"),
         }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn thin_requests_wait_for_published_permissions() {
+    async fn thin_user_sessions_need_a_pin_while_trusted_links_are_served() {
         use crate::runtime::{ServerRuntimeHandle, StorageConfig};
         use jazz::thin::{ThinBody, ThinOp, ThinRequest};
-        // A catalogue-driven store whose permissions head is not published
-        // serves a user's thin requests nothing yet; a trusted link is
-        // served as SYSTEM, which no permissions govern.
+        // A trusted link is served as SYSTEM, which no permissions govern.
         let source = private_docs_public_schema();
-        let runtime = ServerRuntimeHandle::start_awaiting_permissions(
+        let runtime = ServerRuntimeHandle::start_with_storage(
             JazzSchema::new(&source).unwrap(),
             StorageConfig::InMemory,
         )
@@ -5312,7 +6058,13 @@ mod tests {
                     .await
                     .unwrap();
                 let mut stream = runtime.open_wire_stream(session).unwrap();
-                runtime.receive_thin_request(session, schema(), 16).unwrap();
+                let room = runtime
+                    .admit_thin_request(session, 16, false)
+                    .await
+                    .unwrap();
+                runtime
+                    .receive_thin_request(session, schema(), room)
+                    .unwrap();
                 runtime.request_wire_tick(session).unwrap();
                 let frames = tokio::time::timeout(Duration::from_secs(5), stream.recv())
                     .await
@@ -5325,10 +6077,20 @@ mod tests {
                 }
             }
         };
-        let ThinBody::Error { code, .. } = answer(CommitUnitTrust::Session).await else {
-            panic!("a user's thin request before any permissions must be refused");
-        };
-        assert_eq!(code, "NotReady");
+        // A user's session is never governed by the store's own
+        // permissions: unpinned, it is refused outright.
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let refused = runtime
+            .open_thin_session(alice, BTreeMap::new(), None, CommitUnitTrust::Session)
+            .await
+            .expect_err("an unpinned user session is refused");
+        assert!(refused.contains("served through createJazz"), "{refused}");
+        let wire = session_open_wire_error(&refused);
+        assert_eq!(
+            (wire.code, wire.retry),
+            (WireErrorCode::AuthFailed, WireRetry::Never),
+            "an unpinned user session is refused for good"
+        );
         assert_eq!(answer(CommitUnitTrust::TrustedBackend).await, ThinBody::Ok);
     }
 
@@ -5385,8 +6147,12 @@ mod tests {
             });
         }
         for (id, op) in requests.into_iter().enumerate() {
+            let room = runtime
+                .admit_thin_request(session, 16, false)
+                .await
+                .unwrap();
             runtime
-                .receive_thin_request(session, ThinRequest { id: id as u64, op }, 16)
+                .receive_thin_request(session, ThinRequest { id: id as u64, op }, room)
                 .unwrap();
             runtime.request_wire_tick(session).unwrap();
             runtime.settle_for_test().await;
@@ -5471,26 +6237,464 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn thin_requests_past_the_ingress_budget_are_refused() {
+    async fn thin_values_over_a_wire_frame_travel_in_parts() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &schema).await;
+        send_thin(
+            &mut ws,
+            2,
+            ThinOp::Subscribe {
+                query: docs_query(),
+                options: br#"{"tier":"local-first"}"#.to_vec(),
+            },
+        )
+        .await;
+        // A 3 MB title: written in parts, read back and delivered in parts.
+        let long = "t".repeat(3 * 1024 * 1024);
+        send_thin(
+            &mut ws,
+            1,
+            ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells(&long, alice),
+                options: Vec::new(),
+                transaction: None,
+            },
+        )
+        .await;
+        let responses = thin_responses_until(&mut ws, |responses| {
+            responses.iter().any(|r| r.id == 1)
+                && responses.iter().any(|r| match &r.body {
+                    ThinBody::Event { delta, .. } if r.id == 2 => {
+                        let (added, _) =
+                            jazz::binding_codec::decode_subscription_delta_rows(delta).unwrap();
+                        titles_of(added) == [long.clone()]
+                    }
+                    _ => false,
+                })
+        })
+        .await;
+        assert!(
+            responses
+                .iter()
+                .any(|r| r.id == 1 && matches!(r.body, ThinBody::Written { .. }))
+        );
+        assert_eq!(thin_titles(&mut ws, 3, None).await, vec![long.clone()]);
+
+        // A result past the most one answer takes is refused for that
+        // query alone; the session goes on.
+        let huge = "h".repeat(17 * 1024 * 1024);
+        for id in [4, 5] {
+            send_thin(
+                &mut ws,
+                id,
+                ThinOp::Insert {
+                    table: "docs".to_owned(),
+                    cells: doc_cells(&huge, alice),
+                    options: Vec::new(),
+                    transaction: None,
+                },
+            )
+            .await;
+            assert!(matches!(
+                thin_answer(&mut ws, id).await,
+                ThinBody::Written { .. }
+            ));
+        }
+        send_thin(
+            &mut ws,
+            6,
+            ThinOp::Query {
+                query: docs_query(),
+                options: remote_read(),
+                transaction: None,
+            },
+        )
+        .await;
+        match thin_answer(&mut ws, 6).await {
+            ThinBody::Error { code, message } => {
+                assert_eq!(code, "TooLarge");
+                assert!(message.contains("not supported yet"), "{message}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        send_thin(&mut ws, 7, ThinOp::CaptureSnapshot).await;
+        assert!(matches!(
+            thin_answer(&mut ws, 7).await,
+            ThinBody::Snapshot { .. }
+        ));
+    }
+
+    /// A text-merge column, written by a thin client as editors do: an
+    /// `editedFrom` text edit and a splice, both lowered on the server
+    /// against the row as the session may read it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_text_edits_and_splices_apply_on_the_server() {
+        use jazz::thin::{ThinBody, ThinOp};
+        use jazz::tools::{ColumnDescriptor, ColumnMergeStrategy, RowDescriptor, TableName};
+        let source = Schema::from([(
+            TableName::new("notes"),
+            PublicTableSchema {
+                columns: RowDescriptor::new(vec![
+                    ColumnDescriptor::new("body", ColumnType::Text)
+                        .merge_strategy(ColumnMergeStrategy::Markdown),
+                ]),
+                indexed_columns: None,
+                composite_indexes: Vec::new(),
+                policies: public_table_policies(),
+                branch_by: Vec::new(),
+                history: Default::default(),
+            },
+        )]);
+        let state = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build thin test state")
+            .state;
+        publish_source_bundle(&state, &source).await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &source).await;
+        let cells = |columns: &[(&str, &str)]| {
+            let descriptor = jazz::records::RecordDescriptor::new(
+                columns
+                    .iter()
+                    .map(|(name, _)| (*name, jazz::records::ValueType::String)),
+            );
+            let values: Vec<CoreValue> = columns
+                .iter()
+                .map(|(_, value)| CoreValue::String((*value).to_owned()))
+                .collect();
+            let record = jazz::records::OwnedRecord::new(
+                descriptor.create(&values).expect("note record"),
+                descriptor,
+            );
+            jazz::binding_codec::encode_named_cells(&record).expect("encode note cells")
+        };
+        send_thin(
+            &mut ws,
+            1,
+            ThinOp::Insert {
+                table: "notes".to_owned(),
+                cells: cells(&[("body", "Hello")]),
+                options: Vec::new(),
+                transaction: None,
+            },
+        )
+        .await;
+        let ThinBody::Written { row, .. } = thin_answer(&mut ws, 1).await else {
+            panic!("the insert must commit");
+        };
+        const TX: &str = "0190f3e4000070008000000000000009";
+        let edit = |id: u64, mutations: serde_json::Value| ThinOp::UpdateLargeValues {
+            table: "notes".to_owned(),
+            row,
+            patch: cells(&[]),
+            mutations: serde_json::to_vec(&mutations).unwrap(),
+            updated_at_ms: None,
+            transaction: (id == 5).then(|| TX.to_owned()),
+        };
+        send_thin(
+            &mut ws,
+            2,
+            edit(
+                2,
+                serde_json::json!([{
+                    "kind": "text_edit",
+                    "column": "body",
+                    "text": "Hello world",
+                    "edited_from": "Hello",
+                }]),
+            ),
+        )
+        .await;
+        match thin_answer(&mut ws, 2).await {
+            ThinBody::Written { .. } => {}
+            other => panic!("the text edit must commit, got {other:?}"),
+        }
+        send_thin(
+            &mut ws,
+            3,
+            edit(
+                3,
+                serde_json::json!([{
+                    "kind": "splice",
+                    "column": "body",
+                    "within": { "kind": "text_utf16", "from": 11, "to": 11 },
+                    "splices": [{ "at": 0, "delete": 0, "insert": [33] }],
+                }]),
+            ),
+        )
+        .await;
+        match thin_answer(&mut ws, 3).await {
+            ThinBody::Written { .. } => {}
+            other => panic!("the splice must commit, got {other:?}"),
+        }
+        // Inside a transaction, too.
+        send_thin(
+            &mut ws,
+            4,
+            ThinOp::Begin {
+                transaction: TX.to_owned(),
+                kind: "mergeable".to_owned(),
+            },
+        )
+        .await;
+        assert_eq!(thin_answer(&mut ws, 4).await, ThinBody::Ok);
+        send_thin(
+            &mut ws,
+            5,
+            edit(
+                5,
+                serde_json::json!([{
+                    "kind": "text_edit",
+                    "column": "body",
+                    "text": "Hey world!",
+                    "edited_from": "Hello world!",
+                }]),
+            ),
+        )
+        .await;
+        match thin_answer(&mut ws, 5).await {
+            ThinBody::Staged { .. } => {}
+            other => panic!("the transaction's text edit must stage, got {other:?}"),
+        }
+        send_thin(
+            &mut ws,
+            6,
+            ThinOp::Commit {
+                transaction: TX.to_owned(),
+            },
+        )
+        .await;
+        match thin_answer(&mut ws, 6).await {
+            ThinBody::Written { .. } => {}
+            other => panic!("the transaction must commit, got {other:?}"),
+        }
+        send_thin(
+            &mut ws,
+            7,
+            ThinOp::Query {
+                query: postcard::to_allocvec(&jazz::query::Query::from("notes")).unwrap(),
+                options: remote_read(),
+                transaction: None,
+            },
+        )
+        .await;
+        let ThinBody::Rows { rows, .. } = thin_answer(&mut ws, 7).await else {
+            panic!("the query must answer rows");
+        };
+        let bodies: Vec<CoreValue> = jazz::binding_codec::decode_rows(&rows)
+            .unwrap()
+            .into_iter()
+            .flat_map(|batch| batch.rows)
+            .filter_map(|row| row.cells.get("body").cloned())
+            .collect();
+        assert_eq!(bodies, vec![CoreValue::String("Hey world!".to_owned())]);
+    }
+
+    /// Large writes sent together, and small requests sent while they are
+    /// queued, all get answered on the one connection: past the session's
+    /// room a request waits, it does not end the session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_large_thin_writes_share_one_session() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &schema).await;
+        let photo = |n: usize| ThinOp::Insert {
+            table: "docs".to_owned(),
+            cells: doc_cells(&format!("{n}").repeat(12 * 1024 * 1024), alice),
+            options: Vec::new(),
+            transaction: None,
+        };
+        // Three 12 MB writes and a 5 MB one, over a session's room (the
+        // most one request takes) together: later ones wait for room, and
+        // each is followed at once by a small request.
+        let big = ThinOp::Insert {
+            table: "docs".to_owned(),
+            cells: doc_cells(&"b".repeat(5 * 1024 * 1024), alice),
+            options: Vec::new(),
+            transaction: None,
+        };
+        send_thin(&mut ws, 10, big).await;
+        send_thin(&mut ws, 11, ThinOp::CaptureSnapshot).await;
+        for n in 1..=3 {
+            send_thin(&mut ws, 10 + 2 * n as u64, photo(n)).await;
+            send_thin(&mut ws, 11 + 2 * n as u64, ThinOp::CaptureSnapshot).await;
+        }
+        let responses = thin_responses_until(&mut ws, |responses| {
+            (10..=17).all(|id| responses.iter().any(|r| r.id == id))
+        })
+        .await;
+        for response in &responses {
+            match (response.id % 2, &response.body) {
+                (0, ThinBody::Written { .. }) | (1, ThinBody::Snapshot { .. }) => {}
+                (_, body) => panic!("request {} got {body:?}", response.id),
+            }
+        }
+    }
+
+    /// A split request that stops part way ends its own connection once
+    /// its next part is overdue; other connections are answered meanwhile.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_split_thin_request_ends_only_its_connection() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut stalled = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut stalled, &schema).await;
+        let mut other = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut other, &schema).await;
+        let frame = encode_frame(&WireFrame::ThinRequest(jazz::thin::ThinRequest {
+            id: 9,
+            op: ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells(&"s".repeat(30 * 1024 * 1024), alice),
+                options: Vec::new(),
+                transaction: None,
+            },
+        }))
+        .unwrap();
+        let first = jazz::thin::thin_wire_frames(frame).unwrap().remove(0);
+        let batch = postcard::to_allocvec(&vec![first]).unwrap();
+        stalled.send(WsMessage::Binary(batch.into())).await.unwrap();
+        let started = tokio::time::Instant::now();
+        send_thin(&mut other, 1, ThinOp::CaptureSnapshot).await;
+        assert!(matches!(
+            thin_answer(&mut other, 1).await,
+            ThinBody::Snapshot { .. }
+        ));
+        assert!(started.elapsed() < THIN_PART_TIMEOUT);
+        // The stalled connection is told why, and closed.
+        let error = tokio::time::timeout(THIN_PART_TIMEOUT * 5, async {
+            loop {
+                match stalled.next().await {
+                    Some(Ok(message)) => {
+                        for frame in decode_ws_message(&message) {
+                            if let WireFrame::Error(error) = frame {
+                                return Some(error);
+                            }
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+        })
+        .await
+        .expect("the stalled split ends");
+        let error = error.expect("an error frame before the close");
+        assert!(error.message.contains("stalled"), "{error:?}");
+        assert!(started.elapsed() >= THIN_PART_TIMEOUT);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_requests_past_the_ingress_budget_wait_for_room() {
         let (state, _) = private_docs_state().await;
         let runtime = state.runtime_for_client().expect("runtime");
         let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
-        let session = runtime
-            .open_thin_session(alice, BTreeMap::new(), None, CommitUnitTrust::Session)
-            .await
-            .expect("open thin session");
-        let request = |id| jazz::thin::ThinRequest {
-            id,
-            op: jazz::thin::ThinOp::CaptureSnapshot,
+        let bundle = jazz::catalogue::BundleId::from_hex(
+            &current_bundle(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), &state).await,
+        )
+        .expect("bundle id");
+        let open = || {
+            runtime.open_thin_session(
+                alice,
+                BTreeMap::new(),
+                Some(bundle),
+                CommitUnitTrust::Session,
+            )
         };
-        let budget = crate::runtime::SESSION_QUEUE_BUDGET;
-        let error = runtime
-            .receive_thin_request(session, request(1), budget + 1)
-            .expect_err("a request past the budget is refused");
-        assert!(error.contains("ingress budget"), "{error}");
+        let (session, other) = (open().await.unwrap(), open().await.unwrap());
+        let most = jazz::thin::MAX_THIN_MESSAGE_BYTES;
+        let soon = Duration::from_millis(200);
+        // One request may take a session's whole budget; the next waits
+        // until it has run, and another session is not held up by it.
+        let held = runtime
+            .admit_thin_request(session, most, true)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(soon, runtime.admit_thin_request(session, 16, false))
+                .await
+                .is_err()
+        );
+        let elsewhere = runtime.admit_thin_request(other, 16, true).await.unwrap();
+        let waiting = tokio::spawn({
+            let runtime = runtime.clone();
+            async move {
+                runtime
+                    .admit_thin_request(session, 16, false)
+                    .await
+                    .map(drop)
+            }
+        });
         runtime
-            .receive_thin_request(session, request(2), 16)
-            .expect("a request within the budget is queued");
+            .receive_thin_request(
+                session,
+                jazz::thin::ThinRequest {
+                    id: 1,
+                    op: jazz::thin::ThinOp::CaptureSnapshot,
+                },
+                held,
+            )
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("room once the request ran")
+            .unwrap()
+            .unwrap();
+        drop(elsewhere);
+        // Past the most one request takes, refused outright.
+        assert!(
+            runtime
+                .admit_thin_request(session, most + 1, true)
+                .await
+                .is_err()
+        );
+        // The server's budget bounds every session together.
+        let budget = crate::runtime::THIN_INGRESS_SERVER_BUDGET;
+        let mut sessions = Vec::new();
+        let mut rooms = Vec::new();
+        for _ in 0..budget / most {
+            let session = open().await.unwrap();
+            rooms.push(
+                runtime
+                    .admit_thin_request(session, most, true)
+                    .await
+                    .unwrap(),
+            );
+            sessions.push(session);
+        }
+        assert!(
+            tokio::time::timeout(soon, runtime.admit_thin_request(other, 16, true))
+                .await
+                .is_err()
+        );
+        // A request that fits one frame needs only its session's room.
+        tokio::time::timeout(soon, runtime.admit_thin_request(other, 16, false))
+            .await
+            .expect("whole requests do not queue behind splits")
+            .unwrap();
+        rooms.pop();
+        tokio::time::timeout(soon, runtime.admit_thin_request(other, 16, true))
+            .await
+            .expect("room once another request is done")
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

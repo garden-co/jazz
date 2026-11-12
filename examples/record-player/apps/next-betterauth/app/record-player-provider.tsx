@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { JazzProvider, useJazzAuth } from "jazz-tools/react";
+import { JazzProvider, useJazzSession } from "jazz-tools/react";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { Card } from "@astryxdesign/core/Card";
@@ -15,7 +15,6 @@ import { authClient } from "../src/lib/auth-client";
 // offline writes) in its own chunk once the page has loaded.
 const loadLocalFirst = () => import("jazz-tools/local-first");
 
-const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
 // Better Auth's session drives sign-in; RecordPlayer's backend (`createJazz`
 // in src/lib/jazz.server.ts) reads it in `authenticate`. Signing up creates
 // the listener's Jazz account, signing in opens it again.
@@ -33,9 +32,7 @@ export function RecordPlayerProvider({
 }) {
   return (
     <JazzProvider
-      appId={appId}
-      serverUrl="/jazz"
-      client={loadLocalFirst}
+      config={{ serverUrl: "/jazz", client: loadLocalFirst }}
       signedOut={frame(<SignIn />, false)}
       loading={frame(<Status>Connecting RecordPlayer…</Status>, false)}
       error={(state) =>
@@ -67,7 +64,7 @@ export function SignIn() {
   const [password, setPassword] = useState("record-player-demo");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const { reauthenticate } = useJazzAuth();
+  const { refresh } = useJazzSession();
   async function authenticate(mode: "sign-in" | "sign-up") {
     setPending(true);
     setError(null);
@@ -78,7 +75,7 @@ export function SignIn() {
           : await authClient.signUp.email({ email, password, name: email });
       if (result.error) setError(result.error.message ?? "Authentication failed");
       // Jazz asks the backend who is signed in now and opens their account.
-      else await reauthenticate();
+      else await refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Authentication failed");
     } finally {

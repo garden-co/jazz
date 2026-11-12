@@ -10,10 +10,12 @@ export interface S3BlobStore {
   /** An S3-compatible endpoint other than AWS, e.g. R2's. */
   readonly endpoint?: string;
   /**
-   * Prepended to every object name. Defaults to `jazz/<appId>/<store id>/`,
-   * one per store, so stores sharing a bucket (preview and production) never
-   * share objects. A prefix is claimed by the first store that uses it, and
-   * any other store is refused there.
+   * Prepended to every object name. Defaults to `jazz/<store id>/`,
+   * one per store, so stores sharing a bucket (a preview core per branch)
+   * never share objects. A prefix is claimed by the first store that uses
+   * it, and any other store is refused there. A `vercel()` core also claims
+   * the whole bucket for its environment, so production and previews each
+   * need a bucket of their own.
    */
   readonly prefix?: string;
 }
@@ -47,7 +49,10 @@ export function files(options: { dir?: string } = {}): Extract<BlobStore, { kind
  * the bucket itself rejects corrupted uploads.
  *
  * Each store keeps its objects under a prefix of its own (it deletes the
- * chunks it no longer needs), so one bucket serves many stores.
+ * chunks it no longer needs), so one bucket serves many stores. A
+ * `vercel()` core also claims the bucket for its Vercel environment, and a
+ * core of another environment is refused there: give production and
+ * previews a bucket each.
  */
 export function s3(options: Omit<S3BlobStore, "kind"> = {}): S3BlobStore {
   const set = Object.entries(options).filter(([, value]) => value !== undefined);
@@ -60,9 +65,11 @@ export interface VercelBlobStore {
   /** Defaults to `BLOB_STORE_ID`, set when a Blob store is connected to the project. */
   readonly storeId?: string;
   /**
-   * Prepended to every blob's pathname. Defaults to `jazz/<appId>/<store id>/`,
-   * one per core, so preview and production cores sharing a Blob store never
-   * share blobs. A prefix is claimed by the first core that uses it.
+   * Prepended to every blob's pathname. Defaults to `jazz/<store id>/`,
+   * one per core, so the preview cores of different branches sharing a Blob
+   * store never share blobs. A prefix is claimed by the first core that uses
+   * it. The Blob store itself serves one environment: production and
+   * previews each need their own.
    */
   readonly prefix?: string;
 }
@@ -75,6 +82,11 @@ export interface VercelBlobStore {
  * authenticates with the function's own OIDC token, which reaches it with
  * each request, and the Sandbox holds only the store's id.
  * Blobs are private, and each is checked against its SHA-256 when read.
+ *
+ * One Blob store serves one Vercel environment: any function of the
+ * environment's OIDC token reaches the whole store, so the first core
+ * claims it for its environment, and a core of another environment is
+ * refused. Connect a separate Blob store to production and to previews.
  */
 export function vercelBlob(options: Omit<VercelBlobStore, "kind"> = {}): VercelBlobStore {
   const set = Object.entries(options).filter(([, value]) => value !== undefined);
@@ -152,6 +164,10 @@ export interface VercelS3 {
  * Resolve `s3()` for a `vercel()` core from its options and the function's
  * environment (the Marketplace's AWS integration), warning when the bucket
  * is in another region than the Sandbox.
+ *
+ * Vercel sets `AWS_REGION` to the function's own region unless the project
+ * sets it, so without `s3({ region })` the region is only a first guess:
+ * the core signs for the region the bucket answers it is in.
  */
 export function resolveVercelS3(
   blobs: S3BlobStore,

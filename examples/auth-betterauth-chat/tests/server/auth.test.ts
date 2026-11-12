@@ -4,7 +4,7 @@ import { expect, it } from "vitest";
 it("signs up, signs in to Jazz through the backend with the Better Auth cookie, and logs out", async () => {
   const origin = "http://localhost:3000";
   const appId = randomUUID();
-  const values = { NEXT_PUBLIC_JAZZ_APP_ID: appId, NEXT_PUBLIC_APP_ORIGIN: origin };
+  const values = { JAZZ_APP_ID: appId, NEXT_PUBLIC_APP_ORIGIN: origin };
   const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
   Object.assign(process.env, values);
   try {
@@ -24,7 +24,7 @@ it("signs up, signs in to Jazz through the backend with the Better Auth cookie, 
         }),
       );
     const jazzSignIn = async (cookie?: string) =>
-      (await jazz()).fetch(
+      (await jazz()).handle(
         new Request(`${origin}/jazz/apps/${appId}/accounts/backend-sign-in`, {
           method: "POST",
           headers: cookie ? { Cookie: cookie } : {},
@@ -51,7 +51,7 @@ it("signs up, signs in to Jazz through the backend with the Better Auth cookie, 
     const admitted = await jazzSignIn(cookie);
     expect(admitted.status).toBe(200);
     expect(await admitted.json()).toMatchObject({
-      identity: { issuer: `jazz:app:${appId}`, subject: signed.user.id },
+      identity: { issuer: "jazz:backend", subject: signed.user.id },
       claims: { role: "member" },
     });
 

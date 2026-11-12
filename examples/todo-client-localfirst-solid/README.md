@@ -1,12 +1,12 @@
 # todo-client-localfirst-solid
 
-Local-first todo app on Solid + Vite, anonymous auth via `useLocalFirstAuth`, IndexedDB persistence.
+Local-first todo app on Solid + Vite, anonymous device account via `<JazzProvider config={{ initial: "device" }}>`, IndexedDB persistence.
 
 ## What it demonstrates
 
-- Anonymous identity from a locally generated secret — no login UI, no auth server.
+- Anonymous identity from a device account (its key lives on this device) — no login UI, no auth server.
 - `useAll` reactive queries with composable `where()` filters.
-- `useDb` synchronous local writes (`db.insert`, `db.update`, `db.delete`).
+- Synchronous local writes through the `db` handle on the `useAll` result (`todos.db.insert`, `todos.db.update`, `todos.db.delete`).
 - Row-level permissions — `owner_id` enforced by `definePermissions`; invalid mutations surface as toast errors via `solid-sonner`.
 - IndexedDB-backed persistence across reload, synced through the app's own backend.
 - Jazz inside the app's backend: `jazz.server.ts` runs `createJazz` in the Vite server, so pages sync on their own origin under `/jazz`. In production, run the same `createJazz` in your server.

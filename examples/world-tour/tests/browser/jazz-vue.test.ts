@@ -20,14 +20,12 @@ import { type App, createApp, defineComponent, h } from "vue";
 import {
   type JazzClient,
   JazzClientProvider,
-  createAccountManager,
   createJazzClient,
   useAll,
-  useDb,
   useSession,
 } from "jazz-tools/vue";
 import { app } from "../../schema.js";
-import { APP_ID, SERVER_URL } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 
 interface Scope {
   marker: string;
@@ -80,7 +78,7 @@ async function waitFor(check: () => boolean, ms: number, label: string): Promise
 }
 
 function sessionUser(client: JazzClient): string {
-  const userId = client.session?.user.account;
+  const userId = client.session?.user;
   if (!userId) throw new Error("test session is missing user");
   return userId;
 }
@@ -88,6 +86,7 @@ function sessionUser(client: JazzClient): string {
 interface Mounted {
   el: HTMLDivElement;
   client: JazzClient;
+  close(): Promise<void>;
   vueApp: App;
 }
 
@@ -98,18 +97,19 @@ afterEach(async () => {
     const m = mounts.pop()!;
     m.vueApp.unmount();
     m.el.remove();
-    await m.client.shutdown();
+    await m.close();
   }
 });
 
 async function mount(child: ReturnType<typeof defineComponent>): Promise<Mounted> {
-  const accounts = await createAccountManager({ appId: APP_ID, serverUrl: SERVER_URL });
-  const client = await createJazzClient({
-    appId: APP_ID,
+  const session = await createJazzClient({
+    scope: SCOPE,
     serverUrl: SERVER_URL,
     driver: { type: "memory" },
-    account: accounts.createLocalFirst(),
+    initial: "device",
   });
+  const client = session.getSnapshot().client;
+  if (!client) throw new Error("the session opened no client");
 
   const el = document.createElement("div");
   document.body.appendChild(el);
@@ -137,7 +137,7 @@ async function mount(child: ReturnType<typeof defineComponent>): Promise<Mounted
     "JazzClientProvider should resolve and render its default slot",
   );
 
-  const m = { el, client, vueApp };
+  const m = { el, client, close: () => session.close(), vueApp };
   mounts.push(m);
   return m;
 }
@@ -256,11 +256,7 @@ describe("world-tour Jazz + Vue integration", () => {
       setup() {
         const session = useSession();
         return () =>
-          h(
-            "p",
-            { id: "session" },
-            session.value ? `id:${session.value.user.account}` : "anonymous",
-          );
+          h("p", { id: "session" }, session.value ? `id:${session.value.user}` : "anonymous");
       },
     });
 
@@ -268,7 +264,7 @@ describe("world-tour Jazz + Vue integration", () => {
     const text = el.querySelector("#session")!.textContent ?? "";
 
     if (client.session) {
-      expect(text).toBe(`id:${client.session.user.account}`);
+      expect(text).toBe(`id:${client.session.user}`);
     } else {
       expect(text).toBe("anonymous");
     }
@@ -278,9 +274,8 @@ describe("world-tour Jazz + Vue integration", () => {
     const s = scope("inserter");
     const Inserter = defineComponent({
       setup() {
-        const db = useDb();
         const session = useSession();
-        const { data: venues } = useAll(s.queries.venues);
+        const { data: venues, db } = useAll(s.queries.venues);
         function add() {
           db.insert(
             app.venues,
@@ -290,7 +285,7 @@ describe("world-tour Jazz + Vue integration", () => {
               country: "UK",
               lat: 51.4659,
               lng: -0.1149,
-              ownerId: session.value!.user.account,
+              ownerId: session.value!.user,
             }),
           );
         }

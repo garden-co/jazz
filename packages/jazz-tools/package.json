@@ -1,6 +1,6 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-alpha.59",
+  "version": "2.0.0-alpha.60",
   "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
   "license": "MIT",
   "bin": {
@@ -90,6 +90,10 @@
       "types": "./dist/prosemirror/index.d.ts",
       "default": "./dist/prosemirror/index.js"
     },
+    "./text-field": {
+      "types": "./dist/text-field/index.d.ts",
+      "default": "./dist/text-field/index.js"
+    },
     "./react-core": {
       "types": "./dist/react-core/index.d.ts",
       "default": "./dist/react-core/index.js"
@@ -109,6 +113,14 @@
     "./dev": {
       "types": "./dist/dev/index.d.ts",
       "default": "./dist/dev/index.js"
+    },
+    "./inspect": {
+      "types": "./dist/inspect/protocol.d.ts",
+      "default": "./dist/inspect/protocol.js"
+    },
+    "./inspector": {
+      "types": "./dist/inspector/index.d.ts",
+      "default": "./dist/inspector/index.js"
     },
     "./_dev/inspector-client": {
       "types": "./dist/_dev/inspector-client.d.ts",
@@ -149,17 +161,17 @@
   },
   "publishConfig": {
     "access": "public",
-    "tag": "alpha"
+    "tag": "latest"
   },
   "scripts": {
     "build": "pnpm build:runtime && pnpm build:test && pnpm typecheck:react-native && pnpm build:svelte && pnpm build:solid",
     "build:react-native": "tsc --project tsconfig.json",
-    "build:runtime": "node scripts/clean-dist.mjs && tsc && node scripts/bundle-broker-worker.mjs && node scripts/bundle-e2ee-crypto.mjs && node scripts/verify-runtime-sourcemaps.mjs",
+    "build:runtime": "node scripts/clean-dist.mjs && node scripts/ensure-native-inputs.mjs && tsc && node scripts/bundle-broker-worker.mjs && node scripts/bundle-e2ee-crypto.mjs && node scripts/verify-runtime-sourcemaps.mjs",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
     "build:solid": "vite build --config vite.config.solid.ts --mode solid-dom && vite build --config vite.config.solid.ts --mode solid-ssr && tsc --project tsconfig.solid.json --emitDeclarationOnly",
     "check": "tsc --noEmit",
-    "test": "pnpm test:classic-api || status=1; pnpm test:stage-binary || status=1; pnpm test:browser:contract || status=1; pnpm test:node || status=1; pnpm test:react || status=1; pnpm test:svelte || status=1; pnpm test:solid || status=1; pnpm typecheck:react-native || status=1; exit ${status:-0}",
-    "test:stage-binary": "node --test scripts/stage-binary.test.mjs scripts/stage-inspector-overlay.test.mjs",
+    "test": "pnpm test:classic-api || status=1; pnpm test:stage-inspector-overlay || status=1; pnpm test:browser:contract || status=1; pnpm test:node || status=1; pnpm test:react || status=1; pnpm test:svelte || status=1; pnpm test:solid || status=1; pnpm typecheck:react-native || status=1; exit ${status:-0}",
+    "test:stage-inspector-overlay": "node --test scripts/stage-inspector-overlay.test.mjs",
     "test:classic-api": "node --test scripts/classic-api.test.mjs",
     "test:crypto-package": "node --test scripts/bundle-e2ee-crypto.test.mjs && node ../../dev/gates/run-correctness-consumer.mjs -- node scripts/verify-e2ee-package.mjs",
     "test:node": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.ts",
@@ -171,7 +183,8 @@
     "build:test": "node dist/cli.js validate --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.tests.json --incremental --tsBuildInfoFile node_modules/.cache/tsc/tests.tsbuildinfo && pnpm typecheck:public-api",
     "typecheck:public-api": "tsc --project tsconfig.public-api.json",
     "typecheck:react-native": "tsc --project tsconfig.react-native-tests.json",
-    "test:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts && pnpm test:browser:transport",
+    "test:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts && pnpm test:browser:storage-quota && pnpm test:browser:transport",
+    "test:browser:storage-quota": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts tests/browser/db.storage-quota.test.ts && node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts tests/browser/db.storage-quota-retry.test.ts",
     "test:browser:focused": "node scripts/test-browser-focused.mjs",
     "typecheck:browser-helpers": "tsc --project tests/browser/tsconfig.browser-helpers.json",
     "test:browser:transport": "node --test scripts/evaluate-harness.test.mjs",
@@ -179,7 +192,6 @@
     "bench:abstract:node": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.ts src/runtime/schema-marshalling.abstract-bench.test.ts",
     "bench:abstract:browser": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.browser.ts tests/browser/schema-marshalling.abstract-bench.test.ts",
     "bench:realistic:browser": "vitest run --config vitest.config.browser.ts tests/browser/realistic-bench.test.ts",
-    "stage:local": "node scripts/stage-local-binary.mjs",
     "stage:inspector-overlay": "node scripts/stage-inspector-overlay.mjs",
     "pack:dry-run": "npm pack --dry-run"
   },

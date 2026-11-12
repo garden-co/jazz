@@ -36,9 +36,9 @@ const cookieSession = {
   authMode: "external" as const,
 };
 declare const publicSession: PublicSession;
-publicSession.user.account satisfies string | null;
-publicSession.user.identity.issuer satisfies string;
-publicSession.user.identity.subject satisfies string;
+publicSession.user satisfies string | null;
+publicSession.identity.issuer satisfies string;
+publicSession.identity.subject satisfies string;
 // @ts-expect-error Raw transport issuer is not exposed by PublicSession.
 void publicSession.issuer;
 // @ts-expect-error Raw transport subject is not exposed by PublicSession.
@@ -51,7 +51,7 @@ publicDb.getInternalSession();
 // @ts-expect-error Trusted reserved sessions are not public configuration.
 void publicDb.getConfig().trustedReservedSession;
 
-declare const account: import("../index.js").AccountHandle;
+declare const account: import("../accounts/state.js").AccountHandle;
 const enrolled: PackageDbConfig = { appId: "app", serverUrl: "https://core.example", account };
 const runtimeEnrolled: RuntimeDbConfig = enrolled;
 // @ts-expect-error Public contexts require an enrolled account handle.

@@ -1,4 +1,4 @@
-import { createJazz, remote, sqlite, type Jazz } from "jazz-tools/backend";
+import { acceptDeviceAccounts, createJazz, remote, sqlite, type Jazz } from "jazz-tools/backend";
 import { app } from "../../../schema";
 import permissions from "../../../permissions";
 import { serverConfig } from "./config";
@@ -17,19 +17,23 @@ export function jazz(): Promise<Jazz> {
   const started = createJazz({
     app,
     permissions,
-    // The browser names the same app id, so it can tell backend-signed-in
-    // accounts (issuer `jazz:app:<appId>`) from local-first guests.
     store: config.remote
       ? remote({ url: config.remote.url, appId: config.appId, secret: config.remote.adminSecret })
-      : sqlite({ path: config.dataPath, appId: config.appId }),
+      : sqlite({ path: config.dataPath }),
     // Better Auth's session cookie decides who the user is. Guests have no
-    // session and keep their local-first account.
+    // session and keep their device account.
     authenticate: async (request) => {
       const { auth } = await import("./auth");
       const session = await auth().api.getSession({ headers: request.headers });
-      return session ? { userId: session.user.id } : null;
+      // Signed out: a device-account guest, until sign-up links its account.
+      return session
+        ? {
+            userId: session.user.id,
+            expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
+          }
+        : acceptDeviceAccounts(request);
     },
-  });
+  }).ready();
   pending = started;
   // A failed start must not poison every later request.
   started.catch(() => {

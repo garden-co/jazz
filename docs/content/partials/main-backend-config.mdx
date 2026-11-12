@@ -1,0 +1,16 @@
+- `app` defines your schema, and `permissions` defines who can access the data. Your backend uses
+  the versions your code imports (so rolling back your application also returns to the schema and
+  permissions of that version).
+- `authenticate(request)` reads your own session (a cookie, a header) and returns
+  `{ userId, expiresAt, claims? }` (`expiresAt`: when that session expires, in Unix seconds), or
+  `null` when signed out. Jazz uses it for every operation that needs
+  authentication: sign-ins, sync connections and `forReqUser`.
+  If your provider issues JWTs, [`fromJWT()`](/docs/setup/auth/custom#tokens-from-your-identity-provider)
+  is a ready-made `authenticate`. See [How Auth Works in Jazz](/docs/setup/auth/backend).
+- Admin and backend routes never leave the process: from outside, only sync and sign-in are
+  reachable under `/jazz`.
+- `createJazz` opens nothing when your module loads: the store opens on first use, such as the first
+  request or `jazz.db` call, and there's one Jazz per store per process. So it's safe at a module's
+  top level everywhere, including Next.js, whose build and dev workers import your modules too.
+  `await jazz.ready()` opens it right away, for a server that should fail at startup rather than on
+  its first request.

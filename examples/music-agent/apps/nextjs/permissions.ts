@@ -21,8 +21,8 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
     table.allowDelete.never();
   }
 
-  const mine = { ownerAccount: session.user.account };
-  policy.profiles.allowRead.where({ accountId: session.user.account });
+  const mine = { ownerAccount: session.user };
+  policy.profiles.allowRead.where({ accountId: session.user });
   policy.artists.allowRead.where(mine);
   policy.songs.allowRead.where(mine);
   policy.venues.allowRead.where(mine);

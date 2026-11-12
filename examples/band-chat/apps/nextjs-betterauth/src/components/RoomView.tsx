@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAll, useDb } from "jazz-tools/react";
 import {
   AvatarGroup,
@@ -25,20 +25,22 @@ import {
   Timestamp,
   VStack,
 } from "@astryxdesign/core";
-import { app, type Reaction } from "../../schema";
+import { app, type Reaction, type ReadMarker } from "../../schema";
 import { ProfileAvatar, useDirectory } from "../lib/profiles";
 import { Attachment } from "./Attachment";
 import { Composer } from "./Composer";
 import { MembersDialog } from "./MembersDialog";
 import { MessageActions } from "./MessageActions";
+import { ReadByDialog } from "./ReadByDialog";
 import { RenameRoomDialog } from "./RenameRoomDialog";
 import type { RoomSummary } from "./RoomNav";
 import { SketchCanvas } from "./SketchCanvas";
 
-// The newest page of a room's history. Attachment bytes are not selected here:
+// A room opens on its newest page and loads older pages before a cursor, so
+// a page costs the same at any depth. Attachment bytes are not selected here:
 // an image or audio attachment loads its bytes once it scrolls near the
 // viewport, and a file attachment only when it is downloaded.
-const HISTORY_PAGE = 200;
+const HISTORY_PAGE = 50;
 // Consecutive messages from one sender within this window share a group.
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
@@ -54,10 +56,20 @@ export type MessageSummary = {
   $createdAt: Date;
 };
 
-/** A room's newest messages, newest first. */
-export const roomMessagesQuery = (roomId: string) =>
-  app.messages
-    .where({ roomId })
+export type ShownMessage = MessageSummary & { reactionsViaMessage: Reaction[] };
+
+export type HistoryCursor = { at: Date; offset: number };
+
+/** Messages of a room, newest first. A cursor includes rows sharing its timestamp. */
+export function historyQuery(roomId: string, bound: { before?: HistoryCursor; from?: Date }) {
+  const query = app.messages
+    .where(
+      bound.before
+        ? { roomId, $createdAt: { lte: bound.before.at } }
+        : bound.from
+          ? { roomId, $createdAt: { gte: bound.from } }
+          : { roomId },
+    )
     .select(
       "id",
       "roomId",
@@ -69,9 +81,38 @@ export const roomMessagesQuery = (roomId: string) =>
       "canvasId",
       "$createdAt",
     )
+    .include({ reactionsViaMessage: true })
     .orderBy("$createdAt", "desc")
-    .limit(HISTORY_PAGE);
-export const roomReactionsQuery = (roomId: string) => app.reactions.where({ roomId });
+    .orderBy("id", "desc");
+  if (bound.from) return query;
+  return bound.before
+    ? query.offset(bound.before.offset).limit(HISTORY_PAGE)
+    : query.limit(HISTORY_PAGE);
+}
+
+/** One message older than `cursor`, if there is any: whether to offer "Load older". */
+function olderProbeQuery(roomId: string, cursor: HistoryCursor) {
+  return app.messages
+    .where({ roomId, $createdAt: { lte: cursor.at } })
+    .select("id")
+    .orderBy("$createdAt", "desc")
+    .orderBy("id", "desc")
+    .offset(cursor.offset)
+    .limit(1);
+}
+
+function cursorKey(cursor: HistoryCursor) {
+  return `${cursor.at.getTime()}:${cursor.offset}`;
+}
+
+export function mergeHistoryPages(...pages: ShownMessage[][]) {
+  const byId = new Map<string, ShownMessage>();
+  for (const page of pages) {
+    for (const message of page) byId.set(message.id, message);
+  }
+  return [...byId.values()].reverse();
+}
+
 export const roomMembersQuery = (roomId: string) => app.roomMembers.where({ roomId });
 
 /**
@@ -80,55 +121,97 @@ export const roomMembersQuery = (roomId: string) => app.roomMembers.where({ room
  * load alongside the profile and room list instead of after them.
  */
 export function usePrefetchRoom(roomId: string | null) {
-  useAll(roomId ? roomMessagesQuery(roomId) : undefined);
-  useAll(roomId ? roomReactionsQuery(roomId) : undefined);
+  // The live window as the view first opens it: the newest page.
+  useAll(roomId ? historyQuery(roomId, {}) : undefined);
   useAll(roomId ? roomMembersQuery(roomId) : undefined);
 }
 
 export function RoomView({ summary, author }: { summary: RoomSummary; author: string }) {
-  const db = useDb();
   const directory = useDirectory();
   const { room, isCreator } = summary;
   const roomId = room.id;
-  const { data: newestFirst } = useAll(roomMessagesQuery(roomId));
+  // Once older pages are loaded, the live window stops sliding: it keeps
+  // every message from its oldest one on, so nothing falls between it and
+  // the first older page when new messages arrive.
+  const [pinnedFrom, setPinnedFrom] = useState<Date | undefined>(undefined);
+  const { data: liveWindow, db } = useAll(historyQuery(roomId, { from: pinnedFrom }));
   // Undefined until the first result: "No messages yet" only for a room that has none.
-  const isLoadingMessages = newestFirst === undefined;
-  const messages = useMemo(() => [...(newestFirst ?? [])].reverse(), [newestFirst]);
-  const { data: reactions = [] } = useAll(roomReactionsQuery(roomId));
+  const isLoadingMessages = liveWindow === undefined;
+  const newestFirst = useMemo(() => liveWindow ?? [], [liveWindow]);
+  const [olderCursors, setOlderCursors] = useState<HistoryCursor[]>([]);
+  const [olderPages, setOlderPages] = useState<ReadonlyMap<string, ShownMessage[]>>(new Map());
+  const onOlderPage = useCallback((cursor: HistoryCursor, rows: ShownMessage[]) => {
+    setOlderPages((pages) => new Map(pages).set(cursorKey(cursor), rows));
+  }, []);
+  const messages = useMemo(() => {
+    return mergeHistoryPages(
+      newestFirst,
+      ...olderCursors.map((cursor) => olderPages.get(cursorKey(cursor)) ?? []),
+    );
+  }, [newestFirst, olderCursors, olderPages]);
+  const lastCursor = olderCursors.at(-1);
+  const lastPage = lastCursor ? olderPages.get(cursorKey(lastCursor)) : newestFirst;
+  // Where the next older page starts: before the oldest shown message,
+  // skipping the messages already shown at its timestamp.
+  const nextCursor = useMemo((): HistoryCursor | undefined => {
+    const oldest = messages[0];
+    if (!oldest) return undefined;
+    const at = oldest.$createdAt;
+    const offset = messages.filter(
+      (message) => message.$createdAt.getTime() === at.getTime(),
+    ).length;
+    return { at, offset };
+  }, [messages]);
+  // A full last page may still be the last one: ask for one more message
+  // before offering "Load older".
+  const { data: olderProbe } = useAll(
+    lastPage && lastPage.length >= HISTORY_PAGE && nextCursor
+      ? olderProbeQuery(roomId, nextCursor)
+      : undefined,
+  );
+  const hasOlder = (olderProbe?.length ?? 0) > 0;
+  function loadOlder() {
+    if (!nextCursor) return;
+    if (!pinnedFrom) setPinnedFrom(nextCursor.at);
+    setOlderCursors((cursors) => [...cursors, nextCursor]);
+  }
   const { data: loadedMembers } = useAll(roomMembersQuery(roomId));
   const members = loadedMembers ?? [];
   const { data: requests = [] } = useAll(
     isCreator ? app.joinRequests.where({ roomId }) : undefined,
   );
-  const { data: loadedMarkers } = useAll(app.readMarkers.where({ roomId, reader: author }));
-  const markers = loadedMarkers ?? [];
+  // Every member's marker: this reader's moves forward, the others' draw the
+  // check marks under this reader's messages.
+  const { data: loadedMarkers } = useAll(app.readMarkers.where({ roomId }));
+  const markers = useMemo(
+    () => (loadedMarkers ?? []).filter((marker) => marker.reader === author),
+    [loadedMarkers, author],
+  );
+  const readUpTo = useMemo(
+    () => othersReadUpTo(loadedMarkers ?? [], loadedMembers ?? [], author),
+    [loadedMarkers, loadedMembers, author],
+  );
+  const [readByMessage, setReadByMessage] = useState<MessageSummary | undefined>(undefined);
   const [isMembersOpen, setMembersOpen] = useState(false);
   const [isRenameOpen, setRenameOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const reportFailure = (action: string) => (cause: unknown) =>
     setActionError(`${action}: ${cause instanceof Error ? cause.message : String(cause)}`);
 
+  const isMember = members.some((member) => member.memberAuthor === author);
   useMarkRead({
     roomId,
     author,
-    summary,
-    markerIds: loadedMarkers?.map((marker) => marker.id),
+    newestAt: newestFirst[0]?.$createdAt,
+    markers: loadedMarkers ? markers : undefined,
+    isMember,
   });
-
-  const reactionsByMessage = useMemo(() => {
-    const grouped = new Map<string, Reaction[]>();
-    for (const reaction of reactions) {
-      const list = grouped.get(reaction.messageId) ?? [];
-      list.push(reaction);
-      grouped.set(reaction.messageId, list);
-    }
-    return grouped;
-  }, [reactions]);
 
   function leave() {
     const mine = members.find((member) => member.memberAuthor === author);
     if (!mine) return;
-    // Leaving and dropping this reader's private markers commit together.
+    // Leaving and dropping this reader's marker commit together: an
+    // ex-member leaves no read position behind.
     setActionError(null);
     db.transaction((tx) => {
       for (const marker of markers) tx.delete(app.readMarkers, marker.id);
@@ -141,7 +224,6 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
   // A creator without a membership (a room created before the room and its
   // membership were written in one transaction) can still read the room;
   // this puts them back in.
-  const isMember = members.some((member) => member.memberAuthor === author);
   function rejoin() {
     setActionError(null);
     db.insert(app.roomMembers, { roomId, memberAuthor: author, memberProfileId: directory.me.id })
@@ -150,9 +232,9 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
   }
 
   function startSketch() {
-    // The canvas, its message and the room's activity commit together: the
-    // message policy's check that the canvas exists in this room sees the
-    // canvas inserted earlier in the same transaction.
+    // The canvas and its message commit together: the message policy's
+    // check that the canvas exists in this room sees the canvas inserted
+    // earlier in the same transaction.
     setActionError(null);
     db.transaction((tx) => {
       const canvas = tx.insert(app.canvases, { roomId, title: "Sketch" });
@@ -162,7 +244,6 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
         text: "",
         canvasId: canvas.id,
       });
-      tx.update(app.rooms, roomId, { lastActivityAt: new Date() });
     })
       .then((result) => result.wait({ tier: "global" }))
       .catch(reportFailure("Could not start a sketch"));
@@ -263,8 +344,26 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
             )
           }
         >
+          {olderCursors.map((cursor) => (
+            <OlderPage
+              key={cursorKey(cursor)}
+              roomId={roomId}
+              cursor={cursor}
+              onRows={onOlderPage}
+            />
+          ))}
           {messages.length > 0 ? (
             <ChatMessageList aria-label="Messages">
+              {hasOlder ? (
+                <ChatSystemMessage key="older">
+                  <Button
+                    label="Load older messages"
+                    size="sm"
+                    variant="ghost"
+                    onClick={loadOlder}
+                  />
+                </ChatSystemMessage>
+              ) : null}
               {groupMessages(messages).map((group) =>
                 group.kind === "day" ? (
                   <ChatSystemMessage key={group.key} variant="divider">
@@ -274,8 +373,9 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
                   <MessageGroup
                     key={group.key}
                     messages={group.messages}
-                    reactionsByMessage={reactionsByMessage}
                     author={author}
+                    readUpTo={readUpTo}
+                    onShowReadBy={setReadByMessage}
                   />
                 ),
               )}
@@ -283,6 +383,12 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
           ) : null}
         </ChatLayout>
       </StackItem>
+      <ReadByDialog
+        message={readByMessage}
+        onOpenChange={(isOpen) => {
+          if (!isOpen) setReadByMessage(undefined);
+        }}
+      />
       <MembersDialog
         isOpen={isMembersOpen}
         onOpenChange={setMembersOpen}
@@ -304,14 +410,50 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
   );
 }
 
+/** Loads one older page and hands its rows up; it renders nothing itself. */
+function OlderPage({
+  roomId,
+  cursor,
+  onRows,
+}: {
+  roomId: string;
+  cursor: HistoryCursor;
+  onRows: (cursor: HistoryCursor, rows: ShownMessage[]) => void;
+}) {
+  const { data } = useAll(historyQuery(roomId, { before: cursor }));
+  useEffect(() => {
+    if (data) onRows(cursor, data);
+  }, [data, cursor, onRows]);
+  return null;
+}
+
+/**
+ * The newest marker among the room's other current members: a message at or
+ * before it has two check marks. A marker left by someone no longer in the
+ * room (written before markers were removed with their member) counts for
+ * nothing.
+ */
+function othersReadUpTo(
+  markers: readonly ReadMarker[],
+  members: readonly { memberAuthor: string }[],
+  author: string,
+): number {
+  const others = new Set(members.map((member) => member.memberAuthor));
+  others.delete(author);
+  let newest = 0;
+  for (const marker of markers)
+    if (others.has(marker.reader)) newest = Math.max(newest, marker.lastReadAt.getTime());
+  return newest;
+}
+
 type Group =
   | { kind: "day"; key: string; at: Date }
-  | { kind: "messages"; key: string; messages: MessageSummary[] };
+  | { kind: "messages"; key: string; messages: ShownMessage[] };
 
-function groupMessages(messages: MessageSummary[]): Group[] {
+function groupMessages(messages: ShownMessage[]): Group[] {
   const groups: Group[] = [];
-  let current: MessageSummary[] | null = null;
-  let previous: MessageSummary | undefined;
+  let current: ShownMessage[] | null = null;
+  let previous: ShownMessage | undefined;
   for (const message of messages) {
     if (!previous || previous.$createdAt.toDateString() !== message.$createdAt.toDateString()) {
       groups.push({ kind: "day", key: `day-${message.id}`, at: message.$createdAt });
@@ -334,12 +476,15 @@ function groupMessages(messages: MessageSummary[]): Group[] {
 
 function MessageGroup({
   messages,
-  reactionsByMessage,
   author,
+  readUpTo,
+  onShowReadBy,
 }: {
-  messages: MessageSummary[];
-  reactionsByMessage: Map<string, Reaction[]>;
+  messages: ShownMessage[];
   author: string;
+  /** The newest marker among other members, in epoch milliseconds. */
+  readUpTo: number;
+  onShowReadBy: (message: MessageSummary) => void;
 }) {
   const directory = useDirectory();
   const senderId = messages[0]!.senderId;
@@ -375,15 +520,21 @@ function MessageGroup({
               <ChatMessageMetadata
                 timestamp={
                   index === last ? (
-                    <Timestamp value={message.$createdAt.toISOString()} format="time" />
+                    <HStack gap={1} vAlign="center">
+                      <Timestamp value={message.$createdAt.toISOString()} format="time" />
+                      {isMine ? (
+                        <ReadMark isRead={readUpTo >= message.$createdAt.getTime()} />
+                      ) : null}
+                    </HStack>
                   ) : undefined
                 }
                 footer={
                   <MessageActions
                     message={message}
-                    reactions={reactionsByMessage.get(message.id) ?? []}
+                    reactions={message.reactionsViaMessage}
                     author={author}
                     isMine={isMine}
+                    onShowReadBy={() => onShowReadBy(message)}
                   />
                 }
               />
@@ -403,21 +554,42 @@ function MessageGroup({
   );
 }
 
+/** One check mark once the message is sent, two once another member read it. */
+function ReadMark({ isRead }: { isRead: boolean }) {
+  return (
+    <span className="read-mark" aria-label={isRead ? "Read" : "Sent"}>
+      {isRead ? "✓✓" : "✓"}
+    </span>
+  );
+}
+
+/** How often, at most, this reader's marker is written while a room is open. */
+export const MARK_READ_INTERVAL_MS = 5_000;
+
 /**
- * Moves this reader's private marker past the room's last activity while the
- * room is open and the page is visible. Only this account can read the marker.
+ * Moves this reader's marker to the room's newest message while the room is
+ * open, the page is visible and the reader is a member. The marker is one row,
+ * updated in place, never a history, and it only moves forward.
+ *
+ * Writes are throttled: at most one every {@link MARK_READ_INTERVAL_MS} (the
+ * last position always lands, trailing), plus one at once when the reader
+ * switches rooms or hides the page, so co-members' check marks catch up.
  */
 function useMarkRead({
   roomId,
   author,
-  summary,
-  markerIds,
+  newestAt,
+  markers,
+  isMember,
 }: {
   roomId: string;
   author: string;
-  summary: RoomSummary;
+  /** `$createdAt` of the room's newest message, if it has one. */
+  newestAt: Date | undefined;
   /** Undefined until this reader's markers have loaded. */
-  markerIds: string[] | undefined;
+  markers: ReadMarker[] | undefined;
+  /** Only members keep a marker: the policy refuses anyone else's. */
+  isMember: boolean;
 }) {
   const db = useDb();
   const [isVisible, setVisible] = useState(
@@ -428,14 +600,57 @@ function useMarkRead({
     document.addEventListener("visibilitychange", update);
     return () => document.removeEventListener("visibilitychange", update);
   }, []);
-  const needsMarker = !!markerIds && (summary.hasUnread || markerIds.length === 0);
-  const markerId = markerIds?.[0];
-  const activity = summary.room.lastActivityAt?.getTime() ?? 0;
+
+  // This room's write state, read when a write runs rather than when it is
+  // scheduled. A new object per room: the flush that runs as the reader
+  // leaves a room writes that room's marker, not the next one's.
+  const room = useMemo(
+    () => ({
+      markerId: undefined as string | undefined,
+      writtenUpTo: 0,
+      pendingUpTo: undefined as number | undefined,
+      lastWriteAt: 0,
+      timer: undefined as ReturnType<typeof setTimeout> | undefined,
+    }),
+    [roomId],
+  );
+  const marker = markers?.[0];
+  if (marker) {
+    room.markerId = marker.id;
+    room.writtenUpTo = Math.max(room.writtenUpTo, marker.lastReadAt.getTime());
+  }
+
+  // Writes the pending position, if it moves the marker forward.
+  const flush = useCallback(() => {
+    clearTimeout(room.timer);
+    room.timer = undefined;
+    const upTo = room.pendingUpTo;
+    room.pendingUpTo = undefined;
+    if (upTo === undefined || upTo <= room.writtenUpTo) return;
+    room.lastWriteAt = Date.now();
+    room.writtenUpTo = upTo;
+    const lastReadAt = new Date(upTo);
+    if (room.markerId) {
+      db.update(app.readMarkers, room.markerId, { lastReadAt });
+    } else {
+      room.markerId = db.insert(app.readMarkers, { roomId, reader: author, lastReadAt }).value.id;
+    }
+  }, [db, room, roomId, author]);
+
+  const isLoaded = markers !== undefined;
+  const upTo = newestAt?.getTime();
   useEffect(() => {
-    if (!isVisible || !needsMarker) return;
-    // Another device's clock may run ahead; never leave the marker behind it.
-    const lastReadAt = new Date(Math.max(Date.now(), activity));
-    if (markerId) db.update(app.readMarkers, markerId, { lastReadAt });
-    else db.insert(app.readMarkers, { roomId, reader: author, lastReadAt });
-  }, [db, isVisible, needsMarker, markerId, activity, roomId, author]);
+    if (!isVisible || !isLoaded || !isMember || upTo === undefined) return;
+    if (upTo <= room.writtenUpTo) return;
+    room.pendingUpTo = upTo;
+    const wait = room.lastWriteAt + MARK_READ_INTERVAL_MS - Date.now();
+    if (wait <= 0) flush();
+    else room.timer ??= setTimeout(flush, wait);
+  }, [isVisible, isLoaded, isMember, upTo, room, flush]);
+
+  // Hiding the page or leaving the room writes what is pending at once.
+  useEffect(() => {
+    if (!isVisible) flush();
+  }, [isVisible, flush]);
+  useEffect(() => flush, [flush]);
 }

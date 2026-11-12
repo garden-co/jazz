@@ -49,7 +49,7 @@ import { schema as s } from ${JSON.stringify(new URL(indexImportPath, import.met
 import { app } from "./schema.ts";
 
 export default s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user.identity.subject }),
+  policy.todos.allowRead.where({ ownerId: session.identity.subject }),
 ]);
 `;
 }
@@ -142,10 +142,10 @@ describe("dev catalogue push behavior", () => {
             JSON.stringify({
               schemas: kind === "initial" ? [] : [hash],
               migrations: [],
-              activeSchemaHash: kind === "initial" ? null : hash,
+              latestBundleSchemaHash: kind === "initial" ? null : hash,
             }),
           );
-        expect(input.endsWith("/admin/deploy")).toBe(true);
+        expect(input.endsWith("/admin/bundles")).toBe(true);
         body = JSON.parse(String(init?.body));
         return new Response(
           JSON.stringify({
@@ -193,7 +193,7 @@ describe("dev catalogue push behavior", () => {
       { migrations: "none" },
     );
     const permissions = s.definePermissions(oldApp, ({ policy, session }) => {
-      policy.todos.allowRead.where({ owner: session.user.identity.subject });
+      policy.todos.allowRead.where({ owner: session.identity.subject });
     });
     const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
     const fetchMock = vi.fn();

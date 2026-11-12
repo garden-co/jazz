@@ -10,7 +10,7 @@ const secrets = { BETTER_AUTH_SECRET: "auth-secret" };
 const deployment = {
   NODE_ENV: "production",
   NEXT_PUBLIC_APP_ORIGIN: "https://chat.example",
-  NEXT_PUBLIC_JAZZ_APP_ID: "band-chat",
+  JAZZ_APP_ID: "band-chat",
   ...secrets,
 };
 const check = (env: Record<string, string | undefined>) => assertConfiguration(readConfig(env));
@@ -20,7 +20,7 @@ describe("configuration fails closed", () => {
     const config = readConfig({ NODE_ENV: "production", ...secrets });
     expect(usesLocalDefaults(config)).toBe(false);
     expect(() => assertConfiguration(config)).toThrow(
-      /must set NEXT_PUBLIC_APP_ORIGIN, NEXT_PUBLIC_JAZZ_APP_ID/,
+      /must set NEXT_PUBLIC_APP_ORIGIN, JAZZ_APP_ID/,
     );
   });
 
@@ -41,7 +41,7 @@ describe("configuration fails closed", () => {
         NEXT_PUBLIC_APP_ORIGIN: "https://chat.example",
         ...secrets,
       }),
-    ).toThrow(/deployments must set NEXT_PUBLIC_JAZZ_APP_ID/);
+    ).toThrow(/deployments must set JAZZ_APP_ID/);
   });
 
   it("requires the Better Auth secret even for a local run, with no fallback", () => {

@@ -1,17 +1,20 @@
 // #region local-first-client-setup
-import { JazzSessionProvider } from "jazz-tools/react";
+import { JazzProvider } from "jazz-tools/react";
 
 function App() {
   return (
-    <JazzSessionProvider
+    <JazzProvider
       config={{
-        appId: "my-app",
-        serverUrl: "wss://your-jazz-server.example.com",
-        initial: "local-first",
+        // Your backend's Jazz endpoint; the browser names no app.
+        serverUrl: "/jazz",
+        // Start every visitor as a guest on a device account.
+        initial: "device",
+        // Local data, so a guest works offline from its first visit.
+        client: () => import("jazz-tools/local-first"),
       }}
     >
       <YourApp />
-    </JazzSessionProvider>
+    </JazzProvider>
   );
 }
 // #endregion local-first-client-setup

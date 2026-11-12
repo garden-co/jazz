@@ -24,7 +24,7 @@ import {
 } from "./support.js";
 import { createDb as createPublicDb } from "../../src/runtime/default-create-db.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import { jazzAppUser } from "./testing-server.js";
+import { createJazzServerTransportControl, jazzAppUser } from "./testing-server.js";
 import { type BrowserInspectorControlRequest } from "../../src/runtime/native-runtime/browser-worker-protocol.js";
 import {
   listWorkerContexts,
@@ -1041,6 +1041,130 @@ describe("SharedWorker bridge with IndexedDB", () => {
       inspectorControl.postMessage({ type: "close" } satisfies BrowserInspectorControlRequest);
     }
   });
+
+  // alpha.60 adopter pass V3: an update made offline under permissions that
+  // allowed it, uploaded after the deployment tightened them, is refused;
+  // the writer hears of it and the row returns to the accepted version.
+  it("reports an offline update a tightened deployment refuses", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("offline-update-tightened");
+    const dbName = uniqueDbName("offline-update-tightened");
+    const account = await acquireBrowserTestAccount({
+      appId: syncServer.appId,
+      serverUrl: syncServer.serverUrl,
+      key: dbName,
+    });
+    const openDb = (serverUrl?: string) =>
+      createDb({
+        appId: syncServer.appId,
+        driver: { type: "persistent" as const, dbName },
+        serverUrl,
+        account,
+      });
+
+    const online = track(await openDb(syncServer.serverUrl));
+    const row = online.insert(todos, { title: "accepted", done: false });
+    await row.wait({ tier: "global" });
+    const inspector = await online.openInspectorControlPort();
+    inspector.start();
+    await shutdownDbAndWorker(online, inspector);
+
+    // Offline: the update is allowed by the permissions this client knows.
+    const offline = track(await openDb(undefined));
+    expect((await offline.all(allTodos, { tier: "local-first" })).length).toBe(1);
+    await offline.update(todos, row.value.id, { title: "offline edit" }).wait({ tier: "local" });
+    const offlineInspector = await offline.openInspectorControlPort();
+    offlineInspector.start();
+    await shutdownDbAndWorker(offline, offlineInspector);
+
+    // The deployment comes back with updates forbidden.
+    const tightened = await publishPermissionsForServer(syncServer, readOnlyPermissions);
+    const reconnected = track(await openDb(tightened.serverUrl));
+    const errors = vi.fn();
+    reconnected.onMutationError(errors);
+    await reconnected.all(allTodos, { tier: "remote" });
+
+    await waitForCondition(
+      () => errors.mock.calls.length > 0,
+      10_000,
+      `the refused offline update reaches onMutationError (sync status ${JSON.stringify(
+        reconnected.getSyncStatus(),
+      )})`,
+    );
+    expect(errors.mock.calls[0]![0]).toMatchObject({ code: "permission_denied" });
+    await waitForCondition(
+      async () =>
+        (await reconnected.all(allTodos, { tier: "local-first" }))
+          .map((todo) => todo.title)
+          .join() === "accepted",
+      5000,
+      "the row returns to its accepted version",
+    );
+  });
+
+  // The same with the tab open throughout, as the adopter saw it: the
+  // backend goes down, the update is made, the backend comes back tightened
+  // at the address the tab knows.
+  it("reports an offline update a tightened deployment refuses to a tab open throughout", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("offline-update-open-tab");
+    const control = await createJazzServerTransportControl(syncServer.serverUrl);
+    try {
+      const dbName = uniqueDbName("offline-update-open-tab");
+      const account = await acquireBrowserTestAccount({
+        appId: syncServer.appId,
+        serverUrl: control.url,
+        key: dbName,
+      });
+      const db = track(
+        await createDb({
+          appId: syncServer.appId,
+          driver: { type: "persistent" as const, dbName },
+          serverUrl: control.url,
+          account,
+        }),
+      );
+      const errors = vi.fn();
+      db.onMutationError(errors);
+      const row = db.insert(todos, { title: "accepted", done: false });
+      await row.wait({ tier: "global" });
+
+      await control.down();
+      await db.update(todos, row.value.id, { title: "offline edit" }).wait({ tier: "local" });
+      const later = db.update(todos, row.value.id, { title: "second offline edit" });
+      const laterOutcome = later.wait({ tier: "global" }).then(
+        () => "accepted",
+        (error: unknown) => error,
+      );
+
+      const tightened = await publishPermissionsForServer(syncServer, readOnlyPermissions);
+      await control.up(tightened.serverUrl);
+
+      await waitForCondition(
+        async () => errors.mock.calls.length > 0,
+        20_000,
+        "the refused offline edit reaches onMutationError",
+      );
+      expect(errors.mock.calls[0]![0]).toMatchObject({ code: "permission_denied" });
+      const outcome = await withTimeout(
+        laterOutcome,
+        10_000,
+        "the later edit's global wait settles",
+      );
+      expect(String(outcome)).toMatch(/permission denied/i);
+      await waitForCondition(
+        async () =>
+          (await db.all(allTodos, { tier: "local-first" })).map((todo) => todo.title).join() ===
+          "accepted",
+        5000,
+        "the row returns to its accepted version",
+      );
+      // The refusal of the edit waited for only locally reaches the
+      // listener once; the later edit's refusal went to its global wait.
+      await sleep(500);
+      expect(errors).toHaveBeenCalledTimes(1);
+    } finally {
+      await control.stop();
+    }
+  }, 60_000);
 
   it("delivers a rejection to a runtime attached while the worker rehydrates", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
