@@ -32,6 +32,19 @@ To share a todo, insert a row into `todoShares`.
   ../examples/docs/todo-client-localfirst-react/src/shared-access-snippets.tsx#shared-grant
 </include>
 
+### Finding the recipient's account
+
+A share names the recipient's Jazz account, which the sharer's browser doesn't know. Look it up in
+your backend: find the person in your auth library (for example by an email address the sharer
+typed), then `await jazz.createAccountFor(user.id)` returns their account ID, creating the account
+if they don't have one yet; calling it again returns the same ID. Return that ID to the client.
+
+- Match only on details your auth library has verified, such as a verified email address.
+  Otherwise someone could sign up with another person's address and receive their shares.
+- Creating the account early has one cost: a guest (device account) can no longer link to that
+  user when they sign up later, so their guest data stays separate. See
+  [Users without an account](/docs/setup/deployment/own-server#users-without-an-account).
+
 ## Querying shared items
 
 <include cwd lang="tsx" meta='title="SharedWithMe.tsx"'>

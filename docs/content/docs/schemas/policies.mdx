@@ -49,6 +49,10 @@ Apps that do not need user-scoped filtering must still declare every required op
 
 Use the policy helpers `allowRead`, `allowInsert`, `allowUpdate`, and `allowDelete` with [`.where(...)`](/docs/reference/where-operators) to restrict access based on column values.
 
+Policies decide which rows a user may read or write, not which columns. To keep a column from some
+users, move it to its own table with a one-to-one relation to the row, and give that table its own
+policies.
+
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-simple-ts
 </include>
@@ -170,6 +174,44 @@ each other (for example, thousands of folders nested inside one another in the s
 is rejected with the `write_rejected` code and a reason ending in "is not supported yet" once its
 checks would have to read more than 262,144 of its own rows. Split such an import into smaller
 transactions.
+
+### Access through related rows
+
+When access depends on a row two steps away, check that a matching path exists with
+`policy.exists(...)` around a relation: start from a table, filter it, follow a relation with
+`hopTo`, and filter again. For example, a doctor may read the patients they have an appointment
+with:
+
+```ts title="schema.ts"
+const schema = {
+  doctors: s.table({ userId: s.string(), name: s.string() }, {}),
+  patients: s.table({ name: s.string() }, {}),
+  appointments: s.table(
+    { doctorId: s.uuid(), patientId: s.uuid(), at: s.timestamp() },
+    { doctor: s.rel("doctors", "doctorId"), patient: s.rel("patients", "patientId") },
+  ),
+};
+```
+
+```ts title="permissions.ts"
+s.definePermissions(app, ({ policy, session }) => [
+  // Patients with an appointment whose doctor is the signed-in user.
+  policy.patients.allowRead.where((patient) =>
+    policy.exists(
+      policy.appointments
+        .where({ patientId: patient.id })
+        .hopTo("doctor")
+        .where({ userId: session.identity.subject }),
+    ),
+  ),
+  // A doctor's own appointments: "doctors.userId" filters the related doctor.
+  policy.appointments.allowRead.where({ "doctors.userId": session.identity.subject }),
+]);
+```
+
+`hopTo` takes a relation name declared with `s.rel` or `s.reverse`, and the `where` after it
+filters the rows it reaches. A key qualified with a table name, such as `"doctors.userId"`, filters
+a related table directly; it works when exactly one relation leads from the table to that one.
 
 <Accordions type="single">
 <Accordion title="Recursive inheritance">

@@ -18,7 +18,7 @@ const schema = {
       author: s.rel("users", "authorId"),
     },
   ),
-  users: s.table({ name: s.string() }),
+  users: s.table({ name: s.string() }, {}),
 };
 ```
 

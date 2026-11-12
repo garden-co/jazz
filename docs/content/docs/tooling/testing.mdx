@@ -112,6 +112,12 @@ The returned `PolicyTestApp` provides:
 - `testDb.expectDenied(fn)`&hairsp;—&hairsp;wait for the server to reject a write because of a policy
 - `testApp.shutdown()`&hairsp;—&hairsp;stop the local client and server
 
+`as()` acts for any user, whether or not they have a Jazz account yet. Your real backend is
+stricter: `jazz.forReqUser` throws `NoJazzAccountError` for a user who has no account until they
+sign in from a Jazz client or you call `jazz.createAccountFor(userId)` (see
+[Users without an account](/docs/setup/deployment/own-server#users-without-an-account)). Test
+that path through `startTestJazz` below.
+
 To test as a guest (a device account), pass `authMode: "local-first"` and leave out `issuer` and
 `account_id`, with empty `claims`. The test app derives a device account key from `user_id` and acts
 exactly like a real device account with that key, including its own account. The guest's
@@ -161,13 +167,15 @@ const testJazz: TestJazz = await startTestJazz({ app, permissions });
 ```
 
 - **Guests** (anonymous clients, or device accounts) connect to `testJazz.url`.
-- **Signed-in users** call `await testJazz.as(userId, claims)`. Each user gets their own origin,
-  which stands in for their browser's session cookie, and your permissions see `userId` and
-  `claims` as the signed-in user. Pass its `serverUrl` to `createJazzClient` and call
-  `refresh()`, as below.
-- **Clients that send `Authorization: Bearer`** (React Native, Node, a CLI) use
-  `testJazz.bearer(userId, claims)` as their token against `testJazz.url`, for example
-  `bearer: () => token` on `createJazzClient`.
+- **Signed-in users in tests that run in Node** (Vitest, a CLI) sign in with a bearer token:
+  `testJazz.bearer(userId, claims)` returns one your permissions see as that user. Pass it as
+  `bearer: () => token` on `createJazzClient`, with `serverUrl: testJazz.url`, and call
+  `refresh()`, as below. React Native tests do the same.
+- **Signed-in users in a browser** (Vitest browser mode, Playwright) call
+  `await testJazz.as(userId, claims)` instead. Each user gets their own origin, which stands in
+  for their browser's session cookie; point the client at its `serverUrl`. Outside a browser that
+  `serverUrl` doesn't sign anyone in: `refresh()` throws "loginWithBackend and linkWithBackend need
+  a browser".
 - `testJazz.jazz` is the app's `Jazz` handle, for `forReqUser`, `db` and the rest of your backend
   code.
 - `await testJazz.stop()` stops everything it started.
@@ -175,11 +183,13 @@ const testJazz: TestJazz = await startTestJazz({ app, permissions });
 ```typescript
 import { createJazzClient } from "jazz-tools/client";
 
-// A test client keeps its account in memory and signs in as `userId`.
+// A test client keeps its account in memory and signs in as `userId` with a bearer token.
 async function clientAs(userId: string) {
   let saved: string | null = null;
+  const token = testJazz.bearer(userId);
   const session = await createJazzClient({
-    serverUrl: (await testJazz.as(userId)).serverUrl,
+    serverUrl: testJazz.url,
+    bearer: () => token,
     store: { read: async () => saved, update: async (change) => void (saved = change(saved)) },
   });
   await session.refresh(); // ask the backend who is signed in
@@ -295,8 +305,10 @@ import { expect, it, vi } from "vitest";
 
 async function clientAs(testJazz: TestJazz, userId: string) {
   let saved: string | null = null;
+  const token = testJazz.bearer(userId);
   const session = await createJazzClient({
-    serverUrl: (await testJazz.as(userId)).serverUrl,
+    serverUrl: testJazz.url,
+    bearer: () => token,
     store: { read: async () => saved, update: async (change) => void (saved = change(saved)) },
   });
   await session.refresh(); // ask the backend who is signed in
