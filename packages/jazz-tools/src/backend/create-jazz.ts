@@ -291,9 +291,48 @@ export interface LocalFirstGuest {
   readonly [localFirstGuestBrand]: true;
 }
 
+/**
+ * The marker's brand, registered globally like `createJazz`'s store registry:
+ * a bundler may load this module more than once (Next dev evaluates it per
+ * route), and a shared Jazz must still recognise a marker made by another copy.
+ */
+const LOCAL_FIRST_GUEST_BRAND = Symbol.for("jazz-tools.acceptLocalFirstAuth.guest");
+
 const LOCAL_FIRST_GUEST = Object.freeze({
+  [LOCAL_FIRST_GUEST_BRAND]: true,
   kind: "jazz:local-first-guest",
 }) as unknown as LocalFirstGuest;
+
+/** Whether `answer` is {@link acceptLocalFirstAuth}'s marker, from any copy of this module. */
+function isLocalFirstGuest(answer: unknown): answer is LocalFirstGuest {
+  return (
+    typeof answer === "object" &&
+    answer !== null &&
+    (answer as Record<symbol, unknown>)[LOCAL_FIRST_GUEST_BRAND] === true
+  );
+}
+
+/**
+ * `authenticate`'s answer, checked: a user must have a string `userId`. Any
+ * other answer is a bug in the app's `authenticate`, said so here rather than
+ * as a failure from the core about a missing identity.
+ */
+function checkedUser(answer: unknown): JazzUser {
+  const userId = (answer as { userId?: unknown } | null)?.userId;
+  if (typeof answer === "object" && answer !== null && typeof userId === "string" && userId !== "")
+    return answer as JazzUser;
+  throw new TypeError(
+    `createJazz: authenticate must return { userId: string, expiresAt: number }, acceptLocalFirstAuth(request) or null; it returned ${describeAnswer(answer)}`,
+  );
+}
+
+function describeAnswer(answer: unknown): string {
+  if (typeof answer !== "object" || answer === null) return String(answer);
+  const keys = Reflect.ownKeys(answer).map(String);
+  const userId = (answer as { userId?: unknown }).userId;
+  const detail = "userId" in answer ? `, userId: ${JSON.stringify(userId) ?? String(userId)}` : "";
+  return `an object with keys [${keys.join(", ")}]${detail}`;
+}
 
 /** `request` without the credentials a browser sends with it (its cookies, an `Authorization` header). */
 function withoutCredentials(request: Request): Request {
@@ -311,7 +350,11 @@ function withoutCredentials(request: Request): Request {
  * ```ts
  * authenticate: async (request) => {
  *   const session = await auth.api.getSession({ headers: request.headers });
- *   return session ? { userId: session.user.id } : acceptLocalFirstAuth(request);
+ *   if (!session) return acceptLocalFirstAuth(request);
+ *   return {
+ *     userId: session.user.id,
+ *     expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
+ *   };
  * },
  * ```
  *
@@ -1490,8 +1533,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         ? { ...client.user, expiresAt: client.expiresAt }
         : null;
     const answer = await askAuthenticate(request);
-    if (answer === LOCAL_FIRST_GUEST || answer === null) return null;
-    const user = withCheckedExpiry(answer as JazzUser);
+    if (answer === null || isLocalFirstGuest(answer)) return null;
+    const user = withCheckedExpiry(checkedUser(answer));
     // An answer that has already expired names no one, here and in every
     // other place that asks (who is signed in, sign-in, forReqUser), so a
     // client can't be told it is signed in while its sync is refused.
@@ -1511,13 +1554,13 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   let warnedGuestsOff = false;
   async function acceptsGuest(request: Request): Promise<boolean> {
     const answer = await askAuthenticate(request);
-    if (answer === LOCAL_FIRST_GUEST) return true;
+    if (isLocalFirstGuest(answer)) return true;
     // A user is signed in on this browser too: one who just signed up, whose
     // guest still uploads its writes before it links to them. A guest is
     // bound to its own key, never to that user, and whether the app lets
     // guests in doesn't depend on who else is signed in: ask as the request
     // would be without the user's credentials.
-    if (answer && (await askAuthenticate(withoutCredentials(request))) === LOCAL_FIRST_GUEST)
+    if (answer && isLocalFirstGuest(await askAuthenticate(withoutCredentials(request))))
       return true;
     if (!warnedGuestsOff) {
       warnedGuestsOff = true;

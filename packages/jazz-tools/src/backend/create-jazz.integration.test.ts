@@ -1133,6 +1133,95 @@ describe("createJazz", () => {
       .toMatchObject({ state: "offline", reason: "auth" });
   }, 30_000);
 
+  // A bundler may evaluate jazz-tools/backend more than once (Next dev, per
+  // route): createJazz then returns the Jazz the first copy opened for the
+  // store, with the later copy's options, so its guest marker must count.
+  it("lets guests in through acceptLocalFirstAuth from another copy of the module", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-two-copies-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const first = createJazz({ app, permissions, store: sqlite({ path: dir }), authenticate });
+    cleanups.push(() => first.close());
+
+    vi.resetModules();
+    const copy = (await import("./index.js")) as typeof import("./index.js");
+    expect(copy.acceptLocalFirstAuth).not.toBe(acceptLocalFirstAuth);
+    expect(copy.acceptLocalFirstAuth(new Request("http://app/"))).not.toBe(
+      acceptLocalFirstAuth(new Request("http://app/")),
+    );
+    const jazz = copy.createJazz({
+      app,
+      permissions,
+      store: copy.sqlite({ path: dir }),
+      authenticate: (request) => {
+        const userId = request.headers.get("x-test-user");
+        return userId ? { userId, expiresAt: inAnHour() } : copy.acceptLocalFirstAuth(request);
+      },
+    });
+    expect(jazz).toBe(first);
+    await jazz.ready();
+    const origin = await serve(jazz, { sockets: true });
+
+    // A guest is no one signed in, not a user without an id.
+    const backendUser = await fetch(`${origin}/jazz/apps/${jazz.appId}/accounts/backend-user`, {
+      method: "POST",
+    });
+    expect(backendUser.status).toBe(401);
+    await expect(jazz.accountFor(new Request("http://app/x"))).resolves.toBeNull();
+
+    // And its sync session is let in.
+    const guestSession = await createJazzClient({
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "local-first",
+    });
+    cleanups.push(() => guestSession.close());
+    const guest = guestSession.getSnapshot().client!;
+    await guest.db
+      .insert(app.todos, { title: "synced", owner: guest.session!.user! })
+      .wait({ tier: "global" });
+    expect((await jazz.db.all(app.todos)).map((todo) => todo.title)).toEqual(["synced"]);
+  }, 60_000);
+
+  it("names an authenticate answer without a userId as the app's bug, before asking the core", async () => {
+    let answer: unknown;
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: () => answer as never,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: false });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+    const request = () => new Request("http://app/x");
+    for (const [wrong, shown] of [
+      [{}, /returned an object with keys \[\]$/],
+      [{ id: "alice" }, /returned an object with keys \[id\]$/],
+      [{ userId: 42 }, /keys \[userId\], userId: 42$/],
+      [{ userId: "" }, /keys \[userId\], userId: ""$/],
+      ["alice", /returned alice$/],
+    ] as const) {
+      answer = wrong;
+      await expect(jazz.accountFor(request())).rejects.toThrow(
+        /^createJazz: authenticate must return \{ userId: string, expiresAt: number \}, acceptLocalFirstAuth\(request\) or null/,
+      );
+      await expect(jazz.accountFor(request())).rejects.toThrow(shown);
+      const response = await fetch(`${origin}/jazz/apps/${jazz.appId}/accounts/backend-user`, {
+        method: "POST",
+      });
+      expect(response.status).toBe(500);
+      expect(await response.text()).not.toMatch(/422|subject/);
+    }
+    // A user and no one still work as before.
+    answer = { userId: "alice", expiresAt: inAnHour() };
+    await expect(jazz.accountFor(request())).resolves.toBeNull();
+    answer = undefined;
+    await expect(jazz.accountFor(request())).resolves.toBeNull();
+  }, 30_000);
+
   it("refuses a sync session for a user without an account, until they sign in", async () => {
     // One origin whose backend is replaced by one on a new core (a reset dev
     // store): the client remembers alice, but the new core has no account
