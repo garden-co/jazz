@@ -66,7 +66,7 @@ first load). Use it when the app must work offline from the first render, or whe
 sooner. With `"now"`, a loader that fails makes the session fail (`status: "error"`) instead of
 running thin, and `"now"` without `client` is refused.
 
-The `import()` stays in your code, so the Wasm engine (about 3 MB gzipped, 8.7 MB uncompressed)
+The `import()` stays in your code, so the Wasm engine (%bundle.wasm% gzipped, %bundle.wasmRaw% uncompressed)
 downloads only when the client upgrades. After the first render, local storage keeps filling for a
 few seconds. Writes made on the thin client before the upgrade are kept offline only when a query
 the client subscribes to covers them. The local-first chunk and Wasm load lazily, so when you deploy
