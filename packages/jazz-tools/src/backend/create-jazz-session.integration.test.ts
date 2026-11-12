@@ -73,6 +73,10 @@ describe("Node shared backend session", () => {
     await expect(
       createJazzClient({ ...base, initial: { backendSecret: "secret" } } as never),
     ).rejects.toThrow('initial is "device" or left out');
+    // The option check keeps webSocket's own hint.
+    await expect(createJazzClient({ ...base, webSocket: class {} } as never)).rejects.toThrow(
+      "Use credential instead of webSocket",
+    );
     for (const key of ["backendSecret", "adminSecret"]) {
       await expect(createJazzClient({ ...base, [key]: "secret" } as never)).rejects.toThrow(
         `${key} is not a createJazzClient option`,

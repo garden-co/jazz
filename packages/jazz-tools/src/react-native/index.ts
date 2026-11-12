@@ -64,3 +64,16 @@ export type {
   Relationship,
   Relationships,
 } from "../relationships.js";
+
+// Removed in alpha.61: stubs that throw, naming the replacement (one release).
+export {
+  AccountManager,
+  JazzSessionProvider,
+  createAccountManager,
+  createDb,
+  exportLocalFirstSecret,
+  useAccountState,
+  useJazzAuth,
+  useJazzSessionOwner,
+  useLocalFirstAuth,
+} from "../removed-api.js";
