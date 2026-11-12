@@ -433,7 +433,9 @@ export abstract class ConnectionManager {
     if (!runtime) return;
     if (!runtime.waitForPendingWrites)
       throw new Error("Runtime does not support graceful sync shutdown");
-    await runtime.waitForPendingWrites("global");
+    // A stream still sending its value finishes first, rather than the
+    // shutdown closing the runtime under it.
+    await runtime.waitForPendingWrites("global", { inFlightStreams: true });
   }
 
   async shutdown(): Promise<void> {

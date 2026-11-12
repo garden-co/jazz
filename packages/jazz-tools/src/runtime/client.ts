@@ -166,10 +166,12 @@ export interface Runtime {
   /**
    * Wait until every write committed so far reaches `tier`. `throughOutage`
    * keeps the wait pending through outages until a terminal failure.
+   * `inFlightStreams` (a graceful shutdown) first lets streaming writes still
+   * sending their value finish, and waits for their writes too.
    */
   waitForPendingWrites?(
     tier?: string,
-    options?: { throughOutage?: boolean; signal?: AbortSignal },
+    options?: { throughOutage?: boolean; inFlightStreams?: boolean; signal?: AbortSignal },
   ): Promise<void>;
   /** @internal Close mutation admission and report the foreground TxTime high-water. */
   quiesceForegroundTxTimeHighWater?(): Promise<bigint>;

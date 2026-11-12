@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -80,6 +81,35 @@ async function open(
   });
   sessions.push(session);
   return session;
+}
+
+/**
+ * A 1 MiB text value streamed in 64 KiB parts, held after the first part
+ * (once the server has it) until `release()`.
+ */
+function gatedStream() {
+  const parts = Array.from({ length: 16 }, (_, index) =>
+    String.fromCharCode(97 + index).repeat(64 * 1024),
+  );
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const stream = {
+    expected: parts.join(""),
+    firstPartSent: false,
+    release: () => release(),
+    async *chunks(): AsyncGenerator<string> {
+      yield parts[0]!;
+      // Resumed only once the first part was sent and applied.
+      stream.firstPartSent = true;
+      await gate;
+      yield* parts.slice(1);
+    },
+  };
+  return stream;
+}
+
+function sha256(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
 }
 
 function db(session: BrowserJazzSession) {
@@ -248,6 +278,57 @@ describe("browser session", () => {
     expect((await kept.all(app.notes, { tier: "local-first" })).map((row) => row.text)).toEqual([
       "streamed text",
     ]);
+  }, 60_000);
+
+  it("lets a stream in flight finish across the upgrade, and its value lands intact", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    const stream = gatedStream();
+    const streaming = kept.insertStreaming(app.notes, { text: stream.chunks() });
+    // The server has the first part; the upgrade comes mid-stream.
+    await expect.poll(() => stream.firstPartSent).toBe(true);
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    expect(isThinDb(kept)).toBe(false);
+    stream.release();
+
+    const written = await streaming;
+    await written.wait({ tier: "global" });
+    const row = await kept.one(app.notes.where({ id: written.value.id }), { tier: "remote" });
+    expect(row?.text.length).toBe(stream.expected.length);
+    expect(sha256(row!.text)).toBe(sha256(stream.expected));
+    await expect
+      .poll(async () => {
+        const local = await kept.one(app.notes.where({ id: written.value.id }), {
+          tier: "local-first",
+        });
+        return local ? sha256(local.text) : null;
+      })
+      .toBe(sha256(stream.expected));
+  }, 60_000);
+
+  it("ends a stream in flight with an error saying why when the upgraded client shuts down without waiting", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    const stream = gatedStream();
+    const streaming = kept.insertStreaming(app.notes, { text: stream.chunks() });
+    void streaming.catch(() => {});
+    await expect.poll(() => stream.firstPartSent).toBe(true);
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+
+    // Without waitForSync (a sign-out that wipes this device): the thin
+    // runtime closes under the stream.
+    await session.getSnapshot().client!.shutdown();
+    stream.release();
+    const error = await streaming.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(error).toBeInstanceOf(ThinConnectionLostError);
+    expect((error as Error).message).toMatch(
+      /upgraded to local-first and was then shut down without waiting for sync, so the value was not written/,
+    );
   }, 60_000);
 
   it("upgrades with committed thin writes while the server is gone", async () => {
