@@ -7,7 +7,7 @@ import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js"
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { createAccountManager } from "../accounts/create-account-manager.js";
-import { createJazzClient } from "./create-jazz-session.js";
+import { openBrowserSessionCore as createJazzClient } from "./create-jazz-session.js";
 
 // A host without cookies (Node, a CLI) whose user the app's backend signs in
 // with the app's own token: `bearer` on createJazzClient.

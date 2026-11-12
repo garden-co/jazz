@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import {
-  acceptLocalFirstAuth,
+  acceptDeviceAccounts,
   createJazz,
   remote,
   type CreateJazzOptions,
@@ -76,7 +76,7 @@ export interface TestJazz {
    * Sign `userId` in on the origin `originUrl` (from {@link visitor}), as the
    * app's own sign-up sets their cookie: the app's `authenticate` names them
    * there from now on. No Jazz account is made for them: a guest who signs
-   * up there keeps theirs with `linkWithBackend()`. Returns false when
+   * up there keeps theirs with `linkDeviceAccount()`. Returns false when
    * `originUrl` is not one of this app's origins.
    */
   signUp(originUrl: string, userId: string, claims?: Record<string, unknown>): boolean;
@@ -110,7 +110,7 @@ export interface StartTestJazzOptions {
   port?: number;
   /**
    * Whether the app lets local-first guests sync, as an app's `authenticate`
-   * does by returning `acceptLocalFirstAuth(request)` (default true).
+   * does by returning `acceptDeviceAccounts(request)` (default true).
    */
   guests?: boolean;
   /** More `createJazz` options (not `app`, `permissions`, `store` or `authenticate`). */
@@ -146,7 +146,7 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
       : users.get(new URL(request.url).host);
     // A test user's sign-in holds for an hour unless the test says otherwise.
     if (user) return { ...user, expiresAt: user.expiresAt ?? Math.floor(Date.now() / 1000) + 3600 };
-    return options.guests === false ? null : acceptLocalFirstAuth(request);
+    return options.guests === false ? null : acceptDeviceAccounts(request);
   };
   const servers: Server[] = [];
   // Every connection, including upgraded sync sockets, which `server.close`

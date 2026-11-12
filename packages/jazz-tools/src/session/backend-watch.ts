@@ -1,6 +1,6 @@
 import type { AccountHandle, AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
-import { switchJazzSessionUser, type JazzSession } from "./state.js";
+import { switchJazzSessionUser, type SessionCore } from "./state.js";
 
 const LOCAL_FIRST_ISSUER = "urn:jazz:local-first";
 const SYSTEM_ISSUER = "urn:jazz:system";
@@ -116,7 +116,7 @@ export interface BackendWatch {
  * stop the watch. A stopped watch rejects every later `reauthenticate`.
  */
 export function watchBackendUser<Client>(
-  session: JazzSession<Client>,
+  session: SessionCore<Client>,
   probe: () => Promise<BackendUser | null>,
   events: BackendWatchEvents,
   options: {
@@ -151,22 +151,22 @@ export function watchBackendUser<Client>(
      */
     retryMs?: number;
     /**
-     * Called when your backend says no one is signed in any more (confirmed
-     * by a second answer a moment later), before the session signs the
-     * user out. Return `"keep"` to stay signed in for now (your app refreshed
-     * its session itself, or redirects to sign-in first): the session asks
-     * your backend again on the next focus, refusal or `reauthenticate()`.
-     * Return `"sign-out"` (or nothing) to sign out. A hook that throws signs
-     * out.
-     */
-    onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
-    /**
      * Whether this device forgot a guest's account: another tab linked it
      * to a user (their sign-up) under `clearOnSignOut`, so it is theirs now.
      * Such a guest signs out when the backend says no one is signed in, as
      * that user does. Left out, a guest never signs out on its own.
      */
     forgotten?: (account: AccountHandle) => Promise<boolean>;
+    /**
+     * Called when your backend says no one is signed in any more (confirmed
+     * by a second answer a moment later), before the session signs the
+     * user out. Return `"keep"` to stay signed in for now (your app refreshed
+     * its session itself, or redirects to sign-in first): the session asks
+     * your backend again on the next focus, refusal or `refresh()`.
+     * Return `"sign-out"` (or nothing) to sign out. A hook that throws signs
+     * out.
+     */
+    onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
   } = {},
 ): BackendWatch {
   const confirmMs = options.confirmMs ?? 2000;

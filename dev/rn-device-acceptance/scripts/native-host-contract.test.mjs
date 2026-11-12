@@ -23,8 +23,8 @@ function assertCurrentRnBoundary(packageReadme, installGuide, spec) {
   );
   assert.match(
     packageReadme,
-    /createJazzClient.*AccountHandle.*matching native development or release build/i,
-    "persistent clients must retain account-handle admission and native-build requirements",
+    /createJazzClient.*signs in a device account or your backend's user.*matching native development or release build/i,
+    "persistent clients must keep the session's sign-in and the native-build requirements",
   );
   assert.match(
     packageReadme,

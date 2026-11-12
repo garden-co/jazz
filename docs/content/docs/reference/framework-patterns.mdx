@@ -11,22 +11,25 @@ full details.
 
 ## API equivalents
 
-| Concept            | React / Expo                | Vue                         | Svelte                            | Solid                       |
-| ------------------ | --------------------------- | --------------------------- | --------------------------------- | --------------------------- |
-| Provider           | `<JazzProvider>`            | `<JazzProvider>`            | `<JazzProvider>`                  | `<JazzProvider>`            |
-| Auth actions       | `useJazzAuth()`             | `useJazzAuth()`             | `useJazzAuth()`                   | `useJazzAuth()`             |
-| Query subscription | `useAll(query)`             | `useAll(query)`             | `new QuerySubscription(query)`    | `useAll(() => ({ query }))` |
-| Single-row query   | `useOne(query)`             | `useOne(query)`             | `new QuerySubscriptionOne(query)` | `useOne(() => ({ query }))` |
-| DB access          | `useAll(query).db`          | `useAll(query).db`          | `subscription.db`                 | `useAll(...).db`            |
-| Write-only DB      | `useDb()`                   | `useDb()`                   | `getDb()`                         | `useDb()`                   |
-| Session            | `useSession()`              | `useSession()`              | `getSession().current`            | `useSession()`              |
-| Client without UI  | `createJazzClient(options)` | `createJazzClient(options)` | `createJazzClient(options)`       | `createJazzClient(options)` |
+| Concept            | React / Expo               | Vue                        | Svelte                            | Solid                       |
+| ------------------ | -------------------------- | -------------------------- | --------------------------------- | --------------------------- |
+| Provider           | `<JazzProvider>`           | `<JazzProvider>`           | `<JazzProvider>`                  | `<JazzProvider>`            |
+| Jazz session       | `useJazzSession()`         | `useJazzSession()`         | `getJazzSession()`                | `useJazzSession()`          |
+| Query subscription | `useAll(query)`            | `useAll(query)`            | `new QuerySubscription(query)`    | `useAll(() => ({ query }))` |
+| Single-row query   | `useOne(query)`            | `useOne(query)`            | `new QuerySubscriptionOne(query)` | `useOne(() => ({ query }))` |
+| DB access          | `useAll(query).db`         | `useAll(query).db`         | `subscription.db`                 | `useAll(...).db`            |
+| Write-only DB      | `useDb()`                  | `useDb()`                  | `getDb()`                         | `useDb()`                   |
+| Permission session | `useSession()`             | `useSession()`             | `getSession().current`            | `useSession()`              |
+| Client without UI  | `createJazzClient(config)` | `createJazzClient(config)` | `createJazzClient(config)`        | `createJazzClient(config)`  |
 
 ## Provider setup
 
-Wrap your app in `<JazzProvider>`. It takes the same options as `createJazzClient` (`serverUrl`,
-`client`, `initial` and the rest; see [Thin Client](/docs/setup/web-client/thin-client)) and shows
-what you give it while the user is signed out, while Jazz starts and when it fails.
+Wrap your app in `<JazzProvider config={…}>`. `config` takes the same options as
+`createJazzClient` (`serverUrl`, `client`, `initial` and the rest; see
+[Thin Client](/docs/setup/web-client/thin-client)). The provider shows its `signedOut` view while no
+one is signed in, `loading` while Jazz starts or switches users, and `error` when there is no usable
+client. `useJazzSession()` (Svelte: `getJazzSession()`) reads the session anywhere below, including
+in those views.
 
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
   <Tab value="React">
@@ -36,7 +39,7 @@ what you give it while the user is signed out, while Jazz starts and when it fai
     export function Root() {
       return (
         <JazzProvider
-          client={() => import("jazz-tools/local-first")}
+          config={{ serverUrl: "/jazz", client: () => import("jazz-tools/local-first") }}
           signedOut={<SignIn />}
           loading={<p>Loading…</p>}
           error={(state) => <button onClick={state.retry}>{state.error?.message}: retry</button>}
@@ -51,12 +54,15 @@ what you give it while the user is signed out, while Jazz starts and when it fai
   <Tab value="Vue">
     ```vue title="App.vue"
     <script setup lang="ts">
-    import { JazzProvider } from "jazz-tools/vue";
-    const client = () => import("jazz-tools/local-first");
+    import { JazzProvider, type JazzClientConfig } from "jazz-tools/vue";
+    const config: JazzClientConfig = {
+      serverUrl: "/jazz",
+      client: () => import("jazz-tools/local-first"),
+    };
     </script>
 
     <template>
-      <JazzProvider :client="client">
+      <JazzProvider :config="config">
         <TodoApp />
         <template #signedOut><SignIn /></template>
         <template #loading><p>Loading…</p></template>
@@ -67,10 +73,6 @@ what you give it while the user is signed out, while Jazz starts and when it fai
     </template>
     ```
 
-    `client` and the other `createJazzClient` options pass through as attributes, so they aren't
-    type-checked in templates yet. Write them in camelCase (`:clearOnSignOut="true"`): kebab-case
-    attributes such as `clear-on-sign-out` aren't picked up for now.
-
   </Tab>
   <Tab value="Svelte">
     ```svelte title="App.svelte"
@@ -78,7 +80,7 @@ what you give it while the user is signed out, while Jazz starts and when it fai
       import { JazzProvider } from "jazz-tools/svelte";
     </script>
 
-    <JazzProvider client={() => import("jazz-tools/local-first")}>
+    <JazzProvider config={{ serverUrl: "/jazz", client: () => import("jazz-tools/local-first") }}>
       <TodoApp />
       {#snippet signedOut()}<SignIn />{/snippet}
       {#snippet loading()}<p>Loading…</p>{/snippet}
@@ -106,7 +108,7 @@ what you give it while the user is signed out, while Jazz starts and when it fai
     export function Root() {
       return (
         <JazzProvider
-          client={() => import("jazz-tools/local-first")}
+          config={{ serverUrl: "/jazz", client: () => import("jazz-tools/local-first") }}
           signedOut={<SignIn />}
           loading={<p>Loading…</p>}
           error={(error, retry) => <button onClick={retry}>{error.message}: retry</button>}
@@ -121,7 +123,9 @@ what you give it while the user is signed out, while Jazz starts and when it fai
 </Tabs>
 
 Leave out `client` for a thin client. The provider creates its session when it mounts and closes it
-when it unmounts; use a `key` to replace it with new options.
+when it unmounts; use a `key` to replace it with a new config. To show a session you opened yourself
+with `createJazzClient`, pass `session={session}` instead of `config`; the provider then leaves
+closing it to you.
 
 ## Query subscriptions
 
@@ -184,7 +188,17 @@ Get a handle to the database for inserts, updates, and deletes. See [Writing Dat
 
 ## Session/user identity
 
-Access the current user's session. See [How Auth Works](/docs/setup/auth/backend#the-session) for details on authentication modes and identity linking.
+Two things are called a session, and they answer different questions:
+
+- **Who is signed in on this device:** the Jazz session, from `useJazzSession()` (Svelte:
+  `getJazzSession()`). Its `user` is `{ accountId, kind, identity, claims }`, with `kind`
+  `"device"` for a device account (a guest) and `"backend"` for a user your backend signed in, or
+  `null`. It also carries the operations: `refresh()`, `signOut()`, `createDeviceAccount()` and the
+  rest.
+- **What your permissions see:** `useSession()` (Svelte: `getSession()`), the read-only session a
+  query or write runs with, whose `user` is the account ID your policies compare.
+
+See [How Auth Works](/docs/setup/auth/backend#the-session) for details on authentication modes and identity linking.
 
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
   <Tab value="React">

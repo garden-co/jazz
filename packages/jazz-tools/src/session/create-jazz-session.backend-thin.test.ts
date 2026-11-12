@@ -6,7 +6,7 @@ import { createJazz, memory, type Jazz } from "../backend/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { createJazzClient } from "./create-jazz-session.js";
+import { openBrowserSessionCore as createJazzClient } from "./create-jazz-session.js";
 import type { ThinRuntime } from "../thin/thin-runtime.js";
 import { decodeThinResponse, isThinResponse } from "../thin/wire.js";
 
@@ -583,7 +583,10 @@ describe("browser session against the app's backend", () => {
 
     const refusal = /need a browser.*jazz-tools\/react-native or jazz-tools\/expo/;
     await expect(session.loginWithBackend()).rejects.toThrow(refusal);
-    expect(requests).toEqual([]);
+    // The sign-in made no request. (The session's own "who is signed in"
+    // check goes through the app's fetch too, so it isn't counted here.)
+    const signIns = () => requests.filter((url) => !url.includes("backend-user"));
+    expect(signIns()).toEqual([]);
     expect(session.getSnapshot().status).not.toBe("ready");
 
     // A guest can't sign up through the backend here either.
@@ -591,7 +594,7 @@ describe("browser session against the app's backend", () => {
       serverUrl: "http://127.0.0.1:9/jazz",
       store: memoryStore(),
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
       client: async () => ({ createClient: createLocalFirstDb }),
       fetch: async (input) => {
         requests.push(String(input));
@@ -601,7 +604,7 @@ describe("browser session against the app's backend", () => {
     cleanups.push(() => guest.close());
     const account = guest.getSnapshot().account;
     await expect(guest.linkWithBackend()).rejects.toThrow(refusal);
-    expect(requests).toEqual([]);
+    expect(signIns()).toEqual([]);
     expect(guest.getSnapshot().account).toBe(account);
   });
 });
@@ -707,7 +710,7 @@ describe("a shared device (clearOnSignOut)", () => {
       serverUrl: `${origin}/jazz`,
       store,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
       clearOnSignOut: true,
       client: async () => ({ createClient: createLocalFirstDb }),
     });
@@ -740,7 +743,7 @@ describe("a shared device (clearOnSignOut)", () => {
       serverUrl: `${origin}/jazz`,
       store,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
       clearOnSignOut: true,
       client: async () => ({ createClient: createLocalFirstDb }),
     });
@@ -768,7 +771,7 @@ describe("a guest open in two tabs of a shared device (clearOnSignOut)", () => {
         serverUrl: `${origin}/jazz`,
         store,
         driver: { type: "memory" },
-        initial: "local-first",
+        initial: "device",
         clearOnSignOut: true,
       });
       cleanups.push(() => session.close());

@@ -1,5 +1,5 @@
 import * as React from "react";
-import { JazzSessionProvider, useJazzSession } from "jazz-tools/expo";
+import { JazzProvider, useJazzSession } from "jazz-tools/expo";
 import {
   ActivityIndicator,
   Pressable,
@@ -92,9 +92,10 @@ export function App() {
   if (!serverUrl)
     throw new Error("Set EXPO_PUBLIC_JAZZ_SERVER_URL to the app's backend (pnpm backend)");
   return (
-    <JazzSessionProvider
-      config={{ serverUrl, env: "dev", initial: "local-first" }}
-      fallback={<SessionFallback />}
+    <JazzProvider
+      config={{ serverUrl, env: "dev", initial: "device" }}
+      loading={<SessionFallback />}
+      error={<SessionFallback />}
     >
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="dark-content" />
@@ -103,7 +104,7 @@ export function App() {
           <TodoList />
         </View>
       </SafeAreaView>
-    </JazzSessionProvider>
+    </JazzProvider>
   );
 }
 

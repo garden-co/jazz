@@ -1,11 +1,13 @@
 import { type ParentProps } from "solid-js";
-import type { DbConfig } from "jazz-tools";
 import { JazzProvider } from "jazz-tools/solid";
 
-// Prepare a handle outside this context with createAccountManager.
-export function AuthOffline(props: ParentProps<{ config: DbConfig }>) {
+// No server: Jazz stays on this device, with one device account per browser profile.
+export function AuthOffline(props: ParentProps) {
   return (
-    <JazzProvider config={{ ...props.config, serverUrl: undefined }} fallback={<p>Loading...</p>}>
+    <JazzProvider
+      config={{ serverUrl: null, client: () => import("jazz-tools/local-first") }}
+      loading={<p>Loading...</p>}
+    >
       {props.children}
     </JazzProvider>
   );

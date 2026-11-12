@@ -436,7 +436,7 @@ This includes mutations you did not wait for and mutations whose wait finished b
 rejection arrived.
 
 An event with code `outcome_unknown` is not a rejection: the thin client's connection ended for
-good before the server answered (after `reauthenticate()` signed in someone else, `disconnect()` or
+good before the server answered (after `refresh()` signed in someone else, `disconnect()` or
 `close()`), and the write may have been applied. Read the row again before you revert or retry it.
 An ordinary dropped socket doesn't cause this, since the thin client resends unanswered writes when
 it reconnects.

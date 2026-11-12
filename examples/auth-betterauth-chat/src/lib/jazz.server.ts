@@ -8,7 +8,7 @@ import { createRequire as createRequireFromModule } from "node:module";
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
 const nodeRequire = createRequire(import.meta.url);
-const { acceptLocalFirstAuth, createJazz, memory, sqlite } = nodeRequire(
+const { acceptDeviceAccounts, createJazz, memory, sqlite } = nodeRequire(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
@@ -27,8 +27,8 @@ export function jazz(): Promise<Jazz> {
     authenticate: async (request) => {
       const { auth } = await import("./auth");
       const session = await (await auth).api.getSession({ headers: request.headers });
-      // Signed out: a local-first guest, until sign-up links its account.
-      if (!session) return acceptLocalFirstAuth(request);
+      // Signed out: a guest on a device account, until sign-up links it.
+      if (!session) return acceptDeviceAccounts(request);
       const role = (session.user as { role?: string | string[] | null }).role;
       return {
         userId: session.user.id,

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRawSnippet, mount, unmount } from "svelte";
 const factory = vi.hoisted(() => vi.fn());
-vi.mock("../session/create-jazz-session.js", () => ({ createJazzClient: factory }));
+vi.mock("../session/create-jazz-session.js", () => ({ openBrowserSessionCore: factory }));
 vi.mock("./create-jazz-client.js", () => ({ openJazzClient: factory }));
 import JazzProvider from "./JazzProvider.svelte";
 import JazzSvelteProvider from "./JazzSvelteProvider.svelte";
@@ -14,7 +14,7 @@ const children = createRawSnippet(() => ({ render: () => "<p>ready</p>" }));
 // rest-props object.
 describe("Svelte providers refuse the removed autoAttachDevTools", () => {
   const providers = [
-    ["JazzProvider", JazzProvider, { scope: "test", children }],
+    ["JazzProvider", JazzProvider, { config: { scope: "test" }, children }],
     [
       "JazzSvelteProvider",
       JazzSvelteProvider,

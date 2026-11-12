@@ -1,7 +1,6 @@
 import { JazzProvider, useJazzClient } from "jazz-tools/react";
-import { Suspense, useEffect, useState } from "react";
-import type { DbConfig } from "jazz-tools";
-import { prepareAccountConfig } from "./account";
+import { Suspense, useEffect } from "react";
+import { sessionConfig, type AppConfig } from "./account";
 
 import { Loader2Icon } from "lucide-react";
 import { CreateChatRedirect } from "@/components/CreateChatRedirect";
@@ -14,7 +13,7 @@ import Router from "@/components/Router";
 import { RouterScope } from "@/hooks/useRouter";
 
 interface AppProps {
-  config?: Partial<DbConfig>;
+  config?: AppConfig;
   initialPath?: string;
 }
 
@@ -27,28 +26,9 @@ export function App({ config, initialPath }: AppProps = {}) {
   );
 }
 
-function AppInner({ config }: { config?: Partial<DbConfig> }) {
-  const [resolved, setResolved] = useState<DbConfig>();
-  const [error, setError] = useState<Error>();
-  useEffect(() => {
-    let cancelled = false;
-    prepareAccountConfig(config).then(
-      (value) => {
-        if (!cancelled) setResolved(value);
-      },
-      (cause) => {
-        if (!cancelled) setError(cause instanceof Error ? cause : new Error(String(cause)));
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [config]);
-  if (error) throw error;
-  if (!resolved) return <p id="joining-chat">Loading...</p>;
-
+function AppInner({ config }: { config?: AppConfig }) {
   return (
-    <JazzProvider config={resolved} fallback={<p id="joining-chat">Loading...</p>}>
+    <JazzProvider config={sessionConfig(config)} loading={<p id="joining-chat">Loading...</p>}>
       <ExposeDevClient />
       <AppContent />
     </JazzProvider>

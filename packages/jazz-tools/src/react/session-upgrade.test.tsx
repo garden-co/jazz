@@ -8,8 +8,10 @@ import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js"
 import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
-import { createJazzClient, type BrowserJazzSession } from "../session/create-jazz-session.js";
-import { JazzSessionProvider } from "./session.js";
+import { createJazzClient } from "../session/create-jazz-session.js";
+import type { JazzSession } from "../session/jazz-session.js";
+import type { JazzClient } from "./create-jazz-client.js";
+import { JazzProvider } from "./provider.js";
 import { useAll } from "./use-all.js";
 
 const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
@@ -23,7 +25,7 @@ const loadLocalFirst: LocalFirstLoader = async () => ({ createClient: createLoca
 beforeEach(() => vi.stubGlobal("WebSocket", NodeWebSocket));
 
 let server: TestJazz | undefined;
-let session: BrowserJazzSession | undefined;
+let session: JazzSession<JazzClient> | undefined;
 afterEach(async () => {
   cleanup();
   vi.unstubAllGlobals();
@@ -62,20 +64,21 @@ it("upgrades to the local-first client under a mounted tree, keeping its state a
     permissions,
     coreOptions: { allowLocalFirstAuth: true, inMemory: true },
   });
-  session = await createJazzClient({
+  const opened = await createJazzClient({
     scope: server.appId,
     serverUrl: server.url,
     store: memoryStore(),
-    initial: "local-first",
+    initial: "device",
     driver: { type: "memory" },
   });
-  const db = session.getSnapshot().client!.db;
+  session = opened;
+  const db = opened.getSnapshot().client!.db;
   await db.insert(app.notes, { text: "before" }).wait({ tier: "global" });
 
   const view = render(
-    <JazzSessionProvider session={session}>
+    <JazzProvider session={opened}>
       <Notes />
-    </JazzSessionProvider>,
+    </JazzProvider>,
   );
   await waitFor(() => expect(view.getByTestId("notes").textContent).toBe("before"));
   fireEvent.change(view.getByTestId("draft"), { target: { value: "half-typed" } });
@@ -83,7 +86,7 @@ it("upgrades to the local-first client under a mounted tree, keeping its state a
   const loadingBefore = loading.length;
 
   await act(() => db.upgradeToLocalFirst(loadLocalFirst));
-  expect(isThinDb(session.getSnapshot().client!.db)).toBe(false);
+  expect(isThinDb(opened.getSnapshot().client!.db)).toBe(false);
 
   expect(mounts.length).toBe(mountsBefore);
   expect(loading.length).toBe(loadingBefore);

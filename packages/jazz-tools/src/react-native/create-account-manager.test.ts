@@ -1,6 +1,8 @@
 import { NATIVE_RELAY_ABI_V1 } from "jazz-rn/native-relay-abi";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createAccountManager, createDb, schema as s } from "./index.js";
+import { createAccountManager } from "./create-account-manager.js";
+import { createDb } from "./create-db.js";
+import { schema as s } from "./index.js";
 import { accountToken } from "../accounts/enrollment.js";
 import { accountRegistryUrl } from "../accounts/context.js";
 

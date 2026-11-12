@@ -247,7 +247,7 @@ it("says how to sign in when linkWithBackend has no guest to link", async () => 
   const error = await manager.linkWithBackend().catch((cause: unknown) => cause);
   expect(error).toBeInstanceOf(AccountAuthError);
   expect(error).toMatchObject({ code: "local_first_account_required" });
-  expect((error as Error).message).toMatch(/no guest to link/);
-  expect((error as Error).message).toMatch(/loginWithBackend\(\)/);
+  expect((error as Error).message).toMatch(/no device account to link/);
+  expect((error as Error).message).toMatch(/refresh\(\)/);
   expect(manager.getSnapshot()).toMatchObject({ pending: undefined, error });
 });

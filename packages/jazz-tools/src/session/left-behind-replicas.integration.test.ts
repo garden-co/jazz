@@ -2,11 +2,11 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { afterEach, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
-import { acceptLocalFirstAuth, createJazz, memory } from "../backend/index.js";
+import { acceptDeviceAccounts, createJazz, memory } from "../backend/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { createJazzClient } from "./create-jazz-session.js";
+import { openBrowserSessionCore as createJazzClient } from "./create-jazz-session.js";
 
 // `clearOnSignOut` on a shared browser: a user signed out where the page
 // didn't see it (on the server, or another user signing in through the app)
@@ -35,7 +35,7 @@ async function setup(options: { guests?: boolean } = {}) {
     authenticate: (request: Request) => {
       const userId = request.headers.get("x-test-user");
       if (userId) return { userId, expiresAt: Math.floor(Date.now() / 1000) + 3600 };
-      return options.guests ? acceptLocalFirstAuth(request) : null;
+      return options.guests ? acceptDeviceAccounts(request) : null;
     },
   }).ready();
   cleanups.push(() => jazz.close());

@@ -27,7 +27,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import {
-  acceptLocalFirstAuth,
+  acceptDeviceAccounts,
   createJazz,
   createJazzClient,
   files,
@@ -69,7 +69,7 @@ afterEach(async () => {
 /** The test app's own auth: the user named in a header, else a local-first guest. */
 function authenticate(request: Request) {
   const userId = request.headers.get("x-test-user");
-  return userId ? { userId, expiresAt: inAnHour() } : acceptLocalFirstAuth(request);
+  return userId ? { userId, expiresAt: inAnHour() } : acceptDeviceAccounts(request);
 }
 
 /** An `expiresAt` an hour from now, in Unix seconds. */
@@ -189,7 +189,7 @@ async function userSession(appId: string, origin: string, userId: string) {
     driver: { type: "memory" },
   });
   cleanups.push(() => session.close());
-  await session.loginWithBackend();
+  await session.refresh();
   const { client, status, error } = session.getSnapshot();
   if (status !== "ready") throw error ?? new Error(status);
   return client!;
@@ -909,7 +909,7 @@ describe("createJazz", () => {
       driver: { type: "memory" },
     });
     cleanups.push(() => session.close());
-    await session.loginWithBackend();
+    await session.refresh();
     const alice = session.getSnapshot().client!;
     const owner = alice.session!.user!;
     const outcome = (write: { wait(options: { tier: "global" }): Promise<unknown> }) =>
@@ -1037,7 +1037,7 @@ describe("createJazz", () => {
       permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
     });
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
@@ -1064,7 +1064,7 @@ describe("createJazz", () => {
       // The documented setup: the session cookie's user, else a guest.
       authenticate: (request) => {
         const user = /(?:^|; )sid=([^;]+)/.exec(request.headers.get("cookie") ?? "")?.[1];
-        return user ? { userId: user, expiresAt: inAnHour() } : acceptLocalFirstAuth(request);
+        return user ? { userId: user, expiresAt: inAnHour() } : acceptDeviceAccounts(request);
       },
     });
     cleanups.push(() => jazz.close());
@@ -1084,7 +1084,7 @@ describe("createJazz", () => {
       permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
     });
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
@@ -1113,7 +1113,7 @@ describe("createJazz", () => {
       permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
     });
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
@@ -1136,7 +1136,7 @@ describe("createJazz", () => {
   // A bundler may evaluate jazz-tools/backend more than once (Next dev, per
   // route): createJazz then returns the Jazz the first copy opened for the
   // store, with the later copy's options, so its guest marker must count.
-  it("lets guests in through acceptLocalFirstAuth from another copy of the module", async () => {
+  it("lets guests in through acceptDeviceAccounts from another copy of the module", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-two-copies-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const first = createJazz({ app, permissions, store: sqlite({ path: dir }), authenticate });
@@ -1144,9 +1144,9 @@ describe("createJazz", () => {
 
     vi.resetModules();
     const copy = (await import("./index.js")) as typeof import("./index.js");
-    expect(copy.acceptLocalFirstAuth).not.toBe(acceptLocalFirstAuth);
-    expect(copy.acceptLocalFirstAuth(new Request("http://app/"))).not.toBe(
-      acceptLocalFirstAuth(new Request("http://app/")),
+    expect(copy.acceptDeviceAccounts).not.toBe(acceptDeviceAccounts);
+    expect(copy.acceptDeviceAccounts(new Request("http://app/"))).not.toBe(
+      acceptDeviceAccounts(new Request("http://app/")),
     );
     const jazz = copy.createJazz({
       app,
@@ -1154,7 +1154,7 @@ describe("createJazz", () => {
       store: copy.sqlite({ path: dir }),
       authenticate: (request) => {
         const userId = request.headers.get("x-test-user");
-        return userId ? { userId, expiresAt: inAnHour() } : copy.acceptLocalFirstAuth(request);
+        return userId ? { userId, expiresAt: inAnHour() } : copy.acceptDeviceAccounts(request);
       },
     });
     expect(jazz).toBe(first);
@@ -1174,7 +1174,7 @@ describe("createJazz", () => {
       permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
     });
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
@@ -1206,7 +1206,7 @@ describe("createJazz", () => {
     ] as const) {
       answer = wrong;
       await expect(jazz.accountFor(request())).rejects.toThrow(
-        /^createJazz: authenticate must return \{ userId: string, expiresAt: number \}, acceptLocalFirstAuth\(request\) or null/,
+        /^createJazz: authenticate must return \{ userId: string, expiresAt: number \}, acceptDeviceAccounts\(request\) or null/,
       );
       await expect(jazz.accountFor(request())).rejects.toThrow(shown);
       const response = await fetch(`${origin}/jazz/apps/${jazz.appId}/accounts/backend-user`, {
@@ -1257,7 +1257,7 @@ describe("createJazz", () => {
       driver: { type: "memory" },
     });
     cleanups.push(() => session.close());
-    await session.loginWithBackend();
+    await session.refresh();
     const firstAccount = session.getSnapshot().client!.session!.user!;
     await session
       .getSnapshot()
@@ -1286,7 +1286,7 @@ describe("createJazz", () => {
       driver: { type: "memory" },
     });
     cleanups.push(() => again.close());
-    await again.loginWithBackend();
+    await again.refresh();
     const account = again.getSnapshot().client!.session!.user!;
     expect(account).not.toBe(firstAccount);
     await expect(second.accountFor(asAlice)).resolves.toBe(account);
@@ -1354,7 +1354,7 @@ describe("createJazz", () => {
         permissions,
         serverUrl: `${origin}/jazz`,
         driver: { type: "memory" },
-        initial: "local-first",
+        initial: "device",
       });
       cleanups.push(() => session.close());
       const guest = session.getSnapshot().client!;
@@ -1371,7 +1371,7 @@ describe("createJazz", () => {
 
       // The app's sign-up created "alice"; the backend now names her.
       signInAs(origin, "alice");
-      await session.linkWithBackend();
+      await session.linkDeviceAccount();
       const alice = session.getSnapshot().client!;
       expect(alice.session!.user!).toBe(account);
       expect(alice.session!.identity).toEqual({
@@ -1958,7 +1958,7 @@ describe("createJazz", () => {
         driver: { type: "memory" },
       });
       cleanups.push(() => session.close());
-      await session.loginWithBackend();
+      await session.refresh();
       const alice = session.getSnapshot().client!;
 
       const data = new Uint8Array(24 * 1024 * 1024);
@@ -2426,7 +2426,7 @@ describe("createJazz", () => {
       permissions,
       serverUrl: `${guestOrigin}/jazz`,
       driver: { type: "memory" },
-      initial: "local-first",
+      initial: "device",
     });
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
@@ -2826,7 +2826,7 @@ describe("createJazz", () => {
         permissions,
         serverUrl: `${origin}/jazz`,
         driver: { type: "memory" },
-        initial: "local-first",
+        initial: "device",
       });
       cleanups.push(() => session.close());
       return session.getSnapshot().client!;

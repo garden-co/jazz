@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { JazzProvider as Jazz, useJazzAuth, useSession } from "jazz-tools/react";
+import { JazzProvider as Jazz, useJazzSession, useSession } from "jazz-tools/react";
 import { authClient } from "@/lib/auth-client";
 import { ErrorScreen, LoadingScreen } from "@/components/status-screen";
 
@@ -64,18 +64,17 @@ function ProfileSetup() {
 
 /** Signs out of Better Auth, then Jazz follows the backend's answer. */
 export function useGracefulSignOut() {
-  const { reauthenticate } = useJazzAuth();
+  const { refresh } = useJazzSession();
   return async () => {
     await authClient.signOut();
-    await reauthenticate();
+    await refresh();
   };
 }
 
 export function JazzProvider({ children }: { children: React.ReactNode }) {
   return (
     <Jazz
-      serverUrl="/jazz"
-      client={loadLocalFirst}
+      config={{ serverUrl: "/jazz", client: loadLocalFirst }}
       // Signed-out pages (the sign-in form) need no Jazz.
       signedOut={children}
       loading={<LoadingScreen label="Opening your Jazz account…" />}
