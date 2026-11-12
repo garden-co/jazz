@@ -25,6 +25,8 @@ mod branch_view_sync;
 mod branch_views;
 #[path = "../bundle_permissions.rs"]
 mod bundle_permissions;
+#[path = "../callback_transaction_cancellation.rs"]
+mod callback_transaction_cancellation;
 #[path = "../catalogue_rows.rs"]
 mod catalogue_rows;
 #[path = "../claims_change.rs"]
