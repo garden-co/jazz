@@ -13,6 +13,7 @@ import {
 } from "../react-core/session.js";
 import type { SessionCore } from "../session/state.js";
 import { refuseRemovedProviderProps } from "../react/provider-props.js";
+import { assertNoClassicProviderProps } from "../classic-api.js";
 import { openNativeSessionCore, type JazzClientConfig } from "./create-jazz-session.js";
 import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 
@@ -55,6 +56,7 @@ export function NativeJazzProvider<Config>(
       openCore: (config: Config) => Promise<SessionCore<CreatedJazzClient>>;
     },
 ) {
+  assertNoClassicProviderProps("JazzProvider", props);
   refuseRemovedProviderProps(props);
   const { loading, error, ...rest } = props;
   return (

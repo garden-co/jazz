@@ -12,6 +12,7 @@
   import JazzSvelteClientProvider from "./JazzSvelteClientProvider.svelte";
   import { setJazzSession } from "./session-state.js";
   import { refuseAutoAttachDevTools, type NoAutoAttachDevTools } from "../runtime/removed-provider-props.js";
+  import { assertNoClassicProviderProps } from "../classic-api.js";
 
   type Props = NoAutoAttachDevTools & {
     children: Snippet;
@@ -23,7 +24,14 @@
       | { session: JazzSession<JazzClient>; config?: never }
     );
   let { children, signedOut, loading, error, config, session: external, ...rest }: Props = $props();
+  // Re-checked whenever the props change: Classic configuration arriving
+  // later is refused too.
+  $effect.pre(() => {
+    refuseAutoAttachDevTools("JazzProvider", rest);
+    assertNoClassicProviderProps("JazzProvider", rest);
+  });
   refuseAutoAttachDevTools("JazzProvider", rest);
+  assertNoClassicProviderProps("JazzProvider", rest);
   // One provider, one session: key the provider to replace its configuration.
   const owned = untrack(() => !external);
   const session = untrack(() => {

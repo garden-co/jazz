@@ -29,6 +29,17 @@ function memoryAccountStore(): AccountStore {
     },
   };
 }
+/**
+ * This fixture syncs straight with a Jazz server, with no app backend in
+ * front: answer the session's "who is signed in" check here (no one; the
+ * device account stays) instead of asking a server that doesn't serve it.
+ */
+const noBackendFetch: typeof fetch = (input, init) => {
+  const url = input instanceof Request ? input.url : String(input);
+  return url.endsWith("/backend-user")
+    ? Promise.resolve(new Response(null, { status: 401 }))
+    : fetch(input, init);
+};
 const SERVER_URL = (() => {
   const url = new URL(window.location.href).searchParams.get("serverUrl");
   if (!url) throw new Error("Inspector overlay fixture requires its owned server URL");
@@ -90,6 +101,7 @@ function HostApp() {
     serverUrl: SERVER_URL,
     initial: "device",
     store: stores.primary,
+    fetch: noBackendFetch,
     client: loadLocalFirst,
     // The host shares its local-first runtime (its SharedWorker) with the overlay.
     localFirst: "now",

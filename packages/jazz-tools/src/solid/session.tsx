@@ -22,6 +22,7 @@ import { openBrowserSessionCore, type JazzClientConfig } from "../session/create
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { createSolidJazzClientStore } from "./solid-jazz-client-store.js";
 import { JazzClientProvider } from "./provider.js";
+import { assertNoClassicProviderProps } from "../classic-api.js";
 import {
   refuseAutoAttachDevTools,
   type NoAutoAttachDevTools,
@@ -114,6 +115,7 @@ export function ActiveClient(props: { client: JazzClient; children: JSX.Element 
  */
 export function JazzProvider(props: JazzProviderProps) {
   refuseAutoAttachDevTools("JazzProvider", props);
+  assertNoClassicProviderProps("JazzProvider", props);
   if (!props.config === !props.session)
     throw new Error(
       '<JazzProvider> takes either `config` (its session\'s configuration, e.g. config={{ serverUrl: "/jazz" }}) or a `session` from createJazzClient.',

@@ -3,6 +3,7 @@ import {
   h,
   inject,
   nextTick,
+  onBeforeUpdate,
   onMounted,
   onScopeDispose,
   onUnmounted,
@@ -24,6 +25,7 @@ import {
 } from "../session/jazz-session.js";
 import { openBrowserSessionCore, type JazzClientConfig } from "../session/create-jazz-session.js";
 import { JazzClientProvider } from "./provider.js";
+import { assertNoClassicProviderProps } from "../classic-api.js";
 import {
   refuseAutoAttachDevTools,
   type NoAutoAttachDevTools,
@@ -90,6 +92,12 @@ export const JazzProvider = defineComponent({
   },
   setup(props, { slots, attrs }) {
     refuseAutoAttachDevTools("JazzProvider", attrs);
+    assertNoClassicProviderProps("JazzProvider", attrs);
+    // Attributes can arrive later too: refuse Classic configuration then.
+    onBeforeUpdate(() => {
+      refuseAutoAttachDevTools("JazzProvider", attrs);
+      assertNoClassicProviderProps("JazzProvider", attrs);
+    });
     if (!props.config === !props.session)
       throw new Error(
         "<JazzProvider> takes either `config` (its session's configuration, e.g. :config=\"{ serverUrl: '/jazz' }\") or a `session` from createJazzClient.",

@@ -16,6 +16,7 @@ import {
   type NoAutoAttachDevTools,
 } from "../runtime/removed-provider-props.js";
 import { refuseRemovedProviderProps } from "./provider-props.js";
+import { assertNoClassicProviderProps } from "../classic-api.js";
 
 export { JazzClientProvider, type JazzClientProviderProps } from "../react-core/provider.js";
 
@@ -37,6 +38,7 @@ export type JazzProviderProps = JazzSessionSourceProps<JazzClientConfig, Created
  */
 export function JazzProvider(props: JazzProviderProps) {
   refuseAutoAttachDevTools("JazzProvider", props);
+  assertNoClassicProviderProps("JazzProvider", props);
   refuseRemovedProviderProps(props);
   const { loading, error, autoAttachDevTools: _removed, ...rest } = props;
   return (
