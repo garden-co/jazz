@@ -2006,6 +2006,14 @@ struct LiveRead {
     /// leaves it out, and a read the server never answers again (its
     /// upstream gone for good) keeps its holds until it closes.
     holds: HashMap<String, HashSet<[u8; 16]>>,
+    /// Rows its holds dropped since its resume point last moved: that
+    /// point may still count them as held (a support row released with
+    /// no change to the result settles nothing), so losing one forgets it.
+    released: HashMap<String, HashSet<[u8; 16]>>,
+    /// Whether its resume point was settled in this process. One loaded
+    /// from the store (a reload, or the read reopened) may count rows its
+    /// holds here never named, so it is never kept until it settles again.
+    settled_here: bool,
     /// Whether this connection told the read what it holds yet.
     told: bool,
 }
@@ -2211,6 +2219,11 @@ pub(crate) struct Client {
     /// No resume point was stored since they were last all forgotten, so
     /// forgetting them again (another eviction this tick) costs nothing.
     forgotten: bool,
+    /// A superset of the keys of the stored resume points, as the last
+    /// forgetting left them, while none was stored since (`None`: not
+    /// known). A forgetting that keeps exactly these leaves the store as it
+    /// is; a point whose read closed since is not kept, so it is pruned.
+    stored_points: Option<HashSet<[u8; 32]>>,
 }
 
 /// A session's commit a relay uploads as its own, for its upload: the
@@ -5870,25 +5883,97 @@ impl Inner {
         since
     }
 
-    /// Forget every remote query's resume point: this store may no longer
-    /// hold a result as it settled (a row it held was evicted, or is owed
-    /// whole), so each opens fresh until it settles again. An eviction is
-    /// rare enough that a fresh opening costs less than knowing which
-    /// results held the row.
-    fn forget_watermarks(&mut self) -> Result<(), Error> {
-        if self.client.as_ref().is_some_and(|client| client.forgotten) {
+    /// Forget the resume points that may count a row of `table` among
+    /// `rows` as held, though this store no longer holds it as it settled
+    /// (it was evicted, or is owed whole): each such read opens fresh until
+    /// it settles again.
+    ///
+    /// Only a live read this connection told what it holds, whose point
+    /// settled in this process, can be cleared: it keeps its resume point
+    /// when neither its holds nor the rows they
+    /// released since that point moved list any of the rows. Every other
+    /// one is forgotten, since nothing here says which rows it held: a
+    /// closed read's stored point, a one-shot read's, and a live read not
+    /// yet told on this connection. Reads sharing a watermark key (the same
+    /// query, binding and view: two live reads, or a live and a one-shot
+    /// one) share its stored point, kept only when every one of them keeps
+    /// it.
+    ///
+    /// `table` is a stored name, as holds, `AccessLost` and evictions name
+    /// tables: a table no holds name is one no told read holds a row of.
+    fn forget_watermarks_holding(&mut self, table: &str, rows: &[[u8; 16]]) -> Result<(), Error> {
+        let Some(client) = self.client.as_mut() else {
+            return Ok(());
+        };
+        if client.forgotten {
             return Ok(());
         }
-        if self.has_table("_jazz_watermarks")? {
-            self.exec("DELETE FROM _jazz_watermarks", [])
-                .map_err(storage)?;
+        // A stored point is kept only when every read using its key keeps
+        // it: reads sharing a key read the same result, and any one of them
+        // counting a lost row speaks for the stored row.
+        let mut keeps: HashMap<[u8; 32], bool> = HashMap::new();
+        for read in client.reads.values() {
+            let Some(key) = read.watermark else {
+                continue;
+            };
+            let keep = read.through.is_some()
+                && read.live().is_some_and(|live| {
+                    let counts = |held: &HashMap<String, HashSet<[u8; 16]>>| {
+                        held.get(table)
+                            .is_some_and(|held| rows.iter().any(|row| held.contains(row)))
+                    };
+                    live.settled_here
+                        && live.told
+                        && !counts(&live.holds)
+                        && !counts(&live.released)
+                });
+            *keeps.entry(key).or_insert(true) &= keep;
         }
-        if let Some(client) = self.client.as_mut() {
-            for read in client.reads.values_mut() {
+        let kept: HashSet<[u8; 32]> = keeps
+            .into_iter()
+            .filter_map(|(key, keep)| keep.then_some(key))
+            .collect();
+        for read in client.reads.values_mut() {
+            if !read.watermark.is_some_and(|key| kept.contains(&key)) {
                 read.through = None;
                 read.context = None;
             }
-            client.forgotten = true;
+        }
+        client.forgotten = kept.is_empty();
+        if !kept.is_empty() && client.stored_points.as_ref() == Some(&kept) {
+            return Ok(());
+        }
+        client.stored_points = Some(kept.clone());
+        if self.has_table("_jazz_watermarks")? {
+            if kept.is_empty() {
+                self.exec("DELETE FROM _jazz_watermarks", [])
+                    .map_err(storage)?;
+            } else {
+                let mut stored = Vec::new();
+                {
+                    let mut statement = self
+                        .conn
+                        .prepare("SELECT key FROM _jazz_watermarks")
+                        .map_err(storage)?;
+                    let keys = statement
+                        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+                        .map_err(storage)?;
+                    for key in keys {
+                        stored.push(key.map_err(storage)?);
+                    }
+                }
+                for key in stored {
+                    let keep =
+                        <[u8; 32]>::try_from(key.as_slice()).is_ok_and(|key| kept.contains(&key));
+                    if !keep {
+                        self.exec(
+                            "DELETE FROM _jazz_watermarks WHERE key = ?1",
+                            rusqlite::params![key],
+                        )
+                        .map_err(storage)?;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -7297,6 +7382,7 @@ impl Client {
             deferred: VecDeque::new(),
             releasing: None,
             forgotten: false,
+            stored_points: None,
         }
     }
 }
@@ -7365,9 +7451,12 @@ impl Db {
         // A new server session knows nothing: attach every remote query
         // again and resend unsettled commits (the server dedupes by node
         // and transaction).
-        // What the old session refused, the new one answers afresh.
-        for remote in client.reads.values().filter_map(ActiveRead::live) {
+        // What the old session refused, the new one answers afresh, and
+        // what it said each read holds stands only until the new one says
+        // (a transport swapped without a detach included).
+        for remote in client.reads.values_mut().filter_map(ActiveRead::live_mut) {
             remote.refused.borrow_mut().take();
+            remote.told = false;
         }
         let resubscribe: Vec<SyncMessage> = client
             .reads
@@ -7631,7 +7720,8 @@ impl Db {
             drop(inner);
             let mut inner = self.inner.borrow_mut();
             if !evict.is_empty() {
-                inner.forget_watermarks()?;
+                let rows: Vec<[u8; 16]> = evict.iter().map(|(row, _)| *row.0.as_bytes()).collect();
+                inner.forget_watermarks_holding(&table, &rows)?;
             }
             for (row, key) in evict {
                 inner.evict(&table, row, &key)?;
@@ -8134,6 +8224,8 @@ impl Inner {
                 global: global.clone(),
                 visible: None,
                 holds: HashMap::new(),
+                released: HashMap::new(),
+                settled_here: false,
                 told: false,
             }),
         );
@@ -8926,7 +9018,7 @@ impl Db {
                         // the row: a resume from them would count it as
                         // held, though this store no longer has it.
                         if held {
-                            inner.forget_watermarks()?;
+                            inner.forget_watermarks_holding(&table, &[id])?;
                         }
                         let client = inner.client.as_mut().expect("client");
                         client.whole.remove(&(table, id, key));
@@ -9014,9 +9106,15 @@ impl Db {
                                     // Resumable only in the context it was
                                     // read in, known once the `Welcome` said.
                                     if resumable && let Some(context) = client.context {
+                                        // The new point counts what the
+                                        // read holds now, not what it
+                                        // released before.
+                                        live.released.clear();
+                                        live.settled_here = true;
                                         read.through = Some(through);
                                         read.context = context;
                                         client.forgotten = false;
+                                        client.stored_points = None;
                                         live_watermark = read.watermark;
                                     }
                                     (members.clone(), false)
@@ -9310,7 +9408,9 @@ impl Db {
                                 })
                         {
                             if !std::mem::replace(&mut live.told, true) {
-                                live.holds.clear();
+                                for (table, rows) in live.holds.drain() {
+                                    live.released.entry(table).or_default().extend(rows);
+                                }
                             }
                             for (table, row) in removed {
                                 if let Some(rows) = live.holds.get_mut(&table) {
@@ -9319,6 +9419,7 @@ impl Db {
                                         live.holds.remove(&table);
                                     }
                                 }
+                                live.released.entry(table).or_default().insert(row);
                             }
                             for (table, row) in added {
                                 live.holds.entry(table).or_default().insert(row);
@@ -9358,7 +9459,9 @@ impl Db {
                 let mut inner = self.inner.borrow_mut();
                 if inner.client.as_ref().expect("client").whole.is_empty() {
                     inner.store_watermark(&watermark, through)?;
-                    inner.client.as_mut().expect("client").forgotten = false;
+                    let client = inner.client.as_mut().expect("client");
+                    client.forgotten = false;
+                    client.stored_points = None;
                 }
             }
         }
@@ -10289,11 +10392,11 @@ impl Inner {
 
     /// Ask the upstream for a row whole: a `ResendWhole` of it, which it
     /// answers with the row whole or its eviction (SPEC 19.8). Until it arrives
-    /// this store holds a stale version, so every watermark is forgotten
-    /// and none is stored (see `Client::whole`). `seq`: a version of the row
+    /// this store holds a stale version, so the watermarks that may count
+    /// it as held are forgotten and none is stored (see `Client::whole`). `seq`: a version of the row
     /// an own commit produced, which this store must hold too (0 for none).
     fn ask_whole(&mut self, (table, id, key): WholeRow, seq: u64) -> Result<(), Error> {
-        self.forget_watermarks()?;
+        self.forget_watermarks_holding(&table, &[id])?;
         let client = self.client.as_mut().expect("client");
         let owed = client
             .whole
