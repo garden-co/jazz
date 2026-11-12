@@ -1,0 +1,64 @@
+name: Bundle sizes
+
+# Measures what the published jazz-tools adds to a Next.js app, and the Wasm
+# engine's size, and uploads bundle-sizes.json to the `perf-timeline-data`
+# pre-release. The docs build reads it for the sizes the pages quote. See
+# dev/benchmarks/bundle-size/README.md.
+on:
+  # A human publishing the GitHub release, and the publish workflow finishing
+  # (its tag push uses the Actions token, which triggers no workflows).
+  release:
+    types: [published]
+  workflow_run:
+    workflows: ["Publish jazz-tools alpha"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "jazz-tools version to measure (default: the npm `latest` tag)"
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bundle-sizes
+  cancel-in-progress: false
+
+env:
+  SNAPSHOT_TAG: perf-timeline-data
+
+jobs:
+  measure:
+    if: >-
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') &&
+      (github.event_name != 'release' || github.event.release.tag_name != 'perf-timeline-data')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+      - name: Measure
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          version="${VERSION:-$(npm view jazz-tools@latest version)}"
+          node dev/benchmarks/bundle-size/measure.mjs "$version" "$RUNNER_TEMP/bundle-sizes.json"
+      - name: Ensure the data release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$SNAPSHOT_TAG" >/dev/null 2>&1 ||
+            gh release create "$SNAPSHOT_TAG" --prerelease --latest=false \
+              --target "${{ github.event.repository.default_branch }}" \
+              --title "Benchmark timeline data" \
+              --notes "Machine-updated data for the docs benchmark timeline. Not a Jazz release. Built by .github/workflows/perf-timeline-snapshot.yml."
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$SNAPSHOT_TAG" --clobber "$RUNNER_TEMP/bundle-sizes.json"

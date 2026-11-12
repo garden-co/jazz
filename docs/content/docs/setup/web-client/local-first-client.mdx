@@ -56,7 +56,7 @@ including Jazz's Wasm and worker files, with a service worker of your own. If a 
 logs a warning. That tab then has no offline use, and it doesn't retry the upgrade until the
 page reloads.
 
-The `import()` stays in your code, so the Wasm engine (about 3 MB gzipped, 8.7 MB uncompressed)
+The `import()` stays in your code, so the Wasm engine (%bundle.wasm% gzipped, %bundle.wasmRaw% uncompressed)
 downloads only when the client upgrades. After the first render, local storage keeps filling for a
 few seconds. Writes made on the thin client before the upgrade are kept offline only when a query
 the client subscribes to covers them. The local-first chunk and Wasm load lazily, so when you deploy
