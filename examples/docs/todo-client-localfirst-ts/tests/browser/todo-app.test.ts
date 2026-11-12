@@ -1,6 +1,5 @@
 import { todoCrudTest } from "../../../../testing/todo-app-scenarios.js";
-import { createAccountManager } from "jazz-tools";
-import { prepareTestAccount } from "../../../../testing/accounts.js";
+import type { AccountStore, Db } from "jazz-tools";
 /**
  * E2E browser tests for the vanilla TS todo app.
  *
@@ -12,7 +11,20 @@ import { describe, it, expect, afterEach } from "vitest";
 import { startApp } from "../../src/main.js";
 import { app } from "../../schema.js";
 import { SCOPE, SERVER_URL } from "./test-constants.js";
-import { type Db, type DbConfig } from "jazz-tools";
+import type { SessionOverrides } from "../../src/account.js";
+
+/** Device accounts kept in memory: a store per mount is a new account, a shared one reopens it. */
+function memoryAccountStore(): AccountStore {
+  let stored: string | null = null;
+  return {
+    async read() {
+      return stored;
+    },
+    async update(transform) {
+      stored = transform(stored);
+    },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -54,34 +66,33 @@ describe("Vanilla TS Todo App E2E", () => {
   const instances: Array<{ container: HTMLDivElement; destroy: () => Promise<void> }> = [];
 
   /** Mount the app into a fresh container. */
-  async function mount(config?: Partial<DbConfig> & { secret?: string }): Promise<HTMLDivElement> {
+  type MountOptions = SessionOverrides & { secret?: string };
+
+  async function mount(config?: MountOptions): Promise<HTMLDivElement> {
     const { container } = await mountWithDb(config);
     return container;
   }
 
   /** Mount the app into a fresh container and expose its public Db API. */
   async function mountWithDb(
-    config?: Partial<DbConfig> & { secret?: string },
+    config?: MountOptions,
   ): Promise<{ container: HTMLDivElement; db: Db }> {
     const el = document.createElement("div");
     document.body.appendChild(el);
 
     const { secret, ...overrides } = config ?? {};
-    const account =
-      overrides.account ??
-      (await prepareTestAccount(
-        createAccountManager,
-        overrides.appId ?? SCOPE,
-        overrides.serverUrl ?? SERVER_URL,
-        secret,
-      ));
-    const { db, destroy } = await startApp(el, {
-      appId: overrides.appId ?? SCOPE,
+    const { session, destroy } = await startApp(el, {
+      appId: SCOPE,
+      serverUrl: SERVER_URL,
       driver: { type: "persistent", dbName: crypto.randomUUID() },
+      store: memoryAccountStore(),
       ...overrides,
-      account,
+      // A fixed key restores that device account; otherwise each store gets a new one.
+      ...(secret === undefined ? {} : { initial: "signed-out" as const }),
     });
     instances.push({ container: el, destroy });
+    if (secret !== undefined) await session.restoreDeviceAccount(secret);
+    const db = session.db;
 
     // Wait for the app to render
     await waitFor(() => el.querySelector("#todo-list") !== null, 5000, "App should render");
@@ -162,10 +173,11 @@ describe("Vanilla TS Todo App E2E", () => {
 
   it("persists todos across app destroy and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
-    const account = await prepareTestAccount(createAccountManager, SCOPE, SERVER_URL);
+    // One store: the second mount reopens the first one's device account.
+    const store = memoryAccountStore();
 
     // First session: mount, add todo, destroy
-    const el1 = await mount({ account, driver: { type: "persistent", dbName } });
+    const el1 = await mount({ store, driver: { type: "persistent", dbName } });
     addTodo(el1, "Survive reload");
 
     await waitFor(
@@ -177,7 +189,7 @@ describe("Vanilla TS Todo App E2E", () => {
     await destroyInstance(el1);
 
     // Second session: remount with same dbName — IndexedDB data should load
-    const el2 = await mount({ account, driver: { type: "persistent", dbName } });
+    const el2 = await mount({ store, driver: { type: "persistent", dbName } });
 
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,

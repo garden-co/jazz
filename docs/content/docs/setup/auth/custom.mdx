@@ -88,7 +88,7 @@ fetched throws instead, so clients retry rather than signing out.
   out about 32 seconds after the refusal: a 30-second grace in case the refusal was a blip, plus a
   2-second confirmation.
 - **Refreshing short-lived tokens:** store the new token where `token(request)` reads it, such as
-  your cookie, then call `reauthenticate()` so the client asks your backend again.
+  your cookie, then call `refresh()` on the session so the client asks your backend again.
 
 ## How it works
 
@@ -142,7 +142,7 @@ fetched throws instead, so clients retry rather than signing out.
 />
 
 1. The user signs in with your auth library, which sets its own session cookie.
-2. The client asks `/jazz` who is signed in (after `reauthenticate()`, on start, on focus, or when
+2. The client asks `/jazz` who is signed in (after `refresh()`, on start, on focus, or when
    another tab signs in). Your backend runs `authenticate` and returns the user id.
 3. Jazz gives that user an account the first time, and the same account every time after. The
    identity is `{ issuer: "jazz:backend", subject: userId }`.
@@ -151,41 +151,44 @@ fetched throws instead, so clients retry rather than signing out.
 
 ## In the client
 
-When using React, `JazzProvider` uses the identity returned by your backend's `authenticate`
-function. After your own sign-in or sign-out, call `reauthenticate()` from `useJazzAuth()`:
+Your backend decides who is signed in, and the session follows it. When using React,
+`JazzProvider` uses the identity returned by your backend's `authenticate` function. After your own
+sign-in or sign-out, call `refresh()` from `useJazzSession()`:
 
 ```tsx
-import { JazzProvider, useJazzAuth } from "jazz-tools/react";
+import { JazzProvider, useJazzSession } from "jazz-tools/react";
 
-<JazzProvider signedOut={<SignIn />}>
+<JazzProvider config={{ serverUrl: "/jazz" }} signedOut={<SignIn />}>
   <App />
 </JazzProvider>;
 
 function SignOutButton() {
-  const { reauthenticate } = useJazzAuth();
-  return <button onClick={async () => (await signOut(), await reauthenticate())}>Sign out</button>;
+  const { refresh } = useJazzSession();
+  return <button onClick={async () => (await signOut(), await refresh())}>Sign out</button>;
 }
 ```
 
 Jazz also asks your backend when the app starts, when the page regains focus and when another tab
 signs in or out.
 
-Without a framework, call `reauthenticate()` on the session:
+Without a framework, call `refresh()` on the session:
 
 ```ts
 import { createJazzClient } from "jazz-tools/client";
 
-const jazz = await createJazzClient({});
-await jazz.reauthenticate(); // after your own sign-in or sign-out
+const session = await createJazzClient({ serverUrl: "/jazz" });
+await session.refresh(); // after your own sign-in or sign-out
 ```
 
-Svelte, Solid, Vue and React Native expose the same actions through their bindings.
+React Native, Expo, Vue and Solid (`useJazzSession()`) and Svelte (`getJazzSession()`) expose the
+same operations.
 
 ## Guests who sign up
 
-An app can start every visitor as a [local-first](/docs/setup/auth/local-first) guest
-(`initial: "local-first"`). Its backend lets guests sync by returning `acceptDeviceAccounts(request)`
-from `authenticate` for signed-out requests; guests are refused otherwise:
+An app can start every visitor as a guest: a [device account](/docs/setup/auth/local-first)
+(`initial: "device"`), whose key lives on the device. Its backend lets device accounts sync by
+returning `acceptDeviceAccounts(request)` from `authenticate` for signed-out requests; they are
+refused otherwise:
 
 ```ts
 authenticate: async (request) => {
@@ -194,37 +197,37 @@ authenticate: async (request) => {
 },
 ```
 
-When the guest signs up, call `linkWithBackend()` in your sign-up handler:
+When the guest signs up, call `linkDeviceAccount()` in your sign-up handler:
 
 ```ts
 await yourAuth.signUp(email, password); // sets your session cookie
-// Only a device with a guest has something to link.
-if (jazz.getSnapshot().status === "ready") await jazz.linkWithBackend();
-else await jazz.reauthenticate();
+// Only a device account has something to link.
+if (session.getSnapshot().user?.kind === "device") await session.linkDeviceAccount();
+else await session.refresh();
 ```
 
-Without a guest on this device, `linkWithBackend()` rejects with "Linking requires a logged-in
-account"; `reauthenticate()` signs the new user in instead.
+Without a device account signed in, `linkDeviceAccount()` rejects (`local_first_account_required`);
+`refresh()` signs the new user in instead.
 
-The guest proves itself with its own local-first key; your backend checks that the user
+The guest proves itself with its device account's key; your backend checks that the user
 `authenticate` names has no Jazz account yet and links the two. From then on, signing in as that
 user opens the guest's account and everything it wrote. An identity belongs to one account only,
 so linking a user who already has an account fails: Jazz doesn't merge accounts.
 
 The session links the guest on its own too, whenever it finds a signed-in user who has no Jazz
-account yet: after `reauthenticate()`, when the page regains focus after a sign-up popup, or on the
+account yet: after `refresh()`, when the page regains focus after a sign-up popup, or on the
 first check after a sign-up redirect. Checking who is signed in never creates a Jazz account, so a sign-up
-can't get in the way of linking the guest's account. A `linkWithBackend()` call that arrives while that link runs, or after it, joins
+can't get in the way of linking the guest's account. A `linkDeviceAccount()` call that arrives while that link runs, or after it, joins
 it. If your backend refuses the link (the guest's key was retired, or the user got an account of
 their own meanwhile), the session signs the user in to their own account instead and never retries
 that link; the guest stays on this device.
 
 "No Jazz account yet" includes an existing user of your app who signs in to Jazz for the first time.
 On a shared device, where the guest may be someone else's, that user would get the guest's data.
-Pass `linkGuestOnSignUp: false` to `createJazzClient` (or `<JazzProvider>`) to stop the session
-linking on its own. It then leaves such a guest as it is, and your app decides after its own sign-in:
-`linkWithBackend()` to give the user the guest's data, or `loginWithBackend()` for an account of
-their own (the guest stays on this device).
+Pass `linkDeviceAccountOnSignUp: false` to `createJazzClient` (or `<JazzProvider config>`) to stop
+the session linking on its own. It then leaves such a guest as it is, and your app decides after its
+own sign-in: `linkDeviceAccount()` to give the user the guest's data, or `refresh()` for an account
+of their own (the guest stays on this device).
 
 To link from your own backend code instead (a second sign-in method, an anonymous id your app
 issued), call `jazz.linkIdentity({ from, to })`.
