@@ -1,6 +1,5 @@
 //! Jazz hosted by a public RivetKit actor and its actor-owned SQLite database.
 pub mod actor;
-mod scratch;
 mod sql;
 mod storage;
 use std::sync::{
@@ -24,24 +23,19 @@ pub fn worker_store(
 ) -> jazz_server::runtime::WorkerStore {
     let opened = Arc::new(AtomicBool::new(false));
     let on_failure: Arc<dyn Fn(String) + Send + Sync> = Arc::new(on_failure);
-    jazz_server::runtime::WorkerStore::new(
-        move || {
-            if opened.swap(true, Ordering::SeqCst) {
-                return Err("Restart the actor before reopening Jazz".into());
-            }
-            let _runtime = runtime.enter();
-            futures::executor::block_on(storage::open_store_with_failure(
-                db.clone(),
-                on_failure.clone(),
-            ))
-            .map_err(|e| e.to_string())
-        },
-        || futures::executor::block_on(scratch::open()).map_err(|e| e.to_string()),
-    )
+    jazz_server::runtime::WorkerStore::new(move || {
+        if opened.swap(true, Ordering::SeqCst) {
+            return Err("Restart the actor before reopening Jazz".into());
+        }
+        let _runtime = runtime.enter();
+        futures::executor::block_on(storage::open_store_with_failure(
+            db.clone(),
+            on_failure.clone(),
+        ))
+        .map_err(|e| e.to_string())
+    })
 }
 
-#[cfg(feature = "testing")]
-pub use scratch::open as test_scratch;
 #[cfg(feature = "testing")]
 pub use storage::test_connection;
 

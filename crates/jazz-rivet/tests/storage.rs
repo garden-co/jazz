@@ -399,3 +399,140 @@ async fn disconnected_request_finishes_before_storage_closes() -> anyhow::Result
     );
     Ok(())
 }
+
+/// Alice deploys into Bob's actor database. No runtime is visible while the
+/// first deployment's commit is pending. A refused commit leaves no schema;
+/// retry commits it and only then makes the runtime available.
+/// alice -> initialize + deploy -> paused commit -> reject -> retry -> serve
+#[tokio::test(flavor = "multi_thread")]
+async fn first_deployment_is_atomic_and_published_only_after_commit() -> anyhow::Result<()> {
+    use std::sync::atomic::Ordering;
+    let pages = Arc::new(DatabaseFixture::default());
+    let actor = uuid::Uuid::new_v4().to_string();
+    let server = Arc::new(start(pages.clone(), &actor).await?);
+    let database = pages.database(&actor).await?;
+    for refuse in [true, false] {
+        let pause = pages.pause_next_commit();
+        if refuse {
+            pages.fail_next.store(1, Ordering::SeqCst);
+        }
+        let request = tokio::spawn({
+            let server = server.clone();
+            async move { deploy(&server).await }
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            pages.commit_entered.notified(),
+        )
+        .await?;
+        assert!(
+            server.state().runtime().is_none(),
+            "uncommitted runtime must not serve"
+        );
+        drop(pause);
+        let result = request.await?;
+        if refuse {
+            assert!(result.is_err(), "refused commit must fail deployment");
+            assert!(server.state().runtime().is_none());
+            let rows = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                database.query("SELECT name FROM sqlite_master WHERE name IN ('notes', 'notes__h', '_jazz_versions')", None),
+            ).await??;
+            assert!(
+                rows.rows.is_empty(),
+                "initialization must roll back with deployment"
+            );
+        } else {
+            result?;
+            assert!(server.state().runtime().is_some());
+        }
+    }
+    assert_eq!(
+        server.shutdown().await,
+        jazz_server::ShutdownPhase::StorageClosed
+    );
+    let reopened = start(pages, &actor).await?;
+    deploy(&reopened).await?;
+    assert!(reopened.state().runtime().is_some());
+    assert_eq!(
+        reopened.shutdown().await,
+        jazz_server::ShutdownPhase::StorageClosed
+    );
+    Ok(())
+}
+
+/// Alice's schema conflicts with Bob's existing actor table. She corrects the
+/// collision and retries in the same actor generation: the production factory
+/// permits opening only once, so retry must retain the rolled-back connection.
+#[tokio::test(flavor = "multi_thread")]
+async fn rejected_first_deployment_reuses_the_actor_connection() -> anyhow::Result<()> {
+    let pages = Arc::new(DatabaseFixture::default());
+    let actor = uuid::Uuid::new_v4().to_string();
+    let database = pages.database(&actor).await?;
+    database
+        .query("CREATE TABLE notes (value TEXT)", None)
+        .await?;
+    let app = jazz_rivet::app_id_for_actor(&actor);
+    let storage = jazz_rivet::worker_store(
+        database.clone(),
+        tokio::runtime::Handle::current(),
+        |error| panic!("semantic rejection must not fail actor storage: {error}"),
+    );
+    let runtime = tokio::runtime::Handle::current();
+    let built = tokio::task::spawn_blocking(move || {
+        runtime.block_on(
+            jazz_server::ServerBuilder::new(app)
+                .with_auth_config(jazz_server::AuthConfig {
+                    admin_secret: Some(SECRET.into()),
+                    backend_secret: Some(SECRET.into()),
+                    ..Default::default()
+                })
+                .with_storage(jazz_server::StorageBackend::Worker(storage))
+                .build(),
+        )
+    })
+    .await?
+    .map_err(anyhow::Error::msg)?;
+    let server = jazz_server::EmbeddedServer::new(built);
+    assert!(deploy(&server).await.is_err());
+    assert!(server.state().runtime().is_none());
+    database.query("DROP TABLE notes", None).await?;
+    deploy(&server).await?;
+    assert!(server.state().runtime().is_some());
+    assert_eq!(
+        server.shutdown().await,
+        jazz_server::ShutdownPhase::StorageClosed
+    );
+    Ok(())
+}
+
+/// Alice loses the acknowledgement of her first deployment's durable commit.
+/// Bob cannot use an unpublished runtime; Alice's idempotent retry restores
+/// service from the complete committed catalogue.
+#[tokio::test(flavor = "multi_thread")]
+async fn first_deployment_recovers_a_lost_commit_acknowledgement() -> anyhow::Result<()> {
+    let pages = Arc::new(DatabaseFixture::default());
+    let actor = uuid::Uuid::new_v4().to_string();
+    let server = start(pages.clone(), &actor).await?;
+    pages
+        .fail_next
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+    assert!(deploy(&server).await.is_err());
+    assert!(server.state().runtime().is_none());
+    let database = pages.database(&actor).await?;
+    assert_eq!(
+        database
+            .query("SELECT name FROM sqlite_master WHERE name = 'notes'", None)
+            .await?
+            .rows
+            .len(),
+        1
+    );
+    deploy(&server).await?;
+    assert!(server.state().runtime().is_some());
+    assert_eq!(
+        server.shutdown().await,
+        jazz_server::ShutdownPhase::StorageClosed
+    );
+    Ok(())
+}
