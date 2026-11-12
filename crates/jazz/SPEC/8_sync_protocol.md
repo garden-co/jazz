@@ -617,11 +617,24 @@ that masks that row (§8.4). An eviction of a version that still exists keeps
 the session watching the row's id, since the replica may hold the row on
 another branch, and later writes that leave that version unreadable send
 nothing more, whichever of the session's reads watches the id; a version
-that becomes readable ships again while a live read keeps it watched. A row
-the reader's own accepted commit wrote and cannot read (a write-only insert)
-is reconciled at settlement: the commit's fate reports acceptance without
-creating a persistent watch. Local copies are not a redaction boundary; eviction keeps the
-replica coherent, not secret.
+that becomes readable ships again while a live read keeps it watched. The
+rows a reader's own commit wrote reconcile at its settlement, without
+creating a persistent watch: each ships as it is now if the reader may read
+it, else it is evicted. That includes a row the reader's own write moved out
+of its read scope, live read or not. A write that took no access away is
+the exception: where the reader could read the row neither just before nor
+just after each of its commits of one server tick (it may not have existed),
+the row is still at the version those commits made, and none of the
+session's live reads reads its table, the global authority's fate confirms
+each of those versions as written (a write-only insert, and a delete or
+restore after it). The replica keeps them as a cold copy until a covering
+read reconciles it. A version another writer superseded it with, a row a
+live read covers, or a commit a relay accepted for its session (other than
+the writer's own store, which serves its sessions what it holds) reconciles
+as any other written row. A refused commit takes no access away: its rows
+ship again only where the reader may read them, and a cold copy of a row the
+reader lost access to otherwise stays until a covering read. Local copies are not a redaction
+boundary; eviction keeps the replica coherent, not secret.
 
 `CheckAllowed { id, action, acting }` asks whether the session would be
 allowed an action now, without writing; `CheckAllowedResult { id, result }`

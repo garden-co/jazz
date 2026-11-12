@@ -331,3 +331,341 @@ fn write_only_accepted_insert_delete_restore_keeps_the_founder_image() {
         other => panic!("missing actual founder identity: {other:?}"),
     }
 }
+
+fn local_rows(db: &Db) -> Vec<(RowUuid, String)> {
+    let q = db.prepare_query(&Query::from("notes")).unwrap();
+    let opts = ReadOpts::for_read_tier(jazz::db::ReadTier::LocalOnly);
+    let mut rows = block_on(db.all(&q, opts))
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let Value::String(text) = row.cell_at(0).unwrap() else {
+                panic!("text");
+            };
+            (row.row_uuid(), text)
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.0);
+    rows
+}
+fn remote_read(db: &Db, dbs: &[&Db]) -> usize {
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let answer = drive(
+        dbs,
+        db.all_serialized_query(
+            &query,
+            ReadOpts::for_read_tier(jazz::db::ReadTier::Remote),
+            None,
+            None,
+            None,
+        ),
+    )
+    .unwrap();
+    let jazz::db::SerializedReadResult::Rows(answer) = answer else {
+        panic!("flat notes read");
+    };
+    answer.len()
+}
+fn insert(db: &Db, n: u8, text: &str) -> u64 {
+    block_on(db.insert(
+        "notes",
+        cells(text),
+        jazz::db::InsertOptions {
+            row_id: Some(row(n)),
+            ..Default::default()
+        },
+    ))
+    .unwrap()
+    .mergeable_tx_id()
+}
+fn open_as(policies: jazz::tools::TablePolicies, node: u8, who: AuthorSubject) -> Db {
+    let schema = common::compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("text", ColumnType::Text)
+                    .policies(policies),
+            )
+            .build(),
+    );
+    block_on(Db::open(DbConfig::new(
+        schema,
+        jazz::db::DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author: who,
+        },
+    )))
+    .unwrap()
+}
+fn write_only() -> jazz::tools::TablePolicies {
+    use jazz::tools::{PolicyExpr, TablePolicies};
+    TablePolicies::new()
+        .with_select(PolicyExpr::False)
+        .with_insert(PolicyExpr::True)
+        .with_delete(PolicyExpr::True)
+        .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+}
+
+/// A write-only insert stays with its writer once accepted, with no read
+/// subscription, as a cold copy: the next covering remote read, whose answer
+/// the writer may not see it in, reconciles it away (INV-SYNC-14).
+#[test]
+fn an_accepted_write_only_insert_stays_cold_until_a_covering_read() {
+    let (alice, bob) = policy_pair(write_only());
+    connect(&alice, &bob, "alice");
+    let insert = insert(&alice, 1, "founder");
+    drive(
+        &[&alice, &bob],
+        alice.wait_for_transaction(insert, DurabilityTier::Global),
+    )
+    .unwrap();
+    pump(&alice, &bob);
+    assert_eq!(local_rows(&alice), vec![(row(1), "founder".into())]);
+    assert_eq!(remote_read(&alice, &[&alice, &bob]), 0);
+    pump(&alice, &bob);
+    assert_eq!(local_rows(&alice), vec![]);
+    assert_eq!(local_rows(&bob), vec![(row(1), "founder".into())]);
+}
+
+/// A live read of the table covers Alice's write-only insert: her result
+/// must keep matching the authority's for her (INV-SYNC-14), which never
+/// lists the row, so the row is evicted rather than kept as written.
+#[test]
+fn a_write_only_insert_a_live_read_covers_is_evicted() {
+    let (alice, bob) = policy_pair(write_only());
+    connect(&alice, &bob, "alice");
+    let query = alice.prepare_query(&Query::from("notes")).unwrap();
+    let mut live = block_on(alice.subscribe(&query, ReadOpts::default())).unwrap();
+    pump(&alice, &bob);
+    let insert = insert(&alice, 1, "founder");
+    drive(
+        &[&alice, &bob],
+        alice.wait_for_transaction(insert, DurabilityTier::Global),
+    )
+    .unwrap();
+    pump(&alice, &bob);
+    assert_eq!(local_rows(&alice), vec![]);
+    let mut result = Vec::new();
+    while let Some(event) = live.try_next_event() {
+        if let jazz::db::SubscriptionEvent::Delta {
+            reset,
+            added,
+            removed,
+            ..
+        } = event
+        {
+            if reset {
+                result.clear();
+            }
+            result.retain(|row| !removed.iter().any(|gone| gone.row_uuid == *row));
+            result.extend(added.iter().map(|row| row.row_uuid()));
+        }
+    }
+    assert_eq!(result, Vec::<RowUuid>::new());
+    assert_eq!(local_rows(&bob), vec![(row(1), "founder".into())]);
+}
+
+/// Alice's own UPDATE (allowed by its check) moves her row out of her read
+/// scope. She holds no live read of it, yet her write took her access away:
+/// the row is evicted from her replica, not confirmed as written.
+#[test]
+fn an_own_update_out_of_read_scope_evicts_the_row_without_a_subscription() {
+    use jazz::tools::{CmpOp, PolicyExpr, PolicyValue, TablePolicies};
+    let (alice, bob) = policy_pair(
+        TablePolicies::new()
+            .with_select(PolicyExpr::Cmp {
+                column: "text".into(),
+                op: CmpOp::Ne,
+                value: PolicyValue::Literal(jazz::tools::Value::Text("hidden".into())),
+            })
+            .with_insert(PolicyExpr::True)
+            .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+    );
+    connect(&alice, &bob, "alice");
+    let insert = insert(&alice, 1, "visible");
+    drive(
+        &[&alice, &bob],
+        alice.wait_for_transaction(insert, DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(local_rows(&alice), vec![(row(1), "visible".into())]);
+    let hide = block_on(alice.update("notes", row(1), cells("hidden"), Default::default()))
+        .unwrap()
+        .mergeable_tx_id();
+    drive(
+        &[&alice, &bob],
+        alice.wait_for_transaction(hide, DurabilityTier::Global),
+    )
+    .unwrap();
+    pump(&alice, &bob);
+    assert_eq!(local_rows(&alice), vec![]);
+    assert_eq!(local_rows(&bob), vec![(row(1), "hidden".into())]);
+}
+
+/// Alice's write-only insert and Carol's upsert of the same row reach the
+/// authority in one tick: Alice's is accepted, then superseded by Carol's,
+/// which Alice may not read. Alice's version is no longer the row's, so she
+/// is not handed it as current: the row is evicted from her replica.
+#[test]
+fn a_write_only_insert_superseded_by_another_writer_is_evicted() {
+    let alice = open_as(write_only(), 31, author("alice"));
+    alice.become_replica();
+    let carol = open_as(write_only(), 32, AuthorSubject::SYSTEM);
+    carol.become_replica();
+    let bob = open_as(write_only(), 33, AuthorSubject::SYSTEM);
+    bob.set_authority();
+    connect(&alice, &bob, "alice");
+    let (up, down) = duplex();
+    block_on(carol.connect_upstream(up));
+    bob.accept_subscriber(down, AuthorSubject::SYSTEM).unwrap();
+    let all = [&alice, &carol, &bob];
+    for _ in 0..3 {
+        for db in all {
+            block_on(db.tick()).unwrap();
+        }
+    }
+    let mine = insert(&alice, 1, "alice");
+    let theirs = block_on(carol.upsert("notes", row(1), cells("carol"), Default::default()))
+        .unwrap()
+        .mergeable_tx_id();
+    // Both commits reach Bob before he ticks: he accepts Alice's, then
+    // Carol's over it.
+    for db in all {
+        block_on(db.tick()).unwrap();
+    }
+    drive(
+        &all,
+        alice.wait_for_transaction(mine, DurabilityTier::Global),
+    )
+    .unwrap();
+    drive(
+        &all,
+        carol.wait_for_transaction(theirs, DurabilityTier::Global),
+    )
+    .unwrap();
+    for _ in 0..4 {
+        for db in all {
+            block_on(db.tick()).unwrap();
+        }
+    }
+    assert_eq!(local_rows(&bob), vec![(row(1), "carol".into())]);
+    assert_eq!(local_rows(&alice), vec![]);
+}
+
+fn relayed(relay: AuthorSubject, server_link: bool) -> (Db, Db, Db) {
+    let server = open_as(write_only(), 41, AuthorSubject::SYSTEM);
+    server.set_authority();
+    let edge = open_as(write_only(), 42, relay);
+    if server_link {
+        let (up, down) = duplex();
+        block_on(edge.connect_upstream(up));
+        server.accept_subscriber(down, relay).unwrap();
+        edge.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    } else {
+        edge.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    }
+    let client = open_as(write_only(), 43, author("alice"));
+    let (up, down) = duplex();
+    block_on(client.connect_upstream(up));
+    edge.accept_subscriber(down, author("alice")).unwrap();
+    client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    let insert = insert(&client, 1, "founder");
+    let tier = if server_link {
+        DurabilityTier::Global
+    } else {
+        DurabilityTier::Local
+    };
+    drive(
+        &[&client, &edge, &server],
+        client.wait_for_transaction(insert, tier),
+    )
+    .unwrap();
+    for _ in 0..4 {
+        for db in [&client, &edge, &server, &edge] {
+            block_on(db.tick()).unwrap();
+        }
+    }
+    block_on(client.tick()).unwrap();
+    (client, edge, server)
+}
+
+/// Through a relay serving another identity, the relay only passes on the
+/// authority's verdict: it cannot confirm the write-only row as written, so
+/// the session's row is reconciled as any written row it may not read, and
+/// evicted (as before write-only acknowledgements).
+#[test]
+fn a_write_only_insert_through_another_identitys_relay_is_evicted() {
+    let (client, _edge, server) = relayed(AuthorSubject::SYSTEM, true);
+    assert_eq!(local_rows(&server), vec![(row(1), "founder".into())]);
+    assert_eq!(local_rows(&client), vec![]);
+}
+
+/// A relay with no server is the last word on its sessions' commits, but
+/// not the global authority: its acceptance confirms no write-only row as
+/// written, and it reconciles the row as any written row its session may
+/// not read, as before write-only acknowledgements. The writer's replica
+/// keeps the write it holds as Local, as it always did on this path.
+#[test]
+fn a_write_only_insert_a_relay_with_no_server_accepts_stays_local() {
+    let (client, edge, _server) = relayed(AuthorSubject::SYSTEM, false);
+    assert_eq!(local_rows(&edge), vec![(row(1), "founder".into())]);
+    assert_eq!(local_rows(&client), vec![(row(1), "founder".into())]);
+}
+
+/// The writer's own store relaying for it (a worker for its tab) is the
+/// authority's direct session: it keeps the write-only row as written, and
+/// serves its own identity's sessions what it holds.
+#[test]
+fn a_write_only_insert_through_the_writers_own_relay_stays() {
+    let (client, edge, _server) = relayed(author("alice"), true);
+    assert_eq!(local_rows(&edge), vec![(row(1), "founder".into())]);
+    assert_eq!(local_rows(&client), vec![(row(1), "founder".into())]);
+}
+
+/// Alice caches a row she may read; Bob's change then takes her access
+/// away while no live read covers it. Her later edit is refused: the
+/// refusal sends no eviction (a refusal takes no access away), so her cold
+/// copy stays until her next covering remote read reconciles it.
+#[test]
+fn a_refused_edit_leaves_a_cold_copy_to_the_next_covering_read() {
+    use jazz::tools::{CmpOp, PolicyExpr, PolicyValue, TablePolicies};
+    let (alice, bob) = policy_pair(
+        TablePolicies::new()
+            .with_select(PolicyExpr::Cmp {
+                column: "text".into(),
+                op: CmpOp::Ne,
+                value: PolicyValue::Literal(jazz::tools::Value::Text("hidden".into())),
+            })
+            .with_insert(PolicyExpr::True)
+            .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+    );
+    block_on(bob.insert(
+        "notes",
+        cells("visible"),
+        jazz::db::InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    connect(&alice, &bob, "alice");
+    assert_eq!(remote_read(&alice, &[&alice, &bob]), 1);
+    pump(&alice, &bob);
+    block_on(bob.update("notes", row(1), cells("hidden"), Default::default())).unwrap();
+    pump(&alice, &bob);
+    let edit = block_on(alice.update("notes", row(1), cells("edit"), Default::default()))
+        .unwrap()
+        .mergeable_tx_id();
+    assert!(
+        drive(
+            &[&alice, &bob],
+            alice.wait_for_transaction(edit, DurabilityTier::Global)
+        )
+        .is_err()
+    );
+    pump(&alice, &bob);
+    assert_eq!(local_rows(&alice), vec![(row(1), "visible".into())]);
+    assert_eq!(remote_read(&alice, &[&alice, &bob]), 0);
+    pump(&alice, &bob);
+    assert_eq!(local_rows(&alice), vec![]);
+}

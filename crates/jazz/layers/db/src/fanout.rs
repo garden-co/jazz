@@ -125,6 +125,11 @@ impl Group {
         &self.root
     }
 
+    /// The stored tables the query reads, its policies' included.
+    pub(super) fn tables(&self) -> &BTreeSet<String> {
+        &self.tables
+    }
+
     /// The query this group answers.
     pub(super) fn query(&self) -> &Query {
         &self.prepared.query
