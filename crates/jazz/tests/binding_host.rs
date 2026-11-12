@@ -719,6 +719,13 @@ fn a_server_disconnects_a_client_whose_frame_does_not_decode() {
     worker.insert("notes", &title("after"), &none()).unwrap();
     block_on(worker.tick()).unwrap();
     assert!(down.take_outbound().is_empty());
+    // The closed link refuses later host batches instead of queueing them
+    // for a transport nothing reads.
+    let valid = jazz::db::encode_frames(jazz::db::SyncMessage::Unsubscribe { id: 1 }).unwrap();
+    assert_eq!(
+        down.receive_checked(valid).unwrap_err().code,
+        ErrorCode::Protocol
+    );
     drop(tab);
 }
 

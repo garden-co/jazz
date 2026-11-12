@@ -2021,6 +2021,9 @@ impl StreamingMutation {
 pub struct WireQueues {
     inbound: Rc<RefCell<VecDeque<Result<SyncMessage, TransportError>>>>,
     inbound_joiner: Rc<RefCell<FrameJoiner>>,
+    /// A peer frame failed to decode: the link is closing, so nothing more
+    /// is queued for a transport that will never read it.
+    inbound_failed: Rc<Cell<bool>>,
     outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound_ready: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
@@ -2031,14 +2034,12 @@ struct QueueTransport {
 }
 
 impl Transport for QueueTransport {
+    /// Queues every frame of `message`, then tells the host once.
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        for frame in crate::db::encode_frames(message)
-            .map_err(|error| TransportError::Failed(error.to_string()))?
-        {
-            self.queues.outbound.borrow_mut().push_back(frame);
-            if let Some(ready) = self.queues.outbound_ready.borrow().as_ref() {
-                ready();
-            }
+        let frames = crate::db::encode_frames(message)?;
+        self.queues.outbound.borrow_mut().extend(frames);
+        if let Some(ready) = self.queues.outbound_ready.borrow().as_ref() {
+            ready();
         }
         Ok(())
     }
@@ -2083,8 +2084,13 @@ impl Link {
         &self.binding
     }
 
-    /// Frames received from the peer; applied on the next tick.
+    /// Frames received from the peer; applied on the next tick. A frame that
+    /// does not decode closes the link: it and everything after it, in this
+    /// batch or a later one, is dropped.
     pub fn receive(&self, frames: impl IntoIterator<Item = Vec<u8>>) {
+        if self.queues.inbound_failed.get() {
+            return;
+        }
         let mut joiner = self.queues.inbound_joiner.borrow_mut();
         let mut inbound = self.queues.inbound.borrow_mut();
         for frame in frames {
@@ -2093,6 +2099,7 @@ impl Link {
                 Ok(None) => {}
                 Err(error) => {
                     inbound.push_back(Err(error));
+                    self.queues.inbound_failed.set(true);
                     break;
                 }
             }
@@ -2105,10 +2112,17 @@ impl Link {
     /// Join and canonically decode the whole host batch before admitting any
     /// prefix. Stage partial bytes too, so a rejected batch cannot change the
     /// link's previous reassembly state. Completed messages are decoded once.
+    /// A link already closed by a malformed frame refuses every batch.
     pub fn receive_checked(
         &self,
         frames: impl IntoIterator<Item = impl AsRef<[u8]>>,
     ) -> Result<(), Error> {
+        if self.queues.inbound_failed.get() {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "SQLite sync link already closed by a malformed frame",
+            ));
+        }
         let mut staged = self.queues.inbound_joiner.borrow().clone();
         let mut decoded = Vec::new();
         for frame in frames {

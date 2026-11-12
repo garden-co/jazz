@@ -5,7 +5,8 @@ shared decoder checks the existing logical-message size budget, consumes all
 input and rejects alternate varint spellings using `decode_postcard_exact`.
 NAPI and WASM stage fragment reassembly and validate each completed message
 in a batch before queueing any of it. A rejected batch preserves the previous
-reassembly state; accepted messages are decoded once. The
+reassembly state; accepted messages are decoded once. A binding link closed
+by a malformed frame queues nothing more and refuses later checked batches. The
 server closes the malformed session; independent sessions remain usable.
 
 The existing `Unsubscribe { id: 128 }` field bytes remain `01 80 01`. An appended

@@ -1841,8 +1841,9 @@ impl WasmDb {
         )))
     }
 
-    /// Connect after the carrier accepted the server Hello. Negotiated
-    /// features must be compiled in; the rest of the session context
+    /// Connect after the carrier accepted the server Hello. The negotiated
+    /// protocol version must be this binding's and its features compiled
+    /// in; the rest of the session context
     /// (authority endpoints, epochs) has no counterpart on SQLite's sync, so
     /// this is otherwise [`Self::connect_upstream`].
     #[wasm_bindgen(js_name = connectUpstreamWithSession)]
