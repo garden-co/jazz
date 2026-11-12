@@ -349,6 +349,40 @@ fn unbound_transactions_keep_per_operation_identity_selection() {
     commit(&db, tx, false).unwrap();
 }
 
+/// Binding is not what makes a commit recheck its writes: an unbound batch
+/// whose per-operation session loses its claim before commit is refused too,
+/// exactly as the authority would refuse the unit on upload.
+#[test]
+fn unbound_transactions_still_recheck_session_writes_at_commit() {
+    for serializable in [false, true] {
+        let db = open(1, AuthorSubject::SYSTEM);
+        let tx = OpenTransactionId::new();
+        if serializable {
+            block_on(db.begin_serializable(tx)).unwrap();
+        } else {
+            block_on(db.begin_mergeable(tx)).unwrap();
+        }
+        block_on(db.tx_ref(tx).insert(
+            "notes",
+            cells("alice", "revoked"),
+            InsertOptions {
+                identity: WriteIdentity::Session(author("alice")),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        db.set_identity_claims(author("alice"), BTreeMap::new());
+        let error = commit(&db, tx, serializable).unwrap_err();
+        assert_eq!(error.code, ErrorCode::WriteRejected);
+        let query = db.prepare_query(&Query::from("notes")).unwrap();
+        assert!(
+            block_on(db.all(&query, ReadOpts::default()))
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
 struct RecordTransport {
     inner: Box<dyn Transport>,
     sent: Rc<RefCell<Vec<SyncMessage>>>,
