@@ -2046,6 +2046,9 @@ pub(crate) struct Client {
     node: [u8; 16],
     connection: u64,
     fates: HashMap<u64, Result<(), Error>>,
+    /// Fates the upstream gave this replica's commits, counted: each is
+    /// progress a read queued behind them makes (see [`Db::settled_upstream`]).
+    settled_upstream: u64,
     /// Accepted fates from a replica with no server: they order the
     /// commit, but it never becomes `Global`.
     local_fates: HashSet<u64>,
@@ -7197,6 +7200,7 @@ impl Client {
             pending: PendingQueue::default(),
             unsent: Vec::new(),
             fates: HashMap::new(),
+            settled_upstream: 0,
             local_fates: HashSet::new(),
             refused: Vec::new(),
             stored: HashSet::new(),
@@ -8258,6 +8262,8 @@ impl Db {
                          deploy it to the server",
                     )));
                 }
+                // The check may look at this store (its progress).
+                drop(inner);
                 if expired() {
                     return Poll::Ready(Err(Error::new(
                         ErrorCode::NotObserved,
@@ -9166,6 +9172,7 @@ impl Db {
                             client.local_fates.insert(tx);
                         }
                         client.fates.insert(tx, result);
+                        client.settled_upstream += 1;
                         let node = client.node;
                         if let Some(hashes) = client.pushed.remove(&tx) {
                             crate::large::mark_pushed(&inner.conn, &hashes)?;
@@ -10542,6 +10549,25 @@ impl Db {
         self.inner.borrow().replayed_commits
     }
 
+    /// Echoes the serving passes examined to match the images they ship
+    /// against the writers' own commits (for tests and metrics): one per
+    /// image a session's commits could have produced, however many commits
+    /// one tick applied for it.
+    pub fn echo_probes(&self) -> u64 {
+        self.inner.borrow().echo_probes
+    }
+
+    /// Fates the upstream has given this replica's own commits since it
+    /// opened: a read the server answers after them (every read is queued
+    /// behind the commits staged before it) moves with this count.
+    pub fn settled_upstream(&self) -> u64 {
+        self.inner
+            .borrow()
+            .client
+            .as_ref()
+            .map_or(0, |client| client.settled_upstream)
+    }
+
     /// Sessions currently served (for tests and metrics).
     pub fn open_subscribers(&self) -> usize {
         self.inner
@@ -11646,18 +11672,34 @@ impl Db {
                 })
                 .collect();
             echoes.retain(|echo| fated.contains(&echo.id));
+            let mut echo_probes = 0;
             if !echoes.is_empty() {
+                // By version, each in the order it was echoed: a tick that
+                // applied N commits of one writer matches its N images in
+                // one pass, not N scans of N echoes.
+                let mut by_version: HashMap<(String, [u8; 16], Vec<u8>, Pos), VecDeque<Echo>> =
+                    HashMap::with_capacity(echoes.len());
+                for echo in echoes {
+                    by_version
+                        .entry((
+                            echo.table.clone(),
+                            *echo.row.0.as_bytes(),
+                            echo.key.clone(),
+                            echo.at,
+                        ))
+                        .or_default()
+                        .push_back(echo);
+                }
                 images.retain(|image| {
-                    let Some(at) = echoes.iter().position(|e| {
-                        e.table == image.table
-                            && *e.row.0.as_bytes() == image.id
-                            && e.key == image.key
-                            && e.at == image.at
-                            && image.at.accepted()
-                    }) else {
+                    if !image.at.accepted() {
+                        return true;
+                    }
+                    echo_probes += 1;
+                    let version = (image.table.clone(), image.id, image.key.clone(), image.at);
+                    let Some(echo) = by_version.get_mut(&version).and_then(VecDeque::pop_front)
+                    else {
                         return true;
                     };
-                    let echo = echoes.swap_remove(at);
                     as_written
                         .entry(echo.id)
                         .or_default()
@@ -11706,6 +11748,7 @@ impl Db {
                 session.connection_settled = Some(through);
                 out.push(SyncMessage::ConnectionSettled { through });
             }
+            inner.echo_probes += echo_probes;
             // A relay's versions of the session's own commits it still
             // uploads are the session's pending writes, which it holds as
             // it wrote them: shipped at the relay's seqs, they would stand

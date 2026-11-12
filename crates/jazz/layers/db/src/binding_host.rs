@@ -453,8 +453,56 @@ pub fn decode_schema(schema: &[u8]) -> HostResult<JazzSchema> {
 }
 
 /// How long a Remote one-shot read waits for the server to cover it
-/// before failing with `NotObserved`.
+/// without progress before failing with `NotObserved` (see
+/// [`CoverageBudget`]).
 pub const REMOTE_READ_COVERAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// A Remote read's wait for the server's coverage, spent once `budget`
+/// passes with no progress toward its answer: from its first wait, and
+/// again from each fate the upstream gives one of this replica's own
+/// commits.
+///
+/// The server answers a read after the commits staged before it (it
+/// applies a session's messages in order, so the read sees the writer's
+/// own writes): a read right after a burst of N writes waits for all N to
+/// be applied and settled, which takes time growing with N however healthy
+/// the link. Each settled commit shows the server working through what is
+/// ahead of the read, so the budget measures a stalled server, not a busy
+/// one. With nothing settling (a silent server, a lost link, nothing
+/// ahead of the read) it is a plain wall-clock budget.
+pub struct CoverageBudget<N> {
+    db: Rc<Db>,
+    budget: std::time::Duration,
+    now: N,
+    /// When the wait last made progress, and the settled count then.
+    since: std::cell::Cell<Option<(web_time::Instant, u64)>>,
+}
+
+impl<N: Fn() -> web_time::Instant> CoverageBudget<N> {
+    /// A budget for a read on `db`, with `now` as its clock.
+    pub fn new(db: Rc<Db>, budget: std::time::Duration, now: N) -> Self {
+        Self {
+            db,
+            budget,
+            now,
+            since: std::cell::Cell::new(None),
+        }
+    }
+
+    /// Whether the budget is spent; the first call starts it.
+    pub fn spent(&self) -> bool {
+        let now = (self.now)();
+        let settled = self.db.settled_upstream();
+        let since = match self.since.get() {
+            Some((since, seen)) if seen == settled => since,
+            _ => {
+                self.since.set(Some((now, settled)));
+                now
+            }
+        };
+        now.saturating_duration_since(since) >= self.budget
+    }
+}
 
 /// How a host opens: the caller-controlled author, the backend's SYSTEM
 /// author, or a verified self-signed author.
@@ -1364,17 +1412,15 @@ impl Binding {
         };
         let db = self.db.clone();
         // A Remote read must be covered by the server; its budget runs
-        // from its first wait.
+        // from its first wait, and restarts as the commits ahead of it
+        // settle.
         let require_coverage = opts.tier == crate::db::ReadTier::Remote;
-        let started = std::cell::Cell::new(None::<web_time::Instant>);
-        let expired = move || {
-            let first = started.get().unwrap_or_else(|| {
-                let now = web_time::Instant::now();
-                started.set(Some(now));
-                now
-            });
-            first.elapsed() >= REMOTE_READ_COVERAGE_BUDGET
-        };
+        let budget = CoverageBudget::new(
+            db.clone(),
+            REMOTE_READ_COVERAGE_BUDGET,
+            web_time::Instant::now,
+        );
+        let expired = move || budget.spent();
         let hooks = Rc::clone(&self.hooks);
         Ok(Box::pin(self.parked(async move {
             let coverage: Option<&dyn Fn() -> bool> = require_coverage.then_some(&expired);
