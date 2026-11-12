@@ -480,11 +480,12 @@ describe("Inspector reads", () => {
 });
 
 describe("Inspector UI", () => {
-  it("lives at <basePath>/inspect/, and a redirect keeps the deep link's fragment", async () => {
+  it("answers at <basePath>/inspect without redirecting, so a host that strips the slash can't loop", async () => {
+    // Next.js 308s `/jazz/inspect/` to `/jazz/inspect`; a redirect back looped forever.
     const { jazz } = await start();
     const bare = await jazz.handle(new Request("http://localhost:3000/jazz/inspect"));
-    expect(bare.status).toBe(308);
-    expect(bare.headers.get("location")).toBe("/jazz/inspect/");
+    expect(bare.status).not.toBe(308);
+    expect(bare.headers.get("location")).toBeNull();
     const posted = await jazz.handle(
       new Request("http://localhost:3000/jazz/inspect/", { method: "POST" }),
     );

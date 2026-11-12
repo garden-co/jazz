@@ -57,12 +57,26 @@ const OVERLAY_HEADERS = {
   "X-Frame-Options": "SAMEORIGIN",
 };
 
+/**
+ * The page as served at `<basePath>/inspect`, without the trailing slash.
+ * Vite builds it with relative URLs (`./assets/...`), which there would
+ * resolve beside `inspect` rather than below it, so point them below it.
+ */
+export function pageWithoutTrailingSlash(html: string): string {
+  return html.replaceAll('="./', '="inspect/');
+}
+
 export function createInspectorUi(dir: string | null = resolveInspectorUiDir()) {
-  /** The file for `path` below `/inspect` (`/` is the page), or null. */
+  /**
+   * The file for `path` below `/inspect`, or null. The page is at `/`, and at
+   * `""` too: Next.js (and other hosts) redirect `/inspect/` to `/inspect`,
+   * so redirecting back would loop.
+   */
   return async function serveUi(_request: Request, path: string): Promise<Response | null> {
     if (!dir) return null;
     if (path === "/" || path === "") {
-      return new Response(new Uint8Array(await readFile(join(dir, PAGE))), {
+      const html = await readFile(join(dir, PAGE), "utf8");
+      return new Response(path === "" ? pageWithoutTrailingSlash(html) : html, {
         headers: { "Content-Type": TYPES[".html"]!, ...PAGE_HEADERS },
       });
     }
