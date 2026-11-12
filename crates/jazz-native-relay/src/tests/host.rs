@@ -212,25 +212,27 @@ impl Fixture {
 
     /// Run one relay lifecycle command through the host's C ABI.
     fn relay_command(&self, command: RelayCommandRequest) -> RelayCommandResponse {
-        let request = postcard::to_allocvec(&command).unwrap();
+        self.try_relay_command(&command)
+            .unwrap_or_else(|status| panic!("{command:?} failed: {status:?}"))
+    }
+
+    fn try_relay_command(
+        &self,
+        command: &RelayCommandRequest,
+    ) -> Result<RelayCommandResponse, JazzNativeRelayStatus> {
+        let request = postcard::to_allocvec(command).unwrap();
         let mut output = JazzNativeRelayBytes::EMPTY;
-        assert_eq!(
-            unsafe {
-                jazz_native_relay_host_execute(
-                    self.host,
-                    request.as_ptr(),
-                    request.len(),
-                    &mut output,
-                )
-            },
-            JazzNativeRelayStatus::Ok,
-            "{command:?}"
-        );
+        let status = unsafe {
+            jazz_native_relay_host_execute(self.host, request.as_ptr(), request.len(), &mut output)
+        };
+        if status != JazzNativeRelayStatus::Ok {
+            return Err(status);
+        }
         let response =
             postcard::from_bytes(unsafe { std::slice::from_raw_parts(output.data, output.len) })
                 .expect("one canonical relay response");
         unsafe { jazz_native_relay_bytes_free(&mut output) };
-        response
+        Ok(response)
     }
 
     /// Open the scope's relay as the host that carries its upstream frames.
@@ -900,6 +902,33 @@ fn a_relay_refuses_a_client_of_another_identity() {
         .expect("the relay serves its own identity");
 }
 
+/// A server of the app in `bundle`, at its head through the lens, holding
+/// one row "from the server". Returns it and the head schema.
+fn server_with_history(bundle: &serde_json::Value) -> (jazz::binding_host::Binding, JazzSchema) {
+    let (schemas, lenses) =
+        jazz::tools::deployment::published::client_migrations(bundle.to_string().as_bytes())
+            .unwrap();
+    let head = JazzSchema::new(&todos_with("title")).unwrap();
+    let server_identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xee; 16]),
+        author: AuthorSubject::SYSTEM,
+    };
+    let server_db = block_on(Db::open_history_complete(
+        DbConfig::new(head.clone(), server_identity).with_migrations(schemas, lenses),
+    ))
+    .unwrap();
+    server_db.set_authority();
+    let server = jazz::binding_host::Binding::new(server_db, server_identity, true);
+    server
+        .insert(
+            "todos",
+            &title_cells("from the server"),
+            &serde_json::Value::Null,
+        )
+        .unwrap();
+    (server, head)
+}
+
 /// The schema JSON a session attaches: `schema`'s tables, and beside them
 /// the `migrations` the app ships, if any.
 fn app_json(schema: &JazzSchema, migrations: Option<&serde_json::Value>) -> String {
@@ -964,27 +993,7 @@ fn renamed_label_bundle() -> serde_json::Value {
 #[test]
 fn a_foreground_reads_a_server_with_schema_history() {
     let bundle = renamed_label_bundle();
-    let (schemas, lenses) =
-        jazz::tools::deployment::published::client_migrations(bundle.to_string().as_bytes())
-            .unwrap();
-    let head = JazzSchema::new(&todos_with("title")).unwrap();
-    let server_identity = DbIdentity {
-        node: NodeUuid::from_bytes([0xee; 16]),
-        author: AuthorSubject::SYSTEM,
-    };
-    let server_db = block_on(Db::open_history_complete(
-        DbConfig::new(head.clone(), server_identity).with_migrations(schemas, lenses),
-    ))
-    .unwrap();
-    server_db.set_authority();
-    let server = jazz::binding_host::Binding::new(server_db, server_identity, true);
-    server
-        .insert(
-            "todos",
-            &title_cells("from the server"),
-            &serde_json::Value::Null,
-        )
-        .unwrap();
+    let (server, head) = server_with_history(&bundle);
 
     let directory = tempfile::tempdir().unwrap();
     let fixture = Fixture::new();
@@ -1074,4 +1083,55 @@ fn a_scope_readmitted_with_another_history_is_refused() {
         JazzNativeRelayStatus::LifecycleFailure
     );
     assert!(output.data.is_null());
+}
+
+/// A relay attached without the app's migrations stores the head's columns
+/// under other names than its server, so its database refuses the server's
+/// catalogue. The relay then stops that connection, rather than keeping a
+/// link open that never syncs, as an alpha.60 relay did (#4777's symptom):
+/// the host can no longer carry frames over it.
+///
+/// ```text
+/// server (v1 + lens → v2) ──catalogue──► relay (v2 alone)
+///                                          ✗ refuses: its names differ
+///                         ✗──────────────  connection retired
+/// ```
+#[test]
+fn a_relay_attached_without_the_apps_migrations_stops_its_refused_upstream() {
+    let (server, head) = server_with_history(&renamed_label_bundle());
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit_app(
+        &directory.path().join("alice.sqlite"),
+        "alice",
+        0x49,
+        &head,
+        None,
+    );
+    let relay = fixture.open_relay(&capability);
+    let upstream = server
+        .accept_subscriber(Fixture::author(0x49), Default::default())
+        .unwrap();
+    let foreground = fixture.open(&capability);
+    fixture.tick(foreground);
+    for _ in 0..50 {
+        match fixture.try_relay_command(&RelayCommandRequest::ReceiveRelayFrames { relay }) {
+            Ok(RelayCommandResponse::Frames { frames }) => {
+                upstream.receive(frames);
+                block_on(upstream.binding().tick()).unwrap();
+                for frame in upstream.take_outbound() {
+                    let _ = fixture
+                        .try_relay_command(&RelayCommandRequest::SendRelayFrame { relay, frame });
+                }
+                fixture.relay_command(RelayCommandRequest::Pump { relay });
+                fixture.tick(foreground);
+            }
+            Ok(response) => panic!("ReceiveRelayFrames: {response:?}"),
+            Err(_) => {
+                fixture.close(foreground);
+                return;
+            }
+        }
+    }
+    panic!("the relay kept carrying a connection its database refused");
 }
