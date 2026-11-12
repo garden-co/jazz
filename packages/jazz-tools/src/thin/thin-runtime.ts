@@ -287,6 +287,8 @@ export class ThinRuntime implements Runtime {
   private lastRejection: UploadStatus["lastRejection"] = null;
   private readonly syncStatusListeners = new Set<() => void>();
   private readonly transactions = new Map<OpenTransactionId, OpenTransaction>();
+  /** Streaming writes still sending their value; each settles once its write is made. */
+  private readonly streamsInFlight = new Set<Promise<void>>();
   private mutationErrorCallback?: (event: MutationErrorEvent) => void;
   private authFailureCallback?: (reason: string) => void;
 
@@ -1013,6 +1015,36 @@ export class ThinRuntime implements Runtime {
     writeContext?: string | null,
     objectId?: string | null,
   ): Promise<StreamingInsertResult> {
+    const running = this.runStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      writeContext,
+      objectId,
+    );
+    // Until its value is sent and its write made, a graceful shutdown (the
+    // drain after the local-first upgrade) waits for it: see
+    // `waitForPendingWrites`.
+    const settled = running.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.streamsInFlight.add(settled);
+    void settled.then(() => this.streamsInFlight.delete(settled));
+    return running;
+  }
+
+  private async runStreamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    writeContext?: string | null,
+    objectId?: string | null,
+  ): Promise<StreamingInsertResult> {
     const operation =
       mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
     const context = this.writeTarget(writeContext, operation);
@@ -1047,6 +1079,8 @@ export class ThinRuntime implements Runtime {
     );
     // Chunks go one window at a time: each waits for the server to apply
     // the one before, which bounds what a slow server buffers.
+    // Set when the runtime, not the app's source, failed the stream.
+    let runtimeFailed = false;
     const push = async (bytes: Uint8Array) => {
       const windowBytes = 64 * 1024;
       for (let offset = 0; offset < bytes.byteLength; offset += windowBytes) {
@@ -1054,13 +1088,19 @@ export class ThinRuntime implements Runtime {
           type: "streamChunk",
           stream,
           chunk: bytes.subarray(offset, offset + windowBytes),
+        }).catch((error: unknown) => {
+          runtimeFailed = true;
+          throw error;
         });
       }
     };
     const encoder = new TextEncoder();
     let pendingHighSurrogate = "";
     try {
-      await begun;
+      await begun.catch((error: unknown) => {
+        runtimeFailed = true;
+        throw error;
+      });
       for await (const chunk of streamingChunks(source)) {
         if (typeof chunk === "string") {
           if (kind === "Bytea") throw new Error("Bytea streams require Uint8Array chunks");
@@ -1085,6 +1125,17 @@ export class ThinRuntime implements Runtime {
       if (pendingHighSurrogate) await push(encoder.encode(pendingHighSurrogate));
     } catch (error) {
       void this.request({ type: "abortStream", stream }).catch(() => undefined);
+      // The drain after the upgrade lets a stream finish; only the app
+      // shutting the client down (a sign-out, an account switch, a close)
+      // ends one. Say so, and that the value was not written: the stream
+      // never finished, so nothing committed. (The source's own errors
+      // stay as they are. A source that never yields again leaves the
+      // stream pending: it ends at the source's next step.)
+      if (runtimeFailed && this.closed && this.handedOver)
+        throw new ThinConnectionLostError(
+          "the thin runtime closed before this stream finished: its Db had upgraded to local-first, and the app then shut the client down (a sign-out, an account switch or a close), so the value was not written. Write it again on the Db now in use.",
+          { cause: error },
+        );
       throw error;
     }
     const written: WrittenRow[] = context.branchView ? [] : [{ table, id: formatUuid(row) }];
@@ -1324,28 +1375,45 @@ export class ThinRuntime implements Runtime {
     for (const listener of [...this.syncStatusListeners]) listener();
   }
 
-  /** Every write made so far has been answered. Every write is global once answered. */
+  /**
+   * Every write made so far has been answered. Every write is global once
+   * answered. With `inFlightStreams`, streaming writes still sending their
+   * value finish first, and their writes count too, until that signal
+   * aborts: then only the writes made so far count.
+   */
   async waitForPendingWrites(
     _tier?: string,
-    options: { throughOutage?: boolean; signal?: AbortSignal } = {},
+    options: { throughOutage?: boolean; inFlightStreams?: AbortSignal; signal?: AbortSignal } = {},
   ): Promise<void> {
-    // Only writes still waiting for their answer, like a local-first client:
-    // a rejection the app already had doesn't fail every later wait.
-    const dones = [...this.writes.values()]
-      .filter((write) => !write.answered)
-      .map((write) => write.done);
-    // Waiting for sync fails on the server's rejection. A write whose
-    // connection ended unanswered is not rejected, and the shutdown drain
-    // only waits for every write to be answered.
-    const answered = options.throughOutage
-      ? Promise.all(
-          dones.map((done) =>
-            done.catch((error: unknown) => {
-              if (error instanceof ThinRemoteError) throw error;
-            }),
-          ),
-        )
-      : Promise.allSettled(dones);
+    const answered = (async () => {
+      // The drain after the local-first upgrade lets a stream finish rather
+      // than closing the connection under it, until the app shuts down.
+      const streams = options.inFlightStreams;
+      if (streams && !streams.aborted && this.streamsInFlight.size > 0) {
+        const ended = new Promise<void>((resolve) =>
+          streams.addEventListener("abort", () => resolve(), { once: true }),
+        );
+        while (!streams.aborted && this.streamsInFlight.size > 0)
+          await Promise.race([Promise.all(this.streamsInFlight), ended]);
+      }
+      // Only writes still waiting for their answer, like a local-first client:
+      // a rejection the app already had doesn't fail every later wait.
+      const dones = [...this.writes.values()]
+        .filter((write) => !write.answered)
+        .map((write) => write.done);
+      // Waiting for sync fails on the server's rejection. A write whose
+      // connection ended unanswered is not rejected, and the shutdown drain
+      // only waits for every write to be answered.
+      await (options.throughOutage
+        ? Promise.all(
+            dones.map((done) =>
+              done.catch((error: unknown) => {
+                if (error instanceof ThinRemoteError) throw error;
+              }),
+            ),
+          )
+        : Promise.allSettled(dones));
+    })();
     const signal = options.signal;
     if (!signal) {
       await answered;
