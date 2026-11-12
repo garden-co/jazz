@@ -46,7 +46,8 @@ use node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 /// 1 was the first public ABI; 2 added `CodedOperationError` answers to
 /// existing commands, so a JS bundle and native build from different ABIs
 /// refuse to open rather than misread a failure; 3 added its `reason_name`;
-/// 4 ends each subscription delta with its updated rows' splices.
+/// 4 ends each subscription delta with its updated rows' splices; 5 attaches
+/// the app's migrations beside its schema's tables.
 /// Append-only commands use optional native capabilities while existing
 /// command layouts remain stable.
 pub const NATIVE_RELAY_ABI_V1: u16 = 5;
@@ -1940,13 +1941,6 @@ impl NativeRelayHost {
             migrations,
             identity: request.identity,
         };
-        let versions = |migrations: &jazz::db::Migrations| {
-            migrations
-                .schemas
-                .iter()
-                .map(|schema| schema.version_id())
-                .collect::<Vec<_>>()
-        };
         // A scope is immutable once trusted code has admitted it. Reject a
         // conflicting second configuration before JavaScript can receive a
         // capability, even if no relay alias has been opened yet.
@@ -1954,7 +1948,7 @@ impl NativeRelayHost {
             admitted.config.scope == config.scope
                 && (admitted.config.sqlite_path != config.sqlite_path
                     || admitted.config.schema.version_id() != config.schema.version_id()
-                    || versions(&admitted.config.migrations) != versions(&config.migrations)
+                    || admitted.config.migrations_key() != config.migrations_key()
                     || admitted.config.identity != config.identity
                     || admitted.claims != request.claims)
         }) {
