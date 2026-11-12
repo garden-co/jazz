@@ -2365,18 +2365,17 @@ fn a_resumed_window_keeps_a_pending_write_made_while_away() {
     assert_eq!(window_ids(&client, &query, None), on_server);
 }
 
-/// Timing probe (run with `--release -- --ignored --nocapture`, `ROWS` per
-/// room, default 10,000): a 20-row window whose table took one row while
+/// Timing probe (run with `--release -- --nocapture`, `ROWS` per room;
+/// the default 1,000 keeps it cheap in the suite): a 20-row window whose table took one row while
 /// its client was away, resumed and opened fresh. `body` has no index, so
 /// the resume's read of the window as of `since` scans the table, as any
 /// SQL read of this window does; the fresh opening here reuses the window
 /// the first client keeps live on the server. With the sort column indexed
 /// the as-of read stays flat.
 #[test]
-#[ignore = "timing probe"]
 fn window_resume_cost() {
     use std::time::Instant;
-    let per_room = std::env::var("ROWS").map_or(10_000, |rows| rows.parse().unwrap());
+    let per_room = std::env::var("ROWS").map_or(1_000, |rows| rows.parse().unwrap());
     let server = seeded(per_room);
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
