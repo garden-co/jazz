@@ -1381,7 +1381,7 @@ function collectQualifiedWhere(
   const ambiguous = (prefix: string, bare: string, candidates: Relation[]) =>
     new Error(
       `${errors.subject} table "${prefix}" is ambiguous from "${outputTable}": relations ${listed(candidates)} all lead there. ` +
-        `Qualify the column with the relation's name instead, e.g. "${candidates[0]!.name}.${bare}", or use an ${errors.alternative}.`,
+        `Qualify the column with a relation's name instead (${candidates.map((relation) => `"${relation.name}.${bare}"`).join(" or ")}), or use an ${errors.alternative}.`,
     );
   let hasQualifiedFilters = false;
 
@@ -1391,24 +1391,33 @@ function collectQualifiedWhere(
     }
 
     const [prefix, bare] = splitQualifiedColumn(column);
+    // The table's own name qualifies its own columns, even when one of its
+    // relations has that name too.
     if (!prefix || prefix === outputTable) {
       filters.push({ column: bare, raw, scope: baseScope });
       continue;
     }
 
     hasQualifiedFilters = true;
-    const named = relations.find((relation) => relation.name === prefix);
+    // A relation's name qualifies through that relation. A relation named
+    // after the table it leads to is resolved as that table is, as before
+    // relation names qualified keys: through the one relation that leads
+    // there, or the one whose column is `bare`.
     const viaTable = relations.filter((relation) => relation.toTable === prefix);
-    if (named && viaTable.some((relation) => relation !== named)) {
+    const named = relations.find(
+      (relation) => relation.name === prefix && relation.toTable !== prefix,
+    );
+    if (named && viaTable.length > 0) {
+      const others = viaTable.map((relation) => `"${relation.name}"`).join(", ");
       throw new Error(
-        `${errors.subject} column "${prefix}.${bare}": "${prefix}" names both the relation "${named.name}" (to "${named.toTable}") and a table that ${listed(viaTable.filter((relation) => relation !== named))} lead to. ` +
+        `${errors.subject} column "${prefix}.${bare}": "${prefix}" names both the relation "${named.name}" (to "${named.toTable}") and the table "${prefix}", which ${viaTable.length === 1 ? `relation ${others} leads` : `relations ${others} lead`} to. ` +
           `Rename the relation, or use an ${errors.alternative}.`,
       );
     }
     const candidates = named ? [named] : viaTable;
     if (candidates.length === 0) {
       throw new Error(
-        `${errors.subject} column "${prefix}.${bare}": "${prefix}" is neither a relation of "${outputTable}" nor a table one of its relations leads to. ` +
+        `${errors.subject} column "${prefix}.${bare}": "${prefix}" is neither a relation of "${outputTable}" nor a table that one of its relations leads to. ` +
           (relations.length === 0
             ? `"${outputTable}" declares no relations; declare one with s.rel(...).`
             : `Its relations are ${listed(relations)}.`),

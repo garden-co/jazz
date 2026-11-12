@@ -2116,10 +2116,12 @@ fn append_exists_rel_policy_clause(
                     return Err(err(
                         policy_path(table, path),
                         format!(
-                            "Correlating `{hop}.{column}` with this row's `{outer}` after a hop \
-                             (`hopTo`) is not supported in policies yet: past a hop, only the \
-                             hop's key `{hop}.{key}` can be correlated with the protected row. \
-                             Correlate on columns of `{start}`, before the hop, instead.",
+                            "Correlating `{hop}.{column}` with this row's `{outer}` is not \
+                             supported in policies yet: `{hop}` is joined past the first table \
+                             of this `exists` (through `hopTo`, a relation-qualified key or a \
+                             join), and such a table can only be correlated with the protected \
+                             row on its join key `{hop}.{key}`. Correlate on columns of \
+                             `{start}` instead.",
                             hop = nested.table,
                             column = correlation.join_column,
                             outer = correlation.source_column,
