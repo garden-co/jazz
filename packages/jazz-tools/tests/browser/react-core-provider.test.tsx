@@ -656,7 +656,7 @@ describe("react-core provider/hooks browser coverage", () => {
         </CaptureErrorBoundary>,
       );
 
-      await expectText("error", "useDb must be used within <JazzProvider>");
+      await expectText("error", "useDb must be used within <JazzProvider> or <JazzClientProvider>");
     }
   });
 });
