@@ -95,11 +95,17 @@ function gatedStream() {
     String.fromCharCode(97 + (index % 26)).repeat(64 * 1024),
   );
   let release!: () => void;
-  const gate = new Promise<void>((resolve) => (release = resolve));
+  let fail!: (error: Error) => void;
+  const gate = new Promise<void>((resolve, reject) => {
+    release = resolve;
+    fail = reject;
+  });
   const stream = {
     expected: parts.join(""),
     firstPartSent: false,
     release: () => release(),
+    /** The source fails at its next step instead. */
+    fail: (error: Error) => fail(error),
     async *chunks(): AsyncGenerator<string> {
       yield parts[0]!;
       // Resumed only once the first part was sent and applied.
@@ -109,6 +115,13 @@ function gatedStream() {
     },
   };
   return stream;
+}
+
+/** The upgraded Db's own (thin) runtime finishing its last uploads and stopping. */
+function drainOf(kept: Db): Promise<void> {
+  const drain = (kept as unknown as { drain: { done: Promise<void> } | null }).drain;
+  if (!drain) throw new Error("this Db has not upgraded");
+  return drain.done;
 }
 
 function sha256(text: string): string {
@@ -297,6 +310,8 @@ describe("browser session", () => {
 
     const written = await streaming;
     await written.wait({ tier: "global" });
+    // Then the thin runtime's drain ends.
+    await drainOf(kept);
     const row = await kept.one(app.notes.where({ id: written.value.id }), { tier: "remote" });
     expect(row?.text.length).toBe(stream.expected.length);
     expect(sha256(row!.text)).toBe(sha256(stream.expected));
@@ -310,7 +325,7 @@ describe("browser session", () => {
       .toBe(sha256(stream.expected));
   }, 60_000);
 
-  it("ends a stream in flight with an error saying why when the upgraded client shuts down without waiting", async () => {
+  it("ends a stream in flight with an error saying why when the upgraded client shuts down", async () => {
     const server = await startServer();
     const session = await open(server, memoryStore());
     const kept = db(session);
@@ -330,8 +345,58 @@ describe("browser session", () => {
     );
     expect(error).toBeInstanceOf(ThinConnectionLostError);
     expect((error as Error).message).toMatch(
-      /upgraded to local-first and was then shut down without waiting for sync, so the value was not written/,
+      /upgraded to local-first, and the app then shut the client down .*so the value was not written/,
     );
+  }, 60_000);
+
+  // A sign-out or an account switch shuts the client down with waitForSync:
+  // a stalled upload must not hold it.
+  it("doesn't hold a waiting shutdown of the upgraded client for a stalled stream", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    const stream = gatedStream();
+    const streaming = kept.insertStreaming(app.notes, { text: stream.chunks() });
+    void streaming.catch(() => {});
+    await expect.poll(() => stream.firstPartSent).toBe(true);
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+
+    // The source never yields again: the shutdown completes anyway.
+    await session.getSnapshot().client!.shutdown({ waitForSync: true });
+    // The stream ends at its source's next step, saying why.
+    stream.release();
+    await expect(streaming).rejects.toThrow(/the app then shut the client down/);
+  }, 60_000);
+
+  it("keeps a source's own error from a stream that fails during the drain, and the drain ends", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    const stream = gatedStream();
+    const streaming = kept.insertStreaming(app.notes, { text: stream.chunks() });
+    void streaming.catch(() => {});
+    await expect.poll(() => stream.firstPartSent).toBe(true);
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+
+    stream.fail(new Error("the file could not be read"));
+    await expect(streaming).rejects.toThrow("the file could not be read");
+    await drainOf(kept);
+    expect(await kept.all(app.notes, { tier: "remote" })).toEqual([]);
+  }, 60_000);
+
+  it("doesn't hold a waiting shutdown of a thin client that never upgraded for a stream in flight", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    const stream = gatedStream();
+    const streaming = kept.insertStreaming(app.notes, { text: stream.chunks() });
+    void streaming.catch(() => {});
+    await expect.poll(() => stream.firstPartSent).toBe(true);
+
+    // As before: the shutdown closes the runtime under the stream.
+    await session.getSnapshot().client!.shutdown({ waitForSync: true });
+    stream.release();
+    await expect(streaming).rejects.toThrow(/the thin runtime is closed/);
   }, 60_000);
 
   it("upgrades with committed thin writes while the server is gone", async () => {
