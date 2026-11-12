@@ -834,9 +834,10 @@ describe("NativeRuntimeAdapter server transport", () => {
           error.u64(4); // Backpressure
           error.u64(3); // Later
           error.string(refusal);
+          // The server closes the socket once the error frame has been delivered.
           queueMicrotask(() => {
             this.emitMessage(encodeWebSocketFrameBatch([error.finish()]));
-            this.emitServerClose();
+            setTimeout(() => this.emitServerClose(), 0);
           });
           return;
         }
@@ -859,24 +860,30 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
     const terminal = vi.fn();
     runtime.onServerTransportError(terminal);
-    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    try {
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
 
-    await vi.waitFor(() =>
-      expect(runtime.upstreamLinkStatus()).toEqual({
-        state: "offline",
-        reason: "network",
-        retrying: true,
-      }),
-    );
-    expect(runtime.lastLinkFailure()).toMatchObject({ kind: "network", message: refusal });
+      await vi.waitFor(
+        () =>
+          expect(runtime.upstreamLinkStatus()).toEqual({
+            state: "offline",
+            reason: "network",
+            retrying: true,
+          }),
+        { timeout: 5_000 },
+      );
+      expect(runtime.lastLinkFailure()).toMatchObject({ kind: "network", message: refusal });
 
-    refuse = false;
-    await vi.waitFor(() => expect(runtime.upstreamLinkStatus()).toEqual({ state: "connected" }), {
-      timeout: 15_000,
-    });
-    expect(sockets.length).toBeGreaterThan(1);
-    expect(terminal).not.toHaveBeenCalled();
-    await runtime.close();
+      refuse = false;
+      await vi.waitFor(() => expect(runtime.upstreamLinkStatus()).toEqual({ state: "connected" }), {
+        timeout: 15_000,
+      });
+      expect(sockets.length).toBeGreaterThan(1);
+      expect(terminal).not.toHaveBeenCalled();
+    } finally {
+      refuse = false;
+      await runtime.close();
+    }
   }, 30_000);
 
   it.each(["disconnect", "close"] as const)(
