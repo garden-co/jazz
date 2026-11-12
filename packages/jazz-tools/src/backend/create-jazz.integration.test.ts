@@ -795,7 +795,7 @@ describe("createJazz", () => {
     expect(statuses).toEqual([{ state: "connected" }]);
   }, 30_000);
 
-  it("keeps a session that expires in 30 days open, past what one timer can wait", async () => {
+  it("keeps a session that expires in 30 days open until its sessionTtlSeconds cap", async () => {
     const jazz = await createJazz({
       app,
       permissions,
@@ -812,7 +812,7 @@ describe("createJazz", () => {
     await alice.db
       .insert(app.todos, { title: "long session", owner: alice.session!.user! })
       .wait({ tier: "global" });
-    // One timer would clamp ~30 days to 1 ms and re-authenticate at once.
+    // Capped at sessionTtlSeconds (an hour), not re-authenticated at once.
     const opened = upgrades;
     await new Promise((resolve) => setTimeout(resolve, 2_000));
     expect(upgrades).toBe(opened);

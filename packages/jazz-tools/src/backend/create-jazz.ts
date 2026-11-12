@@ -89,6 +89,7 @@ export {
 import {
   AuthenticateExpiresAtError,
   reauthenticateAt,
+  sessionDeadline,
   startTimer,
   withCheckedExpiry,
 } from "./session-expiry.js";
@@ -412,9 +413,12 @@ export interface CreateJazzOptions {
    */
   publicUrl?: string | string[];
   /**
-   * How long a local-first guest's sync session lasts before its client
-   * connects again and is let in anew. Defaults to one hour. A signed-in
-   * user's session lasts until the `expiresAt` `authenticate` returned.
+   * The longest a sync session lasts before its client connects again and
+   * `authenticate` decides anew on that new request. Defaults to one hour.
+   * A signed-in user's session ends sooner if the `expiresAt` `authenticate`
+   * returned comes first; a local-first guest is let in anew each time. So
+   * a sign-out elsewhere, a ban or a changed role reaches an open session
+   * within this long, or at once with `jazz.revokeUser(userId)`.
    */
   sessionTtlSeconds?: number;
   /**
@@ -1916,9 +1920,13 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       const admittedAt = Date.now();
       if (admitted.user) {
         // A signed-in user's session holds until the expiry `authenticate`
-        // gave it. Shortly before, the client is asked to connect again, so
-        // `authenticate` decides on its new request with current cookies.
-        const at = reauthenticateAt(admittedAt, admitted.user.expiresAt * 1000);
+        // gave it, and at most `sessionTtlSeconds`. Shortly before, the
+        // client is asked to connect again, so `authenticate` decides on its
+        // new request with current cookies.
+        const at = reauthenticateAt(
+          admittedAt,
+          sessionDeadline(admittedAt, admitted.user.expiresAt, options.sessionTtlSeconds),
+        );
         if (at === null) {
           // `authenticate` named the user with an answer already expired.
           warnExpiredAnswer();

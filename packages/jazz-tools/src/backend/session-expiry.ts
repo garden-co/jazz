@@ -54,6 +54,24 @@ export function withCheckedExpiry(answer: JazzUser): JazzUser & { expiresAt: num
   return answer as JazzUser & { expiresAt: number };
 }
 
+/** How long a session lasts at most unless `sessionTtlSeconds` says otherwise. */
+export const DEFAULT_SESSION_TTL_SECONDS = 3600;
+
+/**
+ * When a signed-in user's session admitted at `admittedAtMs` must end, in
+ * milliseconds since the epoch: at the expiry `authenticate` gave it, or
+ * after `sessionTtlSeconds`, whichever comes first. The cap bounds how long
+ * a sign-out elsewhere, a ban or a changed role takes to reach an open
+ * connection when the app doesn't call `revokeUser`.
+ */
+export function sessionDeadline(
+  admittedAtMs: number,
+  expiresAtSeconds: number,
+  sessionTtlSeconds = DEFAULT_SESSION_TTL_SECONDS,
+): number {
+  return Math.min(expiresAtSeconds * 1000, admittedAtMs + sessionTtlSeconds * 1000);
+}
+
 /**
  * When a session admitted at `admittedAtMs` and good until `expiresAtMs`
  * is asked to re-authenticate, in milliseconds since the epoch, or null when

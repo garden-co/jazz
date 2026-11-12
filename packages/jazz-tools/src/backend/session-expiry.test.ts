@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AuthenticateExpiresAtError,
+  DEFAULT_SESSION_TTL_SECONDS,
   MAX_TIMER_DELAY_MS,
   MIN_SESSION_MS,
   REAUTHENTICATE_LEAD_MS,
   reauthenticateAt,
+  sessionDeadline,
   startTimer,
   withCheckedExpiry,
 } from "./session-expiry.js";
@@ -77,5 +79,22 @@ describe("startTimer", () => {
     cancel();
     vi.advanceTimersByTime(MAX_TIMER_DELAY_MS * 2);
     expect(run).not.toHaveBeenCalled();
+  });
+});
+
+describe("sessionDeadline", () => {
+  const now = 1_000_000_000_000;
+
+  it("ends a session at its expiresAt when that comes before sessionTtlSeconds", () => {
+    expect(sessionDeadline(now, now / 1000 + 600, 3600)).toBe(now + 600_000);
+  });
+
+  it("caps a long expiresAt at sessionTtlSeconds, one hour by default", () => {
+    // A 30-day app session still re-authenticates within the hour.
+    const thirtyDays = now / 1000 + 30 * 24 * 3600;
+    expect(sessionDeadline(now, thirtyDays)).toBe(now + DEFAULT_SESSION_TTL_SECONDS * 1000);
+    expect(sessionDeadline(now, thirtyDays, 300)).toBe(now + 300_000);
+    // So the timer never needs more than one setTimeout.
+    expect(sessionDeadline(now, thirtyDays) - now).toBeLessThan(MAX_TIMER_DELAY_MS);
   });
 });

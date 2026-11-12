@@ -56,9 +56,10 @@ that ID from your `authenticate` function.
 
 ### When a session expires
 
-A sync connection lasts until the `expiresAt` its `authenticate` answer gave. Shortly before then,
-the connection asks its client to connect again, and Jazz calls `authenticate` on that new request,
-with the cookies (or token) the client has now:
+A sync connection lasts until the `expiresAt` its `authenticate` answer gave, and at most
+`sessionTtlSeconds` (one hour by default). Shortly before then, the connection asks its client to
+connect again, and Jazz calls `authenticate` on that new request, with the cookies (or token) the
+client has now:
 
 - **Still the same user:** the client carries on. It swaps connections underneath, and your app sees
   no change: no reconnecting status, no event, and queries and writes continue.
@@ -67,10 +68,11 @@ with the cookies (or token) the client has now:
 - **No one, or someone else:** the connection is refused, and the browser asks your backend who is
   signed in. Once a second answer agrees, it signs the user out.
 
-To end a user's open connections before then (they signed out on another device, or you banned
-them), call `jazz.revokeUser(userId)` from your sign-out handler or your auth provider's
-session-revoked webhook. It ends their connections on this backend instance at once; connections on
-other instances end at their `expiresAt`.
+So a sign-out on another device, a ban or a changed role reaches an open connection within
+`sessionTtlSeconds` at the latest. To end a user's open connections at once, call
+`jazz.revokeUser(userId)` from your sign-out handler or your auth provider's session-revoked
+webhook. It ends their connections on this backend instance; connections on other instances end
+within `sessionTtlSeconds`.
 
 ### Keep auth middleware off Jazz's routes
 
