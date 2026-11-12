@@ -1201,6 +1201,26 @@ fn a_no_wait_foreground_read_opens_while_the_owner_link_is_live() {
     assert_no_wait_read_opens_from_the_owner(0x83, RemoteLinkHint::Live);
 }
 
+/// A zero first-load wait is no wait (`FirstLoad` docs): a Rust caller's
+/// `WaitForRemote { timeout_ms: 0 }` opens from the owner's store at once,
+/// as `Deliver` does, while the owner's link is live and the server silent.
+#[test]
+fn a_zero_first_load_wait_opens_from_the_owner_like_no_wait() {
+    let server = seeded_server();
+    let foreground = foreground_over(0xc5, 0xc6, warm_worker(0xc6, &server));
+    foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
+    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let mut stream = subscribe(&foreground.tab, &items(), wait_for_remote(Duration::ZERO));
+    let (reset, mut rows, _) = opening(foreground.first_event(&mut stream, None));
+    rows.sort();
+    assert!(reset, "the first delivery opens the stream");
+    assert_eq!(
+        rows,
+        all_rows(),
+        "a zero wait opens with the owner's cached rows"
+    );
+}
+
 /// Apply what a stream publishes to the rows it lists, asserting no event
 /// after the opening is a second one.
 fn follow(stream: &mut SubscriptionStream, rows: &mut BTreeSet<RowUuid>) {
@@ -1455,7 +1475,7 @@ fn no_wait_subscriptions_follow_the_server_through_random_link_changes() {
             "seed {seed_value}: no subscription was opened"
         );
         foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
-        let mut on_model = |streams: &mut Vec<Stream>| {
+        let on_model = |streams: &mut Vec<Stream>| {
             foreground.turn(Some(&server));
             streams.iter_mut().all(|(stream, rows, windowed)| {
                 follow(stream, rows);
