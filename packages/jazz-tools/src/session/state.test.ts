@@ -8,6 +8,10 @@ import {
 } from "./state.js";
 import type { JWTAuth } from "../accounts/enrollment.js";
 import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
+import {
+  isStoreHeldByAnotherTabError,
+  StoreHeldByAnotherTabError,
+} from "../runtime/store-held-by-another-tab-error.js";
 import { markThinDb } from "../runtime/local-first-upgrade.js";
 const handle = (id: string) =>
   Object.freeze({ id, identity: { issuer: "test", subject: id } }) as AccountHandle;
@@ -557,6 +561,28 @@ describe("Jazz session: failures that leave a client usable (K2)", () => {
     });
     // Tried again once the worker is back, it signs out.
     await session.logout();
+    expect(session.getSnapshot().status).toBe("signed-out");
+  });
+
+  // #5139: another tab holds the store as the guest this user signed up from,
+  // and didn't let go within the patience. The sign-out reports that, rather
+  // than a configuration error, and works once the other tab is gone.
+  it("stays ready with the client when another tab holds the store past the wipe's patience", async () => {
+    const { session, client, db, enrollment, old } = await wipingSetup();
+    const failure = new StoreHeldByAnotherTabError();
+    db.deleteClientStorage.mockRejectedValueOnce(failure);
+    await expect(session.logout()).rejects.toSatisfy(isStoreHeldByAnotherTabError);
+    expect(enrollment.logout).not.toHaveBeenCalled();
+    expect(client.shutdown).not.toHaveBeenCalled();
+    expect(session.getSnapshot()).toMatchObject({
+      status: "ready",
+      account: old,
+      client,
+      error: failure,
+      recovery: "action",
+    });
+    await session.logout();
+    expect(db.deleteClientStorage).toHaveBeenCalledTimes(2);
     expect(session.getSnapshot().status).toBe("signed-out");
   });
 

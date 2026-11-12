@@ -346,7 +346,11 @@ On a computer several people use, such as a family laptop or a library terminal:
   never remembers the user, and signing out wipes the account's local storage after waiting up to
   5 seconds for pending writes to upload; writes still unsynced then are lost. For now the wipe
   runs when your page signs out and calls `refresh()`; a sign-out Jazz notices another way
-  (another tab, an expired session) closes the account without wiping it.
+  (another tab, an expired session) closes the account without wiping it. If another tab is still
+  the guest the user signed up from, the wipe waits for that tab to follow the sign-out. If it
+  hasn't after 30 seconds (it may be frozen in the background), the sign-out fails with a
+  `StoreHeldByAnotherTabError` and the user stays signed in, so you can ask them to close the other
+  tab and sign out again.
 - **Sign the old user out before you sign the next one in.** The wait for pending writes covers only
   writes the server still accepts: once your session cookie names the new user, nothing can upload
   the old user's writes. So a user switch while offline drops the old user's unsynced writes from
