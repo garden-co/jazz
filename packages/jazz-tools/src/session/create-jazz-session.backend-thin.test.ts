@@ -539,7 +539,10 @@ describe("browser session against the app's backend", () => {
 
     const refusal = /need a browser.*jazz-tools\/react-native or jazz-tools\/expo/;
     await expect(session.loginWithBackend()).rejects.toThrow(refusal);
-    expect(requests).toEqual([]);
+    // The sign-in made no request. (The session's own "who is signed in"
+    // check goes through the app's fetch too, so it isn't counted here.)
+    const signIns = () => requests.filter((url) => !url.includes("backend-user"));
+    expect(signIns()).toEqual([]);
     expect(session.getSnapshot().status).not.toBe("ready");
 
     // A guest can't sign up through the backend here either.
@@ -557,7 +560,7 @@ describe("browser session against the app's backend", () => {
     cleanups.push(() => guest.close());
     const account = guest.getSnapshot().account;
     await expect(guest.linkWithBackend()).rejects.toThrow(refusal);
-    expect(requests).toEqual([]);
+    expect(signIns()).toEqual([]);
     expect(guest.getSnapshot().account).toBe(account);
   });
 });
@@ -703,6 +706,76 @@ describe("a shared device (clearOnSignOut)", () => {
     cleanups.push(() => next.close());
     expect(next.getSnapshot().client!.session!.user).not.toBe(account);
     expect(stored).not.toContain(root);
+  }, 60_000);
+});
+
+describe("a guest open in two tabs of a shared device (clearOnSignOut)", () => {
+  // Two tabs share one account store and are open as the same guest. Kim
+  // signs up in tab A (the backend links the guest, so its account is hers)
+  // and signs out there. Tab B must not stay open, in memory, as her account.
+  async function twoTabs() {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz);
+    const jar = cookies(origin, null);
+    // Tab B hears of tab A only when it checks (as a tab whose broadcast
+    // came while it was busy or asleep): no BroadcastChannel between them.
+    vi.stubGlobal("BroadcastChannel", undefined);
+    const store = memoryStore();
+    const open = async () => {
+      const session = await createJazzClient({
+        serverUrl: `${origin}/jazz`,
+        store,
+        driver: { type: "memory" },
+        initial: "device",
+        clearOnSignOut: true,
+      });
+      cleanups.push(() => session.close());
+      return session;
+    };
+    const a = await open();
+    const b = await open();
+    // Both have asked the backend once on start: no one is signed in yet.
+    await a.reauthenticate();
+    await b.reauthenticate();
+    const guest = a.getSnapshot().account!;
+    expect(b.getSnapshot()).toMatchObject({ status: "ready", account: { id: guest.id } });
+    return { jar, a, b, guest };
+  }
+
+  it("signs the other tab out once the user who took over its guest signs out", async () => {
+    const { jar, a, b, guest } = await twoTabs();
+    jar.user = jar.socketUser = "kim";
+    await a.linkWithBackend();
+    expect(a.getSnapshot().account!.id).toBe(guest.id);
+    jar.user = jar.socketUser = null;
+    await a.logout();
+    expect(a.getSnapshot().status).toBe("signed-out");
+
+    // Tab B checks (another tab's sign-out, focus): no one is signed in, and
+    // the guest it holds is now Kim's account.
+    await b.reauthenticate();
+    expect(b.getSnapshot()).toMatchObject({ status: "signed-out", account: undefined });
+  }, 60_000);
+
+  it("follows the user into their account while they are still signed in", async () => {
+    const { jar, a, b, guest } = await twoTabs();
+    jar.user = jar.socketUser = "kim";
+    await a.linkWithBackend();
+
+    await b.reauthenticate();
+    expect(b.getSnapshot().status).toBe("ready");
+    expect(b.getSnapshot().account).toMatchObject({
+      id: guest.id,
+      identity: { issuer: "jazz:backend", subject: "kim" },
+    });
+  }, 60_000);
+
+  it("leaves a guest no tab linked alone when no one is signed in", async () => {
+    const { a, b, guest } = await twoTabs();
+    await b.reauthenticate();
+    expect(b.getSnapshot()).toMatchObject({ status: "ready", account: { id: guest.id } });
+    expect(a.getSnapshot()).toMatchObject({ status: "ready", account: { id: guest.id } });
   }, 60_000);
 });
 

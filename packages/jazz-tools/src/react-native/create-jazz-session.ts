@@ -1,3 +1,4 @@
+import { accountForgotten } from "../accounts/persistence.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import {
   firstBackendAnswer,
@@ -94,6 +95,7 @@ export async function openNativeSessionCore(
       registry: clientRegistryUrl(config),
       events: nativeBackendWatchEvents,
       linkGuest: config.linkDeviceAccountOnSignUp,
+      forgotten: (account) => accountForgotten(accounts, account.id),
     }),
   });
   await firstBackendAnswer(session);

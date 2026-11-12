@@ -3,6 +3,7 @@ import type { AccountHandle } from "../accounts/state.js";
 import {
   clientRegistryUrl,
   createAccountManagerWithMinter,
+  watchStoredSelection,
 } from "../accounts/account-manager-core.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import type { ShutdownOptions } from "../runtime/db.js";
@@ -47,7 +48,7 @@ import {
   wipeLeftBehindReplicas,
   type ReplicaOwner,
 } from "./left-behind-replicas.js";
-import type { AccountStore } from "../accounts/persistence.js";
+import { accountForgotten, type AccountStore } from "../accounts/persistence.js";
 import { rememberBackendUser } from "../accounts/enrollment.js";
 
 export type { LocalFirstLoader };
@@ -334,6 +335,8 @@ export async function openBrowserSessionCore(
       registry,
       events: browserBackendWatchEvents(`jazz-account:${registry}`),
       linkGuest: linkDeviceAccountOnSignUp,
+      forgotten: (account) => accountForgotten(accounts, account.id),
+      watchAccounts: (changed) => watchStoredSelection(accounts, changed),
       // Ask "who is signed in" the way sign-in asks: through the app's own
       // `fetch` when it gives one, and with its bearer when it has no cookies.
       ...(bearer
