@@ -26,7 +26,7 @@ use jazz::tools::{
 };
 use jazz::tx::TxId;
 
-use common::{allow_all_policies, compile_schema};
+use common::{allow_all_policies, compile_schema, exists, outer_eq, session_eq};
 
 const LARGE: usize = 300 * 1024;
 
@@ -73,6 +73,22 @@ fn open(node: u8, author: AuthorSubject) -> Db {
             op: CmpOp::Eq,
             value: PolicyValue::Literal(jazz::tools::Value::Boolean(true)),
         }));
+    // Readable by whoever a grant names: its read rests on another table,
+    // and a grant can come after the photo's last version.
+    let grants = TableSchemaBuilder::new("grants")
+        .fk_column("photo", "photos")
+        .column("reader", ColumnType::Text)
+        .policies(allow_all_policies());
+    let photos = TableSchemaBuilder::new("photos")
+        .column("caption", ColumnType::Text)
+        .column("image", ColumnType::Bytea)
+        .policies(allow_all_policies().with_select(exists(
+            "grants",
+            vec![
+                outer_eq("photo", "id"),
+                session_eq("reader", &["identity", "subject"]),
+            ],
+        )));
     // Its `body` merges concurrent text edits (SPEC 4 §4.3).
     let merged = TableSchemaBuilder::new("merged")
         .column("body", ColumnType::Text)
@@ -86,6 +102,8 @@ fn open(node: u8, author: AuthorSubject) -> Db {
         .table(drafts)
         .table(merged)
         .table(shared)
+        .table(grants)
+        .table(photos)
         .build();
     for column in &mut schema
         .get_mut(&TableName::new("merged"))
@@ -3032,4 +3050,297 @@ fn idle_sync_ticks_run_no_reclaim_pass() {
         passes,
         "idle ticks run no reclaim pass"
     );
+}
+
+fn bytes(seed: u64, len: usize) -> Vec<u8> {
+    text(seed, len).into_bytes()
+}
+
+/// A photo shared after its last write: the reader may read its current
+/// version, though not as of that version's own position, when no grant
+/// existed yet. Its chunks are the row's content, so they are answered as
+/// the row is (alpha.61 rc.1 adopter eval E15: the photo never arrived on
+/// a local-first client, only on thin ones).
+#[test]
+fn a_row_shared_after_its_last_write_serves_its_chunks() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let image = bytes(61, LARGE);
+    insert(
+        &server,
+        "photos",
+        1,
+        vec![
+            ("caption", Value::String("beach".into())),
+            ("image", Value::Bytes(image.clone())),
+        ],
+    );
+    insert(
+        &server,
+        "grants",
+        2,
+        vec![
+            ("photo", Value::Uuid(row(1).0)),
+            ("reader", Value::String(user(1).principal_parts().1)),
+        ],
+    );
+    let bob = open(1, user(1));
+    let log = connect(&server, &bob, user(1));
+    let _stream = subscribe(&bob, Query::from("photos"));
+    pump(&server, &[&bob]);
+    assert_eq!(
+        local_cell(&bob, "photos", 1, "caption").unwrap(),
+        Some(Value::String("beach".into())),
+        "the row syncs"
+    );
+    assert!(log.borrow().contains(&"requests"), "{:?}", log.borrow());
+    assert_eq!(
+        local_cell(&bob, "photos", 1, "image").unwrap(),
+        Some(Value::Bytes(image.clone())),
+        "and so do its chunks"
+    );
+
+    // The reader may write the shared row, which keeps its value.
+    block_on(bob.update(
+        "photos",
+        row(1),
+        BTreeMap::from([("caption".to_owned(), Value::String("dunes".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &[&bob]);
+    assert_eq!(
+        local_cell(&server, "photos", 1, "caption").unwrap(),
+        Some(Value::String("dunes".into())),
+        "the server accepts the write"
+    );
+    assert_eq!(
+        local_cell(&server, "photos", 1, "image").unwrap(),
+        Some(Value::Bytes(image.clone()))
+    );
+
+    // Once the grant goes, the replica drops the row (SPEC 19.9). That its
+    // chunks are no longer served is pinned in
+    // `a_row_shared_later_serves_only_its_current_version`.
+    block_on(server.delete("grants", row(2), Default::default())).unwrap();
+    pump(&server, &[&bob]);
+    assert_eq!(local_cell(&bob, "photos", 1, "caption").unwrap(), None);
+}
+
+/// Only the row's current version is read as the row is. A photo written
+/// twice (bytes A, then B) and shared after: the reader is served B
+/// through the current version and may build a write on it, but neither
+/// pulls A nor bases a delta on the first version, which nothing granted
+/// as of its position. Once the grant goes, B is not served either.
+#[test]
+fn a_row_shared_later_serves_only_its_current_version() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let (first, second) = (bytes(62, LARGE), bytes(63, LARGE));
+    // A system replica sees every version as it is written: it names the
+    // first one's position.
+    let system = open(5, AuthorSubject::SYSTEM);
+    let (_, _, seen) = connect_wires(&server, &system, AuthorSubject::SYSTEM);
+    let _all = subscribe(&system, Query::from("photos").select(["caption"]));
+    block_on(system.tick()).unwrap();
+    block_on(server.tick()).unwrap();
+    insert(
+        &server,
+        "photos",
+        1,
+        vec![
+            ("caption", Value::String("v1".into())),
+            ("image", Value::Bytes(first.clone())),
+        ],
+    );
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let first_at = seen
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::Rows { images, .. } => images
+                .iter()
+                .find(|image| image.table.ends_with("photos"))
+                .map(|image| image.at),
+            _ => None,
+        })
+        .expect("the first version, as the system replica sees it");
+    block_on(server.update(
+        "photos",
+        row(1),
+        BTreeMap::from([("image".to_owned(), Value::Bytes(second.clone()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    insert(
+        &server,
+        "grants",
+        2,
+        vec![
+            ("photo", Value::Uuid(row(1).0)),
+            ("reader", Value::String(user(1).principal_parts().1)),
+        ],
+    );
+    let root_of = |value: &[u8]| {
+        jazz::large_values::prepare(jazz::large_values::LargeValueKind::Bytes, value)
+            .unwrap()
+            .value_ref
+            .root
+            .object_hash
+            .0
+    };
+    let (root_a, root_b) = (root_of(&first), root_of(&second));
+
+    let bob = open(1, user(1));
+    let (_, up, down) = connect_wires(&server, &bob, user(1));
+    let _stream = subscribe(&bob, Query::from("photos").select(["image"]));
+    block_on(bob.tick()).unwrap();
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    // The current version as shipped, read off the wire before Bob's
+    // replica takes it.
+    let (current, key) = down
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::Rows { images, .. } => images
+                .iter()
+                .find(|image| image.table.ends_with("photos"))
+                .map(|image| (image.at, image.key.clone())),
+            _ => None,
+        })
+        .expect("the photo's image");
+    down.borrow_mut().clear();
+    let image_column = common::stored(&server, "photos", "image");
+    let pull = |at: jazz::db::Pos, root: [u8; 32]| WirePull {
+        table: "photos".to_owned(),
+        id: *row(1).0.as_bytes(),
+        key: key.clone(),
+        at,
+        root,
+        nodes: vec![root],
+        span: Some((0, LARGE as u64)),
+    };
+    let answered = |pulls: Vec<WirePull>| {
+        down.borrow_mut().clear();
+        up.borrow_mut()
+            .push_back(SyncMessage::ChunkRequests { pulls });
+        block_on(server.tick()).unwrap();
+        let (mut sent, mut missing) = (BTreeSet::new(), BTreeSet::new());
+        for message in down.borrow().iter() {
+            if let SyncMessage::Chunks {
+                nodes,
+                missing: absent,
+            } = message
+            {
+                sent.extend(nodes.iter().map(|node| node.hash));
+                missing.extend(absent.iter().map(|node| node.hash));
+            }
+        }
+        (sent, missing)
+    };
+    assert!(first_at.seq < current.seq);
+    let pulls = vec![pull(current, root_b), pull(first_at, root_a)];
+    let (sent, missing) = answered(pulls);
+    assert!(
+        sent.contains(&root_b),
+        "the current version's value is served"
+    );
+    assert!(!sent.contains(&root_a), "the first version's never is");
+    assert!(missing.contains(&root_a));
+
+    // Deltas: over any earlier version refused, over the current accepted.
+    let update = |tx: u64, seq: u64| SyncMessage::Commit {
+        clock: 0,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([1; 16])),
+        kind: WireKind::Mergeable,
+        ops: vec![WireOp {
+            deltas: vec![CellDelta {
+                column: image_column.clone(),
+                depth: 0,
+                key: Vec::new(),
+                delta: WireDelta {
+                    seq,
+                    base: 0,
+                    edits: Vec::new(),
+                },
+            }],
+            ..WireWrite::Update {
+                table: "photos".to_owned(),
+                row: *row(1).0.as_bytes(),
+                cells: [(image_column.clone(), Value::Nullable(None))].into(),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into()
+        }],
+        acting: Acting::Own,
+    };
+    down.borrow_mut().clear();
+    let on_first = 1;
+    up.borrow_mut().push_back(update(on_first, first_at.seq));
+    let on_current = 1000;
+    up.borrow_mut().push_back(update(on_current, current.seq));
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let fates: BTreeMap<u64, bool> = down
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::Fate {
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
+                outcome,
+                ..
+            } => Some((
+                *tx,
+                matches!(
+                    outcome,
+                    Outcome::Refused {
+                        error: WireError::Rejected { message, .. },
+                        ..
+                    } if message.contains("large-value delta")
+                ),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fates.len(), 2, "{fates:?}");
+    assert!(
+        fates[&on_first],
+        "a delta over the first version is refused: {fates:?}"
+    );
+    assert!(
+        !fates[&on_current],
+        "a delta over the current version is not: {fates:?}"
+    );
+
+    // The accepted write made a new current version, holding B too.
+    let latest = down
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::Rows { images, .. } => images
+                .iter()
+                .rfind(|image| image.table.ends_with("photos"))
+                .map(|image| image.at),
+            _ => None,
+        })
+        .last()
+        .expect("the new version reaches Bob");
+    assert!(latest.seq > current.seq);
+    let (sent, _) = answered(vec![pull(latest, root_b)]);
+    assert!(
+        sent.contains(&root_b),
+        "served through the new current version"
+    );
+
+    // Revoked: the current version's value is no longer served.
+    block_on(server.delete("grants", row(2), Default::default())).unwrap();
+    let (sent, missing) = answered(vec![pull(latest, root_b)]);
+    assert!(sent.is_empty(), "nothing is served once the grant goes");
+    assert!(missing.contains(&root_b));
 }

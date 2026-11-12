@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { anyOf, definePermissions } from "../permissions/index.js";
-import { schema as s } from "../index.js";
+import { schema as s, migration as m } from "../index.js";
+import { appMigrations } from "./client-migrations.js";
 import {
   createPolicyTestApp,
   deploy,
@@ -408,6 +409,55 @@ describe("createPolicyTestApp", () => {
         expect.objectContaining({ id: seeded.id }),
       ]);
       await expect(bob.all(testApp.todos.where({ id: seeded.id }))).resolves.toEqual([]);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+
+  // The /docs/tooling/testing pattern broke on an app's first migration: the
+  // test server was handed only the current schema, so the app's client,
+  // opening with the lenses the app ships, disagreed with it about the app's
+  // first version (alpha.61 adopter round, E11).
+  it("serves an app that ships a migration", async () => {
+    const notesV1 = { notes: s.table({ title: s.string(), owner_id: s.uuid() }, {}) };
+    const notesV2 = {
+      notes: s.table({ title: s.string(), owner_id: s.uuid(), body: s.string().optional() }, {}),
+    };
+    const migration = m.defineMigration({
+      fromHash: await computeSchemaHash(s.defineApp(notesV1, { migrations: "none" }).wasmSchema),
+      toHash: await computeSchemaHash(s.defineApp(notesV2, { migrations: "none" }).wasmSchema),
+      from: notesV1,
+      to: notesV2,
+      migrate: { notes: { body: m.add.string({ default: null }) } },
+    });
+    const app = s.defineApp(notesV2, {
+      migrations: await appMigrations(notesV1, { to: notesV2, migration }),
+    });
+    const permissions = definePermissions(app, ({ policy, session }) => {
+      policy.notes.allowRead.where({ owner_id: session.user });
+      policy.notes.allowInsert.where({ owner_id: session.user });
+    });
+    const policyTestApp = await createPolicyTestApp(app, permissions, expect);
+
+    try {
+      const alice = policyTestApp.as({
+        issuer: "https://policy-test.example",
+        user_id: "alice",
+        account_id: "00000000-0000-4000-8000-000000000001",
+        claims: {},
+        authMode: "external",
+      });
+      const note = await alice
+        .insert(app.notes, {
+          title: "first",
+          owner_id: "00000000-0000-4000-8000-000000000001",
+          body: "hello",
+        })
+        .wait({ tier: "global" });
+
+      await expect(alice.all(app.notes, { tier: "remote" })).resolves.toEqual([
+        expect.objectContaining({ id: note.id, title: "first", body: "hello" }),
+      ]);
     } finally {
       await policyTestApp.shutdown();
     }

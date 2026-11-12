@@ -159,6 +159,13 @@ export async function createJazzSessionOwner<
    * instead of keeping it for that user's next sign-in (shared devices).
    */
   clearOnSignOut?: boolean;
+  /**
+   * @internal With `clearOnSignOut`, how the host closes a signed-out
+   * account's local-first client and wipes its storage, in place of
+   * deleting it through the client: the browser closes this tab's client
+   * first and wipes only once no other tab has the account open.
+   */
+  wipeSignedOut?(client: Client, account: AccountHandle): Promise<boolean | void>;
   /** Add host methods (e.g. `reauthenticate`) to the session before it is sealed. */
   decorate?(session: SessionCore<Client>): Extra;
 }): Promise<SessionCore<Client> & Extra> {
@@ -228,7 +235,10 @@ export async function createJazzSessionOwner<
       if (client) {
         // A thin client keeps nothing in the browser, so there is nothing to wipe.
         const thin = isThinDb((client as WipeableClient).db as Db);
-        if (signsOut && options.clearOnSignOut && !thin) {
+        if (signsOut && options.clearOnSignOut && !thin && options.wipeSignedOut && selected) {
+          // False: another tab still has the account open, and wipes it.
+          wiped = (await options.wipeSignedOut(client, selected)) !== false;
+        } else if (signsOut && options.clearOnSignOut && !thin) {
           const db = (client as WipeableClient).db;
           // Upload what the server still accepts before wiping the rest.
           await db?.waitForSync?.({ timeoutMs: 5_000 }).catch(() => {});
@@ -241,10 +251,13 @@ export async function createJazzSessionOwner<
               `Jazz signed out and wiped ${writes} write(s) the server hadn't confirmed, as clearOnSignOut asks. They are gone from this device; any the server did receive stay there.`,
             );
           await client.shutdown();
-        } else if (signsOut) {
-          await signOutOf(client);
         } else {
-          await client.shutdown({ waitForSync: true });
+          // A client the server refuses (this user's sign-in ended) can't
+          // upload, and the session is moving on from it either way.
+          await stopPastRefusal(
+            client,
+            signsOut ? "Jazz signed out" : "Jazz closed the previous client",
+          );
         }
         // Code that kept this client's Db learns it is gone, instead of
         // its queries going quiet.
@@ -465,7 +478,8 @@ export async function createJazzSessionOwner<
     // Children re-render onto the new client first; the old one finishes
     // uploading its writes before it stops. The swap is done either way: a
     // slow or failing shutdown of the old client neither holds nor fails it.
-    void current.shutdown({ waitForSync: true }).catch((error: unknown) => {
+    // One the server refuses can't upload them, and is closed anyway.
+    void stopPastRefusal(current, "Jazz replaced this client").catch((error: unknown) => {
       console.warn("Jazz could not shut the replaced client down cleanly.", error);
     });
   });
@@ -500,18 +514,20 @@ type SigningOutClient = {
 };
 
 /**
- * Sign out of `client`: upload what the server still accepts, then stop it.
- * When the server refuses this user's sign-in (their session at the backend
- * ended), no retry uploads the rest while they are signed out, and refusing
- * the sign-out would leave them no way out, through reloads too: it signs
- * out and says what became of those writes. A persistent client keeps them
+ * Stop `client` as the session moves on from it (a sign-out, a switch, a
+ * new sign-in, a replacement): upload what the server still accepts, then
+ * stop it. When the server refuses this user's sign-in (their session at
+ * the backend ended, or `jazz.revokeUser`), no retry uploads the rest once
+ * the session has moved on, and failing would leave the session stuck on a
+ * client it can't close, through reloads too: it stops the client anyway
+ * and says what became of those writes (`lead` names what happened). A persistent client keeps them
  * on this device, under that account, and uploads them when it next opens;
  * one that keeps nothing (in memory, or thin) loses them. Any refusal counts,
  * an `expired` credential too: the user is leaving, and no one renews it once
  * they have. Any other failure (an outage) may pass, so it still fails the
  * sign-out for the app to retry.
  */
-async function signOutOf(client: SigningOutClient) {
+async function stopPastRefusal(client: SigningOutClient, lead: string) {
   try {
     await client.shutdown({ waitForSync: true });
   } catch (cause) {
@@ -523,8 +539,8 @@ async function signOutOf(client: SigningOutClient) {
     if (writes > 0)
       console.warn(
         kept
-          ? `Jazz signed out with ${writes} write(s) the server refused, as it no longer accepts this user's sign-in. They stay on this device and upload when this account signs in again.`
-          : `Jazz signed out and dropped ${writes} write(s) the server refused, as it no longer accepts this user's sign-in. This client keeps nothing on the device.`,
+          ? `${lead} with ${writes} write(s) the server refused, as it no longer accepts this user's sign-in. They stay on this device and upload when this account signs in again.`
+          : `${lead} and dropped ${writes} write(s) the server refused, as it no longer accepts this user's sign-in. This client keeps nothing on the device.`,
         cause.cause,
       );
     await client.shutdown();

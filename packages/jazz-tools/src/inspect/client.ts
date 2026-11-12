@@ -198,6 +198,10 @@ export interface PendingApproval {
  * Ask a person to approve an agent token for `endpoint`: listen on a
  * loopback port, and answer with the Inspector URL to open. The token is
  * stored once the browser hands it over.
+ *
+ * The loopback server keeps the process running until the browser hands the
+ * token over, the request times out, or `cancel()` is called: a CLI awaiting
+ * `token` must still be there when the browser comes back.
  */
 export async function requestApproval(
   endpoint: string,
@@ -276,7 +280,6 @@ export async function requestApproval(
     server!.once("error", reject);
     server!.listen(0, "127.0.0.1", resolve);
   });
-  server.unref();
   const port = (server.address() as { port: number }).port;
   timer = setTimeout(
     () => {
@@ -285,7 +288,6 @@ export async function requestApproval(
     },
     options.timeoutMs ?? 10 * 60_000,
   );
-  (timer as unknown as { unref?: () => void }).unref?.();
   const fragment = encodeGrant({
     ...grant,
     callback: `http://127.0.0.1:${port}/callback`,

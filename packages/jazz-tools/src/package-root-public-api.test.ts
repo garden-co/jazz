@@ -373,9 +373,14 @@ describe("package root public API", () => {
       "BrowserAuthSecretStore",
       "createJazzApp",
     ]) {
-      expect(packageRoot, `package root removed auth export ${removed}`).not.toHaveProperty(
-        removed,
-      );
+      // For one release a stub that throws, naming the replacement: no
+      // working alias (see removed-api.ts).
+      const stub = (packageRoot as Record<string, unknown>)[removed];
+      if (stub === undefined) continue;
+      expect(
+        () => (stub as () => unknown)(),
+        `package root removed auth export ${removed}`,
+      ).toThrow(expect.objectContaining({ code: "JAZZ_API_REMOVED" }));
     }
   });
 

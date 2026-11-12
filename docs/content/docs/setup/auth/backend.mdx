@@ -39,6 +39,9 @@ export const jazz = createJazz({
 - `expiresAt` (required) is when this answer stops holding, as Unix time in seconds: the expiry of
   the session the user is signed in with (the one a sign-out ends), or a token's `exp`. Not the
   expiry of a short-lived access token your auth refreshes on its own.
+  Without a valid one, Jazz refuses the sign-in: your backend's log says what `authenticate`
+  returned, and the browser gets only the code `authenticate_expires_at_missing`, which its
+  session's error explains.
 - `claims` are anything your [policies](/docs/schemas/policies) should see, such as the user's role or
   organization, under `session.claims`.
 - Return `null` for a signed-out request.
@@ -66,7 +69,11 @@ client has now:
 - **Their claims changed** (say their role): the new connection carries the new claims, so your
   policies see them from then on.
 - **No one, or someone else:** the connection is refused, and the browser asks your backend who is
-  signed in. Once a second answer agrees, it signs the user out.
+  signed in. In a tab that is in view, a second answer about two seconds later confirms it, and
+  Jazz signs the user out (after `onSignedOut`). A tab in the background waits until it is in view
+  again. Writes made in between don't sync. At the sign-out, a thin client drops them, and a
+  local-first one keeps them on the device for that user's next sign-in (with `clearOnSignOut`,
+  it wipes them). Either way, Jazz logs how many there were.
 
 So a sign-out on another device, a ban or a changed role reaches an open connection within
 `sessionTtlSeconds` at the latest. To end a user's open connections at once, call
@@ -130,6 +137,10 @@ devices, pass `clearOnSignOut: true` to `createJazzClient`: the device then neve
 user, so a reload waits for your backend's answer. After your own sign-in or sign-out, call
 `refresh()` from `useJazzSession()` and Jazz follows your backend's answer.
 Without React, call `refresh()` on the session `createJazzClient` returns.
+If Jazz can't ask your backend (it is offline, or `authenticate` throws or returns no `expiresAt`),
+`refresh()` rejects, and the session shows the failure too: it keeps its current user and client
+(`status` stays `"ready"`), with `error` set and `recovery: "action"`. `retry()` asks your backend
+again.
 
 - **Sign-out.** When your backend answers signed out, Jazz closes the account's client. A local-first client's
   unsynced writes stay in that account's local storage and sync the next time the same user signs
@@ -344,9 +355,14 @@ On a computer several people use, such as a family laptop or a library terminal:
 
 - **Pass `clearOnSignOut: true`** to `createJazzClient` (or `<JazzProvider config>`). The device then
   never remembers the user, and signing out wipes the account's local storage after waiting up to
-  5 seconds for pending writes to upload; writes still unsynced then are lost. For now the wipe
-  runs when your page signs out and calls `refresh()`; a sign-out Jazz notices another way
-  (another tab, an expired session) closes the account without wiping it.
+  5 seconds for pending writes to upload; writes still unsynced then are lost, and the console
+  says how many. A sign-out Jazz notices on its own (your backend answers signed out, in this tab
+  or another) wipes the same way.
+- **Tabs of one account share its local storage**, so it's wiped once the last tab open on that
+  account signs out. A tab that signs out while another tab is still signed in (it signed out of
+  Jazz only, offline say) leaves the data to that tab, unsynced writes included. A tab that closes
+  without signing out leaves it for a later page load to wipe, once your backend confirms the user
+  is signed out.
 - **Sign the old user out before you sign the next one in.** The wait for pending writes covers only
   writes the server still accepts: once your session cookie names the new user, nothing can upload
   the old user's writes. So a user switch while offline drops the old user's unsynced writes from
@@ -414,6 +430,10 @@ Signing out stays signed out until a user signs in again. It doesn't erase local
 anything at your auth provider; you are still responsible for any clean-up your auth
 library requires. Device account keys stay on the device for recovery.
 
+`session.signOut()` signs out of Jazz only. While your own auth still has the user signed in (its
+sign-out failed offline, say), Jazz signs them back in on its next answer from your backend: sign
+out of your auth first, then call `refresh()`.
+
 Closing a client keeps local data on the device and works offline, but doesn't guarantee that sync
 completes. Changing accounts does.
 
@@ -423,7 +443,9 @@ completes. Changing accounts does.
 **It permanently deletes unsynced writes and local-only data.** Data comes back only if it already
 reached your backend and the same account can still read it. It keeps device account keys and doesn't
 sign anyone out. The [browser console helper](/docs/how-jazz-works#reset-browser-storage) does the
-same.
+same. If another tab holds the account's storage under another sign-in (a guest who just signed up
+in this tab), it waits for that tab to follow or close; after 30 seconds it fails with a
+`StoreHeldByAnotherTabError`, and you can call it again once that tab is gone.
 
 ### Owning the session yourself
 
