@@ -181,6 +181,45 @@ describe("the Inspector a backend serves", () => {
     expect(await screen.findByText("bob's bread")).toBeTruthy();
   });
 
+  it("views as a user with the claims given for them, and flags when none are", async () => {
+    // Managers (a claim) see every todo; others see their own.
+    const jazz = await createJazz({
+      app,
+      permissions: s.definePermissions(app, ({ policy, anyOf, session }) => {
+        policy.todos.allowRead.where(
+          anyOf([{ owner: session.user }, session.where({ "claims.role": "manager" })]),
+        );
+      }),
+      store: memory(),
+      authenticate: () => null,
+      inspect: staff,
+      inspector: { audit: () => {} },
+    });
+    cleanups.push(() => jazz.close());
+    await jazz.createAccountFor("manager");
+    await jazz.db
+      .insert(app.todos, { title: "bob's bread", done: true, owner: "bob" })
+      .wait({ tier: "global" });
+    const { call, calls } = callAs(jazz, { "x-staff": "ops@example.com" });
+    render(<BackendApp pageUrl={`${PAGE}#table=todos&as=manager`} call={call} />);
+
+    // No claims: a session with none, and the Inspector says so.
+    expect(await screen.findByText("no claims")).toBeTruthy();
+    expect(screen.queryByText("bob's bread")).toBeNull();
+
+    const claims = screen.getByLabelText("with claims") as HTMLInputElement;
+    fireEvent.change(claims, { target: { value: '{"role":"manager"}' } });
+    fireEvent.blur(claims);
+    expect(await screen.findByText("bob's bread")).toBeTruthy();
+    expect(screen.queryByText("no claims")).toBeNull();
+    expect(calls).toContainEqual(
+      expect.objectContaining({
+        op: "query",
+        as: { userId: "manager", claims: { role: "manager" } },
+      }),
+    );
+  });
+
   it("opens on exactly the rows a deep link's query names", async () => {
     const jazz = await backend();
     const { call } = callAs(jazz, { "x-staff": "ops@example.com" });

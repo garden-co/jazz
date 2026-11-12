@@ -52,6 +52,9 @@ Options:
                  else ${DEFAULT_APP_URL}. Jazz is assumed under /jazz unless the
                  URL names another path.
   --as <user>    Run under this user's permissions (the app's user id)
+  --claims <json>  With --as: the user's session claims, e.g. '{"role":"manager"}'.
+                 Policies that read claims see none unless you pass them; answers
+                 carry a warning when that may matter
 
 Locally (NODE_ENV=development, on this machine) no login is needed. Elsewhere,
 \`login\` asks a person who passes the app's \`inspect\` hook to approve a token.
@@ -61,6 +64,7 @@ Tokens are kept in ~/.config/jazz/inspect-tokens.json; JAZZ_INSPECT_TOKEN wins.
 const VALUE_FLAGS = new Set([
   "--app",
   "--as",
+  "--claims",
   "--ttl",
   "--tables",
   "--label",
@@ -140,7 +144,16 @@ export async function runInspectCommand(args: string[], io: InspectCliIo): Promi
         fetch: io.fetch,
       });
     const as = flag("--as");
-    const asPart = as === undefined ? {} : { as };
+    const claimsText = flag("--claims");
+    if (claimsText !== undefined && as === undefined) {
+      throw new InspectError("bad_request", "--claims goes with --as <user>");
+    }
+    const asPart =
+      as === undefined
+        ? {}
+        : claimsText === undefined
+          ? { as }
+          : { as: { userId: as, claims: json(claimsText, "--claims") as Record<string, unknown> } };
 
     switch (command) {
       case "login": {

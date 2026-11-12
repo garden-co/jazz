@@ -119,6 +119,8 @@ export interface InspectRowsAnswer {
   truncated: boolean;
   /** The Inspector, open on exactly this query. */
   inspectorUrl: string;
+  /** Why the answer may not be what the user in `as` would see, e.g. no claims were given for them. */
+  warning?: string;
 }
 
 export interface InspectSessionInfo {
@@ -369,6 +371,9 @@ export function inspectorLink(inspectorUrl: string, target: InspectorLinkTarget 
   if (target.row) params.set("row", target.row);
   if (target.as !== undefined) {
     params.set("as", typeof target.as === "string" ? target.as : target.as.userId);
+    if (typeof target.as === "object" && target.as.claims !== undefined) {
+      params.set("claims", base64UrlEncode(JSON.stringify(target.as.claims)));
+    }
   }
   const fragment = params.toString();
   return fragment ? `${inspectorUrl}#${fragment}` : inspectorUrl;
@@ -391,7 +396,20 @@ export function parseInspectorLink(fragment: string): InspectorLinkTarget & { gr
   const row = params.get("row");
   if (row) target.row = row;
   const as = params.get("as");
-  if (as) target.as = as;
+  if (as) {
+    target.as = as;
+    const claims = params.get("claims");
+    if (claims) {
+      try {
+        const parsed = JSON.parse(base64UrlDecode(claims)) as unknown;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          target.as = { userId: as, claims: parsed as Record<string, unknown> };
+        }
+      } catch {
+        // A damaged link views as the user without claims.
+      }
+    }
+  }
   const grant = params.get("grant");
   if (grant) target.grant = grant;
   return target;
@@ -461,4 +479,24 @@ export function isLoopbackCallback(callback: string): boolean {
     url.search === "" &&
     url.hash === ""
   );
+}
+
+/**
+ * Whether compiled permissions read `session.claims` anywhere: a
+ * `SessionRef` or `SessionCmp` whose path starts at `claims`.
+ */
+export function readsClaims(permissions: unknown): boolean {
+  const seen = new Set<object>();
+  const visit = (value: unknown): boolean => {
+    if (!value || typeof value !== "object" || seen.has(value)) return false;
+    seen.add(value);
+    const node = value as Record<string, unknown>;
+    const startsAtClaims = (path: unknown) => Array.isArray(path) && path[0] === "claims";
+    if ((node.type === "SessionRef" || node.type === "SessionCmp") && startsAtClaims(node.path)) {
+      return true;
+    }
+    if (startsAtClaims(node.SessionRef)) return true;
+    return Object.values(node).some(visit);
+  };
+  return visit(permissions);
 }

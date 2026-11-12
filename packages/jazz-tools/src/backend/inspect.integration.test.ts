@@ -1211,3 +1211,89 @@ describe("jazz-tools inspect and mcp", () => {
     await served;
   });
 });
+
+describe("Viewing as a user whose permissions read claims", () => {
+  // Managers (a claim) see every expense; others see their own.
+  const claimsApp = s.defineApp(
+    { expenses: s.table({ title: s.string(), owner: s.uuid() }, {}) },
+    { migrations: "none" },
+  );
+  const claimsPermissions = s.definePermissions(claimsApp, ({ policy, anyOf, session }) => {
+    policy.expenses.allowRead.where(
+      anyOf([{ owner: session.user }, session.where({ "claims.role": "manager" })]),
+    );
+    policy.expenses.allowInsert.where(
+      anyOf([{ owner: session.user }, session.where({ "claims.role": "manager" })]),
+    );
+  });
+
+  async function startWithClaims() {
+    const jazz = await createJazz({
+      app: claimsApp,
+      permissions: claimsPermissions,
+      store: memory(),
+      authenticate,
+      inspect: staffOnly,
+    });
+    cleanups.push(() => jazz.close());
+    const worker = await accountOf(jazz, "worker");
+    await accountOf(jazz, "manager");
+    await jazz.db
+      .insert(claimsApp.expenses, { title: "the worker's", owner: worker })
+      .wait({ tier: "global" });
+    return { jazz, worker };
+  }
+
+  it("uses the claims given with `as`, and warns when none were given", async () => {
+    const { jazz } = await startWithClaims();
+    const query = { table: "expenses" };
+
+    // Without claims: a session with none, and the answer says so.
+    const bare = await ok(api(jazz, { op: "query", query, as: "manager" }, STAFF));
+    expect(bare.rows).toEqual([]);
+    expect(bare.warning).toMatch(/read session claims.*none were given for manager/);
+
+    // With them: what the manager's own session sees, and no warning.
+    const as = { userId: "manager", claims: { role: "manager" } };
+    const withClaims = await ok(api(jazz, { op: "query", query, as }, STAFF));
+    expect(withClaims.rows.map((row: any) => row.title)).toEqual(["the worker's"]);
+    expect(withClaims.warning).toBeUndefined();
+    // Its deep link carries the claims along.
+    expect(parseInspectorLink(new URL(withClaims.inspectorUrl).hash).as).toEqual(as);
+
+    // A refused write says why it may have been refused.
+    const write = await refused(
+      api(
+        jazz,
+        {
+          op: "write",
+          ops: [
+            {
+              kind: "insert",
+              table: "expenses",
+              values: { title: "x", owner: crypto.randomUUID() },
+            },
+          ],
+          as: "manager",
+        },
+        STAFF_WRITER,
+      ),
+    );
+    expect(write.message).toMatch(/none were given for manager/);
+
+    expect(
+      await refused(
+        api(jazz, { op: "query", query, as: { userId: "manager", claims: ["manager"] } }, STAFF),
+      ),
+    ).toMatchObject({ status: 400, error: "bad_request" });
+  });
+
+  it("doesn't warn when the app's permissions read no claims", async () => {
+    const { jazz } = await start();
+    await seed(jazz);
+    const asAlice = await ok(
+      api(jazz, { op: "query", query: { table: "todos" }, as: "alice" }, STAFF),
+    );
+    expect(asAlice.warning).toBeUndefined();
+  });
+});
