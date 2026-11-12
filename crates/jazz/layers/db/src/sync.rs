@@ -5580,8 +5580,12 @@ impl Inner {
             client.unavailable.insert(request);
         }
         client.arrived = true;
-        // Pulls this relay parked for its sessions are answered now.
-        client.relay_ready |= parked;
+        // Pulls this relay parked for its sessions are answered now, and so
+        // are its sessions' subscriptions that waited on these chunks: the
+        // tick re-runs them after this serving pass, so they go out on the
+        // one that follows. Without it they wait for an unrelated tick, which
+        // a host that ticks when asked never runs.
+        client.relay_ready |= parked || !self.sessions.is_empty();
         Ok(())
     }
 
