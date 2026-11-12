@@ -1894,6 +1894,28 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("resolves a gather(...) start column qualified by a relation's name as by its table", () => {
+    const seedOf = (start: Record<string, unknown>) => {
+      let relation: PermissionRelation | undefined;
+      definePermissions(app, ({ policy }) => {
+        relation = policy.teams.gather({
+          start,
+          step: ({ current }) =>
+            policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
+          maxDepth: 3,
+        });
+        return [];
+      });
+      return toAssertionRelExprForTest(relationToIr(relation!));
+    };
+    expect(seedOf({ "team_team_edgesViaChild_team.child_team": "team-a" })).toEqual(
+      seedOf({ "team_team_edges.child_team": "team-a" }),
+    );
+    expect(() => seedOf({ "nope.child_team": "team-a" })).toThrow(
+      /gather\(\.\.\.\) qualified start column "nope\.child_team": "nope" is neither a relation of "teams"/,
+    );
+  });
+
   it("keeps chained relation joins anchored to the preceding joined table", () => {
     let relation: PermissionRelation | undefined;
     definePermissions(app, ({ policy }) => {
