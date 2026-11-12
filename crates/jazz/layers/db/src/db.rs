@@ -696,6 +696,9 @@ struct Inner {
     pub(crate) as_written_mismatches: u64,
     /// Pending commits a rebase replayed (see `Db::rebase`).
     pub(crate) replayed_commits: u64,
+    /// Echoes a serving pass examined to match its images (see
+    /// `Db::echo_probes`).
+    pub(crate) echo_probes: u64,
     /// The global authority: what it settles is durable at `Global`.
     authority: bool,
     /// Every session but SYSTEM's must be pinned to a published bundle
@@ -1688,6 +1691,7 @@ impl Db {
                 reopenable: path.is_some(),
                 as_written_mismatches: 0,
                 replayed_commits: 0,
+                echo_probes: 0,
                 authority: false,
                 pins_required: false,
                 upstream_rejections: None,
