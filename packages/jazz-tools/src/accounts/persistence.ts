@@ -123,6 +123,24 @@ function decode(value: string | null): StoredAccounts {
 }
 
 const automaticInitializers = new WeakMap<AccountManager<JWTAuth>, () => Promise<AccountHandle>>();
+const forgottenReaders = new WeakMap<
+  AccountManager<JWTAuth>,
+  (account: string) => Promise<boolean>
+>();
+
+/**
+ * @internal Whether the store `accounts` keeps tombstones `account` (see
+ * `forgottenAccounts`): a manager that doesn't remember its backend user
+ * (`clearOnSignOut`) linked this guest to a user, so the account is theirs
+ * now. A guest another tab still holds in memory is then that user's
+ * account, and signs out as they do.
+ */
+export async function accountForgotten(
+  accounts: AccountManager<JWTAuth>,
+  account: string,
+): Promise<boolean> {
+  return (await forgottenReaders.get(accounts)?.(account)) ?? false;
+}
 
 /** @internal Select and adopt one durable root for automatic first startup. */
 export async function ensureAutomaticLocalFirst(
@@ -297,6 +315,9 @@ export async function prepareAccountManager(options: {
     }),
   });
   restoringStartup = false;
+  forgottenReaders.set(manager, async (account) =>
+    (decode(await options.store.read()).forgottenAccounts ?? []).includes(account),
+  );
   const superseded = async (): Promise<never> => {
     stored.selected = null;
     await save();

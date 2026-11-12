@@ -44,7 +44,7 @@ export async function createAccountManagerWithMinter(
       config.env ?? "dev",
       config.scope?.trim() ? accountAppId(config.scope.trim()) : undefined,
     );
-  return prepareAccountManager({
+  const manager = await prepareAccountManager({
     appId: scope,
     registry,
     store,
@@ -58,6 +58,26 @@ export async function createAccountManagerWithMinter(
     bearer: config.bearer,
     rememberBackendUser: options.rememberBackendUser,
   });
+  if (!config.store) browserSelectionKeys.set(manager, selectionKey(registry, config.env ?? "dev"));
+  return manager;
+}
+
+// The localStorage key each browser account manager keeps its selection under.
+const browserSelectionKeys = new WeakMap<object, string>();
+
+/**
+ * @internal Call `onChange` whenever another tab writes the selection the
+ * browser account manager `accounts` keeps (a `storage` event). A manager
+ * with a store of its own, or outside a browser page, never calls it.
+ */
+export function watchStoredSelection(accounts: object, onChange: () => void): () => void {
+  const key = browserSelectionKeys.get(accounts);
+  if (key === undefined || typeof window === "undefined") return () => {};
+  const listener = (event: StorageEvent) => {
+    if (event.key === key || event.key === null) onChange();
+  };
+  window.addEventListener("storage", listener);
+  return () => window.removeEventListener("storage", listener);
 }
 
 /**
@@ -193,6 +213,10 @@ function scrubEarlierSelection(key: string, previous: string | null, next: strin
  * earlier client kept, copied: the earlier key stays as it was, so that
  * client still finds it after a rollback.
  */
+function selectionKey(registry: string, env: string): string {
+  return `${SELECTION_PREFIX}${encodeURIComponent(registry)}:${encodeURIComponent(env)}`;
+}
+
 function browserAccountStore(registry: string, env: string, scope?: string): AccountStore {
   if (typeof localStorage === "undefined") {
     throw new Error("createAccountManager requires an AccountStore outside the browser");
@@ -200,7 +224,7 @@ function browserAccountStore(registry: string, env: string, scope?: string): Acc
   if (typeof navigator === "undefined" || !navigator.locks) {
     throw new Error("The browser account store requires Web Locks; supply an atomic AccountStore");
   }
-  const key = `${SELECTION_PREFIX}${encodeURIComponent(registry)}:${encodeURIComponent(env)}`;
+  const key = selectionKey(registry, env);
   const earlierKey = () => (scope === undefined ? null : earlierSelectionKey(scope, env));
   const current = () => localStorage.getItem(key) ?? earlierSelection(earlierKey());
   return {
