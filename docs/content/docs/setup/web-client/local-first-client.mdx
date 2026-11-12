@@ -162,10 +162,16 @@ module (`jazz-napi`) on the server. Tell your bundler to leave them alone:
 
     export default defineConfig({
       // plugins: your framework's plugin (React, Vue, Svelte, Solid, SvelteKit) ...
-      // Load the Wasm as a real module instead of pre-bundling it.
-      optimizeDeps: { exclude: ["jazz-wasm"] },
+      // Serve Jazz and its Wasm as they are instead of pre-bundling them.
+      optimizeDeps: { exclude: ["jazz-tools", "jazz-wasm"] },
     });
     ```
+
+    Exclude both. Jazz finds its worker and Wasm files relative to its own modules; under
+    `vite dev`, a pre-bundled `jazz-tools` looks for them in Vite's pre-bundle folder, the dev
+    server answers with your `index.html`, and after about 10 seconds the upgrade gives up ("Shared
+    browser runtime did not issue a foreground node lease") and the app stays on the thin client.
+    `vite build` isn't affected.
 
     It needs Vite 6 or later: Vite 5 answers the local-first chunk with a 500, "Vite is unable to
     parse the worker options as the value is not static". This is the same for React, Vue, Svelte,
