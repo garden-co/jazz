@@ -51,10 +51,16 @@ export const bundleSizeTokens = {
   "%bundle.wasmRaw%": (s: BundleSizes) => aboutMB(s.wasmRawBytes).replace(/^about /, ""),
 } as const;
 
+/** Fills every `%bundle.…%` token; an unknown one fails the build rather than reaching a page. */
 export function replaceBundleSizeTokens(text: string, sizes: BundleSizes) {
-  return text.replace(/%bundle\.(thin|wasm|wasmRaw)%/g, (token) =>
-    bundleSizeTokens[token as keyof typeof bundleSizeTokens](sizes),
-  );
+  return text.replace(/%bundle\.[A-Za-z]*%?/g, (token) => {
+    const format = bundleSizeTokens[token as keyof typeof bundleSizeTokens];
+    if (!format)
+      throw new Error(
+        `Unknown bundle size token ${token}: use ${Object.keys(bundleSizeTokens).join(", ")}.`,
+      );
+    return format(sizes);
+  });
 }
 
 let loaded: Promise<BundleSizes> | undefined;
@@ -65,14 +71,17 @@ export function loadBundleSizes(fetchImpl: typeof fetch = fetch): Promise<Bundle
       const response = await fetchImpl(process.env.BUNDLE_SIZES_URL || bundleSizesUrl, {
         signal: AbortSignal.timeout(10_000),
       });
-      if (response.ok) {
-        const sizes = parseBundleSizes(await response.json());
-        if (sizes) return sizes;
-      }
-    } catch {
-      // Offline or not published yet: the committed copy below.
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const sizes = parseBundleSizes(await response.json());
+      if (!sizes) throw new Error("malformed bundle-sizes.json");
+      return sizes;
+    } catch (error) {
+      const sizes = parseBundleSizes(fallback)!;
+      console.warn(
+        `Bundle sizes: using the committed fallback (jazz-tools ${sizes.jazzToolsVersion}, measured ${sizes.measuredAt.slice(0, 10)}); the published measurement couldn't be read: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return sizes;
     }
-    return parseBundleSizes(fallback)!;
   })();
   return loaded;
 }

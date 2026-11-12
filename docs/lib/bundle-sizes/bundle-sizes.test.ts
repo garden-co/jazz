@@ -30,4 +30,14 @@ describe("bundle sizes", () => {
       ),
     ).toBe("thin about 150 KB, Wasm about 3.1 MB (8.8 MB raw)");
   });
+
+  it("fails on an unknown or broken token", () => {
+    const sizes = parseBundleSizes(fallback)!;
+    expect(() => replaceBundleSizeTokens("about %bundle.thni%", sizes)).toThrow(
+      /Unknown bundle size token %bundle\.thni%/,
+    );
+    expect(() => replaceBundleSizeTokens("about %bundle.thin and more", sizes)).toThrow(
+      /Unknown bundle size token/,
+    );
+  });
 });

@@ -7,7 +7,7 @@ import { JazzProvider } from "jazz-tools/react";
 export default function Page() {
   const [count, setCount] = useState(0);
   return (
-    <JazzProvider signedOut={<p>Signed out</p>}>
+    <JazzProvider config={{ serverUrl: "/jazz" }} signedOut={<p>Signed out</p>}>
       <button onClick={() => setCount(count + 1)}>{count}</button>
     </JazzProvider>
   );

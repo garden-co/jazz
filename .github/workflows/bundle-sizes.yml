@@ -4,6 +4,10 @@ name: Bundle sizes
 # engine's size, and uploads bundle-sizes.json to the `perf-timeline-data`
 # pre-release. The docs build reads it for the sizes the pages quote. See
 # dev/benchmarks/bundle-size/README.md.
+#
+# Two jobs: `measure` installs and builds code from npm (unlocked: whatever
+# the published jazz-tools and Next.js resolve to) with a read-only token;
+# `upload` installs nothing and is the only job that can write.
 on:
   # A human publishing the GitHub release, and the publish workflow finishing
   # (its tag push uses the Actions token, which triggers no workflows).
@@ -15,11 +19,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "jazz-tools version to measure (default: the npm `latest` tag)"
+        description: "jazz-tools version to measure, e.g. 2.0.0-alpha.61 (default: the npm `latest` tag)"
         required: false
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: bundle-sizes
@@ -35,6 +39,8 @@ jobs:
       (github.event_name != 'release' || github.event.release.tag_name != 'perf-timeline-data')
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -48,17 +54,50 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           version="${VERSION:-$(npm view jazz-tools@latest version)}"
+          if ! [[ "$version" =~ ^2\.0\.0-alpha\.[0-9]+$ ]]; then
+            echo "::error::not a jazz-tools 2.0 alpha version: $version"
+            exit 1
+          fi
           node dev/benchmarks/bundle-size/measure.mjs "$version" "$RUNNER_TEMP/bundle-sizes.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bundle-sizes
+          path: ${{ runner.temp }}/bundle-sizes.json
+          if-no-files-found: error
+          retention-days: 7
+
+  upload:
+    needs: measure
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: bundle-sizes
+          path: sizes
+      - name: Check the measurement
+        run: |
+          jq -e '
+            (.jazzToolsVersion | type == "string" and test("^2\\.0\\.0-alpha\\.[0-9]+$")) and
+            (.thinClientAddedGzipBytes | type == "number" and . > 0) and
+            (.wasmGzipBytes | type == "number" and . > 0) and
+            (.wasmRawBytes | type == "number" and . > 0)
+          ' sizes/bundle-sizes.json
       - name: Ensure the data release exists
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           gh release view "$SNAPSHOT_TAG" >/dev/null 2>&1 ||
             gh release create "$SNAPSHOT_TAG" --prerelease --latest=false \
-              --target "${{ github.event.repository.default_branch }}" \
+              --target "$DEFAULT_BRANCH" \
               --title "Benchmark timeline data" \
-              --notes "Machine-updated data for the docs benchmark timeline. Not a Jazz release. Built by .github/workflows/perf-timeline-snapshot.yml."
+              --notes "Machine-updated data for the docs (benchmark timeline, bundle sizes). Not a Jazz release. Built by .github/workflows/perf-timeline-snapshot.yml and bundle-sizes.yml."
       - name: Upload
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$SNAPSHOT_TAG" --clobber "$RUNNER_TEMP/bundle-sizes.json"
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$SNAPSHOT_TAG" --clobber sizes/bundle-sizes.json
