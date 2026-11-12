@@ -17,7 +17,12 @@ afterEach(() => vi.useRealTimers());
 
 async function setup(
   initial: AccountHandle | undefined,
-  options: { noBackend?: boolean; clearOnSignOut?: boolean; visible?: boolean } = {},
+  options: {
+    noBackend?: boolean;
+    clearOnSignOut?: boolean;
+    visible?: boolean;
+    forgotten?: (account: AccountHandle) => Promise<boolean>;
+  } = {},
 ) {
   let backendUser: AccountHandle | null = null;
   const events: string[] = [];
@@ -90,6 +95,7 @@ async function setup(
       reconnectBackoffMs: 20,
       refusedConfirmMs: 30,
       notFoundRetryMs: 10,
+      forgotten: options.forgotten,
     },
   );
   return {
@@ -163,6 +169,43 @@ it("keeps a local-first guest when the backend says no one is signed in", async 
   expect(t.session.getSnapshot().account?.identity.subject).toBe("alice");
   // The guest's storage is kept; only a backend user is signed out on a switch.
   expect(t.events).toEqual(["close:guest"]);
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("signs out, and wipes with clearOnSignOut, a guest another tab linked once no one is signed in", async () => {
+  // Another tab linked this guest to Kim (her sign-up) and forgot it: the
+  // account is hers, so it goes when she signs out, as hers would.
+  let forgotten = false;
+  const t = await setup(guest, { clearOnSignOut: true, forgotten: async () => forgotten });
+  await settle();
+  expect(t.session.getSnapshot()).toMatchObject({ status: "ready", account: guest });
+
+  forgotten = true;
+  // One signed-out answer is confirmed first, as for a backend user.
+  t.probe.mockResolvedValueOnce(null).mockResolvedValueOnce(user("kim").identity);
+  t.otherTab();
+  await settle(30);
+  expect(t.session.getSnapshot()).toMatchObject({ status: "ready", account: guest });
+  // A refused sync link alone never signs it out.
+  t.watch.authRefused();
+  await settle(5);
+  expect(t.session.getSnapshot()).toMatchObject({ status: "ready", account: guest });
+
+  t.otherTab();
+  await settle(30);
+  expect(t.session.getSnapshot()).toMatchObject({ status: "signed-out", account: undefined });
+  expect(t.events).toEqual(["wipe:guest", "close:guest"]);
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("signs out a guest another tab linked at once on reauthenticate", async () => {
+  const t = await setup(guest, { forgotten: async (account) => account === guest });
+  await settle();
+  expect(t.session.getSnapshot()).toMatchObject({ status: "ready", account: guest });
+  await t.watch.reauthenticate();
+  expect(t.session.getSnapshot().status).toBe("signed-out");
   t.watch.stop();
   await t.session.close();
 });

@@ -1,5 +1,5 @@
 import { AccountAuthError, requestBackendUser } from "../accounts/registry-client.js";
-import type { AccountIdentity } from "../accounts/state.js";
+import type { AccountHandle, AccountIdentity } from "../accounts/state.js";
 import type { SyncStatus } from "../runtime/sync-status.js";
 import { watchBackendUser, type BackendUser, type BackendWatchEvents } from "./backend-watch.js";
 import type { JazzSession } from "./state.js";
@@ -42,6 +42,13 @@ export function followUser(options: {
   fetch?: typeof fetch;
   /** See `linkGuestOnSignUp` on `createJazzClient`. Default true. */
   linkGuest?: boolean;
+  /** See `forgotten` on `watchBackendUser`. */
+  forgotten?: (account: AccountHandle) => Promise<boolean>;
+  /**
+   * Call `changed` when another tab changes this device's accounts (a
+   * `storage` event), so a guest it forgot asks the backend at once.
+   */
+  watchAccounts?: (changed: () => void) => () => void;
 }) {
   return <Client>(session: JazzSession<Client>) => decorate(session, options);
 }
@@ -80,6 +87,8 @@ function decorate<Client>(
     events: BackendWatchEvents;
     fetch?: typeof fetch;
     linkGuest?: boolean;
+    forgotten?: (account: AccountHandle) => Promise<boolean>;
+    watchAccounts?: (changed: () => void) => () => void;
   },
 ): Pick<UserFollowingSession<Client>, "reauthenticate" | "linkWithBackend" | "close"> {
   const watch = watchBackendUser(
@@ -88,6 +97,7 @@ function decorate<Client>(
     options.events,
     {
       linkGuest: options.linkGuest,
+      forgotten: options.forgotten,
       reconnect: () =>
         void (session.getSnapshot().client as ObservedClient | undefined)?.db
           ?.reconnect?.()
@@ -111,6 +121,20 @@ function decorate<Client>(
   };
   const unsubscribe = session.subscribe(followClient);
   followClient();
+  // Another tab forgot this guest (it linked it, and may have signed that
+  // user out since): ask the backend now rather than on the next focus.
+  const { forgotten } = options;
+  const stopAccounts = forgotten
+    ? options.watchAccounts?.(() => {
+        const account = session.getSnapshot().account;
+        if (account?.identity.issuer !== "urn:jazz:local-first") return;
+        void forgotten(account)
+          .then((gone) => {
+            if (gone && session.getSnapshot().account === account) return watch.reauthenticate();
+          })
+          .catch(() => {});
+      })
+    : undefined;
   const close = session.close;
   const link = session.linkWithBackend;
   return {
@@ -128,6 +152,7 @@ function decorate<Client>(
       watch.stop();
       unsubscribe();
       stopStatus?.();
+      stopAccounts?.();
       return close();
     },
   };
