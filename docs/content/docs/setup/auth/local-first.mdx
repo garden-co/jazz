@@ -26,14 +26,21 @@ for signed-out requests (an app with no sign-in passes `authenticate: acceptLoca
 Guests are refused otherwise. With `serverUrl: null`, Jazz stays on the device: no backend, one
 local-first account per browser profile.
 
-Session creation prepares crypto, restores usable saved selection, or creates a local-first account. Browser sessions retain signing roots in browser storage. Native hosts use an atomic, protected `AccountStore`. Creating a local-first account works offline once runtime assets are available. A first visit made while your backend is unreachable is not safe yet: the
+Jazz creates the local-first account on the device, or opens an existing one. Provided the app has fully loaded at least once, new local-first accounts can be created offline. In a browser, the account secret is kept in browser storage. On Expo, Jazz stores local-first account secrets using SecureStore. In a bare React Native app, provide your own atomic `AccountStore` backed by protected device storage. A first visit made while your backend is unreachable is not safe yet: the
 client stays thin, and a guest write made then can be lost on reload.
 
-Framework `JazzSessionProvider` and session hooks expose the same lifecycle. Account commands run outside contexts after ordinary graceful shutdown, which Jazz coordinates automatically. See [Lifecycle](/docs/setup/auth/backend#lifecycle). Lower-level account handles and client factories remain available when an app deliberately owns its own context lifecycle.
+If you're using a framework, Jazz provides `JazzSessionProvider` and hooks for working with the current account. See [Lifecycle](/docs/setup/auth/backend#lifecycle) for details.
 
 ## Backing up and restoring the secret
 
-A signing root is a credential. Possession allows acting as its local-first identity. Jazz represents it as `jazz-auth-v1:` followed by 43 unpadded base64url characters encoding 32 random bytes. Export it explicitly from a live local-first handle:
+Local-first accounts are accessed using a secret, which is held by the account owner. The secret is
+32 automatically generated random bytes. If these bytes are lost, the user can't log back into
+their account without a linked sign-in method. You can convert the secret into a recovery phrase
+that users can back up and use to regain access if the secret is deleted from the device's storage.
+
+The recovery phrase is like a password: anyone who has it can log into the account. Keep it out of
+logs, and warn the user that it's sensitive. `exportLocalFirstSecret` returns the secret as a
+`jazz-auth-v1:…` string:
 
 ```ts
 import { exportLocalFirstSecret } from "jazz-tools";
@@ -43,17 +50,21 @@ const secret = exportLocalFirstSecret(jazz.getSnapshot().account!);
 const phrase = RecoveryPhrase.fromSecret(secret);
 ```
 
-The recovery phrase encodes the same root; it is not a second password. Keep it out of logs and ordinary account-state UI. Export fails for external or logged-out handles, and secrets never appear in snapshots. Signing roots remain retained after logout so explicit recovery can restore them.
+You can only export the secret while the local-first account is signed in. Logging out doesn't delete the secret from the device, so the account can still be restored later.
 
 ### Recovery passphrase
 
-Restore through the session; it owns the graceful handoff:
+To restore a local-first account from a recovery phrase, convert the phrase back into a secret and
+pass it to `restoreLocalFirst`:
 
 ```ts
 await jazz.restoreLocalFirst(RecoveryPhrase.toSecret(userInput));
 ```
 
-Session account transitions wait for pending writes to sync before replacing the client. Ordinary `jazz.close()` preserves local durability without requiring online sync.
+If the phrase is invalid, `RecoveryPhrase.toSecret` throws a `RecoveryPhraseError` whose `code` is
+`invalid-word`, `invalid-checksum` or `invalid-length`, so handle it in your sign-in form. See
+[Lifecycle](/docs/setup/auth/backend#lifecycle) for what happens to pending writes when the account
+changes.
 
 ### Passkey backup
 
@@ -69,7 +80,14 @@ const backup = new BrowserPasskeyBackup({
 await backup.backup(exportLocalFirstSecret(jazz.getSnapshot().account!), "My account");
 ```
 
-`await backup.restore()` returns the root for `await jazz.restoreLocalFirst(secret)`. Pin the canonical production hostname when configuring a passkey backup; passkey availability and synchronization depend on the user's platform.
+Pass the value returned by `await backup.restore()` to `await jazz.restoreLocalFirst(secret)` to
+log in to the account.
+
+Passkey support and sync depend on the user's platform. Passkeys are associated with a domain: if
+`appHostname` isn't set correctly, the user may not be offered the passkey when restoring their
+account, or may not be able to create it. Without `appHostname`, the passkey belongs to the current
+page's hostname, so a passkey made on a preview URL won't work on production. Set it to your
+production hostname.
 
 ## Signing up later
 
@@ -88,11 +106,4 @@ accounts. See [Other / Custom](/docs/setup/auth/custom#guests-who-sign-up) and
 
 Use `session.user`, the account, for stable ownership. Use `session.identity`, the exact issuer and subject, when a policy deliberately distinguishes linked identities. A local-first identity is authenticated by its signing key; it is not an unauthenticated guest.
 
-Claims from your backend can add application requirements, such as a verified role. They cannot replace the account assignment. Define those checks in [Declarative Permissions](/docs/schemas/policies), alongside ownership policies.
-
-## Use it without Jazz
-
-The keys, tokens, recovery phrases and passkey backup live in a self-contained module inside
-`jazz-tools` (re-exported as `jazz-tools/passphrase` and `jazz-tools/passkey-backup`) that doesn't
-depend on the rest of Jazz. Standalone packaging, so other apps can use it directly, is planned
-after alpha.60.
+You can also use claims returned by your backend's `authenticate` function in your permission policies. For example, you could give users with an admin role access to additional data. See [Declarative Permissions](/docs/schemas/policies).

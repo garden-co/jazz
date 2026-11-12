@@ -30,7 +30,13 @@ import type {
   TxId,
 } from "../runtime/client.js";
 import { parseSnapshotRef, type SnapshotRef } from "../runtime/snapshot-ref.js";
-import { CONNECTED, CONNECTING, offlineLink, type LinkStatus } from "../runtime/sync-status.js";
+import {
+  CONNECTED,
+  CONNECTING,
+  offlineLink,
+  type LinkStatus,
+  type UploadStatus,
+} from "../runtime/sync-status.js";
 import { streamingChunks } from "../runtime/streaming-source.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import { writeRow } from "../runtime/write-row.js";
@@ -216,6 +222,8 @@ type Write = {
   confirmed: boolean;
   /** The rows it wrote on the main branch, for {@link ThinRuntime.handOffWrittenRows}. */
   rows: readonly WrittenRow[];
+  /** When it was made, in Unix ms. */
+  madeAt: number;
 };
 
 /** A row a thin write touched. */
@@ -271,6 +279,9 @@ export class ThinRuntime implements Runtime {
   private nextWriteSeq = 1;
   /** Writes the server has not answered yet. */
   private unanswered = 0;
+  /** Writes the server rejected, and the latest rejection. */
+  private rejected = 0;
+  private lastRejection: UploadStatus["lastRejection"] = null;
   private readonly syncStatusListeners = new Set<() => void>();
   private readonly transactions = new Map<OpenTransactionId, OpenTransaction>();
   private mutationErrorCallback?: (event: MutationErrorEvent) => void;
@@ -1262,6 +1273,22 @@ export class ThinRuntime implements Runtime {
     return this.unanswered;
   }
 
+  /** The writes waiting for the server's answer, and what it rejected, for the sync status. */
+  uploadStatus(): UploadStatus {
+    let oldestPendingAt: number | null = null;
+    for (const write of this.writes.values()) {
+      if (write.answered) continue;
+      if (oldestPendingAt === null || write.madeAt < oldestPendingAt)
+        oldestPendingAt = write.madeAt;
+    }
+    return {
+      pending: this.unanswered,
+      oldestPendingAt,
+      rejected: this.rejected,
+      lastRejection: this.lastRejection,
+    };
+  }
+
   /** Observe changes of {@link pendingUploadCount} and {@link upstreamLinkStatus}. */
   onSyncStatusChange(listener: () => void, signal: AbortSignal): void {
     if (signal.aborted) return;
@@ -1321,6 +1348,7 @@ export class ThinRuntime implements Runtime {
       answered: false,
       confirmed: false,
       rows,
+      madeAt: Date.now(),
       done: Promise.resolve(),
     };
     // A standalone write goes under this runtime's next write id, so it can
@@ -1349,6 +1377,11 @@ export class ThinRuntime implements Runtime {
       },
       (error: unknown) => {
         const failure = error instanceof Error ? error : new Error(String(error));
+        // The sync status counts a rejection whether or not a wait takes it.
+        if (failure instanceof ThinRemoteError) {
+          this.rejected++;
+          this.lastRejection = { code: failure.code, message: failure.message, at: Date.now() };
+        }
         // A failure no wait observes is reported once, like a local-first
         // client's rejected write.
         queueMicrotask(() => {

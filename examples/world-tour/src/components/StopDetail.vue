@@ -10,7 +10,11 @@
           {{ stop.venue?.city }}, {{ stop.venue?.country }} · {{ formatLongDate(stop.date) }}
         </p>
       </div>
-      <p v-if="stop.publicDescription">{{ stop.publicDescription }}</p>
+      <div
+        v-if="stop.publicDescription"
+        class="markdown"
+        v-html="renderMarkdown(stop.publicDescription)"
+      />
       <dl class="facts">
         <template v-if="stop.venue?.capacity">
           <dt>Capacity</dt>
@@ -18,7 +22,7 @@
         </template>
         <template v-if="note">
           <dt>Private notes</dt>
-          <dd>{{ note.body }}</dd>
+          <dd class="markdown" v-html="renderMarkdown(note.body)" />
         </template>
       </dl>
       <div class="actions">
@@ -43,6 +47,7 @@
       <label class="field">
         <span class="field__label">Public description</span>
         <textarea v-model="draft.description" class="input" rows="3" />
+        <span class="field__hint">Markdown: **bold**, *italic*, [link](https://…)</span>
       </label>
       <label class="field">
         <span class="field__label">Private notes</span>
@@ -63,6 +68,8 @@ import { computed, reactive, ref } from "vue";
 import { useAll } from "jazz-tools/vue";
 import { app, type StopStatus, type StopWithVenue } from "../../schema.js";
 import { formatLongDate, fromDateInput, statusLabels, toDateInput } from "../lib/format.js";
+import { renderMarkdown } from "../lib/markdown.js";
+import { saveStopEdit, type OpenedTexts } from "../lib/stop-edit.js";
 import { reportWriteError } from "../lib/write-errors.js";
 import Button from "./ui/Button.vue";
 
@@ -74,34 +81,31 @@ const note = computed(() => notes.value?.[0] ?? null);
 
 const editing = ref(false);
 const draft = reactive({ date: "", status: "confirmed" as StopStatus, description: "", notes: "" });
+// The texts as the form opened them: saving writes the form's texts as edits
+// of these (see saveStopEdit).
+const opened: OpenedTexts = { description: "", notes: "" };
 
 function startEdit() {
+  opened.description = props.stop.publicDescription;
+  opened.notes = note.value?.body ?? "";
   Object.assign(draft, {
     date: toDateInput(props.stop.date),
     status: props.stop.status,
-    description: props.stop.publicDescription,
-    notes: note.value?.body ?? "",
+    description: opened.description,
+    notes: opened.notes,
   });
   editing.value = true;
 }
 
-// The stop and its private note change together, in one transaction.
 function save() {
-  const { id, bandId, date } = props.stop;
-  const existing = note.value;
   // Keep the show's time of day when only the day changes.
   const day = fromDateInput(draft.date);
-  day.setHours(date.getHours(), date.getMinutes());
-  const body = draft.notes.trim();
-  db.transaction((tx) => {
-    tx.update(app.stops, id, {
-      date: day,
-      status: draft.status,
-      publicDescription: draft.description,
-    });
-    if (existing && body) tx.update(app.stopNotes, existing.id, { body });
-    else if (existing) tx.delete(app.stopNotes, existing.id);
-    else if (body) tx.insert(app.stopNotes, { stopId: id, bandId, body });
+  day.setHours(props.stop.date.getHours(), props.stop.date.getMinutes());
+  saveStopEdit(db, props.stop, note.value, opened, {
+    date: day,
+    status: draft.status,
+    description: draft.description,
+    notes: draft.notes,
   }).catch(reportWriteError);
   editing.value = false;
 }

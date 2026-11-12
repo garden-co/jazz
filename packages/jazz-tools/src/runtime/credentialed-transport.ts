@@ -1,5 +1,6 @@
 import type { AppBearer } from "../accounts/enrollment.js";
 import type { BrowserWebSocket, WebSocketConstructor } from "./native-runtime/websocket.js";
+import { httpStreamFallbackWebSocket } from "./native-runtime/http-stream-socket.js";
 
 /** A backend client's credential: its workload's OIDC token, or how to get a fresh one. */
 export type BackendClientCredential = string | (() => string | Promise<string>);
@@ -8,12 +9,20 @@ export type BackendClientCredential = string | (() => string | Promise<string>);
  * `fetch` and `WebSocket` that send `credential` as `Authorization: Bearer`
  * to `serverUrl`'s origin (and nowhere else), fetching a fresh token for
  * every request and socket. For backend clients: Node processes that sync
- * through an app's main backend with their workload's token.
+ * through an app's main backend with their workload's token. Like a
+ * browser's same-origin socket, the `WebSocket` gives way to the main
+ * backend's HTTP stream where that backend can't upgrade sockets; a socket
+ * that fails otherwise says why with `describeFailedUpgrade`, when given.
  */
 export function credentialedTransport(
   serverUrl: string,
   credential: BackendClientCredential,
   base: { fetch: typeof fetch; WebSocket: unknown } = globalThis,
+  describeFailedUpgrade?: (
+    url: string,
+    headers: Record<string, string>,
+    signal: AbortSignal,
+  ) => Promise<string | undefined>,
 ): { fetch: typeof fetch; WebSocket: WebSocketConstructor } {
   const origin = new URL(serverUrl.replace(/^ws/, "http")).origin;
   const token = async () => {
@@ -40,13 +49,24 @@ export function credentialedTransport(
     options?: { headers?: Record<string, string> },
   ) => BrowserWebSocket;
   if (typeof Base !== "function") throw new Error("Jazz: this platform has no WebSocket");
+  const socket = lazySocket(
+    Base,
+    (url) => (forOrigin(url) ? token() : null),
+    "the backend client's credential",
+  );
   return {
     fetch: credentialedFetch,
-    WebSocket: lazySocket(
-      Base,
-      (url) => (forOrigin(url) ? token() : null),
-      "the backend client's credential",
-    ),
+    WebSocket: httpStreamFallbackWebSocket(socket, {
+      fetch: credentialedFetch,
+      describeFailedUpgrade:
+        describeFailedUpgrade &&
+        (async (url, signal) =>
+          describeFailedUpgrade(
+            url,
+            forOrigin(url) ? { authorization: `Bearer ${await token()}` } : {},
+            signal,
+          )),
+    }),
   };
 }
 

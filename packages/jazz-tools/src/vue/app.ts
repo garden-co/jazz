@@ -19,11 +19,15 @@ import type { JazzSessionActions } from "../session/state.js";
 import type { AccountDbConfig } from "../accounts/context.js";
 import type { JazzClient } from "./create-jazz-client.js";
 import { JazzClientProvider, LegacyJazzProvider } from "./provider.js";
+import {
+  refuseAutoAttachDevTools,
+  type NoAutoAttachDevTools,
+} from "../runtime/removed-provider-props.js";
 
-export type JazzProviderProps = Partial<JazzClientConfig> & {
-  config?: AccountDbConfig;
-  autoAttachDevTools?: boolean;
-};
+export type JazzProviderProps = Partial<JazzClientConfig> &
+  NoAutoAttachDevTools & {
+    config?: AccountDbConfig;
+  };
 export type UseJazzAuth = {
   readonly snapshot: Readonly<ShallowRef<JazzAppSnapshot<JazzClient>>>;
   readonly sessionActions: JazzSessionActions;
@@ -56,20 +60,11 @@ export const JazzProvider = defineComponent({
     // a boolean; left out, each keeps the session's own default.
     clearOnSignOut: { type: Boolean, default: undefined },
     linkGuestOnSignUp: { type: Boolean, default: undefined },
-    autoAttachDevTools: { type: Boolean, default: true },
   },
   setup(props, { slots, attrs }) {
+    refuseAutoAttachDevTools("JazzProvider", attrs);
     if (props.config)
-      return () =>
-        h(
-          LegacyJazzProvider,
-          {
-            ...attrs,
-            config: props.config!,
-            autoAttachDevTools: props.autoAttachDevTools,
-          },
-          slots,
-        );
+      return () => h(LegacyJazzProvider, { ...attrs, config: props.config! }, slots);
     // Vue passes undeclared attributes as written: `driver` stays `driver`,
     // but a kebab-case `log-level` must still reach the client as `logLevel`.
     const options: Record<string, unknown> = {};
@@ -116,10 +111,7 @@ export const JazzProvider = defineComponent({
       if (state.status === "ready" && state.client)
         return h(
           JazzClientProvider,
-          {
-            client: state.client,
-            autoAttachDevTools: props.autoAttachDevTools,
-          },
+          { client: state.client },
           { default: slots.default, fallback: loading },
         );
       if (state.status === "signed-out") return slots.signedOut?.() ?? null;

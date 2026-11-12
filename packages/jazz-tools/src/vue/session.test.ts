@@ -7,7 +7,6 @@ import { JazzSessionProvider, useJazzSession } from "./session.js";
 import { useJazzClient } from "./provider.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
 vi.mock("../web/create-jazz-client.js", () => ({ openJazzClient: vi.fn() }));
-vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
 const account = Object.freeze({
   id: "local",
   identity: { issuer: "test", subject: "local" },
@@ -70,7 +69,7 @@ describe("Vue session provider", () => {
       render: () =>
         h(
           JazzSessionProvider,
-          { session, autoAttachDevTools: false },
+          { session },
           { default: () => h(Child), fallback: () => h(Fallback) },
         ),
     });
@@ -91,12 +90,7 @@ describe("Vue session provider", () => {
   it("unmount releases an in-flight detach without closing the caller session", async () => {
     const { session, client } = await fixture();
     const app = createApp({
-      render: () =>
-        h(
-          JazzSessionProvider,
-          { session, autoAttachDevTools: false },
-          { default: () => h("p", "active") },
-        ),
+      render: () => h(JazzSessionProvider, { session }, { default: () => h("p", "active") }),
     });
     app.mount(document.createElement("div"));
     await flush();

@@ -435,7 +435,7 @@ function admissionManager(
   config: Record<string, unknown> = {},
 ) {
   let pinned = true;
-  const error = new Error(
+  let error = new Error(
     heldByAnotherSignIn
       ? BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN
       : "incompatible persistent browser configuration",
@@ -447,12 +447,14 @@ function admissionManager(
     runtimeSource: {
       createBrowserWorkerConnection: vi.fn(() => {
         const rejected = pinned;
+        const refusal = error;
+        const held = heldByAnotherSignIn;
         const connection = {
           ready: async () => {
-            if (rejected) throw error;
+            if (rejected) throw refusal;
           },
           canRetryInitialConfigurationAdmission: () => rejected && retryable,
-          waitsForAnotherSignIn: () => rejected && heldByAnotherSignIn,
+          waitsForAnotherSignIn: () => rejected && held,
           shutdown: vi.fn(async () => undefined),
         } as unknown as BrowserWorkerConnection & { shutdown: ReturnType<typeof vi.fn> };
         connections.push(connection);
@@ -474,6 +476,11 @@ function admissionManager(
     error,
     unpin: () => {
       pinned = false;
+    },
+    /** Later attempts are refused for another reason than a held store. */
+    refuseOtherwise: (other: Error) => {
+      error = other;
+      heldByAnotherSignIn = false;
     },
   };
 }
@@ -554,6 +561,61 @@ describe("Browser configuration admission retries", () => {
       expect(connections.length).toBeGreaterThan(attempts);
       expect(status()).not.toMatchObject({ state: "offline" });
       await expect(manager.ensureReady("runtime")).resolves.toBeUndefined();
+    } finally {
+      host.isShuttingDown = true;
+      await manager.shutdown().catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops reporting a held store once a later attempt is refused for another reason", async () => {
+    vi.useFakeTimers();
+    const { manager, host, connections, refuseOtherwise } = admissionManager(true, true);
+    const status = () =>
+      (manager as unknown as { transportLinkStatus(): unknown }).transportLinkStatus();
+    try {
+      const waiting = manager.ensureReady("runtime");
+      const failed = expect(waiting).rejects.toSatisfy(isStoreHeldByAnotherTabError);
+      await vi.advanceTimersByTimeAsync(
+        BrowserConnectionManager.HELD_BY_ANOTHER_TAB_PATIENCE_MS + 1_000,
+      );
+      await failed;
+      expect(status()).toEqual({ state: "offline", reason: "held-by-another-tab", retrying: true });
+      // The other tab let go, but this build's configuration no longer fits
+      // the store (another deploy upgraded it).
+      const other = new Error("incompatible persistent browser configuration");
+      refuseOtherwise(other);
+      const attempts = connections.length;
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(connections.length).toBeGreaterThan(attempts);
+      expect(status()).toEqual({ state: "offline", reason: "stopped", retrying: false });
+      await expect(manager.ensureReady("runtime")).rejects.toBe(other);
+    } finally {
+      host.isShuttingDown = true;
+      await manager.shutdown().catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps reporting a held store when a retry meets an unresponsive worker", async () => {
+    vi.useFakeTimers();
+    const { manager, host, connections, refuseOtherwise } = admissionManager(true, true);
+    const status = () =>
+      (manager as unknown as { transportLinkStatus(): unknown }).transportLinkStatus();
+    try {
+      const failed = expect(manager.ensureReady("runtime")).rejects.toSatisfy(
+        isStoreHeldByAnotherTabError,
+      );
+      await vi.advanceTimersByTimeAsync(
+        BrowserConnectionManager.HELD_BY_ANOTHER_TAB_PATIENCE_MS + 1_000,
+      );
+      await failed;
+      // A dead worker says nothing about whether the other tab let go.
+      refuseOtherwise(new BrowserWorkerUnresponsiveError("worker stopped responding"));
+      const attempts = connections.length;
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(connections.length).toBeGreaterThan(attempts);
+      expect(status()).toEqual({ state: "offline", reason: "held-by-another-tab", retrying: true });
     } finally {
       host.isShuttingDown = true;
       await manager.shutdown().catch(() => undefined);
@@ -670,7 +732,9 @@ describe("BrowserConnectionManager.shutdown", () => {
         expect(outcome).toBe(error);
         expect(fixture.liveClientAtRetirement()).toBe(false);
         expect(fixture.connection.flushLocal).not.toHaveBeenCalled();
-        expect(fixture.connection.shutdown).toHaveBeenCalledOnce();
+        // Once when its failure was observed (releasing its page lock), once
+        // by teardown; a connection's shutdown is idempotent.
+        expect(fixture.connection.shutdown).toHaveBeenCalledTimes(2);
         expect(fixture.disposeTelemetry).toHaveBeenCalledOnce();
         expect(fixture.messages).not.toContain("return-foreground-node-lease");
         expect(() => fixture.manager.getClient({})).toThrow("shut down");
@@ -1164,6 +1228,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     const secondReady = deferred();
     const first = {
       ready: vi.fn(() => firstReady.promise),
+      shutdown: vi.fn(async () => undefined),
       reconnect: vi.fn(async () => undefined),
       waitForServerConnection: vi.fn(async () => undefined),
       waitForPendingWrites: vi.fn(async () => undefined),
@@ -1326,9 +1391,27 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     expect(manager.isExplicitlyOffline()).toBe(false);
   });
 
+  it("lets go of a failed follower's page lock even if the tab never reconnects", async () => {
+    const fixture = await leasedManagerFixture();
+    try {
+      expect(fixture.connection.shutdown).not.toHaveBeenCalled();
+      fixture.fail(new Error("Protocol: follower port closed"));
+      await Promise.resolve();
+      // Shut down at once (closing its port and releasing its liveness lock),
+      // with no reconnect and no replacement connection.
+      expect(fixture.connection.shutdown).toHaveBeenCalledOnce();
+      expect(fixture.createConnection).toHaveBeenCalledOnce();
+    } finally {
+      fixture.allowFinish();
+      fixture.host.isShuttingDown = true;
+      await fixture.manager.shutdown().catch(() => undefined);
+    }
+  });
+
   it("reacquires a fresh follower after a terminal follower failure", async () => {
     const first = {
       ready: vi.fn(async () => undefined),
+      shutdown: vi.fn(async () => undefined),
       reconnect: vi.fn(async () => undefined),
       waitForServerConnection: vi.fn(async () => undefined),
       waitForPendingWrites: vi.fn(async () => undefined),
@@ -1375,6 +1458,8 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     await manager.reconnect();
 
     expect(host.runtimeSource.createBrowserWorkerConnection).toHaveBeenCalledTimes(2);
+    // The failed follower is closed, so its page lock no longer keeps it attached.
+    expect(first.shutdown).toHaveBeenCalledOnce();
     expect(first.reconnect).not.toHaveBeenCalled();
     expect(second.reconnect).toHaveBeenCalledOnce();
     await expect(manager.ensureReady("server")).resolves.toBeUndefined();

@@ -18,7 +18,6 @@ import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js
 import type { JazzClient } from "./create-jazz-client.js";
 const mocks = vi.hoisted(() => ({ factory: vi.fn() }));
 vi.mock("../session/create-jazz-session.js", () => ({ createJazzClient: mocks.factory }));
-vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
 const flush = async () => {
   for (let i = 0; i < 20; i++) {
     await Promise.resolve();
@@ -71,7 +70,6 @@ describe("Vue ergonomic app", () => {
       render: () =>
         h(JazzProvider, {
           scope: "test",
-          autoAttachDevTools: false,
           "clear-on-sign-out": true,
           "link-guest-on-sign-up": false,
           "log-level": "debug",
@@ -95,7 +93,7 @@ describe("Vue ergonomic app", () => {
     const { session } = await fixture();
     mocks.factory.mockReset().mockResolvedValue(session);
     const app = createApp({
-      render: () => h(JazzProvider, { scope: "test", autoAttachDevTools: false }),
+      render: () => h(JazzProvider, { scope: "test" }),
     });
     app.mount(document.createElement("div"));
     await flush();
@@ -103,6 +101,22 @@ describe("Vue ergonomic app", () => {
     expect(config).not.toHaveProperty("clearOnSignOut");
     expect(config).not.toHaveProperty("linkGuestOnSignUp");
     app.unmount();
+  });
+
+  it("refuses the removed auto-attach-dev-tools attribute instead of passing it to the client", () => {
+    mocks.factory.mockReset();
+    for (const attrs of [{ autoAttachDevTools: false }, { "auto-attach-dev-tools": false }]) {
+      const errors: unknown[] = [];
+      const app = createApp({ render: () => h(JazzProvider, { scope: "test", ...attrs }) });
+      app.config.errorHandler = (error) => {
+        errors.push(error);
+      };
+      app.config.warnHandler = () => {};
+      app.mount(document.createElement("div"));
+      expect(String(errors[0])).toMatch(/JazzProvider takes no autoAttachDevTools.*mountInspector/);
+      app.unmount();
+    }
+    expect(mocks.factory).not.toHaveBeenCalled();
   });
 
   it("retries startup failures with the default error button and starts signed out by default", async () => {
@@ -113,12 +127,7 @@ describe("Vue ergonomic app", () => {
       .mockResolvedValue(session);
     const node = document.createElement("div");
     const app = createApp({
-      render: () =>
-        h(
-          JazzProvider,
-          { scope: "test", autoAttachDevTools: false },
-          { default: () => h("p", "active") },
-        ),
+      render: () => h(JazzProvider, { scope: "test" }, { default: () => h("p", "active") }),
     });
     app.mount(node);
     await flush();
@@ -140,7 +149,6 @@ describe("Vue ergonomic app", () => {
         h(JazzProvider, {
           scope: `test-${version.value}`,
           initial: "signed-out",
-          autoAttachDevTools: false,
         }),
     });
     app.mount(node);
@@ -172,7 +180,7 @@ describe("Vue ergonomic app", () => {
         render: () =>
           h(
             JazzProvider,
-            { scope: "test", autoAttachDevTools: false },
+            { scope: "test" },
             { default: () => h(Child), signedOut: () => h("p", "signed out") },
           ),
       });
@@ -232,7 +240,7 @@ it("follows the backend on reauthenticate: signed out, signed in, signed out", a
     render: () =>
       h(
         JazzProvider,
-        { initial: "signed-out", autoAttachDevTools: false },
+        { initial: "signed-out" },
         {
           default: () => h("p", "PRIVATE"),
           signedOut: () => h(SignedOut),

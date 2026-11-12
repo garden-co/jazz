@@ -58,8 +58,10 @@ const workloadSpecs = {
   },
   "band-book": {
     ...nativeExample("band-book"),
-    // The rest of the policy sweep: the other arms and the 10k table.
-    nightly: { benches: ["nightly"], env: {}, timeout: 20 },
+    // The rest of the policy sweep (the other arms and the 10k table), one
+    // band's workspace opens against another band's requests on a server,
+    // and the song sheet text merges beyond one paragraph.
+    nightly: { benches: ["nightly", "contention", "text_merge"], env: {}, timeout: 35 },
   },
   "world-tour": nativeExample("world-tour"),
   wequencer: nativeExample("wequencer"),
@@ -74,6 +76,9 @@ const workloadSpecs = {
     features: null,
     minStack: null,
     timeout: 25,
+    // One label's catalogue search against another label's requests on a
+    // server.
+    nightly: { benches: ["contention"], env: {}, timeout: 15 },
   },
   "permissioned-resources": nativeExample("permissioned-resources"),
 };

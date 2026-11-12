@@ -75,6 +75,16 @@ CodSpeed's compatibility crate is intentionally named `divan` at the workspace
 level. This keeps the Rust benchmark source identical for local `cargo bench`
 and hosted CodSpeed instrumentation.
 
+## Memory ceilings
+
+Besides speed, each hero app can say how much data it holds before the sync
+server or a client runs out of memory, counted in its own units. That is not
+a CodSpeed case: [memory-ceiling](memory-ceiling/README.md) grows the data
+through the app's real schema and permissions against the shipped server
+binary, and `.github/workflows/memory-ceiling.yml` runs it nightly. An app
+joins with one adapter module beside its benchmarks (BigLabel's is
+`examples/big-label/benchmarks/memory-ceiling.ts`).
+
 ## Native performance workloads
 
 - [StagePlan](../../examples/stage-plan/benchmarks/README.md): task authoring,
@@ -91,6 +101,23 @@ and hosted CodSpeed instrumentation.
   MusicAgent and BigLabel: see each app's `benchmarks/` directory.
 - [Permissioned resources](../../examples/permissioned-resources/benchmarks/README.md):
   anonymized adopter workload, 27,518-row first sync with deep permissions.
+
+## Contention workloads
+
+Some apps hold a slow request next to cheap ones on the same server. Their
+`contention` bench targets time a cheap request twice, with the server
+otherwise idle and while another client repeats the slow request back to back,
+so the difference is the contention. They run a real durable server with
+ordinary JWT clients over WebSockets, each client on its own thread, using
+`jazz_testkit::contention`. They are nightly extras.
+
+- [BigLabel](../../examples/big-label/benchmarks/README.md): another label's
+  back-catalogue search against opening and renaming your releases.
+- [BandBook](../../examples/band-book/benchmarks/README.md): another band
+  opening its big workspace against opening and checking off your pages.
+
+The design follows Tobias Lins's server read-contention harness
+([#4322](https://github.com/garden-co/jazz/pull/4322)).
 
 These packages completely replace their former crate-local benchmark targets.
 Their profiling binaries and CodSpeed suites use the same workload code.
