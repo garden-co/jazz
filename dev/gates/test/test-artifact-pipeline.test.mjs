@@ -494,7 +494,6 @@ test("CI uses the correctness artifact path while package builds keep release WA
   );
 
   const turbo = JSON.parse(readFileSync(new URL("../../../turbo.json", import.meta.url), "utf8"));
-  const expectedRustSettings = ["CARGO_TARGET_DIR", "CARGO_BUILD_JOBS", "CARGO_NET_OFFLINE"];
   const expectedLease = [
     "JAZZ_TEST_ARTIFACT_LOCK_PATH",
     "JAZZ_ARTIFACT_BUILD_LEASE",
@@ -503,18 +502,13 @@ test("CI uses the correctness artifact path while package builds keep release WA
   ];
   assert.deepEqual(
     turbo.tasks["jazz-napi#build"].passThroughEnv,
-    [...expectedRustSettings, "JAZZ_RN_TEST_BRIDGE", ...expectedLease],
+    ["JAZZ_RN_TEST_BRIDGE", ...expectedLease],
     "jazz-napi#build must preserve RN bridge feature selection and the aggregate parent's artifact lease and sealed test surface",
   );
   for (const task of ["jazz-wasm#build", "jazz-wasm#build:fast"])
     assert.deepEqual(
       turbo.tasks[task].passThroughEnv,
-      [
-        ...expectedRustSettings,
-        "AR_wasm32-unknown-unknown",
-        "AR_wasm32_unknown_unknown",
-        ...expectedLease,
-      ],
+      ["AR_wasm32-unknown-unknown", "AR_wasm32_unknown_unknown", ...expectedLease],
       `${task} must preserve archiver selection and the aggregate parent's artifact lease and sealed test surface`,
     );
   for (const task of ["build"])
