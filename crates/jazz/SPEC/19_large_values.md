@@ -457,10 +457,20 @@ that the receiver holds, named by its seq.
   version, and nodes only beneath roots its readable versions reach. A reader
   allowed to see one version but not a later one never receives the later
   version's edits. Losing read access takes effect at once. A version is
-  readable when the reader may read the row as it stands and, for a version
-  other than the row's current one, could read it as of its own position
-  (INV-RLS-13). The current version is the row itself, so a reader granted
-  access after the row's last write (a share made later) reads its content.
+  readable when the reader may read the row as it stands, and an earlier
+  version only if, as history, it is also readable as of its own position
+  (INV-RLS-13 governs earlier versions). The current version is the row
+  itself, so a reader granted access after the row's last write (a share
+  made later) reads its content. A relay judges "current" by its own store,
+  which may lag its upstream: a version superseded upstream but not yet at
+  the relay is current there, and the upstream judges again when the relay
+  forwards the pull.
+- **Known gap.** A writer granted access after the row's last write bases
+  its deltas and access proofs on the version it holds. If that version is
+  superseded before the commit arrives, the base is an earlier version the
+  writer could not read as of its position, and the commit is rejected
+  (`WriteRejected`) rather than rebased. Pulls recover on the next version;
+  such writes do not.
 - **No existence oracle.** The server never tells a client it already holds a
   node the client cannot read: an unreadable pull is answered as absent, and
   uploads are never skipped on the server's word. Deduplication is silent.

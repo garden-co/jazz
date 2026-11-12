@@ -13751,15 +13751,15 @@ fn readable_version(
     )
 }
 
-/// Whether `identity` may read the version of `row` at `seq` and, still,
-/// the row as it stands: losing read access takes effect at once for the
-/// content of every earlier version too (SPEC 19.9, INV-RLS-13).
+/// Whether `identity` may read the version of `row` at `at`: the row as it
+/// stands, when the version is the row's current one; otherwise also the
+/// version as of its own position, as history (SPEC 19.9, INV-RLS-13).
+/// Losing read access to the row takes effect at once for every version.
 ///
-/// The row's current version is the row as it stands, so reading the row
-/// is reading it. An earlier version is read as of its own position, as
-/// history is: a reader granted access after the row's last write (a share
-/// row made later) may read the current version's content, though not as
-/// of that version's position, when nothing granted it yet.
+/// So a reader granted access after the row's last write (a share row made
+/// later) reads the current version's content, though nothing granted it
+/// as of that version's position. A relay judges "current" by its own
+/// store, which may lag; its upstream judges again.
 fn still_readable_version(
     inner: &Inner,
     policies: &Schema,
