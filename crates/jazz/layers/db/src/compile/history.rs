@@ -121,6 +121,7 @@ impl Ctx<'_> {
             params: self.params,
             projection,
             tables: self.tables,
+            policy_tables: self.policy_tables,
             aggregate: false,
             joined: 0,
             versioned: true,

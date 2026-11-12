@@ -572,7 +572,9 @@ impl Inner {
         let mut structural = BTreeSet::new();
         // A policy can read another row of the root table. The query's
         // root predicate cannot narrow changes to that supporting occurrence.
-        if compiled.sql.matches(&quote(&root.stored)).count() > 1 {
+        // The compiler reports it: counting the table's name in the SQL would
+        // also count a cut's or branch view's own extra reads of the table.
+        if compiled.policy_tables.contains(&root.stored) {
             structural.insert(root.stored.clone());
         }
         fn joins(

@@ -201,6 +201,13 @@ pub struct Ctx<'a> {
     pub params: Vec<Sql>,
     /// Every table the compiled SQL reads: the invalidation dependencies.
     pub tables: BTreeSet<String>,
+    /// The tables a policy's SQL reads as evidence (EXISTS, INHERITS,
+    /// relations): a policy reading another row of the query's own root
+    /// table makes that row's change move the result.
+    pub policy_tables: BTreeSet<String>,
+    /// How deep inside policy SQL compilation is: tables read there join
+    /// `policy_tables`.
+    policy_depth: usize,
     /// Whether `_jazz_withheld` exists: a branch view over a base masks
     /// base rows its markers name too.
     pub withheld: bool,
@@ -301,6 +308,8 @@ pub struct Compiled {
     /// tags it holds.
     pub projection: Vec<Projected>,
     pub tables: BTreeSet<String>,
+    /// The tables policy SQL reads as evidence (see [`Ctx::policy_tables`]).
+    pub policy_tables: BTreeSet<String>,
     /// Rows are aggregate groups: column 0 is the group key, hashed to an id.
     pub aggregate: bool,
     /// Joined source row ids each row carries after its root's id, seq and
@@ -334,6 +343,8 @@ impl<'a> Ctx<'a> {
             binding,
             params: Vec::new(),
             tables: BTreeSet::new(),
+            policy_tables: BTreeSet::new(),
+            policy_depth: 0,
             withheld: false,
             view: None,
             cut: None,
@@ -518,6 +529,9 @@ impl<'a> Ctx<'a> {
     /// mask), then base rows the head does not override. Filters, policies,
     /// ordering and windows all apply after this masking.
     pub(crate) fn source(&mut self, table: &Table) -> Result<String, Error> {
+        if self.policy_depth > 0 {
+            self.policy_tables.insert(table.stored.clone());
+        }
         // Explicit columns: a schema view reads its own columns of the
         // physical (unioned) table.
         let mut columns = "rid, id, _branch, _clock, _writer, _state".to_owned();
@@ -606,6 +620,9 @@ impl<'a> Ctx<'a> {
     fn table(&mut self, name: &str) -> Result<&'a Table, Error> {
         let table = self.schema.table(name)?;
         self.tables.insert(table.stored.clone());
+        if self.policy_depth > 0 {
+            self.policy_tables.insert(table.stored.clone());
+        }
         Ok(table)
     }
 
@@ -782,6 +799,7 @@ impl<'a> Ctx<'a> {
             params: self.params,
             projection,
             tables: self.tables,
+            policy_tables: self.policy_tables,
             aggregate: true,
             joined: 0,
             versioned: false,
@@ -873,6 +891,7 @@ impl<'a> Ctx<'a> {
             params: self.params,
             projection,
             tables: self.tables,
+            policy_tables: self.policy_tables,
             aggregate: false,
             joined: 0,
             versioned: false,
@@ -1033,6 +1052,7 @@ impl<'a> Ctx<'a> {
             params: self.params,
             projection,
             tables: self.tables,
+            policy_tables: self.policy_tables,
             aggregate: false,
             joined: 0,
             versioned: false,
@@ -1298,6 +1318,7 @@ impl<'a> Ctx<'a> {
             params: self.params,
             projection,
             tables: self.tables,
+            policy_tables: self.policy_tables,
             aggregate: false,
             joined: sources.len() - 1,
             versioned: true,
@@ -1476,6 +1497,7 @@ impl<'a> Ctx<'a> {
             params: self.params,
             projection,
             tables: self.tables,
+            policy_tables: self.policy_tables,
             aggregate: false,
             joined: 0,
             versioned: false,
@@ -1862,15 +1884,20 @@ impl<'a> Ctx<'a> {
         table: &Table,
         body: impl FnOnce(&mut Self, &Table) -> Result<String, Error>,
     ) -> Result<String, Error> {
-        let Some(current) = self.schema.policies_from.as_deref() else {
-            return body(self, table);
+        self.policy_depth += 1;
+        let result = match self.schema.policies_from.as_deref() {
+            None => body(self, table),
+            Some(current) => match current.by_stored(&table.stored) {
+                None => Ok("0".to_owned()),
+                Some(governing) => {
+                    let own = std::mem::replace(&mut self.schema, current);
+                    let result = body(self, governing);
+                    self.schema = own;
+                    result
+                }
+            },
         };
-        let Some(governing) = current.by_stored(&table.stored) else {
-            return Ok("0".to_owned());
-        };
-        let own = std::mem::replace(&mut self.schema, current);
-        let result = body(self, governing);
-        self.schema = own;
+        self.policy_depth -= 1;
         result
     }
 

@@ -1,7 +1,7 @@
 //! A root filter cannot hide changes to another root row used by its read policy.
 use crate::common::{compile_schema, exists, read_and_allow_all_writes, session_eq};
 use jazz::db::{
-    CurrentRow, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, SubscriptionEvent,
+    CurrentRow, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, SubscriptionEvent,
     SubscriptionStream, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -9,6 +9,9 @@ use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TableSchemaBuilder};
 use std::collections::BTreeMap;
+
+#[path = "common/duplex_transport.rs"]
+mod duplex_transport;
 
 fn alice() -> AuthorSubject {
     AuthorSubject::for_test_bytes([0x71; 16])
@@ -22,13 +25,13 @@ fn cells(body: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([("body".into(), Value::String(body.into()))])
 }
 
-fn open(requires_support: bool, has_support: bool) -> Db {
+fn schema(requires_support: bool) -> jazz::schema::JazzSchema {
     let policy = if requires_support {
         exists("notes", vec![session_eq("body", &["claims", "support"])])
     } else {
         PolicyExpr::True
     };
-    let schema = compile_schema(
+    compile_schema(
         &SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new("notes")
@@ -36,9 +39,12 @@ fn open(requires_support: bool, has_support: bool) -> Db {
                     .policies(read_and_allow_all_writes(policy)),
             )
             .build(),
-    );
+    )
+}
+
+fn open(requires_support: bool, has_support: bool) -> Db {
     let db = block_on(Db::open(DbConfig::new(
-        schema,
+        schema(requires_support),
         DbIdentity {
             node: NodeUuid::from_bytes([0x72; 16]),
             author: AuthorSubject::SYSTEM,
@@ -211,4 +217,66 @@ fn ordinary_root_key_skips_unrelated_rows() {
         db.fanout_stats().woken > before.woken,
         "matching key still wakes"
     );
+}
+
+fn pump(dbs: &[&Db]) {
+    for _ in 0..8 {
+        for db in dbs {
+            block_on(db.tick()).unwrap();
+        }
+    }
+}
+
+/// Alice's replica watches the same filtered note at `ReadTier::Remote`: it
+/// reads as of its settled cut, whose SQL names `notes` more than once, yet
+/// no policy reads another note. A local unrelated insert stays asleep; the
+/// matching row's server update still wakes it.
+#[test]
+fn remote_tier_root_key_skips_unrelated_rows() {
+    let server = open(false, true);
+    let client = block_on(Db::open(DbConfig::new(
+        schema(false),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x73; 16]),
+            author: alice(),
+        },
+    )))
+    .unwrap();
+    let (client_side, server_side) = duplex_transport::duplex();
+    block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+
+    let prepared = client.prepare_query(&query()).unwrap();
+    let mut stream =
+        block_on(client.subscribe(&prepared, ReadOpts::for_read_tier(ReadTier::Remote))).unwrap();
+    pump(&[&client, &server]);
+    let mut rows = BTreeMap::new();
+    drain(&mut stream, &mut rows);
+    assert_eq!(rows, BTreeMap::from([(row(4), "secret".into())]));
+
+    let before = client.fanout_stats();
+    block_on(client.insert(
+        "notes",
+        cells("unrelated"),
+        InsertOptions {
+            row_id: Some(row(6)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump(&[&client, &server]);
+    drain(&mut stream, &mut rows);
+    assert_eq!(rows, BTreeMap::from([(row(4), "secret".into())]));
+    assert_eq!(
+        client.fanout_stats().woken,
+        before.woken,
+        "a settled-cut read keeps its root key"
+    );
+
+    block_on(server.update("notes", row(4), cells("moved"), Default::default())).unwrap();
+    pump(&[&client, &server]);
+    drain(&mut stream, &mut rows);
+    assert!(rows.is_empty(), "matching key still wakes: {rows:?}");
+    assert!(client.fanout_stats().woken > before.woken);
 }
