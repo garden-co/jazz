@@ -22,3 +22,6 @@ export {
   type JazzSessionViewProps,
   type UseJazzSessionResult,
 } from "./session.js";
+
+// Removed in alpha.61: stubs that throw, naming the replacement (one release).
+export { createUseLocalFirstAuth, useJazzSessionOwner } from "../removed-api.js";

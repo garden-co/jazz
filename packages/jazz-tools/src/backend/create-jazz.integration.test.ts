@@ -42,6 +42,7 @@ import {
   type WsLikeSocket,
 } from "./index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
+import { requestBackendSignIn, requestBackendUser } from "../accounts/registry-client.js";
 import {
   encodeWebSocketFrameBatch,
   encodeWireClientHello,
@@ -954,6 +955,48 @@ describe("createJazz", () => {
     // A valid answer passes the check: alice just has no account yet.
     answer = { userId: "alice", expiresAt: inAnHour() };
     await expect(jazz.forReqUser(request())).rejects.toThrow(/has no Jazz account yet/);
+  });
+
+  it("tells the browser by a stable code that authenticate returned no expiresAt, and the client names the fix", async () => {
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: () => ({ userId: "alice", internal: "secret-session-detail" }) as never,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: false });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+    const registry = `${origin}/jazz/apps/${jazz.appId}/accounts`;
+
+    // Before: a bare 500 the browser reported as "Jazz could not ask your
+    // backend who is signed in", the reason only in the server's log.
+    const response = await fetch(`${registry}/backend-user`, { method: "POST" });
+    expect(response.status).toBe(500);
+    // Only the code: nothing of what the app's authenticate returned.
+    expect(await response.text()).toBe("authenticate_expires_at_missing");
+    // The server logs the detail, once.
+    expect(errors).toHaveBeenCalledWith(
+      expect.stringMatching(/authenticate must return expiresAt with the user.*It returned none/),
+    );
+
+    // The client's error (the session's `refresh()` and sign-in reject with
+    // it, or with it as their cause) names the fix.
+    for (const ask of [() => requestBackendUser(registry), () => requestBackendSignIn(registry)]) {
+      const error = await ask().then(
+        () => undefined,
+        (error: unknown) => error as { code?: string; status?: number; message?: string },
+      );
+      expect(error).toMatchObject({ code: "authenticate_expires_at_missing", status: 500 });
+      expect(error?.message).toMatch(
+        /^authenticate_expires_at_missing: your backend's authenticate \(createJazz\) named a user without expiresAt.*Return expiresAt with the user/,
+      );
+    }
+    // And it says so on the console, once, for the session's background checks.
+    expect(
+      errors.mock.calls.filter(([line]) => String(line).startsWith("Jazz: authenticate_expires")),
+    ).toHaveLength(1);
   });
 
   it("refuses a sync session whose authenticate answer has already expired", async () => {

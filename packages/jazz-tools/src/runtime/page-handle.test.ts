@@ -1,5 +1,10 @@
 import { afterEach, expect, it } from "vitest";
-import { registerPageDb, type PageDb } from "./page-handle.js";
+import {
+  ensureWindowJazz,
+  registerPageDb,
+  WindowJazzConflictError,
+  type PageDb,
+} from "./page-handle.js";
 import {
   syncStatus,
   CONNECTED,
@@ -91,4 +96,31 @@ it("lists nothing outside a browser page", () => {
   const db = fakeDb(syncStatus(CONNECTED, uploadStatusFromCount(0)));
   registerPageDb(db, "x")();
   expect((globalThis as { window?: Window }).window).toBeUndefined();
+});
+
+it("refuses a window.__jazz the app set, by name, instead of extending it", () => {
+  // Before: `TypeError: Cannot add property clearStorage, object is not
+  // extensible` at the upgrade to local-first, for a sealed one; an
+  // extensible one had Jazz's members written over its own.
+  for (const own of [Object.seal({ debug: true }), { status: "mine" }, "app", null]) {
+    const window = page();
+    (window as { __jazz?: unknown }).__jazz = own;
+    const db = fakeDb(syncStatus(CONNECTED, uploadStatusFromCount(0)));
+    expect(() => registerPageDb(db, "app-1")).toThrow(WindowJazzConflictError);
+    expect(() => ensureWindowJazz(window)).toThrow(
+      /^window\.__jazz is reserved for Jazz \(its page handle: .*\), and this page already has a window\.__jazz that Jazz didn't set \((object|string|null)\)\. Rename your app's global/,
+    );
+    // Left as the app set it.
+    expect((window as { __jazz?: unknown }).__jazz).toBe(own);
+  }
+});
+
+it("extends the window.__jazz Jazz installed, from any copy of Jazz on the page", () => {
+  const window = page();
+  const unlist = registerPageDb(fakeDb(syncStatus(CONNECTED, uploadStatusFromCount(0))), "a");
+  const installed = window.__jazz!;
+  // Another client (or another copy of jazz-tools) installs it again: same object.
+  expect(ensureWindowJazz(window)).toBe(installed);
+  expect(installed[Symbol.for("jazz-tools.window-jazz") as never]).toBe(true);
+  unlist();
 });

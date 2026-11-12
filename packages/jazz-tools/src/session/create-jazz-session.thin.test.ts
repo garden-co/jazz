@@ -680,4 +680,25 @@ describe("browser session", () => {
       /takes no account: the session signs in itself/,
     );
   });
+
+  it("refuses a missing config and unknown options, naming the options it takes", async () => {
+    // Before: `TypeError: Cannot read properties of undefined (reading 'appId')`.
+    await expect((createJazzClient as (config?: unknown) => Promise<unknown>)()).rejects.toThrow(
+      /^createJazzClient needs a config object, e\.g\. createJazzClient\(\{ serverUrl: "\/jazz" \}\), or createJazzClient\(\{\}\) for the defaults; got nothing\. Options: bearer, client, clearOnSignOut, .*serverUrl.*\.$/,
+    );
+    const base = { serverUrl: "https://app.example.test/jazz", store: memoryStore() };
+    // Before: accepted and ignored.
+    await expect(createJazzClient({ ...base, auth: {} } as never)).rejects.toThrow(
+      /createJazzClient has no option "auth": your backend decides who is signed in \(createJazz's `authenticate`\).*Options: .*initial/,
+    );
+    await expect(createJazzClient({ ...base, guest: true } as never)).rejects.toThrow(
+      /has no option "guest": guests are device accounts: use `initial: "device"`/,
+    );
+    await expect(createJazzClient({ ...base, serverURL: "/jazz" } as never)).rejects.toThrow(
+      /^createJazzClient has no option "serverURL"\. Options: /,
+    );
+    // Every documented option is still taken.
+    const session = await createJazzClient({ ...base, initial: "signed-out" });
+    await session.close();
+  });
 });

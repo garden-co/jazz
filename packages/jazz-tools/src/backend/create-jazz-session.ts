@@ -1,4 +1,5 @@
 import { textAnchorsFrom, type TextAnchors } from "../runtime/text-anchors.js";
+import { refuseInvalidSessionConfig } from "../session/config-options.js";
 import { createHash, randomUUID } from "node:crypto";
 import { clientScope } from "../runtime/client-scope.js";
 import { admitBackendSecret } from "./admission.js";
@@ -39,11 +40,7 @@ import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-a
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { createJazzSessionOwner, type SessionCore } from "../session/state.js";
-import {
-  createStartedJazzSession,
-  refuseRemovedSessionOptions,
-  type JazzSession,
-} from "../session/jazz-session.js";
+import { createStartedJazzSession, type JazzSession } from "../session/jazz-session.js";
 import {
   createJazzClientFromDb,
   type JazzClient as SharedJazzClient,
@@ -259,13 +256,30 @@ export interface BackendClientSession extends Omit<JazzSession<JazzClient>, "clo
   close(options?: BackendClientCloseOptions): Promise<void>;
 }
 
+/** Every option a Node `createJazzClient` takes, checked against its config type. */
+const BACKEND_SESSION_OPTIONS = {
+  serverUrl: true,
+  app: true,
+  permissions: true,
+  initial: true,
+  credential: true,
+  store: true,
+  driver: true,
+  appId: true,
+  scope: true,
+  env: true,
+  accountId: true,
+  bundle: true,
+  slowQueryThresholdMs: true,
+} as const satisfies Record<keyof JazzClientConfig, true>;
+
 /**
  * A Node client that syncs through an app's main backend (`createJazz`) as
  * a backend client, with `credential`, or as a device account (a guest).
  * Supply an AccountStore to keep device accounts across process restarts.
  */
 export async function createJazzClient(input: JazzClientConfig): Promise<BackendClientSession> {
-  refuseRemovedSessionOptions(input);
+  refuseInvalidSessionConfig(input, BACKEND_SESSION_OPTIONS);
   if (input.initial !== undefined && input.initial !== "device")
     throw new Error('createJazzClient: initial is "device" or left out');
   // The session core's name for a device account.

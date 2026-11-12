@@ -4,6 +4,7 @@ import { renderToString } from "react-dom/server";
 import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
+import { ownJazzSession, startJazzSession, type JazzSession } from "../session/jazz-session.js";
 import { JazzSessionProvider, useJazzSession, type UseJazzSessionResult } from "./session.js";
 import { useJazzClient } from "./provider.js";
 import { makeFakeAccount, makeFakeClient } from "./test-utils.js";
@@ -134,6 +135,31 @@ it("keeps auth fallback mounted to acknowledge a backend-driven sign-out", async
   });
   await waitFor(() => expect(view.container.textContent).toBe("signed-out"));
   expect(client.shutdown).toHaveBeenCalled();
+});
+it("renders nothing once its session is closed, or the closed view", async () => {
+  for (const closed of [undefined, <p>Session closed</p>]) {
+    const { factory } = fixture();
+    const session = ownJazzSession({}, factory, { start: false });
+    await startJazzSession(session as JazzSession<unknown>);
+    const view = render(
+      <JazzSessionProvider
+        session={session}
+        openCore={factory}
+        loading={<p>Loading</p>}
+        closed={closed}
+      >
+        <p>data</p>
+      </JazzSessionProvider>,
+    );
+    await waitFor(() => expect(view.container.textContent).toBe("data"));
+    await act(async () => {
+      await session.close();
+    });
+    expect(session.getSnapshot().status).toBe("closed");
+    // Before: the loading view, forever.
+    expect(view.container.textContent).toBe(closed ? "Session closed" : "");
+    view.unmount();
+  }
 });
 it("logs a startup failure even when the app renders no error UI", async () => {
   const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});

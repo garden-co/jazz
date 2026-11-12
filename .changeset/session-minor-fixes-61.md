@@ -1,0 +1,13 @@
+---
+"jazz-tools": patch
+---
+
+Session fixes from the alpha.61 adopter round:
+
+- `createJazzClient()` without a config, and a config option it doesn't take (`auth`, `guest`, a typo), are refused by name, listing the options it takes; for likely old names the error says what replaced them. Before, a missing config failed with `Cannot read properties of undefined (reading 'appId')` and unknown options were ignored.
+- When the backend's `authenticate` names a user without a valid `expiresAt`, the browser now gets the code `authenticate_expires_at_missing` and a client error naming the fix (also logged once on the console), instead of a bare 500 reported as "Jazz could not ask your backend who is signed in". The response carries nothing of what `authenticate` returned; the backend log keeps the detail.
+- `<JazzProvider>` (React, React Native, Expo, Vue, Solid, Svelte) renders a `closed` view, nothing by default, once its session is closed, instead of its `loading` view forever.
+- `window.__jazz` is reserved for Jazz's page handle. A `window.__jazz` the app set itself is refused by name when the session starts (and when a Db opens), instead of failing at the local-first upgrade with "Cannot add property clearStorage, object is not extensible".
+- `session.refresh()` that can't ask the backend both rejects and shows the failure on the snapshot (a usable client stays `ready`, with `error` and `recovery: "action"`); now documented and covered through the real backend-user path.
+- For one release, the names alpha.61 removed are exported as stubs that throw when used, naming the replacement (`[JAZZ_API_REMOVED]`), instead of a bundler's guess at a similar name: `useJazzAuth`, `useJazzSessionOwner`, `useAccountState`, `accountState`, `createAccountState`, `createJazzSessionState`, `createAccountManager`, `AccountManager`, `createDb`, `createJazzApp`, `exportLocalFirstSecret`, `useLocalFirstAuth`, `createUseLocalFirstAuth`, `LocalFirstAuth`, `BrowserAuthSecretStore`, `ExpoAuthSecretStore`, `expoAuthSecretStore`, `JazzSessionProvider`, `JazzSvelteProvider` and `acceptLocalFirstAuth`, each from the entry points that exported it in alpha.60. They are typed `@deprecated` (naming the replacement), and are not working aliases.
+- Jazz Classic errors (`JAZZ_CLASSIC_API_REMOVED`) name the Jazz 2 place to start where there is one: `useAll` / `useOne` for `useCoState`, the session (`useJazzSession()`) for `useAccount`, `<JazzProvider config>` for the Classic providers, tables for `co` / `CoMap`, and so on.
