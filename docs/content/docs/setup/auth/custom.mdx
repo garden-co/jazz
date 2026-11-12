@@ -91,8 +91,9 @@ fetched throws instead, so clients retry rather than signing out.
 - **Revoking a session:** once `authenticate` stops accepting a user's token, their open sync
   sessions end when their token expires or within `sessionTtlSeconds` (one hour by default),
   whichever is first, or at once if you call `jazz.revokeUser(userId)`. A tab
-  that stays in view then shows them signed out about 32 seconds after the refusal: a 30-second
-  grace in case the refusal was a blip, plus a 2-second confirmation.
+  that stays in view then shows them signed out about 2 seconds after the refusal, once a second
+  answer from your backend confirms the first (`onSignedOut` can still keep them). A tab in the
+  background waits until it is in view again.
 - **Refreshing short-lived tokens:** store the new token where `token(request)` reads it, such as
   your cookie, then call `refresh()` on the session so the client asks your backend again.
 
