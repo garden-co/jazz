@@ -11,6 +11,7 @@ export default defineConfig({
       "lib/search-analytics.test.ts",
       "lib/copy-analytics.test.ts",
       "lib/sidebar-rules.test.ts",
+      "lib/llm-text.test.ts",
     ],
     exclude: ["**/node_modules/**", "**/.next/**"],
   },
