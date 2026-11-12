@@ -80,10 +80,8 @@ const session = await createJazzClient({
   credential: githubOidcToken,
 });
 
-const { client } = session.getSnapshot();
-await client!.db.insert(app.imports, { source: "nightly" }).wait({ tier: "global" });
-await client!.db.shutdown({ waitForSync: true }); // let queued writes reach the backend
-await session.close();
+await session.db.insert(app.imports, { source: "nightly" }).wait({ tier: "global" });
+await session.close(); // uploads queued writes first, for up to 10 seconds
 
 // GitHub Actions hands out OIDC tokens to jobs with `permissions: id-token: write`.
 async function githubOidcToken() {
@@ -97,8 +95,11 @@ async function githubOidcToken() {
 }
 ```
 
-`session.close()` on its own discards writes that haven't reached the backend yet, and so does
-exiting the process. Before a script ends, `await db.shutdown({ waitForSync: true })`. Each token
+`session.close()` first waits for the writes the client holds to reach the backend, for up to
+10 seconds (`close({ timeoutMs })`). With the memory driver, writes that still haven't arrived are
+lost, and `close()` rejects saying how many; `close({ timeoutMs: 0 })` closes at once and accepts
+that. Exiting the process without `close()` loses them too, so always await it before a script
+ends. Each token
 needs at least 60 seconds of validity left when Jazz uses it; one closer to expiry is refused. Each
 identity can hold at most 4 sync sockets at a time for now, so keep to four workers per trusted
 identity.

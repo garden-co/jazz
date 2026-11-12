@@ -1039,11 +1039,11 @@ test("React Native docs advertise the supported alpha session and account-handle
   );
   const expoSetup = clientSetupGuide.match(/## Setup\n([\s\S]*?)(?=\n## )/)?.[1];
   assert.ok(expoSetup, "the React Native guide must include a Setup section");
-  assert.match(expoSetup, /import \{ JazzSessionProvider \} from "jazz-tools\/expo"/);
+  assert.match(expoSetup, /import \{ JazzProvider \} from "jazz-tools\/expo"/);
   assert.match(
     expoSetup,
-    /<JazzSessionProvider config=\{\{ serverUrl, initial: "local-first" \}\}>[\s\S]*<TodoApp \/>[\s\S]*<\/JazzSessionProvider>/,
-    "Expo setup must give the session provider one local-first configuration and mount its child",
+    /<JazzProvider config=\{\{ serverUrl, initial: "device" \}\}>[\s\S]*<TodoApp \/>[\s\S]*<\/JazzProvider>/,
+    "Expo setup must give the provider one device-account configuration and mount its child",
   );
   assert.doesNotMatch(
     expoSetup,
@@ -1056,10 +1056,7 @@ test("React Native docs advertise the supported alpha session and account-handle
     /React Native\/Expo alpha uses these same read and write durability tiers/,
   );
   assert.match(durabilityGuide, /client with `createJazzClient`/);
-  assert.match(
-    examplesGuide,
-    /Supported alpha app:[\s\S]*`AccountHandle`[\s\S]*`JazzSessionProvider`/,
-  );
+  assert.match(examplesGuide, /Supported alpha app:[\s\S]*device accounts[\s\S]*`JazzProvider`/);
   assert.match(
     exampleReadme,
     /Expo local-first todos using `jazz-tools\/react-native` and the installed `jazz-rn` runtime/,

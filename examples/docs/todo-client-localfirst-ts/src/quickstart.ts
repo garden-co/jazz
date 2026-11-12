@@ -1,14 +1,13 @@
 // #region setup-ts
-import { createAccountManager, createDb } from "jazz-tools";
+import { createJazzClient } from "jazz-tools/client";
 import { app } from "../schema.js";
 import { renderTodoItem } from "./TodoItem.js";
 
 // Your backend serves Jazz at /jazz (createJazz); the browser names no app.
-const config = { serverUrl: "/jazz" };
-const accounts = await createAccountManager(config);
-const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
-const db = await createDb({ ...config, account });
-// use db.shutdown() to clean up when finished
+// `initial: "device"` signs in as a device account: a guest that needs no sign-in.
+const session = await createJazzClient({ serverUrl: "/jazz", initial: "device" });
+const db = session.db;
+// use session.close() to clean up when finished
 // #endregion setup-ts
 
 // #region list-ts
