@@ -39,11 +39,10 @@ Jazz format stamps are still validated, and unstamped Jazz metadata is rejected.
 encoding changes: the Jazz format remains 1 and `JazzRivetAppIdV1` continues to
 map an actor ID deterministically to the same app ID.
 
-Schema deployment validation uses a fresh, bounded, in-memory SQLite database.
-Its small `rusqlite` adapter is only for disposable validation; it never opens
-actor storage. Its dependency must be compatible with the SQLite library linked
-by RivetKit, which is why this crate remains an independent Cargo workspace.
-Other Jazz providers keep their existing native SQLite dependency and execution.
+First deployment initializes Jazz and applies its catalogue in one transaction
+on the actor's SQLite database. The runtime is published only after commit;
+failure rolls back the initialization. Schema and migration checks run in memory,
+without a separate validation database or a Jazz-owned SQLite dependency.
 
 ## Checks
 

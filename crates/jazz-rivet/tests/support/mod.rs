@@ -182,11 +182,8 @@ pub async fn worker_store(
 ) -> anyhow::Result<jazz_server::runtime::WorkerStore> {
     let db = pages.database(&actor).await?;
     let runtime = tokio::runtime::Handle::current();
-    Ok(jazz_server::runtime::WorkerStore::new(
-        move || {
-            let _runtime = runtime.enter();
-            futures::executor::block_on(file(pages.clone(), db.clone())).map_err(|e| e.to_string())
-        },
-        || futures::executor::block_on(jazz_rivet::test_scratch()).map_err(|e| e.to_string()),
-    ))
+    Ok(jazz_server::runtime::WorkerStore::new(move || {
+        let _runtime = runtime.enter();
+        futures::executor::block_on(file(pages.clone(), db.clone())).map_err(|e| e.to_string())
+    }))
 }
