@@ -23,7 +23,7 @@ export const jazz = createJazz({
   app,
   permissions,
   store: sqlite({ path: process.env.JAZZ_DATA_DIR ?? "./data/jazz" }),
-  // Read your session; return { userId, claims? } for a signed-in user, or null for a guest
+  // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
   authenticate: async (request) => null,
 });
 ```
@@ -31,9 +31,12 @@ export const jazz = createJazz({
 <include>../../../partials/main-backend-config.mdx</include>
 
 The examples on this page are ES modules and use top-level `await`, so the backend package needs
-`"type": "module"` (or `.mts` files). In a CommonJS package, such as an Expo app's, a default import
-like `permissions` arrives as `{ default }`, and `createJazz` fails with "permissions.ts defines
-permissions for unknown table(s): default". Run the backend from its own ESM package instead.
+`"type": "module"` (or `.mts` files). `schema.ts` and `permissions.ts` must be ES modules too. In a
+CommonJS package, such as an Expo app's, importing them gives `{ default }`, and `createJazz` fails
+with "permissions.ts defines permissions for unknown table(s): default". A backend in its own ESM
+package isn't enough while those two files stay in the CommonJS package: put them in a folder (for
+example `jazz/`) with a `package.json` of `{ "type": "module" }`, and import them from there in both
+the app and the backend.
 
 ### Large values
 
@@ -182,7 +185,7 @@ export const jazz = createJazz({
     url: process.env.JAZZ_SERVER_URL!,
     secret: process.env.JAZZ_ADMIN_SECRET!, // the app's admin secret
   }),
-  // Read your session; return { userId, claims? } for a signed-in user, or null for a guest
+  // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
   authenticate: async (request) => null,
 });
 ```

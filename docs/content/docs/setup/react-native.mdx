@@ -80,6 +80,11 @@ and the `jazz-rn` native module must come from the same release, so ship it as a
 To reach a backend on your computer, the Android emulator uses `http://10.0.2.2:<port>` instead of
 `localhost`, and Android blocks plain `http://` unless you allow cleartext traffic for development.
 
+An Expo app's package is CommonJS, while your backend imports `schema.ts` and `permissions.ts` as ES
+modules. Keep those two files in a folder of their own (for example `jazz/`) with a `package.json`
+of `{ "type": "module" }`, and import them from there in both the app and the backend; see
+[Your Own Server](/docs/setup/deployment/own-server).
+
 A bare React Native host uses the same direct dependency and New Architecture, with an OS-protected
 account store. The [canonical Expo
 scaffold](https://github.com/garden-co/jazz/tree/v2.0.0-alpha.61/examples/todo-client-localfirst-expo)
