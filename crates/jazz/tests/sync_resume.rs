@@ -2367,9 +2367,11 @@ fn a_resumed_window_keeps_a_pending_write_made_while_away() {
 
 /// Timing probe (run with `--release -- --ignored --nocapture`, `ROWS` per
 /// room, default 10,000): a 20-row window whose table took one row while
-/// its client was away, resumed and opened fresh. The resume reads the
-/// window as of `since`, an as-of read whose cost grows with the table,
-/// while a fresh opening reads the window's rows alone.
+/// its client was away, resumed and opened fresh. `body` has no index, so
+/// the resume's read of the window as of `since` scans the table, as any
+/// SQL read of this window does; the fresh opening here reuses the window
+/// the first client keeps live on the server. With the sort column indexed
+/// the as-of read stays flat.
 #[test]
 #[ignore = "timing probe"]
 fn window_resume_cost() {
