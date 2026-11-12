@@ -6819,12 +6819,14 @@ impl Inner {
     /// `None` opens it fresh, shipping the whole result.
     ///
     /// Only an authority resumes: a relay's store may be cold, and its seqs
-    /// are not the ones its sessions resume from. A windowed, flat-join,
-    /// aggregate, relation or history read opens fresh, as does a one-shot
-    /// read with its own claims (they are not part of the session's read
-    /// context the client resumes from), a `since` past what this store
-    /// serves (a reset store), or one at or before the current schema's
-    /// activation (its policies may read differently).
+    /// are not the ones its sessions resume from. A window resumes as any
+    /// other read: a write to its own table makes the result as of `since`
+    /// decide which unchanged rows entered or left it, and its opening lists
+    /// its rows. A flat-join, aggregate, relation or history read opens
+    /// fresh, as does a one-shot read with its own claims (they are not part
+    /// of the session's read context the client resumes from), a `since`
+    /// past what this store serves (a reset store), or one at or before the
+    /// current schema's activation (its policies may read differently).
     fn resume_from(
         &self,
         prepared: &PreparedQuery,
@@ -6839,7 +6841,6 @@ impl Inner {
             || request_claims
             || read.cut.is_some()
             || since > self.served_through()
-            || crate::db::is_windowed(query)
             || query.flat_join.is_some()
             || query.aggregate.is_some()
             || query.relation.is_some()
