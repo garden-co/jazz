@@ -21,11 +21,11 @@ export function jazz(): Promise<Jazz> {
       ? remote({ url: config.remote.url, appId: config.appId, secret: config.remote.adminSecret })
       : sqlite({ path: config.dataPath }),
     // Better Auth's session cookie decides who the user is. Guests have no
-    // session and keep their local-first account.
+    // session and keep their device account.
     authenticate: async (request) => {
       const { auth } = await import("./auth");
       const session = await auth().api.getSession({ headers: request.headers });
-      // Signed out: a local-first guest, until sign-up links its account.
+      // Signed out: a device-account guest, until sign-up links its account.
       return session ? { userId: session.user.id } : acceptDeviceAccounts(request);
     },
   }).ready();

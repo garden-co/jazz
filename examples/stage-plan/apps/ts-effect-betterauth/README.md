@@ -9,8 +9,8 @@ permissions; this app shows the Effect bindings.
   moving tasks, and adding the standard pre-show checklist, each one
   transaction.
 - The browser (`src/main.ts`, `src/planner.ts`) opens Jazz with
-  `createJazzApp({ serverUrl: "/jazz" })`, which starts signed out and asks
-  the backend who is signed in, calls `jazz.reauthenticate()` after signing in
+  `createJazzClient({ serverUrl: "/jazz" })`, which starts signed out and asks
+  the backend who is signed in, calls `jazz.refresh()` after signing in
   or out with Better Auth, wraps the client's database with `Jazz.fromDb`, and draws each live query
   from `jazz.stream(...)` with plain DOM.
 - The Hono server (`server/index.ts`) mounts the app's Jazz (`createJazz` in

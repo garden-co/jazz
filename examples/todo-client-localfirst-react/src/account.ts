@@ -5,9 +5,9 @@ import type { JazzClientConfig } from "jazz-tools/client";
  * Tests point the app at a sync server by its app id; a browser client takes
  * that as its `scope` (it names no app of its own).
  */
-type SessionOverrides = Omit<Partial<JazzClientConfig>, "appId"> & { appId?: string };
+export type SessionOverrides = Omit<Partial<JazzClientConfig>, "appId"> & { appId?: string };
 
 export function sessionConfig({ appId, ...rest }: SessionOverrides = {}): JazzClientConfig {
   const overrides = appId === undefined ? rest : { ...rest, scope: appId };
-  return { env: "dev", ...overrides, initial: "local-first" };
+  return { env: "dev", ...overrides, initial: "device" };
 }

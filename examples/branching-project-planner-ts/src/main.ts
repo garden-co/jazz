@@ -1,11 +1,14 @@
-import { createAccountManager, createDb, parseSnapshotRef, serializeSnapshotRef } from "jazz-tools";
+import { createJazzClient, parseSnapshotRef, serializeSnapshotRef } from "jazz-tools";
 import { app, type Task } from "../schema.js";
 
-const appId = "branching-project-planner-example";
-// The account registry names its authority; this database runs without a server.
-const accounts = await createAccountManager({ appId, serverUrl: location.origin });
-const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
-const db = await createDb({ appId, driver: { type: "persistent" }, account });
+// This database runs without a server, on this browser's device account.
+const session = await createJazzClient({
+  serverUrl: null,
+  client: () => import("jazz-tools/local-first"),
+  initial: "device",
+  driver: { type: "persistent" },
+});
+const db = session.db;
 
 let mainScenario = await db.one(app.scenarios.where({ name: "Main plan" }));
 if (!mainScenario) {
@@ -103,5 +106,5 @@ document.querySelector<HTMLButtonElement>("#change-main")!.onclick = () => {
       .catch(report);
 };
 document.querySelector<HTMLButtonElement>("#reopen")!.onclick = () => {
-  void db.shutdown().then(() => location.reload(), report);
+  void session.close().then(() => location.reload(), report);
 };
