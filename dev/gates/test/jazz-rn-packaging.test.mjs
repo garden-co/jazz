@@ -882,7 +882,8 @@ test("the canonical Expo scaffold documents the account-handle client and direct
   assert.equal(manifest.scripts["verify:expo"], "pnpm verify:expo:android && pnpm verify:expo:ios");
   assert.equal(appConfig.newArchEnabled, true);
   assert.deepEqual(appConfig.plugins, ["jazz-rn"]);
-  assert.match(readme, /jazz-rn@alpha/);
+  assert.match(readme, /installs\n?\s*`jazz-rn` from npm directly/);
+  assert.doesNotMatch(readme, /@alpha/);
   assert.match(readme, /direct app dependency/);
   assert.match(readme, /does \*\*not\*\* run in Expo Go/);
   assert.match(
@@ -996,7 +997,8 @@ test("React Native docs advertise the supported alpha session and account-handle
     readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
   ]);
 
-  assert.match(readme, /pnpm add jazz-tools@alpha jazz-rn@alpha/);
+  assert.match(readme, /pnpm add jazz-tools jazz-rn$/m);
+  assert.doesNotMatch(readme, /@alpha/);
   assert.match(readme, /"plugins": \["jazz-rn"\]/);
   assert.match(readme, /npx expo prebuild --clean/);
   assert.match(readme, /newArchEnabled=true/);
@@ -3217,7 +3219,7 @@ test("release, preview, and labeled platform gates seal and link the staged rela
   assert.match(alphaPublish, /JAZZ_REUSE_PREVIEW_ARTIFACTS/);
   assert.match(alphaPublish, /release-artifact-source-revision\.mjs/);
   assert.match(alphaPublish, /Verify packed jazz-rn relay payload/);
-  assert.match(alphaPublish, /Publish jazz-rn \(alpha tag\)/);
+  assert.match(alphaPublish, /Publish jazz-rn$/m);
   assert.match(
     alphaPublish,
     /uses: \.\/\.github\/workflows\/build-jazz-packages\.yml[\s\S]*include_rn: true/,
