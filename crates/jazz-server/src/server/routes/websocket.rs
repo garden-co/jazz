@@ -5113,7 +5113,7 @@ mod tests {
     }
 
     enum WsOpen {
-        Admitted(TestWs),
+        Admitted(Box<TestWs>),
         Refused(WireError),
     }
 
@@ -5145,7 +5145,7 @@ mod tests {
             .expect("websocket result");
         let frames = decode_ws_message(&response);
         match frames.as_slice() {
-            [WireFrame::Hello(_)] => WsOpen::Admitted(ws),
+            [WireFrame::Hello(_)] => WsOpen::Admitted(Box::new(ws)),
             [WireFrame::Error(error)] => WsOpen::Refused(error.clone()),
             other => panic!("expected a server hello or error, got {other:?}"),
         }
@@ -5153,7 +5153,7 @@ mod tests {
 
     fn admitted(outcome: WsOpen, label: &str) -> TestWs {
         match outcome {
-            WsOpen::Admitted(ws) => ws,
+            WsOpen::Admitted(ws) => *ws,
             WsOpen::Refused(error) => panic!("{label}: refused: {error:?}"),
         }
     }
@@ -5494,7 +5494,7 @@ mod tests {
         let mut refused = 0;
         while let Some(outcome) = pending.next().await {
             match outcome {
-                WsOpen::Admitted(ws) => admitted_links.push(ws),
+                WsOpen::Admitted(ws) => admitted_links.push(*ws),
                 outcome @ WsOpen::Refused(_) => {
                     assert_cap_refusal(outcome, CAP, "storm connection");
                     refused += 1;
