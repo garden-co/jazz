@@ -97,7 +97,7 @@ import { NoJazzAccountError } from "./no-account-error.js";
 import { RequestAuthenticationError } from "./request-auth.js";
 import { optionalPeerImportError } from "./optional-peer.js";
 import { closingBeforeDeadline } from "./socket-deadline.js";
-import { vercelUpgradesSockets } from "./vercel-sockets.js";
+import { importWs, vercelUpgradesSockets } from "./ws-peer.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
@@ -3441,10 +3441,11 @@ interface SocketUpgrader {
 }
 
 async function socketUpgrader(): Promise<SocketUpgrader> {
-  const { WebSocketServer } = (await import("ws" as string)) as {
-    WebSocketServer: new (options: { noServer: true; maxPayload: number }) => SocketUpgrader;
-  };
-  return new WebSocketServer({ noServer: true, maxPayload: MAX_STREAM_MESSAGE_BYTES });
+  const { WebSocketServer } = await importWs("attach()");
+  return new WebSocketServer({
+    noServer: true,
+    maxPayload: MAX_STREAM_MESSAGE_BYTES,
+  }) as SocketUpgrader;
 }
 
 /** A sync socket's path below `basePath`. */
