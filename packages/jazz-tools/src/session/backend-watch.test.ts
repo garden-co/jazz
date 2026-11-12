@@ -212,6 +212,22 @@ it("signs out a guest another tab linked at once on reauthenticate", async () =>
   await t.session.close();
 });
 
+it("never lets onSignedOut keep a guest another tab linked to someone else", async () => {
+  const onSignedOut = vi.fn(() => "keep" as const);
+  const t = await setup(guest, {
+    clearOnSignOut: true,
+    forgotten: async (account) => account === guest,
+    onSignedOut,
+  });
+  await settle();
+  await t.watch.reauthenticate();
+  expect(onSignedOut).not.toHaveBeenCalled();
+  expect(t.session.getSnapshot().status).toBe("signed-out");
+  expect(t.events).toEqual(["wipe:guest", "close:guest"]);
+  t.watch.stop();
+  await t.session.close();
+});
+
 it("doesn't sign out, or wipe with clearOnSignOut, on one signed-out answer", async () => {
   const t = await setup(user("alice"), { clearOnSignOut: true });
   t.signIn(user("alice"));

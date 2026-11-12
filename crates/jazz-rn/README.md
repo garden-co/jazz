@@ -83,7 +83,7 @@ autolinking must discover it from the application, not through `jazz-tools`.
 For an Expo development build, the minimal configuration is:
 
 ```bash
-pnpm add jazz-tools@alpha jazz-rn@alpha
+pnpm add jazz-tools jazz-rn
 ```
 
 Install the same version of both. A release candidate is not on npm: install

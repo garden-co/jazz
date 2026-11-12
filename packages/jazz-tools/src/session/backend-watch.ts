@@ -438,6 +438,8 @@ export function watchBackendUser<Client>(
       return attempt(session.loginWithBackend());
     }
     signedOutLink = undefined;
+    // A guest that is someone else's account now: the app can't keep it.
+    let forgottenGuest = false;
     if (!backendUser) {
       // A guest another tab linked to a user, who has signed out since: the
       // account is theirs, so it signs out here too (and, with
@@ -446,6 +448,7 @@ export function watchBackendUser<Client>(
       const forgotten = await options.forgotten(startedWith).catch(() => false);
       if (!forgotten) return;
       if (quiet(asked)) return busy();
+      forgottenGuest = true;
     }
     if (refused) {
       // Never sign out on a refusal alone (the cookie may be stale), but a
@@ -466,8 +469,10 @@ export function watchBackendUser<Client>(
     // The app moved on meanwhile (signed out itself, continued as a guest,
     // signed someone in): that account is not the one this answer was about.
     if (session.getSnapshot().account !== startedWith) return busy();
-    if ((await askSignedOut()) === "keep" || quiet(asked)) return;
-    if (session.getSnapshot().account !== startedWith) return busy();
+    if (!forgottenGuest) {
+      if ((await askSignedOut()) === "keep" || quiet(asked)) return;
+      if (session.getSnapshot().account !== startedWith) return busy();
+    }
     return attempt(session.logout());
   }
   /** The app's `onSignedOut` decision; a hook that fails signs out. */
