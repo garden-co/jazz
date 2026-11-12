@@ -795,6 +795,30 @@ describe("createJazz", () => {
     expect(statuses).toEqual([{ state: "connected" }]);
   }, 30_000);
 
+  it("keeps a session that expires in 30 days open, past what one timer can wait", async () => {
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        const userId = request.headers.get("x-test-user");
+        return userId ? { userId, expiresAt: inSeconds(30 * 24 * 3600) } : null;
+      },
+    }).ready();
+    cleanups.push(() => jazz.close());
+    let upgrades = 0;
+    const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
+    const alice = await userSession(jazz.appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "long session", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    // One timer would clamp ~30 days to 1 ms and re-authenticate at once.
+    const opened = upgrades;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(upgrades).toBe(opened);
+    expect(alice.db.getSyncStatus().link).toEqual({ state: "connected" });
+  }, 30_000);
+
   it("ends a session at its expiresAt once authenticate no longer names the user", async () => {
     const signedOut = new Set<string>();
     const jazz = await createJazz({

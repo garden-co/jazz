@@ -5,6 +5,8 @@ import type { BrowserWebSocket } from "./websocket.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
+  REAUTHENTICATE_WIRE_MESSAGE_PREFIX,
+  isReauthenticateWireError,
   FEATURE_HEARTBEAT,
   FEATURE_PAYLOAD_ZSTD,
   HEARTBEAT_SILENCE_MS,
@@ -1386,3 +1388,22 @@ class RecordingWebSocket extends MessageWebSocket {
 
   private static epoch = 1n;
 }
+
+describe("planned re-authentication", () => {
+  it("is only the backend's marked auth_failed/after_resume error, not the core's session mismatches", () => {
+    const planned = {
+      code: "auth_failed",
+      retry: "after_resume",
+      message: `${REAUTHENTICATE_WIRE_MESSAGE_PREFIX} the session reached the expiry authenticate gave it`,
+    };
+    expect(isReauthenticateWireError(planned)).toBe(true);
+    expect(
+      isReauthenticateWireError({
+        ...planned,
+        message: "session id does not match this connection",
+      }),
+    ).toBe(false);
+    expect(isReauthenticateWireError({ ...planned, retry: "after_auth" })).toBe(false);
+    expect(isReauthenticateWireError({ ...planned, code: "internal" })).toBe(false);
+  });
+});

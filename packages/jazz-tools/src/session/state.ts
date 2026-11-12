@@ -217,6 +217,10 @@ export async function createJazzSessionOwner<
     if (token !== generation) throw superseded();
     // A switch has signed the previous account out: a failed sign-in can't reopen it.
     const previous = signsOut ? undefined : selected;
+    // A clearOnSignOut wipe that may not have finished, reported with the
+    // signed-out state: on a shared device the app must know.
+    let unfinishedWipe: Error | undefined;
+    let wiped = false;
     await (detached ??
       detach({ status: "transitioning", account: selected, pending: operation }).done);
     if (token !== generation) throw superseded();
@@ -231,6 +235,7 @@ export async function createJazzSessionOwner<
           // Say what the wipe took, as a sign-out past refused writes does.
           const writes = db?.getSyncStatus?.().pendingUploads ?? 0;
           await db?.deleteClientStorage?.();
+          wiped = true;
           if (writes > 0)
             console.warn(
               `Jazz signed out and wiped ${writes} write(s) the server hadn't confirmed, as clearOnSignOut asks. They are gone from this device; any the server did receive stay there.`,
@@ -269,10 +274,15 @@ export async function createJazzSessionOwner<
         throw cause;
       }
       // A sign-out whose teardown began and failed still signs out: the
-      // user asked to leave, and did. The failure is logged, not published
-      // as the session's error. Code that kept the half-closed client's Db
-      // learns it is gone.
+      // user asked to leave, and did. The failure is logged, and published
+      // as the session's error only when a clearOnSignOut wipe may not have
+      // finished. Code that kept the half-closed client's Db learns it is gone.
       console.error("Jazz signed out, but closing the signed-out client failed.", cause);
+      if (options.clearOnSignOut && !wiped && !isThinDb((client as WipeableClient).db as Db))
+        unfinishedWipe = new Error(
+          "Jazz signed out, but couldn't finish wiping this device's data (clearOnSignOut). Some of the signed-out user's data may still be on this device.",
+          { cause },
+        );
       (client as WipeableClient).db?.markReplaced?.("signed-out");
       client = undefined;
     }
@@ -317,7 +327,12 @@ export async function createJazzSessionOwner<
       throw cause;
     }
     if (token !== generation) throw superseded();
-    publish({ status: client ? "ready" : "signed-out", account: selected, client });
+    publish({
+      status: client ? "ready" : "signed-out",
+      account: selected,
+      client,
+      ...(unfinishedWipe ? { error: unfinishedWipe, recovery: "session" as const } : {}),
+    });
   };
   const run = (
     operation: JazzSessionOperation,

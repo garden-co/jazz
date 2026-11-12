@@ -609,3 +609,45 @@ describe("Jazz session: failures that leave a client usable (K2)", () => {
     expect(session.getSnapshot().client).toBeUndefined();
   });
 });
+
+describe("Jazz session: a clearOnSignOut wipe that didn't finish", () => {
+  it("signs out and says the wipe may not have finished", async () => {
+    const old = handle("old");
+    const enrollment = {
+      createLocalFirst: vi.fn(() => old),
+      restoreLocalFirst: vi.fn(() => old),
+      logout: vi.fn(),
+      loginWithBackend: vi.fn(async () => handle("next")),
+      linkWithBackend: vi.fn(async (_account: AccountHandle) => handle("next")),
+    };
+    let usable = true;
+    const failure = new Error("IndexedDB deletion was blocked");
+    const client = {
+      db: {
+        waitForSync: vi.fn(async () => {}),
+        // The worker started the reset (the client is gone), then failed.
+        deleteClientStorage: vi.fn(async () => {
+          usable = false;
+          throw failure;
+        }),
+        getSyncStatus: () => ({ pendingUploads: 0 }),
+        markReplaced: vi.fn(),
+        isUsable: () => usable,
+      },
+      shutdown: vi.fn(async () => {}),
+    };
+    const session = await createJazzSessionOwner({
+      accounts: new AccountManager(enrollment, old),
+      clearOnSignOut: true,
+      openClient: async () => client,
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    await session.logout();
+    error.mockRestore();
+    expect(enrollment.logout).toHaveBeenCalledOnce();
+    const snapshot = session.getSnapshot();
+    expect(snapshot.status).toBe("signed-out");
+    expect(snapshot.error?.message).toMatch(/couldn't finish wiping this device's data/);
+    expect(snapshot.error?.cause).toBe(failure);
+  });
+});

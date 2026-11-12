@@ -127,7 +127,12 @@ export function fromJWT(
       if (isRequestAuthenticationError(error)) return null;
       throw error;
     }
-    // Verified with `requireExp`, so the token says until when it holds.
-    return { userId: payload.sub, claims: readClaims(payload), expiresAt: payload.exp as number };
+    // Verified with `requireExp`, so the token says until when it holds; it
+    // is accepted up to the clock tolerance past that, and so holds as long.
+    return {
+      userId: payload.sub,
+      claims: readClaims(payload),
+      expiresAt: (payload.exp as number) + lifetime.clockToleranceSeconds,
+    };
   };
 }

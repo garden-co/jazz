@@ -664,10 +664,18 @@ export function browserBackendWatchEvents(channelName: string): BackendWatchEven
 }
 
 /**
+ * How long a shared answer stays in `localStorage`: long enough for the
+ * windows queued behind the lock, so who is signed in isn't kept on the
+ * device past that (a sign-out with `clearOnSignOut` leaves nothing behind).
+ */
+const SHARED_ANSWER_MS = 10_000;
+
+/**
  * {@link BackendWatchEvents.singleFlight} for the windows of one browser: a
  * Web Lock takes turns, and the answer is left in `localStorage` before the
- * lock is let go, so the window that takes it next reads it at once. Where
- * either is missing, every probe runs on its own.
+ * lock is let go, so the window that takes it next reads it at once. The
+ * answer is removed again after {@link SHARED_ANSWER_MS}. Where either is
+ * missing, every probe runs on its own.
  */
 export function browserSingleFlight(
   name: string,
@@ -681,10 +689,23 @@ export function browserSingleFlight(
     }
   })();
   if (!locks || !storage) return undefined;
+  const forget = (stored?: string) => {
+    try {
+      if (stored === undefined || storage.getItem(name) === stored) storage.removeItem(name);
+    } catch {
+      // Storage off: nothing was kept.
+    }
+  };
   const read = (): { startedAt: number; value: unknown } | undefined => {
     try {
       const stored = storage.getItem(name);
-      return stored ? (JSON.parse(stored) as { startedAt: number; value: unknown }) : undefined;
+      if (!stored) return undefined;
+      const answer = JSON.parse(stored) as { startedAt: number; value: unknown };
+      if (Date.now() - answer.startedAt > SHARED_ANSWER_MS) {
+        forget(stored);
+        return undefined;
+      }
+      return answer;
     } catch {
       return undefined;
     }
@@ -699,7 +720,10 @@ export function browserSingleFlight(
       const startedAt = Date.now();
       const value = await probe();
       try {
-        storage.setItem(name, JSON.stringify({ startedAt, value }));
+        const stored = JSON.stringify({ startedAt, value });
+        storage.setItem(name, stored);
+        const expire = setTimeout(() => forget(stored), SHARED_ANSWER_MS);
+        (expire as unknown as { unref?: () => void }).unref?.();
       } catch {
         // Storage full or off: this window's answer is its own.
       }

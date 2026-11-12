@@ -50,11 +50,14 @@ async function readSession(sealed: string | undefined) {
       sealed: current,
       expiresAt: expOf(result.accessToken),
     };
-  if (!refreshed.has(sealed))
+  if (!refreshed.has(sealed)) {
     refreshed.set(
       sealed,
       session.refresh().then((next) => (next.authenticated && next.sealedSession) || null),
     );
+    // Long enough for the requests racing on this stale seal; then forget it.
+    setTimeout(() => refreshed.delete(sealed), 5 * 60_000).unref();
+  }
   const fresh = await refreshed.get(sealed);
   if (!fresh) return null;
   const again = await workos.userManagement

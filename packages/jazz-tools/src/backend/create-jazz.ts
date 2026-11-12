@@ -12,7 +12,10 @@ import { LOCAL_FIRST_JWT_ISSUER, parseJwtPayload } from "../runtime/client-sessi
 import { verifyLocalFirstToken } from "../runtime/local-first-token.js";
 import { endpointScope } from "../runtime/client-scope.js";
 import { PostcardWriter } from "../runtime/native-runtime/native-codec.js";
-import { encodeWebSocketFrameBatch } from "../runtime/native-runtime/websocket.js";
+import {
+  encodeWebSocketFrameBatch,
+  REAUTHENTICATE_WIRE_MESSAGE_PREFIX,
+} from "../runtime/native-runtime/websocket.js";
 import type {
   BrowserWebSocket,
   WebSocketConstructor,
@@ -83,7 +86,12 @@ export {
   type S3BlobStore,
   type VercelBlobStore,
 } from "./blobs.js";
-import { reauthenticateAt, withCheckedExpiry } from "./session-expiry.js";
+import {
+  AuthenticateExpiresAtError,
+  reauthenticateAt,
+  startTimer,
+  withCheckedExpiry,
+} from "./session-expiry.js";
 import { NoJazzAccountError } from "./no-account-error.js";
 import { RequestAuthenticationError } from "./request-auth.js";
 import { optionalPeerImportError } from "./optional-peer.js";
@@ -1448,6 +1456,23 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     retiring.add(closeOld);
   }
 
+  // An `authenticate` that returns expired answers, or none at all, is a
+  // bug in the app: said once per process.
+  let warnedExpiredAnswer = false;
+  function warnExpiredAnswer() {
+    if (warnedExpiredAnswer) return;
+    warnedExpiredAnswer = true;
+    console.error(
+      "createJazz: authenticate named a user with an expiresAt in the past, so Jazz treats them as signed out. Return the expiry of the session the user is signed in with (the one a sign-out ends), in Unix seconds, not of a short-lived access token.",
+    );
+  }
+  let warnedMissingExpiry = false;
+  function warnMissingExpiry(error: Error) {
+    if (warnedMissingExpiry) return;
+    warnedMissingExpiry = true;
+    console.error(error.message);
+  }
+
   /**
    * Who sent `request`: a scoped backend client's user, or the user the
    * app's own `authenticate` names. A trusted backend client has no user.
@@ -1461,9 +1486,16 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         ? { ...client.user, expiresAt: client.expiresAt }
         : null;
     const answer = await askAuthenticate(request);
-    return answer === LOCAL_FIRST_GUEST || answer === null
-      ? null
-      : withCheckedExpiry(answer as JazzUser);
+    if (answer === LOCAL_FIRST_GUEST || answer === null) return null;
+    const user = withCheckedExpiry(answer as JazzUser);
+    // An answer that has already expired names no one, here and in every
+    // other place that asks (who is signed in, sign-in, forReqUser), so a
+    // client can't be told it is signed in while its sync is refused.
+    if (user.expiresAt * 1000 <= Date.now()) {
+      warnExpiredAnswer();
+      return null;
+    }
+    return user;
   }
 
   async function askAuthenticate(request: Request): Promise<JazzUser | LocalFirstGuest | null> {
@@ -1823,17 +1855,6 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     readonly trusted: boolean;
   }
 
-  // An `authenticate` that returns expired answers is a bug in the app:
-  // said once per process.
-  let warnedExpiredAnswer = false;
-  function warnExpiredAnswer() {
-    if (warnedExpiredAnswer) return;
-    warnedExpiredAnswer = true;
-    console.error(
-      "createJazz: authenticate named a user with an expiresAt in the past, so the sync session was refused. Return the expiry of the session the user is signed in with (the one a sign-out ends), in Unix seconds, not of a short-lived access token.",
-    );
-  }
-
   /** The sessions this instance serves, for the Inspector's `sessions`. */
   const liveSessions = new Set<{
     session: ClientSession;
@@ -1855,16 +1876,15 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     let userId: string | undefined;
     let trusted = false;
     // A session that never sends its prelude ends too.
-    let expiry: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+    let stopExpiry: (() => void) | undefined = startTimer(() => {
       onEvent(null, { kind: "close", code: 1008, reason: "no sign-in in time" });
       end();
     }, PRELUDE_DEADLINE_MS);
-    (expiry as unknown as { unref?: () => void }).unref?.();
     const end = () => {
       if (ended) return;
       ended = true;
       liveSessions.delete(live);
-      if (expiry) clearTimeout(expiry);
+      stopExpiry?.();
       socket?.close();
     };
     // Ask the client to connect again, so the app's auth decides on a new
@@ -1892,7 +1912,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       }
       userId = admitted.userId;
       trusted = admitted.trusted;
-      if (expiry) clearTimeout(expiry);
+      stopExpiry?.();
       const admittedAt = Date.now();
       if (admitted.user) {
         // A signed-in user's session holds until the expiry `authenticate`
@@ -1912,12 +1932,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
           end();
           return false;
         }
-        expiry = setTimeout(reauthenticate, at - admittedAt);
+        stopExpiry = startTimer(reauthenticate, at - admittedAt);
       } else if (admitted.guest) {
         // A guest's key is its credential; the app lets it in anew each
         // `sessionTtlSeconds`, the same way.
         const ttl = (options.sessionTtlSeconds ?? 3600) * 1000;
-        expiry = setTimeout(reauthenticate, ttl);
+        stopExpiry = startTimer(reauthenticate, ttl);
       } else {
         // A backend client's session ends with its token, so it reconnects
         // with a fresh one.
@@ -1925,9 +1945,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
           (options.sessionTtlSeconds ?? 3600) * 1000,
           admitted.expiresAt === undefined ? Infinity : admitted.expiresAt * 1000 - admittedAt,
         );
-        expiry = setTimeout(end, Math.max(ttl, 0));
+        stopExpiry = startTimer(end, ttl);
       }
-      (expiry as unknown as { unref?: () => void }).unref?.();
       socket = core.openSocket(headerPairs(request.headers), onEvent, admitted.access);
       return socket.send(admitted.prelude);
     };
@@ -1981,7 +2000,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
                 onEvent(null, { kind: "close", code: 1008, reason: "sign-in refused" });
               } else {
                 // The core is unreachable or failed (5xx), or the app's own
-                // `authenticate` threw: the client tries again later.
+                // `authenticate` threw: the client tries again later. An
+                // `authenticate` without `expiresAt` fails the same way every
+                // time: say why, once.
+                if (error instanceof AuthenticateExpiresAtError) warnMissingExpiry(error);
                 onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
               }
               end();
@@ -3637,7 +3659,9 @@ function reauthenticateBatch(): Buffer {
   frame.u64(1); // WireFrame::Error
   frame.u64(3); // WireErrorCode::AuthFailed
   frame.u64(2); // WireRetry::AfterResume
-  frame.string("reauthenticate: the session reached the expiry authenticate gave it");
+  frame.string(
+    `${REAUTHENTICATE_WIRE_MESSAGE_PREFIX} the session reached the expiry authenticate gave it`,
+  );
   return Buffer.from(encodeWebSocketFrameBatch([frame.finish()]));
 }
 

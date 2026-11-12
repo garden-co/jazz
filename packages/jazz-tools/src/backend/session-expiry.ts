@@ -65,3 +65,38 @@ export function reauthenticateAt(admittedAtMs: number, expiresAtMs: number): num
   const lead = Math.min(REAUTHENTICATE_LEAD_MS, remaining / 2);
   return Math.max(admittedAtMs + Math.min(MIN_SESSION_MS, remaining), expiresAtMs - lead);
 }
+
+/**
+ * The longest delay a timer takes as asked: Node and browsers clamp larger
+ * ones (past ~24.8 days) to almost nothing, which would fire a long
+ * session's re-authentication right after it opens.
+ */
+export const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+
+/**
+ * Call `run` after `delayMs`, however long, chaining timers below
+ * {@link MAX_TIMER_DELAY_MS}. Unref'd, so it never keeps a process alive.
+ * Returns a cancel.
+ */
+export function startTimer(run: () => void, delayMs: number): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let cancelled = false;
+  const due = Date.now() + Math.max(delayMs, 0);
+  const arm = () => {
+    const left = due - Date.now();
+    timer = setTimeout(
+      () => {
+        if (cancelled) return;
+        if (due - Date.now() > 0) arm();
+        else run();
+      },
+      Math.min(Math.max(left, 0), MAX_TIMER_DELAY_MS),
+    );
+    (timer as unknown as { unref?: () => void }).unref?.();
+  };
+  arm();
+  return () => {
+    cancelled = true;
+    if (timer !== undefined) clearTimeout(timer);
+  };
+}
