@@ -1867,6 +1867,26 @@ impl NapiDb {
             .into())
     }
 
+    /// The Inspector's `explain`: for each of `rows` (uuid strings) of
+    /// `table`, which clauses of its read policy (the arms of its top-level
+    /// `Or`) hold for `author` with `claims`.
+    #[napi(
+        js_name = "explainReadClauses",
+        ts_return_type = "Array<{ id: string; holds: boolean[] }>"
+    )]
+    pub fn explain_read_clauses(
+        &self,
+        table: String,
+        rows: Vec<String>,
+        author: Uint8Array,
+        claims: Option<JsonValue>,
+    ) -> js::Result<JsonValue> {
+        Ok(self
+            .binding()?
+            .explain_read_clauses(&table, &rows, &author, claims)
+            .map_err(host_error)?)
+    }
+
     #[napi]
     pub fn subscribe(
         &self,

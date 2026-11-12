@@ -5,6 +5,8 @@
 import type { WasmSchema } from "jazz-tools";
 import {
   fromJsonForColumn,
+  type InspectAs,
+  type InspectExplainAnswer,
   type InspectQuery,
   type InspectRowsAnswer,
   type InspectSessionInfo,
@@ -219,6 +221,81 @@ export function explorerHrefFor(query: InspectQuery, schema: WasmSchema): string
   return `/data-explorer/${encodeURIComponent(query.table)}/data${search ? `?${search}` : ""}`;
 }
 
+/** Why the user viewed as can or can't read each row of `query`: the backend's `explain`. */
+function ExplainRows({ query, as }: { query: InspectQuery; as: InspectAs }) {
+  const backend = useBackendContext();
+  const [answer, setAnswer] = useState<InspectExplainAnswer | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  if (!backend) return null;
+  const run = () => {
+    setLoading(true);
+    setError(null);
+    backend.call<InspectExplainAnswer>({ op: "explain", query, as }).then(
+      (next) => {
+        setAnswer(next);
+        setLoading(false);
+      },
+      (failure: Error) => {
+        setError(failure.message);
+        setLoading(false);
+      },
+    );
+  };
+  const clause = (index: number) => {
+    const text = answer?.clauses[index]?.text;
+    return text ? `${index}: ${text}` : `clause ${index}`;
+  };
+  return (
+    <section aria-label="Explain">
+      <button type="button" onClick={run} disabled={loading}>
+        {answer ? "Explain again" : "Explain why"}
+      </button>
+      {error ? <p className={styles.error}>{error}</p> : null}
+      {answer ? (
+        <>
+          {answer.warning ? <p className={styles.error}>{answer.warning}</p> : null}
+          {answer.note ? <p className={styles.note}>{answer.note}</p> : null}
+          {answer.clauses.length ? (
+            <ol start={0} className={styles.note} aria-label="Read policy clauses">
+              {answer.clauses.map((entry) => (
+                <li key={entry.index}>{entry.text ?? `clause ${entry.index}`}</li>
+              ))}
+            </ol>
+          ) : null}
+          <table className={styles.table}>
+            <thead>
+              <tr>
+                <th>id</th>
+                <th>{answer.as} may read</th>
+                <th>because</th>
+              </tr>
+            </thead>
+            <tbody>
+              {answer.rows.map((row) => (
+                <tr key={row.id}>
+                  <td>{row.id}</td>
+                  <td>{row.allowed ? "yes" : "no"}</td>
+                  <td>
+                    {row.allowed
+                      ? row.by.map(clause).join("; ")
+                      : answer.clauses.length
+                        ? "no clause holds"
+                        : "no read policy"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {answer.truncated ? (
+            <p className={styles.note}>More rows matched; raise the limit to explain them.</p>
+          ) : null}
+        </>
+      ) : null}
+    </section>
+  );
+}
+
 export function LinkedQuery() {
   const backend = useBackendContext();
   const { wasmSchema } = useDevtoolsContext();
@@ -263,6 +340,7 @@ export function LinkedQuery() {
       <pre className={styles.code}>{JSON.stringify(query, null, 2)}</pre>
       {error ? <p className={styles.error}>{error}</p> : null}
       {answer?.warning ? <p className={styles.error}>{answer.warning}</p> : null}
+      {as && !query.table.startsWith("history.") ? <ExplainRows query={query} as={as} /> : null}
       {answer ? (
         <>
           <p className={styles.note}>

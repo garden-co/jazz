@@ -23,7 +23,18 @@ const readsNoClaims = definePermissions(app, ({ policy, session }) => {
 function inspector(permissions: unknown) {
   const sessions: unknown[] = [];
   const events: InspectEvent[] = [];
-  const db = { all: async () => [] };
+  const explained: { ids: string[] }[] = [];
+  const db = {
+    all: async () => [
+      { id: "11111111-1111-4111-8111-111111111111", title: "a" },
+      { id: "22222222-2222-4222-8222-222222222222", title: "b" },
+    ],
+    explainReadClauses: (_table: unknown, ids: string[]) => {
+      explained.push({ ids });
+      // The second row went away between the two reads.
+      return [{ id: ids[0]!, holds: [false, true] }];
+    },
+  };
   const deps = {
     appId: "app",
     basePath: "/jazz",
@@ -57,7 +68,7 @@ function inspector(permissions: unknown) {
     );
     return { status: response.status, body: (await response.json()) as any };
   };
-  return { call, sessions, events };
+  return { call, sessions, events, explained };
 }
 
 describe("viewing as a user when the permissions read claims", () => {
@@ -86,5 +97,28 @@ describe("viewing as a user when the permissions read claims", () => {
   it("doesn't warn when they read none", async () => {
     const { call } = inspector(readsNoClaims);
     expect((await call({ op: "query", query, as: "alice" })).body.warning).toBeUndefined();
+  });
+
+  it("explains every row the query matches, by clause, for the user", async () => {
+    const { call, explained } = inspector(readsClaims);
+    const as = { userId: "manager", claims: { role: "manager" } };
+    const answer = await call({ op: "explain", query, as });
+    expect(answer.status).toBe(200);
+    expect(answer.body.clauses).toEqual([
+      { index: 0, text: "owner = session.user" },
+      { index: 1, text: 'session.claims.role = "manager"' },
+    ]);
+    expect(explained).toEqual([
+      {
+        ids: ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"],
+      },
+    ]);
+    expect(
+      answer.body.rows.map((row: any) => [row.id, row.allowed, row.by, row.row.title]),
+    ).toEqual([["11111111-1111-4111-8111-111111111111", true, [1], "a"]]);
+    expect(answer.body.warning).toBeUndefined();
+    expect(answer.body.inspectorUrl).toMatch(/#q=.*as=manager&claims=/);
+
+    expect((await call({ op: "explain", query })).status).toBe(400);
   });
 });

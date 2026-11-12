@@ -19,7 +19,7 @@
 
 import { NoJazzAccountError } from "./no-account-error.js";
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import type { ColumnType, WasmSchema } from "../drivers/types.js";
+import type { ColumnType, TablePolicies, WasmSchema } from "../drivers/types.js";
 import type { Db, QueryBuilder, TableProxy } from "../runtime/db.js";
 import { historySourceTable, historyTableName } from "../runtime/history-relation.js";
 import {
@@ -34,11 +34,14 @@ import {
   fromJsonForColumn,
   inspectorLink,
   isLoopbackHost,
+  policyClauses,
   readsClaims,
+  renderPolicy,
   rowLimit,
   toJsonValue,
   type InspectAs,
   type InspectErrorCode,
+  type InspectExplainAnswer,
   type InspectQuery,
   type InspectRequest,
   type InspectSessionInfo,
@@ -670,6 +673,58 @@ export function createInspector(deps: InspectorDeps) {
     };
   }
 
+  /**
+   * Which read-policy clause let `as` see each row `query` matches with the
+   * backend's authority, or that none did. The clauses are the arms of the
+   * table's policy's top-level `or`.
+   */
+  async function explain(admitted: Admitted, query: InspectQuery, as: InspectAs | undefined) {
+    if (as === undefined) {
+      throw new InspectError("bad_request", "explain needs as: the user to explain for");
+    }
+    if (!query || typeof query !== "object" || typeof query.table !== "string") {
+      throw new InspectError("bad_request", "query needs { table, ... }");
+    }
+    if (historySourceTable(query.table) !== undefined) {
+      throw new InspectError("bad_request", "explain needs a table, not its history");
+    }
+    // Every row the query matches, whoever may see it; then, as the user,
+    // which clauses hold for each.
+    const read = await readRows(admitted, query, undefined);
+    const { db, as: asUser, asClaims, warning } = await dbFor(as);
+    const policies = (deps.permissions as Record<string, TablePolicies> | undefined)?.[query.table];
+    const policy = policies?.select?.using ?? policies?.select?.with_check;
+    const clauses = policyClauses(policy);
+    const ids = read.rows.map((row) => String(row.id));
+    const found = new Map(
+      db.explainReadClauses(tableProxy(query.table), ids).map((row) => [row.id, row.holds]),
+    );
+    // A table-scoped token doesn't see the app's permissions (see `schema`),
+    // so it gets the clauses' numbers without their text.
+    const showPolicy = !(admitted.via === "token" && admitted.tables);
+    const answer: Omit<InspectExplainAnswer, "inspectorUrl"> = {
+      table: query.table,
+      as: asUser!,
+      clauses: clauses.map((clause, index) => ({
+        index,
+        ...(showPolicy ? { text: renderPolicy(clause) } : {}),
+      })),
+      rows: read.rows.flatMap((row) => {
+        const holds = found.get(String(row.id));
+        // Gone between the two reads.
+        if (!holds) return [];
+        const by = holds.flatMap((held, index) => (held ? [index] : []));
+        return [{ id: String(row.id), allowed: by.length > 0, by, row }];
+      }),
+      truncated: read.truncated,
+      ...(policy === undefined
+        ? { note: `${query.table} has no read policy, so every row is denied` }
+        : {}),
+      ...(warning ? { warning } : {}),
+    };
+    return { answer, as: asUser, asClaims };
+  }
+
   function schemaAnswer(admitted: Admitted) {
     const schema = deps.schema();
     const tables: Record<string, unknown> = {};
@@ -815,11 +870,21 @@ export function createInspector(deps: InspectorDeps) {
           },
           event: {},
         };
-      case "explain":
-        throw new InspectError(
-          "not_supported",
-          "explain (which policy allowed or denied each row) is not supported yet; compare `query` with and without `as` meanwhile",
-        );
+      case "explain": {
+        const explained = await explain(admitted, body.query, body.as);
+        return {
+          answer: {
+            ...explained.answer,
+            inspectorUrl: inspectorLink(url, { query: body.query, as: body.as }),
+          },
+          event: {
+            table: body.query?.table,
+            rows: explained.answer.rows.length,
+            as: explained.as,
+            asClaims: explained.asClaims,
+          },
+        };
+      }
       case "link": {
         if (body.query) checkTable(admitted, body.query.table);
         else if (body.table) checkTable(admitted, body.table);
