@@ -331,8 +331,8 @@ importers:
         specifier: 0.6.3
         version: 0.6.3(@stylexjs/stylex@0.19.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@garden-co/design':
-        specifier: github:garden-co/design#7a89af53eb9d5f63d5d949cc1612ca41dbc1a225
-        version: https://codeload.github.com/garden-co/design/tar.gz/7a89af53eb9d5f63d5d949cc1612ca41dbc1a225(@astryxdesign/core@0.6.3(@stylexjs/stylex@0.19.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)
+        specifier: github:garden-co/design#f936ccdd09ec764ad911ed89caf70e8e7ae6eae6
+        version: https://codeload.github.com/garden-co/design/tar.gz/f936ccdd09ec764ad911ed89caf70e8e7ae6eae6(@astryxdesign/core@0.6.3(@stylexjs/stylex@0.19.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)
       '@vercel/analytics':
         specifier: ^2.0.1
         version: 2.0.1(@sveltejs/kit@2.57.1(@opentelemetry/api@1.9.1)(@sveltejs/vite-plugin-svelte@7.0.0(svelte@5.53.6)(vite@8.0.1(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)))(svelte@5.53.6)(typescript@6.0.2)(vite@8.0.1(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)))(next@16.2.11(@opentelemetry/api@1.9.1)(@playwright/test@1.58.2)(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)(svelte@5.53.6)(vue@3.5.29(typescript@6.0.2))
@@ -2150,6 +2150,9 @@ importers:
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
+      markdown-it:
+        specifier: 14.3.3
+        version: 14.3.3
       vue:
         specifier: ^3.5.0
         version: 3.5.29(typescript@6.0.2)
@@ -2157,6 +2160,9 @@ importers:
       '@playwright/test':
         specifier: ^1.58.2
         version: 1.58.2
+      '@types/markdown-it':
+        specifier: 14.2.0
+        version: 14.2.0
       '@vitejs/plugin-vue':
         specifier: catalog:default
         version: 6.0.4(vite@8.0.1(@types/node@25.6.0)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))(vue@3.5.29(typescript@6.0.2))
@@ -4318,8 +4324,8 @@ packages:
       tailwindcss:
         optional: true
 
-  '@garden-co/design@https://codeload.github.com/garden-co/design/tar.gz/7a89af53eb9d5f63d5d949cc1612ca41dbc1a225':
-    resolution: {tarball: https://codeload.github.com/garden-co/design/tar.gz/7a89af53eb9d5f63d5d949cc1612ca41dbc1a225}
+  '@garden-co/design@https://codeload.github.com/garden-co/design/tar.gz/f936ccdd09ec764ad911ed89caf70e8e7ae6eae6':
+    resolution: {tarball: https://codeload.github.com/garden-co/design/tar.gz/f936ccdd09ec764ad911ed89caf70e8e7ae6eae6}
     version: 0.1.0
     peerDependencies:
       '@astryxdesign/core': ^0.6.3
@@ -16165,7 +16171,7 @@ snapshots:
     optionalDependencies:
       tailwindcss: 4.2.1
 
-  '@garden-co/design@https://codeload.github.com/garden-co/design/tar.gz/7a89af53eb9d5f63d5d949cc1612ca41dbc1a225(@astryxdesign/core@0.6.3(@stylexjs/stylex@0.19.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)':
+  '@garden-co/design@https://codeload.github.com/garden-co/design/tar.gz/f936ccdd09ec764ad911ed89caf70e8e7ae6eae6(@astryxdesign/core@0.6.3(@stylexjs/stylex@0.19.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)':
     optionalDependencies:
       '@astryxdesign/core': 0.6.3(@stylexjs/stylex@0.19.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       react: 19.2.4
