@@ -7157,8 +7157,6 @@ impl Client {
         self.pending.iter().find(|p| p.id == *id).map(|p| p.tx)
     }
 
-    /// How far the live read `key` is settled: its own settle, or the
-    /// connection's position when that is further.
     /// Whether the upstream live read under `key` was answered by the
     /// global authority.
     fn settled_globally(&self, key: &str) -> bool {
@@ -7169,6 +7167,8 @@ impl Client {
             .is_some_and(|live| live.global.get())
     }
 
+    /// How far the live read `key` is settled: its own settle, or the
+    /// connection's position when that is further.
     fn settled_through(&self, key: &str) -> u64 {
         let visible = self
             .live_reads
@@ -11495,7 +11495,7 @@ impl Db {
                                 .get_mut(&id)
                                 .expect("just read");
                             settle.sent = Some(at);
-                            settle.global = global || upstream;
+                            settle.global |= global || upstream;
                             at
                         }
                         // Served here with no server: once relaying
@@ -11507,7 +11507,7 @@ impl Db {
                                 .get_mut(&id)
                                 .expect("just read");
                             settle.sent.get_or_insert(0);
-                            settle.global = global;
+                            settle.global |= global;
                             through
                         }
                         None => through,
