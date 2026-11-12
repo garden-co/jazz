@@ -2323,7 +2323,13 @@ async fn bridge_connection(
             }
         })
     };
-    let lost = || LinkEnd::Lost(LinkFailure::Network("native relay wire closed".to_owned()));
+    // A wire the owner retired because it refused the upstream stops the
+    // link with that refusal, however the bridge found it closed: the
+    // refusal can land between the check below and a queue operation.
+    let lost = || match wire.refusal() {
+        Some(reason) => LinkEnd::Stop(reason),
+        None => LinkEnd::Lost(LinkFailure::Network("native relay wire closed".to_owned())),
+    };
     loop {
         if cancelled.load(Ordering::Acquire) {
             return LinkEnd::Cancelled;
