@@ -1,6 +1,5 @@
 import * as React from "react";
-import { JazzProvider, type DbConfig } from "jazz-tools/react-native";
-import { createAccountManager } from "jazz-tools/expo";
+import { JazzProvider, type JazzClientConfig } from "jazz-tools/expo";
 import {
   ActivityIndicator,
   Platform,
@@ -26,24 +25,6 @@ const defaultServerUrl = Platform.select({
 // lookups like globalThis.process.env[key] won't be replaced.
 declare const process: { env: Record<string, string | undefined> };
 const envServerUrl = process.env.EXPO_PUBLIC_JAZZ_SERVER_URL;
-
-const accounts = new Map<string, ReturnType<typeof localFirstAccount>>();
-
-/** This device's local-first guest of the app's backend. */
-function localFirstAccount(serverUrl: string) {
-  return createAccountManager({ serverUrl }).then(
-    (manager) => manager.getLoggedIn() ?? manager.createLocalFirst(),
-  );
-}
-
-function accountFor(serverUrl: string) {
-  let account = accounts.get(serverUrl);
-  if (!account) {
-    account = localFirstAccount(serverUrl);
-    accounts.set(serverUrl, account);
-  }
-  return account;
-}
 
 const styles = StyleSheet.create({
   container: {
@@ -109,22 +90,27 @@ const defaultFallback = (
 );
 
 type AppProps = {
-  config?: Partial<DbConfig>;
+  config?: Partial<JazzClientConfig>;
   fallback?: React.ReactNode;
 };
 
 export default function App({ config, fallback }: AppProps = {}) {
   const serverUrl = config?.serverUrl ?? envServerUrl ?? defaultServerUrl;
-  const account = React.use(accountFor(serverUrl));
+  // The session captures its config at mount: a new config remounts it.
   const configKey = JSON.stringify(config ?? {});
-  const resolvedConfig = React.useMemo(
-    () => ({ env: "dev", ...config, serverUrl, account }),
-    [configKey, serverUrl, account],
+  const resolvedConfig = React.useMemo<JazzClientConfig>(
+    // This device's device account (a guest) of the app's backend.
+    () => ({ env: "dev", ...config, serverUrl, initial: "device" }),
+    [configKey, serverUrl],
   );
   const [activeTab, setActiveTab] = React.useState<Tab>("stress");
 
   return (
-    <JazzProvider config={resolvedConfig} fallback={fallback ?? defaultFallback}>
+    <JazzProvider
+      key={configKey + serverUrl}
+      config={resolvedConfig}
+      loading={fallback ?? defaultFallback}
+    >
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="dark-content" />
         <View style={styles.content}>

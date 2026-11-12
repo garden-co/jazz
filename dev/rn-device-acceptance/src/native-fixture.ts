@@ -1,7 +1,9 @@
 import { NativeModules, Platform as NativePlatform } from "react-native";
 import { executeNativeRelayCommand } from "jazz-rn";
-import { createAccountManager } from "jazz-tools/expo";
-import { createNativeAccountTestSession } from "jazz-tools/_dev/native-account-session";
+import {
+  createExpoAccountManager as createAccountManager,
+  createNativeAccountTestSession,
+} from "jazz-tools/_dev/native-account-session";
 import { schemaSource } from "./scope-fixture";
 import type { SeedBoundary } from "./seed-teardown";
 import type { DeviceDiagnosticCode } from "./device-diagnostics.ts";

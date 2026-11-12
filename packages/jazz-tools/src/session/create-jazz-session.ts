@@ -105,6 +105,20 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
      * away, so it works offline.
      */
     client?: LocalFirstLoader;
+    /**
+     * When the local-first client (`client`) opens:
+     * - `"background"` (the default): start thin and upgrade once the page
+     *   has loaded, unless this account upgraded in this browser before.
+     *   The first paint needs no WASM.
+     * - `"now"`: open the local-first client straight away, for every
+     *   account. For apps that must work offline from the first render, or
+     *   that use `db.transaction`, which only the local-first client has.
+     *   If the local-first client can't load, the session fails (`retry()`
+     *   tries again) rather than running thin.
+     *
+     * Needs `client`: `"now"` without it is refused.
+     */
+    localFirst?: "now" | "background";
   };
 
 /** @internal A browser session's core, which follows your auth's signed-in user. */
@@ -162,6 +176,7 @@ export async function openBrowserSessionCore(
     clearOnSignOut,
     linkDeviceAccountOnSignUp,
     client: loadLocalFirst,
+    localFirst,
     // The account manager's own: neither is client configuration, and a Db
     // keeps only cloneable data (db.getConfig()).
     store: _store,
@@ -170,6 +185,7 @@ export async function openBrowserSessionCore(
     ...clientConfig
   } = { ...config, serverUrl };
   refuseUnkeptOptions(clientConfig);
+  refuseLocalFirstTiming(localFirst, loadLocalFirst);
   const accounts = await createAccountManagerWithMinter(
     { ...config, serverUrl },
     mintLocalFirstTokenInJs,
@@ -281,11 +297,14 @@ export async function openBrowserSessionCore(
   };
 
   const openClient = async (account: AccountHandle) => {
-    if (loadLocalFirst && upgrades.has(account)) {
+    if (loadLocalFirst && (localFirst === "now" || upgrades.has(account))) {
       let module: LocalFirstModule;
       try {
         module = await loadLocalFirst();
       } catch (error) {
+        // Asked for local-first now: running thin would quietly break what
+        // the app needs it for (offline, db.transaction).
+        if (localFirst === "now") throw error;
         // A chunk that no longer loads (renamed by a deploy, or the network)
         // costs the app its offline start, not the session: it runs thin,
         // and the background upgrade tries the loader again.
@@ -492,6 +511,7 @@ async function createDeviceOnlySession(config: JazzClientConfig): Promise<Browse
     initial,
     clearOnSignOut,
     linkDeviceAccountOnSignUp: _linkDeviceAccountOnSignUp,
+    localFirst: _localFirst,
     client: loadLocalFirst,
     store: _store,
     fetch: _fetch,
@@ -594,4 +614,17 @@ function localFirstMemory(registry: string) {
       }
     },
   };
+}
+
+/** `localFirst`, checked: a timing the session can't honour fails by name. */
+function refuseLocalFirstTiming(localFirst: unknown, loader: LocalFirstLoader | undefined): void {
+  if (localFirst === undefined || localFirst === "background") return;
+  if (localFirst !== "now")
+    throw new Error(
+      `Unknown localFirst ${JSON.stringify(localFirst)}; expected "now" or "background"`,
+    );
+  if (!loader)
+    throw new Error(
+      'localFirst: "now" opens the local-first client, which needs the `client` loader: pass client: () => import("jazz-tools/local-first")',
+    );
 }
