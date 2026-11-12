@@ -1585,6 +1585,65 @@ impl SyncMessage {
     }
 }
 
+/// Log one sync message crossing a link at `debug` (target `jazz::sync`):
+/// the hop, its kind, the read or transaction it is about, what it carries
+/// and its encoded size (before the link frames or compresses it). Free when debug logging is off.
+fn log_message(hop: &'static str, message: &SyncMessage) {
+    if !tracing::enabled!(target: "jazz::sync", tracing::Level::DEBUG) {
+        return;
+    }
+    // The message's own encoding, before the link frames or compresses it.
+    let bytes = postcard::serialize_with_flavor(message, postcard::ser_flavors::Size::default())
+        .unwrap_or(0);
+    let detail = match message {
+        SyncMessage::Read {
+            id,
+            query,
+            tier,
+            wait,
+            since,
+            span,
+            ..
+        } => format!(
+            "id={id} table={} tier={tier:?} wait={wait:?} resume={} span={}",
+            query.table,
+            since.is_some(),
+            match span {
+                ReadSpan::Live => "live",
+                ReadSpan::Once { .. } => "once",
+            }
+        ),
+        SyncMessage::Unsubscribe { id } => format!("id={id}"),
+        SyncMessage::Settled {
+            id,
+            through,
+            members,
+            global,
+        } => format!(
+            "id={id} through={through} global={global} listed={}",
+            members.as_ref().map_or(0, Vec::len)
+        ),
+        SyncMessage::Rows { images, .. } => {
+            let mut tables = BTreeMap::<&str, usize>::new();
+            for image in images {
+                *tables.entry(image.table.as_str()).or_default() += 1;
+            }
+            format!("rows={} by_table={tables:?}", images.len())
+        }
+        SyncMessage::Holds { id, added, removed } => {
+            format!("id={id} added={} removed={}", added.len(), removed.len())
+        }
+        SyncMessage::AccessLost { table, .. } => format!("table={table}"),
+        SyncMessage::ResendWhole { rows } => format!("rows={}", rows.len()),
+        SyncMessage::Refused { id, code, .. } => format!("id={id} code={code:?}"),
+        SyncMessage::Fate { id, global, .. } => format!("tx={id:?} global={global}"),
+        SyncMessage::Commit { id, ops, .. } => format!("tx={id:?} ops={}", ops.len()),
+        SyncMessage::ConnectionSettled { through } => format!("through={through}"),
+        _ => String::new(),
+    };
+    tracing::debug!(target: "jazz::sync", hop, kind = message.kind(), bytes, "{detail}");
+}
+
 // ---- client state ---------------------------------------------------------
 
 pub(crate) enum Kind {
@@ -8700,6 +8759,7 @@ impl Db {
             let mut failed = false;
             if let Some(transport) = client.transport.as_mut() {
                 while let Some(message) = transport.try_recv() {
+                    log_message("upstream→client", &message);
                     inbound.push(message);
                 }
                 failed = transport.take_failure().is_some();
@@ -9431,7 +9491,7 @@ impl Db {
         let mut out = out.into_iter();
         while let Some(message) = out.next() {
             match transport.send(message.clone()) {
-                Ok(()) => {}
+                Ok(()) => log_message("client→upstream", &message),
                 Err(TransportError::Backpressure) => {
                     let mut held: Vec<SyncMessage> = std::iter::once(message).chain(out).collect();
                     held.append(&mut client.outbox);
@@ -10659,7 +10719,10 @@ impl Db {
                 return Err(Error::new(ErrorCode::Protocol, error));
             }
             let mut inbound = std::mem::take(&mut session.backlog);
-            inbound.extend(std::iter::from_fn(|| session.transport.try_recv()));
+            inbound.extend(
+                std::iter::from_fn(|| session.transport.try_recv())
+                    .inspect(|message| log_message("session→store", message)),
+            );
             let failed = session.transport.take_failure().is_some();
             (inbound.into(), failed)
         };
@@ -11949,6 +12012,7 @@ impl Db {
                 // host tells it why (see `take_closed_subscribers`): a
                 // backed-up one may reconnect, one sent a message that
                 // cannot be encoded would fail the same way again.
+                log_message("store→session", &message);
                 if let Err(error) = session.transport.send(message) {
                     let code = match error {
                         TransportError::Backpressure => ErrorCode::Backpressure,
