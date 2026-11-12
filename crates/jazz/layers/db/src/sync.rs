@@ -13754,6 +13754,12 @@ fn readable_version(
 /// Whether `identity` may read the version of `row` at `seq` and, still,
 /// the row as it stands: losing read access takes effect at once for the
 /// content of every earlier version too (SPEC 19.9, INV-RLS-13).
+///
+/// The row's current version is the row as it stands, so reading the row
+/// is reading it. An earlier version is read as of its own position, as
+/// history is: a reader granted access after the row's last write (a share
+/// row made later) may read the current version's content, though not as
+/// of that version's position, when nothing granted it yet.
 fn still_readable_version(
     inner: &Inner,
     policies: &Schema,
@@ -13763,10 +13769,16 @@ fn still_readable_version(
     at: Pos,
     identity: Option<AuthorSubject>,
 ) -> Result<bool, Error> {
-    Ok(
-        readable_version(inner, policies, table, row, key, at, identity)?
-            && readable(inner, policies, table, row, key, identity)?,
-    )
+    if !readable(inner, policies, table, row, key, identity)? {
+        return Ok(false);
+    }
+    if inner
+        .current_image(table, row, key)?
+        .is_some_and(|current| current.at == at)
+    {
+        return Ok(true);
+    }
+    readable_version(inner, policies, table, row, key, at, identity)
 }
 
 /// Whether `identity` may read a row of stored table `table`, by

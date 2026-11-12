@@ -456,7 +456,11 @@ that the receiver holds, named by its seq.
 - **Reads.** A reader receives a version's edits only as part of that
   version, and nodes only beneath roots its readable versions reach. A reader
   allowed to see one version but not a later one never receives the later
-  version's edits. Losing read access takes effect at once.
+  version's edits. Losing read access takes effect at once. A version is
+  readable when the reader may read the row as it stands and, for a version
+  other than the row's current one, could read it as of its own position
+  (INV-RLS-13). The current version is the row itself, so a reader granted
+  access after the row's last write (a share made later) reads its content.
 - **No existence oracle.** The server never tells a client it already holds a
   node the client cannot read: an unreadable pull is answered as absent, and
   uploads are never skipped on the server's word. Deduplication is silent.

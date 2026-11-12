@@ -26,7 +26,7 @@ use jazz::tools::{
 };
 use jazz::tx::TxId;
 
-use common::{allow_all_policies, compile_schema};
+use common::{allow_all_policies, compile_schema, exists, outer_eq, session_eq};
 
 const LARGE: usize = 300 * 1024;
 
@@ -73,6 +73,22 @@ fn open(node: u8, author: AuthorSubject) -> Db {
             op: CmpOp::Eq,
             value: PolicyValue::Literal(jazz::tools::Value::Boolean(true)),
         }));
+    // Readable by whoever a grant names: its read rests on another table,
+    // and a grant can come after the photo's last version.
+    let grants = TableSchemaBuilder::new("grants")
+        .fk_column("photo", "photos")
+        .column("reader", ColumnType::Text)
+        .policies(allow_all_policies());
+    let photos = TableSchemaBuilder::new("photos")
+        .column("caption", ColumnType::Text)
+        .column("image", ColumnType::Bytea)
+        .policies(allow_all_policies().with_select(exists(
+            "grants",
+            vec![
+                outer_eq("photo", "id"),
+                session_eq("reader", &["identity", "subject"]),
+            ],
+        )));
     // Its `body` merges concurrent text edits (SPEC 4 §4.3).
     let merged = TableSchemaBuilder::new("merged")
         .column("body", ColumnType::Text)
@@ -86,6 +102,8 @@ fn open(node: u8, author: AuthorSubject) -> Db {
         .table(drafts)
         .table(merged)
         .table(shared)
+        .table(grants)
+        .table(photos)
         .build();
     for column in &mut schema
         .get_mut(&TableName::new("merged"))
@@ -3032,4 +3050,76 @@ fn idle_sync_ticks_run_no_reclaim_pass() {
         passes,
         "idle ticks run no reclaim pass"
     );
+}
+
+fn bytes(seed: u64, len: usize) -> Vec<u8> {
+    text(seed, len).into_bytes()
+}
+
+/// A photo shared after its last write: the reader may read its current
+/// version, though not as of that version's own position, when no grant
+/// existed yet. Its chunks are the row's content, so they are answered as
+/// the row is (alpha.61 rc.1 adopter eval E15: the photo never arrived on
+/// a local-first client, only on thin ones).
+#[test]
+fn a_row_shared_after_its_last_write_serves_its_chunks() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let image = bytes(61, LARGE);
+    insert(
+        &server,
+        "photos",
+        1,
+        vec![
+            ("caption", Value::String("beach".into())),
+            ("image", Value::Bytes(image.clone())),
+        ],
+    );
+    insert(
+        &server,
+        "grants",
+        2,
+        vec![
+            ("photo", Value::Uuid(row(1).0)),
+            ("reader", Value::String(user(1).principal_parts().1)),
+        ],
+    );
+    let bob = open(1, user(1));
+    let log = connect(&server, &bob, user(1));
+    let _stream = subscribe(&bob, Query::from("photos"));
+    pump(&server, &[&bob]);
+    assert_eq!(
+        local_cell(&bob, "photos", 1, "caption").unwrap(),
+        Some(Value::String("beach".into())),
+        "the row syncs"
+    );
+    assert!(log.borrow().contains(&"requests"), "{:?}", log.borrow());
+    assert_eq!(
+        local_cell(&bob, "photos", 1, "image").unwrap(),
+        Some(Value::Bytes(image.clone())),
+        "and so do its chunks"
+    );
+
+    // The reader may write the shared row, which keeps its value.
+    block_on(bob.update(
+        "photos",
+        row(1),
+        BTreeMap::from([("caption".to_owned(), Value::String("dunes".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &[&bob]);
+    assert_eq!(
+        local_cell(&server, "photos", 1, "caption").unwrap(),
+        Some(Value::String("dunes".into())),
+        "the server accepts the write"
+    );
+    assert_eq!(
+        local_cell(&server, "photos", 1, "image").unwrap(),
+        Some(Value::Bytes(image.clone()))
+    );
+
+    // Once the grant goes, so do the chunks (SPEC 19.9).
+    block_on(server.delete("grants", row(2), Default::default())).unwrap();
+    pump(&server, &[&bob]);
+    assert_eq!(local_cell(&bob, "photos", 1, "caption").unwrap(), None);
 }
