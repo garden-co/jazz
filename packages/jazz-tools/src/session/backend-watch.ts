@@ -1,4 +1,4 @@
-import type { AccountIdentity } from "../accounts/state.js";
+import type { AccountHandle, AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
 import { switchJazzSessionUser, type JazzSession } from "./state.js";
 
@@ -160,6 +160,13 @@ export function watchBackendUser<Client>(
      * out.
      */
     onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
+    /**
+     * Whether this device forgot a guest's account: another tab linked it
+     * to a user (their sign-up) under `clearOnSignOut`, so it is theirs now.
+     * Such a guest signs out when the backend says no one is signed in, as
+     * that user does. Left out, a guest never signs out on its own.
+     */
+    forgotten?: (account: AccountHandle) => Promise<boolean>;
   } = {},
 ): BackendWatch {
   const confirmMs = options.confirmMs ?? 2000;
@@ -431,7 +438,18 @@ export function watchBackendUser<Client>(
       return attempt(session.loginWithBackend());
     }
     signedOutLink = undefined;
-    if (!backendUser) return;
+    // A guest that is someone else's account now: the app can't keep it.
+    let forgottenGuest = false;
+    if (!backendUser) {
+      // A guest another tab linked to a user, who has signed out since: the
+      // account is theirs, so it signs out here too (and, with
+      // `clearOnSignOut`, is wiped), instead of staying open in memory.
+      if (current?.issuer !== LOCAL_FIRST_ISSUER || !startedWith || !options.forgotten) return;
+      const forgotten = await options.forgotten(startedWith).catch(() => false);
+      if (!forgotten) return;
+      if (quiet(asked)) return busy();
+      forgottenGuest = true;
+    }
     if (refused) {
       // Never sign out on a refusal alone (the cookie may be stale), but a
       // visible page's cookies are fresh: check again shortly as on focus.
@@ -451,8 +469,10 @@ export function watchBackendUser<Client>(
     // The app moved on meanwhile (signed out itself, continued as a guest,
     // signed someone in): that account is not the one this answer was about.
     if (session.getSnapshot().account !== startedWith) return busy();
-    if ((await askSignedOut()) === "keep" || quiet(asked)) return;
-    if (session.getSnapshot().account !== startedWith) return busy();
+    if (!forgottenGuest) {
+      if ((await askSignedOut()) === "keep" || quiet(asked)) return;
+      if (session.getSnapshot().account !== startedWith) return busy();
+    }
     return attempt(session.logout());
   }
   /** The app's `onSignedOut` decision; a hook that fails signs out. */

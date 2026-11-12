@@ -4,6 +4,7 @@ import type { AccountHandle } from "../accounts/state.js";
 import {
   clientRegistryUrl,
   createAccountManagerWithMinter,
+  watchStoredSelection,
 } from "../accounts/account-manager-core.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import type { ShutdownOptions } from "../runtime/db.js";
@@ -42,7 +43,7 @@ import {
   wipeLeftBehindReplicas,
   type ReplicaOwner,
 } from "./left-behind-replicas.js";
-import type { AccountStore } from "../accounts/persistence.js";
+import { accountForgotten, type AccountStore } from "../accounts/persistence.js";
 import { rememberBackendUser } from "../accounts/enrollment.js";
 
 export type { LocalFirstLoader };
@@ -308,6 +309,8 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
       events: browserBackendWatchEvents(`jazz-account:${registry}`),
       linkGuest: linkGuestOnSignUp,
       onSignedOut,
+      forgotten: (account) => accountForgotten(accounts, account.id),
+      watchAccounts: (changed) => watchStoredSelection(accounts, changed),
       // Without cookies, the bearer is what names the user to the backend.
       ...(bearer ? { fetch: bearerFetch(bearer, config.fetch) } : {}),
     }),

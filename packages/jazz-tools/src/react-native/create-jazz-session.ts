@@ -1,4 +1,5 @@
 import type { SignedOutDecision } from "../session/backend-watch.js";
+import { accountForgotten } from "../accounts/persistence.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import {
   firstBackendAnswer,
@@ -89,6 +90,7 @@ export async function createJazzClient(
       events: nativeBackendWatchEvents,
       linkGuest: config.linkGuestOnSignUp,
       onSignedOut,
+      forgotten: (account) => accountForgotten(accounts, account.id),
     }),
   });
   await firstBackendAnswer(session);

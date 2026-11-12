@@ -1,5 +1,9 @@
 import { expect, it, vi } from "vitest";
-import { ensureAutomaticLocalFirst, prepareAccountManager } from "./persistence.js";
+import {
+  accountForgotten,
+  ensureAutomaticLocalFirst,
+  prepareAccountManager,
+} from "./persistence.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { generateAuthSecret } from "../runtime/auth-secret-store.js";
@@ -602,6 +606,30 @@ it("a tab that loaded the guest before the link cannot write its root back", asy
   tabB.logout();
   await tabB.settleSelection();
   expect(store.value()).not.toContain(kim);
+});
+
+it("tells a tab still open as a guest that another tab linked and forgot it", async () => {
+  const store = storeWith(null);
+  const kim = guestRoot(1);
+  const tabA = await sharedDevice(store, kim);
+  tabA.createLocalFirst();
+  await tabA.settleSelection();
+  const tabB = await sharedDevice(store, guestRoot(2));
+  const held = tabB.getLoggedIn()!;
+  expect(held.id).toBe(accountOf(kim));
+  expect(await accountForgotten(tabB, held.id)).toBe(false);
+
+  await tabA.linkWithBackend();
+  await tabA.settleSelection();
+  // Read from the store, not tab B's snapshot from before the link.
+  expect(await accountForgotten(tabB, held.id)).toBe(true);
+  expect(await accountForgotten(tabB, accountOf(guestRoot(2)))).toBe(false);
+
+  // Restored explicitly, the root is no one's to forget any more.
+  tabA.logout();
+  tabA.restoreLocalFirst(kim);
+  await tabA.settleSelection();
+  expect(await accountForgotten(tabB, held.id)).toBe(false);
 });
 
 it("never reopens a forgotten root written back while the tombstone stayed", async () => {
