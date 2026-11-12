@@ -13,7 +13,7 @@ export async function openSessionTab(
   currentPage: Page,
   id: string,
   serverUrl: string,
-  options: { clearOnSignOut?: boolean; localFirst?: "now" } = {},
+  options: { clearOnSignOut?: boolean; localFirst?: "now"; signedIn?: boolean } = {},
 ): Promise<void> {
   await closeSessionTab(id);
   const page = await context.newPage();
@@ -37,6 +37,20 @@ export function sessionTabState(id: string): Promise<unknown> {
 
 export function insertInSessionTab(id: string, title: string): Promise<void> {
   return evaluateHarnessOperation(tab(id), harness, "insertInSessionTab", { title });
+}
+
+/** Run one of the tab's actions (see session-tab-harness.ts). */
+export function runInSessionTab(
+  id: string,
+  action: "insertLocally" | "signOut" | "reconnect",
+  title?: string,
+): Promise<void> {
+  const operation = {
+    insertLocally: "insertLocallyInSessionTab",
+    signOut: "signOutInSessionTab",
+    reconnect: "reconnectSessionTab",
+  }[action];
+  return evaluateHarnessOperation(tab(id), harness, operation, { title });
 }
 
 export function holdSessionTabBackend(id: string, hold: boolean): Promise<void> {

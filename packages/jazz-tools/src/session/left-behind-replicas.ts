@@ -57,6 +57,7 @@ function isOwner(value: unknown): value is ReplicaOwner {
 }
 
 type Locks = {
+  query?(): Promise<{ held?: { name?: string }[]; pending?: { name?: string }[] }>;
   request(
     name: string,
     options: { mode: "shared" | "exclusive"; ifAvailable?: boolean },
@@ -73,18 +74,24 @@ const lockName = (registry: string, account: string) => `jazz-replica-v1:${regis
  * Locks there is nothing to hold, and none is needed: persistent browser
  * storage requires them, so such a browser keeps no replica to protect.
  */
-export async function holdReplica(registry: string, account: string): Promise<() => void> {
+export async function holdReplica(registry: string, account: string): Promise<() => Promise<void>> {
   const available = locks();
-  if (!available) return () => {};
+  if (!available) return async () => {};
   let release!: () => void;
   const released = new Promise<void>((resolve) => (release = resolve));
+  let held!: Promise<unknown>;
   await new Promise<void>((acquired) => {
-    void available.request(lockName(registry, account), { mode: "shared" }, async () => {
+    held = available.request(lockName(registry, account), { mode: "shared" }, async () => {
       acquired();
       await released;
     });
   });
-  return release;
+  // Resolves once the lock is gone, not merely asked to go: a wipe that
+  // checks right after must not find this tab still holding it.
+  return async () => {
+    release();
+    await held.catch(() => {});
+  };
 }
 
 /**
@@ -114,8 +121,19 @@ export async function whileNoTabHolds(
   return ran;
 }
 
+/**
+ * Whether a tab holds `account`'s replica open, or waits to: a look at the
+ * Web Locks, taking none. False without Web Locks (nothing holds anything).
+ */
+export async function replicaHeld(registry: string, account: string): Promise<boolean> {
+  const state = await locks()?.query?.();
+  if (!state) return false;
+  const name = lockName(registry, account);
+  return [...(state.held ?? []), ...(state.pending ?? [])].some((lock) => lock.name === name);
+}
+
 /** A wipe that hangs (storage another tab is still closing) waits for a later load. */
-const WIPE_TIMEOUT_MS = 30_000;
+export const WIPE_TIMEOUT_MS = 30_000;
 
 /**
  * Wipe each replica `record` holds whose user the session doesn't hold now,

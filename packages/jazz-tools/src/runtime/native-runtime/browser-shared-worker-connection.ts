@@ -869,9 +869,9 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     await this.connection?.flushLocal();
   }
 
-  async deleteStorage(): Promise<void> {
+  async deleteStorage(): Promise<{ pendingUploads?: number } | void> {
     await this.ready();
-    await this.connection?.deleteStorage();
+    return this.connection?.deleteStorage();
   }
 
   async openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort> {

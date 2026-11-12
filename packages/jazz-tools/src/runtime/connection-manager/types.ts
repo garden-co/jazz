@@ -377,7 +377,7 @@ export abstract class ConnectionManager {
     this.client?.updateCookieSession(auth.cookieSession);
   }
 
-  abstract deleteClientStorage(): Promise<void>;
+  abstract deleteClientStorage(): Promise<{ pendingUploads?: number } | void>;
 
   /**
    * Whether this connection can still serve its Db: no storage reset took

@@ -673,6 +673,11 @@ export type BrowserFollowerPortEvent =
       peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
       /** Present on init replies; identifies the worker owning the durable root. */
       workerRealmId?: string;
+      /**
+       * Present on a `prepare-storage-reset` reply: how many of the store's
+       * writes, of any tab, the server hasn't confirmed (the reset loses them).
+       */
+      pendingUploads?: number;
     }
   | { type: "auth-failure"; reason: string }
   | { type: "auth-restored" }
