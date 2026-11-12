@@ -76,7 +76,6 @@ enum Backend {
 
 pub(crate) struct DbConnection {
     backend: Backend,
-    pub(crate) provider_table_prefixes: Vec<String>,
     pub(crate) journal: TransactionJournal,
     chunks: RefCell<Option<Arc<crate::large::Chunks>>>,
     cleanup: RefCell<Vec<String>>,
@@ -102,7 +101,6 @@ impl DbConnection {
     fn from_backend(backend: Backend) -> Self {
         Self {
             backend,
-            provider_table_prefixes: Vec::new(),
             journal: Default::default(),
             chunks: Default::default(),
             cleanup: Default::default(),

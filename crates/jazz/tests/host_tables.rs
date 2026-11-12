@@ -148,20 +148,45 @@ fn host_tables_share_the_store_file_and_survive_reopening() {
     assert_eq!(rows.len(), 1);
 }
 
+/// Alice opens Jazz beside Bob's existing SQLite data and writes host metadata.
+/// Bob's table definition and contents survive initialization and reopening.
 #[test]
-fn a_file_jazz_did_not_write_is_refused_before_any_host_table_is_touched() {
+fn a_shared_file_preserves_foreign_tables_beside_host_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("jazz.sqlite");
-    rusqlite::Connection::open(&path)
-        .unwrap()
-        .execute_batch("CREATE TABLE theirs (x INTEGER)")
+    let other = rusqlite::Connection::open(&path).unwrap();
+    other
+        .execute_batch("CREATE TABLE theirs (x INTEGER); INSERT INTO theirs VALUES (42)")
         .unwrap();
-    let before = std::fs::read(&path).unwrap();
-    let Err(error) = StoreFile::open(&path, options()) else {
-        panic!("a foreign file must be refused");
-    };
-    assert_eq!(error.code, ErrorCode::UnsupportedStorageCodecs);
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    {
+        let file = StoreFile::open(&path, options()).unwrap();
+        block_on(file.host_put_many(CATALOGUE, &[pair(b"alice", b"metadata")])).unwrap();
+        let db = block_on(Db::open_file(config(), file)).unwrap();
+        block_on(db.close()).unwrap();
+    }
+    let db = block_on(Db::open_at(config(), &path, options())).unwrap();
+    assert_eq!(
+        block_on(db.host_get(CATALOGUE, b"alice")).unwrap(),
+        Some(b"metadata".to_vec())
+    );
+    assert_eq!(
+        other
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'theirs'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "CREATE TABLE theirs (x INTEGER)"
+    );
+    let values: Vec<i64> = other
+        .prepare("SELECT x FROM theirs")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(values, [42]);
 }
 
 /// Alice suspends while owning a host savepoint. Bob's host read, application

@@ -9,7 +9,7 @@
 //!   with every row, history version, branch, large value, renamed column
 //!   and pending upload intact, accept current writes, and reopen again.
 //! - A damaged copy is refused with a storage error, never read as data; a
-//!   file in another storage format, or one Jazz did not write, is refused
+//!   file in another Jazz storage format or with unstamped Jazz metadata is refused
 //!   with `UnsupportedStorageCodecs` and left byte-for-byte as it was.
 //! - `fixtures/pre-sqlite/` holds Groove stores (RocksDB directories from the
 //!   published alpha.54 and alpha.56 packages and the last Groove format, and

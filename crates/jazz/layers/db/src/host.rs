@@ -218,17 +218,6 @@ impl StoreFile {
         crate::format::admit(&mut conn.sql()).await?;
         Ok(Self { conn, path: None })
     }
-    /// Open a shared SQLite file, excluding only explicitly reserved provider
-    /// table prefixes from empty-file admission. Never excludes Jazz's stamp.
-    pub async fn worker_with_provider_tables(
-        worker: impl crate::backend::WorkerSql + 'static,
-        prefixes: &[&str],
-    ) -> Result<Self, Error> {
-        let mut conn = DbConnection::worker(worker);
-        crate::format::admit_with_provider_tables(&mut conn.sql(), prefixes).await?;
-        conn.provider_table_prefixes = prefixes.iter().map(|s| (*s).to_owned()).collect();
-        Ok(Self { conn, path: None })
-    }
     /// Wait for the worker to drain and close before releasing its actor generation.
     pub async fn close_worker(&self) -> Result<(), Error> {
         self.conn.close_worker().await

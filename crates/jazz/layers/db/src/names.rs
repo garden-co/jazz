@@ -579,6 +579,51 @@ impl Names {
         (copies, dropped)
     }
 
+    /// Every physical application table owned by any admitted schema, including
+    /// zero-column tables and tables absent from the currently opening version.
+    pub(crate) fn stored_tables(&self) -> BTreeSet<String> {
+        self.versions
+            .values()
+            .flat_map(|(_, names)| names.tables.values().map(|(table, _)| table.clone()))
+            .chain(self.branches.keys().cloned())
+            .collect()
+    }
+
+    /// Do not adopt an unrelated SQLite object just because its name matches a
+    /// newly admitted Jazz table. Check before minting metadata or issuing DDL.
+    async fn check_new_tables(&self, conn: &DbConnection, schema: &Schema) -> Result<(), Error> {
+        use jazz_sql::Row as _;
+        let owned = self.stored_tables();
+        for table in schema
+            .tables
+            .values()
+            .filter(|table| !owned.contains(&table.stored))
+        {
+            for name in [
+                &table.stored,
+                &format!("{}__h", table.stored),
+                &format!("{}__by_clock", table.stored),
+            ] {
+                let existing: Option<String> = conn
+                    .sql()
+                    .query_optional(
+                        "SELECT name FROM sqlite_master WHERE name = ?1 COLLATE NOCASE",
+                        jazz_sql::params![name.as_str()],
+                        |row| row.get(0),
+                    )
+                    .await
+                    .map_err(storage)?;
+                if let Some(existing) = existing {
+                    return Err(schema_error(format!(
+                        "Cannot create Jazz table {}: SQLite object {existing} already exists outside Jazz's schema catalogue",
+                        table.stored
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The most recently admitted version's names.
     pub(crate) fn latest(&self) -> Option<&StoredNames> {
         self.versions
@@ -739,22 +784,7 @@ impl Names {
     /// store does this as it admits a version; [`Self::align`] then puts
     /// the current schema's in its order.
     pub(crate) async fn mint(&self, conn: &DbConnection, schema: &Schema) -> Result<(), Error> {
-        for table in schema.tables.values() {
-            if conn.provider_table_prefixes.iter().any(|prefix| {
-                table
-                    .stored
-                    .to_ascii_lowercase()
-                    .starts_with(&prefix.to_ascii_lowercase())
-            }) {
-                return Err(Error::new(
-                    ErrorCode::Schema,
-                    format!(
-                        "Table {} uses a storage-provider-reserved namespace",
-                        table.stored
-                    ),
-                ));
-            }
-        }
+        self.check_new_tables(conn, schema).await?;
         for table in schema.tables.values() {
             for column in &table.columns {
                 if let Some(variants) = &column.variants {

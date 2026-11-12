@@ -916,39 +916,25 @@ const STATEMENT_CACHE_CAPACITY: usize = 512;
 async fn stored_schema<S: jazz_sql::Sql>(
     conn: &mut S,
     jazz: &JazzSchema,
-    provider_prefixes: &[String],
+    names: &std::collections::BTreeSet<String>,
 ) -> Result<Schema, Error>
 where
     S::Error: std::fmt::Display,
 {
-    let names: Vec<String> = conn
-        .query_rows(
-            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
-            &[],
-            |row| row.get(0),
-        )
-        .await
-        .map_err(crate::values::provider_error)?;
     let mut tables = BTreeMap::new();
     for name in names {
-        if provider_prefixes
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
-            || name.starts_with("_jazz")
-            || name.starts_with("_cf_")
-            || name.starts_with("sqlite_")
-            || name.ends_with("__h")
-        {
-            continue;
-        }
         let columns: Vec<String> = conn
-            .query_rows(
-                &format!("PRAGMA table_info({})", quote(&name)),
-                &[],
-                |row| row.get(1),
-            )
+            .query_rows(&format!("PRAGMA table_info({})", quote(name)), &[], |row| {
+                row.get(1)
+            })
             .await
             .map_err(crate::values::provider_error)?;
+        if columns.is_empty() {
+            return Err(Error::new(
+                ErrorCode::Storage,
+                format!("Jazz catalogue references missing table {name}"),
+            ));
+        }
         let columns = columns
             .into_iter()
             .filter(|column| {
@@ -960,13 +946,13 @@ where
         // A large-capable column is one the large-value refcount triggers
         // watch (`large::triggers`): its kind comes from the schemas unioned
         // in.
-        let large = crate::large::stored_large_columns(conn, &name).await?;
+        let large = crate::large::stored_large_columns(conn, name).await?;
         for column in &mut table.columns {
             if large.contains(&column.stored) {
                 column.ty = ValueType::Nullable(Box::new(ValueType::String));
             }
         }
-        tables.insert(name, table);
+        tables.insert(name.clone(), table);
     }
     Ok(Schema {
         tables,
@@ -1574,24 +1560,8 @@ impl Db {
         })
         .await?;
         conn.observe_transactions(&chunks)?;
-        let fresh = if conn.provider_table_prefixes.is_empty() {
-            let count: i64 = conn.sql().query_one(
-                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_jazz\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
-                &[], |row| row.get(0),
-            ).await.map_err(storage)?;
-            count == 0
-        } else {
-            let existing: Vec<String> = conn.sql().query_rows(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_jazz\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'",
-            &[], |row| row.get(0),
-        ).await.map_err(storage)?;
-            !existing.iter().any(|name| {
-                !conn
-                    .provider_table_prefixes
-                    .iter()
-                    .any(|prefix| name.starts_with(prefix))
-            })
-        };
+        let owned_tables = names.stored_tables();
+        let fresh = owned_tables.is_empty();
         // A reopened store keeps every column earlier schemas added; bring
         // it up to this schema without touching what is already there.
         let physical = if fresh {
@@ -1613,12 +1583,8 @@ impl Db {
             // store's union grew: the opening schema is not always the
             // newest (a server core reopens under its genesis while later
             // versions' tables and columns take writes, #4769).
-            let mut physical = stored_schema(
-                &mut conn.sql(),
-                &config.schema,
-                &conn.provider_table_prefixes,
-            )
-            .await?;
+            let mut physical =
+                stored_schema(&mut conn.sql(), &config.schema, &owned_tables).await?;
             let mut ddl = String::new();
             for (version, earlier) in &admitted {
                 if *version == config.schema.version_id() {
