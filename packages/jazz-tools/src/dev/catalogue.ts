@@ -7,6 +7,7 @@ import type { ColumnType as WasmColumnType, WasmSchema } from "../drivers/types.
 import type { DefinedMigration } from "../migrations.js";
 import { schemaDefinitionToAst } from "../migrations.js";
 import { toValue } from "../runtime/value-converter.js";
+import { shippedMigrations } from "../runtime/client-migrations.js";
 import type { Lens, SqlType } from "../schema.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import {
@@ -358,6 +359,43 @@ export async function deployArtifacts(
       artifacts.permissions,
     ).map((diagnostic) => diagnostic.message),
   };
+}
+
+/**
+ * Publish an app as its code declares it: the schema `defineApp` built, every
+ * schema version and migration it ships (`defineApp(schema, { migrations })`)
+ * and `permissions`. This is what `createJazz` publishes on start, so anything
+ * else that serves the app (a test server) must publish the same, or a client
+ * opening the app with its lenses disagrees with the server about its history.
+ */
+export async function deployApp(
+  options: CatalogueServerOptions & {
+    app: SchemaSourceInput;
+    permissions: CompiledPermissionsMap;
+    allowDroppingHistory?: boolean;
+  },
+): Promise<DeployResult> {
+  const declared = resolveSchemaSource(options.app);
+  const schema = mergePermissionsIntoWasmSchema(declared, {});
+  await validateSchemaAndPermissions(schema, options.permissions);
+  const targetSchemaHash = await computeSchemaHash(schema);
+  const shipped = shippedMigrations(declared);
+  const schemas = new Map<string, WasmSchema>();
+  for (const version of shipped?.schemas ?? []) {
+    schemas.set(version.hash, (version.schema as { tables: WasmSchema }).tables);
+  }
+  schemas.set(targetSchemaHash, schema);
+  const graph = await fetchMigrationGraph(options);
+  return deployArtifacts(options, graph, {
+    targetSchemaHash,
+    schemas: [...schemas].map(([hash, schema]) => ({ hash, schema })),
+    migrations: (shipped?.migrations ?? []).map((edge) => ({
+      fromHash: edge.fromHash,
+      toHash: edge.toHash,
+      forward: edge.forward as PublishedTableLens[],
+    })),
+    permissions: options.permissions,
+  });
 }
 
 /** Publish schemas, migrations and permissions together. */
