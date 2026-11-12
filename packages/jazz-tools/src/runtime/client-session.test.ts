@@ -100,10 +100,8 @@ describe("client session resolution", () => {
     ).toEqual({
       transport: "cookie",
       session: {
-        user: {
-          account: null,
-          identity: { issuer: "https://issuer.example", subject: "cookie-user" },
-        },
+        user: null,
+        identity: { issuer: "https://issuer.example", subject: "cookie-user" },
         claims: {
           role: "writer",
           auth_mode: "external",
@@ -153,10 +151,8 @@ describe("client session resolution", () => {
     });
 
     expect(session).toEqual({
-      user: {
-        account: null,
-        identity: { issuer: "https://issuer.example", subject: "user-subject" },
-      },
+      user: null,
+      identity: { issuer: "https://issuer.example", subject: "user-subject" },
       claims: {
         iss: "https://issuer.example",
         sub: "user-subject",
@@ -180,7 +176,8 @@ describe("client session resolution", () => {
         jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice", ...metadata }),
       }),
     ).toMatchObject({
-      user: { account: null, identity: { issuer: "https://issuer.example", subject: "alice" } },
+      user: null,
+      identity: { issuer: "https://issuer.example", subject: "alice" },
       claims: metadata,
     });
   });
@@ -200,10 +197,8 @@ describe("client session resolution", () => {
 
     providerClaims.roles.push("admin");
     expect(session).toEqual({
-      user: {
-        account: null,
-        identity: { issuer: "https://issuer.example", subject: "verified-subject" },
-      },
+      user: null,
+      identity: { issuer: "https://issuer.example", subject: "verified-subject" },
       claims: {
         iss: "https://issuer.example",
         sub: "verified-subject",
@@ -241,7 +236,8 @@ describe("client session resolution", () => {
     });
 
     expect(stringAudience).toEqual({
-      user: { account: null, identity: { issuer: "https://issuer.example", subject: "alice" } },
+      user: null,
+      identity: { issuer: "https://issuer.example", subject: "alice" },
       claims: {
         iss: "https://issuer.example",
         sub: "alice",
@@ -373,14 +369,11 @@ describe("client session resolution", () => {
       jwtToken: makeJwt({ iss: "issuer", sub: "alice" }),
     });
 
-    expect(spaced?.user).toEqual({
-      account: null,
-      identity: { issuer: " issuer ", subject: " alice " },
-    });
+    expect(spaced?.identity).toEqual({ issuer: " issuer ", subject: " alice " });
     expect(spaced?.claims.iss).toBe(" issuer ");
     expect(spaced?.claims.sub).toBe(" alice ");
     expect(spaced?.claims.subject).toBeUndefined();
-    expect(spaced?.user).not.toEqual(plain?.user);
+    expect(spaced?.identity).not.toEqual(plain?.identity);
     for (const subject of [" ", "\t", "\n", "\v", "\f", "\r", " \t\n\v\f\r "]) {
       expect(
         resolveClientSessionSync({
@@ -406,10 +399,7 @@ describe("client session resolution", () => {
         jwtToken: makeJwt({ iss: `${subject}issuer`, sub: subject }),
       });
 
-      expect(session?.user).toEqual({
-        account: null,
-        identity: { issuer: `${subject}issuer`, subject },
-      });
+      expect(session?.identity).toEqual({ issuer: `${subject}issuer`, subject });
       expect(session?.claims.iss).toBe(`${subject}issuer`);
       expect(session?.claims.sub).toBe(subject);
       expect(session?.claims.subject).toBeUndefined();
@@ -448,7 +438,8 @@ describe("client session resolution", () => {
         jwtToken: makeJwt({ iss: "issuer🚀", sub: "alice🚀" }),
       }),
     ).toMatchObject({
-      user: { account: null, identity: { issuer: "issuer🚀", subject: "alice🚀" } },
+      user: null,
+      identity: { issuer: "issuer🚀", subject: "alice🚀" },
       claims: {},
     });
   });
@@ -499,10 +490,8 @@ describe("client session resolution", () => {
         jwtToken: makeJwt({ iss: "https://issuer.example", sub: SYSTEM_SESSION_ISSUER }),
       }),
     ).toMatchObject({
-      user: {
-        account: null,
-        identity: { issuer: "https://issuer.example", subject: SYSTEM_SESSION_ISSUER },
-      },
+      user: null,
+      identity: { issuer: "https://issuer.example", subject: SYSTEM_SESSION_ISSUER },
       claims: {},
       authMode: "external",
     });
@@ -542,7 +531,8 @@ describe("resolveJwtSession — reserved issuer admission", () => {
       "local-first",
     );
     expect(localFirst).toEqual({
-      user: { account: null, identity: { issuer: "urn:jazz:local-first", subject: "u1" } },
+      user: null,
+      identity: { issuer: "urn:jazz:local-first", subject: "u1" },
       claims: { iss: LOCAL_FIRST_JWT_ISSUER, sub: "u1", role: "writer" },
       authMode: "local-first",
     });
@@ -561,7 +551,8 @@ describe("resolveJwtSession — reserved issuer admission", () => {
       "anonymous",
     );
     expect(anonymous).toEqual({
-      user: { account: null, identity: { issuer: "urn:jazz:anonymous", subject: "u1" } },
+      user: null,
+      identity: { issuer: "urn:jazz:anonymous", subject: "u1" },
       claims: { iss: ANONYMOUS_JWT_ISSUER, sub: "u1" },
       authMode: "anonymous",
     });
@@ -582,7 +573,8 @@ describe("resolveJwtSession — reserved issuer admission", () => {
       for (const proofKey of ["first-proof-key", "second-proof-key"]) {
         const payload = { sub: "user", iss: issuer, jazz_pub_key: proofKey };
         expect(sessionFromVerifiedReservedJwtPayload(payload, authMode)).toEqual({
-          user: { account: null, identity: { issuer, subject: "user" } },
+          user: null,
+          identity: { issuer, subject: "user" },
           claims: { iss: issuer, sub: "user" },
           authMode,
         });
@@ -630,14 +622,14 @@ describe("resolveJwtSession — reserved issuer admission", () => {
       },
     });
 
-    expect(issuerA?.user).toEqual({
-      account: null,
-      identity: { issuer: "https://issuer-a.example", subject: "provider-user" },
+    expect(issuerA?.identity).toEqual({
+      issuer: "https://issuer-a.example",
+      subject: "provider-user",
     });
-    expect(issuerB?.user).toEqual({
-      account: null,
-      identity: { issuer: "https://issuer-b.example", subject: "provider-user" },
+    expect(issuerB?.identity).toEqual({
+      issuer: "https://issuer-b.example",
+      subject: "provider-user",
     });
-    expect(issuerA?.user).not.toEqual(issuerB?.user);
+    expect(issuerA?.identity).not.toEqual(issuerB?.identity);
   });
 });

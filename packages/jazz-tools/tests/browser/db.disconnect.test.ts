@@ -14,7 +14,7 @@ import {
   waitForQuery,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp, type JazzServerInfo } from "./testing-server.js";
 
 const schema = {
   todos: s.table(
@@ -135,17 +135,15 @@ describe("Db disconnect/reconnect", () => {
 
   it("removes a remotely deleted owned row from the current default local worker snapshot", async () => {
     const label = uniqueDbName("local-worker-live-delete");
-    const server = await getJazzServerInfo(label);
-    await deploy({
-      ...server,
-      schema: app,
-      permissions: s.definePermissions(app, ({ policy, session }) => {
-        policy.todos.allowRead.where({ "$createdBy.account": session.user.account });
-        policy.todos.allowInsert.always();
-        policy.todos.allowUpdate.where({ "$createdBy.account": session.user.account });
-        policy.todos.allowDelete.where({ "$createdBy.account": session.user.account });
-      }),
+    const core = await getJazzServerInfo(label);
+    const permissions = s.definePermissions(app, ({ policy, session }) => {
+      policy.todos.allowRead.where({ "$createdBy.account": session.user });
+      policy.todos.allowInsert.always();
+      policy.todos.allowUpdate.where({ "$createdBy.account": session.user });
+      policy.todos.allowDelete.where({ "$createdBy.account": session.user });
     });
+    await deploy({ ...core, schema: app, permissions });
+    const server = await startJazzApp(core, { schema: app, permissions });
     const secret = generateAuthSecret();
     const db = await createWorkerDb(ctx, `${label}-reader`, secret, server);
     const peer = await createWorkerDb(ctx, `${label}-writer`, secret, server);
@@ -998,5 +996,5 @@ async function publishSyncServerSchemaAndPermissions(
     schema: app,
     permissions: allowAllPermissions,
   });
-  return testingServer;
+  return startJazzApp(testingServer, { schema: app, permissions: allowAllPermissions });
 }

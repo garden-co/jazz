@@ -1,7 +1,11 @@
+import { signChallenge } from "../local-first-auth/index.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import {
   AccountAuthError,
-  requestAccountRegistry,
+  LINK_GUEST_KEY_MISSING_MESSAGE,
+  LINK_NEEDS_GUEST_MESSAGE,
+  requestBackendLinkChallenge,
+  requestBackendSignIn,
   readAccountAssignment,
 } from "./registry-client.js";
 export { AccountAuthError } from "./registry-client.js";
@@ -9,13 +13,20 @@ import { isReservedJazzIssuer, parseJwtPayload } from "../runtime/client-session
 import { isPortableAuthorComponent } from "../runtime/author-id.js";
 import {
   AccountManager,
-  AccountOperationSuperseded,
   type AccountHandle,
   type AccountIdentity,
   type AccountSelectionDurability,
 } from "./state.js";
 
-/** A refresh callback must continue to authenticate the same exact identity. */
+/**
+ * The backend refuses a link for good when the signed-in user already has an
+ * account of their own (most often: they signed up on another device), or
+ * when this guest's key was retired or is another app's.
+ */
+const LINK_REFUSED_MESSAGE =
+  "link_refused: the backend won't link this device account to the signed-in user, most likely because they already have an account (from another device). Call refresh() to open their account instead. The device account stays signed in on this device until then, and linking never moves its data into an existing account.";
+
+/** @internal A local-first account's self-minted token, or its refresh callback. */
 export type JWTAuth = string | { getToken(): Promise<string> };
 
 export interface BackendAuth {
@@ -30,41 +41,24 @@ interface HandleCredentials {
   registry: string;
   auth?: JWTAuth;
   backend?: Readonly<BackendAuth & { nodeId: string }>;
+  /**
+   * Signed in through the app's own backend (`createJazz`): the backend states
+   * the identity and its claims; the client holds no credential.
+   */
+  delegated?: Readonly<{ claims: Record<string, unknown>; bearer?: AppBearer }>;
   localFirstSecret?: string;
-  /** A retained external assignment awaiting its first provider credential. */
-  provisional?: boolean;
-  /** The JWT the registry just accepted, offered once to the next context token request. */
-  primed?: string;
   invalidated: Set<() => void>;
-  bound: Set<() => void>;
 }
 const credentials = new WeakMap<AccountHandle, HandleCredentials>();
 
-/** Non-secret assignment a manager may persist to reopen an external account locally. */
-export interface RetainedAccountAssignment {
-  readonly account: string;
-  readonly issuer: string;
-  readonly subject: string;
-}
+/**
+ * The app's own credential for its backend, for a client that sends no
+ * cookie (a native app): its current bearer token, or null when signed out.
+ */
+export type AppBearer = () => string | null | Promise<string | null>;
 
 const ACCOUNT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const NIL_ACCOUNT_ID = "00000000-0000-0000-0000-000000000000";
-
-/** @internal Validate a stored assignment; never trust persisted text as an identity proof. */
-export function isRetainedAccountAssignment(value: unknown): value is RetainedAccountAssignment {
-  if (!value || typeof value !== "object") return false;
-  const { account, issuer, subject } = value as Record<string, unknown>;
-  return (
-    typeof account === "string" &&
-    ACCOUNT_ID_PATTERN.test(account) &&
-    account !== NIL_ACCOUNT_ID &&
-    typeof issuer === "string" &&
-    typeof subject === "string" &&
-    isPortableAuthorComponent(issuer) &&
-    isPortableAuthorComponent(subject) &&
-    !isReservedJazzIssuer(issuer)
-  );
-}
 
 /** @internal Native key derivation stays in Rust; hosts prepare it before use. */
 export interface LocalFirstAccountFactory {
@@ -113,11 +107,14 @@ async function tokenFor(auth: JWTAuth): Promise<string> {
 }
 class EnrolledAccount {
   readonly identity: AccountIdentity;
+  readonly claims?: Readonly<Record<string, unknown>>;
   constructor(
     readonly id: string,
     identity: AccountIdentity,
+    claims?: Readonly<Record<string, unknown>>,
   ) {
     this.identity = Object.freeze({ ...identity });
+    if (claims) this.claims = claims;
     Object.freeze(this);
   }
 }
@@ -126,25 +123,12 @@ function mintHandle(
   registry: string,
   id: string,
   identity: AccountIdentity,
-  auth: JWTAuth | undefined,
+  auth: JWTAuth,
   localFirstSecret?: string,
 ): AccountHandle {
   const handle = new EnrolledAccount(id, identity) as AccountHandle;
-  credentials.set(handle, {
-    registry,
-    auth,
-    localFirstSecret,
-    provisional: auth === undefined,
-    invalidated: new Set(),
-    bound: new Set(),
-  });
+  credentials.set(handle, { registry, auth, localFirstSecret, invalidated: new Set() });
   return handle;
-}
-
-function tokenStillFresh(token: string): boolean {
-  const expires = parseJwtPayload(token)?.exp;
-  // Leave headroom for transport admission; an expiring token is refetched.
-  return typeof expires === "number" && expires * 1000 > Date.now() + 60_000;
 }
 
 /** Export a local signing root for passphrase/passkey backup. Never store it in UI snapshots. */
@@ -161,18 +145,43 @@ export async function accountToken(handle: AccountHandle, registry: string): Pro
   const material = credentials.get(handle);
   if (!material || material.registry !== registry)
     throw new AccountAuthError("invalid_account_handle");
-  if (material.provisional) throw new AccountAuthError("account_credential_pending");
+  if (material.delegated) throw new AccountAuthError("backend_signed_in_account_has_no_token");
   if (material.backend || !material.auth)
     throw new AccountAuthError("backend_account_requires_backend_host");
-  const primed = material.primed;
-  material.primed = undefined;
-  // Reuse the JWT the registry accepted moments ago instead of asking the
-  // provider again; its identity was checked against this handle then.
-  const token = primed && tokenStillFresh(primed) ? primed : await tokenFor(material.auth);
+  const token = await tokenFor(material.auth);
   if (credentials.get(handle) !== material) throw new AccountAuthError("account_logged_out");
   if (!sameIdentity(identityFromToken(token), handle.identity))
     throw new AccountAuthError("credential_identity_changed");
   return token;
+}
+
+/**
+ * @internal The claims of an account signed in through the app's backend, or
+ * undefined for any other account. The backend re-states them on every
+ * connection; these only shape local permission checks.
+ */
+export function delegatedAccountClaims(
+  handle: AccountHandle,
+  registry: string,
+): Readonly<Record<string, unknown>> | undefined {
+  const material = credentials.get(handle);
+  if (!material || material.registry !== registry)
+    throw new AccountAuthError("invalid_account_handle");
+  return material.delegated?.claims;
+}
+
+/**
+ * @internal The app's bearer an account signed in through the app's backend
+ * was signed in with, for a host whose sync connection sends no cookie.
+ */
+export function delegatedAccountBearer(
+  handle: AccountHandle,
+  registry: string,
+): AppBearer | undefined {
+  const material = credentials.get(handle);
+  if (!material || material.registry !== registry)
+    throw new AccountAuthError("invalid_account_handle");
+  return material.delegated?.bearer;
 }
 
 /** @internal Opaque backend material, accessible only to a supported host adapter. */
@@ -184,43 +193,6 @@ export function getBackendAuth(
   if (!material || material.registry !== registry)
     throw new AccountAuthError("invalid_account_handle");
   return material.backend;
-}
-
-/**
- * @internal True while a retained external handle has no provider credential.
- * Its context is open locally and presents no credential upstream until
- * revalidation binds one.
- */
-export function isProvisionalAccount(handle: AccountHandle): boolean {
-  return credentials.get(handle)?.provisional === true;
-}
-
-/** @internal The non-secret assignment to persist for a JWT-enrolled external handle. */
-export function retainedAccountAssignment(
-  handle: AccountHandle,
-): RetainedAccountAssignment | undefined {
-  const material = credentials.get(handle);
-  if (
-    !material ||
-    material.backend ||
-    material.localFirstSecret !== undefined ||
-    isReservedJazzIssuer(handle.identity.issuer)
-  )
-    return undefined;
-  const assignment = {
-    account: handle.id,
-    issuer: handle.identity.issuer,
-    subject: handle.identity.subject,
-  };
-  return isRetainedAccountAssignment(assignment) ? assignment : undefined;
-}
-
-/** @internal Notify a context when revalidation binds a fresh credential to its handle. */
-export function onAccountCredentialBound(handle: AccountHandle, listener: () => void): () => void {
-  const material = credentials.get(handle);
-  if (!material) return () => {};
-  material.bound.add(listener);
-  return () => material.bound.delete(listener);
 }
 
 /** @internal Stop contexts when their owning manager logs out. */
@@ -241,6 +213,30 @@ export function accountRegistry(handle: AccountHandle): string {
   return material.registry;
 }
 
+/**
+ * @internal What a device remembers of the user its backend signed in, so a
+ * reload reopens their account (offline too) instead of starting over. The
+ * shape of the backend's sign-in answer: the account, identity and claims,
+ * never a credential. The backend still states the identity on every
+ * connection.
+ */
+export interface RememberedBackendUser {
+  readonly account: string;
+  readonly identity: AccountIdentity;
+  readonly claims: Readonly<Record<string, unknown>>;
+}
+
+/** @internal The remembered form of a user the backend signed in, or undefined for any other account. */
+export function rememberBackendUser(handle: AccountHandle): RememberedBackendUser | undefined {
+  const material = credentials.get(handle);
+  if (!material?.delegated) return undefined;
+  return {
+    account: handle.id,
+    identity: { issuer: handle.identity.issuer, subject: handle.identity.subject },
+    claims: { ...material.delegated.claims },
+  };
+}
+
 /** @internal Public host factories prepare native crypto and persistence first. */
 export function createAccountManagerWithRuntime(options: {
   /** Exact application-scoped HTTP URL ending in /accounts. */
@@ -248,18 +244,23 @@ export function createAccountManagerWithRuntime(options: {
   localFirst: LocalFirstAccountFactory;
   backend?: BackendAccountHost;
   restoredLocalFirstSecret?: string;
-  /** A retained external assignment, reopened without credentials until revalidated. */
-  restoredAccount?: RetainedAccountAssignment;
-  /**
-   * Re-admit the selected external account in place on a same-identity
-   * login. Only hosts that retain assignments across reloads opt in; others
-   * keep the ordinary teardown-and-reopen transition.
-   */
-  revalidateInPlace?: boolean;
+  /** The backend user this device last had selected (see `RememberedBackendUser`). */
+  restoredBackendUser?: RememberedBackendUser;
   selectionDurability?: AccountSelectionDurability;
   fetch?: typeof fetch;
+  /** Sent as `Authorization: Bearer` on sign-in requests to the app's backend. */
+  bearer?: AppBearer;
 }): AccountManager<JWTAuth> {
   const registry = options.registry.replace(/\/$/, "");
+  const bearer = options.bearer;
+  const backendFetch: typeof fetch | undefined = bearer
+    ? async (input, init) => {
+        const token = await bearer();
+        const headers = new Headers(init?.headers);
+        if (token) headers.set("Authorization", `Bearer ${token}`);
+        return (options.fetch ?? fetch)(input, { ...init, headers });
+      }
+    : options.fetch;
   const issued = new Set<AccountHandle>();
   let epoch = 0;
   const assertCurrent = (started: number) => {
@@ -269,51 +270,6 @@ export function createAccountManagerWithRuntime(options: {
     issued.add(handle);
     return handle;
   };
-  const request = (path: string, token: string, body?: unknown) =>
-    requestAccountRegistry(registry, path, token, body, options.fetch);
-  const readHandle = (value: unknown, auth: JWTAuth, expected: AccountIdentity): AccountHandle =>
-    retain(mintHandle(registry, readAccountAssignment(value, expected), expected, auth));
-  const prime = (handle: AccountHandle, token: string) => {
-    const material = credentials.get(handle);
-    if (material) material.primed = token;
-    return handle;
-  };
-  // The provider token a declined revalidation already fetched. Only the
-  // enrollment that immediately follows it, for the same auth, in the same
-  // logout epoch and within a few seconds, may reuse it; any other account
-  // operation discards it first, so a stale identity is never re-enrolled.
-  let pinned: { auth: JWTAuth; token: string; epoch: number; at: number } | undefined;
-  const pin = (auth: JWTAuth, token: string) => {
-    pinned = { auth, token, epoch, at: Date.now() };
-  };
-  const unpin = () => {
-    const taken = pinned;
-    pinned = undefined;
-    return taken;
-  };
-  const enrollmentToken = (auth: JWTAuth) => {
-    const taken = unpin();
-    const reuse =
-      taken &&
-      taken.auth === auth &&
-      taken.epoch === epoch &&
-      Date.now() - taken.at < 10_000 &&
-      tokenStillFresh(taken.token)
-        ? taken.token
-        : undefined;
-    return reuse !== undefined ? Promise.resolve(reuse) : tokenFor(auth);
-  };
-  const enroll = async (operation: string, auth: JWTAuth): Promise<AccountHandle> => {
-    const started = epoch;
-    const token = await enrollmentToken(auth);
-    assertCurrent(started);
-    const identity = identityFromToken(token);
-    if (isReservedJazzIssuer(identity.issuer))
-      throw new AccountAuthError("external_identity_required");
-    const response = await request(operation, token);
-    assertCurrent(started);
-    return prime(readHandle(response, auth, identity), token);
-  };
   if (options.restoredLocalFirstSecret !== undefined)
     parseAuthSecret(options.restoredLocalFirstSecret);
   const restored =
@@ -322,16 +278,11 @@ export function createAccountManagerWithRuntime(options: {
       : options.localFirst.restore?.(options.restoredLocalFirstSecret);
   if (options.restoredLocalFirstSecret !== undefined && !restored)
     throw new AccountAuthError("local_first_restore_unavailable");
-  if (
-    options.restoredAccount !== undefined &&
-    (restored || !isRetainedAccountAssignment(options.restoredAccount))
-  )
-    throw new AccountAuthError("invalid_retained_account");
-  const retainedAccount = options.restoredAccount;
+  if (options.restoredLocalFirstSecret !== undefined && options.restoredBackendUser !== undefined)
+    throw new AccountAuthError("ambiguous_restored_account");
   return new AccountManager(
     {
       logout() {
-        unpin();
         epoch++;
         const listeners: (() => void)[] = [];
         for (const handle of issued) {
@@ -350,21 +301,18 @@ export function createAccountManagerWithRuntime(options: {
         }
       },
       createLocalFirst() {
-        unpin();
         const local = options.localFirst.create();
         return retain(
           mintHandle(registry, local.accountId, local.identity, local.auth, local.secret),
         );
       },
       restoreLocalFirst(secret) {
-        unpin();
         parseAuthSecret(secret);
         const local = options.localFirst.restore?.(secret);
         if (!local) throw new AccountAuthError("local_first_restore_unavailable");
         return retain(mintHandle(registry, local.accountId, local.identity, local.auth, secret));
       },
-      async becomeBackend(auth) {
-        unpin();
+      async admitBackend(auth) {
         const started = epoch;
         if (!options.backend) throw new AccountAuthError("backend_host_unavailable");
         if (typeof auth?.backendSecret !== "string" || !auth.backendSecret)
@@ -382,92 +330,52 @@ export function createAccountManagerWithRuntime(options: {
           registry,
           backend: Object.freeze({ backendSecret, nodeId }),
           invalidated: new Set(),
-          bound: new Set(),
         });
         return retain(handle);
       },
-      registerJWT: (auth) => enroll("register", auth),
-      loginJWT: (auth) => enroll("login", auth),
-      loginOrRegisterJWT: (auth) => enroll("login-or-register", auth),
-      revalidateJWT: !options.revalidateInPlace
-        ? undefined
-        : async (account, operation, auth, isCurrent = () => true) => {
-            unpin();
-            // In-place revalidation of the selected external account. Anything
-            // other than "the registry still assigns this exact identity to this
-            // exact account" returns undefined so the caller performs a full,
-            // ordinary transition (shutdown, enrollment, reopen).
-            const material = credentials.get(account);
-            if (
-              !material ||
-              material.registry !== registry ||
-              material.backend ||
-              material.localFirstSecret !== undefined ||
-              isReservedJazzIssuer(account.identity.issuer)
-            )
-              return undefined;
-            const started = epoch;
-            const token = await tokenFor(auth);
-            assertCurrent(started);
-            const identity = identityFromToken(token);
-            // A different provider subject is decided before any registry call;
-            // the ordinary enrollment then reuses this token instead of asking
-            // the provider again.
-            if (!sameIdentity(identity, account.identity)) {
-              pin(auth, token);
-              return undefined;
-            }
-            const response = await request(
-              operation === "loginJWT" ? "login" : "login-or-register",
-              token,
-            );
-            assertCurrent(started);
-            if (readAccountAssignment(response, identity) !== account.id) {
-              pin(auth, token);
-              return undefined;
-            }
-            if (credentials.get(account) !== material)
-              throw new AccountAuthError("account_logged_out");
-            // A logout or newer operation that started meanwhile wins: the
-            // account stays unconfirmed rather than syncing as it is torn down.
-            if (!isCurrent()) throw new AccountOperationSuperseded();
-            material.auth = auth;
-            material.provisional = false;
-            material.primed = token;
-            for (const listener of [...material.bound]) {
-              try {
-                listener();
-              } catch (error) {
-                console.error("Account credential listener failed", error);
-              }
-            }
-            return account;
-          },
-      async linkJWT(account, auth) {
-        unpin();
-        const started = epoch;
-        const approvingToken = await accountToken(account, registry);
-        const token = await tokenFor(auth);
-        assertCurrent(started);
-        const identity = identityFromToken(token);
-        if (isReservedJazzIssuer(identity.issuer))
-          throw new AccountAuthError("external_identity_required");
-        if (account.identity.issuer === "urn:jazz:local-first") {
-          const response = await request("found-local-first", approvingToken);
-          assertCurrent(started);
-          const registered = readHandle(response, approvingToken, account.identity);
-          if (registered.id !== account.id) throw new AccountAuthError("founding_account_mismatch");
-        }
-        const intent = (await request("links/request", approvingToken, { identity })) as {
-          nonce?: unknown;
-        };
-        assertCurrent(started);
-        if (typeof intent?.nonce !== "string") throw new AccountAuthError("invalid_link_response");
-        const response = await request("links/accept", token, { nonce: intent.nonce });
-        assertCurrent(started);
-        const linked = readHandle(response, auth, identity);
+      loginWithBackend: () => backendAccount(() => requestBackendSignIn(registry, backendFetch)),
+      async linkWithBackend(account) {
+        // The guest proves itself by signing a challenge the backend issued
+        // for the signed-in user, never with its sync token: a proof links
+        // once, and only to that user.
+        if (account.identity.issuer !== "urn:jazz:local-first")
+          throw new AccountAuthError(
+            "local_first_account_required",
+            undefined,
+            LINK_NEEDS_GUEST_MESSAGE,
+          );
+        const material = credentials.get(account);
+        if (!material || material.registry !== registry || !material.localFirstSecret)
+          throw new AccountAuthError(
+            "local_first_account_required",
+            undefined,
+            LINK_GUEST_KEY_MISSING_MESSAGE,
+          );
+        const secret = material.localFirstSecret;
+        // The namespace the guest's account was founded in (its token's
+        // audience: the app id, or the endpoint for an app-less client), so
+        // the backend founds the same account.
+        const audience = material.auth
+          ? parseJwtPayload(await tokenFor(material.auth))?.aud
+          : undefined;
+        const linked = await backendAccount(async () => {
+          const challenge = await requestBackendLinkChallenge(registry, backendFetch);
+          if (credentials.get(account) !== material)
+            throw new AccountAuthError("account_logged_out");
+          return requestBackendSignIn(registry, backendFetch, {
+            link: {
+              challenge,
+              proof: signChallenge(secret, challenge),
+              ...(typeof audience === "string" ? { audience } : {}),
+            },
+          }).catch((error: unknown) => {
+            if (error instanceof AccountAuthError && error.code === "link_refused")
+              throw new AccountAuthError(error.code, error.status, LINK_REFUSED_MESSAGE);
+            throw error;
+          });
+        });
         if (linked.id !== account.id) throw new AccountAuthError("linked_account_mismatch");
-        return prime(linked, token);
+        return linked;
       },
     },
     restored
@@ -480,16 +388,48 @@ export function createAccountManagerWithRuntime(options: {
             options.restoredLocalFirstSecret,
           ),
         )
-      : retainedAccount
-        ? retain(
-            mintHandle(
-              registry,
-              retainedAccount.account,
-              { issuer: retainedAccount.issuer, subject: retainedAccount.subject },
-              undefined,
-            ),
-          )
+      : options.restoredBackendUser
+        ? delegatedHandle(options.restoredBackendUser)
         : undefined,
     options.selectionDurability,
   );
+
+  async function backendAccount(signIn: () => Promise<unknown>): Promise<AccountHandle> {
+    const started = epoch;
+    const value = await signIn();
+    assertCurrent(started);
+    return delegatedHandle(value);
+  }
+
+  /** A handle for a user the backend signed in, from its answer (or a remembered one). */
+  function delegatedHandle(value: unknown): AccountHandle {
+    const { identity, claims } = (value ?? {}) as {
+      identity?: AccountIdentity;
+      claims?: unknown;
+    };
+    if (
+      !identity ||
+      typeof identity.issuer !== "string" ||
+      typeof identity.subject !== "string" ||
+      !isPortableAuthorComponent(identity.issuer) ||
+      !isPortableAuthorComponent(identity.subject) ||
+      isReservedJazzIssuer(identity.issuer)
+    )
+      throw new AccountAuthError("invalid_account_response");
+    const id = readAccountAssignment(value, identity);
+    const delegatedClaims =
+      claims && typeof claims === "object" && !Array.isArray(claims)
+        ? Object.freeze({ ...(claims as Record<string, unknown>) })
+        : Object.freeze({});
+    const handle = new EnrolledAccount(id, identity, delegatedClaims) as AccountHandle;
+    credentials.set(handle, {
+      registry,
+      delegated: Object.freeze({
+        claims: delegatedClaims,
+        ...(bearer ? { bearer } : {}),
+      }),
+      invalidated: new Set(),
+    });
+    return retain(handle);
+  }
 }

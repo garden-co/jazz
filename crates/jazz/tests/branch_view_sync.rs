@@ -38,13 +38,7 @@ fn block_on<F: Future>(future: F) -> F::Output {
 /// whoever holds a grant.
 fn schema() -> JazzSchema {
     use jazz::tools::{CmpOp, PolicyExpr, PolicyValue, TablePolicies};
-    let me = || {
-        PolicyValue::SessionRef(vec![
-            "user".to_owned(),
-            "identity".to_owned(),
-            "subject".to_owned(),
-        ])
-    };
+    let me = || PolicyValue::SessionRef(vec!["identity".to_owned(), "subject".to_owned()]);
     let readable = PolicyExpr::Or(vec![
         PolicyExpr::IsNull {
             column: "owner".to_owned(),

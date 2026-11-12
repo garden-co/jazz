@@ -1,9 +1,11 @@
+import { fetchFor } from "../runtime/in-process-transport.js";
 import { appScopedUrl } from "../runtime/url.js";
 
 export type GraphPresence = "local" | "server" | "both";
 
 export interface MigrationGraph {
-  activeSchemaHash: string | null;
+  /** The schema of the bundle the server published last: new sessions pin to it. */
+  latestBundleSchemaHash: string | null;
   schemas: string[];
   migrations: Array<{
     fromHash: string;
@@ -39,7 +41,7 @@ export function combineMigrationGraphs(
     presence: presence(localEdges.has(id), serverEdges.has(id)),
   }));
   return {
-    activeSchemaHash: server.activeSchemaHash,
+    latestBundleSchemaHash: server.latestBundleSchemaHash,
     localSchemaHash: local.currentSchemaHash,
     schemas,
     schemaPresence: new Map(
@@ -60,17 +62,27 @@ export interface MigrationGraphOptions {
 }
 
 export async function fetchMigrationGraph(options: MigrationGraphOptions): Promise<MigrationGraph> {
-  const response = await fetch(
-    appScopedUrl(options.serverUrl, options.appId, "admin/migrations/graph"),
-    { headers: { "X-Jazz-Admin-Secret": options.adminSecret } },
-  );
+  const url = appScopedUrl(options.serverUrl, options.appId, "admin/migrations/graph");
+  const response = await fetchFor(url)(url, {
+    headers: { "X-Jazz-Admin-Secret": options.adminSecret },
+  });
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
     throw new Error(
       `Migration graph fetch failed: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ""}`,
     );
   }
-  const graph = (await response.json()) as MigrationGraph;
+  const body = (await response.json()) as MigrationGraph & { activeSchemaHash?: string | null };
+  // A core from before alpha.60 names the schema its last deployment made
+  // current instead; that deployment's bundle is its latest.
+  const graph: MigrationGraph =
+    body && body.latestBundleSchemaHash === undefined && body.activeSchemaHash !== undefined
+      ? {
+          latestBundleSchemaHash: body.activeSchemaHash,
+          schemas: body.schemas,
+          migrations: body.migrations,
+        }
+      : body;
   const isHash = (hash: unknown): hash is string =>
     typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash);
   if (
@@ -78,7 +90,9 @@ export async function fetchMigrationGraph(options: MigrationGraphOptions): Promi
     !Array.isArray(graph.schemas) ||
     !graph.schemas.every(isHash) ||
     new Set(graph.schemas).size !== graph.schemas.length ||
-    !(graph.activeSchemaHash === null || graph.schemas.includes(graph.activeSchemaHash)) ||
+    !(
+      graph.latestBundleSchemaHash === null || graph.schemas.includes(graph.latestBundleSchemaHash)
+    ) ||
     !Array.isArray(graph.migrations) ||
     !graph.migrations.every(
       (edge) =>
@@ -126,13 +140,13 @@ export function renderMigrationGraph(graph: MigrationGraph, color = false): stri
     while (stack.length) {
       const { hash, prefix, connector, continuation } = stack.pop()!;
       const repeated = visited.has(hash);
-      const current = hash === graph.activeSchemaHash;
+      const latest = hash === graph.latestBundleSchemaHash;
       let label =
         hash.slice(0, prefixLength) +
-        (current ? " (current)" : "") +
+        (latest ? " (latest bundle)" : "") +
         (hash === graph.localSchemaHash ? " (schema.ts)" : "") +
         presenceLabel(graph.schemaPresence?.get(hash));
-      if (current && color) label = `\x1b[1;36m${label}\x1b[0m`;
+      if (latest && color) label = `\x1b[1;36m${label}\x1b[0m`;
       lines.push(`${prefix}${connector}● ${label}${repeated ? " (shown above)" : ""}`);
       if (repeated) {
         hasReference = true;
@@ -162,6 +176,6 @@ export function renderMigrationGraph(graph: MigrationGraph, color = false): stri
     }
   }
   if (hasReference) lines.push("", "Repeated labels refer to the same schema.");
-  if (graph.activeSchemaHash === null) lines.push("", "No schema is currently active.");
+  if (graph.latestBundleSchemaHash === null) lines.push("", "No bundle is published yet.");
   return lines.join("\n");
 }

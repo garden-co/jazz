@@ -310,6 +310,8 @@ pub(crate) async fn start_local_client(schema: Schema) -> (TempDir, JazzClient) 
         account_id: None,
         jwt_token: None,
         backend_secret: None,
+        backend_session: None,
+        bundle: None,
         admin_secret: None,
         migrations: Default::default(),
     };

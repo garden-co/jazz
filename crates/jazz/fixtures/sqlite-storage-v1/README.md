@@ -12,9 +12,9 @@ pending uploads moved from one encoded message to a row per op, and
 watermarks became per-sequencer rows).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `775997e916743e83dc13ef9c3c3615e39459fe2b89d580e4719451e1d0284748`.
+  the SQLite file `d47da977328c19bdead4d6eefa5c706f234ded153b2095cc2a26a3b736e54232`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `57645f326a73a5b27cce7bf9026e3b41817c4229659d95a9dc46b6e35de5ac48`.
+  `544e4b09a34b75703140aa4b301aa3b50eaeb2be8c9857740518542564c5e4a1`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -60,9 +60,7 @@ way.
 Keeping the deploy catalogue as typed rows (`_jazz_versions` numbering the
 admitted versions, `_jazz_names` keyed by that number, `_jazz_stored_columns`,
 and `_jazz_schemas`, `_jazz_lenses` and `_jazz_permissions`) regenerated it
-the same way. A development store with the earlier layout (`_jazz_names`
-keyed by version id) is refused at open with "delete the local store and
-resync".
+the same way.
 
 Moving a commit's bases, access proofs (formerly sources) and deltas onto its
 ops, so each pending op is stored with them and `_jazz_pending_items` keeps
@@ -131,3 +129,24 @@ Giving the reserved row columns descriptive names regenerated it the same
 way: `_b` is `_branch`, `_t` is `_clock` (index `__by_clock`), `_w` is
 `_writer`, `_st` is `_state` and `_cols` is `_touched`; `_base` keeps its
 name. History is keyed by `(id, _branch, _clock, _writer)`.
+
+Replacing BLAKE3 with SHA-256 everywhere Jazz used it (large-value
+object hashes are now plain SHA-256 over the node's encoding, so an object
+store can verify a presigned upload against the node hash itself; schema
+hashes, schema version ids, stored column and table names, and derived ids
+are SHA-256 too) regenerated it the same way.
+
+Resuming reads from where they settled regenerated it the same way:
+`_jazz_watermarks` is `(key, through, context)`, where `context` is the
+digest of the permissions bundle and claims the result was read under
+(`NULL` for a session with neither, as every session here is).
+
+Storing pending uploads as rows shaped like the rows they write, instead of
+encoded sync messages (`_jazz_pending` with named columns, one
+`_jazz_pending_ops` row per op, one `_jazz_pending_cells` row per written
+cell with its kind and a native SQLite value, `_jazz_pending_deltas`,
+`_jazz_pending_reads` and `_jazz_pending_read_rows`; the retry store's
+`_jazz_rejected_ops`, `_jazz_rejected_cells` and `_jazz_rejected_deltas`
+in the same layout), regenerated it the same way and re-pinned the browser
+corpus, whose store an open now gives the `_jazz_pending*` tables (the
+retry store's tables appear with the first refused commit).

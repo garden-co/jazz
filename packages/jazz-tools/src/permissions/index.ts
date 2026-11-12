@@ -18,7 +18,7 @@ import type {
   RelProjectColumn,
   RelValueRef,
 } from "../ir.js";
-import { blake3 } from "@noble/hashes/blake3.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { assertSchemaNameAllowed } from "../schema-name.js";
 
@@ -272,7 +272,7 @@ export interface PermissionRelation {
 export interface ReachableSeedBuilder {
   /**
    * Seed the walk with `team_column` of the `seed_table` rows whose `user_column`
-   * equals `from`, such as `session.user.account` or `session.claims["sub"]`.
+   * equals `from`, such as `session.user` or `session.claims["sub"]`.
    */
   seeded_by(
     seed_table: string,
@@ -622,7 +622,7 @@ class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
   ): PermissionRelation {
     if (!isSessionRefValue(from)) {
       throw new Error(
-        'seeded_by(...) takes a session reference such as session.user.account or session.claims["sub"].',
+        'seeded_by(...) takes a session reference such as session.user or session.claims["sub"].',
       );
     }
     const accessScope = "__reachable_access_0";
@@ -776,13 +776,18 @@ type DirectWhereInputGuard<Input, WhereInput> = [Input] extends [(...args: never
         : [error: "Input is not assignable to the allowed where input type"];
 
 export type SessionContext = {
-  /** Exact author; compare account for ownership shared by linked identities. */
-  readonly user: SessionRefValue & {
-    readonly account: SessionRefValue;
-    readonly identity: SessionRefValue & {
-      readonly issuer: SessionRefValue;
-      readonly subject: SessionRefValue;
-    };
+  /**
+   * The account. `{ $createdBy: session.user }` matches rows written through
+   * any identity linked to the account.
+   */
+  readonly user: SessionRefValue;
+  /**
+   * The exact login (issuer and subject), shared by no other identity linked
+   * to the account: compare it with `$createdBy.identity`.
+   */
+  readonly identity: SessionRefValue & {
+    readonly issuer: SessionRefValue;
+    readonly subject: SessionRefValue;
   };
   /** Raw provider claims, kept separate from Jazz-owned session identity. */
   readonly claims: Readonly<Record<string, SessionRefValue>>;
@@ -913,7 +918,12 @@ class UpdateRuleBuilder<WhereInput, Row> {
   ): Rule;
   where<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): Rule;
   where(input: unknown, ..._guard: unknown[]): Rule {
-    const condition = resolveWhereInput(input, this.hasTypeColumn, this.columnTransforms);
+    const condition = resolveRuleInput(
+      `policy.${this.table}.allowUpdate.where`,
+      input,
+      this.hasTypeColumn,
+      this.columnTransforms,
+    );
     const rule: Rule = {
       table: this.table,
       action: "update",
@@ -937,7 +947,12 @@ class UpdateRuleBuilder<WhereInput, Row> {
   ): this;
   whereOld<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): this;
   whereOld(input: unknown, ..._guard: unknown[]): this {
-    this.oldCondition = resolveWhereInput(input, this.hasTypeColumn, this.columnTransforms);
+    this.oldCondition = resolveRuleInput(
+      `policy.${this.table}.allowUpdate.whereOld`,
+      input,
+      this.hasTypeColumn,
+      this.columnTransforms,
+    );
     this.registerBuilder();
     return this;
   }
@@ -947,7 +962,12 @@ class UpdateRuleBuilder<WhereInput, Row> {
   ): this;
   whereNew<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): this;
   whereNew(input: unknown, ..._guard: unknown[]): this {
-    this.newCondition = resolveWhereInput(input, this.hasTypeColumn, this.columnTransforms);
+    this.newCondition = resolveRuleInput(
+      `policy.${this.table}.allowUpdate.whereNew`,
+      input,
+      this.hasTypeColumn,
+      this.columnTransforms,
+    );
     this.registerBuilder();
     return this;
   }
@@ -986,6 +1006,16 @@ export function definePermissions<TApp extends AppLike>(
   app: TApp,
   factory: (ctx: PolicyContext<TApp>) => void,
 ): CompiledPermissions {
+  if (app === undefined || app === null) {
+    // What a circular import hands over: permissions.ts imports the app
+    // from schema.ts while schema.ts is still loading because it imports
+    // permissions.ts.
+    throw new Error(
+      "definePermissions(app, ...) got no app. If permissions.ts imports the app from " +
+        "schema.ts and schema.ts imports permissions.ts, the import is circular: import " +
+        "permissions.ts where you create Jazz instead of from schema.ts.",
+    );
+  }
   const tableNames = Object.entries(app)
     .filter(
       ([, value]) =>
@@ -1035,8 +1065,16 @@ export function definePermissions<TApp extends AppLike>(
     raw: rawPermissionExpression,
     allowedTo: createAllowedToContext(),
     session: createSessionContext(),
-  } as unknown as PolicyContext<TApp>;
-  factory(ctx);
+  };
+  // Removed in alpha.60; destructuring it names its replacement instead of
+  // passing `undefined` on to a rule.
+  Object.defineProperty(ctx, "isCreator", {
+    enumerable: false,
+    get() {
+      throw new Error(ISCREATOR_REMOVED);
+    },
+  });
+  factory(ctx as unknown as PolicyContext<TApp>);
   const compiled = compileRules(rules, fkReferencesByTable, relationsByTable);
   for (const [table, policies] of Object.entries(compiled)) {
     for (const operation of [policies.select, policies.insert, policies.update, policies.delete]) {
@@ -1046,6 +1084,12 @@ export function definePermissions<TApp extends AppLike>(
   }
   return compiled;
 }
+
+const ISCREATOR_REMOVED =
+  "`isCreator` was removed in alpha.60. Write the creator check out as a row condition: " +
+  "`{ $createdBy: session.user }` matches rows written through any identity linked to the " +
+  "account (including alpha.59 rows imported with an account), and " +
+  '`{ "$createdBy.identity": session.identity }` only the exact login.';
 
 function collectFkReferencesByTable(app: AppLike): Map<string, Map<string, string>> {
   const result = new Map<string, Map<string, string>>();
@@ -1149,7 +1193,12 @@ function buildTablePolicyBuilder(
   ): ActionBuilder<unknown, unknown> => {
     const builder: ActionBuilder<unknown, unknown> = {
       where: ((input: unknown) => {
-        const condition = resolveWhereInput(input, hasTypeColumn, columnTransforms);
+        const condition = resolveRuleInput(
+          `policy.${table}.allow${capitalize(action)}.where`,
+          input,
+          hasTypeColumn,
+          columnTransforms,
+        );
         return registerRule(
           clause === "using"
             ? { table, action, using: condition }
@@ -1255,7 +1304,7 @@ function createUnionRelation(
           inputs: states.map((state) => {
             const input = relationStateToRelExpr(state);
             return {
-              label: `permission:${bytesToHex(blake3(new TextEncoder().encode(JSON.stringify(input))))}`,
+              label: `permission:${bytesToHex(sha256(new TextEncoder().encode(JSON.stringify(input))))}`,
               input,
             };
           }),
@@ -1875,12 +1924,23 @@ export function createSessionContext(): SessionContext {
     __jazzPermissionKind: "session-ref",
     path,
   });
-  const user = Object.assign(claimRef("user"), {
-    account: claimRef("user", "account"),
-    identity: Object.assign(claimRef("user", "identity"), {
-      issuer: claimRef("user", "identity", "issuer"),
-      subject: claimRef("user", "identity", "subject"),
-    }),
+  const user = claimRef("user");
+  // `session.user` is the account itself now: name the replacement for the
+  // parts it used to have instead of building a policy on `undefined`.
+  for (const [part, replacement] of [
+    ["account", "session.user, which is the account"],
+    ["identity", "session.identity, the exact login"],
+  ] as const) {
+    Object.defineProperty(user, part, {
+      enumerable: false,
+      get() {
+        throw new Error(`session.user.${part} was removed: use ${replacement}.`);
+      },
+    });
+  }
+  const identity = Object.assign(claimRef("identity"), {
+    issuer: claimRef("identity", "issuer"),
+    subject: claimRef("identity", "subject"),
   });
   const whereBuilder = Object.assign(
     (input: Record<string, unknown>): SessionWhereCondition =>
@@ -1907,6 +1967,7 @@ export function createSessionContext(): SessionContext {
           );
         }
         if (prop === "user") return user;
+        if (prop === "identity") return identity;
         if (prop === "authMode") return claimRef(prop);
         throw new Error(
           `Unknown session property ${prop}; raw provider claims must use session.claims["${prop}"]`,
@@ -2075,6 +2136,27 @@ function normalizeWhereObject(input: unknown, hasTypeColumn?: boolean): Record<s
   return input;
 }
 
+/** {@link resolveWhereInput} for the rule `site` names, which its errors name too. */
+function resolveRuleInput(
+  site: string,
+  input: unknown,
+  hasTypeColumn: boolean,
+  columnTransforms?: ColumnTransformMap,
+): Condition {
+  try {
+    return resolveWhereInput(input, hasTypeColumn, columnTransforms);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Unsupported permission condition")) {
+      error.message = `${site}: ${error.message}`;
+    }
+    throw error;
+  }
+}
+
+function capitalize(word: string): string {
+  return word.charAt(0).toUpperCase() + word.slice(1);
+}
+
 function resolveWhereInput(
   input: unknown,
   hasTypeColumn: boolean,
@@ -2111,7 +2193,18 @@ function resolveWhereInput(
       where: normalizeWhereObject(input, hasTypeColumn),
     });
   }
-  throw new Error("Unsupported permission condition input.");
+  throw new Error(
+    `Unsupported permission condition input: ${describeConditionInput(input)}. A condition is a ` +
+      "where-object such as `{ owner_id: session.user }`, a function of the row returning " +
+      "one, `anyOf`/`allOf` of conditions, `policy.<table>.exists.where(...)`, `allowedTo.<op>(...)`, " +
+      "or `raw(...)`.",
+  );
+}
+
+function describeConditionInput(input: unknown): string {
+  if (input === null) return "null";
+  if (Array.isArray(input)) return "an array (wrap several conditions in anyOf or allOf)";
+  return typeof input === "string" ? `the string ${JSON.stringify(input)}` : String(typeof input);
 }
 
 function filtersToCondition(

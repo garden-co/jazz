@@ -1,121 +1,137 @@
 import { Context, Effect, Layer } from "effect";
 import { HttpServerRequest } from "effect/http";
-import type { AccountHandle } from "../accounts/state.js";
 import {
-  createJazzSession,
-  type JazzClient as BackendClient,
-  type JazzSessionConfig,
-} from "../backend/create-jazz-session.js";
-import type { BackendRequestOptions } from "../backend/request-auth.js";
-import type { RequestLike } from "../runtime/client.js";
+  createJazz,
+  type CreateJazzOptions,
+  type Jazz as AppJazz,
+} from "../backend/create-jazz.js";
+import { isNoJazzAccountError } from "../backend/no-account-error.js";
 import type { Db } from "../runtime/db.js";
-import type { JazzSession } from "../session/state.js";
-import { JazzError, toJazzError } from "./errors.js";
+import { JazzError, JazzNoAccount, toJazzError } from "./errors.js";
 import { Jazz, type JazzDb } from "./jazz.js";
 
 export interface JazzBackendService {
-  /** The underlying backend session, for account actions this binding does not wrap. */
-  readonly session: JazzSession<BackendClient>;
-  /** The currently selected backend client. Fails when the session is not ready. */
-  readonly client: Effect.Effect<BackendClient, JazzError>;
+  /** The app's Jazz (`createJazz`), for what this binding does not wrap: serving `/jazz`, `linkIdentity`. */
+  readonly jazz: AppJazz;
   /**
    * The backend's own database, acting with the backend's authority rather
-   * than a user's. Prefer {@link forRequest} in request handlers.
+   * than a user's. Prefer {@link forReqUser} in request handlers.
    */
-  readonly authority: Effect.Effect<JazzDb, JazzError>;
-  /** Verify a request's credentials and act as that user, with their permissions. */
-  forRequest(
-    request: RequestLike,
-    options?: BackendRequestOptions,
-  ): Effect.Effect<JazzDb, JazzError>;
-  /** Act as an admitted account, with its permissions. */
-  forAccount(account: AccountHandle): Effect.Effect<JazzDb, JazzError>;
-  /** Keep backend permissions while recording the request's verified user as author. */
-  withAttributionForRequest(request: RequestLike): Effect.Effect<JazzDb, JazzError>;
-  /** Keep backend permissions while recording `account` as author. */
-  withAttribution(account: AccountHandle): Effect.Effect<JazzDb, JazzError>;
+  readonly authority: Effect.Effect<JazzDb>;
+  /**
+   * Act as the user your `authenticate` names for `request`, with their
+   * permissions. Fails with {@link JazzNoAccount} when that user has no Jazz
+   * account yet.
+   */
+  forReqUser(request: Request): Effect.Effect<JazzDb, JazzError | JazzNoAccount>;
+  /**
+   * Keep backend permissions while recording the request's signed-in user as
+   * author. Your permissions are not checked (see `createJazz`'s `withAttribution`).
+   * Fails with {@link JazzNoAccount} when that user has no Jazz account yet.
+   */
+  withAttribution(request: Request): Effect.Effect<JazzDb, JazzError | JazzNoAccount>;
+  /**
+   * Create the Jazz account of `userId` (as your `authenticate` names them),
+   * or return the one they have (see `createJazz`'s `createAccountFor`).
+   */
+  createAccountFor(userId: string): Effect.Effect<string, JazzError>;
 }
 
 /**
- * A Node backend's Jazz session. It deliberately does not provide
+ * The app's Jazz in an Effect backend. It deliberately does not provide
  * {@link Jazz} itself: handlers choose whose permissions they act with, most
- * often the requesting user's through {@link JazzBackend.forRequest}.
+ * often the requesting user's through {@link JazzBackend.forReqUser}.
  *
  * @example
  * ```ts
  * const handler = Effect.gen(function* () {
  *   const jazz = yield* Jazz;
  *   return yield* jazz.all(app.todos);
- * }).pipe(JazzBackend.forCurrentRequest());
+ * }).pipe(JazzBackend.forCurrentReqUser());
  * ```
  */
 export class JazzBackend extends Context.Service<JazzBackend, JazzBackendService>()(
   "jazz-tools/effect/JazzBackend",
 ) {
-  /** Wrap an existing backend session. The caller keeps ownership of it. */
-  static readonly fromSession = (session: JazzSession<BackendClient>): JazzBackendService =>
-    makeJazzBackend(session);
+  /** Wrap an app's Jazz (`createJazz`). The caller keeps ownership of it. */
+  static readonly fromJazz = (jazz: AppJazz): JazzBackendService => makeJazzBackend(jazz);
 
-  /** Provide {@link JazzBackend} from a backend session the caller owns. */
-  static readonly layerSession = (session: JazzSession<BackendClient>): Layer.Layer<JazzBackend> =>
-    Layer.succeed(JazzBackend, makeJazzBackend(session));
+  /** Provide {@link JazzBackend} from an app's Jazz the caller owns. */
+  static readonly layerJazz = (jazz: AppJazz): Layer.Layer<JazzBackend> =>
+    Layer.succeed(JazzBackend, makeJazzBackend(jazz));
 
   /**
-   * Open a backend session for the layer's lifetime and close it when the
-   * layer's scope closes. The layer fails if the session does not open ready,
-   * for example when `initial` backend admission is rejected.
+   * Run the app's Jazz (`createJazz`) for the layer's lifetime and close it
+   * when the layer's scope closes.
    */
-  static readonly layer = (config: JazzSessionConfig): Layer.Layer<JazzBackend, JazzError> =>
+  static readonly layer = (options: CreateJazzOptions): Layer.Layer<JazzBackend, JazzError> =>
     Layer.effect(
       JazzBackend,
       Effect.gen(function* () {
-        const session = yield* Effect.acquireRelease(
-          Effect.tryPromise({ try: () => createJazzSession(config), catch: toJazzError("open") }),
-          (session) => Effect.ignore(Effect.tryPromise(() => session.close())),
+        const jazz = yield* Effect.acquireRelease(
+          Effect.tryPromise({
+            // createJazz opens on first use; the layer opens it up front so
+            // a store that cannot open fails the layer, not a later request.
+            try: async () => {
+              const jazz = createJazz(options);
+              try {
+                await jazz.ready();
+              } catch (error) {
+                await jazz.close().catch(() => undefined);
+                throw error;
+              }
+              return jazz;
+            },
+            catch: toJazzError("open"),
+          }),
+          (jazz) => Effect.ignore(Effect.tryPromise(() => jazz.close())),
         );
-        const backend = makeJazzBackend(session);
-        yield* backend.client;
-        return backend;
+        return makeJazzBackend(jazz);
       }),
     );
 
   /** Provide {@link Jazz} to `self` as the user who sent `request`. */
-  static readonly forRequest =
-    (request: RequestLike, options?: BackendRequestOptions) =>
+  static readonly forReqUser =
+    (request: Request) =>
     <A, E, R>(
       self: Effect.Effect<A, E, R>,
-    ): Effect.Effect<A, E | JazzError, Exclude<R, Jazz> | JazzBackend> =>
+    ): Effect.Effect<A, E | JazzError | JazzNoAccount, Exclude<R, Jazz> | JazzBackend> =>
       Effect.provideServiceEffect(
         self,
         Jazz,
-        JazzBackend.use((backend) => backend.forRequest(request, options)),
+        JazzBackend.use((backend) => backend.forReqUser(request)),
       );
 
   /**
    * Provide {@link Jazz} to `self` as the user who sent the current
-   * `HttpServerRequest`, for handlers built with `effect/http`.
+   * `HttpServerRequest`, for handlers built with `effect/http`. Your
+   * `authenticate` gets the request's method, URL and headers but not its
+   * body, which stays for the handler to read.
    */
-  static readonly forCurrentRequest =
-    (options?: BackendRequestOptions) =>
+  static readonly forCurrentReqUser =
+    () =>
     <A, E, R>(
       self: Effect.Effect<A, E, R>,
     ): Effect.Effect<
       A,
-      E | JazzError,
+      E | JazzError | JazzNoAccount,
       Exclude<R, Jazz> | JazzBackend | HttpServerRequest.HttpServerRequest
     > =>
       Effect.provideServiceEffect(
         self,
         Jazz,
         HttpServerRequest.HttpServerRequest.use((request) =>
-          JazzBackend.use((backend) => backend.forRequest(request, options)),
+          Effect.try({
+            try: () => credentialsOf(request),
+            catch: toJazzError("forReqUser"),
+          }).pipe(Effect.flatMap((web) => JazzBackend.use((backend) => backend.forReqUser(web)))),
         ),
       );
 
   /** Provide {@link Jazz} to `self` with the backend's own authority. */
   static readonly asAuthority = <A, E, R>(
     self: Effect.Effect<A, E, R>,
-  ): Effect.Effect<A, E | JazzError, Exclude<R, Jazz> | JazzBackend> =>
+  ): Effect.Effect<A, E, Exclude<R, Jazz> | JazzBackend> =>
     Effect.provideServiceEffect(
       self,
       Jazz,
@@ -123,35 +139,35 @@ export class JazzBackend extends Context.Service<JazzBackend, JazzBackendService
     );
 }
 
-function makeJazzBackend(session: JazzSession<BackendClient>): JazzBackendService {
-  const client = Effect.suspend(() => {
-    const snapshot = session.getSnapshot();
-    return snapshot.status === "ready" && snapshot.client
-      ? Effect.succeed(snapshot.client)
-      : Effect.fail(
-          new JazzError({
-            operation: "backend",
-            cause:
-              snapshot.error ?? new Error(`Jazz backend session is ${snapshot.status}, not ready`),
-          }),
-        );
-  });
-  const scoped = (operation: string, open: (client: BackendClient) => Promise<Db>) =>
-    Effect.flatMap(client, (client) =>
-      Effect.tryPromise({ try: () => open(client), catch: toJazzError(operation) }).pipe(
-        Effect.map(Jazz.fromDb),
-      ),
-    );
+/**
+ * The request `authenticate` decides on, without its body: `toWeb` would hand
+ * over the body stream, and reading it there (some effect versions start to)
+ * leaves the handler's own body read empty.
+ */
+function credentialsOf(request: HttpServerRequest.HttpServerRequest): Request {
+  const url = HttpServerRequest.toURL(request);
+  if (url._tag === "None") throw new Error(`forCurrentReqUser: invalid request URL ${request.url}`);
+  return new Request(url.value, { method: request.method, headers: request.headers });
+}
+
+function makeJazzBackend(jazz: AppJazz): JazzBackendService {
+  const scoped = (operation: string, open: () => Promise<Db>) =>
+    Effect.tryPromise({
+      try: open,
+      catch: (cause): JazzError | JazzNoAccount =>
+        isNoJazzAccountError(cause)
+          ? new JazzNoAccount({ userId: cause.userId, operation })
+          : toJazzError(operation)(cause),
+    }).pipe(Effect.map(Jazz.fromDb));
   return {
-    session,
-    client,
-    authority: Effect.map(client, (client) => Jazz.fromDb(client.db)),
-    forRequest: (request, options) =>
-      scoped("forRequest", (client) => client.forRequest(request, options)),
-    forAccount: (account) => scoped("forAccount", (client) => client.forAccount(account)),
-    withAttributionForRequest: (request) =>
-      scoped("withAttributionForRequest", (client) => client.withAttributionForRequest(request)),
-    withAttribution: (account) =>
-      scoped("withAttribution", (client) => client.withAttribution(account)),
+    jazz,
+    authority: Effect.sync(() => Jazz.fromDb(jazz.db)),
+    forReqUser: (request) => scoped("forReqUser", () => jazz.forReqUser(request)),
+    withAttribution: (request) => scoped("withAttribution", () => jazz.withAttribution(request)),
+    createAccountFor: (userId) =>
+      Effect.tryPromise({
+        try: () => jazz.createAccountFor(userId),
+        catch: toJazzError("createAccountFor"),
+      }),
   };
 }

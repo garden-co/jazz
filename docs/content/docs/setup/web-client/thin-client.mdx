@@ -1,0 +1,178 @@
+---
+title: Thin Client
+description: "Learn how to set up the thin browser client, which talks to your backend with no local database."
+---
+
+The default browser client: about 160 KB gzipped, with no Wasm and no local storage. Your main
+backend runs every query under the signed-in user's policies and sends finished rows, and writes
+commit on the server.
+
+<include>../../../partials/web-client-choose.mdx</include>
+
+## Connect
+
+The thin client is the default: `JazzProvider` in React, Vue or Svelte, or `createJazzClient`
+from `jazz-tools/client`, without a `client` loader.
+
+<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "TypeScript"]} persist updateAnchor>
+  <Tab value="React">
+    ```tsx title="App.tsx"
+    import { JazzProvider } from "jazz-tools/react";
+
+    function Root() {
+      return (
+        <JazzProvider config={{ serverUrl: "/jazz" }} signedOut={<SignIn />}>
+          <App />
+        </JazzProvider>
+      );
+    }
+    ```
+
+    In the Next.js App Router, `JazzProvider` is a client component. Put it in a file that starts
+    with `"use client"` and render that from `app/layout.tsx` around `{children}`:
+
+    ```tsx title="app/providers.tsx"
+    "use client";
+    import { JazzProvider } from "jazz-tools/react";
+
+    export function Providers({ children }: { children: React.ReactNode }) {
+      return (
+        <JazzProvider config={{ serverUrl: "/jazz" }} signedOut={<SignIn />}>
+          {children}
+        </JazzProvider>
+      );
+    }
+    ```
+
+    Server components and route handlers read through
+    [`jazz.forReqUser`](/docs/setup/deployment/own-server#user-scoped-use) instead.
+
+  </Tab>
+  <Tab value="Vue">
+    ```vue title="App.vue"
+    <script setup lang="ts">
+    import { JazzProvider } from "jazz-tools/vue";
+    </script>
+
+    <template>
+      <JazzProvider :config="{ serverUrl: '/jazz' }">
+        <TodoApp />
+        <template #signedOut><SignIn /></template>
+      </JazzProvider>
+    </template>
+    ```
+
+    After your own sign-in, call `refresh()` from `useJazzSession()` (from `jazz-tools/vue`).
+    See [Framework Patterns](/docs/reference/framework-patterns) for the other Vue APIs.
+
+  </Tab>
+  <Tab value="Svelte">
+    ```svelte title="App.svelte"
+    <script lang="ts">
+      import { JazzProvider } from "jazz-tools/svelte";
+    </script>
+
+    <JazzProvider config={{ serverUrl: "/jazz" }}>
+      <TodoApp />
+      {#snippet signedOut()}<SignIn />{/snippet}
+    </JazzProvider>
+    ```
+
+    After your own sign-in, call `refresh()` on `getJazzSession()` (from `jazz-tools/svelte`,
+    called during component setup). In SvelteKit, render the provider only in the browser; see
+    [Framework Patterns](/docs/reference/framework-patterns) for that and the other Svelte APIs.
+
+  </Tab>
+  <Tab value="TypeScript">
+    ```ts title="app.ts"
+    import { createJazzClient } from "jazz-tools/client";
+    import { app } from "./schema";
+
+    const session = await createJazzClient({ serverUrl: "/jazz" });
+    // After your own sign-in or sign-out, ask your backend again.
+    authClient.onSessionChange(() => void session.refresh());
+
+    // session.db throws while no one is signed in.
+    if (session.getSnapshot().status === "ready") {
+      const todos = await session.db.all(app.todos);
+    }
+    ```
+
+  </Tab>
+</Tabs>
+
+<include>../../../partials/web-client-sign-in.mdx</include>
+
+<include>../../../partials/web-client-reads-writes.mdx</include>
+
+## Options
+
+<include>../../../partials/web-client-shared-options.mdx</include>
+
+## Limitations
+
+Each is an explicit "not supported" error:
+
+- no offline use: while the backend is unreachable, reads and subscriptions wait and are answered after the reconnect; writes are not optimistic: they show after one round trip, and `wait()` resolves when the server answered
+- no attributed writes
+- no streaming inside a transaction
+- text edits with `editedFrom` on merge text columns are rejected (`NotObserved`) for now; use the
+  local-first client for [collaborative text editing](/docs/recipes/data-patterns/collaborative-text-editing)
+- pending writes live in memory only: a write the server hasn't answered yet is lost if the page
+  reloads or closes (see [Pending writes](#pending-writes) below)
+- a single write, and a single answer to a query, can be at most 32 MiB. The client refuses a
+  larger write itself; streamed writes (`insertStreaming` and the like) go in pieces, so a larger
+  file uploads fine. The server answers a larger result with a `TooLarge` error for that query
+  alone (ending a live query) and keeps the session, so one very large row fails every query that
+  includes it. Read such a value a page at a time with a
+  [range select](/docs/reading/includes-and-relations#partial-large-values), such as
+  `select({ content: { from, to } })`, until streaming reads arrive
+
+## Pending writes
+
+When the socket drops, the client reconnects on its own and resends any write the server hadn't
+answered. Standalone inserts, updates, upserts, deletes and restores carry a key the server
+deduplicates by, so a resend lands exactly once. `getSyncStatus()` and `useSyncStatus()` show
+whether the client is connected and how many writes still wait for an answer.
+
+A write ends with `ThinConnectionLostError` (from `jazz-tools/thin`) only when the connection ends
+for good while it waits: after `refresh()` signs in someone else, after `disconnect()`, or
+when the client closes. It may or may not have committed, so read before you retry. A transaction
+in flight when the socket drops ends the same way.
+
+Pending writes are kept in memory, not on disk. To warn before the user leaves with unsent
+changes:
+
+```ts
+window.addEventListener("beforeunload", (event) => {
+  if (db.getSyncStatus().pendingUploads > 0) event.preventDefault();
+});
+```
+
+For writes that survive a reload, [upgrade to local-first](#upgrading-to-local-first).
+
+## Upgrading to local-first
+
+To keep initial loading fast, start with the thin client and upgrade to the local-first client
+when it's needed. Hand the provider a loader to upgrade in the background after the first load, or
+call `upgradeToLocalFirst` when your app needs it (below). The session keeps the same `Db`: live queries and listeners carry on, restarting from the
+local-first client's first result, and the thin client's pending writes finish first:
+
+```tsx
+<JazzProvider config={{ serverUrl: "/jazz", client: () => import("jazz-tools/local-first") }}>
+```
+
+The dynamic import lives in your code, so the local-first client and its Wasm become a separate
+chunk: apps that never pass `client` never download it.
+
+To upgrade only when you need to, for example when a user opens an editor or goes offline, call
+the hook instead:
+
+```tsx
+const { upgradeToLocalFirst } = useDb();
+await upgradeToLocalFirst(() => import("jazz-tools/local-first"));
+```
+
+Without a framework, call the same method on `session.db`:
+`await db.upgradeToLocalFirst(() => import("jazz-tools/local-first"))`. The session upgrades in place,
+so you keep using the same `Db`. See [Local-First Client](/docs/setup/web-client/local-first-client).

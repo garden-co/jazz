@@ -1,10 +1,10 @@
 "use client";
 
 import * as React from "react";
-import { JazzProvider, useJazzAuth, useAuthState } from "jazz-tools/react";
+import { JazzProvider, useJazzSession, useAuthState } from "jazz-tools/react";
 import { ChatPanel } from "../src/ChatPanel";
 import { AuthCard } from "../src/AuthCard";
-import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
+import { authClient } from "../src/lib/auth-client";
 
 type Credentials = (email: string, password: string) => Promise<void>;
 
@@ -18,7 +18,7 @@ function ChatShell({
   onSignOut: () => Promise<void>;
 }): React.JSX.Element {
   const { claims, authMode, user } = useAuthState();
-  const userId = user?.account ?? null;
+  const userId = user;
   const role = typeof claims.role === "string" ? claims.role : null;
   const canPostAnnouncements = authMode === "external" && role === "admin";
   return (
@@ -56,16 +56,11 @@ function ChatShell({
   );
 }
 
+// Jazz runs inside this app's backend (src/lib/jazz.server.ts), on its own origin.
 const config = {
-  appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
-  serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
-};
-
-async function getToken(): Promise<string> {
-  const token = await getJwtFromBetterAuth();
-  if (!token) throw new Error("Better Auth did not provide a token");
-  return token;
-}
+  serverUrl: "/jazz",
+  initial: "device",
+} as const;
 
 export default function Page() {
   const [providerError, setProviderError] = React.useState<Error>();
@@ -80,13 +75,7 @@ export default function Page() {
     />
   );
   return (
-    <JazzProvider
-      {...config}
-      initial="local-first"
-      signedOut={screen}
-      loading={screen}
-      error={screen}
-    >
+    <JazzProvider config={config} signedOut={screen} loading={screen} error={screen}>
       {screen}
     </JazzProvider>
   );
@@ -103,17 +92,17 @@ function SessionScreen({
   reportError: React.Dispatch<React.SetStateAction<Error | undefined>>;
   recovery: React.RefObject<(() => Promise<void>) | undefined>;
 }) {
-  const { sessionActions: actions, ...session } = useJazzAuth();
+  const session = useJazzSession();
   React.useEffect(() => {
     if (restored.current || session.status !== "ready") return;
     restored.current = true;
     void perform(async () => {
-      const token = await getJwtFromBetterAuth();
-      if (token) await actions.loginOrRegisterJWT({ getToken });
+      const { data } = await authClient.getSession();
+      if (data) await session.refresh();
     }).catch(() => {});
   }, [session.status]);
   // This is the manual hybrid escape hatch: no automatic enrollment connector
-  // runs while signup links the provider identity to this local-first account.
+  // runs while signup links the provider identity to this device account.
   async function perform(action: () => Promise<void>) {
     recovery.current = action;
     try {
@@ -127,19 +116,21 @@ function SessionScreen({
   async function signIn(email: string, password: string) {
     const result = await authClient.signIn.email({ email, password });
     if (result.error) throw new Error(result.error.message);
-    await perform(() => actions.loginOrRegisterJWT({ getToken: getToken }));
+    await perform(() => session.refresh());
   }
   async function signUp(email: string, password: string) {
     const result = await authClient.signUp.email({ email, name: email, password });
     if (result.error) throw new Error(result.error.message);
-    await perform(() => actions.linkJWT({ getToken: getToken }));
+    // The backend links this browser's device account to the new user,
+    // so everything written as a guest stays theirs.
+    await perform(() => session.linkDeviceAccount());
   }
   async function signOut() {
     await perform(async () => {
-      await actions.logout();
+      await session.signOut();
       const result = await authClient.signOut();
       if (result.error) throw new Error(result.error.message ?? "Provider sign-out failed");
-      await actions.createLocalFirst();
+      await session.createDeviceAccount();
     });
   }
   const error = providerError ?? session.error;
@@ -151,10 +142,7 @@ function SessionScreen({
           <button
             onClick={() =>
               void perform(
-                session.error
-                  ? session.retry
-                  : (recovery.current ??
-                      (() => actions.loginOrRegisterJWT({ getToken: getToken }))),
+                session.error ? session.retry : (recovery.current ?? (() => session.refresh())),
               ).catch(() => {})
             }
           >

@@ -19,7 +19,9 @@ pub use account_session::{
 };
 mod node_lease;
 mod relay;
+mod text_anchors;
 pub use relay::*;
+pub use text_anchors::jazz_native_relay_text_anchors;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
@@ -44,10 +46,11 @@ use node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 /// 1 was the first public ABI; 2 added `CodedOperationError` answers to
 /// existing commands, so a JS bundle and native build from different ABIs
 /// refuse to open rather than misread a failure; 3 added its `reason_name`;
-/// 4 ends each subscription delta with its updated rows' splices.
+/// 4 ends each subscription delta with its updated rows' splices; 5 attaches
+/// the app's migrations beside its schema's tables.
 /// Append-only commands use optional native capabilities while existing
 /// command layouts remain stable.
-pub const NATIVE_RELAY_ABI_V1: u16 = 4;
+pub const NATIVE_RELAY_ABI_V1: u16 = 5;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_CANCELLED: u8 = 3;
@@ -163,7 +166,14 @@ struct PendingPrivateSession {
 struct PrivateRelaySocketSession {
     server_url: String,
     app_id: String,
+    /// What the socket presents: a local-first account's own token, or, for
+    /// a user signed in through the app's backend, the app's own bearer.
     bearer: String,
+    /// Set for a user signed in through the app's backend: the session the
+    /// socket states, which the backend checks against who `bearer` is. The
+    /// bearer then rides the upgrade's `Authorization` header to the app's
+    /// backend, never the prelude a core reads.
+    backend_session: Option<serde_json::Value>,
 }
 
 /// JSON-shaped form accepted only by the platform-owned admission C entry
@@ -517,6 +527,10 @@ pub enum ForegroundDbCommandRequest {
     /// verdict (append-only: an older native build answers it with an error
     /// and the host reports none).
     PendingUploadCount,
+    /// The foreground's uploads: pending, since when, and what the server
+    /// refused since it opened (append-only: an older native build answers
+    /// it with an error and the host falls back to `PendingUploadCount`).
+    UploadStatus,
 }
 
 /// One refusal of a scope's credential by its upstream. Every refusal gets a
@@ -716,6 +730,12 @@ pub enum ForegroundDbCommandResponse {
     /// Answer to [`ForegroundDbCommandRequest::PendingUploadCount`].
     PendingUploadCount {
         count: u64,
+    },
+    /// Answer to [`ForegroundDbCommandRequest::UploadStatus`]: the core's
+    /// upload status as JSON (`{ pending, oldestPendingAt, rejected,
+    /// lastRejection }`).
+    UploadStatus {
+        status_json: String,
     },
 }
 
@@ -1163,10 +1183,20 @@ impl NativeRelayHost {
                 app_id: AppId::from_string(&session.app_id)
                     .unwrap_or_else(|_| AppId::from_name(&session.app_id)),
                 peer_identity,
-                auth: AuthConfig {
-                    jwt_token: Some(session.bearer),
-                    ..AuthConfig::default()
+                auth: match &session.backend_session {
+                    Some(stated) => AuthConfig {
+                        backend_session: Some(stated.clone()),
+                        ..AuthConfig::default()
+                    },
+                    None => AuthConfig {
+                        jwt_token: Some(session.bearer.clone()),
+                        ..AuthConfig::default()
+                    },
                 },
+                authorization: session
+                    .backend_session
+                    .is_some()
+                    .then(|| format!("Bearer {}", session.bearer)),
                 on_event: Arc::new(move |event| {
                     link_for_event
                         .lock()
@@ -1883,7 +1913,20 @@ impl NativeRelayHost {
             return Err(JazzNativeRelayStatus::LifecycleFailure);
         }
         reject_bearer_claims(&request.claims)?;
-        let public_schema = serde_json::from_str(&request.schema_json)
+        // The attached schema, and beside its tables the migrations the app
+        // ships, if any (`ClientMigrations` in jazz-tools).
+        let mut public_schema = serde_json::from_str::<serde_json::Value>(&request.schema_json)
+            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let migrations = public_schema
+            .as_object_mut()
+            .and_then(|fields| fields.remove("migrations"))
+            .map(|bundle| serde_json::to_vec(&bundle))
+            .transpose()
+            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let migrations =
+            jazz::tools::deployment::published::lowered_client_migrations(migrations.as_deref())
+                .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let public_schema = serde_json::from_value(public_schema)
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         let schema =
             JazzSchema::new(&public_schema).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
@@ -1895,6 +1938,7 @@ impl NativeRelayHost {
             scope: request.scope.into(),
             sqlite_path: PathBuf::from(request.sqlite_path),
             schema,
+            migrations,
             identity: request.identity,
         };
         // A scope is immutable once trusted code has admitted it. Reject a
@@ -1904,6 +1948,7 @@ impl NativeRelayHost {
             admitted.config.scope == config.scope
                 && (admitted.config.sqlite_path != config.sqlite_path
                     || admitted.config.schema.version_id() != config.schema.version_id()
+                    || admitted.config.migrations_key() != config.migrations_key()
                     || admitted.config.identity != config.identity
                     || admitted.claims != request.claims)
         }) {
@@ -1945,7 +1990,7 @@ impl NativeRelayHost {
         RelayScope::from(scope.clone())
             .validate()
             .map_err(relay_status)?;
-        let digest = blake3::hash(
+        let digest = jazz::sha256::hash(
             format!(
                 "{}\0{}\0{}",
                 scope.app_namespace, scope.storage_namespace, canonical_subject
@@ -1973,6 +2018,7 @@ impl NativeRelayHost {
                     server_url: request.server_url,
                     app_id: request.app_id,
                     bearer: request.jwt,
+                    backend_session: None,
                 }),
             },
         );

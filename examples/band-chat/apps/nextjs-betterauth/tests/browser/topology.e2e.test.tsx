@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createAccountManager, createDb, type Db } from "jazz-tools";
+import { createJazzClient, type Db, type JazzClientConfig } from "jazz-tools";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
 import {
   TestCleanup,
@@ -13,10 +13,14 @@ import {
 } from "../../../../../../packages/jazz-tools/tests/browser/topology-harness";
 import {
   getJazzServerInfo,
-  getJazzServerJwtForUser,
+  jazzAppFetch,
+  jazzAppUserUrl,
+  startJazzApp,
+  type JazzServerInfo,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server";
 import permissions from "../../permissions";
 import { app } from "../../schema";
+import { memoryAccountStore } from "../../../../../testing/accounts";
 
 const cleanup = new TestCleanup();
 afterEach(async () => cleanup.cleanup());
@@ -78,20 +82,17 @@ describe("BandChat cross-topology recovery", () => {
           {
             name: "issuer-scoped room admission",
             run: async () => {
-              const server = await getJazzServerInfo(uniqueDbName("band-chat-topology"));
+              const core = await getJazzServerInfo(uniqueDbName("band-chat-topology"));
               await deploy({
-                appId: server.appId,
-                serverUrl: server.serverUrl,
-                adminSecret: server.adminSecret,
+                appId: core.appId,
+                serverUrl: core.serverUrl,
+                adminSecret: core.adminSecret,
                 schema: app,
                 permissions,
               });
-              const [ownerToken, peerToken] = await Promise.all([
-                getJazzServerJwtForUser("owner", undefined, server.appId),
-                getJazzServerJwtForUser("peer", undefined, server.appId),
-              ]);
-              owner = await openMember(server, "owner", ownerToken);
-              peer = await openMember(server, "peer", peerToken);
+              const server = await startJazzApp(core, { schema: app, permissions });
+              owner = await openMember(server, "owner");
+              peer = await openMember(server, "peer");
               const room = await owner.db.insert(app.rooms, { name: "Topology rehearsal" }).wait({
                 tier: "global",
               });
@@ -241,19 +242,16 @@ describe("BandChat cross-topology recovery", () => {
   }, 75_000);
 
   it("never publishes an empty owner room snapshot while another browser member bootstraps", async () => {
-    const server = await getJazzServerInfo(uniqueDbName("band-chat-room-subscription"));
+    const core = await getJazzServerInfo(uniqueDbName("band-chat-room-subscription"));
     await deploy({
-      appId: server.appId,
-      serverUrl: server.serverUrl,
-      adminSecret: server.adminSecret,
+      appId: core.appId,
+      serverUrl: core.serverUrl,
+      adminSecret: core.adminSecret,
       schema: app,
       permissions,
     });
-    const [ownerToken, guestToken] = await Promise.all([
-      getJazzServerJwtForUser("subscription-owner", undefined, server.appId),
-      getJazzServerJwtForUser("subscription-guest", undefined, server.appId),
-    ]);
-    const owner = await openMemberDb(server, "subscription-owner", ownerToken);
+    const server = await startJazzApp(core, { schema: app, permissions });
+    const owner = await openMemberDb(server, "subscription-owner");
     const observedSnapshots: Array<ReadonlyArray<string>> = [];
     const unsubscribers: Array<() => void> = [];
     try {
@@ -282,7 +280,7 @@ describe("BandChat cross-topology recovery", () => {
         "owner room-list callback observes its locally created room",
       );
 
-      const guest = await openMemberDb(server, "subscription-guest", guestToken);
+      const guest = await openMemberDb(server, "subscription-guest");
       const guestRoomSnapshots: Array<ReadonlyArray<string>> = [];
       unsubscribers.push(
         guest.db.subscribe(app.rooms.select("*", "$createdBy").orderBy("name", "asc"), (rooms) =>
@@ -358,20 +356,17 @@ describe("BandChat cross-topology recovery", () => {
           {
             name: "member admission",
             run: async () => {
-              const server = await getJazzServerInfo(uniqueDbName("band-chat-window"));
+              const core = await getJazzServerInfo(uniqueDbName("band-chat-window"));
               await deploy({
-                appId: server.appId,
-                serverUrl: server.serverUrl,
-                adminSecret: server.adminSecret,
+                appId: core.appId,
+                serverUrl: core.serverUrl,
+                adminSecret: core.adminSecret,
                 schema: app,
                 permissions,
               });
-              const [ownerToken, peerToken] = await Promise.all([
-                getJazzServerJwtForUser("window-owner", undefined, server.appId),
-                getJazzServerJwtForUser("window-peer", undefined, server.appId),
-              ]);
-              owner = await openMember(server, "window-owner", ownerToken);
-              peer = await openMember(server, "window-peer", peerToken);
+              const server = await startJazzApp(core, { schema: app, permissions });
+              owner = await openMember(server, "window-owner");
+              peer = await openMember(server, "window-peer");
               const room = await owner.db.insert(app.rooms, { name: "Bounded window" }).wait({
                 tier: "global",
               });
@@ -479,23 +474,39 @@ describe("BandChat cross-topology recovery", () => {
   }, 75_000);
 });
 
-async function openMemberDb(
-  server: { appId: string; serverUrl: string },
+const loadLocalFirst = () => import("jazz-tools/local-first");
+
+/**
+ * Sign `userId` in on their own origin of the app backend, and open their
+ * local-first client: a session of its own (its own account store), closed
+ * with the test's cleanup.
+ */
+async function openSession(
+  server: JazzServerInfo,
   userId: string,
-  jwtToken: string,
+  config: Partial<JazzClientConfig>,
+) {
+  const session = await createJazzClient({
+    serverUrl: await jazzAppUserUrl(server, userId),
+    fetch: jazzAppFetch,
+    store: memoryAccountStore(),
+    client: loadLocalFirst,
+    // These tests write offline and read the local tiers: local-first from the start.
+    localFirst: "now",
+    ...config,
+  });
+  cleanup.trackTransport({ stop: () => session.close() });
+  return { db: session.db, author: session.getSnapshot().user!.accountId };
+}
+
+async function openMemberDb(
+  server: JazzServerInfo,
+  userId: string,
 ): Promise<Pick<ClientIdentity, "db" | "author">> {
-  const accounts = await createAccountManager({ appId: server.appId, serverUrl: server.serverUrl });
-  const account = await accounts.registerJWT({ getToken: async () => jwtToken });
-  const db = cleanup.track(
-    await createDb({
-      appId: server.appId,
-      serverUrl: server.serverUrl,
-      account,
-      logLevel: "trace",
-      driver: { type: "persistent", dbName: uniqueDbName(`band-chat-${userId}`) },
-    }),
-  );
-  return { db, author: account.id };
+  return openSession(server, userId, {
+    logLevel: "trace",
+    driver: { type: "persistent", dbName: uniqueDbName(`band-chat-${userId}`) },
+  });
 }
 
 /**
@@ -520,12 +531,8 @@ async function admitAfterRequest(
   return membership.id;
 }
 
-async function openMember(
-  server: { appId: string; serverUrl: string },
-  userId: string,
-  jwtToken: string,
-): Promise<ClientIdentity> {
-  const { db, author } = await openMemberDb(server, userId, jwtToken);
+async function openMember(server: JazzServerInfo, userId: string): Promise<ClientIdentity> {
+  const { db, author } = await openMemberDb(server, userId);
   const profile = await db
     .insert(app.profiles, { author, displayName: userId })
     .wait({ tier: "global" });

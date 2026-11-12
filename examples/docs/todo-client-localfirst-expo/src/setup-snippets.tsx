@@ -1,15 +1,16 @@
 // #region context-setup-expo-minimal
-import { JazzSessionProvider } from "jazz-tools/expo";
+import { JazzProvider } from "jazz-tools/expo";
 import { SafeAreaView, Text, View } from "react-native";
 import { TodoList } from "./TodoList";
 
 export function App() {
   return (
-    <JazzSessionProvider
+    <JazzProvider
       config={{
-        appId: "<your-app-id>",
-        serverUrl: "https://your-core.example",
-        initial: "local-first",
+        // Your backend's Jazz endpoint (createJazz); the app names no app id.
+        serverUrl: "https://your-app.example/jazz",
+        // Everyone starts as a guest: a device account, kept in SecureStore.
+        initial: "device",
       }}
     >
       <SafeAreaView style={{ flex: 1 }}>
@@ -18,7 +19,7 @@ export function App() {
           <TodoList />
         </View>
       </SafeAreaView>
-    </JazzSessionProvider>
+    </JazzProvider>
   );
 }
 // #endregion context-setup-expo-minimal

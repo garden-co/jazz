@@ -1,14 +1,13 @@
 import { For, createMemo, createSignal, type JSX } from "solid-js";
-import { useAll, useDb, useSession } from "jazz-tools/solid";
+import { useAll, useSession } from "jazz-tools/solid";
 import { toast } from "solid-sonner";
 import { app, type Todo } from "./lib/schema.js";
 
 export function TodoList() {
-  const db = useDb();
   const session = useSession();
   const [title, setTitle] = createSignal("");
 
-  const sessionUserId = createMemo(() => session()?.user.account ?? null);
+  const sessionUserId = createMemo(() => session()?.user ?? null);
   const todos = useAll(() => ({ query: app.todos }));
 
   const handleSubmit: JSX.EventHandler<HTMLFormElement, SubmitEvent> = (e) => {
@@ -18,7 +17,7 @@ export function TodoList() {
     const ownerId = sessionUserId();
     if (!trimmedTitle || !ownerId) return;
 
-    db().insert(app.todos, {
+    todos.db.insert(app.todos, {
       title: trimmedTitle,
       done: false,
       owner_id: ownerId,
@@ -31,7 +30,7 @@ export function TodoList() {
     const checkbox = event.currentTarget as HTMLInputElement;
 
     try {
-      db().update(app.todos, todo.id, { done: !todo.done });
+      todos.db.update(app.todos, todo.id, { done: !todo.done });
     } catch {
       checkbox.checked = todo.done;
       toast.error("You don't have permission to update this task");
@@ -40,7 +39,7 @@ export function TodoList() {
 
   const deleteTodo = (todoId: string) => {
     try {
-      db().delete(app.todos, todoId);
+      todos.db.delete(app.todos, todoId);
     } catch {
       toast.error("You don't have permission to delete this task");
     }

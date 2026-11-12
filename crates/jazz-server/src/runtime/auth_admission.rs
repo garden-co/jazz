@@ -149,7 +149,7 @@ impl AdmittedSession {
     ///
     /// The account is not request material: transport hosts may call this
     /// only with their own trusted admission configuration. Rebuilding the
-    /// policy claim map keeps `user` and `user.account` derived from the
+    /// policy claim map keeps `user` (the account) derived from the
     /// newly admitted row author while retaining the verified provider data.
     pub fn with_trusted_account(mut self, account: AccountId) -> Result<Self, AuthAdmissionError> {
         if self.source == AdmissionSource::Anonymous {

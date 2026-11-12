@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 /* The relay ABI this header describes (Rust `NATIVE_RELAY_ABI_V1`). */
-#define JAZZ_NATIVE_RELAY_ABI_VERSION 4
+#define JAZZ_NATIVE_RELAY_ABI_VERSION 5
 
 /*
  * Return the shared native relay ABI version embedded in this artifact.
@@ -55,6 +55,14 @@ jazz_native_relay_status jazz_native_relay_mint_local_first_token(
     uint64_t ttl_seconds, uint64_t now_seconds,
     jazz_native_relay_bytes *out);
 
+/* Stateless text anchors and ranges (jazz-text). request is UTF-8 JSON
+ * {"op": "captureAnchor" | "resolveAnchor" | "captureRange" | "resolveRange", ...};
+ * out receives the result as UTF-8 JSON. Release it with
+ * jazz_native_relay_bytes_free. */
+jazz_native_relay_status jazz_native_relay_text_anchors(
+    const uint8_t *request, size_t request_len,
+    jazz_native_relay_bytes *out);
+
 typedef struct jazz_native_relay_host jazz_native_relay_host;
 typedef struct jazz_native_relay_host_lease jazz_native_relay_host_lease;
 typedef void (*jazz_native_relay_foreground_wake_callback)(void *context, uint64_t foreground, uint8_t wake_kind, uint64_t delay_ms);
@@ -80,7 +88,8 @@ jazz_native_relay_status jazz_native_relay_host_execute(
 /* Trusted platform-only two phase admission. Setup receives serverUrl, appId,
  * jwt, and the platform-selected storage root; JWT payload decoding only
  * selects a local cache scope and is never authentication. Attach receives
- * only the opaque setup capability and canonical schema JSON. */
+ * only the opaque setup capability and canonical schema JSON, which may
+ * carry the app's `migrations` beside its `tables`. */
 /* Internal account adapter: logical handle metadata is separate from the
  * platform-selected absolute OS storage root. Returned capabilities belong to
  * this runtime lease and are released on runtime invalidation. */

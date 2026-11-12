@@ -4,20 +4,19 @@ import type { ReactNode } from "react";
 import {
   Db,
   JazzProvider,
-  createDb,
   createJazzClient,
   schema,
   useAll,
   useAllSuspense,
   useDb,
   useJazzClient,
-  useLocalFirstAuth,
   useSession,
-  type AuthSecretStore,
-  type DbConfig,
   type JazzClient,
-  type JazzClientConfig,
 } from "./index.js";
+import type { OpenJazzClientConfig } from "./create-jazz-client.js";
+import type { AccountStore } from "../accounts/persistence.js";
+
+declare const store: AccountStore;
 
 const app = schema.defineApp(
   {
@@ -32,19 +31,12 @@ const app = schema.defineApp(
   { migrations: "none" },
 );
 
-declare const authSecretStore: AuthSecretStore;
 declare const account: AccountHandle;
-
-const config: DbConfig = {
-  appId: "rn-typecheck",
-  account,
-  serverUrl: "https://sync.example.test",
-};
 
 // Persistent RN admission is intentionally a field on the ordinary public
 // client config. It does not expose JSI factories, byte encoders, or a
 // JavaScript-selectable durable path.
-const admittedConfig: JazzClientConfig = {
+const admittedConfig: OpenJazzClientConfig = {
   appId: "rn-native-relay-typecheck",
   nativeRelay: { capability: new Uint8Array(32) },
   account,
@@ -52,8 +44,13 @@ const admittedConfig: JazzClientConfig = {
 };
 
 async function clientFactory(): Promise<JazzClient> {
-  const db = await createDb(config);
-  const client = await createJazzClient(config);
+  const session = await createJazzClient({
+    serverUrl: "https://sync.example.test",
+    store,
+    initial: "device",
+  });
+  const client = session.getSnapshot().client!;
+  const db = client.db;
   const rows = await db.all(app.todos);
   const one = await db.one(app.todos.where({ title: { eq: "milk" } }));
 
@@ -67,11 +64,6 @@ function Hooks({ children }: { children: ReactNode }) {
   const db = useDb();
   const client = useJazzClient();
   const session = useSession();
-  const auth = useLocalFirstAuth({
-    key: "rn-auth-key",
-    appId: "rn-typecheck",
-    store: authSecretStore,
-  });
   const todos = useAll(app.todos);
   const suspenseTodos = useAllSuspense(app.todos);
 
@@ -79,15 +71,16 @@ function Hooks({ children }: { children: ReactNode }) {
   client satisfies { db: Db; shutdown(): Promise<void> };
   session satisfies ReturnType<typeof useSession>;
   if (session) {
-    session.user.account satisfies string | null;
-    session.user.identity.subject satisfies string;
+    session.user satisfies string | null;
+    session.identity.subject satisfies string;
   }
-  auth.secret satisfies string | null;
   todos satisfies ReturnType<typeof useAll<typeof app.todos._rowType>>;
-  suspenseTodos satisfies Array<{ id: string; title: string; done?: boolean | null }>;
+  suspenseTodos.data satisfies Array<{ id: string; title: string; done?: boolean | null }>;
+  suspenseTodos.db satisfies Db;
+  todos.db satisfies Db;
 
   return (
-    <JazzProvider config={config} fallback={null}>
+    <JazzProvider config={{ serverUrl: "https://sync.example.test", store }} loading={null}>
       {children}
     </JazzProvider>
   );

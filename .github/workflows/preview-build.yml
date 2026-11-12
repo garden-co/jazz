@@ -98,14 +98,6 @@ jobs:
           name: pkg-jazz-rn
           path: crates/jazz-rn
 
-      - name: Ensure CLI binaries stay executable
-        run: |
-          chmod 755 \
-            packages/jazz-tools/bin/native/jazz-tools-darwin-arm64 \
-            packages/jazz-tools/bin/native/jazz-tools-darwin-x64 \
-            packages/jazz-tools/bin/native/jazz-tools-linux-arm64 \
-            packages/jazz-tools/bin/native/jazz-tools-linux-x64
-
       # Match alpha releases: the inspector is private and must be embedded in
       # jazz-tools before publishing a self-contained consumer package.
       - name: Stage inspector overlay assets into jazz-tools
@@ -122,6 +114,7 @@ jobs:
           test "${#TARBALLS[@]}" -eq 1
           tar -tf "${TARBALLS[0]}" > "${PACK_DIRECTORY}/contents.txt"
           grep -Fxq 'package/dist/dev/inspector-overlay/embedded/embedded.html' "${PACK_DIRECTORY}/contents.txt"
+          grep -Fxq 'package/dist/dev/inspector-overlay/embedded/backend.html' "${PACK_DIRECTORY}/contents.txt"
 
       - name: Publish to pkg.pr.new
         env:
@@ -146,8 +139,6 @@ jobs:
             node dev/artifacts/rn-preview-dependencies.mjs "${PREVIEW_COMMIT}"
             PACKAGES+=('./crates/jazz-rn/npm/android' './crates/jazz-rn/npm/ios' './crates/jazz-rn')
           fi
-          # Bind source and dependency URLs to the exact same publication list.
-          node packages/create-jazz/scripts/write-preview-snapshot.mjs "${PREVIEW_COMMIT}" "${PACKAGES[@]}"
           pnpm exec pkg-pr-new publish \
             --pnpm \
             --comment=update \

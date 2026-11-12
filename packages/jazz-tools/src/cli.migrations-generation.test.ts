@@ -1,4 +1,5 @@
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { assert, vi } from "vitest";
 import {
@@ -6,6 +7,7 @@ import {
   compileSchema as saveBaseline,
 } from "./dev/catalogue-project.js";
 import { describe, expect, it } from "vitest";
+import { validate } from "./cli.js";
 import { createCliFixtures } from "../tests/cli/fixtures.js";
 
 const {
@@ -15,6 +17,7 @@ const {
   fileExists,
   typecheckGeneratedMigration,
   captureConsoleLogs,
+  rootPermissionsSchema,
   rootSchemaWithoutInlinePermissions,
   rootSchemaWithTodoNotes,
   storedRootSchema,
@@ -25,7 +28,7 @@ const {
 } = createCliFixtures(import.meta.url);
 
 describe("cli migrations", () => {
-  it.each(["offline", "empty-server", "failed-server"])(
+  it.each(["empty-server", "failed-server"])(
     "does not save an initial snapshot without a usable baseline (%s)",
     async (kind) => {
       const { root } = await createWorkspace();
@@ -34,7 +37,7 @@ describe("cli migrations", () => {
       const fetchMock = vi.fn(async () =>
         kind === "failed-server"
           ? new Response("unavailable", { status: 503 })
-          : Response.json({ activeSchemaHash: null, schemas: [], migrations: [] }),
+          : Response.json({ latestBundleSchemaHash: null, schemas: [], migrations: [] }),
       );
       vi.stubGlobal("fetch", fetchMock);
       await expect(
@@ -51,9 +54,115 @@ describe("cli migrations", () => {
       );
       expect(await fileExists(join(migrationsDir, "snapshots"))).toBe(false);
       expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toEqual([]);
-      if (kind === "offline") expect(fetchMock).not.toHaveBeenCalled();
     },
   );
+
+  // An app on its own store (`sqlite()`) has no server to fetch a baseline
+  // from: the docs' first step snapshots schema.ts, and the next schema
+  // change migrates from it, with migrations/index.ts kept up to date
+  // (alpha.60 adopter pass V4).
+  it("snapshots schema.ts on the first offline run and migrates from it next", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const shipping = (source: string) =>
+      `import { migrations } from "./migrations/index.ts";\n` +
+      source.replace('{ migrations: "none" }', "{ migrations }");
+    await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithoutInlinePermissions()));
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+    // The generated stub imports jazz-tools, as in an app.
+    await mkdir(join(root, "node_modules"), { recursive: true });
+    await symlink(
+      fileURLToPath(new URL("..", import.meta.url)),
+      join(root, "node_modules", "jazz-tools"),
+      "dir",
+    );
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs: firstValidate } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    expect(firstValidate.join("\n")).toContain("no schema snapshot yet");
+
+    const first = await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    assert(first.status === "initial-snapshot");
+    expect(await fileExists(first.snapshotPath)).toBe(true);
+    const index = () => readFile(join(migrationsDir, "index.ts"), "utf8");
+    expect(await index()).toContain(first.hash);
+
+    await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithTodoNotes()));
+    const { logs: changedValidate } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    expect(changedValidate.join("\n")).toContain("changed since the latest snapshot");
+    expect(changedValidate).not.toContain(
+      "Permission-only changes do not create schema hashes or require migrations.",
+    );
+
+    const second = await createCatalogueMigration({
+      schemaDir: root,
+      migrationsDir,
+      name: "add-notes",
+    });
+    assert(second.status === "generated");
+    expect(second.fromHash).toBe(first.hash);
+    // The stub is in migrations/index.ts without another `validate`.
+    const bundled = await index();
+    expect(bundled).toContain(`"fromHash": "${first.hash}"`);
+    expect(bundled).toContain(`"toHash": "${second.toHash}"`);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // A migration validate passed used to fail only at deploy (adopter b22):
+  // renaming an optional column to a required one.
+  it("refuses in validate a migration that a deploy would refuse, naming the column", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const shipping = (source: string) =>
+      `import { migrations } from "./migrations/index.ts";\n` +
+      source.replace('{ migrations: "none" }', "{ migrations }");
+    await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithTodoNotes()));
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+    await mkdir(join(root, "node_modules"), { recursive: true });
+    await symlink(
+      fileURLToPath(new URL("..", import.meta.url)),
+      join(root, "node_modules", "jazz-tools"),
+      "dir",
+    );
+    vi.stubGlobal("fetch", vi.fn());
+    const first = await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    assert(first.status === "initial-snapshot");
+
+    await writeFile(
+      join(root, "schema.ts"),
+      shipping(
+        rootSchemaWithTodoNotes().replace(
+          "notes: s.string().optional(),",
+          'body: s.string().default(""),',
+        ),
+      ),
+    );
+    const second = await createCatalogueMigration({
+      schemaDir: root,
+      migrationsDir,
+      name: "notes-to-body",
+    });
+    assert(second.status === "generated");
+    await validate({ schemaDir: root });
+
+    // The author keeps the values by renaming, but the column's optionality
+    // changes with it, which no migration step does.
+    const stub = await readFile(second.filePath, "utf8");
+    await writeFile(
+      second.filePath,
+      stub
+        .split("\n")
+        .filter((line) => !line.includes('"notes": m.drop'))
+        .map((line) =>
+          line.includes('"body": m.add') ? '      "body": m.renameFrom("notes"),' : line,
+        )
+        .join("\n"),
+    );
+    await expect(validate({ schemaDir: root })).rejects.toThrow(
+      /The migrations in migrations would not deploy: .*table "todos".*"body" comes out optional but is required/,
+    );
+  });
 
   it.each([false, true])(
     "uses the active server schema on first run (unchanged=%s)",
@@ -69,7 +178,7 @@ describe("cli migrations", () => {
       const fetchMock = vi.fn(async (url: string) => {
         if (url.endsWith("/migrations/graph"))
           return Response.json({
-            activeSchemaHash: baseline.hash,
+            latestBundleSchemaHash: baseline.hash,
             schemas: [baseline.hash],
             migrations: [],
           });
@@ -210,7 +319,7 @@ describe("cli migrations", () => {
     expect(logs).toContain(
       "No reviewed migration file needed because this schema change does not require row transformations.",
     );
-    expect(logs.some((line) => line.includes("Run npx jazz-tools@"))).toBe(true);
+    expect(logs.some((line) => line.includes("createJazz publishes"))).toBe(true);
   });
 
   it("skips creating a migration file for reordered columns across explicit schema hashes", async () => {
@@ -339,7 +448,8 @@ describe("cli migrations", () => {
                 nullable: false,
                 merge_strategy: "Counter",
               },
-              { name: "addedValue", column_type: { type: "BigInt" }, nullable: true },
+              // Another type than removedValue, so it can't be its rename.
+              { name: "addedValue", column_type: { type: "Text" }, nullable: true },
               { name: "label", column_type: { type: "Text" }, nullable: false },
             ],
           },
@@ -367,7 +477,7 @@ describe("cli migrations", () => {
     }
 
     const generated = await readFile(filePath, "utf8");
-    expect(generated).toContain('"addedValue": m.add.bigint({ default: null }),');
+    expect(generated).toContain('"addedValue": m.add.string({ default: null }),');
     expect(generated).toContain('"removedValue": m.drop.bigint({ backwardsDefault: null }),');
     expect(generated).toContain('"value": s.bigint().merge("counter"),');
     await typecheckGeneratedMigration(filePath);
@@ -415,7 +525,7 @@ describe("cli migrations", () => {
         toHash: toHash.slice(0, 12),
       }),
     ).rejects.toThrow(
-      'Changing column "todos.done" from required to optional is not supported yet. Add a column under a new name and drop the old one instead.',
+      'Changing column "todos.done" from required to optional is not supported yet. A migration can add, drop or rename a column but not convert its values',
     );
     expect(
       (await readdir(migrationsDir).catch(() => [])).filter((name) => name.endsWith(".ts")),
@@ -468,7 +578,7 @@ describe("cli migrations", () => {
           toHash: toHash.slice(0, 12),
         }),
       ).rejects.toThrow(
-        `Changing ${change} column "todos.state" is not supported yet. Add a column under a new name and drop the old one instead.`,
+        `Changing ${change} column "todos.state" is not supported yet. A migration can add, drop or rename a column but not convert its values`,
       );
       expect(
         (await readdir(migrationsDir).catch(() => [])).filter((name) => name.endsWith(".ts")),

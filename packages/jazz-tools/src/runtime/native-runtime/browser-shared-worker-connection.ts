@@ -17,6 +17,7 @@ import {
   type BrowserFollowerPortRequest,
   type BrowserInspectorControlEvent,
   type BrowserWorkerInitOptions,
+  BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN,
 } from "./browser-worker-protocol.js";
 import type {
   BrowserForegroundNodeLease,
@@ -464,12 +465,15 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   private worker: SharedWorker | null = null;
   private readonly readyPromise: Promise<void>;
   private initialConfigurationAdmissionRejected = false;
+  private heldByAnotherSignIn = false;
   private readyError: Error | null = null;
   private connection: MessagePortBrowserFollowerConnection | null = null;
   private closed = false;
   private readonly workerName: string;
   private connectedGeneration: number | null = null;
   private cancelBootstrap: (() => void) | null = null;
+  /** Lets go of this connection's liveness lock (see `holdLivenessLock`). */
+  private releaseLivenessLock: (() => void) | null = null;
 
   constructor(
     runtime: NativeRuntimeAdapter,
@@ -510,8 +514,55 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
       () => undefined,
       (error: unknown) => {
         this.readyError = toError(error);
+        this.releaseLivenessLock?.();
         callbacks.onFailure(this.readyError);
       },
+    );
+  }
+
+  /**
+   * Hold a Web Lock for as long as this page lives, and name it to the
+   * worker: the browser releases it when the page goes away without a word
+   * (closed, crashed, discarded), and the worker then detaches this tab, so
+   * a tab waiting for this store under another sign-in gets in.
+   *
+   * Connecting doesn't wait for the grant, and the tab names the lock to the
+   * worker only once it holds it (`announceLivenessLock`): a worker that
+   * asked for it first would be granted it at once and drop a live tab.
+   */
+  private holdLivenessLock(): { name: string; granted: Promise<void> } | undefined {
+    const locks = globalThis.navigator?.locks;
+    if (!locks) return undefined;
+    const name = `jazz-tab-alive:${crypto.randomUUID()}`;
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    this.releaseLivenessLock = release;
+    const granted = new Promise<void>((resolve, reject) => {
+      locks
+        .request(name, () => {
+          resolve();
+          return released;
+        })
+        .catch(reject);
+    });
+    granted.catch(() => undefined);
+    return { name, granted };
+  }
+
+  /** Name the held liveness lock to the worker that admitted this tab on `port`. */
+  private announceLivenessLock(
+    lock: { name: string; granted: Promise<void> },
+    port: MessagePort,
+  ): void {
+    void lock.granted.then(
+      () => {
+        if (this.closed || this.worker?.port !== port) return;
+        port.postMessage({
+          type: "liveness-lock",
+          name: lock.name,
+        } satisfies BrowserFollowerPortRequest);
+      },
+      () => undefined,
     );
   }
 
@@ -522,6 +573,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     workerName: string,
     createWorker: (name: string) => SharedWorker,
   ): Promise<void> {
+    const livenessLock = this.holdLivenessLock();
     let generation = readWorkerGeneration(workerName);
     for (let attempt = 0; attempt < MAX_SHARED_WORKER_GENERATION_ATTEMPTS; attempt += 1) {
       if (this.closed) return;
@@ -537,6 +589,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
       if (this.closed) return;
       if (outcome.connected) {
         this.connectedGeneration = generation;
+        if (livenessLock && this.worker) this.announceLivenessLock(livenessLock, this.worker.port);
         return;
       }
       generation = advanceWorkerGeneration(workerName, generation);
@@ -664,8 +717,10 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
           port.close();
           if (this.worker === worker) this.worker = null;
           const error = deserializeBrowserRelayError(event.data.error);
+          this.heldByAnotherSignIn = error.message === BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN;
           this.initialConfigurationAdmissionRejected =
-            error.message === "incompatible persistent browser configuration";
+            error.message === "incompatible persistent browser configuration" ||
+            this.heldByAnotherSignIn;
           settle({ connected: false, error });
           return;
         }
@@ -786,14 +841,22 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     return this.initialConfigurationAdmissionRejected;
   }
 
+  waitsForAnotherSignIn(): boolean {
+    return this.heldByAnotherSignIn;
+  }
+
   async shutdown(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
     this.cancelBootstrap?.();
-    await this.connection?.shutdown(true);
-    this.connection = null;
-    this.worker?.port.close();
-    this.worker = null;
+    try {
+      await this.connection?.shutdown(true);
+    } finally {
+      this.connection = null;
+      this.worker?.port.close();
+      this.worker = null;
+      this.releaseLivenessLock?.();
+    }
   }
 
   async waitForPendingWrites(): Promise<void> {

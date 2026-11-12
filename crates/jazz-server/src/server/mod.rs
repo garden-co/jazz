@@ -1,10 +1,7 @@
-#[cfg(test)]
-use std::sync::Mutex as StdMutex;
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::thread;
 
 use crate::middleware::AuthConfig;
-use crate::middleware::auth::JwtVerifier;
 use jazz::tools::AppId;
 
 mod account_store;
@@ -14,24 +11,29 @@ mod catalogue;
 mod catalogue_storage;
 #[cfg(test)]
 mod data_dir_corpus;
+#[cfg(feature = "embedded-server")]
+mod embedded;
 pub use crate::runtime::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
+pub mod alpha59_alpha60;
 pub(crate) mod deployment;
 mod permissions_validation;
 pub mod routes;
+#[cfg(any(test, feature = "embedded-server"))]
 pub(crate) mod runtime_catalogue;
 mod shutdown;
 #[cfg(feature = "embedded-server")]
 mod testing;
 
-pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
-pub(crate) use catalogue::{ActiveSchemaSummary, ServerCatalogue, StoredCatalogue};
+pub use builder::{BlobStore, BuiltServer, ServerBuilder, StorageBackend};
+pub(crate) use catalogue::{ServerCatalogue, StoredCatalogue};
 pub(crate) use catalogue_storage::CatalogueStorage;
+#[cfg(feature = "embedded-server")]
+pub use embedded::{
+    EmbeddedOutgoing, EmbeddedServer, EmbeddedSocketPeer, EmbeddedSocketSender, OpenSocketRefused,
+};
 pub use shutdown::{ShutdownController, ShutdownPhase, WebSocketEntryRefused};
 #[cfg(feature = "embedded-server")]
-pub use testing::{
-    JazzServer, JazzServerBuilder, ServerDataDir, TEST_JWT_AUDIENCE, TEST_JWT_ISSUER,
-    TestJwtIssuer, TestJwtOptions,
-};
+pub use testing::{JazzServer, JazzServerBuilder, ServerDataDir, TEST_JWT_ISSUER};
 
 /// Publish catalogue inputs directly into an in-process test server.
 #[cfg(feature = "embedded-server")]
@@ -89,7 +91,10 @@ pub struct ServerState {
     pub app_id: AppId,
     /// Authentication configuration.
     pub auth_config: AuthConfig,
-    pub jwt_verifier: Option<Arc<JwtVerifier>>,
+    /// How backend credentials are checked (see `middleware::workload`): a
+    /// trusted workload's token, or the admin secret.
+    pub(crate) backend_credential: Option<Arc<crate::middleware::workload::BackendCredential>>,
+    pub(crate) workload_secrets: Option<crate::middleware::workload::InternalSecrets>,
     /// Sendable handle to the local-owner server shell for the websocket route.
     pub(crate) core_server_shell: StdRwLock<Option<ServerRuntimeHandle>>,
     /// Per-state admission owner for policy-scoped WebSocket connections.
@@ -103,16 +108,9 @@ pub struct ServerState {
     /// The app's store: the one file (and thread) the catalogue, the account
     /// registry and, once started, the runtime share.
     pub(crate) store: Option<crate::runtime::AppStore>,
-    /// Serializes durable-catalogue reconciliation into the local runtime shell.
-    ///
-    /// Catalogue storage can advance while a previous bridge is in flight, but
-    /// bridge installs must reach the shell in the same order so an older head
-    /// cannot overwrite a newer one.
+    /// Serializes catalogue changes (deployments and in-process bridges)
+    /// into the local runtime shell, so they reach it in commit order.
     pub(crate) runtime_catalogue_publication: tokio::sync::Mutex<()>,
-    #[cfg(test)]
-    runtime_catalogue_before_publication_hook: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
-    #[cfg(test)]
-    runtime_catalogue_after_permissions_read_hook: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Tests: the shutdown finalizer panics.
     #[cfg(test)]
     panic_during_shutdown_for_test: std::sync::atomic::AtomicBool,
@@ -120,52 +118,6 @@ pub struct ServerState {
 }
 
 impl ServerState {
-    #[cfg(test)]
-    pub(crate) fn set_runtime_catalogue_before_publication_hook_for_test(
-        &self,
-        hook: Box<dyn FnOnce() + Send>,
-    ) {
-        *self
-            .runtime_catalogue_before_publication_hook
-            .lock()
-            .expect("runtime catalogue test hook lock") = Some(hook);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_runtime_catalogue_before_publication_hook_for_test(&self) {
-        let hook = self
-            .runtime_catalogue_before_publication_hook
-            .lock()
-            .expect("runtime catalogue test hook lock")
-            .take();
-        if let Some(hook) = hook {
-            hook();
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_runtime_catalogue_after_permissions_read_hook_for_test(
-        &self,
-        hook: Box<dyn FnOnce() + Send>,
-    ) {
-        *self
-            .runtime_catalogue_after_permissions_read_hook
-            .lock()
-            .expect("runtime catalogue test hook lock") = Some(hook);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_runtime_catalogue_after_permissions_read_hook_for_test(&self) {
-        let hook = self
-            .runtime_catalogue_after_permissions_read_hook
-            .lock()
-            .expect("runtime catalogue test hook lock")
-            .take();
-        if let Some(hook) = hook {
-            hook();
-        }
-    }
-
     /// Test-only observation of whether Core has installed a runtime shell.
     #[cfg(feature = "test")]
     #[doc(hidden)]
@@ -216,7 +168,7 @@ impl ServerState {
         if let Some(existing) = core_server_shell.clone() {
             return Ok(existing);
         }
-        let started = store.start_runtime(schema, crate::runtime::NodeRole::Core, false, true)?;
+        let started = store.start_runtime(schema, crate::runtime::NodeRole::Core, false)?;
         *core_server_shell = Some(started.clone());
         Ok(started)
     }

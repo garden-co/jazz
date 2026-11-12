@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import {
   Avatar,
   Button,
@@ -25,11 +25,12 @@ const BAND_ROLES: WorkspaceRole[] = ["owner", "member", "viewer"];
 
 /** Owners rename the band, change roles and invite people to the whole band. */
 export function WorkspaceDialog({ onClose }: { onClose: () => void }) {
-  const db = useDb();
   const { workspace, members, me } = useWorkspace();
   const [name, setName] = useState(workspace.name);
   const [inviteRole, setInviteRole] = useState<"member" | "viewer">("member");
-  const { data: invites } = useAll(app.invites.where({ workspaceId: workspace.id, pageId: null }));
+  const { data: invites, db } = useAll(
+    app.invites.where({ workspaceId: workspace.id, pageId: null }),
+  );
 
   return (
     <Dialog isOpen onOpenChange={(open) => !open && onClose()} padding={4} width={560}>

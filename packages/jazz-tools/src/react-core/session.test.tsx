@@ -1,16 +1,13 @@
 import React, { StrictMode, useEffect, useSyncExternalStore } from "react";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { renderToString } from "react-dom/server";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
-import {
-  JazzSessionProvider,
-  ConfiguredJazzSessionProvider,
-  useJazzSession,
-  useJazzSessionOwner,
-  type UseJazzSessionResult,
-} from "./session.js";
+import { JazzSessionProvider, useJazzSession, type UseJazzSessionResult } from "./session.js";
+import { ownJazzSession, startJazzSession, type JazzSession } from "../session/jazz-session.js";
+import type { SessionCore } from "../session/state.js";
+import type { CoreJazzClient } from "./provider.js";
 import { useJazzClient } from "./provider.js";
 import { makeFakeAccount, makeFakeClient } from "./test-utils.js";
 
@@ -20,10 +17,8 @@ async function setup() {
   const enrollment = {
     createLocalFirst: () => makeFakeAccount(),
     restoreLocalFirst: () => makeFakeAccount(),
-    registerJWT: vi.fn(async () => makeFakeAccount()),
-    loginJWT: vi.fn(async () => makeFakeAccount()),
-    loginOrRegisterJWT: vi.fn(async () => makeFakeAccount()),
-    linkJWT: vi.fn(async () => makeFakeAccount()),
+    loginWithBackend: vi.fn(async () => makeFakeAccount()),
+    linkWithBackend: vi.fn(async () => makeFakeAccount()),
     logout: vi.fn(),
   };
   const accounts = new AccountManager(enrollment, account);
@@ -34,8 +29,38 @@ async function setup() {
     clients.push(client);
     return client;
   });
-  const session = await createJazzSessionOwner({ accounts, openClient });
-  return { session, clients, enrollment, openClient };
+  const core = await createJazzSessionOwner({ accounts, openClient });
+  const session = ownJazzSession({}, async () => core, { start: false });
+  await startJazzSession(session as JazzSession<unknown>);
+  return { core, session, clients, enrollment, openClient };
+}
+/** The provider with one view for every status but ready, as the old `fallback`. */
+function Provider({
+  fallback,
+  children,
+  ...source
+}: { fallback?: React.ReactNode; children: React.ReactNode } & (
+  | { session: JazzSession<CoreJazzClient>; config?: never; openCore?: never }
+  | {
+      config: object;
+      openCore: (config: object) => Promise<SessionCore<CoreJazzClient>>;
+      session?: never;
+    }
+)) {
+  const noCore = async (): Promise<never> => {
+    throw new Error("unused");
+  };
+  return (
+    <JazzSessionProvider
+      {...(source.session ? { session: source.session } : { config: source.config! })}
+      openCore={source.openCore ?? noCore}
+      loading={fallback}
+      signedOut={fallback}
+      error={fallback}
+    >
+      {children}
+    </JazzSessionProvider>
+  );
 }
 let latest: UseJazzSessionResult;
 function Status() {
@@ -76,24 +101,24 @@ describe("JazzSessionProvider", () => {
     });
     const view = render(
       <StrictMode>
-        <JazzSessionProvider session={session} fallback={<Status />}>
+        <Provider session={session} fallback={<Status />}>
           <QueryConsumer />
-        </JazzSessionProvider>
+        </Provider>
       </StrictMode>,
     );
     expect(subscribed).toBe(1);
     let operation!: Promise<void>;
     act(() => {
-      operation = latest.logout();
+      operation = latest.signOut();
     });
     await act(async () => {
       await operation;
     });
     expect(view.container.textContent).toBe("signed-out:");
     expect(enrollment.logout).toHaveBeenCalledOnce();
-    const { createLocalFirst } = latest;
+    const { createDeviceAccount } = latest;
     act(() => {
-      operation = createLocalFirst();
+      operation = createDeviceAccount();
     });
     await act(async () => {
       await operation;
@@ -107,19 +132,19 @@ describe("JazzSessionProvider", () => {
   it("releases an unmounted consumer's pending barrier without closing an external session", async () => {
     const { session, clients } = await setup();
     const view = render(
-      <JazzSessionProvider session={session}>
+      <Provider session={session}>
         <Status />
-      </JazzSessionProvider>,
+      </Provider>,
     );
     let operation!: Promise<void>;
     act(() => {
-      operation = session.logout();
+      operation = session.signOut();
       view.unmount();
     });
     await operation;
     expect(session.getSnapshot().status).toBe("signed-out");
     expect(clients[0]!.shutdown).toHaveBeenCalledOnce();
-    await session.createLocalFirst();
+    await session.createDeviceAccount();
     expect(session.getSnapshot().status).toBe("ready");
     await session.close();
   });
@@ -128,9 +153,9 @@ describe("JazzSessionProvider", () => {
     const { session, clients } = await setup();
     const view = render(
       <StrictMode>
-        <JazzSessionProvider session={session}>
+        <Provider session={session}>
           <Status />
-        </JazzSessionProvider>
+        </Provider>
       </StrictMode>,
     );
     view.unmount();
@@ -142,22 +167,22 @@ describe("JazzSessionProvider", () => {
 
   it("shows a recoverable transition error and permits a later operation", async () => {
     const { session, enrollment } = await setup();
-    enrollment.linkJWT.mockRejectedValueOnce(new Error("link rejected"));
+    enrollment.linkWithBackend.mockRejectedValueOnce(new Error("link rejected"));
     const view = render(
-      <JazzSessionProvider session={session} fallback={<Status />}>
+      <Provider session={session} fallback={<Status />}>
         <Status />
-      </JazzSessionProvider>,
+      </Provider>,
     );
     let operation!: Promise<void>;
     act(() => {
-      operation = latest.linkJWT("token");
+      operation = latest.linkDeviceAccount();
     });
     await act(async () => {
       await expect(operation).rejects.toThrow("link rejected");
     });
     expect(view.container.textContent).toBe("ready:link rejected");
     act(() => {
-      operation = latest.logout();
+      operation = latest.signOut();
     });
     await act(async () => {
       await operation;
@@ -168,83 +193,82 @@ describe("JazzSessionProvider", () => {
   });
 
   it("owns one factory result in StrictMode and closes it on real unmount", async () => {
-    const { session, clients } = await setup();
-    const factory = vi.fn(async () => session);
+    const { core, clients } = await setup();
+    const factory = vi.fn(async () => core);
     const view = render(
       <StrictMode>
-        <ConfiguredJazzSessionProvider
-          config={{}}
-          createJazzSession={factory}
-          fallback={<Status />}
-        >
+        <Provider config={{}} openCore={factory} fallback={<Status />}>
           <Status />
-        </ConfiguredJazzSessionProvider>
+        </Provider>
       </StrictMode>,
     );
     await waitFor(() => expect(view.container.textContent).toBe("ready:"));
     expect(factory).toHaveBeenCalledOnce();
     expect(clients[0]!.shutdown).not.toHaveBeenCalled();
     view.unmount();
-    await waitFor(() => expect(session.getSnapshot().status).toBe("closed"));
+    await waitFor(() => expect(core.getSnapshot().status).toBe("closed"));
     expect(clients[0]!.shutdown).toHaveBeenCalledOnce();
   });
 
   it("exposes initialization errors and retries from the fallback", async () => {
-    const { session } = await setup();
+    // A fallback may render nothing, so the failure is also logged.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    onTestFinished(() => consoleError.mockRestore());
+    const { core } = await setup();
     const factory = vi
       .fn()
       .mockRejectedValueOnce(new Error("startup failed"))
-      .mockResolvedValueOnce(session);
+      .mockResolvedValueOnce(core);
     const view = render(
-      <ConfiguredJazzSessionProvider config={{}} createJazzSession={factory} fallback={<Status />}>
+      <Provider config={{}} openCore={factory} fallback={<Status />}>
         <Status />
-      </ConfiguredJazzSessionProvider>,
+      </Provider>,
     );
     await waitFor(() => expect(view.container.textContent).toBe("error:startup failed"));
+    expect(consoleError).toHaveBeenCalledWith(
+      "Jazz could not start:",
+      expect.objectContaining({ message: "startup failed" }),
+    );
     await act(async () => {
       await latest.retry();
     });
     expect(factory).toHaveBeenCalledTimes(2);
     expect(view.container.textContent).toBe("ready:");
     view.unmount();
-    await waitFor(() => expect(session.getSnapshot().status).toBe("closed"));
+    await waitFor(() => expect(core.getSnapshot().status).toBe("closed"));
   });
 
   it("disposes a factory result that arrives after unmount", async () => {
-    const { session, clients } = await setup();
-    let resolve!: (value: typeof session) => void;
+    const { core, clients } = await setup();
+    let resolve!: (value: typeof core) => void;
     const factory = () =>
-      new Promise<typeof session>((yes) => {
+      new Promise<typeof core>((yes) => {
         resolve = yes;
       });
     const view = render(
-      <ConfiguredJazzSessionProvider config={{}} createJazzSession={factory}>
+      <Provider config={{}} openCore={factory}>
         <Status />
-      </ConfiguredJazzSessionProvider>,
+      </Provider>,
     );
     await act(async () => {
       await Promise.resolve();
     });
     view.unmount();
     await new Promise((yes) => setTimeout(yes, 5));
-    resolve(session);
+    resolve(core);
     await waitFor(() => expect(clients[0]!.shutdown).toHaveBeenCalledOnce());
-    expect(session.getSnapshot().status).toBe("closed");
+    expect(core.getSnapshot().status).toBe("closed");
   });
 
   it("does not initialize during SSR and makes the fallback hook available", () => {
     const factory = vi.fn();
     expect(
       renderToString(
-        <ConfiguredJazzSessionProvider
-          config={{}}
-          createJazzSession={factory}
-          fallback={<Status />}
-        >
+        <Provider config={{}} openCore={factory} fallback={<Status />}>
           <Status />
-        </ConfiguredJazzSessionProvider>,
+        </Provider>,
       ),
-    ).toContain("transitioning");
+    ).toContain("starting");
     expect(factory).not.toHaveBeenCalled();
   });
 });
@@ -259,9 +283,9 @@ it("Suspense hide and reveal does not leak a detach lease", async () => {
   }
   const tree = (suspended: boolean) => (
     <React.Suspense fallback={<p>Suspended</p>}>
-      <JazzSessionProvider session={session} fallback={<Status />}>
+      <Provider session={session} fallback={<Status />}>
         <Child suspended={suspended} />
-      </JazzSessionProvider>
+      </Provider>
     </React.Suspense>
   );
   const view = render(tree(false));
@@ -271,7 +295,7 @@ it("Suspense hide and reveal does not leak a detach lease", async () => {
   expect(view.container.textContent).toBe("ready:");
   let operation!: Promise<void>;
   act(() => {
-    operation = session.logout();
+    operation = session.signOut();
   });
   await act(async () => {
     for (let i = 0; i < 20; i++) await Promise.resolve();
@@ -286,14 +310,14 @@ it("replaces external sessions and releases both views on unmount", async () => 
   const first = await setup();
   const second = await setup();
   const view = render(
-    <JazzSessionProvider session={first.session}>
+    <Provider session={first.session}>
       <Status />
-    </JazzSessionProvider>,
+    </Provider>,
   );
   view.rerender(
-    <JazzSessionProvider session={second.session}>
+    <Provider session={second.session}>
       <Status />
-    </JazzSessionProvider>,
+    </Provider>,
   );
   await first.session.close();
   expect(first.clients[0]!.shutdown).toHaveBeenCalledOnce();
@@ -301,39 +325,4 @@ it("replaces external sessions and releases both views on unmount", async () => 
   view.unmount();
   await second.session.close();
   expect(second.clients[0]!.shutdown).toHaveBeenCalledOnce();
-});
-
-it("the owner hook keeps auth coordination mounted across ready and fallback views", async () => {
-  const { session } = await setup();
-  const factory = vi.fn(async () => session);
-  const mounted = vi.fn();
-  const unmounted = vi.fn();
-  function Coordinator() {
-    const owner = useJazzSessionOwner({}, factory);
-    useEffect(() => {
-      mounted();
-      return unmounted;
-    }, []);
-    return owner.session ? (
-      <JazzSessionProvider session={owner.session} fallback={<Status />}>
-        <Status />
-      </JazzSessionProvider>
-    ) : null;
-  }
-  const view = render(<Coordinator />);
-  await waitFor(() => expect(view.container.textContent).toBe("ready:"));
-  let operation!: Promise<void>;
-  act(() => {
-    operation = session.logout();
-  });
-  await act(async () => {
-    await operation;
-  });
-  expect(view.container.textContent).toBe("signed-out:");
-  expect(mounted).toHaveBeenCalledOnce();
-  expect(unmounted).not.toHaveBeenCalled();
-  expect(factory).toHaveBeenCalledOnce();
-  view.unmount();
-  await waitFor(() => expect(session.getSnapshot().status).toBe("closed"));
-  expect(unmounted).toHaveBeenCalledOnce();
 });

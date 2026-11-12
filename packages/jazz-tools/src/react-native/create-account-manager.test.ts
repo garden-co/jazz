@@ -1,6 +1,8 @@
 import { NATIVE_RELAY_ABI_V1 } from "jazz-rn/native-relay-abi";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createAccountManager, createDb } from "./index.js";
+import { createAccountManager } from "./create-account-manager.js";
+import { createDb } from "./create-db.js";
+import { schema as s } from "./index.js";
 import { accountToken } from "../accounts/enrollment.js";
 import { accountRegistryUrl } from "../accounts/context.js";
 
@@ -135,7 +137,41 @@ describe("React Native account preparation", () => {
     expect(manager.getLoggedIn()).toBe(account);
   });
 
-  it("neither retains an external assignment nor revalidates it in place", async () => {
+  it("attaches the app's shipped migrations with its schema", async () => {
+    vi.stubGlobal("crypto", undefined);
+    const jwt = `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: "00000000-0000-4000-8000-000000000001" }))}.signature`;
+    const attached = new Error("schema attached");
+    const native = {
+      abiVersion: NATIVE_RELAY_ABI_V1,
+      accountSecret: vi.fn(() => new Uint8Array(32).fill(7)),
+      mintLocalFirstToken: vi.fn(() => jwt),
+      beginAccountSession: vi.fn((_request: string) => new Uint8Array(32).fill(9)),
+      attachAccountSchema: vi.fn((_pending: Uint8Array, _schema: string) => {
+        throw attached;
+      }),
+      releaseAccountSession: vi.fn(),
+      refreshAccountSession: vi.fn(),
+      openAttached: vi.fn(),
+    };
+    mocks.install.mockReturnValue(native);
+    const migrations = {
+      schemas: [{ hash: "root", schema: { tables: {} } }],
+      migrations: [{ fromHash: "root", toHash: "head", forward: [] }],
+    };
+    const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations });
+    const config = { appId: "native-history", serverUrl: "https://core.example", store: store() };
+    const manager = await createAccountManager(config);
+    const db = await createDb({ appId: config.appId, account: manager.createLocalFirst() });
+
+    await expect(db.all(app.notes)).rejects.toBe(attached);
+
+    const payload = JSON.parse(native.attachAccountSchema.mock.calls[0]![1]);
+    expect(Object.keys(payload.tables)).toEqual(["notes"]);
+    expect(payload.migrations).toEqual(migrations);
+    await db.shutdown();
+  });
+
+  it("remembers the backend-signed-in user without a credential, never as an assignment", async () => {
     const identity = { issuer: "https://issuer.example", subject: "alice" };
     const account = "00000000-0000-4000-8000-00000000000a";
     vi.stubGlobal(
@@ -155,13 +191,19 @@ describe("React Native account preparation", () => {
       store: accountStore,
     };
     const manager = await createAccountManager(config);
-    expect(manager.revalidatesInPlace).toBe(false);
-    const exp = Math.floor(Date.now() / 1000) + 3600;
-    await manager.loginJWT(
-      `e30.${btoa(JSON.stringify({ iss: identity.issuer, sub: identity.subject, exp }))}.sig`,
-    );
+    await manager.loginWithBackend();
     await vi.waitFor(async () => expect(await accountStore.read()).not.toBeNull());
-    expect(JSON.parse((await accountStore.read())!).assignment).toBeNull();
-    expect((await createAccountManager(config)).getLoggedIn()).toBeUndefined();
+    const stored = JSON.parse((await accountStore.read())!);
+    expect(stored.assignment).toBeUndefined();
+    // Remembered so a reload reopens the user; the backend's first answer re-verifies it.
+    expect(stored.backendUser).toEqual({
+      format: "jazz-backend-user-v1",
+      account,
+      identity,
+      claims: {},
+    });
+    const reopened = (await createAccountManager(config)).getLoggedIn();
+    expect(reopened?.id).toBe(account);
+    expect(reopened?.identity).toEqual(identity);
   });
 });

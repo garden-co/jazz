@@ -1,10 +1,13 @@
-import type { JazzSessionConfig } from "jazz-tools/client";
+import type { JazzClientConfig } from "jazz-tools/client";
 
-export function sessionConfig(overrides: Partial<JazzSessionConfig> = {}): JazzSessionConfig {
-  const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
-  const appId = overrides.appId ?? env?.VITE_JAZZ_APP_ID ?? env?.JAZZ_APP_ID;
-  const serverUrl = overrides.serverUrl ?? env?.VITE_JAZZ_SERVER_URL ?? env?.JAZZ_SERVER_URL;
-  if (!appId) throw new Error("Missing Jazz appId");
-  if (!serverUrl) throw new Error("Missing Jazz core serverUrl for account preparation");
-  return { env: "dev", ...overrides, appId, serverUrl, initial: "local-first" };
+/** The app's backend serves Jazz on this origin (`/jazz`), so the client needs no URL. */
+/**
+ * Tests point the app at a sync server by its app id; a browser client takes
+ * that as its `scope` (it names no app of its own).
+ */
+export type SessionOverrides = Omit<Partial<JazzClientConfig>, "appId"> & { appId?: string };
+
+export function sessionConfig({ appId, ...rest }: SessionOverrides = {}): JazzClientConfig {
+  const overrides = appId === undefined ? rest : { ...rest, scope: appId };
+  return { env: "dev", ...overrides, initial: "device" };
 }

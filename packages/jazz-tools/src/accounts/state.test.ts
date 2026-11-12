@@ -5,6 +5,7 @@ import {
   type AccountHandle,
   type AccountSelectionDurability,
 } from "./state.js";
+import { AccountAuthError } from "./registry-client.js";
 
 // Enrollment is deliberately a controlled boundary here: these tests exercise
 // UI scheduling, not credential verification or registry acceptance.
@@ -29,10 +30,8 @@ function setup(durability?: AccountSelectionDurability) {
   const manager = new AccountManager(
     {
       createLocalFirst: () => local,
-      registerJWT: () => pending.promise,
-      loginJWT: () => pending.promise,
-      loginOrRegisterJWT: () => pending.promise,
-      linkJWT: () => pending.promise,
+      loginWithBackend: () => pending.promise,
+      linkWithBackend: () => pending.promise,
     },
     undefined,
     durability,
@@ -52,11 +51,7 @@ describe("account selection", () => {
     const manager = new AccountManager(
       {
         createLocalFirst: () => local,
-        registerJWT: () => enrollment.promise,
-        loginJWT: () => enrollment.promise,
-        loginOrRegisterJWT: () => enrollment.promise,
-        linkJWT: () => enrollment.promise,
-        revalidateJWT: async (account) => account,
+        loginWithBackend: () => enrollment.promise,
       },
       initial,
       { selectionChanged, settle },
@@ -76,8 +71,7 @@ describe("account selection", () => {
     manager.createLocalFirst();
     manager.createLocalFirst(); // Publishing the same handle is not a transition.
     manager.reportPersistenceError(new Error("storage full"));
-    await manager.loginJWT("same identity"); // Revalidation retains the handle.
-    const pending = manager.registerJWT("new identity");
+    const pending = manager.loginWithBackend();
     expect(selectionChanged.mock.calls).toEqual([[local]]);
     enrollment.resolve(external);
     await pending;
@@ -117,7 +111,7 @@ describe("account selection", () => {
     expect(selectionChanged).toHaveBeenCalledOnce();
     expect(settle).not.toHaveBeenCalled();
 
-    const login = manager.loginJWT("token");
+    const login = manager.loginWithBackend();
     expect(manager.getSnapshot()).toMatchObject({ account: local, error: failure });
     const external = handle("external");
     pending.resolve(external);
@@ -198,7 +192,7 @@ describe("account selection", () => {
   it("does not restore a login after logout even if enrollment committed remotely", async () => {
     const { manager, pending } = setup();
     manager.createLocalFirst();
-    const operation = manager.loginJWT("token");
+    const operation = manager.loginWithBackend();
     manager.logout();
     pending.resolve(handle("external"));
     await expect(operation).rejects.toBeInstanceOf(AccountOperationSuperseded);
@@ -209,9 +203,9 @@ describe("account selection", () => {
   it("preserves a working selection while linking and after a failed link", async () => {
     const { manager, pending, local } = setup();
     manager.createLocalFirst();
-    const operation = manager.linkJWT("token");
+    const operation = manager.linkWithBackend();
     expect(manager.getLoggedIn()).toBe(local);
-    expect(manager.getSnapshot().pending).toBe("linkJWT");
+    expect(manager.getSnapshot().pending).toBe("linkWithBackend");
     const error = new Error("already assigned");
     pending.reject(error);
     await expect(operation).rejects.toBe(error);
@@ -221,7 +215,7 @@ describe("account selection", () => {
 
   it("does not replace a newer offline selection with an older async response", async () => {
     const { manager, pending, local } = setup();
-    const operation = manager.registerJWT("token");
+    const operation = manager.loginWithBackend();
     manager.createLocalFirst();
     pending.resolve(handle("external"));
     await expect(operation).rejects.toBeInstanceOf(AccountOperationSuperseded);
@@ -234,19 +228,26 @@ it("does not start remote linking when a pending-state subscriber logs out", asy
   const local = handle("local");
   const manager = new AccountManager({
     createLocalFirst: () => local,
-    registerJWT: async () => local,
-    loginJWT: async () => local,
-    loginOrRegisterJWT: async () => local,
-    linkJWT: async () => {
+    linkWithBackend: async () => {
       calls++;
       return local;
     },
   });
   manager.createLocalFirst();
   manager.subscribe(() => {
-    if (manager.getSnapshot().pending === "linkJWT") manager.logout();
+    if (manager.getSnapshot().pending === "linkWithBackend") manager.logout();
   });
-  await expect(manager.linkJWT("token")).rejects.toBeInstanceOf(AccountOperationSuperseded);
+  await expect(manager.linkWithBackend()).rejects.toBeInstanceOf(AccountOperationSuperseded);
   expect(calls).toBe(0);
   expect(manager.getLoggedIn()).toBeUndefined();
+});
+
+it("says how to sign in when linkWithBackend has no guest to link", async () => {
+  const { manager } = setup();
+  const error = await manager.linkWithBackend().catch((cause: unknown) => cause);
+  expect(error).toBeInstanceOf(AccountAuthError);
+  expect(error).toMatchObject({ code: "local_first_account_required" });
+  expect((error as Error).message).toMatch(/no device account to link/);
+  expect((error as Error).message).toMatch(/refresh\(\)/);
+  expect(manager.getSnapshot()).toMatchObject({ pending: undefined, error });
 });

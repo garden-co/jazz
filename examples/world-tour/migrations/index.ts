@@ -8,7 +8,7 @@ import type { ClientMigrations } from "jazz-tools";
 export const migrations: ClientMigrations = {
   "schemas": [
     {
-      "hash": "b900355d7b8c2c3c22e3f3cc51dd0557a41648b3a690eafae05d5a9f5f51584d",
+      "hash": "fe7f83ec735520f17a141fce778da257d48bf1a8563906de7169c3cff39ab174",
       "schema": {
         "tables": {
           "bands": {
@@ -227,7 +227,8 @@ export const migrations: ClientMigrations = {
                 "column_type": {
                   "type": "Text"
                 },
-                "nullable": false
+                "nullable": false,
+                "merge_strategy": "Markdown"
               }
             ],
             "relations": {
@@ -271,7 +272,8 @@ export const migrations: ClientMigrations = {
                 "column_type": {
                   "type": "Text"
                 },
-                "nullable": false
+                "nullable": false,
+                "merge_strategy": "Markdown"
               }
             ],
             "relations": {

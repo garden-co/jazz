@@ -8,7 +8,7 @@ import type { ClientMigrations } from "jazz-tools";
 export const migrations: ClientMigrations = {
   "schemas": [
     {
-      "hash": "8287e5d6fc9fa9f3e073fc55b1205a599768489a0a7c5e32d3896097c567baff",
+      "hash": "eee271fbb284b62bb48730800515e17806d793d113c3d408e646fe68db0a8c8e",
       "schema": {
         "tables": {
           "crew": {
@@ -228,7 +228,8 @@ export const migrations: ClientMigrations = {
                 "column_type": {
                   "type": "Text"
                 },
-                "nullable": true
+                "nullable": true,
+                "merge_strategy": "Text"
               },
               {
                 "name": "rank",

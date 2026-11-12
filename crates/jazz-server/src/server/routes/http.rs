@@ -16,10 +16,7 @@ use crate::server::{ServerState, ShutdownPhase};
 use jazz::tools::public_schema::{Schema, TablePolicies};
 use jazz::tools::transport_error::ErrorResponse;
 
-use super::utils::{
-    parse_app_id_param, parse_schema_hash_param, permissions_head_view, permissions_map_view,
-    unix_timestamp_millis,
-};
+use super::utils::{parse_app_id_param, parse_schema_hash_param, unix_timestamp_millis};
 
 /// Admin secret presented in the `X-Jazz-Admin-Secret` request header, if any.
 pub(super) fn admin_secret_header(headers: &HeaderMap) -> Option<&str> {
@@ -95,18 +92,17 @@ pub(super) struct AdminSubscriptionIntrospectionResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct PermissionsHeadView {
-    pub(super) schema_hash: String,
-    pub(super) version: u64,
-    pub(super) parent_bundle_object_id: Option<String>,
-    pub(super) bundle_object_id: String,
+pub(super) struct PublishedBundleView {
+    bundle: String,
+    schema_hash: String,
+    published_at: u64,
+    permissions: std::collections::HashMap<String, TablePolicies>,
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct StoredPermissionsResponse {
-    head: Option<PermissionsHeadView>,
-    permissions: Option<std::collections::HashMap<String, TablePolicies>>,
+pub(super) struct PublishedBundlesResponse {
+    /// Oldest first; the last is what a backend booting now pins to.
+    bundles: Vec<PublishedBundleView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -194,25 +190,29 @@ pub(super) async fn migration_graph_handler(
     Ok(Json(graph))
 }
 
-pub(super) async fn permissions_handler(
+/// Every bundle the core has published, with its permissions: what an
+/// admin reads to see what a session pinned to a bundle may do.
+pub(super) async fn published_bundles_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-) -> Result<Json<StoredPermissionsResponse>, Response> {
+) -> Result<Json<PublishedBundlesResponse>, Response> {
     require_admin(&state, &headers)?;
-    let current = state
-        .catalogue
-        .active_schema(&state.catalogue_store)
-        .map_err(read_failed("current permissions"))?;
-    Ok(Json(match current {
-        Some(current) => StoredPermissionsResponse {
-            head: Some(permissions_head_view(current.summary)),
-            permissions: Some(permissions_map_view(current.permissions)),
-        },
-        None => StoredPermissionsResponse {
-            head: None,
-            permissions: None,
-        },
-    }))
+    let bundles = state
+        .catalogue_store
+        .published_bundles()
+        .into_iter()
+        .map(|bundle| PublishedBundleView {
+            bundle: bundle.id.to_string(),
+            schema_hash: bundle.schema.to_string(),
+            published_at: bundle.published_at,
+            permissions: bundle
+                .permissions
+                .into_iter()
+                .map(|(table, policies)| (table.to_string(), policies))
+                .collect(),
+        })
+        .collect();
+    Ok(Json(PublishedBundlesResponse { bundles }))
 }
 
 pub(super) async fn admin_subscription_introspection_handler(
@@ -388,9 +388,11 @@ mod tests {
         assert!(reason.contains("injected runtime failure"), "{reason}");
     }
 }
-/// Commit a complete, validated deployment. Detached execution makes request
-/// cancellation independent of the durable commit/activation boundary.
-pub(super) async fn deploy_handler(
+
+/// `/bundles`: publish a complete, validated deployment as a permissions
+/// bundle that sessions are pinned to. Nothing becomes current. Detached
+/// execution makes request cancellation independent of the durable commit.
+pub(super) async fn publish_bundle_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     body: Result<

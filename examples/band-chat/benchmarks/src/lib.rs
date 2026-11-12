@@ -4,6 +4,7 @@
 //! than importing application runtime or fixture helpers.
 
 pub mod announcements;
+pub mod deep_room;
 mod fast_resume;
 pub mod live_rooms;
 pub mod membership_room;

@@ -1,0 +1,669 @@
+import { randomUUID } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { exportJWK, generateKeyPair, SignJWT, type JWTPayload } from "jose";
+import { startLocalJazzServer } from "../dev/dev-server.js";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { schema as s } from "../index.js";
+import {
+  createJazz,
+  createJazzClient,
+  isNoJazzAccountError,
+  memory,
+  remote,
+  trustWorkload,
+  type Jazz,
+} from "./index.js";
+import {
+  encodeWebSocketFrameBatch,
+  encodeWireClientHello,
+} from "../runtime/native-runtime/websocket.js";
+
+const app = s.defineApp(
+  {
+    todos: s.table({ title: s.string(), owner: s.uuid() }, {}),
+  },
+  { migrations: "none" },
+);
+const permissions = s.definePermissions(app, ({ policy, session }) => {
+  policy.todos.allowRead.where({ owner: session.user });
+  policy.todos.allowInsert.where({ owner: session.user });
+  policy.todos.allowUpdate.never();
+  policy.todos.allowDelete.never();
+});
+
+const AUDIENCE = "https://app.example.test";
+const cleanups: Array<() => Promise<unknown>> = [];
+afterEach(async () => {
+  while (cleanups.length) await cleanups.pop()!().catch(() => undefined);
+});
+
+/** A stand-in OIDC issuer on loopback: discovery, JWKS and token minting. */
+let issuer: string;
+let sign: (
+  claims: JWTPayload,
+  options?: { expiresIn?: string | number; audience?: string; issuer?: string },
+) => Promise<string>;
+/** When set, the issuer's key set answers 500 (an outage). */
+let keysDown = false;
+let otherKeySign: (claims: JWTPayload) => Promise<string>;
+let issuerServer: Server;
+beforeAll(async () => {
+  const { publicKey, privateKey } = await generateKeyPair("ES256");
+  const other = await generateKeyPair("ES256");
+  const jwk = { ...(await exportJWK(publicKey)), kid: "k1", alg: "ES256", use: "sig" };
+  issuerServer = createServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    if (req.url === "/.well-known/openid-configuration") {
+      res.end(JSON.stringify({ issuer, jwks_uri: `${issuer}/jwks` }));
+    } else if (req.url === "/jwks" && keysDown) {
+      res.statusCode = 500;
+      res.end("{}");
+    } else if (req.url === "/jwks") {
+      res.end(JSON.stringify({ keys: [jwk] }));
+    } else {
+      res.statusCode = 404;
+      res.end("{}");
+    }
+  });
+  await new Promise<void>((resolve) => issuerServer.listen(0, "127.0.0.1", resolve));
+  issuer = `http://127.0.0.1:${(issuerServer.address() as AddressInfo).port}`;
+  const mint = (
+    key: CryptoKey,
+    claims: JWTPayload,
+    expiresIn: string | number = "10m",
+    audience = AUDIENCE,
+    tokenIssuer = issuer,
+  ) =>
+    new SignJWT(claims)
+      .setProtectedHeader({ alg: "ES256", kid: "k1" })
+      .setIssuer(tokenIssuer)
+      .setAudience(audience)
+      .setIssuedAt()
+      .setExpirationTime(expiresIn)
+      .sign(key);
+  sign = (claims, options) =>
+    mint(privateKey, claims, options?.expiresIn, options?.audience, options?.issuer);
+  otherKeySign = (claims) => mint(other.privateKey, claims);
+});
+afterAll(() => new Promise((resolve) => issuerServer.close(resolve)));
+
+/** The app's own auth: the user named in a header. */
+function authenticate(request: Request) {
+  const userId = request.headers.get("x-test-user");
+  return userId ? { userId, expiresAt: Math.floor(Date.now() / 1000) + 3600 } : null;
+}
+
+async function serve(jazz: Jazz): Promise<string> {
+  const server: Server = createServer((req, res) => jazz.nodeHandler(req, res));
+  await jazz.attach(server);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  cleanups.push(
+    () =>
+      new Promise((resolve) => {
+        server.closeAllConnections();
+        server.close(resolve);
+      }),
+  );
+  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+async function appWith(backendClients: Parameters<typeof createJazz>[0]["backendClients"]) {
+  const jazz = await createJazz({
+    app,
+    permissions,
+    store: memory(),
+    authenticate,
+    backendClients,
+  }).ready();
+  cleanups.push(() => jazz.close());
+  return { appId: jazz.appId, jazz, origin: await serve(jazz) };
+}
+
+const signIn = (origin: string, appId: string, headers: Record<string, string>) =>
+  fetch(`${origin}/jazz/apps/${appId}/accounts/backend-sign-in`, { method: "POST", headers });
+
+const scoped = (claims: Record<string, string>) =>
+  trustWorkload({
+    issuer,
+    audience: AUDIENCE,
+    claims,
+    as: (token) => ({ userId: `machine:${token.sub}`, claims: { machine: true } }),
+  });
+
+describe("trustWorkload", () => {
+  it("needs claims that name the workload", () => {
+    expect(() => trustWorkload({ issuer, audience: AUDIENCE, claims: {}, as: "backend" })).toThrow(
+      /claims must name the workload/,
+    );
+    expect(() =>
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { aud: "x" }, as: "backend" }),
+    ).toThrow(/checked on its own/);
+    expect(() =>
+      trustWorkload({
+        issuer: "http://issuer.example.test",
+        audience: AUDIENCE,
+        claims: { sub: "x" },
+        as: "backend",
+      }),
+    ).toThrow(/https/);
+  });
+});
+
+describe("scoped backend clients", () => {
+  it("act as the user their claims map to, and nothing else gets in", async () => {
+    const { appId, origin } = await appWith([scoped({ sub: "worker", repository: "acme/app" })]);
+    const good = await sign({ sub: "worker", repository: "acme/app" });
+
+    const signedIn = await signIn(origin, appId, { authorization: `Bearer ${good}` });
+    expect(signedIn.status).toBe(200);
+    expect(await signedIn.json()).toMatchObject({
+      identity: { issuer: "jazz:backend", subject: "machine:worker" },
+      claims: { machine: true },
+    });
+
+    const refused = [
+      // meant for another audience
+      await sign({ sub: "worker", repository: "acme/app" }, { audience: "https://other.test" }),
+      // too close to expiry for a session (inside the minimum remaining time)
+      await sign(
+        { sub: "worker", repository: "acme/app" },
+        { expiresIn: Math.floor(Date.now() / 1000) + 30 },
+      ),
+      // another workload of the same issuer
+      await sign({ sub: "worker", repository: "acme/other" }),
+      await sign({ sub: "intruder", repository: "acme/app" }),
+      // the issuer's claims, but not its key
+      await otherKeySign({ sub: "worker", repository: "acme/app" }),
+      // expired (past the clock tolerance)
+      await sign(
+        { sub: "worker", repository: "acme/app" },
+        { expiresIn: Math.floor(Date.now() / 1000) - 120 },
+      ),
+    ];
+    for (const token of refused) {
+      expect((await signIn(origin, appId, { authorization: `Bearer ${token}` })).status).toBe(401);
+    }
+    // A refused token from a trusted issuer is never handed to `authenticate`.
+    const bad = refused[0]!;
+    expect(
+      (await signIn(origin, appId, { authorization: `Bearer ${bad}`, "x-test-user": "alice" }))
+        .status,
+    ).toBe(401);
+    // A token from an issuer no trust names is the app's own auth to judge:
+    // alone it grants nothing, and it doesn't stop the app's own user.
+    const foreign = await sign({ sub: "worker" }, { issuer: "https://elsewhere.test" });
+    expect((await signIn(origin, appId, { authorization: `Bearer ${foreign}` })).status).toBe(401);
+    expect(
+      (await signIn(origin, appId, { authorization: `Bearer ${foreign}`, "x-test-user": "alice" }))
+        .status,
+    ).toBe(200);
+    // The app's own users still sign in as before.
+    expect((await signIn(origin, appId, { "x-test-user": "alice" })).status).toBe(200);
+  });
+
+  it("sync with the user's permissions", async () => {
+    const { appId, jazz, origin } = await appWith([scoped({ sub: "worker" })]);
+    let tokens = 0;
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      // A fresh token for every request and socket.
+      credential: () => (tokens++, sign({ sub: "worker" })),
+    });
+    cleanups.push(() => session.close());
+    // It opened signed in as its user, without being asked to.
+    const { client, status, error } = session.getSnapshot();
+    if (status !== "ready") throw error ?? new Error(status);
+    const account = client!.session!.user!;
+    expect(client!.session!.identity).toEqual({
+      issuer: "jazz:backend",
+      subject: "machine:worker",
+    });
+
+    const row = await client!.db
+      .insert(app.todos, { title: "from the worker", owner: account })
+      .wait({ tier: "global" });
+    expect((await jazz.db.all(app.todos.where({ id: row.id }))).map((t) => t.title)).toEqual([
+      "from the worker",
+    ]);
+    // Its permissions are the user's: a row for someone else is refused.
+    await expect(
+      client!.db
+        .insert(app.todos, { title: "for someone else", owner: randomUUID() })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
+    // API routes see the same user.
+    const request = new Request("http://app/x", {
+      headers: { authorization: `Bearer ${await sign({ sub: "worker" })}` },
+    });
+    expect(await jazz.accountFor(request)).toBe(account);
+    // Sign-in and the socket each asked for a token.
+    expect(tokens).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("trusted backend clients", () => {
+  it("sync with backend authority", async () => {
+    const { appId, jazz, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+    ]);
+    // Without its token, the route doesn't exist.
+    expect(
+      (await fetch(`${origin}/jazz/apps/${appId}/backend/admit`, { method: "POST" })).status,
+    ).toBe(404);
+    // A token of another workload is refused.
+    expect(
+      (
+        await fetch(`${origin}/jazz/apps/${appId}/backend/admit`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${await sign({ sub: "intruder" })}` },
+        })
+      ).status,
+    ).toBe(401);
+
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      // The token alone decides: this one opens as a trusted machine.
+      credential: () => sign({ sub: "ops" }),
+    });
+    cleanups.push(() => session.close());
+    const { client, status, error } = session.getSnapshot();
+    if (status !== "ready") throw error ?? new Error(status);
+
+    // Policies don't apply: it writes rows no user's policy would allow.
+    const owner = randomUUID();
+    const row = await client!.db
+      .insert(app.todos, { title: "from ops", owner })
+      .wait({ tier: "global" });
+    const [written] = await jazz.db.all(
+      app.todos.where({ id: row.id }).select("owner", "$createdBy"),
+    );
+    expect(written?.owner).toBe(owner);
+    // Its writes are the system's, never a user's.
+    expect(written?.$createdBy).toMatchObject({
+      account: "00000000-0000-0000-0000-000000000000",
+      identity: { issuer: "urn:jazz:system" },
+    });
+    // A trusted machine has no user of its own.
+    expect(
+      (
+        await signIn(origin, appId, {
+          authorization: `Bearer ${await sign({ sub: "ops" })}`,
+        })
+      ).status,
+    ).toBe(401);
+  });
+
+  it("a credential trusted as neither fails to open, and decides alone", async () => {
+    const { appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+    ]);
+    const base = {
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" as const },
+    };
+    await expect(
+      createJazzClient({ ...base, credential: () => sign({ sub: "intruder" }) }),
+    ).rejects.toThrow(/neither as a trusted machine nor as a user/);
+    await expect(
+      createJazzClient({
+        ...base,
+        credential: () => sign({ sub: "ops" }),
+        initial: "device",
+      }),
+    ).rejects.toThrow(/leave out initial/);
+  });
+
+  it("are refused on the socket with another workload's token", async () => {
+    const { appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+    ]);
+    const socket = new WebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
+      headers: { authorization: `Bearer ${await sign({ sub: "intruder" })}` },
+    } as never);
+    socket.addEventListener("open", () =>
+      socket.send(JSON.stringify({ peer_identity: "x", backend_secret: "stand-in" })),
+    );
+    const code = await new Promise<number>((resolve) =>
+      socket.addEventListener("close", (event) => resolve(event.code)),
+    );
+    expect(code).toBe(1008);
+  });
+
+  it("may act for a user, like the main backend", async () => {
+    const { appId, jazz, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+    ]);
+    const alice = await jazz.createAccountFor("alice");
+    // A prelude stating alice's session is admitted on the machine's token.
+    const socket = new WebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
+      headers: { authorization: `Bearer ${await sign({ sub: "ops" })}` },
+    } as never);
+    socket.addEventListener("open", () => {
+      socket.send(
+        JSON.stringify({
+          peer_identity: "x",
+          backend_secret: "stand-in",
+          backend_session: {
+            issuer: "jazz:backend",
+            user_id: "alice",
+            account_id: alice,
+            claims: {},
+            authMode: "external",
+          },
+        }),
+      );
+      socket.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
+    });
+    const answered = await new Promise<string>((resolve) => {
+      socket.addEventListener("message", () => resolve("message"));
+      socket.addEventListener("close", (event) => resolve(`closed ${event.code}`));
+    });
+    socket.close();
+    expect(answered).toBe("message");
+    // Through its client: a write as alice carries her identity and is
+    // checked against her policies.
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      credential: () => sign({ sub: "ops" }),
+    });
+    cleanups.push(() => session.close());
+    const { client } = session.getSnapshot();
+    const asAlice = await client!.forUser("alice");
+    const row = await asAlice
+      .insert(app.todos, { title: "as alice", owner: alice! })
+      .wait({ tier: "global" });
+    const [written] = await jazz.db.all(
+      app.todos.where({ id: row.id }).select("title", "$createdBy"),
+    );
+    expect(written?.$createdBy).toMatchObject({ account: alice });
+    await expect(
+      asAlice
+        .insert(app.todos, { title: "not alice's", owner: randomUUID() })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
+    // Without its token, the same prelude is refused.
+    const bare = new WebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`);
+    bare.addEventListener("open", () =>
+      bare.send(
+        JSON.stringify({
+          peer_identity: "x",
+          backend_secret: "stand-in",
+          backend_session: { issuer: "jazz:backend", user_id: "alice" },
+        }),
+      ),
+    );
+    const code = await new Promise<number>((resolve) =>
+      bare.addEventListener("close", (event) => resolve(event.code)),
+    );
+    expect(code).toBe(1008);
+  });
+
+  it("acts for a user with no account only once one is created", async () => {
+    const { jazz, appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+    ]);
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      credential: () => sign({ sub: "ops" }),
+    });
+    cleanups.push(() => session.close());
+    const { client } = session.getSnapshot();
+    const refusal = await client!.forUser("bob").catch((error: unknown) => error);
+    expect(isNoJazzAccountError(refusal)).toBe(true);
+    expect((refusal as Error).message).toMatch(/^forUser: user "bob" has no Jazz account yet/);
+    // The lookup made none.
+    expect(
+      await jazz.accountFor(new Request("http://app/x", { headers: { "x-test-user": "bob" } })),
+    ).toBeNull();
+    const bob = await jazz.createAccountFor("bob");
+    const asBob = await client!.forUser("bob");
+    const row = await asBob
+      .insert(app.todos, { title: "as bob", owner: bob })
+      .wait({ tier: "global" });
+    const [written] = await jazz.db.all(app.todos.where({ id: row.id }).select("$createdBy"));
+    expect(written?.$createdBy).toMatchObject({
+      account: bob,
+      identity: { issuer: "jazz:backend", subject: "bob" },
+    });
+    await expect(client!.forUser("")).rejects.toThrow(/pass the user's id/);
+  });
+
+  it("gives a user's session to its trusted machines only", async () => {
+    const { jazz, appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+      scoped({ sub: "worker" }),
+    ]);
+    await jazz.createAccountFor("alice");
+    const ask = (headers: Record<string, string>) =>
+      fetch(`${origin}/jazz/apps/${appId}/backend/user-session`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify({ userId: "alice" }),
+      });
+    const answer = await ask({ authorization: `Bearer ${await sign({ sub: "ops" })}` });
+    expect(answer.status).toBe(200);
+    expect(answer.headers.get("cache-control")).toBe("no-store");
+    expect(await answer.json()).toEqual({
+      account: await jazz.createAccountFor("alice"),
+      issuer: "jazz:backend",
+    });
+    // Only a POST with a user's id.
+    const ops = { authorization: `Bearer ${await sign({ sub: "ops" })}` };
+    const url = `${origin}/jazz/apps/${appId}/backend/user-session`;
+    expect((await fetch(url, { headers: ops })).status).toBe(405);
+    for (const body of ["not json", JSON.stringify({}), JSON.stringify({ userId: "" })]) {
+      expect((await fetch(url, { method: "POST", headers: ops, body })).status).toBe(400);
+    }
+    // A scoped machine, a browser with the app's own session, and no one.
+    expect((await ask({ authorization: `Bearer ${await sign({ sub: "worker" })}` })).status).toBe(
+      401,
+    );
+    expect((await ask({ "x-test-user": "alice" })).status).toBe(404);
+    expect((await ask({})).status).toBe(404);
+
+    // A scoped machine's client acts as its own user, never another.
+    const worker = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      credential: () => sign({ sub: "worker" }),
+    });
+    cleanups.push(() => worker.close());
+    await expect(worker.getSnapshot().client!.forUser("alice")).rejects.toThrow(
+      /only on a trusted backend client/,
+    );
+  });
+
+  it("refuses to act for a user whose identity was revoked", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: remote({ url: core.url, appId, secret: core.adminSecret }),
+      authenticate,
+      backendClients: [
+        trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+      ],
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz);
+    const alice = { issuer: "jazz:backend", subject: "alice" };
+    const admin = (operation: string, body: unknown) =>
+      fetch(`${core.url}/apps/${appId}/admin/accounts/${operation}`, {
+        method: "POST",
+        headers: { "X-Jazz-Admin-Secret": core.adminSecret, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    expect((await admin("login-or-register", { identity: alice })).status).toBe(200);
+    expect((await admin("revoke", { approver: alice, target: alice })).status).toBe(204);
+
+    const answer = await fetch(`${origin}/jazz/apps/${appId}/backend/user-session`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${await sign({ sub: "ops" })}` },
+      body: JSON.stringify({ userId: "alice" }),
+    });
+    expect(answer.status).toBe(403);
+    expect(await answer.json()).toEqual({ code: "identity_not_authorized" });
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      credential: () => sign({ sub: "ops" }),
+    });
+    cleanups.push(() => session.close());
+    await expect(session.getSnapshot().client!.forUser("alice")).rejects.toMatchObject({
+      status: 403,
+      message: expect.stringMatching(/identity_not_authorized/),
+    });
+  }, 60_000);
+
+  it("a key outage is a 503, never read as a refusal", async () => {
+    const { appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+    ]);
+    keysDown = true;
+    cleanups.push(async () => {
+      keysDown = false;
+    });
+    const response = await fetch(`${origin}/jazz/apps/${appId}/backend/admit`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${await sign({ sub: "ops" })}` },
+    });
+    expect(response.status).toBe(503);
+  });
+
+  it("can't sync as a backend without its token", async () => {
+    const { appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+    ]);
+    const socket = new WebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`);
+    socket.addEventListener("open", () =>
+      socket.send(JSON.stringify({ peer_identity: "x", backend_secret: "guess" })),
+    );
+    const code = await new Promise<number>((resolve) =>
+      socket.addEventListener("close", (event) => resolve(event.code)),
+    );
+    expect(code).toBe(1008);
+  });
+});
+
+describe("a backend client's close()", () => {
+  it("uploads the writes it holds first", async () => {
+    const { jazz, appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "importer" }, as: "backend" }),
+    ]);
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      credential: () => sign({ sub: "importer" }),
+    });
+    const { client } = session.getSnapshot();
+    const owner = randomUUID();
+    // A script's import: writes, none waited for, then close() and exit.
+    for (let i = 0; i < 200; i++) client!.db.insert(app.todos, { title: `row ${i}`, owner });
+    await session.close();
+    expect(await jazz.db.all(app.todos.where({ owner }))).toHaveLength(200);
+  }, 60_000);
+
+  it("closes a guest the backend refused, saying the writes it couldn't upload are lost", async () => {
+    const { appId, origin } = await appWith([]);
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "device",
+    });
+    const { client } = session.getSnapshot();
+    const me = client!.session!.user!;
+    client!.db.insert(app.todos, { title: "kept nowhere", owner: me });
+    const started = Date.now();
+    await expect(session.close()).rejects.toThrow(
+      /closed with 1 write the server never accepted, which are lost/,
+    );
+    // Refused for good: no point waiting out the deadline.
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(session.getSnapshot().status).toBe("closed");
+  }, 30_000);
+
+  it("closes at once with timeoutMs 0, warning about the writes it drops", async () => {
+    const { appId, origin } = await appWith([]);
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "device",
+    });
+    const { client } = session.getSnapshot();
+    client!.db.insert(app.todos, { title: "dropped", owner: client!.session!.user! });
+    await expect(session.close({ timeoutMs: -1 })).rejects.toThrow(/timeoutMs/);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await session.close({ timeoutMs: 0 });
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/1 write the server never accepted/));
+    } finally {
+      warn.mockRestore();
+    }
+    expect(session.getSnapshot().status).toBe("closed");
+  }, 30_000);
+
+  it("only warns when its persistent driver keeps the writes it couldn't upload", async () => {
+    const { appId, origin } = await appWith([]);
+    const dataPath = join(mkdtempSync(join(tmpdir(), "jazz-client-close-")), "client.db");
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "persistent", dataPath },
+      initial: "device",
+    });
+    const { client } = session.getSnapshot();
+    client!.db.insert(app.todos, { title: "kept on disk", owner: client!.session!.user! });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await session.close();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringMatching(/1 write not uploaded yet .*driver keeps them/),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+    expect(session.getSnapshot().status).toBe("closed");
+  }, 30_000);
+});

@@ -1,6 +1,5 @@
 import { todoCrudTest } from "../../../testing/todo-app-scenarios.js";
-import { createAccountManager } from "jazz-tools";
-import { prepareTestAccount } from "../../../testing/accounts.js";
+import { memoryAccountStore } from "../../../testing/accounts.js";
 /**
  * E2E browser tests for the React todo app.
  *
@@ -12,8 +11,11 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID, ADMIN_SECRET } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 import type { DbConfig } from "jazz-tools";
+
+type AccountStore = ReturnType<typeof memoryAccountStore>;
+const loadLocalFirst = () => import("jazz-tools/local-first");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -59,31 +61,24 @@ describe("React Todo App E2E", () => {
   /** Mount the real App. Returns the container element. */
   async function mountApp(
     config: {
-      account?: DbConfig["account"];
+      /** The device account's store: mounts sharing one are the same user. */
+      store?: AccountStore;
       appId?: string;
       serverUrl?: string;
-      auth?: { localFirstSecret: string };
-      adminSecret?: string;
       driver?: DbConfig["driver"];
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
     document.body.appendChild(el);
     const r = createRoot(el);
-    const { auth, adminSecret: _adminSecret, ...dbConfig } = config;
-    const account =
-      config.account ??
-      (await prepareTestAccount(
-        createAccountManager,
-        config.appId ?? "test-app",
-        config.serverUrl ?? `http://127.0.0.1:${TEST_PORT}`,
-        auth?.localFirstSecret,
-      ));
     const resolvedConfig = {
       appId: config.appId ?? "test-app",
       driver: { type: "persistent" as const, dbName: crypto.randomUUID() },
-      ...dbConfig,
-      account,
+      ...config,
+      store: config.store ?? memoryAccountStore(),
+      // These tests are about the local-first client (IndexedDB, sync between replicas).
+      client: loadLocalFirst,
+      localFirst: "now" as const,
     };
     const storageNamespace =
       resolvedConfig.driver?.type === "persistent" ? resolvedConfig.driver.dbName : undefined;
@@ -131,15 +126,11 @@ describe("React Todo App E2E", () => {
   });
 
   it("keeps the mounted context when an equivalent inline config is rerendered", async () => {
-    const account = await prepareTestAccount(
-      createAccountManager,
-      APP_ID,
-      `http://127.0.0.1:${TEST_PORT}`,
-    );
+    const store = memoryAccountStore();
     const el = await mountApp({
-      appId: APP_ID,
-      serverUrl: `http://127.0.0.1:${TEST_PORT}`,
-      account,
+      appId: SCOPE,
+      serverUrl: SERVER_URL,
+      store,
     });
     const mounted = mounts.find((item) => item.container === el)!;
     const input = el.querySelector<HTMLInputElement>(
@@ -150,10 +141,10 @@ describe("React Todo App E2E", () => {
       mounted.root.render(
         <App
           config={{
-            appId: APP_ID,
-            serverUrl: `http://127.0.0.1:${TEST_PORT}`,
+            appId: SCOPE,
+            serverUrl: SERVER_URL,
             driver: { type: "persistent", dbName: mounted.storageNamespace! },
-            account,
+            store,
           }}
         />,
       );
@@ -188,14 +179,10 @@ describe("React Todo App E2E", () => {
 
   it("persists todos across app unmount and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
-    const account = await prepareTestAccount(
-      createAccountManager,
-      "test-app",
-      `http://127.0.0.1:${TEST_PORT}`,
-    );
+    const store = memoryAccountStore();
 
     // First session: mount app, add a todo via the form
-    const el1 = await mountApp({ account, driver: { type: "persistent", dbName } });
+    const el1 = await mountApp({ store, driver: { type: "persistent", dbName } });
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
     const form1 = input1.closest("form")!;
 
@@ -213,8 +200,8 @@ describe("React Todo App E2E", () => {
     // Unmount (triggers db.shutdown, flushes IndexedDB)
     await unmountApp(el1);
 
-    // Second session: remount with same account and dbName — IndexedDB data should load
-    const el2 = await mountApp({ account, driver: { type: "persistent", dbName } });
+    // Second session: remount with same store and dbName — IndexedDB data should load
+    const el2 = await mountApp({ store, driver: { type: "persistent", dbName } });
 
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,
@@ -226,20 +213,16 @@ describe("React Todo App E2E", () => {
   });
 
   it("syncs a todo between two app instances through the server", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = SERVER_URL;
 
     // Mount two independent app instances connected to the same server
     const el1 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
-      adminSecret: ADMIN_SECRET,
-      auth: { localFirstSecret: "jazz-auth-v1:Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs" },
     });
     const el2 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
-      adminSecret: ADMIN_SECRET,
-      auth: { localFirstSecret: "jazz-auth-v1:VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg" },
     });
 
     // Let both app instances finish server/event-stream setup before mutating.
@@ -267,19 +250,17 @@ describe("React Todo App E2E", () => {
   });
 
   it("syncs a todo between two app instances through the server without local persistence", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = SERVER_URL;
 
     // Mount two independent app instances connected to the same server
     const el1 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
-      auth: { localFirstSecret: "jazz-auth-v1:disAKUpEX273joMo4f1NTW-tDTpc4bzPy_l5tvNLXnc" },
       driver: { type: "memory" },
     });
     const el2 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
-      auth: { localFirstSecret: "jazz-auth-v1:TqNBXTv_Mv7HBp3FZ6KtHJwBWvnkI7YcOlrS57d3eEs" },
       driver: { type: "memory" },
     });
 

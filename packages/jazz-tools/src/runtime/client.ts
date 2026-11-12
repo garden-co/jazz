@@ -25,7 +25,7 @@ import { getTrustedReservedSession, setTrustedReservedSession } from "./db-inter
 import { isRenewableAuthFailure, mapAuthReason } from "./auth-state.js";
 import { httpUrlToWs } from "./url.js";
 import type { RemoteLinkState } from "./remote-link-state.js";
-import type { LinkStatus } from "./sync-status.js";
+import type { LinkFailure, LinkStatus, UploadStatus } from "./sync-status.js";
 import { toError } from "./util.js";
 import { parseUuidBytes } from "./hex.js";
 
@@ -158,6 +158,21 @@ export type AuthUpdate =
  * Common interface for the runtime backing `JazzClient`.
  */
 export interface Runtime {
+  /**
+   * @internal The Db handed over to a successor: end reads not sent yet with
+   * a `RuntimeClosedError` cause, so they ask the successor instead.
+   */
+  endUnsentReads?(): void;
+  /**
+   * Wait until every write committed so far reaches `tier`. `throughOutage`
+   * keeps the wait pending through outages until a terminal failure.
+   */
+  waitForPendingWrites?(
+    tier?: string,
+    options?: { throughOutage?: boolean; signal?: AbortSignal },
+  ): Promise<void>;
+  /** @internal Close mutation admission and report the foreground TxTime high-water. */
+  quiesceForegroundTxTimeHighWater?(): Promise<bigint>;
   beginTransaction(
     transactionKind: TransactionKind,
     id: OpenTransactionId,
@@ -178,9 +193,11 @@ export interface Runtime {
   setRemoteLinkHint?(state: RemoteLinkState): void;
   /** @internal The upstream link as the app sees it. */
   upstreamLinkStatus?(): LinkStatus;
-  /** @internal How many local commits still wait for the server's verdict. */
-  pendingUploadCount?(): number;
-  /** @internal Observe changes of the link status or the pending count. */
+  /** @internal This client's uploads: pending, since when, and refusals. */
+  uploadStatus?(): UploadStatus;
+  /** @internal The latest link failure this client saw, if any. */
+  lastLinkFailure?(): LinkFailure | null;
+  /** @internal Observe changes of the link status or the upload status. */
   onSyncStatusChange?(listener: () => void, signal: AbortSignal): void;
   /** @internal Construct a provisional row without staging or accepting a write. */
   previewInsert?(table: string, values: InsertValues, objectId?: string): Row;
@@ -298,6 +315,12 @@ export interface Runtime {
   nativeUpstreamConfigured?(): boolean;
   /** Push updated auth credentials into the live Rust transport. */
   updateAuth(auth_json: string): void;
+  /**
+   * The session this client resolved from its credentials, set before it
+   * connects and again whenever its auth changes. A runtime that serves
+   * only its connection's session (thin) compares calls against it.
+   */
+  useSession?(session: Session | null): void;
   /** End waits held for a refused credential that nothing will renew. */
   endCredentialWait?(): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
@@ -350,6 +373,8 @@ export interface AuthConfig {
   admin_secret?: string;
   /** Opaque session payload forwarded by a backend proxy. */
   backend_session?: unknown;
+  /** The published permissions bundle the session is pinned to. */
+  bundle?: string;
 }
 
 /**
@@ -1149,6 +1174,7 @@ export class JazzClient {
     this.scheduler = getScheduler();
     this.context = context;
     this.resolvedSession = this.resolveSessionFromContext();
+    this.runtime.useSession?.(this.resolvedSession);
 
     const onAuthFailure = runtimeOptions?.onAuthFailure;
     this.runtime.onAuthFailure((rawReason: string) => {
@@ -1437,6 +1463,7 @@ export class JazzClient {
 
     try {
       this.resolvedSession = this.resolveSessionFromContext();
+      this.runtime.useSession?.(this.resolvedSession);
       if (updateRuntime) {
         this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
       }
@@ -1445,6 +1472,7 @@ export class JazzClient {
       this.context.cookieSession = previousCookieSession;
       setTrustedReservedSession(this.context, previousTrustedReservedSession);
       this.resolvedSession = previousResolvedSession;
+      this.runtime.useSession?.(previousResolvedSession);
       throw error;
     }
   }
@@ -1640,11 +1668,74 @@ export class JazzClient {
     attribution?: string,
     objectId?: string,
   ): Promise<WriteHandle<{ id: string }>> {
+    const result = await this.runStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+      objectId,
+    );
+    if (result.kind !== "committed") {
+      throw new Error("Streaming mutations cannot be staged inside an open transaction");
+    }
+    return new WriteHandle(result.txId, this, { id: result.id });
+  }
+
+  /**
+   * @internal Stage a streamed mutation in open transaction
+   * `openTransactionId`; it commits with the transaction.
+   */
+  async streamingMutationInTransaction(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    openTransactionId: OpenTransactionId,
+    options?: InsertOptions | UpdateOptions,
+    session?: Session,
+    attribution?: string,
+    objectId?: string,
+  ): Promise<{ id: string }> {
+    const result = await this.runStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+      objectId,
+      openTransactionId,
+    );
+    if (result.kind !== "staged") {
+      throw new Error("A streaming mutation in a transaction must be staged in it");
+    }
+    return { id: result.id };
+  }
+
+  private async runStreamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: InsertOptions | UpdateOptions,
+    session?: Session,
+    attribution?: string,
+    objectId?: string,
+    openTransactionId?: OpenTransactionId,
+  ): Promise<StreamingInsertResult> {
     if (!this.runtime.streamingMutation) {
       throw new Error("This runtime does not support streaming mutations");
     }
-    const writeContext = this.writeContext(session, attribution, undefined, options);
-    const result = await this.runtime.streamingMutation(
+    const writeContext = this.writeContext(session, attribution, openTransactionId, options);
+    return this.runtime.streamingMutation(
       mutation,
       table,
       values,
@@ -1653,10 +1744,6 @@ export class JazzClient {
       writeContext,
       objectId ?? ("id" in (options ?? {}) ? (options as InsertOptions).id : undefined),
     );
-    if (result.kind !== "committed") {
-      throw new Error("Streaming mutations cannot be staged inside an open transaction");
-    }
-    return new WriteHandle(result.txId, this, { id: result.id });
   }
 
   /**
@@ -1859,7 +1946,9 @@ export class JazzClient {
     branch?: BranchView,
   ): MutationResult {
     if (branch) {
-      throw new Error("Partial-value updates are not yet supported in branch views.");
+      throw new Error(
+        "Partial-value updates (applyDiffs, editedFrom) are not yet supported in branch views.",
+      );
     }
     const writeContext = this.writeContext(session, attribution, openTransactionId, { updatedAt });
     if (!this.runtime.updateLargeValues) {

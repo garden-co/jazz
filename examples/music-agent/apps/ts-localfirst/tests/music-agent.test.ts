@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "vitest";
-import { createAccountManager, createDb, type Db } from "jazz-tools";
+import { createJazzClient, type Db } from "jazz-tools";
 import { definePermissions } from "jazz-tools/permissions";
-import { startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
+import { startTestJazz, type TestJazz } from "jazz-tools/testing";
 import { app } from "../schema.js";
+import { memoryAccountStore } from "../../../../testing/accounts.js";
 import {
   DeterministicMusicAgent,
   JazzMusicStore,
@@ -10,46 +11,42 @@ import {
   type MusicStore,
 } from "../src/music-agent.js";
 
-const openDbs: Db[] = [];
+const sessions: Awaited<ReturnType<typeof createJazzClient>>[] = [];
 
 /** Bytes columns stream Uint8Array chunks (text columns take strings). */
 async function* byteChunks(parts: readonly string[]): AsyncIterable<Uint8Array> {
   for (const part of parts) yield new TextEncoder().encode(part);
 }
-let server: LocalJazzServerHandle | undefined;
+let server: TestJazz | undefined;
 
 afterEach(async () => {
-  await Promise.all(openDbs.splice(0).map((db) => db.shutdown()));
+  await Promise.all(sessions.splice(0).map((session) => session.close()));
   await server?.stop();
   server = undefined;
 });
 
-/** A real local-first account on an in-memory Jazz runtime. */
-async function openDb(appId: string, serverUrl?: string): Promise<Db> {
-  let stored: string | null = null;
-  const accounts = await createAccountManager({
-    appId,
-    serverUrl: serverUrl ?? "http://127.0.0.1:1",
-    store: {
-      read: async () => stored,
-      update: async (transform) => {
-        stored = transform(stored);
-      },
-    },
-  });
-  const db = await createDb({
-    appId,
-    ...(serverUrl ? { serverUrl } : {}),
-    account: accounts.createLocalFirst(),
+const loadLocalFirst = () => import("jazz-tools/local-first");
+
+/**
+ * A real device account of its own on an in-memory local-first Jazz runtime:
+ * on this device only, or syncing through the app backend at `serverUrl`.
+ */
+async function openDb(serverUrl: string | null = null): Promise<Db> {
+  const session = await createJazzClient({
+    serverUrl,
+    initial: "device",
+    store: memoryAccountStore(),
     driver: { type: "memory" },
+    client: loadLocalFirst,
+    localFirst: "now",
   });
-  openDbs.push(db);
-  return db;
+  sessions.push(session);
+  return session.db;
 }
 
 const stores: [string, () => Promise<MusicStore>][] = [
   ["memory", async () => new MemoryMusicStore()],
-  ["Jazz", async () => new JazzMusicStore(await openDb(`music-agent-${crypto.randomUUID()}`))],
+  ["Jazz", async () => new JazzMusicStore(await openDb())],
 ];
 
 describe.each(stores)("MusicAgent on the %s store", (_name, openStore) => {
@@ -113,9 +110,10 @@ describe("MusicAgent across synced Jazz clients", () => {
         table.allowUpdate.always();
       }
     });
-    server = await startLocalJazzServer({ inMemory: true, schema: app, permissions });
-    const writerDb = await openDb(server.appId, server.url);
-    const readerDb = await openDb(server.appId, server.url);
+    // Guests sync through the app's backend: a core admits only its backend.
+    server = await startTestJazz({ app, permissions });
+    const writerDb = await openDb(server.url);
+    const readerDb = await openDb(server.url);
     const store = new JazzMusicStore(writerDb);
 
     const conversation = await store.createConversation("Synced");

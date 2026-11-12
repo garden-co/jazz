@@ -1,4 +1,4 @@
-//! Migrations as the CLI publishes them (`POST .../admin/deploy`) and as an
+//! Migrations as createJazz publishes them (`POST .../admin/bundles`) and as an
 //! app ships them to its clients: per-table lens edits between two schema
 //! hashes, lowered against the resolved source and target schemas.
 
@@ -226,6 +226,90 @@ pub fn client_migrations(json: &[u8]) -> Result<(Vec<JazzSchema>, Vec<MigrationL
         .map(|entry| JazzSchema::new(&entry.schema).map_err(|error| format!("migrations: {error}")))
         .collect::<Result<_, _>>()?;
     Ok((schemas, lenses))
+}
+
+/// Check each migration of a [`ClientMigrations`] bundle (JSON) leading to
+/// `target` (a schema hash) as a deployment checks it: lowered, its lens
+/// reviewed and reproducing its target from its source. So `jazz-tools
+/// validate` refuses a migration a deploy would refuse, naming it. Where a
+/// migration sits in the history is left to the deploy, whose store may
+/// hold the versions that connect it; permissions are left out too, as
+/// validate compiles them on its own.
+pub fn check_client_migrations(json: &[u8], target: &str) -> Result<(), String> {
+    let bundle: ClientMigrations =
+        serde_json::from_slice(json).map_err(|error| format!("decode migrations: {error}"))?;
+    let target = parse_schema_hash(target)?;
+    let mut schemas = Vec::new();
+    let mut by_hash = std::collections::HashMap::new();
+    for entry in &bundle.schemas {
+        let hash = parse_schema_hash(&entry.hash)?;
+        // As a deployment does: a schema must be the one its hash names.
+        let actual = SchemaHash::compute(&entry.schema);
+        if actual != hash {
+            return Err(super::DeploymentError::SchemaHashMismatch {
+                claimed: hash,
+                actual,
+            }
+            .to_string());
+        }
+        schemas.push((hash, entry.schema.clone()));
+        by_hash.insert(hash, &entry.schema);
+    }
+    let mut migrations = Vec::new();
+    for migration in bundle.migrations {
+        let (from, to) = (
+            parse_schema_hash(&migration.from_hash)?,
+            parse_schema_hash(&migration.to_hash)?,
+        );
+        let (Some(source), Some(target)) = (by_hash.get(&from), by_hash.get(&to)) else {
+            return Err(format!(
+                "migrations: {} -> {} names a schema the bundle lacks",
+                migration.from_hash, migration.to_hash
+            ));
+        };
+        migrations.push(lower_migration(migration, source, target)?);
+    }
+    // Where each migration sits is the deployment's to judge: the store's
+    // catalogue may hold the versions that connect these. Each migration's
+    // own checks need only its two schemas.
+    let schemas = schemas
+        .into_iter()
+        .map(|(hash, schema)| (hash.0, super::structural(schema)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if !schemas.contains_key(&target.0) {
+        return Err(format!("migrations: no schema {target} to check against"));
+    }
+    let compiled = schemas
+        .iter()
+        .map(|(hash, schema)| {
+            crate::schema::JazzSchema::new(schema)
+                .map(|schema| (*hash, super::SchemaVersion::new(schema)))
+                .map_err(|error| format!("invalid schema {}: {error}", SchemaHash(*hash)))
+        })
+        .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
+    let mut edges = std::collections::BTreeMap::new();
+    for lens in migrations {
+        let edge = (lens.source_hash.0, lens.target_hash.0);
+        // Two migrations between the same versions must be one.
+        if let Some(previous) = edges.get(&edge)
+            && *previous != lens
+        {
+            return Err(super::DeploymentError::ConflictingMigration {
+                from: lens.source_hash,
+                to: lens.target_hash,
+            }
+            .to_string());
+        }
+        edges.insert(edge, lens);
+    }
+    let check = || -> Result<(), super::DeploymentError> {
+        super::check_lenses(&schemas, &compiled, &edges)?;
+        // Paths between two versions must agree whatever else the store
+        // holds; whether the history is one is the deploy's to judge.
+        let order = super::topological_order(&schemas, &edges)?;
+        super::validate_parallel_paths(&order, &schemas, &edges)
+    };
+    check().map_err(|error| error.to_string())
 }
 
 /// The bundle in `migrations` (JSON, see [`client_migrations`]) lowered for

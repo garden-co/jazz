@@ -128,11 +128,7 @@ fn policy_metrics_schema() -> Schema {
                         .with_insert(PolicyExpr::True)
                         .with_select(PolicyExpr::eq_session(
                             "owner_id",
-                            vec![
-                                "user".to_owned(),
-                                "identity".to_owned(),
-                                "subject".to_owned(),
-                            ],
+                            vec!["identity".to_owned(), "subject".to_owned()],
                         ))
                         .with_delete(PolicyExpr::True),
                 ),
@@ -393,7 +389,7 @@ impl ObservedSubscription {
                         );
                     }
                 }
-                SubscriptionStreamItem::Rejected { reason } => {
+                SubscriptionStreamItem::Rejected { reason, .. } => {
                     panic!("{label}: subscription rejected: {reason:?}")
                 }
             }
@@ -418,7 +414,7 @@ impl ObservedSubscription {
             match tokio::time::timeout(deadline - now, self.stream.next()).await {
                 Err(_) => return,
                 Ok(None) => panic!("{label}: subscription stream closed"),
-                Ok(Some(SubscriptionStreamItem::Rejected { reason })) => {
+                Ok(Some(SubscriptionStreamItem::Rejected { reason, .. })) => {
                     panic!("{label}: subscription rejected: {reason:?}")
                 }
                 Ok(Some(SubscriptionStreamItem::Delta(delta))) => {
@@ -1977,21 +1973,16 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
                 .expect("start test server");
             let admin_id = test_user_id("aggregate-admin");
             let spy_id = test_user_id("aggregate-spy");
-            let mut admin_context =
-                server.make_client_context_for_user(schema.clone(), admin_id.clone());
-            // Exercise the authenticated-reader boundary, rather than the
-            // test helper's trusted-backend shortcut.  A backend secret makes
-            // this direct link's actual reader SYSTEM by design.
-            admin_context.backend_secret = None;
+            let mut admin_context = server.make_user_context(schema.clone(), admin_id.clone());
+            // Exercise the authenticated-reader boundary: the backend acts
+            // for this user, rather than reading as SYSTEM on its own link.
             support::enroll_test_context(&mut admin_context)
                 .await
                 .expect("enroll admin identity");
             let admin = jazz_testkit::connect(admin_context)
                 .await
                 .expect("connect admin");
-            let mut spy_context =
-                server.make_client_context_for_user(schema.clone(), spy_id.clone());
-            spy_context.backend_secret = None;
+            let mut spy_context = server.make_user_context(schema.clone(), spy_id.clone());
             support::enroll_test_context(&mut spy_context)
                 .await
                 .expect("enroll spy identity");
@@ -2084,8 +2075,7 @@ async fn shared_count_spy_with_concurrent_owner_subscription() {
             let mut clients = Vec::new();
             for name in ["review-owner", "review-spy"] {
                 let id = test_user_id(name);
-                let mut ctx = server.make_client_context_for_user(schema.clone(), id.clone());
-                ctx.backend_secret = None;
+                let mut ctx = server.make_user_context(schema.clone(), id.clone());
                 support::enroll_test_context(&mut ctx)
                     .await
                     .expect("enroll");

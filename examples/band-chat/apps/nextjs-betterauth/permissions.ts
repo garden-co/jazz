@@ -5,13 +5,11 @@ import { app, type Reaction, type Room } from "./schema";
 const bandChatPermissions = definePermissions(
   app,
   ({ policy, session, allOf, anyOf, allowedTo }) => {
-    const me = session.user.account;
+    const me = session.user;
     const isMember = (room: RowContext<Room>) =>
       policy.roomMembers.exists.where({ roomId: room.id, memberAuthor: me });
     const isMemberOf = (roomId: RowRefValue) =>
       policy.roomMembers.exists.where({ roomId, memberAuthor: me });
-    // Admission is explicit about the creator rather than inheriting "may
-    // update the room": members may also bump the room's last activity.
     const isCreatorOf = (roomId: RowRefValue) =>
       policy.rooms.exists.where({ id: roomId, "$createdBy.account": me });
     const canMutateReaction = (reaction: RowContext<Reaction>) =>
@@ -40,18 +38,11 @@ const bandChatPermissions = definePermissions(
     // membership row is visible; every other identity must already be a member.
     policy.rooms.allowRead.where((room) => anyOf([{ "$createdBy.account": me }, isMember(room)]));
     policy.rooms.allowInsert.always();
-    // The creator may rename the room. Any member may record new activity, but
-    // an `exists` check against the stored row keeps the name unchanged.
-    // `lastActivityAt` itself is not bounded: a member may write any time,
-    // including a future one (documented in the README).
+    // Only the creator may rename the room. Members never write to it: the
+    // room list orders and marks rooms by their newest message.
     policy.rooms.allowUpdate
-      .whereOld((room) => anyOf([{ "$createdBy.account": me }, isMember(room)]))
-      .whereNew((room) =>
-        anyOf([
-          { "$createdBy.account": me },
-          allOf([isMember(room), policy.rooms.exists.where({ id: room.id, name: room.name })]),
-        ]),
-      );
+      .whereOld({ "$createdBy.account": me })
+      .whereNew({ "$createdBy.account": me });
     policy.rooms.allowDelete.where({ "$createdBy.account": me });
 
     policy.roomMembers.allowRead.where(allowedTo.read("room"));
@@ -104,14 +95,25 @@ const bandChatPermissions = definePermissions(
       anyOf([{ requester: me }, isCreatorOf(request.roomId)]),
     );
 
-    policy.readMarkers.allowRead.where({ reader: me });
+    // Read markers: one "read up to" row per member and room, no history.
+    // Co-members see each other's markers (the check marks and "Read by"
+    // under a message); outsiders and ex-members see none.
+    policy.readMarkers.allowRead.where((marker) => isMemberOf(marker.roomId));
     policy.readMarkers.allowInsert.where((marker) =>
       allOf([{ reader: me }, isMemberOf(marker.roomId)]),
     );
+    // Only the reader moves their own marker, and only while a member. That a
+    // marker only moves forward is the app's rule (useMarkRead never writes
+    // an earlier position), not this policy's: a policy cannot yet compare a
+    // column with the written row's value other than for equality (#5130).
     policy.readMarkers.allowUpdate
       .whereOld({ reader: me })
       .whereNew((marker) => allOf([{ reader: me }, isMemberOf(marker.roomId)]));
-    policy.readMarkers.allowDelete.where({ reader: me });
+    // A reader drops their own marker when they leave; the room creator drops
+    // a member's marker when removing them, so an ex-member leaves no trace.
+    policy.readMarkers.allowDelete.where((marker) =>
+      anyOf([{ reader: me }, isCreatorOf(marker.roomId)]),
+    );
 
     policy.messages.allowRead.where((message) => isMemberOf(message.roomId));
     policy.messages.allowInsert.where((message) =>

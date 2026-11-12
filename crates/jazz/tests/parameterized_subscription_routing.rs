@@ -190,7 +190,7 @@ fn apply_pending_events(
                     rows.insert(row.row_uuid());
                 }
             }
-            SubscriptionEvent::Rejected { reason } => {
+            SubscriptionEvent::Rejected { reason, .. } => {
                 panic!("{label} subscription was rejected: {reason:?}")
             }
             SubscriptionEvent::Closed => panic!("{label} subscription closed unexpectedly"),

@@ -195,8 +195,16 @@ export function renameTask(db: Db, me: Me, task: Task, title: string) {
   });
 }
 
-export function updateTaskNotes(db: Db, task: Task, notes: string) {
-  return db.update(app.tasks, task.id, { notes: notes || null });
+/**
+ * Saves the notes typed in the task dialog. `editedFrom` is what the field
+ * showed when typing began: the write is an edit of it, so the server merges
+ * it with a crewmate's concurrent edit instead of undoing that edit. Notes
+ * that were empty, or are cleared, are written as a plain value.
+ */
+export function updateTaskNotes(db: Db, task: Task, notes: string, editedFrom: string | null) {
+  if (!notes) return db.update(app.tasks, task.id, { notes: null });
+  if (editedFrom === null) return db.update(app.tasks, task.id, { notes });
+  return db.update(app.tasks, task.id, { notes }, { editedFrom: { notes: editedFrom } });
 }
 
 export function deleteTask(db: Db, me: Me, task: Task) {

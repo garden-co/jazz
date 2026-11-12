@@ -1,6 +1,4 @@
 import { todoCrudTest } from "../../../../testing/todo-app-scenarios.js";
-import { createAccountManager } from "jazz-tools";
-import { prepareTestAccount } from "../../../../testing/accounts.js";
 /**
  * E2E browser tests for the React todo app.
  *
@@ -12,8 +10,11 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID, ADMIN_SECRET } from "./test-constants.js";
-import type { DbConfig } from "jazz-tools";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
+import type { AccountStore } from "jazz-tools";
+import { createJazzClient, type JazzClient, type JazzSession } from "jazz-tools/react";
+import { sessionConfig, type SessionOverrides } from "../../src/account.js";
+import { memoryAccountStore } from "./memory-account-store.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -39,48 +40,61 @@ function typeInto(input: HTMLInputElement, value: string) {
 // Tests
 // ---------------------------------------------------------------------------
 
+/**
+ * Whether the list shows a todo with this title. Every account can read every
+ * todo here, and all tests share one server, so a local-first client also
+ * shows other tests' todos: look for this test's own, not a row count.
+ */
+function hasTodo(el: HTMLElement, title: string): boolean {
+  return [...el.querySelectorAll("#todo-list li span")].some((span) => span.textContent === title);
+}
+
 describe("React Todo App E2E", () => {
   const mounts: Array<{
     root: Root;
     container: HTMLDivElement;
     storageNamespace: string | undefined;
+    session: JazzSession<JazzClient> | undefined;
   }> = [];
 
-  /** Mount the real App. Returns the container element. */
+  /**
+   * Mount the real App on its own device account (a fresh one unless `store`
+   * holds one), or on the device account `deviceKey` restores.
+   */
   async function mountApp(
     config: {
-      account?: DbConfig["account"];
       appId?: string;
       serverUrl?: string;
-      secret?: string;
-      adminSecret?: string;
-      driver?: DbConfig["driver"];
+      deviceKey?: string;
+      store?: AccountStore;
+      driver?: SessionOverrides["driver"];
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
     document.body.appendChild(el);
     const r = createRoot(el);
-    const { secret, adminSecret: _adminSecret, ...overrides } = config;
-    const account =
-      overrides.account ??
-      (await prepareTestAccount(
-        createAccountManager,
-        overrides.appId ?? "test-app",
-        overrides.serverUrl ?? `http://127.0.0.1:${TEST_PORT}`,
-        secret,
-      ));
-    const resolvedConfig = {
-      appId: config.appId ?? "test-app",
-      driver: { type: "persistent" as const, dbName: crypto.randomUUID() },
+    const { deviceKey, ...overrides } = config;
+    const resolvedConfig: SessionOverrides = {
+      appId: SCOPE,
+      store: memoryAccountStore(),
+      driver: { type: "persistent", dbName: crypto.randomUUID() },
+      // Open local-first from the first render: these tests check local
+      // persistence and offline-style writes, which the thin client doesn't keep.
+      localFirst: "now",
       ...overrides,
-      account,
     };
+    // A fixed device key: open signed out, then restore that account.
+    let session: JazzSession<JazzClient> | undefined;
+    if (deviceKey !== undefined) {
+      session = await createJazzClient(sessionConfig({ ...resolvedConfig, initial: "signed-out" }));
+      await session.restoreDeviceAccount(deviceKey);
+    }
     const storageNamespace =
       resolvedConfig.driver?.type === "persistent" ? resolvedConfig.driver.dbName : undefined;
-    mounts.push({ root: r, container: el, storageNamespace });
+    mounts.push({ root: r, container: el, storageNamespace, session });
 
     await act(async () => {
-      r.render(<App config={resolvedConfig} />);
+      r.render(session ? <App session={session} /> : <App config={resolvedConfig} />);
     });
 
     // Wait for JazzProvider to initialize and TodoList to render
@@ -97,8 +111,10 @@ describe("React Todo App E2E", () => {
   async function unmountApp(el: HTMLDivElement): Promise<void> {
     const idx = mounts.findIndex((m) => m.container === el);
     if (idx === -1) return;
-    const { root, storageNamespace } = mounts[idx];
+    const { root, storageNamespace, session } = mounts[idx];
     await act(async () => root.unmount());
+    // The provider doesn't close a session it was given.
+    await session?.close();
     el.remove();
     mounts.splice(idx, 1);
 
@@ -141,59 +157,46 @@ describe("React Todo App E2E", () => {
 
   it("persists todos across app unmount and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
-    const account = await prepareTestAccount(
-      createAccountManager,
-      "test-app",
-      `http://127.0.0.1:${TEST_PORT}`,
-    );
+    const title = `Survive reload ${crypto.randomUUID()}`;
+    // One store: the second mount reopens the same device account.
+    const store = memoryAccountStore();
 
     // First session: mount app, add a todo via the form
-    const el1 = await mountApp({ account, driver: { type: "persistent", dbName } });
+    const el1 = await mountApp({ store, driver: { type: "persistent", dbName } });
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
     const form1 = input1.closest("form")!;
 
     await act(async () => {
-      typeInto(input1, "Survive reload");
+      typeInto(input1, title);
       form1.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
 
-    await waitFor(
-      () => el1.querySelectorAll("#todo-list li").length === 1,
-      3000,
-      "Todo should appear in first session",
-    );
+    await waitFor(() => hasTodo(el1, title), 3000, "Todo should appear in first session");
 
     // Unmount (triggers db.shutdown, flushes IndexedDB)
     await unmountApp(el1);
 
     // Second session: remount with same dbName — IndexedDB data should load
-    const el2 = await mountApp({ account, driver: { type: "persistent", dbName } });
+    const el2 = await mountApp({ store, driver: { type: "persistent", dbName } });
 
-    await waitFor(
-      () => el2.querySelectorAll("#todo-list li").length === 1,
-      5000,
-      "Todo should survive remount from IndexedDB",
-    );
-
-    expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Survive reload");
+    await waitFor(() => hasTodo(el2, title), 5000, "Todo should survive remount from IndexedDB");
   });
 
   it("syncs a todo between two app instances through the server", async () => {
+    const title = `Synced todo ${crypto.randomUUID()}`;
     (globalThis as { __JAZZ_SUBSCRIPTION_TRACE__?: boolean }).__JAZZ_SUBSCRIPTION_TRACE__ = true;
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = SERVER_URL;
 
     // Mount two independent app instances connected to the same server
     const el1 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
-      adminSecret: ADMIN_SECRET,
-      secret: "jazz-auth-v1:Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
+      deviceKey: "jazz-auth-v1:Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
     });
     const el2 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
-      adminSecret: ADMIN_SECRET,
-      secret: "jazz-auth-v1:VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg",
+      deviceKey: "jazz-auth-v1:VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg",
     });
 
     // Let both app instances finish server/event-stream setup before mutating.
@@ -204,42 +207,30 @@ describe("React Todo App E2E", () => {
     const form1 = input1.closest("form")!;
 
     await act(async () => {
-      typeInto(input1, "Synced todo");
+      typeInto(input1, title);
       form1.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
 
-    await waitFor(
-      () => el1.querySelectorAll("#todo-list li").length === 1,
-      3000,
-      "Todo should appear in app 1",
-    );
+    await waitFor(() => hasTodo(el1, title), 3000, "Todo should appear in app 1");
 
     // Wait for it to appear in app 2 via server sync
-    await waitFor(
-      () => el2.querySelectorAll("#todo-list li").length === 1,
-      20000,
-      "Todo should sync to app 2 through the server",
-    );
-
-    expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Synced todo");
+    await waitFor(() => hasTodo(el2, title), 20000, "Todo should sync to app 2 through the server");
   });
 
   it("syncs a todo between two app instances through the server without local persistence", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = SERVER_URL;
 
     // Mount two independent app instances connected to the same server
     const el1 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
-      adminSecret: ADMIN_SECRET,
-      secret: "jazz-auth-v1:disAKUpEX273joMo4f1NTW-tDTpc4bzPy_l5tvNLXnc",
+      deviceKey: "jazz-auth-v1:disAKUpEX273joMo4f1NTW-tDTpc4bzPy_l5tvNLXnc",
       driver: { type: "memory" },
     });
     const el2 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
-      adminSecret: ADMIN_SECRET,
-      secret: "jazz-auth-v1:TqNBXTv_Mv7HBp3FZ6KtHJwBWvnkI7YcOlrS57d3eEs",
+      deviceKey: "jazz-auth-v1:TqNBXTv_Mv7HBp3FZ6KtHJwBWvnkI7YcOlrS57d3eEs",
       driver: { type: "memory" },
     });
 

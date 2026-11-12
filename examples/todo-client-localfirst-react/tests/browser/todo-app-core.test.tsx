@@ -1,10 +1,9 @@
-import { createAccountManager } from "jazz-tools";
-import { prepareTestAccount } from "../../../testing/accounts.js";
+import { memoryAccountStore } from "../../../testing/accounts.js";
 /**
  * Core browser canary for the React todo app.
  *
  * Mounts the real <App /> component in Chromium and connects two persistent
- * IndexedDB clients to one local Jazz server. The public serverUrl config is
+ * IndexedDB clients to the app's backend. The public serverUrl config is
  * converted by the runtime to the websocket endpoint.
  */
 
@@ -13,8 +12,12 @@ import { createRoot, type Root } from "react-dom/client";
 import { act, useEffect } from "react";
 import { App } from "../../src/App.js";
 import { app } from "../../schema.js";
-import { APP_ID, ADMIN_SECRET, SERVER_URL } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 import type { DbConfig } from "jazz-tools";
+
+type AccountStore = ReturnType<typeof memoryAccountStore>;
+// These tests are about the local-first client (IndexedDB, sync between replicas).
+const loadLocalFirst = () => import("jazz-tools/local-first");
 import { useDb } from "jazz-tools/react";
 
 type TestWindow = Window & {
@@ -100,19 +103,13 @@ describe("React Todo App core browser canary", () => {
   async function mountApp(config: {
     appId?: string;
     serverUrl?: string;
-    secret?: string;
-    adminSecret?: string;
+    /** The device account's store: mounts sharing one are the same user. */
+    store?: AccountStore;
     driver?: DbConfig["driver"];
     onEdgeSettled?: (error: Error | null) => void;
   }): Promise<HTMLDivElement> {
-    const { onEdgeSettled, secret, adminSecret: _adminSecret, ...dbConfig } = config;
+    const { onEdgeSettled, store = memoryAccountStore(), ...dbConfig } = config;
     const appId = dbConfig.appId ?? "test-app";
-    const account = await prepareTestAccount(
-      createAccountManager,
-      appId,
-      dbConfig.serverUrl ?? SERVER_URL,
-      secret,
-    );
     const el = document.createElement("div");
     document.body.appendChild(el);
     const r = createRoot(el);
@@ -120,7 +117,7 @@ describe("React Todo App core browser canary", () => {
 
     await act(async () => {
       r.render(
-        <App config={{ appId, ...dbConfig, account }}>
+        <App config={{ appId, ...dbConfig, store, client: loadLocalFirst, localFirst: "now" }}>
           {onEdgeSettled && <TodosEdgeReadinessProbe onSettled={onEdgeSettled} />}
         </App>,
       );
@@ -163,26 +160,24 @@ describe("React Todo App core browser canary", () => {
     mounts.length = 0;
   });
 
-  it("syncs two persistent IndexedDB app instances through one core server", async () => {
+  it("syncs two persistent IndexedDB app instances through the app's backend", async () => {
     const writerDbName = uniqueDbName("core-writer");
     const readerDbName = uniqueDbName("core-reader");
     let writerEdgeResult: Error | null | undefined;
     let readerEdgeResult: Error | null | undefined;
 
     const writer = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       driver: { type: "persistent", dbName: writerDbName },
       serverUrl: SERVER_URL,
-      secret: "jazz-auth-v1:Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
       onEdgeSettled: (error) => {
         writerEdgeResult = error;
       },
     });
     const reader = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
-      secret: "jazz-auth-v1:VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg",
       onEdgeSettled: (error) => {
         readerEdgeResult = error;
       },
@@ -241,13 +236,13 @@ describe("React Todo App core browser canary", () => {
   it("reopens a persistent IndexedDB app instance with DOM-written todos", async () => {
     const dbName = uniqueDbName("core-reopen");
     const title = "Core durable todo";
+    const store = memoryAccountStore();
 
     const firstSession = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       driver: { type: "persistent", dbName },
       serverUrl: SERVER_URL,
-      adminSecret: ADMIN_SECRET,
-      secret: "jazz-auth-v1:GWA1Dzw4x_QVSAKK3_i0U4MlfJBdYlG3jOwAK_rLx28",
+      store,
     });
 
     await addTodoAndWaitForLocalDurability(firstSession, title);
@@ -260,11 +255,10 @@ describe("React Todo App core browser canary", () => {
     await unmountApp(firstSession, dbName);
 
     const secondSession = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       driver: { type: "persistent", dbName },
       serverUrl: SERVER_URL,
-      adminSecret: ADMIN_SECRET,
-      secret: "jazz-auth-v1:GWA1Dzw4x_QVSAKK3_i0U4MlfJBdYlG3jOwAK_rLx28",
+      store,
     });
 
     await waitFor(
@@ -279,29 +273,27 @@ describe("React Todo App core browser canary", () => {
   it("reopened persistent IndexedDB client catches up a locally durable write after websocket reconnect", async () => {
     const writerDbName = uniqueDbName("core-reconnect-writer");
     const readerDbName = uniqueDbName("core-reconnect-reader");
-    const writerSecret = "jazz-auth-v1:71E6G0xpMXIiQ_dFv6tCLVCEt33kivVHtQ7FD-fkYlc";
-    const readerSecret = "jazz-auth-v1:Hw5MHsjqxaP82KsnDXOB9V_7bRWGip1wDRY70fVr8Z8";
+    const writerStore = memoryAccountStore();
+    const readerStore = memoryAccountStore();
     const onlineTitle = "Core reconnect online todo";
     const offlineTitle = "Core reconnect offline todo";
     let writerEdgeResult: Error | null | undefined;
     let readerEdgeResult: Error | null | undefined;
 
     const writer = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       driver: { type: "persistent", dbName: writerDbName },
       serverUrl: SERVER_URL,
-      adminSecret: ADMIN_SECRET,
-      secret: writerSecret,
+      store: writerStore,
       onEdgeSettled: (error) => {
         writerEdgeResult = error;
       },
     });
     const reader = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
-      adminSecret: ADMIN_SECRET,
-      secret: readerSecret,
+      store: readerStore,
       onEdgeSettled: (error) => {
         readerEdgeResult = error;
       },
@@ -333,11 +325,10 @@ describe("React Todo App core browser canary", () => {
 
     let edgeResult: Error | null | undefined;
     const reconnectedReader = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
-      adminSecret: ADMIN_SECRET,
-      secret: readerSecret,
+      store: readerStore,
       onEdgeSettled: (error) => {
         edgeResult = error;
       },

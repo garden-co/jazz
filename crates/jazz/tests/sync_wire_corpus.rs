@@ -54,7 +54,7 @@ const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 /// Every `SyncMessage` variant, in declaration order. A message too
 /// large for one frame travels in parts below the message layer
 /// (binding_host's frame-split test covers it).
-const VARIANTS: [&str; 20] = [
+const VARIANTS: [&str; 21] = [
     "Read",
     "Unsubscribe",
     "ResendWhole",
@@ -75,6 +75,7 @@ const VARIANTS: [&str; 20] = [
     "Catalogue",
     "Welcome",
     "ConnectionSettled",
+    "Holds",
 ];
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -375,7 +376,7 @@ impl Transport for Recording {
 /// `AccessLost` (a branch view's row whose head version the reader may not
 /// read), and serializable `Commit`s with a snapshot the authority served
 /// and one a worker with no server numbered.
-const SHAPES: [&str; 13] = [
+const SHAPES: [&str; 15] = [
     "Read/once",
     "Rows/tx_ids",
     "Catalogue/versions",
@@ -389,10 +390,20 @@ const SHAPES: [&str; 13] = [
     "Rows/pending",
     "Read/once-resumed",
     "Read/once-historical",
+    "Read/live-resumed-pinned",
+    "Welcome/pinned",
 ];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
     match message {
+        SyncMessage::Read {
+            since: Some(since),
+            span: ReadSpan::Live,
+            ..
+        } if since.context.is_some() => Some(SHAPES[13]),
+        SyncMessage::Welcome {
+            context: Some(_), ..
+        } => Some(SHAPES[14]),
         SyncMessage::Read {
             since,
             span: ReadSpan::Once { at },
@@ -502,7 +513,7 @@ fn subject(n: u8) -> Value {
     Value::String(user(n).principal_parts().1)
 }
 
-const ME: [&str; 3] = ["user", "identity", "subject"];
+const ME: [&str; 2] = ["identity", "subject"];
 
 /// `notes.kind`: an enum, which rows carry by variant name whatever tags a
 /// store keeps it as.
@@ -539,6 +550,7 @@ fn schema_with_copy() -> JazzSchema {
                     .column("body", ColumnType::Bytea)
                     .column("kind", kind())
                     .column("first_owner", ColumnType::Text)
+                    .nullable_column("label", ColumnType::Text)
                     .policies(read_and_allow_all_writes(session_eq("owner", &ME))),
             )
             .build(),
@@ -553,14 +565,21 @@ fn note(owner: u8, body: Vec<u8>) -> BTreeMap<String, Value> {
     ])
 }
 
+/// Every store in the scenario reads this wall clock, so commit clocks and
+/// the frames that carry them are the same on every run.
+const CORPUS_NOW_MS: u64 = 1_800_000_000_000;
+
 fn open(node: u8, author: AuthorSubject, draft: bool) -> Db {
-    block_on(Db::open(DbConfig::new(
-        schema(draft),
-        DbIdentity {
-            node: NodeUuid::from_bytes([node; 16]),
-            author,
-        },
-    )))
+    block_on(Db::open(
+        DbConfig::new(
+            schema(draft),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )
+        .with_clock(|| CORPUS_NOW_MS),
+    ))
     .unwrap()
 }
 
@@ -595,13 +614,16 @@ fn large(seed: u8) -> Vec<u8> {
 /// A scenario that sends every `SyncMessage` variant at least once.
 fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     let recorded: Recorded = Rc::default();
-    let server = block_on(Db::open_history_complete(DbConfig::new(
-        schema(false),
-        DbIdentity {
-            node: NodeUuid::from_bytes([1; 16]),
-            author: AuthorSubject::SYSTEM,
-        },
-    )))
+    let server = block_on(Db::open_history_complete(
+        DbConfig::new(
+            schema(false),
+            DbIdentity {
+                node: NodeUuid::from_bytes([1; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )
+        .with_clock(|| CORPUS_NOW_MS),
+    ))
     .unwrap();
     let shared = RowUuid::from_bytes([0x11; 16]);
     block_on(server.insert(
@@ -818,10 +840,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
 
     // Fate rejected with a reason: alice stamps a write further ahead of
     // the server's clock than the skew tolerance allows.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
+    let now = CORPUS_NOW_MS;
     block_on(alice.insert(
         "notes",
         note(1, vec![6]),
@@ -839,8 +858,9 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     block_on(mallory.insert("notes", note(2, vec![7]), InsertOptions::default())).unwrap();
     pump(&[&mallory, &server, &mallory]);
 
-    // Catalogue with versions and cells: the server admits a version whose
-    // lens copies a column while alice is connected.
+    // Catalogue with versions, cells and defaults: the server admits a
+    // version whose lens copies a column and adds one with a default while
+    // alice is connected.
     let copied = schema_with_copy();
     let lens = MigrationLens::new(
         schema(false).version_id(),
@@ -848,10 +868,16 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         vec![TableLens {
             source_table: "notes".into(),
             target_table: "notes".into(),
-            ops: vec![LensOp::CopyColumn {
-                from: "owner".into(),
-                to: "first_owner".into(),
-            }],
+            ops: vec![
+                LensOp::CopyColumn {
+                    from: "owner".into(),
+                    to: "first_owner".into(),
+                },
+                LensOp::AddColumn {
+                    column: "label".into(),
+                    default: Value::Nullable(Some(Box::new(Value::String("inbox".into())))),
+                },
+            ],
         }],
     )
     .unwrap();
@@ -926,6 +952,72 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         .borrow_mut()
         .insert("ResendWhole".to_owned(), ("server".to_owned(), frame));
 
+    // A session pinned to a permissions bundle: its Welcome names the
+    // bundle, and a reconnecting replica resumes a live read from the seq
+    // it settled through under that bundle. Pinned as a server and a
+    // replica encode them, from the frames recorded above.
+    let bundle = [0xb1; 32];
+    let pinned = {
+        let recorded = recorded.borrow();
+        let decode = |name: &str| postcard::from_bytes::<SyncMessage>(&recorded[name].1).unwrap();
+        let SyncMessage::Welcome {
+            admitted,
+            catalogue,
+            ..
+        } = decode("Welcome")
+        else {
+            unreachable!()
+        };
+        let SyncMessage::Read {
+            id,
+            query,
+            binding,
+            include_deleted,
+            tier,
+            wait,
+            view,
+            ..
+        } = decode("Read")
+        else {
+            unreachable!()
+        };
+        [
+            (
+                "Welcome/pinned",
+                "client",
+                SyncMessage::Welcome {
+                    admitted,
+                    catalogue,
+                    context: Some(bundle),
+                },
+            ),
+            (
+                "Read/live-resumed-pinned",
+                "server",
+                SyncMessage::Read {
+                    id,
+                    query,
+                    binding,
+                    include_deleted,
+                    tier,
+                    wait,
+                    view,
+                    since: Some(jazz::db::Since {
+                        through: 7,
+                        context: Some(bundle),
+                    }),
+                    span: ReadSpan::Live,
+                },
+            ),
+        ]
+    };
+    for (name, reader, message) in pinned {
+        let [frame] = encode_frames(message).unwrap().try_into().unwrap();
+        recorded
+            .borrow_mut()
+            .insert(name.to_owned(), (reader.to_owned(), frame));
+    }
+
     hidden_in_a_view(&recorded);
 
     // Alice's fresh client records a plain one-shot, then repeats it using
@@ -965,6 +1057,7 @@ fn hidden_in_a_view(recorded: &Recorded) {
                 author,
             },
         )
+        .with_clock(|| CORPUS_NOW_MS)
     };
     let server = block_on(Db::open(config(0x61, AuthorSubject::SYSTEM))).unwrap();
     server.set_authority();

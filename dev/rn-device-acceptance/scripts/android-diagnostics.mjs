@@ -9,6 +9,10 @@ const WRITER_READ_DETAIL =
   /^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-\d{1,6}-polls-\d{1,6}-row-responses-\d{1,6}-ready-(yes|no)$/;
 const THREADTIME_WRITER_READ_DETAIL =
   /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzScopeWriterRead\s*:\s*(\S+)\s*$/;
+const PUBLIC_CLIENT_WRITE_DETAIL =
+  /^public-client-write-detail:[A-Za-z][A-Za-z0-9]{0,47}-(none|[a-z0-9_]{1,40})(:[A-Za-z0-9_.]{1,96})?$/;
+const THREADTIME_PUBLIC_CLIENT_WRITE =
+  /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzPublicClientWrite\s*:\s*(\S+)\s*$/;
 const THREADTIME_FOREGROUND_WAKE =
   /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzForegroundWake\s*:\s*(armed|enabled|requested|scheduled|delivered|callback-invoked|foreground-mismatch|inactive)\s*$/;
 
@@ -59,6 +63,15 @@ export function androidScopeWriterReadDiagnostic(output) {
   return latest;
 }
 
+export function androidPublicClientWriteDiagnostic(output) {
+  let latest;
+  for (const line of String(output).split(/\r?\n/)) {
+    const detail = THREADTIME_PUBLIC_CLIENT_WRITE.exec(line)?.[1];
+    if (detail && PUBLIC_CLIENT_WRITE_DETAIL.test(detail)) latest = detail;
+  }
+  return latest;
+}
+
 export function androidForegroundWakeDiagnostic(output) {
   let armed = false;
   const stages = [];
@@ -93,7 +106,15 @@ export function androidAcceptanceFailure(kind, phase, output) {
     diagnostic === "scope-isolation-writer-read-failed"
       ? androidScopeWriterReadDiagnostic(output)
       : undefined;
-  const detailedStage = writerRead ? `${stage}; scope writer read: ${writerRead}` : stage;
+  const publicWrite =
+    diagnostic === "public-client-write-failed"
+      ? androidPublicClientWriteDiagnostic(output)
+      : undefined;
+  const detailedStage = writerRead
+    ? `${stage}; scope writer read: ${writerRead}`
+    : publicWrite
+      ? `${stage}; public client write: ${publicWrite}`
+      : stage;
   const foregroundWake =
     diagnostic === "same-runtime-postcommit-wake-failed"
       ? androidForegroundWakeDiagnostic(output)

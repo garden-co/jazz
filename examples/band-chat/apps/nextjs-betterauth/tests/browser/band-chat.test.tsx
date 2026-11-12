@@ -2,12 +2,15 @@ import { afterEach, it } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { createAccountManager, type AccountStore, type DbConfig } from "jazz-tools";
+import type { JazzClientConfig } from "jazz-tools";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
 import {
   getJazzServerInfo,
-  getJazzServerJwtForUser,
+  jazzAppFetch,
+  jazzAppUserUrl,
+  startJazzApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server";
+import { memoryAccountStore } from "../../../../../testing/accounts";
 import permissions from "../../permissions";
 import { app } from "../../schema";
 import { BandChatPreview } from "../../src/BandChat";
@@ -47,38 +50,23 @@ async function waitFor(check: () => boolean, message: string, timeoutMs = 5_000)
   throw new Error(`${message}; diagnostics=${failureDiagnostics()}`);
 }
 
-function inMemoryAccountStore(): AccountStore {
-  let selected: string | null = null;
+// A device account on this browser only, with the local-first client: no server.
+function localPreviewConfig(): JazzClientConfig {
   return {
-    async read() {
-      return selected;
-    },
-    async update(transform) {
-      selected = transform(selected);
-    },
-  };
-}
-
-async function localPreviewConfig(): Promise<DbConfig> {
-  const appId = "band-chat-browser-receipt";
-  const accounts = await createAccountManager({
-    appId,
-    serverUrl: "https://band-chat-preview.example",
-    store: inMemoryAccountStore(),
-  });
-  return {
-    appId,
+    serverUrl: null,
+    initial: "device",
+    store: memoryAccountStore(),
     driver: { type: "memory" },
-    account: accounts.createLocalFirst(),
+    client: () => import("jazz-tools/local-first"),
   };
 }
 
 async function mount(
-  config: DbConfig | undefined = undefined,
+  config: JazzClientConfig | undefined = undefined,
   label: PreviewLabel = "local",
   initialParams?: Record<string, string>,
 ) {
-  const selectedConfig = config ?? (await localPreviewConfig());
+  const selectedConfig = config ?? localPreviewConfig();
   const element = document.createElement("div");
   element.dataset.testid = `preview-${label}`;
   document.body.append(element);
@@ -155,26 +143,29 @@ it("negotiates persistent browser workers and renders the owner, join-request, m
   // still opening.  Admission may hold *delivery* until storage opens, but it
   // must not serially defer native registrations: that ordering used to leave
   // the policy-maintained member view without a Stream B witness.
-  const server = await getJazzServerInfo(
+  const core = await getJazzServerInfo(
     `019d4a17-4591-7c0a-a320-${crypto.randomUUID().slice(0, 12)}`,
   );
   await deploy({
-    appId: server.appId,
-    serverUrl: server.serverUrl,
-    adminSecret: server.adminSecret,
+    appId: core.appId,
+    serverUrl: core.serverUrl,
+    adminSecret: core.adminSecret,
     schema: app,
     permissions,
   });
-  const ownerToken = await getJazzServerJwtForUser("browser-owner", undefined, server.appId);
-  const guestToken = await getJazzServerJwtForUser("browser-guest", undefined, server.appId);
-  const ownerAccount = await enrollTestAccount(server, ownerToken);
-  const guestAccount = await enrollTestAccount(server, guestToken);
+  const server = await startJazzApp(core, { schema: app, permissions });
+  // Each user's own origin, whose requests the backend names as them.
+  const ownerUrl = await jazzAppUserUrl(server, "browser-owner");
+  const guestUrl = await jazzAppUserUrl(server, "browser-guest");
   const owner = await mount(
     {
-      appId: server.appId,
+      serverUrl: ownerUrl,
+      fetch: jazzAppFetch,
+      store: memoryAccountStore(),
       driver: { type: "persistent", dbName: `band-chat-owner-${crypto.randomUUID()}` },
-      account: ownerAccount,
-      serverUrl: server.serverUrl,
+      client: () => import("jazz-tools/local-first"),
+      // The persistent worker must open on first mount (see the regression above).
+      localFirst: "now",
     },
     "owner",
   );
@@ -192,10 +183,13 @@ it("negotiates persistent browser workers and renders the owner, join-request, m
 
   const guest = await mount(
     {
-      appId: server.appId,
+      serverUrl: guestUrl,
+      fetch: jazzAppFetch,
+      store: memoryAccountStore(),
       driver: { type: "persistent", dbName: `band-chat-guest-${crypto.randomUUID()}` },
-      account: guestAccount,
-      serverUrl: server.serverUrl,
+      client: () => import("jazz-tools/local-first"),
+      // The persistent worker must open on first mount (see the regression above).
+      localFirst: "now",
     },
     "guest",
     { join: roomId },
@@ -260,11 +254,6 @@ it("negotiates persistent browser workers and renders the owner, join-request, m
   // retained in the guest's local-first store. The permission receipt proves
   // that a post-removal write is rejected at the serving authority.
 }, 90_000);
-
-async function enrollTestAccount(server: { appId: string; serverUrl: string }, token: string) {
-  const accounts = await createAccountManager({ appId: server.appId, serverUrl: server.serverUrl });
-  return accounts.registerJWT({ getToken: async () => token });
-}
 
 it("creates a local room, sends and reacts to a message, and applies client-side picker validation", async () => {
   const element = await mount();

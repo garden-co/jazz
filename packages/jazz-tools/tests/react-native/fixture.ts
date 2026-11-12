@@ -9,20 +9,27 @@ import {
   type CompiledPermissionsMap,
 } from "../../src/schema-permissions.js";
 import type { Session } from "../../src/runtime/context.js";
+import type { TestJazz } from "../../src/testing/index.js";
 import { createAccountManagerWithRuntime } from "../../src/accounts/enrollment.js";
 import { accountRegistryUrl } from "../../src/accounts/context.js";
-import {
-  internalSessionFromJwtPayload,
-  parseJwtPayload,
-} from "../../src/runtime/client-session.js";
 import { serializeSchemaSource } from "../../src/drivers/schema-wire.js";
+import { shippedMigrations } from "../../src/runtime/client-migrations.js";
 import { createPlatformHost, installPlatformHost } from "./native-platform.js";
 
 export interface NativeRelayFixtureOptions {
   appId?: string;
   session?: Session;
-  /** Real authenticated upstream, using the production private-session ABI. */
-  upstream?: { serverUrl: string; jwt: string };
+  /**
+   * Sync with the app's backend (`startTestJazz`) as `userId`, signed in
+   * with the app's bearer for them, through the production account ABI.
+   * `serverUrl` (default the backend's) can route through a proxy.
+   */
+  upstream?: {
+    backend: TestJazz;
+    userId: string;
+    claims?: Record<string, unknown>;
+    serverUrl?: string;
+  };
 }
 // Factory installation is a process-global platform action. Serializing only
 // Db creation prevents concurrent fixtures selecting another fixture's host;
@@ -62,25 +69,23 @@ export async function createNativeRelayFixture(
     })());
   try {
     const appId = options.appId ?? `rn-api-${randomUUID()}`;
-    if (options.upstream && !options.session)
-      throw new Error("Upstream RN fixture requires its admitted public session");
-    const session = options.session ?? {
+    if (options.upstream && options.session)
+      throw new Error("An upstream RN fixture's session is the one its backend signs in");
+    const upstream = options.upstream && {
+      serverUrl: options.upstream.serverUrl ?? options.upstream.backend.url,
+      bearer: options.upstream.backend.bearer(options.upstream.userId, options.upstream.claims),
+    };
+    let session: Session = options.session ?? {
       issuer: "https://auth.example",
       user_id: "rn-api-test",
       claims: {},
       authMode: "external" as const,
     };
-    const serverUrl = options.upstream?.serverUrl ?? "https://edge.example";
+    const serverUrl = upstream?.serverUrl ?? "https://edge.example";
     const registry = accountRegistryUrl(serverUrl, appId);
-    const jwt =
-      options.upstream?.jwt ??
-      `e30.${Buffer.from(
-        JSON.stringify({
-          ...session.claims,
-          iss: session.issuer,
-          sub: session.user_id,
-        }),
-      ).toString("base64url")}.fixture-signature`;
+    // The app's own token for its backend: the real backend's (upstream), or
+    // one the offline stand-in below reads the subject from.
+    let bearer = upstream?.bearer ?? `fixture-bearer:${session.user_id}`;
     const assignments = new Map<string, string>();
     const manager = createAccountManagerWithRuntime({
       registry,
@@ -89,26 +94,25 @@ export async function createNativeRelayFixture(
           throw new Error("External fixture has no local-first key");
         },
       },
-      // Only offline enrollment is substituted. All database operations still
-      // traverse the production native account/foreground boundary.
+      bearer: () => bearer,
+      // Only the backend's sign-in answer is substituted offline. All database
+      // operations still traverse the production native account boundary.
       ...(!options.upstream
         ? {
             fetch: (async (_url, init) => {
               const token = new Headers(init?.headers).get("Authorization")!.slice(7);
-              const identity = parseJwtPayload(token)!;
-              const key = JSON.stringify([identity.iss, identity.sub]);
-              let id = assignments.get(key);
+              const subject = token.slice("fixture-bearer:".length);
+              let id = assignments.get(subject);
               if (!id) {
                 id =
-                  identity.iss === session.issuer && identity.sub === session.user_id
-                    ? (session.account_id ?? randomUUID())
-                    : randomUUID();
-                assignments.set(key, id);
+                  subject === session.user_id ? (session.account_id ?? randomUUID()) : randomUUID();
+                assignments.set(subject, id);
               }
               return new Response(
                 JSON.stringify({
                   account: id,
-                  identity: { issuer: identity.iss, subject: identity.sub },
+                  identity: { issuer: session.issuer, subject },
+                  claims: session.claims,
                 }),
                 { status: 200 },
               );
@@ -116,8 +120,14 @@ export async function createNativeRelayFixture(
           }
         : {}),
     });
-    const account = await manager.registerJWT(jwt);
-    const claims = internalSessionFromJwtPayload(parseJwtPayload(jwt)!)!.claims;
+    const account = await manager.loginWithBackend();
+    if (options.upstream)
+      session = {
+        issuer: account.identity.issuer,
+        user_id: account.identity.subject,
+        claims: options.upstream.claims ?? {},
+        authMode: "external",
+      };
     // Keep a separate native admission for below-public-API ownership probes.
     // Public createDb calls below prepare their own account-bound admission.
     const capability = nativeHost.attachAccountSchema(
@@ -129,12 +139,15 @@ export async function createNativeRelayFixture(
           account_id: account.id,
           issuer: account.identity.issuer,
           subject: account.identity.subject,
-          jwt,
-          claims,
-          server_url: options.upstream?.serverUrl ?? null,
+          bearer,
+          claims: session.claims,
+          server_url: upstream?.serverUrl ?? null,
         }),
       ),
-      serializeSchemaSource(mergePermissionsIntoWasmSchema(resolveSchemaSource(app), permissions)),
+      serializeSchemaSource(
+        mergePermissionsIntoWasmSchema(resolveSchemaSource(app), permissions),
+        shippedMigrations(resolveSchemaSource(app)),
+      ),
     );
     cleanupCapability = capability;
     const config: DbConfig = { appId, account, ...(options.upstream ? { serverUrl } : {}) };
@@ -142,12 +155,14 @@ export async function createNativeRelayFixture(
       nativeHost,
       manager,
       async loginOriginal(): Promise<DbConfig> {
-        return { ...config, account: await manager.loginJWT(jwt) };
+        bearer = upstream?.bearer ?? `fixture-bearer:${session.user_id}`;
+        return { ...config, account: await manager.loginWithBackend() };
       },
+      /** Sign another user in through the (offline) backend. */
       async registerIdentity(subject: string): Promise<DbConfig> {
-        if (options.upstream) throw new Error("Real upstream fixtures need real provider tokens");
-        const token = `e30.${Buffer.from(JSON.stringify({ iss: session.issuer, sub: subject })).toString("base64url")}.fixture-signature`;
-        return { ...config, account: await manager.registerJWT(token) };
+        if (options.upstream) throw new Error("Real upstream fixtures need a real bearer");
+        bearer = `fixture-bearer:${subject}`;
+        return { ...config, account: await manager.loginWithBackend() };
       },
       capability,
       config,

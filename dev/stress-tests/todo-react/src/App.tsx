@@ -1,7 +1,5 @@
-import { useState, useEffect, use, Suspense } from "react";
-import { JazzProvider } from "jazz-tools/react";
-import type { DbConfig } from "jazz-tools";
-import { BrowserAuthSecretStore } from "jazz-tools";
+import { useState, useEffect } from "react";
+import { JazzProvider, type JazzClientConfig } from "jazz-tools/react";
 import { TodoList } from "./TodoList.js";
 import { GenerateData } from "./GenerateData.js";
 
@@ -33,46 +31,32 @@ function Router() {
   return <GenerateData />;
 }
 
-const appId = requireEnv(import.meta.env.VITE_JAZZ_APP_ID, "JAZZ_APP_ID");
-const serverUrl = requireEnv(import.meta.env.VITE_JAZZ_SERVER_URL, "JAZZ_SERVER_URL");
+// The app's backend serves Jazz on this origin (see jazz.server.ts).
+const serverUrl = `${location.origin}/jazz`;
 const telemetryCollectorUrl = import.meta.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL;
 
-function requireEnv(value: string | undefined, name: string): string {
-  if (!value) {
-    throw new Error(`${name} is required`);
-  }
-  return value;
-}
-
-function AppInner() {
-  const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
-  const config: DbConfig & { asyncSubscriptionsOnly: boolean } = {
-    appId,
-    env: import.meta.env.DEV ? "dev" : "prod",
-    devMode: import.meta.env.DEV,
-    secret,
-    serverUrl,
-    telemetryCollectorUrl,
-    logLevel: telemetryCollectorUrl ? "debug" : undefined,
-    // The generator batches writes with db.transaction, which only the
-    // in-process sync client exposes (the worker-backed async facade has no
-    // transaction support).
-    asyncSubscriptionsOnly: false,
-  };
-
-  return (
-    <JazzProvider config={config} fallback={<p>Loading...</p>}>
-      <Router />
-    </JazzProvider>
-  );
-}
+// Every browser is a device account (a guest) of the app's backend. The
+// generator batches writes with db.transaction, which only the local-first
+// client has (in-process, not the worker-backed async facade), so it opens
+// at once rather than starting thin.
+const config: JazzClientConfig & { asyncSubscriptionsOnly: boolean } = {
+  env: import.meta.env.DEV ? "dev" : "prod",
+  devMode: import.meta.env.DEV,
+  serverUrl,
+  initial: "device",
+  client: () => import("jazz-tools/local-first"),
+  localFirst: "now",
+  telemetryCollectorUrl,
+  logLevel: telemetryCollectorUrl ? "debug" : undefined,
+  asyncSubscriptionsOnly: false,
+};
 
 // #region context-setup-react
 export function App() {
   return (
-    <Suspense fallback={<p>Loading...</p>}>
-      <AppInner />
-    </Suspense>
+    <JazzProvider config={config} loading={<p>Loading...</p>}>
+      <Router />
+    </JazzProvider>
   );
 }
 // #endregion context-setup-react

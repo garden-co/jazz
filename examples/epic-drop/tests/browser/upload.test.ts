@@ -1,48 +1,37 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createAccountManager, createDb, generateAuthSecret, type Db } from "jazz-tools";
-import { prepareTestAccount } from "../../../testing/accounts.js";
+import { createJazzClient, type Db, type JazzSession } from "jazz-tools";
+import { memoryAccountStore } from "../../../testing/accounts.js";
 import { app } from "../../schema.js";
 import { fileTableQuery } from "../../src/file-list-query.js";
-import { APP_ID, TEST_PORT } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 
-const dbs: Db[] = [];
+const sessions: JazzSession<unknown>[] = [];
 
 afterEach(async () => {
-  await Promise.all(dbs.splice(0).map((db) => db.shutdown()));
+  await Promise.all(sessions.splice(0).map((session) => session.close()));
 });
 
-async function openDb(label: string): Promise<Db> {
-  const db = await createDb({
-    appId: APP_ID,
-    account: await prepareTestAccount(
-      createAccountManager,
-      APP_ID,
-      `http://127.0.0.1:${TEST_PORT}`,
-    ),
+/**
+ * A Db for a new device account of its own, on the local-first client:
+ * synced through the app's backend, or (`serverUrl: null`) on this device only.
+ */
+async function openDb(label: string, serverUrl: string | null = null): Promise<Db> {
+  const session = await createJazzClient({
+    scope: SCOPE,
+    serverUrl,
+    initial: "device",
+    store: memoryAccountStore(),
+    client: () => import("jazz-tools/local-first"),
     driver: { type: "persistent", dbName: `epic-drop-${label}-${crypto.randomUUID()}` },
   });
-  dbs.push(db);
-  return db;
+  sessions.push(session);
+  return session.db;
 }
 
-async function openRemoteDb(label: string, secret: string): Promise<Db> {
-  const db = await createDb({
-    appId: APP_ID,
-    serverUrl: `http://127.0.0.1:${TEST_PORT}`,
-    account: await prepareTestAccount(
-      createAccountManager,
-      APP_ID,
-      `http://127.0.0.1:${TEST_PORT}`,
-      secret,
-    ),
-    driver: { type: "persistent", dbName: `epic-drop-${label}-${crypto.randomUUID()}` },
-  });
-  dbs.push(db);
-  return db;
-}
+const openRemoteDb = (label: string) => openDb(label, SERVER_URL);
 
 function sessionUser(db: Db): string {
-  const id = db.getAuthState().session?.user.account;
+  const id = db.getAuthState().session?.user;
   if (!id) throw new Error("expected local-first user session");
   return id;
 }
@@ -120,8 +109,8 @@ describe("EpicDrop streamed upload foundation", () => {
   });
 
   it("requires both file ownership and folder authority for attach and moves", async () => {
-    const alice = await openRemoteDb("alice", generateAuthSecret());
-    const bob = await openRemoteDb("bob", generateAuthSecret());
+    const alice = await openRemoteDb("alice");
+    const bob = await openRemoteDb("bob");
     const aliceId = sessionUser(alice);
     const bobId = sessionUser(bob);
     const aliceFolder = alice.insert(app.folders, { name: "Alice", owner_id: aliceId });

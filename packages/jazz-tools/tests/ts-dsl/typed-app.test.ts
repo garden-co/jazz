@@ -479,7 +479,7 @@ describe("typed app prototype", () => {
           union: {
             inputs: [
               {
-                label: "derived:1c44bf1d4071d2a3afc5366664fa381c051f854cf0386c214c8cd9155d618f5e",
+                label: "derived:d48cadaae9a566a710ffe64030c95b86598055df9c54c3170acefb10c448fa2f",
                 input: {
                   table: "team_edges",
                   conditions: [{ column: "child_team", op: "eq", value: "team-a" }],
@@ -487,7 +487,7 @@ describe("typed app prototype", () => {
                 },
               },
               {
-                label: "derived:542367f64bd5953a37a1d016b833a4a4539f4fe6937567e2aafb939f42bba6d8",
+                label: "derived:9ca5aebdc72dbdc2fb4a2b163d5ee572234fab051359a67ef4edbf8ced2ff4c8",
                 input: {
                   table: "teams",
                   conditions: [],

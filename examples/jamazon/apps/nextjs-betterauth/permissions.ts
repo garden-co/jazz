@@ -28,10 +28,10 @@ export default definePermissions(app, ({ policy, session, allOf, allowedTo }) =>
     table.allowDelete.never();
   }
 
-  // A cart belongs to exactly one account. Guests have a local-first account
+  // A cart belongs to exactly one account. Guests have a device account
   // too, so the same rule covers a guest cart and a signed-in cart; linking a
   // provider identity keeps the account, and with it the cart.
-  const mine = { shopper: session.user.account };
+  const mine = { shopper: session.user };
   policy.carts.allowRead.where(mine);
   policy.carts.allowInsert.where(mine);
   policy.carts.allowUpdate.whereOld(mine).whereNew(mine);

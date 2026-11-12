@@ -170,24 +170,17 @@ export * from "./permissions/index.js";
 export * from "./dev/inspector-overlay/inspector-host-types.js";
 export { installInspectorHost, type InspectorHostDb } from "./dev/inspector-overlay/host-bridge.js";
 
-export {
-  createAccountManager,
-  type AccountManagerConfig,
-} from "./accounts/create-account-manager.js";
 export * from "./accounts/exports.js";
 
 export { accountRegistryUrl } from "./accounts/context.js";
 
-export { createJazzSession, type JazzSessionConfig } from "./session/create-jazz-session.js";
+export { createJazzClient, type JazzClientConfig } from "./session/create-jazz-session.js";
 export type {
   JazzSession,
-  JazzSessionActions,
   JazzSessionSnapshot,
   JazzSessionOperation,
-  NeedsLoginState,
-} from "./session/state.js";
-
-export * from "./session/auth-provider-exports.js";
+  JazzUser,
+} from "./session/jazz-session.js";
 
 export type {
   ForwardRelationship,

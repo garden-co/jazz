@@ -1,6 +1,5 @@
 import * as React from "react";
-import { JazzProvider, type DbConfig } from "jazz-tools/react-native";
-import { ExpoAuthSecretStore } from "jazz-tools/expo";
+import { JazzProvider, type JazzClientConfig } from "jazz-tools/expo";
 import {
   ActivityIndicator,
   Platform,
@@ -14,34 +13,18 @@ import {
 import { TodoList } from "./src/TodoList";
 import { StressTest } from "./src/StressTest";
 
+// The app's backend (backend.ts) serves Jazz under /jazz.
 const defaultServerUrl = Platform.select({
-  android: "http://10.0.2.2:1625",
-  ios: "http://127.0.0.1:1625",
-  default: "http://127.0.0.1:1625",
+  android: "http://10.0.2.2:1625/jazz",
+  ios: "http://127.0.0.1:1625/jazz",
+  default: "http://127.0.0.1:1625/jazz",
 });
-
-const defaultAppId = "00000000-0000-0000-0000-000000000002";
 
 // Expo's Metro bundler inlines process.env.EXPO_PUBLIC_* at bundle time.
 // They must be accessed as literal process.env.KEY expressions — dynamic
 // lookups like globalThis.process.env[key] won't be replaced.
 declare const process: { env: Record<string, string | undefined> };
-const envAppId = process.env.EXPO_PUBLIC_JAZZ_APP_ID;
 const envServerUrl = process.env.EXPO_PUBLIC_JAZZ_SERVER_URL;
-const envAdminSecret = process.env.EXPO_PUBLIC_JAZZ_ADMIN_SECRET;
-
-function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
-  const appId = overrides.appId ?? envAppId ?? defaultAppId;
-
-  return {
-    appId,
-    env: overrides.env ?? "dev",
-    serverUrl: overrides.serverUrl ?? envServerUrl ?? defaultServerUrl,
-    secret,
-    adminSecret: overrides.adminSecret ?? envAdminSecret,
-    ...overrides,
-  };
-}
 
 const styles = StyleSheet.create({
   container: {
@@ -107,18 +90,27 @@ const defaultFallback = (
 );
 
 type AppProps = {
-  config?: Partial<DbConfig>;
+  config?: Partial<JazzClientConfig>;
   fallback?: React.ReactNode;
 };
 
 export default function App({ config, fallback }: AppProps = {}) {
-  const secret = React.use(ExpoAuthSecretStore.getOrCreateSecret());
+  const serverUrl = config?.serverUrl ?? envServerUrl ?? defaultServerUrl;
+  // The session captures its config at mount: a new config remounts it.
   const configKey = JSON.stringify(config ?? {});
-  const resolvedConfig = React.useMemo(() => defaultConfig(secret, config), [configKey, secret]);
+  const resolvedConfig = React.useMemo<JazzClientConfig>(
+    // This device's device account (a guest) of the app's backend.
+    () => ({ env: "dev", ...config, serverUrl, initial: "device" }),
+    [configKey, serverUrl],
+  );
   const [activeTab, setActiveTab] = React.useState<Tab>("stress");
 
   return (
-    <JazzProvider config={resolvedConfig} fallback={fallback ?? defaultFallback}>
+    <JazzProvider
+      key={configKey + serverUrl}
+      config={resolvedConfig}
+      loading={fallback ?? defaultFallback}
+    >
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="dark-content" />
         <View style={styles.content}>

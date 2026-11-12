@@ -33,8 +33,8 @@ use std::time::{Duration, Instant};
 
 use jazz::binding_host::{self, Binding, EventChunk, HostError, Link};
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, LargeValueUpdate, RemoteLinkHint, SubscriptionStream,
-    block_on,
+    Db, DbConfig, DbIdentity, FileOptions, LargeValueUpdate, Migrations, RemoteLinkHint,
+    SubscriptionStream, block_on,
 };
 use jazz::ids::{AuthorSubject, RowUuid};
 use jazz::link::{
@@ -121,6 +121,11 @@ impl RelayScope {
     }
 }
 
+pub(crate) type MigrationsKey = (
+    Vec<jazz::ids::SchemaVersionId>,
+    Vec<jazz::ids::MigrationLensId>,
+);
+
 /// Immutable configuration used to start a relay owner thread.
 #[derive(Clone, Debug)]
 pub struct RelayOpenConfig {
@@ -133,10 +138,27 @@ pub struct RelayOpenConfig {
     /// interpolates auth tokens or untrusted strings into a filesystem path.
     pub sqlite_path: PathBuf,
     pub schema: JazzSchema,
+    /// The app's earlier schema versions and the lenses between them, as it
+    /// ships them: the store keeps each column where the authority does.
+    pub migrations: Migrations,
     pub identity: DbIdentity,
 }
 
 impl RelayOpenConfig {
+    /// What identifies this config's schema history: its earlier versions
+    /// and its content-addressed lenses, in the order shipped. A scope
+    /// reopened with another history is another configuration.
+    pub(crate) fn migrations_key(&self) -> MigrationsKey {
+        (
+            self.migrations
+                .schemas
+                .iter()
+                .map(|schema| schema.version_id())
+                .collect(),
+            self.migrations.lenses.iter().map(|lens| lens.id).collect(),
+        )
+    }
+
     fn validate(&self) -> Result<(), RelayError> {
         ensure_native_relay_abi_compatible(self.supported_abi)?;
         self.scope.validate()
@@ -258,6 +280,7 @@ struct RelayInner {
     alive: Arc<AtomicBool>,
     sqlite_path: PathBuf,
     schema_version: jazz::ids::SchemaVersionId,
+    migrations: MigrationsKey,
     identity: DbIdentity,
 }
 
@@ -308,6 +331,7 @@ impl NativeRelay {
         config.validate()?;
         let sqlite_path = config.sqlite_path.clone();
         let schema_version = config.schema.version_id();
+        let migrations = config.migrations_key();
         let identity = config.identity;
         let alive = Arc::new(AtomicBool::new(true));
         let (commands, receiver) =
@@ -341,6 +365,7 @@ impl NativeRelay {
                 alive,
                 sqlite_path,
                 schema_version,
+                migrations,
                 identity,
             }),
         })
@@ -808,6 +833,7 @@ fn poll_once<T>(future: &mut Pin<Box<dyn Future<Output = T>>>) -> Poll<T> {
 
 pub(crate) struct RelayWorker {
     schema: JazzSchema,
+    migrations: Migrations,
     persistent: Binding,
     persistent_dirty: Rc<Cell<bool>>,
     upstream: Option<UpstreamConnection>,
@@ -862,7 +888,10 @@ impl RelayWorker {
                 .map_err(|error| RelayError::Storage(error.to_string()))?;
         }
         let db = block_on(Db::open_at(
-            DbConfig::new(config.schema.clone(), config.identity),
+            DbConfig::new(config.schema.clone(), config.identity).with_migrations(
+                config.migrations.schemas.clone(),
+                config.migrations.lenses.clone(),
+            ),
             &config.sqlite_path,
             FileOptions::default(),
         ))
@@ -871,6 +900,7 @@ impl RelayWorker {
         let persistent_dirty = hook(&persistent);
         Ok(Self {
             schema: config.schema,
+            migrations: config.migrations,
             persistent,
             persistent_dirty,
             upstream: None,
@@ -966,8 +996,13 @@ impl RelayWorker {
             .db
             .check_serves(identity.author)
             .map_err(|error| RelayError::Host(error.into()))?;
-        let db = block_on(Db::open(DbConfig::new(self.schema.clone(), identity)))
-            .map_err(|error| RelayError::Host(error.into()))?;
+        let db = block_on(Db::open(
+            DbConfig::new(self.schema.clone(), identity).with_migrations(
+                self.migrations.schemas.clone(),
+                self.migrations.lenses.clone(),
+            ),
+        ))
+        .map_err(|error| RelayError::Host(error.into()))?;
         // Continue after the node's previous holder: its transaction ids
         // were (seq, node), and the relay deduplicates by them.
         if high_water > 0 {
@@ -1331,6 +1366,8 @@ struct StreamingOptions {
     updated_at_ms: Option<f64>,
     head: Option<jazz::protocol::BranchSelector>,
     base: Option<jazz::protocol::BranchViewBase>,
+    /// The open transaction the finished value is staged in.
+    transaction: Option<String>,
 }
 
 fn foreground_command(
@@ -1635,6 +1672,10 @@ fn foreground_command(
         Request::PendingUploadCount => Response::PendingUploadCount {
             count: binding.pending_upload_count() as u64,
         },
+        Request::UploadStatus => Response::UploadStatus {
+            status_json: serde_json::to_string(&binding.upload_status())
+                .expect("an upload status serializes"),
+        },
         Request::BeginStreamingMutation {
             mutation,
             table,
@@ -1660,6 +1701,7 @@ fn foreground_command(
                 options.updated_at_ms,
                 options.head,
                 options.base,
+                options.transaction.as_deref(),
             )?;
             let handle = client.handle();
             client.uploads.insert(handle, upload);
@@ -1679,9 +1721,14 @@ fn foreground_command(
             let mut mutation = client.uploads.remove(&upload).ok_or_else(|| {
                 HostError::Argument(format!("unknown streaming mutation {upload}"))
             })?;
-            let (tx_id, _) = client.track(mutation.finish()?);
-            Response::TransactionCommitted {
-                tx_id: *tx_id.as_bytes(),
+            if mutation.in_transaction() {
+                mutation.finish_in_transaction()?;
+                Response::MutationStaged
+            } else {
+                let (tx_id, _) = client.track(mutation.finish()?);
+                Response::TransactionCommitted {
+                    tx_id: *tx_id.as_bytes(),
+                }
             }
         }
         Request::AbortStreamingMutation { upload } => Response::StreamingMutationAborted {
@@ -1780,10 +1827,11 @@ fn wait_for_write(
         .writes
         .get(&TransactionId(tx_id))
         .ok_or_else(|| HostError::Argument("unknown foreground transaction id".to_owned()))?;
-    let wait = client.binding.wait_for_write(&tracked.write, tier)?;
-    if !observe_only {
-        tracked.claimed.set(true);
-    }
+    let wait = client.binding.wait_for_write(
+        &tracked.write,
+        tier,
+        (!observe_only).then(|| Rc::clone(&tracked.claimed)),
+    )?;
     client.pending_or_ready(
         Box::pin(async move {
             wait.await?;
@@ -1813,6 +1861,7 @@ impl NativeRelayRegistry {
         if let Some(existing) = relays.get(&config.scope) {
             if existing.inner.sqlite_path != config.sqlite_path
                 || existing.inner.schema_version != config.schema.version_id()
+                || existing.inner.migrations != config.migrations_key()
                 || existing.inner.identity != config.identity
             {
                 return Err(RelayError::ScopeConfigurationMismatch);
@@ -1873,6 +1922,9 @@ pub struct NativeRelaySocketConfig {
     pub app_id: AppId,
     pub peer_identity: AuthorSubject,
     pub auth: AuthConfig,
+    /// The upgrade request's `Authorization` header (see
+    /// [`NativeTransportRequest::authorization`]).
+    pub authorization: Option<String>,
     /// Every event of the worker's [`UpstreamLink`], in order.
     pub on_event: Arc<dyn Fn(LinkEvent) + Send + Sync>,
 }
@@ -1926,14 +1978,27 @@ impl NativeRelaySocketWorker {
         config: NativeRelaySocketConfig,
         connector: Arc<dyn NativeTransportConnector>,
     ) -> Result<Self, RelayError> {
+        // A socket presents exactly one user credential: a local-first
+        // account's own token, or a session stated to the app's backend with
+        // the app's bearer on the upgrade. Never a backend or admin secret.
+        let token = config
+            .auth
+            .jwt_token
+            .as_deref()
+            .is_some_and(|t| !t.is_empty());
+        let stated = config.auth.backend_session.is_some()
+            && config
+                .authorization
+                .as_deref()
+                .is_some_and(|a| !a.is_empty());
         if config.peer_identity == AuthorSubject::SYSTEM
-            || config.auth.jwt_token.as_deref().is_none_or(str::is_empty)
+            || token == stated
+            || (token && config.authorization.is_some())
             || config.auth.backend_secret.is_some()
             || config.auth.admin_secret.is_some()
-            || config.auth.backend_session.is_some()
         {
             return Err(RelayError::Socket(
-                "native relay sockets require an ordinary non-SYSTEM bearer session".to_owned(),
+                "native relay sockets require an ordinary non-SYSTEM user session".to_owned(),
             ));
         }
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -2123,6 +2188,8 @@ async fn connect_and_bridge(
         app_id: config.app_id,
         peer_identity: config.peer_identity,
         auth: config.auth.clone(),
+        authorization: config.authorization.clone(),
+        bundle: None,
         wake: Arc::new(move || inbound_wake.notify_one()),
     };
     let connecting = connector.connect(request);

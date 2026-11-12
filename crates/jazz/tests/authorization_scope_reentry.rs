@@ -50,7 +50,7 @@ fn schema() -> JazzSchema {
         MEMBERSHIPS,
         vec![
             outer_eq("team", "team"),
-            session_eq("user", &["user", "identity", "subject"]),
+            session_eq("user", &["identity", "subject"]),
         ],
     );
     compile_schema(
@@ -66,7 +66,7 @@ fn schema() -> JazzSchema {
                     .column("user", PublicColumnType::Text)
                     .policies(read_and_allow_all_writes(session_eq(
                         "user",
-                        &["user", "identity", "subject"],
+                        &["identity", "subject"],
                     ))),
             )
             .table(
@@ -313,7 +313,9 @@ fn write_only_updates_and_upserts_are_denied_without_disclosing_the_target() {
     assert_eq!(full_error.code, ErrorCode::WriteRejected);
     assert!(
         full_error.message.contains("UPDATE")
-            && full_error.message.contains("requires read permission"),
+            && full_error
+                .message
+                .contains("the row does not exist or the session may not read it"),
         "full-update denial must not distinguish the hidden target: {full_error:?}"
     );
     assert_eq!(ordered_page(&db, reader(), &prepared), vec![winner, second]);
@@ -333,7 +335,9 @@ fn write_only_updates_and_upserts_are_denied_without_disclosing_the_target() {
     assert_eq!(partial_error.code, ErrorCode::WriteRejected);
     assert!(
         partial_error.message.contains("UPDATE")
-            && partial_error.message.contains("requires read permission"),
+            && partial_error
+                .message
+                .contains("the row does not exist or the session may not read it"),
         "partial-update denial must explain its read authorization requirement: {partial_error:?}"
     );
     assert_eq!(ordered_page(&db, reader(), &prepared), vec![winner, second]);
@@ -378,7 +382,9 @@ fn write_only_updates_and_upserts_are_denied_without_disclosing_the_target() {
     assert_eq!(upsert_error.code, ErrorCode::WriteRejected);
     assert!(
         upsert_error.message.contains("UPSERT")
-            && upsert_error.message.contains("requires read permission"),
+            && upsert_error
+                .message
+                .contains("the row does not exist or the session may not read it"),
         "upsert denial must explain its read authorization requirement: {upsert_error:?}"
     );
 
@@ -473,7 +479,11 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
         Err(error) => error,
     };
     assert_eq!(denied.code, ErrorCode::WriteRejected);
-    assert!(denied.message.contains("requires read permission"));
+    assert!(
+        denied
+            .message
+            .contains("the row does not exist or the session may not read it")
+    );
     assert_eq!(reader_page(), vec![winner, second]);
     assert!(stream.try_next_event().is_none());
 

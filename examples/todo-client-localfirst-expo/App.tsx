@@ -1,5 +1,5 @@
 import * as React from "react";
-import { JazzSessionProvider, useJazzSession } from "jazz-tools/expo";
+import { JazzProvider, useJazzSession } from "jazz-tools/expo";
 import {
   ActivityIndicator,
   Pressable,
@@ -12,10 +12,10 @@ import {
 import { TodoList } from "./src/TodoList";
 
 // Expo's Metro bundler inlines process.env.EXPO_PUBLIC_* at bundle time.
-// Set these in the shell that starts Metro.
+// Set it in the shell that starts Metro: the app's backend's /jazz URL
+// (`pnpm backend`), as the device reaches it.
 declare const process: { env: Record<string, string | undefined> };
 
-const appId = process.env.EXPO_PUBLIC_JAZZ_APP_ID!;
 const serverUrl = process.env.EXPO_PUBLIC_JAZZ_SERVER_URL!;
 const styles = StyleSheet.create({
   container: {
@@ -89,12 +89,13 @@ function SessionFallback() {
 }
 
 export function App() {
-  if (!appId || !serverUrl)
-    throw new Error("Set EXPO_PUBLIC_JAZZ_APP_ID and EXPO_PUBLIC_JAZZ_SERVER_URL");
+  if (!serverUrl)
+    throw new Error("Set EXPO_PUBLIC_JAZZ_SERVER_URL to the app's backend (pnpm backend)");
   return (
-    <JazzSessionProvider
-      config={{ appId, serverUrl, env: "dev", initial: "local-first" }}
-      fallback={<SessionFallback />}
+    <JazzProvider
+      config={{ serverUrl, env: "dev", initial: "device" }}
+      loading={<SessionFallback />}
+      error={<SessionFallback />}
     >
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="dark-content" />
@@ -103,7 +104,7 @@ export function App() {
           <TodoList />
         </View>
       </SafeAreaView>
-    </JazzSessionProvider>
+    </JazzProvider>
   );
 }
 

@@ -2,70 +2,42 @@ import "server-only";
 
 import { app as schemaApp } from "../schema";
 import permissions from "../permissions";
-import type { JazzSessionConfig, Db } from "jazz-tools/backend";
+import type { Db, Jazz } from "jazz-tools/backend";
 
 // This is a workaround to resolve correctly NAPI modules in the monorepo
-// Real-world apps should just `import { createJazzSession } from "jazz-tools/backend"`
+// Real-world apps should just `import { createJazz } from "jazz-tools/backend"`
 import { createRequire as createRequireFromModule } from "node:module";
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-const nodeRequire = createRequire(import.meta.url);
+const { acceptDeviceAccounts, createJazz, memory, sqlite } = createRequire(import.meta.url)(
+  "jazz-tools/backend",
+) as typeof import("jazz-tools/backend");
 
-type BackendState = Awaited<ReturnType<typeof import("jazz-tools/backend").createJazzSession>>;
-type BackendModule = {
-  createJazzSession: (config: JazzSessionConfig) => Promise<BackendState>;
-};
-type GlobalBackendState = typeof globalThis & {
-  __jazzNextCsrSsrBackend?: Promise<BackendState>;
-};
+type GlobalJazz = typeof globalThis & { __jazzNextCsrSsr?: Promise<Jazz> };
+const globalState = globalThis as GlobalJazz;
 
-const globalState = globalThis as GlobalBackendState;
-
-function readBackendConfig(): {
-  appId: string;
-  serverUrl: string;
-  backendSecret: string;
-} {
-  const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID;
-  const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
-  const backendSecret = process.env.BACKEND_SECRET;
-  const missingKeys = [
-    appId ? undefined : "NEXT_PUBLIC_JAZZ_APP_ID",
-    serverUrl ? undefined : "NEXT_PUBLIC_JAZZ_SERVER_URL",
-    backendSecret ? undefined : "BACKEND_SECRET",
-  ].filter((key): key is string => key !== undefined);
-  if (missingKeys.length > 0) {
-    throw new Error(`Missing server backend configuration: ${missingKeys.join(", ")}`);
-  }
-  return { appId: appId!, serverUrl: serverUrl!, backendSecret: backendSecret! };
+/**
+ * Jazz, inside this Next app: browsers sync with it under `/jazz` (see
+ * app/jazz/[...path]/route.ts), and server components and actions read and
+ * write through its `db`. There is no sign-in, so browsers are local-first
+ * guests. Shared across requests and hot reloads.
+ */
+export function jazz(): Promise<Jazz> {
+  const pending = (globalState.__jazzNextCsrSsr ??= createJazz({
+    app: schemaApp,
+    permissions,
+    // No sign-in: every browser is a guest, so let guests sync.
+    authenticate: acceptDeviceAccounts,
+    store: process.env.JAZZ_IN_MEMORY === "1" ? memory() : sqlite({ path: ".jazz" }),
+  }).ready());
+  // A failed start must not poison every later request.
+  pending.catch(() => {
+    if (globalState.__jazzNextCsrSsr === pending) globalState.__jazzNextCsrSsr = undefined;
+  });
+  return pending;
 }
 
+/** The backend's own database (backend authority), for server components and actions. */
 export async function getBackendDb(): Promise<Db> {
-  if (!globalState.__jazzNextCsrSsrBackend) {
-    const config = readBackendConfig();
-    const { createJazzSession } = nodeRequire("jazz-tools/backend") as BackendModule;
-    globalState.__jazzNextCsrSsrBackend = createJazzSession({
-      appId: config.appId,
-      app: schemaApp,
-      permissions,
-      driver: { type: "memory" },
-      serverUrl: config.serverUrl,
-      initial: { backendSecret: config.backendSecret },
-    });
-  }
-  const pending = globalState.__jazzNextCsrSsrBackend;
-  try {
-    const session = await pending;
-    const snapshot = session.getSnapshot();
-    if (snapshot.status !== "ready" || !snapshot.client) {
-      await session.close();
-      throw snapshot.error ?? new Error("Backend session is not ready");
-    }
-    return snapshot.client.db;
-  } catch (error) {
-    if (globalState.__jazzNextCsrSsrBackend === pending) {
-      globalState.__jazzNextCsrSsrBackend = undefined;
-    }
-    throw error;
-  }
+  return (await jazz()).db;
 }

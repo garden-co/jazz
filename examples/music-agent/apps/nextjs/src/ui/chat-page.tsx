@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useAll, useDb, useSession } from "jazz-tools/react";
+import { useAll, useJazzSession, useSession } from "jazz-tools/react";
 import { AppShell } from "@astryxdesign/core/AppShell";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
@@ -10,35 +10,39 @@ import { TopNav, TopNavHeading } from "@astryxdesign/core/TopNav";
 import { app } from "@/schema";
 import { StatusScreen } from "@/components/status-screen";
 import { bootstrapWorkspace } from "@/src/lib/account-enrollment";
-import { authClient, getJwtFromBetterAuth } from "@/src/lib/auth-client";
+import { authClient } from "@/src/lib/auth-client";
 import { ConversationView } from "./conversation-view";
 
 /** Prepare the workspace once (server-side, idempotent), then show the app. */
 export function ChatPage({ agentLabel }: { agentLabel: string }) {
   const { data: session } = authClient.useSession();
+  // The server prepares the workspace of the user's Jazz account, which their
+  // first Jazz sign-in creates: wait for it rather than race it.
+  const jazz = useJazzSession();
+  const account = jazz.status === "ready" ? jazz.user?.accountId : undefined;
   const [bootstrap, setBootstrap] = useState<"loading" | "ready" | "failed">("loading");
   useEffect(() => {
-    if (!session) return;
+    if (!session || !account) return;
     let cancelled = false;
-    void getJwtFromBetterAuth()
-      .then((token) => (token ? bootstrapWorkspace(token) : undefined))
+    setBootstrap("loading");
+    void bootstrapWorkspace()
+      .catch(() => undefined)
       .then((response) => {
         if (!cancelled) setBootstrap(response?.ok ? "ready" : "failed");
       });
     return () => {
       cancelled = true;
     };
-  }, [session?.user.id]);
-  if (!session || bootstrap === "loading")
+  }, [session?.user.id, account]);
+  if (!session || !account || bootstrap === "loading")
     return <StatusScreen message="Preparing your booking desk…" />;
   if (bootstrap === "failed") return <StatusScreen error="The workspace could not be prepared." />;
   return <MusicAgentApp agentLabel={agentLabel} userName={session.user.name} />;
 }
 
 export function MusicAgentApp({ agentLabel, userName }: { agentLabel: string; userName: string }) {
-  const db = useDb();
-  const account = useSession()?.user.account;
-  const { data: artists = [] } = useAll(app.artists);
+  const account = useSession()?.user;
+  const { data: artists = [], db } = useAll(app.artists);
   const { data: conversations = [] } = useAll(app.conversations.orderBy("$createdAt", "desc"));
   const [selectedId, setSelectedId] = useState<string>();
   const artist = artists[0];

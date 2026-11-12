@@ -1057,8 +1057,8 @@ export function schemaDefinitionToAst(definition: SchemaDefinition | AppSchema<a
  * The forward direction applies the migration; the backward direction is generated automatically
  * so older clients can still read data written under the new schema.
  *
- * Migration stubs can be generated with the `jazz-tools@alpha migrations create` command
- * and published with the `jazz-tools@alpha deploy` command.
+ * Migration stubs can be generated with the `jazz-tools migrations create` command
+ * and published by createJazz when the app's backend starts.
  *
  * @example
  * ```typescript

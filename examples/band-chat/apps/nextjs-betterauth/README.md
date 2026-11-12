@@ -11,11 +11,14 @@ product slice, not another generic Todo tutorial.
   components; inline image previews, audio players and downloadable file chips;
   emoji reactions; shared sketches; profiles with names and photos. The UI is
   Astryx with the Jazz theme from `@garden-co/design`, using design tokens only.
-- Better Auth owns the browser session, signs an ES256 JWT, and exposes its
-  JWKS route. Jazz enrolls that JWT into an account handle: sign-up uses
-  `registerJWT`, sign-in uses `loginJWT`, and the provider receives the result.
-- Better Auth's generated tables are persisted through a trusted backend Jazz
-  context and carry explicit deny-all client policies. Read hooks do not create
+- **Jazz runs inside the Next app.** `src/lib/jazz.server.ts` calls
+  `createJazz`, and `app/jazz/[...path]/route.ts` mounts it under `/jazz`, so
+  browsers sync with BandChat's own origin. Better Auth owns the browser
+  session; `authenticate` reads it, and the client asks the backend who is
+  signed in (on start, after signing out, on focus and across tabs). There are
+  no JWTs, JWKS or token routes. Sign-up and sign-in only call Better Auth.
+- Better Auth's generated tables are persisted through the backend's own Jazz
+  database (`jazz.db`) and carry explicit deny-all client policies. Read hooks do not create
   accounts, profiles, rooms, or memberships: a profile is created on an explicit
   first-run step.
 - **Creator-managed admission.** A room creator bootstraps their own membership
@@ -32,19 +35,40 @@ product slice, not another generic Todo tutorial.
 - **Profile visibility follows relationships.** A profile is readable by its
   owner, by co-members, by anyone who can read a message it sent, and by a room
   creator reviewing its join request.
-- A message must reference a profile owned by `session.user.account`. Profiles,
+- A message must reference a profile owned by `session.user`. Profiles,
   memberships, and row provenance store that enrolled account UUID. The
   external issuer and subject remain account identity metadata, never
   membership values. Revocation rejects subsequent writes at the serving
   authority; it does not erase rows already retained locally.
-- **Unread state.** `rooms.lastActivityAt` is a denormalized carrier that any
-  member may bump (an `exists` check against the stored row keeps the name
-  creator-only). The value is not bounded by the policy: a member can write any
-  time, including a future one, which keeps the room at the top of everyone's
-  list. Opening the room still clears it, because a read marker never lags the
-  room's activity. Each reader keeps a private `readMarkers` row per room; a room
-  is unread when its activity is newer than the marker, and only unread rooms pay
-  for a bounded count query.
+- **Unread state.** The room list reads each room with its newest message
+  (`messagesViaRoom`, newest first, limit 1), which also orders the list.
+  Nobody writes to the room when they post, so no member can keep a room on
+  top or hide new messages from others. Each reader keeps one `readMarkers` row
+  per room holding the `$createdAt` of the newest message they have seen; it
+  only moves forward. A room is unread when its newest message was sent by
+  someone else after the marker, and only unread rooms pay for a count, capped
+  at 100. `$createdAt` is the sender's clock, so a message sent from a clock
+  far behind can land before the marker and not count as unread.
+- **Read receipts.** The marker is the only read state: one "read up to" row
+  per member and room, updated in place, never a history. The room's current
+  members can read it: under your own messages, one check mark means sent and
+  two mean another member's marker has reached it, and "Read by" lists the
+  members whose marker reaches a message, by name, without times. This is a
+  privacy change from a marker private to its reader: co-members see how far
+  you have read, and the marker's `$updatedAt` shows roughly when you last had
+  the room open. The app writes the marker only while the room is open and the
+  page visible, at most every 5 seconds (plus once when you switch rooms or
+  hide the page), so its cost does not grow with the room's traffic. Leaving a
+  room, or being removed by its creator, deletes your marker in the same
+  transaction: ex-members leave no read position behind and can read no one
+  else's. That a marker only moves forward is the app's rule, not a policy's:
+  a policy cannot yet compare a column with the written row's new value.
+- **History.** A room opens on its newest 50 messages, each with its reactions.
+  Older messages load 50 at a time before a cursor: the oldest shown
+  `$createdAt`, skipping only the messages already shown at that same time, so
+  the offset never grows with the history. Once older pages are loaded, the
+  live window keeps everything from its oldest message on, so new messages
+  cannot open a gap.
 - **Attachments** stream into the message row with `db.insertStreaming`. The
   room timeline selects message metadata only. An image or audio attachment
   reads its bytes once it scrolls near the viewport, and any other file only
@@ -66,25 +90,21 @@ product slice, not another generic Todo tutorial.
 pnpm dev
 ```
 
-`pnpm dev` needs no configuration. It serves http://127.0.0.1:3000, `withJazz`
-supplies a local Jazz app and sync server, and local `BACKEND_SECRET` and
-`BETTER_AUTH_SECRET` values are generated into the git-ignored
-`.env.development.local`. No secret is checked in. The local sync server keeps
-its data in `node_modules/.cache/jazz-dev-server`; if Better Auth reports that
-it cannot decrypt its private key after the secret changed, delete that
-directory.
+`pnpm dev` needs no configuration. It serves http://127.0.0.1:3000, keeps
+Jazz data in the git-ignored `.jazz/` directory, and generates a local
+`BETTER_AUTH_SECRET` into the git-ignored `.env.development.local`. No secret is
+checked in. If Better Auth reports that it cannot decrypt its private key after
+the secret changed, delete `.jazz/`.
 
 Configuration fails closed. Local defaults apply only to a non-production
 process on a loopback origin; a production build or start must set every value
 listed in `.env.example`, or it refuses to start (`src/lib/config.mjs`,
 `tests/config.test.ts`).
 
-A deployed Jazz server must verify BandChat's tokens the way `withJazz` does
-locally: JWKS at `<NEXT_PUBLIC_APP_ORIGIN>/api/auth/jwks`, JWT issuer equal to
-`NEXT_PUBLIC_APP_ORIGIN`, and JWT audience `band-chat` (`--jwt-issuer` /
-`--jwt-audience`, or `JAZZ_JWT_ISSUER` / `JAZZ_JWT_AUDIENCE`). Otherwise it
-rejects every sign-in with 401. The browser and backend share one Jazz
-environment (`NEXT_PUBLIC_JAZZ_ENV`, else `prod` in production, else `dev`).
+By default the backend stores data in SQLite next to the app. To sync through
+Jazz Cloud or your own sync server instead, set `JAZZ_SERVER_URL`,
+and the app's admin secret in `JAZZ_ADMIN_SECRET`; the backend then uses `remote()`.
+Browsers still talk only to `/jazz` and never see these values.
 
 ## Checks
 
@@ -106,13 +126,13 @@ deploys the real permissions to a test authority and drives the React UI through
 profile setup, room creation, a guest opening the room link and asking to join,
 the owner admitting the request, guest messaging, and removal. It also covers
 the local create/send/react path and attachment-picker validation. The browser receipt
-uses test-authority JWTs; it does not claim to exercise Better Auth's HTTP
-session/JWKS endpoints.
+enrolls test accounts directly against a test authority; it does not exercise
+Better Auth's HTTP session endpoints.
 
 ## Non-goals
 
-This app intentionally does not restore the retired Todo app, a separate app
-backend, app-local worker/WASM copies, or a compatibility path for pre-canonical
+This app intentionally does not restore the retired Todo app, a separate sync
+server, app-local worker/WASM copies, or a compatibility path for pre-canonical
 author identifiers. The room link is deliberately an "ask to join" link, not a
 bearer capability; secure, revocable invite capabilities belong to
 [#1954](https://github.com/garden-co/jazz/issues/1954).

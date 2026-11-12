@@ -1,27 +1,22 @@
-import { type ReactNode } from "react";
 import type { PublicSession } from "../runtime/context.js";
-import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
-import { jazzDevPluginActive } from "../dev-tools/auto-attach.js";
 import {
-  JazzProvider as CoreJazzProvider,
   useDb as useCoreDb,
   useJazzClient as useCoreJazzClient,
   useSession,
-  type CreateJazzClient,
 } from "../react-core/provider.js";
-import { ConfiguredJazzAppProvider, type JazzAppViewProps } from "../react-core/app.js";
-import type { JazzAuth } from "../session/app.js";
-import { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
-import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
-import { DevToolsAutoAttach } from "./devtools-auto-attach.js";
-
-// In dev builds, pull in a generated module that withJazz (next.ts/vite.ts/...)
-// rewrites on every schema push. The bundler tracks this as a dependency of the
-// React provider, so any push to the file forces a full reload of the host app
-// without each framework plugin needing its own dev-server WebSocket wiring.
-if (process.env.NODE_ENV === "development" && typeof window !== "undefined") {
-  import("jazz-tools/_dev/schema-hash").catch(() => {});
-}
+import {
+  JazzSessionProvider,
+  type JazzSessionSourceProps,
+  type JazzSessionViewProps,
+} from "../react-core/session.js";
+import { openBrowserSessionCore, type JazzClientConfig } from "../session/create-jazz-session.js";
+import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
+import {
+  refuseAutoAttachDevTools,
+  type NoAutoAttachDevTools,
+} from "../runtime/removed-provider-props.js";
+import { refuseRemovedProviderProps } from "./provider-props.js";
+import { assertNoClassicProviderProps } from "../classic-api.js";
 
 export { JazzClientProvider, type JazzClientProviderProps } from "../react-core/provider.js";
 
@@ -31,57 +26,40 @@ interface JazzClientContextValue {
   shutdown: CreatedJazzClient["shutdown"];
 }
 
-const createClient: CreateJazzClient = (config) =>
-  createJazzClient(config) as Promise<CreatedJazzClient>;
+export type JazzProviderProps = JazzSessionSourceProps<JazzClientConfig, CreatedJazzClient> &
+  JazzSessionViewProps<CreatedJazzClient> &
+  NoAutoAttachDevTools;
 
-type JazzProviderCommonProps = {
-  fallback?: ReactNode;
-  children: ReactNode;
-  /** Dev-only: auto-open the inspector overlay. Default true. */
-  autoAttachDevTools?: boolean;
-};
-
-export type JazzAppProviderProps = JazzSessionConfig &
-  JazzAppViewProps<CreatedJazzClient> & {
-    auth?: JazzAuth;
-    autoAttachDevTools?: boolean;
-  };
-export type JazzProviderProps =
-  | (JazzProviderCommonProps & { config: DbConfig })
-  | JazzAppProviderProps;
-
-type ConfiguredJazzProviderProps = JazzProviderCommonProps & {
-  config: DbConfig;
-};
-
-function ConfiguredJazzProvider({
-  config,
-  fallback,
-  children,
-  autoAttachDevTools,
-}: ConfiguredJazzProviderProps) {
-  const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
-  // Subscription traces only register while devMode is on at subscribe time,
-  // so it must be on from Db construction for the overlay's Subscriptions tab
-  // to see the app's startup queries — the host bridge's later setDevMode(true)
-  // only covers subscriptions opened after the overlay attached. Default it on
-  // exactly when the overlay will mount; an explicit config value always wins.
-  const effectiveConfig =
-    shouldAutoAttach && config.devMode === undefined && jazzDevPluginActive()
-      ? { ...config, devMode: true }
-      : config;
-
-  return (
-    <CoreJazzProvider config={effectiveConfig} fallback={fallback} createJazzClient={createClient}>
-      {shouldAutoAttach ? <DevToolsAutoAttach /> : null}
-      {children}
-    </CoreJazzProvider>
-  );
-}
-
+/**
+ * Jazz for a React app: owns a session (`config`) or shows yours (`session`),
+ * renders `children` with its client once someone is signed in, and
+ * `signedOut`, `loading` or `error` otherwise. Read the session anywhere
+ * below with `useJazzSession()`.
+ */
 export function JazzProvider(props: JazzProviderProps) {
-  if ("config" in props) return <ConfiguredJazzProvider {...props} />;
-  return <ApplicationJazzProvider {...props} />;
+  refuseAutoAttachDevTools("JazzProvider", props);
+  assertNoClassicProviderProps("JazzProvider", props);
+  refuseRemovedProviderProps(props);
+  const { loading, error, autoAttachDevTools: _removed, ...rest } = props;
+  return (
+    <JazzSessionProvider
+      {...rest}
+      openCore={openBrowserSessionCore}
+      loading={loading === undefined ? <p role="status">Loading…</p> : loading}
+      error={
+        error === undefined
+          ? (state) => (
+              <section role="alert">
+                <p>Jazz couldn’t start. Please try again.</p>
+                <button type="button" onClick={() => void state.retry().catch(() => {})}>
+                  Try again
+                </button>
+              </section>
+            )
+          : error
+      }
+    />
+  );
 }
 
 export function useJazzClient(): JazzClientContextValue {
@@ -98,39 +76,3 @@ export function useDb(): CreatedJazzClient["db"] {
 export { useSession };
 
 export type { JazzClientContextValue };
-
-function ApplicationJazzProvider({
-  auth,
-  children,
-  signedOut,
-  loading,
-  error,
-  autoAttachDevTools,
-  ...config
-}: JazzAppProviderProps) {
-  const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
-  return (
-    <ConfiguredJazzAppProvider
-      config={{ ...config, initial: config.initial ?? (auth ? undefined : "local-first") }}
-      auth={auth}
-      createJazzSession={createJazzSession}
-      signedOut={signedOut}
-      loading={loading === undefined ? <p role="status">Loading…</p> : loading}
-      error={
-        error === undefined
-          ? (state) => (
-              <section role="alert">
-                <p>We couldn’t connect to your account. Please try again.</p>
-                <button type="button" onClick={() => void state.retry()}>
-                  Try again
-                </button>
-              </section>
-            )
-          : error
-      }
-    >
-      {shouldAutoAttach ? <DevToolsAutoAttach /> : null}
-      {children}
-    </ConfiguredJazzAppProvider>
-  );
-}

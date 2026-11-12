@@ -1,5 +1,5 @@
 /** Shared constants for browser tests — no Node.js imports. */
-export const TEST_PORT = 19977;
-export const JWT_SECRET = "test-jwt-secret-for-react-browser-tests";
-export const ADMIN_SECRET = "test-admin-secret-for-react-browser-tests";
-export const APP_ID = "00000000-0000-0000-0000-000000000102";
+/** The app's backend: Jazz in the test server, on the page's own origin. */
+export const SERVER_URL = `${globalThis.location?.origin}/jazz`;
+/** What a client here is scoped by: its endpoint, the backend's own URL. */
+export const SCOPE = `${globalThis.location?.origin}/jazz`;

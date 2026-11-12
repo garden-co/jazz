@@ -1,36 +1,33 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createAccountManager, createDb, generateAuthSecret, type Db } from "jazz-tools";
-import { prepareTestAccount } from "../../../testing/accounts.js";
+import { createJazzClient, type Db, type JazzSession } from "jazz-tools";
+import { memoryAccountStore } from "../../../testing/accounts.js";
 import { app } from "../../schema.js";
 import { hexDump, readFileBlob, readFileRange } from "../../src/large-values.js";
 import { createInvite, inviteLink, parseInviteHash, redeemInvite } from "../../src/sharing.js";
-import { APP_ID, TEST_PORT } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 
-const dbs: Db[] = [];
-const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+const sessions: JazzSession<unknown>[] = [];
 
 afterEach(async () => {
-  await Promise.all(dbs.splice(0).map((db) => db.shutdown()));
+  await Promise.all(sessions.splice(0).map((session) => session.close()));
 });
 
+/** A Db for a new device account of its own, on the local-first client. */
 async function openRemoteDb(label: string): Promise<Db> {
-  const db = await createDb({
-    appId: APP_ID,
-    serverUrl,
-    account: await prepareTestAccount(
-      createAccountManager,
-      APP_ID,
-      serverUrl,
-      generateAuthSecret(),
-    ),
+  const session = await createJazzClient({
+    scope: SCOPE,
+    serverUrl: SERVER_URL,
+    initial: "device",
+    store: memoryAccountStore(),
+    client: () => import("jazz-tools/local-first"),
     driver: { type: "persistent", dbName: `epic-drop-${label}-${crypto.randomUUID()}` },
   });
-  dbs.push(db);
-  return db;
+  sessions.push(session);
+  return session.db;
 }
 
 function sessionUser(db: Db): string {
-  const id = db.getAuthState().session?.user.account;
+  const id = db.getAuthState().session?.user;
   if (!id) throw new Error("expected local-first user session");
   return id;
 }

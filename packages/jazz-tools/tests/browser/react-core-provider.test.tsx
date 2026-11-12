@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import {
   JazzClientProvider as JazzProvider,
-  JazzProvider as ConfiguredJazzProvider,
+  JazzDbProvider as ConfiguredJazzProvider,
   useDb,
   useSession,
 } from "../../src/react-core/provider.js";
@@ -142,7 +142,7 @@ describe("react-core provider/hooks browser coverage", () => {
     initialClient.shutdown = vi.fn(async () => {});
     const replacementClient = makeClient({ db: { name: "replacement-db" } });
     replacementClient.shutdown = vi.fn(async () => {});
-    const createJazzClient = vi
+    const openJazzClient = vi
       .fn()
       .mockResolvedValueOnce(initialClient)
       .mockResolvedValueOnce(replacementClient);
@@ -153,7 +153,7 @@ describe("react-core provider/hooks browser coverage", () => {
           appId: "provider-browser-lifecycle",
           secret: "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         }}
-        createJazzClient={createJazzClient}
+        openJazzClient={openJazzClient}
         fallback={<div data-testid="configured-provider">loading</div>}
       >
         <DbNameView />
@@ -161,12 +161,12 @@ describe("react-core provider/hooks browser coverage", () => {
     );
 
     await expectText("db-name", "initial-db");
-    expect(createJazzClient).toHaveBeenCalledTimes(1);
+    expect(openJazzClient).toHaveBeenCalledTimes(1);
 
     render(
       <ConfiguredJazzProvider
         config={{ appId: "provider-browser-lifecycle", jwtToken: "token" }}
-        createJazzClient={createJazzClient}
+        openJazzClient={openJazzClient}
         fallback={<div data-testid="configured-provider">loading</div>}
       >
         <DbNameView />
@@ -175,7 +175,7 @@ describe("react-core provider/hooks browser coverage", () => {
 
     await expectText("db-name", "replacement-db");
     expect(initialClient.shutdown).toHaveBeenCalledOnce();
-    expect(createJazzClient).toHaveBeenCalledTimes(2);
+    expect(openJazzClient).toHaveBeenCalledTimes(2);
 
     render(null);
 
@@ -656,7 +656,7 @@ describe("react-core provider/hooks browser coverage", () => {
         </CaptureErrorBoundary>,
       );
 
-      await expectText("error", "useDb must be used within <JazzProvider>");
+      await expectText("error", "useDb must be used within <JazzProvider> or <JazzClientProvider>");
     }
   });
 });
@@ -745,7 +745,7 @@ function UseAllSuspenseView({
   query: QueryBuilder<Todo>;
   options?: QueryOptions;
 }) {
-  const rows = useAllSuspense(query, options);
+  const { data: rows } = useAllSuspense(query, options);
   return <div data-testid="rows">{rows.map((row) => row.title).join("|")}</div>;
 }
 

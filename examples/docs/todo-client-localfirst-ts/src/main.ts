@@ -1,6 +1,6 @@
-import { createDb, type DbConfig, type Db } from "jazz-tools";
-import { sessionConfig } from "./account.js";
-import { createJazzSession } from "jazz-tools/client";
+import type { Db } from "jazz-tools";
+import { sessionConfig, type SessionOverrides } from "./account.js";
+import { createJazzClient, type JazzClient, type JazzSession } from "jazz-tools/client";
 import { authSessionExamples } from "./auth-session-snippets.js";
 import { app, type Todo } from "../schema.js";
 
@@ -54,22 +54,49 @@ function orderTodosWithDepth(todos: Todo[]): { todo: Todo; depth: number }[] {
 }
 
 // #region context-setup-ts-client
-async function openLocalFirst(config?: Partial<DbConfig>) {
-  const session = await createJazzSession(sessionConfig(config));
-  // Read the current client from session.getSnapshot(); close the session on teardown.
+async function openSession(config?: SessionOverrides) {
+  const session = await createJazzClient(sessionConfig(config));
+  // session.db is the signed-in user's Db; close the session on teardown.
   return session;
 }
 // #endregion context-setup-ts-client
 
+// #region follow-session-ts
+/**
+ * Run `attach` on the session's current Db, and again each time the session
+ * replaces it: when the user signs in, signs out or switches accounts. (The
+ * upgrade to the local-first client keeps the same Db.)
+ */
+export function followDb(
+  session: JazzSession<JazzClient>,
+  attach: (db: Db) => () => void,
+): () => void {
+  let current: Db | undefined;
+  let detach: (() => void) | undefined;
+  const follow = () => {
+    const next = session.getSnapshot().client?.db;
+    if (next === current) return;
+    detach?.();
+    detach = undefined;
+    current = next;
+    if (next) detach = attach(next);
+  };
+  const stop = session.subscribe(follow);
+  follow();
+  return () => {
+    stop();
+    detach?.();
+  };
+}
+// #endregion follow-session-ts
+
 export async function startApp(
   container: HTMLElement,
-  config?: Partial<DbConfig>,
-): Promise<{ db: Db; destroy: () => Promise<void> }> {
-  // Explicit fixed handles remain supported for advanced callers and replica tests.
-  const session = config?.account ? undefined : await openLocalFirst(config);
-  const db = config?.account
-    ? await createDb({ ...config, appId: config.appId!, account: config.account })
-    : session!.getSnapshot().client!.db;
+  config?: SessionOverrides,
+): Promise<{ session: JazzSession<JazzClient>; db: Db; destroy: () => Promise<void> }> {
+  const session = await openSession(config);
+  // Writes go to the current Db: the session swaps it when the user signs in or out.
+  const currentDb = () => session.db;
 
   // Build DOM
   const h1 = document.createElement("h1");
@@ -102,7 +129,7 @@ export async function startApp(
   container.appendChild(list);
   // Subscribe to all todos.
   const query = app.todos;
-  db.subscribe(query, (todos) => {
+  const render = (todos: Todo[]) => {
     const ordered = orderTodosWithDepth(todos);
     parentSelect.replaceChildren(noParentOption);
     for (const todo of todos) {
@@ -143,13 +170,14 @@ export async function startApp(
       items.appendChild(item);
     }
     list.replaceChildren(items);
-  });
+  };
+  const stopTodos = followDb(session, (db) => db.subscribe(query, render));
 
   // Add todo form
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     const selectedParentId = parentSelect.value;
-    db.insert(app.todos, {
+    currentDb().insert(app.todos, {
       title: input.value,
       done: false,
       ...(selectedParentId ? { parentId: selectedParentId } : {}),
@@ -166,17 +194,20 @@ export async function startApp(
 
     if (target.classList.contains("toggle")) {
       const checkbox = target as HTMLInputElement;
-      db.update(app.todos, id, { done: checkbox.checked });
+      currentDb().update(app.todos, id, { done: checkbox.checked });
     } else if (target.classList.contains("delete-btn")) {
-      db.delete(app.todos, id);
+      currentDb().delete(app.todos, id);
     }
   });
 
   return {
-    db,
+    session,
+    get db() {
+      return currentDb();
+    },
     destroy: async () => {
-      if (session) await session.close();
-      else await db.shutdown();
+      stopTodos();
+      await session.close();
       container.innerHTML = "";
     },
   };

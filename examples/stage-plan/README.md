@@ -16,9 +16,11 @@ StagePlan is the Jazz example for two things:
 
 ## Apps
 
-| App                                              | Stack                                                         |
-| ------------------------------------------------ | ------------------------------------------------------------- |
-| [`apps/react-localfirst`](apps/react-localfirst) | React, Vite, local-first accounts, Astryx with the Jazz theme |
+| App                                                      | Stack                                                                      |
+| -------------------------------------------------------- | -------------------------------------------------------------------------- |
+| [`apps/react-localfirst`](apps/react-localfirst)         | React, Vite, device accounts, Astryx with the Jazz theme                   |
+| [`apps/sveltekit-hybrid`](apps/sveltekit-hybrid)         | SvelteKit, Jazz in the app, device-account guest then Better Auth          |
+| [`apps/ts-effect-betterauth`](apps/ts-effect-betterauth) | TypeScript and Effect, no UI framework, Jazz in a Hono server, Better Auth |
 
 ## Run it
 
@@ -29,7 +31,7 @@ cd examples/stage-plan/apps/react-localfirst
 pnpm dev
 ```
 
-`pnpm dev` starts a local Jazz server through the Vite plugin. The first time
+`pnpm dev` starts a local Jazz core next to the Vite dev server. The first time
 you open the app, it creates your crew profile and a demo show,
 "The Late Lanterns: album launch", with the same eight tasks every time.
 If the server rejects part of the demo while the tab is open, a banner offers
@@ -77,8 +79,8 @@ and are enforced by the server.
 
 ## Identity
 
-Like the todo examples, StagePlan uses a local-first account: no sign-up, the
-browser profile holds the account. That keeps the example small; see the
+Like the todo examples, StagePlan uses a device account: no sign-up, the
+browser profile holds the account's key. That keeps the example small; see the
 [auth docs](https://jazz.tools/docs/auth/authentication) to add a provider.
 
 ## Schema and the W1 workload

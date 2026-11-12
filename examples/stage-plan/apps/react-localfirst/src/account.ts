@@ -1,14 +1,24 @@
-import type { JazzSessionConfig } from "jazz-tools/client";
+import type { JazzClientConfig } from "jazz-tools/client";
 
 /**
- * A local-first account, like the todo example: no sign-up, the browser
- * profile holds the account secret. Crew join shows through invite links.
+ * A device account, like the todo example: no sign-up, the browser profile
+ * holds the account's key. Crew join shows through invite links.
  */
-export function sessionConfig(overrides: Partial<JazzSessionConfig> = {}): JazzSessionConfig {
-  const env = import.meta.env as Record<string, string | undefined>;
-  const appId = overrides.appId ?? env.VITE_JAZZ_APP_ID ?? env.JAZZ_APP_ID;
-  const serverUrl = overrides.serverUrl ?? env.VITE_JAZZ_SERVER_URL ?? env.JAZZ_SERVER_URL;
-  if (!appId) throw new Error("Missing Jazz appId");
-  if (!serverUrl) throw new Error("Missing Jazz serverUrl");
-  return { env: "dev", ...overrides, appId, serverUrl, initial: "local-first" };
+/**
+ * Tests point the app at a sync server by its app id; a browser client takes
+ * that as its `scope` (it names no app of its own).
+ */
+export type SessionOverrides = Omit<Partial<JazzClientConfig>, "appId"> & { appId?: string };
+
+export function sessionConfig({ appId, ...rest }: SessionOverrides = {}): JazzClientConfig {
+  const overrides = appId === undefined ? rest : { ...rest, scope: appId };
+  // The app's backend serves Jazz on this origin (`/jazz`), so it needs no URL.
+  return {
+    env: "dev",
+    // Start on the thin client; load the local-first one in its own chunk
+    // once the page has loaded, then keep working offline.
+    client: () => import("jazz-tools/local-first"),
+    ...overrides,
+    initial: "device",
+  };
 }

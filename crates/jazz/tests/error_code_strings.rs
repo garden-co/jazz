@@ -14,7 +14,7 @@ use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 /// Every variant, spelled out. The exhaustive `match` in `pinned` stops this
 /// file compiling when a variant is added, so a new code must be pinned here.
-const ALL: [ErrorCode; 10] = [
+const ALL: [ErrorCode; 11] = [
     ErrorCode::Schema,
     ErrorCode::Query,
     ErrorCode::WriteRejected,
@@ -25,6 +25,7 @@ const ALL: [ErrorCode; 10] = [
     ErrorCode::NotObserved,
     ErrorCode::HistoricalReadRequiresServer,
     ErrorCode::UnsupportedStorageCodecs,
+    ErrorCode::AuthorityChanged,
 ];
 
 fn pinned(code: ErrorCode) -> &'static str {
@@ -39,6 +40,7 @@ fn pinned(code: ErrorCode) -> &'static str {
         ErrorCode::NotObserved => "not_observed",
         ErrorCode::HistoricalReadRequiresServer => "historical_read_requires_server",
         ErrorCode::UnsupportedStorageCodecs => "unsupported_storage_codecs",
+        ErrorCode::AuthorityChanged => "authority_changed",
     }
 }
 
@@ -68,7 +70,6 @@ fn pinned_reason(reason: Reason) -> &'static str {
         Reason::MissingRequired => "missing_required",
         Reason::BranchMove => "branch_move",
         Reason::MissingChunks => "missing_chunks",
-        Reason::PermissionsHeadMissing => "permissions_head_missing",
         Reason::PredecessorRejected => "predecessor_rejected",
         Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
         Reason::IdentityMismatch => "identity_mismatch",
@@ -135,6 +136,7 @@ fn a_public_api_error_keeps_its_display_text_and_exposes_the_stable_code() {
         },
         id_source: None,
         chunk_store: None,
+        host_chunk_io: false,
         clock: None,
         migrations: Default::default(),
         system_node: None,

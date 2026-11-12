@@ -23,8 +23,8 @@ function assertCurrentRnBoundary(packageReadme, installGuide, spec) {
   );
   assert.match(
     packageReadme,
-    /AccountHandle.*createJazzClient.*matching native development or release build/i,
-    "persistent clients must retain account-handle admission and native-build requirements",
+    /createJazzClient.*signs in a device account or your backend's user.*matching native development or release build/i,
+    "persistent clients must keep the session's sign-in and the native-build requirements",
   );
   assert.match(
     packageReadme,
@@ -295,9 +295,9 @@ function assertPublicClientSeedStages(source) {
     previous = position;
   }
   for (const pattern of [
-    /markFailure\("public-client-open-failed"\);\s*const client = await createJazzClient/,
+    /markFailure\("public-client-open-failed"\);\s*const client = await openJazzClient/,
     /markFailure\("public-client-subscribe-failed"\);\s*unsubscribe = client\.db\.subscribe/,
-    /markFailure\("public-client-write-failed"\);\s*const write = client\.db\.insert/,
+    /markFailure\("public-client-write-failed"\);\s*try \{\s*const write = client\.db\.insert/,
     /markFailure\("public-client-read-failed"\);\s*const rows = await client\.db\.all/,
     /markFailure\("public-client-publish-failed"\);\s*if \(!\(await waitForPublication\(\(\) => observed\)\)\)/,
     /markFailure\("public-client-core-observation-failed"\);\s*boundary\?\.\("js-before-core-await"\);\s*await waitForCoreObservation\(\);/,
@@ -386,13 +386,13 @@ function assertPublicClientRelayReadback(source) {
   const create = awaitCall(client.initializer);
   assert.ok(
     create &&
-      isIdentifier(create.expression, "createJazzClient") &&
+      isIdentifier(create.expression, "openJazzClient") &&
       create.arguments.length === 1 &&
       ts.isCallExpression(create.arguments[0]) &&
       isIdentifier(create.arguments[0].expression, "clientConfig") &&
       create.arguments[0].arguments.length === 1 &&
       isIdentifier(create.arguments[0].arguments[0], "admitted"),
-    "relay readback must await createJazzClient(clientConfig(admitted))",
+    "relay readback must await openJazzClient(clientConfig(admitted))",
   );
   assert.ok(
     ts.isVariableStatement(unsubscribeStatement) &&
@@ -640,7 +640,7 @@ test("both platform session wrappers delegate one authenticated socket owner to 
   // worker, then activates the same Rust-owned worker after publication.
   assert.match(relay, /NativeRelaySocketWorker::prepare_with_connector\(/);
   assert.match(relay, /worker\._worker\.activate\(\)/);
-  assert.match(relay, /native relay sockets require an ordinary non-SYSTEM bearer session/);
+  assert.match(relay, /native relay sockets require an ordinary non-SYSTEM user session/);
   assert.match(relay, /private_socket_sessions\.remove/);
 });
 
@@ -683,7 +683,9 @@ test("Android acceptance reads only bounded receipt and allowlisted diagnostic t
   );
   assert.match(harness, /rn_server_session_harness/);
   assert.match(driver, /host: "10\.0\.2\.2"/);
-  assert.match(harness, /http:\/\/\$\{host\}:\$\{session\.server_port\}/);
+  // Devices reach Jazz through the app's backend, never Core directly.
+  assert.match(harness, /http:\/\/\$\{host\}:\$\{backend\.port\}\$\{backend\.basePath\}/);
+  assert.match(harness, /device-backend\.mjs/);
   for (const input of ["jazzDeviceEdgeEndpoint"]) {
     assert.match(driver, new RegExp(`"${input}"`));
     assert.match(fixture, new RegExp(`"${input}"`));
@@ -809,7 +811,7 @@ test("RN packaging and public docs describe the proven alpha boundary semantical
     fs.readFileSync(path.resolve(root, "../../crates/jazz-rn/README.md"), "utf8"),
   );
   const installGuide = prose(
-    fs.readFileSync(path.resolve(root, "../../docs/content/docs/install/client.mdx"), "utf8"),
+    fs.readFileSync(path.resolve(root, "../../docs/content/docs/setup/react-native.mdx"), "utf8"),
   );
   const spec = prose(
     fs.readFileSync(path.resolve(root, "../../crates/jazz/SPEC/19_native_relays.md"), "utf8"),
@@ -999,11 +1001,11 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
   // The restart assertion must cross the public RN API. A byte-level `all`
   // after re-admission only proves the host transport; it does not prove a
   // fresh application can start, select its foreground runtime, and decode a
-  // persisted row through `createJazzClient`.
+  // persisted row through `openJazzClient`.
   assert.match(app, /await proveHighLevelForegroundRestart\(reopened, receipt\.runNonce\)/);
   assert.match(
     app,
-    /seedHighLevelForegroundRuntime\(\s*scopeA,\s*receipt\.runNonce,\s*markFailure,\s*waitForNativeCoreObservation,\s*recordNativeSeedBoundary,?\s*\)/,
+    /seedHighLevelForegroundRuntime\(\s*scopeA,\s*receipt\.runNonce,\s*markFailure,\s*waitForNativeCoreObservation,\s*recordNativeSeedBoundary,\s*reportPublicClientWriteFailure,?\s*\)/,
   );
   // Before the driver ends the seed process, a separately opened public
   // foreground must read the run-bound row. This prevents the restart claim
@@ -1012,7 +1014,7 @@ test("process-restart acceptance has two disjoint, host-terminated phases", () =
     app,
     /markFailure\("public-client-relay-readback-failed"\);\s*await proveHighLevelForegroundRelayReadback\(scopeA, receipt\.runNonce\)/,
   );
-  assert.match(highLevelForeground, /createJazzClient\(clientConfig\(admitted\)\)/);
+  assert.match(highLevelForeground, /openJazzClient\(clientConfig\(admitted\)\)/);
   assert.match(highLevelForeground, /client\.db\.all\(app\.todos\)/);
   assert.match(highLevelForeground, /assertPersistedTitleForRun/);
   assertPublicClientRelayReadback(highLevelForeground);
@@ -1232,7 +1234,7 @@ test("dispatch device workflow uses Blacksmith KVM while source jobs remain chea
     assert.match(
       section,
       new RegExp(
-        `pnpm install --frozen-lockfile[\\s\\S]*?pnpm --filter rn-device-acceptance build:workspace-prerequisites[\\s\\S]*?${followingStage}`,
+        `pnpm install --frozen-lockfile[\\s\\S]*?pnpm --filter rn-device-acceptance build:device-backend[\\s\\S]*?pnpm --filter jazz-rn build\\n[\\s\\S]*?${followingStage}`,
       ),
       `${job} must stage the source-built React Native public entrypoint immediately after install and before native bundling`,
     );

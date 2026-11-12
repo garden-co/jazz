@@ -56,6 +56,8 @@ mod local_first_auth_integration;
 mod local_first_server_wait;
 #[path = "../merged_redelivery.rs"]
 mod merged_redelivery;
+#[path = "../migrated_table_after_restart.rs"]
+mod migrated_table_after_restart;
 #[path = "../mixed_generation_history.rs"]
 mod mixed_generation_history;
 #[path = "../native_account_admission.rs"]

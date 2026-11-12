@@ -1,41 +1,92 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
-import { Button } from "@astryxdesign/core/Button";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Link as AstryxLink } from "@astryxdesign/core/Link";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHeader,
-  TableHeaderCell,
-  TableRow,
-} from "@astryxdesign/core/Table";
 import { Text } from "@astryxdesign/core/Text";
 import { AppLink } from "@/components/design/app-link";
 import {
   BackendDiagram,
-  ConsistencyDiagram,
+  FrontendDiagram,
   HistoryDiagram,
   LargeValuesDiagram,
   PermissionsDiagram,
   SchemaDiagram,
-  StackDiagram,
 } from "@/components/home/diagrams";
 import { AdopterQuotes } from "@/components/home/adopter-quotes";
+import { HeroPattern } from "@/components/home/hero-pattern";
+import {
+  DeploymentCarousel,
+  DeploymentPicker,
+  DeploymentSlides,
+} from "@/components/home/deployment-carousel";
 import { CodeWindow } from "@/components/home/code-window";
 import { PricingCalculator } from "@/components/home/pricing-calculator";
-import { CreateJazzCommand } from "@/components/home/create-jazz-command";
+import { PricingTable } from "@/components/home/pricing-table";
+import { AgentPrompt } from "@/components/home/agent-prompt";
 import { FrameworkLogos } from "@/components/home/framework-logos";
-import { WalkthroughVideo } from "@/components/showcase/walkthrough-video";
-import { pricingMeters } from "@/lib/home-pricing";
+import { ExampleReel, type ReelItem } from "@/components/home/example-reel";
+import { heroExamples } from "@/lib/showcase/catalogue";
 import { adopterQuotes } from "@/lib/home-quotes";
 import { blogSource } from "@/lib/source";
-import { StippleCanvas, heroPattern } from "@garden-co/design/stipple";
+
+/** The agent quickstart, shown in full in the call to action. */
+const quickstart = readFileSync(join(process.cwd(), "public/quickstart.md"), "utf8").trim();
+
+/**
+ * The quickstart is hard-wrapped at 100 columns, which wraps again in a
+ * narrow box. For display, join each paragraph or list item back into one
+ * line; headings, list markers and "Default:" / "See" lines start new ones.
+ */
+function unwrap(markdown: string) {
+  const out: string[] = [];
+  for (const line of markdown.split("\n")) {
+    const text = line.trim();
+    const previous = out[out.length - 1];
+    const startsBlock = /^(#|- |\d+\. |Default:|See )/.test(text);
+    if (text && previous?.trim() && !startsBlock && !previous.trim().startsWith("#")) {
+      out[out.length - 1] = `${previous} ${text}`;
+    } else {
+      out.push(line);
+    }
+  }
+  return out.join("\n");
+}
 
 export const metadata: Metadata = {
-  title: "Jazz - The database that syncs.",
+  title: "Jazz - The data layer that you own.",
 };
+
+const serverCode = `import { createJazz, vercel } from "jazz-tools/backend";
+import { app, permissions } from "./schema";
+
+export const jazz = createJazz({
+  app,
+  permissions,
+  // Also: cloudflare() (coming soon), and plain sqlite()
+  // for local dev and your own servers
+  store: vercel(),
+  // Better Auth, WorkOS, many other providers or any custom auth:
+  // pass on the user ID and permission-relevant claims, or null
+  authenticate: (request) => getSignedInUser(request),
+});`;
+
+const routeCode = `import { jazz } from "@/jazz.server";
+import { app } from "@/schema";
+
+export async function GET(request: Request) {
+  // Runs as the signed-in user: only their todos
+  // according to permissions defined in schema.ts
+  const db = await jazz.forReqUser(request);
+  const todos = await db.all(app.todos.where({ done: false }));
+  return Response.json(todos);
+}`;
+
+const mountCode = `import { jazz } from "@/jazz.server";
+
+// Sync for browsers, apps and agents, on your own origin
+export const { GET, POST, DELETE } = jazz.next();`;
 
 const schemaCode = `import { schema as s } from "jazz-tools";
 
@@ -50,15 +101,12 @@ const schema = {
   ),
 };
 
-export const app = s.defineApp(schema);`;
+export const app = s.defineApp(schema);
 
-const permissionsCode = `import { schema as s } from "jazz-tools";
-import { app } from "./schema";
-
-export default s.definePermissions(
+export const permissions = s.definePermissions(
   app,
   ({ policy, session }) => {
-    const mine = { owner_id: session.user.account };
+    const mine = { owner_id: session.user };
 
     policy.todos.allowRead.where(mine);
     policy.todos.allowInsert.where(mine);
@@ -69,23 +117,20 @@ export default s.definePermissions(
   },
 );`;
 
-const componentCode = `import { useAll, useDb } from "jazz-tools/react";
+const componentCode = `import { useAll } from "jazz-tools/react";
 import { app } from "./schema";
 
 export function OpenTodos() {
-  const db = useDb();
-  const { data: todos = [] } = useAll(
-    app.todos.where({ done: false }),
-  );
+  // As an alternative to traditional querying via api/todos you can query
+  // and write to Jazz directly from the client, which will do real-time sync
+  // through the /jazz route, either through a thin client or fully
+  // local-first with offline support
+  const { data: todos = [], db } = useAll(app.todos.where({ done: false }));
 
   return todos.map((todo) => (
     <label key={todo.id}>
-      <input
-        type="checkbox"
-        onChange={() =>
-          db.update(app.todos, todo.id, { done: true })
-        }
-      />
+      <input type="checkbox"
+        onChange={() => db.update(app.todos, todo.id, { done: true })} />
       {todo.title}
     </label>
   ));
@@ -93,16 +138,16 @@ export function OpenTodos() {
 
 const principles = [
   {
-    title: "Local copies",
-    body: "Every client and server keeps the rows its queries need, so reads never wait on the network.",
+    title: "Part of your backend",
+    body: "Jazz is a library your server imports, wherever you deploy it, and keeps its data on that platform's storage. Its schema and permissions are the code you deploy, with no database server to run.",
   },
   {
-    title: "Partial sync",
-    body: "Only the rows a query touches move, on demand. First load is fast, later loads are instant.",
+    title: "Live queries everywhere",
+    body: "Traditional clients call your API routes as usual. Browsers, mobile apps and backend clients can also live-sync on your own origin, querying straight from a component. Results stay up to date as anyone writes.",
   },
   {
-    title: "One source of truth",
-    body: "Core authorizes every write and stores it durably. Everyone converges on the same data.",
+    title: "Local-first when you want it",
+    body: "Clients start thin. Switch one to local-first for offline use and instant reads: it runs the same Rust engine on the device, with the same queries.",
   },
 ];
 
@@ -112,26 +157,24 @@ const features: {
   body: ReactNode;
   links: { label: string; href: string }[];
   diagram: ReactNode;
-  caption: string;
 }[] = [
   {
     id: "permissions",
-    title: "Row-level security and per-query auth",
+    title: "Declarative permissions and per-query auth",
     body: (
       <>
         <p>
-          Permissions are policies over your data and the user&apos;s JWT claims, defined in code
-          and testable like the rest of your app.
+          Declarative permissions are policies over your data and the user your backend signed in,
+          defined in code and testable like the rest of your app.
         </p>
         <p>
-          Jazz optimizes each query together with the policies that apply to it, which removes work
-          from your backend and gives you zero-roundtrip security.
+          Jazz optimizes each query together with the policies that apply to it, so the same rules
+          hold whether a query runs in a route handler or comes straight from the browser.
         </p>
       </>
     ),
-    links: [{ label: "Permissions", href: "/docs/auth/permissions" }],
+    links: [{ label: "Permissions", href: "/docs/schemas/policies" }],
     diagram: <PermissionsDiagram />,
-    caption: "A query and its read policy, planned together",
   },
   {
     id: "data",
@@ -152,35 +195,15 @@ const features: {
           This allows you to truly keep all data in one place, with no external links and no
           separate systems. And permission policies apply exactly like on normal data.
         </p>
+        <p>
+          Under the hood, large values are stored as prolly trees, so appends, point edits, partial
+          and streaming reads stay fast. Jazz syncs only the parts you need, and queries over large
+          data run in a streaming fashion.
+        </p>
       </>
     ),
     links: [{ label: "Column types", href: "/docs/schemas/column-types" }],
     diagram: <LargeValuesDiagram />,
-    caption:
-      "Under the hood, Jazz uses prolly trees when values get large, ensuring appends, point edits, partial and streaming reads stay fast. Jazz syncs only the parts you need and any queries you run over large data operate in a streaming fashion.",
-  },
-  {
-    id: "consistency",
-    title: "Local-first data with tunable consistency",
-    body: (
-      <>
-        <p>
-          Like an embedded database, Jazz brings durable data directly into your frontend and
-          backend, and syncs it to the cloud. It feels like shared reactive state that abstracts
-          away networking.
-        </p>
-        <p>
-          Jazz is eventually consistent by default. Where transactionality matters, trade latency
-          for globally consistent transactions, in the same database.
-        </p>
-      </>
-    ),
-    links: [
-      { label: "How sync works", href: "/docs/concepts/how-sync-works" },
-      { label: "Durability tiers", href: "/docs/reference/durability-tiers" },
-    ],
-    diagram: <ConsistencyDiagram />,
-    caption: "A write's local state, its sync message, and its confirmed fate",
   },
   {
     id: "history",
@@ -198,11 +221,10 @@ const features: {
       </>
     ),
     links: [
-      { label: "Branches", href: "/docs/concepts/branches" },
-      { label: "Edit metadata", href: "/docs/reading/queries#magic-columns" },
+      { label: "Branches", href: "/docs/recipes/drafts-and-branches" },
+      { label: "Edit metadata", href: "/docs/reading/metadata" },
     ],
     diagram: <HistoryDiagram />,
-    caption: "The history of one row, with a draft branch",
   },
   {
     id: "schema",
@@ -221,11 +243,10 @@ const features: {
     ),
     links: [{ label: "Migrations", href: "/docs/schemas/migrations" }],
     diagram: <SchemaDiagram />,
-    caption: "One raw table, read as two app versions through migration lenses",
   },
   {
     id: "backend",
-    title: "Slims your backend and simplifies your infra",
+    title: "Simplifies your backend and infra",
     body: (
       <>
         <p>
@@ -234,84 +255,101 @@ const features: {
         </p>
         <p>
           Jazz also covers roles that usually need their own infrastructure or vendors: blob
-          storage, file and image CDN, durable streams and real-time message queues.
+          storage, durable streams and real-time messaging, all under the same permissions.
         </p>
       </>
     ),
     links: [
-      { label: "Server setup", href: "/docs/getting-started/server-setup" },
-      { label: "Auth providers", href: "/docs/recipes/auth/auth-provider-integration" },
-      { label: "Permissions", href: "/docs/auth/permissions" },
-      { label: "How sync works", href: "/docs/concepts/how-sync-works" },
+      { label: "Main backend", href: "/docs/setup/deployment/own-server" },
+      { label: "Auth", href: "/docs/setup/auth/backend" },
+      { label: "Permissions", href: "/docs/schemas/policies" },
+      { label: "How sync works", href: "/docs/how-jazz-works" },
     ],
     diagram: <BackendDiagram />,
-    caption: "What moves out of your code into Jazz",
+  },
+  {
+    id: "frontend",
+    title: "Slims your frontend, from thin client to local-first",
+    body: (
+      <>
+        <p>
+          Even as a thin client, Jazz replaces the request/response loop and all the client state
+          around it. A component asks for the rows it needs with one reactive query hook and stays
+          live as they change: no fetch calls per endpoint, no cache to invalidate, no refetching.
+        </p>
+        <p>
+          Turn a client local-first and Jazz also takes over the client logic that is usually the
+          hardest to hand-build: optimistic updates, sync and offline support. It keeps a durable
+          copy on the device, so reads never wait on the network and writes show up at once.
+        </p>
+      </>
+    ),
+    links: [
+      { label: "Thin client", href: "/docs/setup/web-client/thin-client" },
+      { label: "Local-first client", href: "/docs/setup/web-client/local-first-client" },
+      { label: "How sync works", href: "/docs/how-jazz-works" },
+    ],
+    diagram: <FrontendDiagram />,
   },
 ];
 
-const hostingRows: {
-  topic: string;
-  selfHosted: ReactNode;
-  cloud: ReactNode;
-  enterprise: ReactNode;
-}[] = [
-  {
-    topic: "Setup",
-    selfHosted: "One open-source, single-tenant server binary",
-    cloud: "Zero config; create an app from the CLI or dashboard",
-    enterprise: "Dedicated deployment or bring your own cloud, set up with you",
-  },
-  {
-    topic: "Topology",
-    selfHosted: "Runs where you deploy it",
-    cloud: "Globally distributed and geo-optimized",
-    enterprise: "Regions and data residency to your requirements",
-  },
-  {
-    topic: "Reliability",
-    selfHosted: "You operate backups and failover",
-    cloud: "Fault-tolerant, with backups included",
-    enterprise: "Uptime SLA and direct support",
-  },
-  {
-    topic: "Scaling",
-    selfHosted: "Size the instance yourself",
-    cloud: "Scales more granularly than instance-based databases",
-    enterprise: "Capacity planned with you",
-  },
-  ...pricingMeters.map((meter) => ({
-    topic: meter.name,
-    selfHosted: {
-      Compute: "Your own servers; one instance runs a whole app",
-      Storage: "Your own disks",
-      Egress: "Your hosting provider's rates",
-    }[meter.name],
-    cloud: (
-      <>
-        <Text as="p" display="block" weight="medium">
-          {meter.price} {meter.unit}
-        </Text>
-        <Text as="p" display="block" type="supporting" color="secondary" className="mt-1">
-          {meter.note} {meter.included}.
-        </Text>
-      </>
-    ),
-    enterprise: "Volume pricing",
-  })),
-];
+// The homepage leads with the two-device StagePlan walkthrough, then every
+// other example that has one, in catalogue order.
+const reelItems: ReelItem[] = heroExamples
+  .flatMap((example): ReelItem[] => {
+    if (example.id === "stage-plan")
+      return [
+        {
+          id: example.id,
+          title: example.title,
+          subtitle: "Two laptops on one live board, with edits made offline syncing back.",
+          src: "/examples/videos/stage-plan-two-devices.mp4",
+          poster: "/examples/videos/stage-plan-two-devices.jpg",
+          label:
+            "Two laptops running the StagePlan example, a crew chief and a crew member on the same show board. A task added or a card moved on one appears on the other, and a comment shows up live in the task the other has open. Edits made with the laptop's Wi-Fi turned off arrive when it is turned back on.",
+        },
+      ];
+    if (!example.video) return [];
+    return [
+      {
+        id: example.id,
+        title: example.title,
+        subtitle: example.tagline,
+        src: example.video.src,
+        poster: example.video.poster,
+        label: example.video.caption,
+      },
+    ];
+  })
+  .sort((a, b) => Number(b.id === "stage-plan") - Number(a.id === "stage-plan"));
 
 function SectionHeader({
   id,
   title,
+  step,
   children,
 }: {
   id?: string;
   title: ReactNode;
+  /** Shows a numbered step badge before the title. */
+  step?: number;
   children?: ReactNode;
 }) {
   return (
     <div className="grid gap-4">
-      <Heading level={2} type="display-3" id={id} className="home-anchor max-w-3xl">
+      <Heading
+        level={2}
+        type="display-3"
+        id={id}
+        className={`home-anchor max-w-3xl${step ? " home-step-heading" : ""}`}
+      >
+        {step ? (
+          <span className="home-step" aria-hidden="true">
+            <span className="home-step-dot">
+              <span className="home-step-number">{step}</span>
+            </span>
+          </span>
+        ) : null}
         {title}
       </Heading>
       {children ? <div className="home-prose max-w-2xl">{children}</div> : null}
@@ -321,33 +359,26 @@ function SectionHeader({
 
 function Figure({
   children,
-  caption,
   className,
-  number,
   after,
 }: {
   children: ReactNode;
-  caption?: string;
   className?: string;
-  number?: number;
-  /** Rendered below the caption, such as a follow-up link. */
+  /** Rendered below the figure, such as a follow-up link. */
   after?: ReactNode;
 }) {
   return (
     <figure className={`home-figure-frame ${className ?? ""}`}>
       <div className="home-figure">{children}</div>
-      {caption ? (
-        <figcaption className="home-figcaption">
-          {number ? <span className="home-figcaption-number">Fig. {number}</span> : null}
-          {caption}
-        </figcaption>
-      ) : null}
       {after}
     </figure>
   );
 }
 
 const dateFormatter = new Intl.DateTimeFormat("en-US", { dateStyle: "medium" });
+
+/** The "From the blog" section is hidden for now; flip to show it again. */
+const SHOW_BLOG = false;
 
 function latestPosts(count: number) {
   return [...blogSource.getPages()]
@@ -358,20 +389,20 @@ export default function HomePage() {
   return (
     <div className="w-full">
       <section className="home-hero h-[80vh] w-full">
-        <StippleCanvas pattern={heroPattern} className="home-hero-pattern" />
+        <HeroPattern className="home-hero-pattern" />
         <div aria-hidden className="home-hero-fade" />
         <div className="mx-auto flex h-full w-full max-w-(--fd-layout-width) items-end px-4 relative">
-          <div className="w-full max-w-[42rem] space-y-6 pb-2 sm:space-y-10">
+          <div className="w-full max-w-[48rem] space-y-6 pb-2 sm:space-y-10">
             <Heading level={1} type="display-1">
               <span className="block">the</span>
-              <span className="block -ml-[0.04em]">database</span>
-              <span className="block">that syncs</span>
+              <span className="block -ml-[0.04em]">data layer</span>
+              <span className="block whitespace-nowrap">that you own</span>
             </Heading>
             <Text as="p" display="block" className="max-w-[40em] text-xl leading-relaxed">
-              Jazz is a relational database built on real-time sync.
-              <br />
-              It runs across the cloud, your backend, frontend, native apps, CLIs and agent VMs. Mix
-              and match ACID and eventually consistent / local-first.
+              Jazz is a relational database with tables, blobs, durable streams, collaborative rich
+              text and more, all protected by declarative permissions. It runs in your existing
+              cloud as part of your backend. Use live queries from your server or straight from your
+              clients, including local-first apps.
             </Text>
           </div>
         </div>
@@ -379,67 +410,66 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="how-it-works" title="One database from the client to the cloud" />
-          <Figure
-            className="home-figure-wide mt-6"
-            number={1}
-            caption="Jazz uses the same Rust database engine core everywhere: as WebAssembly in the browser, as a native module in React Native and Node, and as the database server in Jazz Cloud and the jazz-tools CLI."
-          >
-            <StackDiagram />
-          </Figure>
-          <div className="home-facts mt-10">
-            {principles.map((item) => (
-              <div key={item.title} className="home-fact">
-                <Heading level={3}>{item.title}</Heading>
-                <Text as="p" display="block" color="secondary" className="mt-2">
-                  {item.body}
-                </Text>
+          <SectionHeader id="how-it-works" title="Live data, from your cloud to every client" />
+          <DeploymentCarousel>
+            <div className="home-overview mt-6">
+              <Figure className="home-figure-wide">
+                <DeploymentPicker />
+                <DeploymentSlides />
+              </Figure>
+              <div className="home-facts">
+                <div className="home-fact">
+                  <Heading level={3}>Runs in your own cloud</Heading>
+                  <Text as="p" display="block" color="secondary" className="mt-2">
+                    Jazz makes use of your platform&apos;s native serverless primitives, sharding
+                    and scaling to zero as needed.
+                  </Text>
+                </div>
+                {principles.map((item) => (
+                  <div key={item.title} className="home-fact">
+                    <Heading level={3}>{item.title}</Heading>
+                    <Text as="p" display="block" color="secondary" className="mt-2">
+                      {item.body}
+                    </Text>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            </div>
+          </DeploymentCarousel>
         </div>
       </section>
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="code" title="Use straight from the client as simple reactive state">
-            <Text as="p" display="block" type="large" color="secondary" weight="normal">
-              Define tables and permissions in TypeScript, then query from any component. Writes
-              apply locally at once and sync in the background.
-            </Text>
-          </SectionHeader>
-          <div className="home-code-grid mt-6">
-            <CodeWindow
-              files={[
-                { name: "OpenTodos.tsx", language: "tsx", code: componentCode },
-                { name: "schema.ts", language: "ts", code: schemaCode },
-                { name: "permissions.ts", language: "ts", code: permissionsCode },
-              ]}
-            />
-            <Figure
-              className="home-video-figure"
-              number={2}
-              caption="StagePlan on two devices, recorded from the running app."
-              after={
-                <AppLink href="/examples" className="home-video-link font-medium">
-                  More examples and benchmarks →
-                </AppLink>
-              }
-            >
-              <WalkthroughVideo
-                className="home-video"
-                src="/examples/videos/stage-plan-two-devices.mp4"
-                poster="/examples/videos/stage-plan-two-devices.jpg"
-                width={1280}
-                height={926}
-                aria-label="Two laptops running the StagePlan example, a crew chief and a crew member on the same show board. A task added or a card moved on one appears on the other, and a comment shows up live in the task the other has open. Edits made with the laptop's Wi-Fi turned off arrive when it is turned back on."
+          <SectionHeader id="code" step={1} title="Install in your backend and define a schema" />
+          <div className="home-code-pair mt-6">
+            <div className="home-code-stack">
+              <CodeWindow files={[{ name: "jazz.server.ts", language: "ts", code: serverCode }]} />
+              <CodeWindow
+                files={[{ name: "jazz/[...path]/route.ts", language: "ts", code: mountCode }]}
               />
-            </Figure>
+            </div>
+            <CodeWindow files={[{ name: "schema.ts", language: "ts", code: schemaCode }]} />
           </div>
-          <Text as="p" display="block" color="secondary" className="mt-6">
-            Also for Vue, Svelte, Solid, React Native, plain TypeScript and Rust.{" "}
-            <AppLink href="/docs/install/client">Install guides</AppLink>
-          </Text>
+        </div>
+      </section>
+
+      <section className="home-section home-section-continued">
+        <div className="home-container">
+          <SectionHeader id="query" step={2} title="Query from anywhere" />
+          <div className="home-code-pair mt-6">
+            <CodeWindow files={[{ name: "api/todos/route.ts", language: "ts", code: routeCode }]} />
+            <CodeWindow files={[{ name: "OpenTodos.tsx", language: "tsx", code: componentCode }]} />
+          </div>
+        </div>
+      </section>
+
+      <section className="home-section home-section-continued">
+        <div className="home-container">
+          <SectionHeader id="demo" step={3} title="Build any kind of app, on your infra." />
+          <div className="mt-6">
+            <ExampleReel items={reelItems} moreHref="/examples" />
+          </div>
         </div>
       </section>
 
@@ -454,10 +484,10 @@ export default function HomePage() {
       <section className="home-section">
         <div className="home-container">
           <Heading level={2} type="display-3" id="features" className="home-anchor home-statement">
-            A database responsible for more.
+            One layer for letting apps and agents deal with all kinds of data.
           </Heading>
           <div className="mt-6">
-            {features.map((feature, index) => (
+            {features.map((feature) => (
               <article key={feature.id} className="home-feature">
                 <div className="home-feature-text">
                   <Heading level={3} id={feature.id} className="home-anchor">
@@ -472,13 +502,7 @@ export default function HomePage() {
                     ))}
                   </div>
                 </div>
-                <Figure
-                  className="home-feature-figure"
-                  number={index + 3}
-                  caption={feature.caption}
-                >
-                  {feature.diagram}
-                </Figure>
+                <Figure className="home-feature-figure">{feature.diagram}</Figure>
               </article>
             ))}
           </div>
@@ -487,78 +511,10 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="cloud" title="Self-host or use Jazz Cloud">
-            <Text as="p" display="block" type="large" color="secondary" weight="normal">
-              The single-tenant Jazz server will always be open source and is easy to self-host.
-              Jazz Cloud is the same database, running on global infrastructure tailored for it.
-            </Text>
-            <Text as="p" display="block" type="large" color="secondary" weight="normal">
-              As developers, we hate pricing that makes limiting assumptions about your app and your
-              users, so we bill across simple metrics for the things that are irreducibly hard.
-            </Text>
-          </SectionHeader>
-          <div id="pricing" className="home-table home-anchor mt-6">
-            {/* Below 900px each topic gets its own row above a rounded box of
-                values; from 900px the topic moves into a left column and the
-                values form one ordinary table (see .home-table in global.css). */}
-            <Table density="balanced" verticalAlign="top">
-              <TableHeader>
-                <TableRow>
-                  <TableHeaderCell className="home-table-topic-cell">
-                    <span className="sr-only">Topic</span>
-                  </TableHeaderCell>
-                  <TableHeaderCell>Self-hosted</TableHeaderCell>
-                  <TableHeaderCell>Jazz Cloud</TableHeaderCell>
-                  <TableHeaderCell>Enterprise</TableHeaderCell>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {hostingRows.flatMap((row) => [
-                  <TableRow key={`${row.topic}-topic`} className="home-table-topic">
-                    <TableCell colSpan={3}>
-                      <Text weight="medium">{row.topic}</Text>
-                    </TableCell>
-                  </TableRow>,
-                  <TableRow key={row.topic} className="home-table-values">
-                    <TableCell className="home-table-topic-cell">
-                      <Text weight="medium">{row.topic}</Text>
-                    </TableCell>
-                    <TableCell>
-                      <Text color="secondary">{row.selfHosted}</Text>
-                    </TableCell>
-                    <TableCell>{row.cloud}</TableCell>
-                    <TableCell>{row.enterprise}</TableCell>
-                  </TableRow>,
-                ])}
-                <TableRow className="home-table-actions">
-                  <TableCell className="home-table-topic-cell" />
-                  <TableCell>
-                    <Button
-                      label="How to self-host"
-                      variant="secondary"
-                      href="/docs/getting-started/server-setup#self-hosted-database-server"
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <Button
-                      label={"Generate API\u00a0key"}
-                      variant="primary"
-                      href="https://v2.dashboard.jazz.tools"
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <Button
-                      label={"Book a\u00a0call"}
-                      variant="primary"
-                      href="https://cal.com/anselm-io/cloud-pro-intro"
-                    />
-                  </TableCell>
-                </TableRow>
-              </TableBody>
-            </Table>
-          </div>
-          <div className="mt-12 grid gap-8">
-            <Heading level={3}>Estimate your Jazz Cloud bill</Heading>
+          <SectionHeader id="pricing" title="Priced for flexible self-hosting & BYOC" />
+          <PricingTable />
+          <div className="grid gap-8">
+            <Heading level={3}>What it costs on each platform</Heading>
             {/* Not ported to Astryx yet. A data-astryx-theme attribute ends the
                 theme's @scope, so its element resets (p, h1-h6, code) leave the
                 calculator's Tailwind typography alone. */}
@@ -569,61 +525,65 @@ export default function HomePage() {
         </div>
       </section>
 
-      <section className="home-section">
-        <div className="home-container">
-          <div className="flex flex-wrap items-end justify-between gap-4">
-            <Heading level={2} type="display-3" id="blog" className="home-anchor">
-              From the blog
-            </Heading>
-            <AppLink href="/blog" className="font-medium">
-              All posts →
-            </AppLink>
-          </div>
-          <ol className="home-posts mt-10">
-            {latestPosts(3).map((post) => (
-              <li key={post.url} className="home-post">
-                <Text as="p" display="block" type="supporting" color="secondary">
-                  <time dateTime={new Date(post.data.date).toISOString().slice(0, 10)}>
-                    {dateFormatter.format(new Date(post.data.date))}
-                  </time>{" "}
-                  · {post.data.author}
-                </Text>
-                <Heading level={3} className="mt-3">
-                  <a href={post.url} className="home-post-link">
-                    {post.data.title}
-                  </a>
-                </Heading>
-                {post.data.description ? (
-                  <Text as="p" display="block" color="secondary" className="mt-2">
-                    {post.data.description}
+      {SHOW_BLOG ? (
+        <section className="home-section">
+          <div className="home-container">
+            <div className="flex flex-wrap items-end justify-between gap-4">
+              <Heading level={2} type="display-3" id="blog" className="home-anchor">
+                From the blog
+              </Heading>
+              <AppLink href="/blog" className="font-medium">
+                All posts →
+              </AppLink>
+            </div>
+            <ol className="home-posts mt-10">
+              {latestPosts(3).map((post) => (
+                <li key={post.url} className="home-post">
+                  <Text as="p" display="block" type="supporting" color="secondary">
+                    <time dateTime={new Date(post.data.date).toISOString().slice(0, 10)}>
+                      {dateFormatter.format(new Date(post.data.date))}
+                    </time>{" "}
+                    · {post.data.author}
                   </Text>
-                ) : null}
-              </li>
-            ))}
-          </ol>
-        </div>
-      </section>
+                  <Heading level={3} className="mt-3">
+                    <a href={post.url} className="home-post-link">
+                      {post.data.title}
+                    </a>
+                  </Heading>
+                  {post.data.description ? (
+                    <Text as="p" display="block" color="secondary" className="mt-2">
+                      {post.data.description}
+                    </Text>
+                  ) : null}
+                </li>
+              ))}
+            </ol>
+          </div>
+        </section>
+      ) : null}
 
       <section className="home-section home-cta">
-        <div className="home-container grid gap-8 lg:grid-cols-12 lg:items-end">
-          <div className="lg:col-span-7">
+        <div className="home-container grid gap-8 lg:grid-cols-12 lg:items-start">
+          <div className="lg:col-span-6">
             <Heading level={2} type="display-2">
-              npm create jazz
+              Start with your agent
             </Heading>
             <Text as="p" display="block" type="large" color="secondary" className="mt-4">
-              Scaffold a synced app in one command, with auth and hosting set up for you.
+              Paste this into your coding agent. It works for a new project and for an app you
+              already have: the agent asks what it needs and sets Jazz up in your backend.
             </Text>
+            <div className="mt-8">
+              <FrameworkLogos />
+            </div>
           </div>
-          <div className="flex flex-col gap-4 lg:col-span-5 lg:items-end">
-            <CreateJazzCommand />
+          <div className="flex flex-col gap-4 lg:col-span-6 lg:items-end">
+            <AgentPrompt quickstart={quickstart} display={unwrap(quickstart)} />
             <Text as="p" display="block" color="secondary">
-              Read the <AppLink href="/docs/quickstart">quickstart</AppLink> or join the{" "}
+              Or have it run <code>npm create jazz</code>. Read the{" "}
+              <AppLink href="/docs/setup/run-locally">quickstart</AppLink> or join the{" "}
               <AstryxLink href="https://discord.gg/RN9UKh52be">Jazz Discord</AstryxLink>.
             </Text>
           </div>
-        </div>
-        <div className="home-container mt-10">
-          <FrameworkLogos />
         </div>
       </section>
     </div>

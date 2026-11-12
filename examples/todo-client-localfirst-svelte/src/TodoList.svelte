@@ -1,20 +1,19 @@
 <script lang="ts">
-	import { getDb, getSession, QuerySubscription } from 'jazz-tools/svelte';
+	import { getSession, QuerySubscription } from 'jazz-tools/svelte';
 	import { toast } from 'svelte-sonner';
 	import { app } from './lib/schema.js';
 
 	// #region reading-reactive-svelte
-	const db = getDb();
 	const todos = new QuerySubscription(app.todos);
 	// #endregion reading-reactive-svelte
 	const session = getSession();
-	const sessionUserId = $derived(session.current?.user.account ?? null);
+	const sessionUserId = $derived(session.current?.user ?? null);
 	let title = $state('');
 
 	function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
 		if (!title.trim() || !sessionUserId) return;
-		db.insert(app.todos, { title: title.trim(), done: false, owner_id: sessionUserId });
+		todos.db.insert(app.todos, { title: title.trim(), done: false, owner_id: sessionUserId });
 		title = '';
 	}
 
@@ -22,7 +21,7 @@
 		const checkbox = event.currentTarget as HTMLInputElement;
 
 		try {
-			db.update(app.todos, todo.id, { done: !todo.done });
+			todos.db.update(app.todos, todo.id, { done: !todo.done });
 		} catch {
 			checkbox.checked = todo.done;
 			toast.error("You don't have permission to update this task");
@@ -31,7 +30,7 @@
 
 	function deleteTodo(todoId: string) {
 		try {
-			db.delete(app.todos, todoId);
+			todos.db.delete(app.todos, todoId);
 		} catch {
 			toast.error("You don't have permission to delete this task");
 		}
