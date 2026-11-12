@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createAccountManager, createDb, type Db } from "jazz-tools";
+import { createJazzClient, type Db, type JazzClientConfig } from "jazz-tools";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
 import {
   TestCleanup,
@@ -8,11 +8,14 @@ import {
 } from "../../../../../../packages/jazz-tools/tests/browser/support";
 import {
   getJazzServerInfo,
-  signInWithJazzApp,
+  jazzAppFetch,
+  jazzAppUserUrl,
   startJazzApp,
+  type JazzServerInfo,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server";
 import permissions from "../../permissions";
 import { app } from "../../schema";
+import { memoryAccountStore } from "../../../../../testing/accounts";
 
 const cleanup = new TestCleanup();
 afterEach(async () => cleanup.cleanup());
@@ -199,21 +202,37 @@ function live<T extends { id: string }>(db: Db, query: Parameters<Db["subscribe"
   return state;
 }
 
-async function openMember(
-  server: Awaited<ReturnType<typeof startJazzApp>>,
+const loadLocalFirst = () => import("jazz-tools/local-first");
+
+/**
+ * Sign `userId` in on their own origin of the app backend, and open their
+ * local-first client: a session of its own (its own account store), closed
+ * with the test's cleanup.
+ */
+async function openSession(
+  server: JazzServerInfo,
   userId: string,
-): Promise<Member> {
-  const { serverUrl, account } = await signInWithJazzApp(createAccountManager, server, userId);
-  const db = cleanup.track(
-    await createDb({
-      appId: server.appId,
-      serverUrl,
-      account,
-      driver: { type: "persistent", dbName: uniqueDbName(`band-chat-${userId}`) },
-    }),
-  );
+  config: Partial<JazzClientConfig>,
+) {
+  const session = await createJazzClient({
+    serverUrl: await jazzAppUserUrl(server, userId),
+    fetch: jazzAppFetch,
+    store: memoryAccountStore(),
+    client: loadLocalFirst,
+    ...config,
+  });
+  cleanup.trackTransport({ stop: () => session.close() });
+  // Sessions start thin; these tests write offline and read the local tiers.
+  await session.db.upgradeToLocalFirst(loadLocalFirst);
+  return { db: session.db, author: session.getSnapshot().user!.accountId };
+}
+
+async function openMember(server: JazzServerInfo, userId: string): Promise<Member> {
+  const { db, author } = await openSession(server, userId, {
+    driver: { type: "persistent", dbName: uniqueDbName(`band-chat-${userId}`) },
+  });
   const profile = await db
-    .insert(app.profiles, { author: account.id, displayName: userId })
+    .insert(app.profiles, { author, displayName: userId })
     .wait({ tier: "global" });
-  return { db, author: account.id, profileId: profile.id };
+  return { db, author, profileId: profile.id };
 }

@@ -8,18 +8,27 @@
 // Exercised by overlay.spec.ts.
 import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { JazzProvider, useAll, useJazzClient } from "jazz-tools/react";
-import {
-  createAccountManager,
-  installInspectorHost,
-  type DbConfig,
-  type AccountHandle,
-} from "jazz-tools";
+import { JazzProvider, useAll, useJazzClient, type JazzClientConfig } from "jazz-tools/react";
+import { installInspectorHost, type AccountStore } from "jazz-tools";
 import { app } from "./schema.js";
 
 // Mirrors tests/browser/test-constants.ts (inlined: that module reads process.env).
 const APP_ID = "00000000-0000-0000-0000-000000000099";
 const TEST_ENV = "dev";
+const loadLocalFirst = () => import("jazz-tools/local-first");
+
+/** Each runtime's own device account: separate stores are separate users. */
+function memoryAccountStore(): AccountStore {
+  let value: string | null = null;
+  return {
+    async read() {
+      return value;
+    },
+    async update(transform) {
+      value = transform(value);
+    },
+  };
+}
 const SERVER_URL = (() => {
   const url = new URL(window.location.href).searchParams.get("serverUrl");
   if (!url) throw new Error("Inspector overlay fixture requires its owned server URL");
@@ -28,6 +37,21 @@ const SERVER_URL = (() => {
 
 function HostInner({ secondaryReady }: { secondaryReady: boolean }) {
   const { db } = useJazzClient();
+  // The host shares its local-first runtime (its SharedWorker) with the
+  // overlay: open it now rather than waiting for the background upgrade.
+  const [localFirst, setLocalFirst] = useState(() => db.isLocalFirst());
+  const [upgradeError, setUpgradeError] = useState<string>();
+  useEffect(() => {
+    if (localFirst) return;
+    let current = true;
+    db.upgradeToLocalFirst(loadLocalFirst).then(
+      () => current && setLocalFirst(db.isLocalFirst()),
+      (error: unknown) => current && setUpgradeError(String(error)),
+    );
+    return () => {
+      current = false;
+    };
+  }, [db, localFirst]);
   // A real query: creates the host client (so getRuntimeSchema resolves) and
   // registers a public subscription the overlay's Subscriptions tab should display.
   const { data: readinessTodos = [] } = useAll(
@@ -38,13 +62,15 @@ function HostInner({ secondaryReady }: { secondaryReady: boolean }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
-    if (!secondaryReady || !primaryReady) return;
+    if (!secondaryReady || !primaryReady || !localFirst) return;
     const iframeWindow = iframeRef.current?.contentWindow;
     if (!iframeWindow) return;
     // The real host-side installer: publishes the handle + pushes subscriptions.
     return installInspectorHost(db, iframeWindow, window.location.origin);
-  }, [db, primaryReady, secondaryReady]);
+  }, [db, primaryReady, secondaryReady, localFirst]);
 
+  if (upgradeError) return <p id="host-status">Local-first upgrade failed: {upgradeError}</p>;
+  if (!localFirst) return <p id="host-status">Opening local-first runtime...</p>;
   if (!secondaryReady) return <p id="host-status">Starting secondary runtime...</p>;
   if (!primaryReady) return <p id="host-status">Loading primary runtime data...</p>;
 
@@ -68,14 +94,20 @@ function SecondaryRuntime({ onReady }: { onReady: () => void }) {
   return <p hidden>Secondary runtime ready</p>;
 }
 
-function HostApp({ primary, secondary }: { primary: AccountHandle; secondary: AccountHandle }) {
+function HostApp() {
   const [secondaryReady, setSecondaryReady] = useState(false);
+  // Two independent device accounts, one per runtime.
+  const [stores] = useState(() => ({
+    primary: memoryAccountStore(),
+    secondary: memoryAccountStore(),
+  }));
 
-  const config: DbConfig = {
-    appId: APP_ID,
+  const config: JazzClientConfig = {
     env: TEST_ENV,
     serverUrl: SERVER_URL,
-    account: primary,
+    initial: "device",
+    store: stores.primary,
+    client: loadLocalFirst,
     // devMode must be on at subscribe time for subscription traces to register.
     // Under the jazz dev plugin the provider defaults it on automatically, but
     // this fixture runs under the inspector's own vite server (no plugin flag),
@@ -85,14 +117,17 @@ function HostApp({ primary, secondary }: { primary: AccountHandle; secondary: Ac
 
   return (
     <>
-      <JazzProvider config={config} fallback={<p id="host-status">Connecting...</p>}>
+      <JazzProvider config={config} loading={<p id="host-status">Connecting...</p>}>
         <HostInner secondaryReady={secondaryReady} />
       </JazzProvider>
       <JazzProvider
         config={{
-          appId: APP_ID,
           env: TEST_ENV,
-          account: secondary,
+          // No server: this runtime keeps its data on this device only.
+          serverUrl: null,
+          client: loadLocalFirst,
+          initial: "device",
+          store: stores.secondary,
           // Share the logical base: account IDs must isolate the physical roots.
           driver: { type: "persistent", dbName: APP_ID },
           devMode: true,
@@ -104,11 +139,8 @@ function HostApp({ primary, secondary }: { primary: AccountHandle; secondary: Ac
   );
 }
 
-const accounts = await createAccountManager({ appId: APP_ID, serverUrl: SERVER_URL });
-const primary = accounts.createLocalFirst();
-const secondary = accounts.createLocalFirst();
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <HostApp primary={primary} secondary={secondary} />
+    <HostApp />
   </StrictMode>,
 );

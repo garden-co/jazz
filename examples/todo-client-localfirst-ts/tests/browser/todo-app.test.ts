@@ -1,6 +1,5 @@
 import { todoCrudTest } from "../../../testing/todo-app-scenarios.js";
-import { createAccountManager } from "jazz-tools";
-import { prepareTestAccount } from "../../../testing/accounts.js";
+import { memoryAccountStore } from "../../../testing/accounts.js";
 /**
  * E2E browser tests for the vanilla TS todo app.
  *
@@ -12,7 +11,11 @@ import { describe, it, expect, afterEach } from "vitest";
 import { startApp } from "../../src/main.js";
 import { app } from "../../schema.js";
 import { SCOPE, SERVER_URL } from "./test-constants.js";
-import type { Db, DbConfig } from "jazz-tools";
+import type { Db } from "jazz-tools";
+import type { SessionOverrides } from "../../src/account.js";
+
+// These tests are about the local-first client (IndexedDB, sync between replicas).
+const loadLocalFirst = () => import("jazz-tools/local-first");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -54,17 +57,15 @@ describe("Vanilla TS Todo App E2E", () => {
   const instances: Array<{ container: HTMLDivElement; db: Db; destroy: () => Promise<void> }> = [];
 
   /** Mount the app into a fresh container. */
-  async function mount(config?: Partial<DbConfig>): Promise<HTMLDivElement> {
+  /** Each mount is its own user unless it shares a `store` with another. */
+  async function mount(config?: SessionOverrides): Promise<HTMLDivElement> {
     const el = document.createElement("div");
     document.body.appendChild(el);
 
-    const appId = config?.appId ?? SCOPE;
-    const account =
-      config?.account ??
-      (await prepareTestAccount(createAccountManager, appId, config?.serverUrl ?? SERVER_URL));
     const { db, destroy } = await startApp(el, {
-      appId,
-      account,
+      appId: SCOPE,
+      store: memoryAccountStore(),
+      client: loadLocalFirst,
       driver: { type: "persistent", dbName: crypto.randomUUID() },
       ...config,
     });
@@ -159,10 +160,10 @@ describe("Vanilla TS Todo App E2E", () => {
 
   it("persists todos across app destroy and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
-    const account = await prepareTestAccount(createAccountManager, SCOPE, SERVER_URL);
+    const store = memoryAccountStore();
 
     // First session: mount, add todo, destroy
-    const el1 = await mount({ account, driver: { type: "persistent", dbName } });
+    const el1 = await mount({ store, driver: { type: "persistent", dbName } });
     addTodo(el1, "Survive reload");
 
     await waitFor(
@@ -173,8 +174,8 @@ describe("Vanilla TS Todo App E2E", () => {
 
     await destroyInstance(el1);
 
-    // Second session: remount with same account and dbName — IndexedDB data should load
-    const el2 = await mount({ account, driver: { type: "persistent", dbName } });
+    // Second session: remount with same store and dbName — IndexedDB data should load
+    const el2 = await mount({ store, driver: { type: "persistent", dbName } });
 
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,

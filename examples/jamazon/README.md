@@ -13,14 +13,14 @@ the Jazz design system.
 - **A public catalogue.** Categories, a product grid, product pages with generated illustrations,
   specifications and live stock badges. Search is a live Jazz query over the local copy of the
   catalogue, so it narrows on every keystroke and keeps working offline.
-- **An offline-first cart.** Every visitor gets a local-first Jazz account on first load, so the
+- **An offline-first cart.** Every visitor gets a Jazz device account on first load, so the
   cart works before sign-in and without a connection. Cart edits are ordinary local writes that
   sync to the shopper's other devices. Each (cart, product) pair has one row with a
   deterministic id: two devices that add the same product converge on one line, and if they set
   different quantities the later edit wins. Lines are zeroed rather than deleted, so removing
   and re-adding a product addresses the same row everywhere.
 - **Guest carts that follow you.** Creating an account links the Better Auth identity to the
-  guest's Jazz account (`linkWithBackend`), so the cart stays put. Signing in to an existing account
+  guest's Jazz account (`linkDeviceAccount`), so the cart stays put. Signing in to an existing account
   switches accounts, and the app claims the guest cart's lines into the account's cart, keeping
   the larger quantity where both have the product.
 - **An idempotent checkout.** Shipping details live on the cart row (they sync too). Reaching the

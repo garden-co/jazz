@@ -106,7 +106,7 @@ async function mount(child: ReturnType<typeof defineComponent>): Promise<Mounted
     scope: SCOPE,
     serverUrl: SERVER_URL,
     driver: { type: "memory" },
-    initial: "local-first",
+    initial: "device",
   });
   const client = session.getSnapshot().client;
   if (!client) throw new Error("the session opened no client");

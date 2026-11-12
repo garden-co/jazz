@@ -2,7 +2,7 @@
 
 EpicDrop is a file browser for large binary values in Jazz. Files stream in and out of a `bytes`
 column, previews read only the range they need, and folders are shared with other people through
-invite links. It runs as a Vite and React single-page app on an anonymous local-first account.
+invite links. It runs as a Vite and React single-page app on an anonymous device account (its key lives in the browser).
 
 ## What you can do
 
