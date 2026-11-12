@@ -527,7 +527,9 @@ fn queued_child_moves_refresh_the_previously_published_parent() {
     insert(&server, "messages", 4, &[("room", Value::Uuid(id(1).0))]);
     let (upstream, downstream) = duplex();
     let _upstream = block_on(client.connect_upstream(upstream));
-    server.accept_subscriber(downstream, AuthorSubject::SYSTEM);
+    server
+        .accept_subscriber(downstream, AuthorSubject::SYSTEM)
+        .unwrap();
     let query = client
         .prepare_query(
             &Query::from("rooms")

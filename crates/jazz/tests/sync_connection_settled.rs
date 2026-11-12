@@ -1205,3 +1205,136 @@ fn optional_include_nested_transitive_support_keeps_visible_cut() {
         "live result observes revoked support after release"
     );
 }
+
+/// A live room with its comments nested reads both as of its own settle.
+/// Comments past it arrive while the settle is held: the first one's
+/// refresh re-runs the room under the held cut; the second one's re-checks
+/// only the affected room, and must nest its comments under that same cut,
+/// not the store's current state.
+///
+/// Settle held -> two comments arrive -> neither shows -> release -> both show.
+#[test]
+fn a_rechecked_parent_nests_its_children_under_the_held_cut() {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("docs")
+                    .column("title", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("comments")
+                    .fk_column("doc", "docs")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let open_node = |node, author| {
+        block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )))
+        .unwrap()
+    };
+    let server = open_node(0x75, AuthorSubject::SYSTEM);
+    let client = open_node(0x76, user(1));
+    let link = connect(&server, &client, user(1));
+    let comment = |n: u8, body: &str| {
+        block_on(server.insert(
+            "comments",
+            BTreeMap::from([
+                ("doc".into(), Value::Uuid(row(1).0)),
+                ("body".into(), Value::String(body.into())),
+            ]),
+            InsertOptions {
+                row_id: Some(row(n)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    };
+    block_on(server.insert(
+        "docs",
+        BTreeMap::from([("title".into(), Value::String("parent".into()))]),
+        InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    comment(2, "first");
+    let query =
+        Query::from("docs").array_subquery(ArraySubquery::new("comments", "comments", "doc", "id"));
+    let prepared = client.prepare_query(&query).unwrap();
+    let mut stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let read = link.next_read(|| pump(&server, &client));
+    let mut current = BTreeSet::new();
+    let mut drain = |stream: &mut SubscriptionStream| {
+        while let Some(event) = stream.try_next_event() {
+            match event {
+                SubscriptionEvent::Delta { added, updated, .. } => {
+                    for output in added.into_iter().chain(updated) {
+                        assert_eq!(output.row.row_uuid(), row(1));
+                        let Some(Value::Array(children)) = output.row.cell("comments") else {
+                            panic!("nested comments expected");
+                        };
+                        current = children
+                            .iter()
+                            .map(|child| match child {
+                                Value::Record(record) => record
+                                    .to_values()
+                                    .unwrap()
+                                    .into_iter()
+                                    .find_map(|value| match value {
+                                        Value::String(body) => Some(body),
+                                        _ => None,
+                                    })
+                                    .expect("a comment body"),
+                                other => panic!("a nested row expected: {other:?}"),
+                            })
+                            .collect();
+                    }
+                }
+                SubscriptionEvent::Rejected { reason, .. } => panic!("{reason}"),
+                _ => {}
+            }
+        }
+        current.clone()
+    };
+    assert_eq!(drain(&mut stream), titles(&["first"]));
+
+    link.hold(move |m| match m {
+        SyncMessage::Settled { id, .. } => *id == read,
+        SyncMessage::ConnectionSettled { .. } => true,
+        _ => false,
+    });
+    comment(3, "late");
+    pump(&server, &client);
+    assert_eq!(
+        drain(&mut stream),
+        titles(&["first"]),
+        "a comment past the room's settle does not show"
+    );
+    let before = client.fanout_stats();
+    comment(4, "later");
+    pump(&server, &client);
+    let after = client.fanout_stats();
+    assert_eq!(
+        (after.rechecked, after.reran),
+        (before.rechecked + 1, before.reran),
+        "the second comment re-checks only its room under the cut it applied"
+    );
+    assert_eq!(
+        drain(&mut stream),
+        titles(&["first"]),
+        "the affected room's re-check nests its comments under the same cut"
+    );
+
+    link.release();
+    pump(&server, &client);
+    assert_eq!(drain(&mut stream), titles(&["first", "late", "later"]));
+}

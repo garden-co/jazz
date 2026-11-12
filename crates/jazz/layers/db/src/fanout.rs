@@ -1188,7 +1188,7 @@ impl Inner {
         };
         let fresh = match self
             .execute(&narrowed, &group.prepared.query.table)
-            .and_then(|rows| self.nest_relations(&prepared, group.identity, &group.read, rows))
+            .and_then(|rows| self.nest_relations(&prepared, group.identity, &read, rows))
         {
             Ok(rows) => rows,
             Err(error) => return Some(Err(error)),
