@@ -1984,11 +1984,17 @@ export async function unshippedMigrationsWarning(
 ): Promise<string | null> {
   const schemaFile = rootSchemaFile(schemaDir);
   if (!schemaFile || (await importsClientMigrations(schemaFile))) return null;
-  const snapshots = await listLocalSnapshotEntries(schemaDir, migrationsDir);
-  if (snapshots.length === 0) return null;
+  // Only reads: validate --check must not create the migrations directory.
+  const dir = resolvedMigrationsDir(schemaDir, migrationsDir);
+  const committed = (await new MigrationStorage(dir).listSnapshots()).filter((entry) =>
+    isCommittedSnapshotFileName(entry.fileName),
+  );
+  if (committed.length === 0) return null;
+  const shown = (path: string) => relative(schemaDir, path) || ".";
   return (
     `${basename(schemaFile)} doesn't import its migrations, so jazz-tools did not write ` +
-    "migrations/index.ts and the app ships none of the schema versions in migrations/. " +
+    `${shown(clientMigrationsPath(schemaFile))} and the app ships none of the schema versions in ` +
+    `${shown(dir)}. ` +
     'Add `import { migrations } from "./migrations";` to schema.ts, pass `{ migrations }` to ' +
     '`defineApp` (instead of `{ migrations: "none" }`), and run `jazz-tools validate` again.'
   );

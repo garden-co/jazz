@@ -119,9 +119,11 @@ describe("cli migrations", () => {
     await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
     const hint = 'Add `import { migrations } from "./migrations";` to schema.ts';
 
-    // Nothing to ship yet: no hint before the first snapshot.
+    // Nothing to ship yet: no hint before the first snapshot, and looking
+    // for snapshots creates no migrations directory.
     const { logs: fresh } = await captureConsoleLogs(() => validate({ schemaDir: root }));
     expect(fresh.join("\n")).not.toContain(hint);
+    expect(await fileExists(migrationsDir)).toBe(false);
 
     const { logs: created } = await captureConsoleLogs(() =>
       createMigration({ schemaDir: root, migrationsDir }),
