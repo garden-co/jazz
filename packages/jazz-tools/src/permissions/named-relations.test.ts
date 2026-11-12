@@ -134,3 +134,45 @@ describe("declared relationships in permissions", () => {
     ).toThrow(/reverse relationships do not support maxDepth/);
   });
 });
+
+describe("relation-qualified where(...) keys", () => {
+  const twoWays = s.defineApp(
+    {
+      users: s.table({ uid: s.string() }, {}),
+      docs: s.table(
+        { a: s.uuid(), b: s.uuid() },
+        { ua: s.rel("users", "a"), ub: s.rel("users", "b") },
+      ),
+    },
+    { migrations: "none" },
+  );
+  const oneWay = s.defineApp(
+    {
+      users: s.table({ uid: s.string() }, {}),
+      docs: s.table({ a: s.uuid(), b: s.uuid() }, { ua: s.rel("users", "a") }),
+    },
+    { migrations: "none" },
+  );
+  const readWhere = (app: typeof twoWays | typeof oneWay, key: string) =>
+    s.definePermissions(app, ({ policy, session }) => {
+      policy.docs.allowRead.where({ [key]: session.user });
+    }).docs?.select?.using;
+
+  it("resolve a column through the named relation, as the table name does when only one relation leads there", () => {
+    expect(readWhere(twoWays, "ua.uid")).toEqual(readWhere(oneWay, "users.uid"));
+    expect(readWhere(oneWay, "ua.uid")).toEqual(readWhere(oneWay, "users.uid"));
+    expect(readWhere(twoWays, "ub.uid")).not.toEqual(readWhere(twoWays, "ua.uid"));
+  });
+
+  it("name the relations to qualify with when the table is ambiguous", () => {
+    expect(() => readWhere(twoWays, "users.uid")).toThrow(
+      /table "users" is ambiguous from "docs": relations "ua" \(to "users"\), "ub" \(to "users"\) all lead there\. Qualify the column with the relation's name instead, e\.g\. "ua\.uid"/,
+    );
+  });
+
+  it("list the table's relations when the qualifier is neither a relation nor a reachable table", () => {
+    expect(() => readWhere(twoWays, "doctor.uid")).toThrow(
+      /"doctor" is neither a relation of "docs" nor a table one of its relations leads to\. Its relations are "ua" \(to "users"\), "ub" \(to "users"\)\./,
+    );
+  });
+});
