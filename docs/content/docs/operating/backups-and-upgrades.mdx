@@ -65,29 +65,29 @@ still decides who is signed in: after your own sign-in or sign-out, `refresh()` 
 - **`<JazzProvider>` refuses the old shapes** (the config as its own props, `fallback`, a config
   with an `account`) with an error that names the new one.
 
-| Alpha.60                                                                       | Alpha.61                                                                                  |
-| :----------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------- |
-| `createAccountManager(config)` + `createDb({ ...config, account })`            | `const session = await createJazzClient({ ...config, initial: "device" })`; `session.db` |
-| `createDb` (`jazz-tools`, `jazz-tools/react-native`)                           | `createJazzClient(…)`, then `session.db`                                                  |
-| `createJazzApp(config)`                                                        | `<JazzProvider config={config}>`, or `await createJazzClient(config)`                     |
-| `<JazzProvider serverUrl="/jazz" …>` (config as props)                         | `<JazzProvider config={{ serverUrl: "/jazz", … }}>`                                       |
-| `<JazzProvider config={{ …, account }}>`, `JazzSvelteProvider`                 | `<JazzProvider config={…}>`; a client you opened yourself: `<JazzClientProvider client>` (Svelte: `<JazzSvelteClientProvider client>`) |
-| `<JazzSessionProvider session={s}>`                                            | `<JazzProvider session={s}>`                                                              |
-| `fallback`                                                                     | `loading`, `signedOut`, `error`                                                           |
-| `useJazzAuth()`, `useJazzSessionOwner()`, `useAccountState`, `accountState`    | `useJazzSession()` (Svelte: `getJazzSession()`)                                           |
-| `reauthenticate()`, `loginWithBackend()`                                       | `refresh()`                                                                               |
-| `logout()` / `dispose()`                                                       | `signOut()` / `close()`                                                                   |
-| `createLocalFirst()`                                                           | `createDeviceAccount()`                                                                   |
-| `restoreLocalFirst(secret)`                                                    | `restoreDeviceAccount(key)`                                                               |
-| `linkWithBackend()`                                                            | `linkDeviceAccount()`                                                                     |
-| `exportLocalFirstSecret(snapshot.account)`                                     | `session.exportDeviceKey()`                                                               |
-| `initial: "local-first"`                                                       | `initial: "device"`                                                                       |
-| `linkGuestOnSignUp`                                                            | `linkDeviceAccountOnSignUp`                                                               |
-| `snapshot.account?.id`                                                         | `snapshot.user?.accountId`                                                                |
-| `user.id` (your backend's user ID)                                             | `user.identity.subject`                                                                   |
-| `sessionActions.createLocalFirst()` and the other `sessionActions`             | the same operations on the session itself                                                 |
-| `useLocalFirstAuth`, `LocalFirstAuth`, `BrowserAuthSecretStore`, `ExpoAuthSecretStore`, `AuthSecretStore` | `session.exportDeviceKey()` and `session.restoreDeviceAccount(key)`             |
-| `acceptLocalFirstAuth` (backend)                                               | `acceptDeviceAccounts`                                                                    |
+| Alpha.60                                                                                                  | Alpha.61                                                                                                                               |
+| :-------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------- |
+| `createAccountManager(config)` + `createDb({ ...config, account })`                                       | `const session = await createJazzClient({ ...config, initial: "device" })`; `session.db`                                               |
+| `createDb` (`jazz-tools`, `jazz-tools/react-native`)                                                      | `createJazzClient(…)`, then `session.db`                                                                                               |
+| `createJazzApp(config)`                                                                                   | `<JazzProvider config={config}>`, or `await createJazzClient(config)`                                                                  |
+| `<JazzProvider serverUrl="/jazz" …>` (config as props)                                                    | `<JazzProvider config={{ serverUrl: "/jazz", … }}>`                                                                                    |
+| `<JazzProvider config={{ …, account }}>`, `JazzSvelteProvider`                                            | `<JazzProvider config={…}>`; a client you opened yourself: `<JazzClientProvider client>` (Svelte: `<JazzSvelteClientProvider client>`) |
+| `<JazzSessionProvider session={s}>`                                                                       | `<JazzProvider session={s}>`                                                                                                           |
+| `fallback`                                                                                                | `loading`, `signedOut`, `error`                                                                                                        |
+| `useJazzAuth()`, `useJazzSessionOwner()`, `useAccountState`, `accountState`                               | `useJazzSession()` (Svelte: `getJazzSession()`)                                                                                        |
+| `reauthenticate()`, `loginWithBackend()`                                                                  | `refresh()`                                                                                                                            |
+| `logout()` / `dispose()`                                                                                  | `signOut()` / `close()`                                                                                                                |
+| `createLocalFirst()`                                                                                      | `createDeviceAccount()`                                                                                                                |
+| `restoreLocalFirst(secret)`                                                                               | `restoreDeviceAccount(key)`                                                                                                            |
+| `linkWithBackend()`                                                                                       | `linkDeviceAccount()`                                                                                                                  |
+| `exportLocalFirstSecret(snapshot.account)`                                                                | `session.exportDeviceKey()`                                                                                                            |
+| `initial: "local-first"`                                                                                  | `initial: "device"`                                                                                                                    |
+| `linkGuestOnSignUp`                                                                                       | `linkDeviceAccountOnSignUp`                                                                                                            |
+| `snapshot.account?.id`                                                                                    | `snapshot.user?.accountId`                                                                                                             |
+| `user.id` (your backend's user ID)                                                                        | `user.identity.subject`                                                                                                                |
+| `sessionActions.createLocalFirst()` and the other `sessionActions`                                        | the same operations on the session itself                                                                                              |
+| `useLocalFirstAuth`, `LocalFirstAuth`, `BrowserAuthSecretStore`, `ExpoAuthSecretStore`, `AuthSecretStore` | `session.exportDeviceKey()` and `session.restoreDeviceAccount(key)`                                                                    |
+| `acceptLocalFirstAuth` (backend)                                                                          | `acceptDeviceAccounts`                                                                                                                 |
 
 `snapshot.user` is `{ accountId, kind: "device" | "backend", identity: { issuer, subject }, claims }`
 for whoever is signed in, a device account included, or `null`. A client config without `serverUrl`

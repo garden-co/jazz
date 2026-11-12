@@ -1056,10 +1056,7 @@ test("React Native docs advertise the supported alpha session and account-handle
     /React Native\/Expo alpha uses these same read and write durability tiers/,
   );
   assert.match(durabilityGuide, /client with `createJazzClient`/);
-  assert.match(
-    examplesGuide,
-    /Supported alpha app:[\s\S]*device accounts[\s\S]*`JazzProvider`/,
-  );
+  assert.match(examplesGuide, /Supported alpha app:[\s\S]*device accounts[\s\S]*`JazzProvider`/);
   assert.match(
     exampleReadme,
     /Expo local-first todos using `jazz-tools\/react-native` and the installed `jazz-rn` runtime/,
