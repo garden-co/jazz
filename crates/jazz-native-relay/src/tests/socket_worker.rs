@@ -494,3 +494,138 @@ fn tick_events_command_and_response_have_pinned_bytes() {
         vec![26, 2, b'[', b']', 0, 0]
     );
 }
+
+/// A core with schema history (a root version, then a head) stores a column
+/// where the version that introduced it put it. A replica attached with the
+/// head alone would name it after the head instead, and read nothing from
+/// that core. So the attach carries the app's migrations beside its tables:
+///
+/// ```
+/// app ─{tables, migrations}─► relay store: same column     as core
+/// app ─{tables}────────────►  relay store: another column  than core
+/// ```
+#[test]
+fn an_attached_schema_stores_columns_where_its_shipped_migrations_put_them() {
+    use jazz::tools::deployment::published::with_client_migrations;
+    use jazz::tools::{Schema, SchemaHash};
+    let todos = |column: &str| -> Schema {
+        let allow = PolicyExpr::True;
+        SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column(column, ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(allow.clone())
+                            .with_insert(allow.clone())
+                            .with_update(Some(allow.clone()), allow.clone())
+                            .with_delete(allow),
+                    ),
+            )
+            .build()
+    };
+    let (root_schema, head) = (todos("title"), todos("name"));
+    let (root_hash, head_hash) = (
+        SchemaHash::compute(&root_schema).to_string(),
+        SchemaHash::compute(&head).to_string(),
+    );
+    let bundle = serde_json::json!({
+        "schemas": [
+            {"hash": root_hash, "schema": root_schema},
+            {"hash": head_hash, "schema": head},
+        ],
+        "migrations": [{
+            "fromHash": root_hash,
+            "toHash": head_hash,
+            "forward": [{
+                "table": "todos",
+                "operations": [{"type": "rename", "column": "title", "value": "name"}],
+            }],
+        }],
+    });
+    let head_schema = JazzSchema::new(&head).unwrap();
+    let stored_column = |path: &std::path::Path| -> String {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT group_concat(name) FROM pragma_table_info('todos') \
+                 WHERE name LIKE 'title%' OR name LIKE 'name%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let identity = DbIdentity {
+        node: jazz::ids::NodeUuid::from_bytes([0x5a; 16]),
+        author: jazz::ids::AuthorSubject::for_test_bytes([0x5a; 16]),
+    };
+    let core_dir = tempfile::tempdir().unwrap();
+    let core_path = core_dir.path().join("core.sqlite");
+    let core = jazz::db::block_on(jazz::db::Db::open_at(
+        with_client_migrations(
+            jazz::db::DbConfig::new(head_schema.clone(), identity),
+            Some(&serde_json::to_vec(&bundle).unwrap()),
+        )
+        .unwrap(),
+        &core_path,
+        jazz::db::FileOptions::default(),
+    ))
+    .unwrap();
+    let on_core = stored_column(&core_path);
+    drop(core);
+
+    let attach = |payload: serde_json::Value, app_id: &str, root: &std::path::Path| {
+        let (_release, never) = tokio::sync::oneshot::channel();
+        let mut host = NativeRelayHost {
+            socket_connector: Some(ScriptedConnector::new([Step::ConnectWhenReleased(never)])),
+            ..NativeRelayHost::default()
+        };
+        let pending = host
+            .begin_private_session(PrivateSessionSetupJson {
+                server_url: "https://edge.example".to_owned(),
+                app_id: app_id.to_owned(),
+                jwt: bearer(1),
+                storage_root: root.display().to_string(),
+            })
+            .unwrap();
+        let admitted = host
+            .attach_canonical_schema(pending, &payload.to_string())
+            .unwrap();
+        host.open_foreground(admitted, DIRECT_FOREGROUND_RUNTIME_TOKEN)
+            .unwrap();
+        stored_column(&host.admitted_scopes[&admitted].config.sqlite_path)
+    };
+    let tables = serde_json::to_value(head_schema.public_schema()).unwrap();
+    let mut shipped = tables.clone();
+    shipped["migrations"] = bundle;
+
+    let root = tempfile::tempdir().unwrap();
+    assert_eq!(attach(shipped, "with-history", root.path()), on_core);
+    assert_ne!(attach(tables, "head-only", root.path()), on_core);
+}
+
+/// A bundle the relay cannot lower refuses the attach: the store must not open
+/// with columns stored where the authority does not keep them.
+#[test]
+fn an_attached_schema_with_malformed_migrations_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let (_release, never) = tokio::sync::oneshot::channel();
+    let mut host = NativeRelayHost {
+        socket_connector: Some(ScriptedConnector::new([Step::ConnectWhenReleased(never)])),
+        ..NativeRelayHost::default()
+    };
+    let pending = host
+        .begin_private_session(PrivateSessionSetupJson {
+            server_url: "https://edge.example".to_owned(),
+            app_id: "malformed-migrations".to_owned(),
+            jwt: bearer(1),
+            storage_root: root.path().display().to_string(),
+        })
+        .unwrap();
+    let mut payload = serde_json::to_value(schema().public_schema()).unwrap();
+    payload["migrations"] = serde_json::json!({"schemas": "nope"});
+    assert!(matches!(
+        host.attach_canonical_schema(pending, &payload.to_string()),
+        Err(JazzNativeRelayStatus::LifecycleFailure)
+    ));
+}
