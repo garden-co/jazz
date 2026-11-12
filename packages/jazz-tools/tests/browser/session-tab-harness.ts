@@ -19,6 +19,19 @@ declare global {
 }
 
 let session: BrowserJazzSession | undefined;
+// What the tab went through: each status its session published, and what it
+// logged as a warning or an error.
+const history = { statuses: [] as string[], warnings: [] as string[], errors: [] as string[] };
+for (const [level, into] of [
+  ["warn", history.warnings],
+  ["error", history.errors],
+] as const) {
+  const log = console[level].bind(console);
+  console[level] = (...args: unknown[]) => {
+    into.push(args.map((arg) => (arg instanceof Error ? arg.message : String(arg))).join(" "));
+    log(...args);
+  };
+}
 // While set, this tab's requests to the backend wait: its session can't
 // learn of a sign-in elsewhere until they go on.
 let held: { promise: Promise<void>; release: () => void } | undefined;
@@ -34,11 +47,16 @@ const nodeFetch: typeof fetch = async (input, init) => {
   return new Response(response.body, { status: response.status, headers: response.headers });
 };
 
-/** Open a local-first guest's session at `serverUrl`, and wait for its local-first client. */
+/**
+ * Open a local-first guest's session at `serverUrl` (or, `signedIn`, the
+ * session of whoever the backend says is signed in there), and wait for its
+ * local-first client.
+ */
 export async function openSessionTab(input: {
   serverUrl: string;
   clearOnSignOut?: boolean;
   localFirst?: "now";
+  signedIn?: boolean;
 }): Promise<void> {
   const pageFetch = globalThis.fetch;
   globalThis.fetch = ((request: RequestInfo | URL, init?: RequestInit) => {
@@ -50,11 +68,15 @@ export async function openSessionTab(input: {
   session = await createJazzClient({
     serverUrl: input.serverUrl,
     fetch: nodeFetch,
-    initial: "device",
+    ...(input.signedIn ? {} : { initial: "device" as const }),
     clearOnSignOut: input.clearOnSignOut,
     client: async () => ({ createClient: createLocalFirstDb }),
     ...(input.localFirst ? { localFirst: input.localFirst } : {}),
   });
+  const opened = session;
+  history.statuses.push(opened.getSnapshot().status);
+  opened.subscribe(() => history.statuses.push(opened.getSnapshot().status));
+  if (input.signedIn && opened.getSnapshot().status !== "ready") await opened.reauthenticate();
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const client = session.getSnapshot().client;
@@ -71,6 +93,8 @@ export async function sessionTabState(): Promise<{
   subject?: string;
   link: unknown;
   titles: string[];
+  error?: string;
+  history: typeof history;
 }> {
   const snapshot = session!.getSnapshot();
   const db = snapshot.client?.db;
@@ -81,7 +105,27 @@ export async function sessionTabState(): Promise<{
     subject: snapshot.account?.identity?.subject,
     link: db?.getSyncStatus().link,
     titles,
+    ...(snapshot.error ? { error: snapshot.error.message } : {}),
+    history,
   };
+}
+
+/** Insert a task in this tab, and wait only for this browser's store to have it. */
+export async function insertLocallyInSessionTab(input: { title: string }): Promise<void> {
+  await session!
+    .getSnapshot()
+    .client!.db.insert(sessionTabApp.tasks, { title: input.title })
+    .wait({ tier: "local" });
+}
+
+/** Sign this tab's session out, as the app's sign-out button calls `signOut()`. */
+export async function signOutInSessionTab(): Promise<void> {
+  await session!.logout();
+}
+
+/** Let this browser's worker sync again after a `db.disconnect()` (in any tab). */
+export async function reconnectSessionTab(): Promise<void> {
+  await session!.getSnapshot().client!.db.reconnect();
 }
 
 /** Insert a task in this tab and wait for the server to have it. */
