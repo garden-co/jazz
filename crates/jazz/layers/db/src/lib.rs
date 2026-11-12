@@ -39,6 +39,8 @@ pub mod compile;
 pub mod db;
 #[cfg(feature = "durable-object-limits")]
 mod durable_object_limits;
+#[cfg(feature = "testing")]
+pub mod fault_vfs;
 pub mod format;
 pub mod host;
 pub(crate) mod large;
@@ -46,6 +48,7 @@ pub mod link;
 pub(crate) mod merge;
 pub mod names;
 pub mod options;
+pub mod pages;
 pub mod slow;
 #[cfg(feature = "sql-trace")]
 mod sql_trace;

@@ -74,6 +74,7 @@ fn open_db() -> Db {
         clock: None,
         migrations: Default::default(),
         system_node: None,
+        page_source: None,
     }))
     .expect("open db")
 }

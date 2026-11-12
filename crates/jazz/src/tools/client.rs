@@ -169,9 +169,10 @@ fn classify_tick_driver_error(error: &CoreError) -> TickFailure {
     use crate::db::ErrorCode::*;
     match error.code {
         // A refused upstream detaches only its link; the store is fine.
-        Backpressure | Protocol | TransactionConflict | NotObserved | AuthorityChanged => {
-            TickFailure::Recoverable
-        }
+        // A tick loads what it faults on itself; one that reaches here was
+        // run where nothing loads, and the next one may get further.
+        Backpressure | Protocol | TransactionConflict | NotObserved | AuthorityChanged
+        | PageFault => TickFailure::Recoverable,
         Storage
         | UnsupportedStorageCodecs
         | Schema

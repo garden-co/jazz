@@ -742,6 +742,8 @@ struct Inner {
     /// Whether `_jazz_withheld` exists (see `sync::WITHHELD_DDL`): branch
     /// views over a base read it only then.
     withheld: std::cell::Cell<bool>,
+    /// Where the file's VFS loads missing pages from ([`crate::pages`]).
+    page_source: Option<Rc<dyn crate::pages::PageSource>>,
 }
 
 /// Large-value nodes one tick may reclaim.
@@ -1372,6 +1374,10 @@ impl Error {
 
 impl Db {
     pub async fn open(config: DbConfig) -> Result<Self, Error> {
+        #[cfg(feature = "testing")]
+        if crate::fault_vfs::from_env().is_some() {
+            return Self::open_with_page_faults(config).await;
+        }
         let conn = Connection::open_in_memory().map_err(storage)?;
         crate::format::admit(&conn)?;
         Self::open_on(config, conn, None)
@@ -1386,12 +1392,107 @@ impl Db {
         path: &std::path::Path,
         options: FileOptions,
     ) -> Result<Self, Error> {
-        Self::open_file(config, crate::host::StoreFile::open(path, options)?).await
+        let Some(source) = config.page_source.clone() else {
+            return Self::open_file(config, crate::host::StoreFile::open(path, options)?).await;
+        };
+        // On a paging VFS, opening is one operation run until no read
+        // faults ([`crate::pages`]). A failed run is a crash before the
+        // open returned, which a store survives by design; the next run
+        // reopens the file. The config's sources are shared between runs.
+        let shared = crate::pages::SharedConfig::new(config);
+        source.begin_op();
+        let opened = loop {
+            let run = crate::host::StoreFile::open(path, options)
+                .and_then(|file| Self::open_file_now(shared.attempt(), file));
+            #[cfg(feature = "testing")]
+            crate::fault_vfs::check_run(matches!(&run, Err(error) if crate::pages::is_fault(error)));
+            match run {
+                Err(error) if crate::pages::is_fault(&error) => {
+                    if let Err(error) = source.load().await {
+                        break Err(error);
+                    }
+                }
+                run => break run,
+            }
+        };
+        source.end_op();
+        opened
+    }
+
+    /// A store opened by [`Db::open`] on a temporary file whose VFS faults
+    /// at random (`JAZZ_PAGE_FAULTS`, see [`crate::fault_vfs`]).
+    #[cfg(feature = "testing")]
+    async fn open_with_page_faults(mut config: DbConfig) -> Result<Self, Error> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // Unique per thread, numbered within it: a seed's faults (which
+        // follow the files' names) are the same each run of a test.
+        static THREADS: AtomicU64 = AtomicU64::new(0);
+        thread_local! {
+            static FILES: std::cell::Cell<(u64, u64)> =
+                std::cell::Cell::new((THREADS.fetch_add(1, Ordering::Relaxed), 0));
+        }
+        crate::fault_vfs::register();
+        let (thread, file) = FILES.with(|files| {
+            let (thread, file) = files.get();
+            files.set((thread, file + 1));
+            (thread, file)
+        });
+        let path = std::env::temp_dir().join(format!(
+            "jazz-page-faults-{}-{thread:06}-{file:06}.sqlite",
+            std::process::id(),
+        ));
+        let _ = std::fs::remove_file(&path);
+        config.page_source = Some(crate::fault_vfs::source());
+        let options = FileOptions {
+            vfs: Some(crate::fault_vfs::FAULT_VFS),
+            journal: Journal::Memory,
+            ..FileOptions::default()
+        };
+        Self::open_at(config, &path, options).await
+    }
+
+    /// Run `op` as one operation on a paging VFS: again after loading what
+    /// it faulted on, until it ends without a fault ([`crate::pages`]).
+    /// `op` must be restartable. Without a page source it runs once.
+    pub(crate) async fn paged<T>(
+        &self,
+        mut op: impl FnMut() -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let Some(source) = self.inner.borrow().page_source.clone() else {
+            return op();
+        };
+        source.begin_op();
+        let result = loop {
+            // What fan-out left for an earlier run's fault goes first; a
+            // fault fan-out met ends the run ([`crate::pages`]).
+            self.inner().retry_fan_faults();
+            let run = op();
+            let run = match (run, self.inner().take_fan_fault()) {
+                (Ok(_), Some(fault)) => Err(fault),
+                (run, _) => run,
+            };
+            #[cfg(feature = "testing")]
+            crate::fault_vfs::check_run(matches!(&run, Err(error) if crate::pages::is_fault(error)));
+            match run {
+                Err(error) if crate::pages::is_fault(&error) => {
+                    if let Err(error) = source.load().await {
+                        break Err(error);
+                    }
+                }
+                result => break result,
+            }
+        };
+        source.end_op();
+        result
     }
 
     /// Open on a file [`crate::host::StoreFile::open`] admitted, whose host
     /// tables may already have been read or written.
     pub async fn open_file(config: DbConfig, file: crate::host::StoreFile) -> Result<Self, Error> {
+        Self::open_file_now(config, file)
+    }
+
+    fn open_file_now(config: DbConfig, file: crate::host::StoreFile) -> Result<Self, Error> {
         let crate::host::StoreFile { conn, path } = file;
         Self::open_on(
             config,
@@ -1704,6 +1805,7 @@ impl Db {
                 gone: RefCell::new(Vec::new()),
                 migrations: config.migrations,
                 withheld: std::cell::Cell::new(withheld > 0),
+                page_source: config.page_source,
             })),
         };
         {
@@ -1956,12 +2058,13 @@ impl Db {
         if let Some(code) = self.inner().failing_ticks.pop_front() {
             return Err(Error::new(code, "a tick failure injected by a test"));
         }
-        self.sync_tick()?;
-        {
+        self.paged(|| {
+            self.sync_tick()?;
             let mut inner = self.inner();
             inner.fan.collect();
-            inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
-        }
+            inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)
+        })
+        .await?;
         self.pump_chunk_store().await
     }
 
@@ -1990,7 +2093,7 @@ impl Db {
             lease.unfetched.clear();
         }
         if any && fetched.is_ok() {
-            fetched = self.sync_tick();
+            fetched = self.paged(|| self.sync_tick()).await;
         }
         let done = io.run(&*store).await;
         let applied = self.end_chunk_io(&chunks, done);

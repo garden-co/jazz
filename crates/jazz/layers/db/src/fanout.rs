@@ -89,6 +89,10 @@ pub(super) struct Group {
     /// yet: the run is retried when chunks arrive, and nothing (opening,
     /// delta or settlement) is published meanwhile.
     awaiting: bool,
+    /// A refresh met a page fault ([`crate::pages`]): the next run of the
+    /// operation refreshes it again (`true`: as a reset). Nothing it would
+    /// have published went out.
+    faulted: Option<bool>,
     /// Whether the opening was published.
     opened: bool,
     /// Under a branch view, per branched stored table, the branch keys it
@@ -159,6 +163,13 @@ pub(super) struct Fanout {
     stats: FanoutStats,
     /// Bumped by every dropped stream, so `collect` scans only when needed.
     pub(super) dropped: Rc<std::cell::Cell<usize>>,
+    /// The first page fault a refresh met since the operation's run began
+    /// ([`crate::pages`]): fan-out cannot fail where it runs, so the run
+    /// ends with it instead ([`Inner::take_fan_fault`]).
+    fault: RefCell<Option<Error>>,
+    /// Changes whose watch keys could not be read for a fault: woken
+    /// again by the next run.
+    stale_changes: Vec<(String, RowUuid, Vec<u8>)>,
 }
 
 /// The canonical form of a stored SQL value, for watch matching.
@@ -426,6 +437,7 @@ impl Inner {
             keys: Vec::new(),
             includes,
             awaiting,
+            faulted: None,
             opened: !awaiting,
             branches,
             masks,
@@ -725,7 +737,15 @@ impl Inner {
             let Some(columns) = self.fan.key_columns.get(table) else {
                 continue;
             };
-            for image in self.images(table, *row, key, columns) {
+            let images = match self.images(table, *row, key, columns) {
+                Ok(images) => images,
+                Err(error) => {
+                    self.latch_fault(error);
+                    self.fan.stale_changes.push((table.clone(), *row, key.clone()));
+                    continue;
+                }
+            };
+            for image in images {
                 for (column, value) in image {
                     if let Some(groups) = self.fan.keys.get(&(table.clone(), column, value)) {
                         wake(groups, table, *row, key);
@@ -847,12 +867,18 @@ impl Inner {
         row: RowUuid,
         key: &[u8],
         columns: &BTreeSet<String>,
-    ) -> Vec<Vec<(String, String)>> {
+    ) -> Result<Vec<Vec<(String, String)>>, Error> {
         let read = |sql: String,
                     params: &[&dyn rusqlite::ToSql]|
-         -> Vec<(i64, Vec<u8>, Vec<(String, String)>)> {
-            let Ok(mut statement) = self.conn.prepare_cached(&sql) else {
-                return Vec::new();
+         -> Result<Vec<(i64, Vec<u8>, Vec<(String, String)>)>, Error> {
+            // Only a page fault is an error: a row that cannot be read
+            // as watched names no watch key ([`crate::pages`]).
+            let fault = |error: rusqlite::Error| {
+                crate::pages::is_sqlite_fault(&error).then(crate::pages::fault)
+            };
+            let mut statement = match self.conn.prepare_cached(&sql) {
+                Ok(statement) => statement,
+                Err(error) => return fault(error).map_or(Ok(Vec::new()), Err),
             };
             // Names from the first row: a cached `SELECT *` prepared before
             // its table gained a column names the old columns until a step
@@ -879,14 +905,33 @@ impl Inner {
                 }
                 Ok((seq, branch, out))
             });
-            rows.map(|rows| rows.filter_map(Result::ok).collect())
-                .unwrap_or_default()
+            let mut out = Vec::new();
+            match rows {
+                Ok(rows) => {
+                    for row in rows {
+                        match row {
+                            Ok(row) => out.push(row),
+                            Err(error) => {
+                                if let Some(fault) = fault(error) {
+                                    return Err(fault);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    if let Some(fault) = fault(error) {
+                        return Err(fault);
+                    }
+                }
+            }
+            Ok(out)
         };
         let id = row.0.as_bytes().to_vec();
         let current = read(
             format!("SELECT * FROM {} WHERE id = ?1", quote(table)),
             &[&id],
-        );
+        )?;
         let seq = current
             .iter()
             .find(|(_, branch, _)| branch.as_slice() == key)
@@ -899,12 +944,46 @@ impl Inner {
                 crate::values::STATE_AS_SENT
             ),
             &[&id, &key, &seq],
-        );
-        current
+        )?;
+        Ok(current
             .into_iter()
             .chain(old)
             .map(|(_, _, image)| image)
-            .collect()
+            .collect())
+    }
+
+    /// Note a page fault fan-out met where it cannot fail
+    /// ([`crate::pages`]): the operation's run ends with the first one.
+    fn latch_fault(&self, error: Error) {
+        crate::pages::deferred(&error);
+        let mut fault = self.fan.fault.borrow_mut();
+        if fault.is_none() {
+            *fault = Some(error);
+        }
+    }
+
+    /// The page fault fan-out met during this run, if any.
+    pub(crate) fn take_fan_fault(&self) -> Option<Error> {
+        self.fan.fault.borrow_mut().take()
+    }
+
+    /// Redo what fan-out left for a fault: wake groups by the changes it
+    /// could not read, and refresh the groups whose refresh faulted.
+    pub(crate) fn retry_fan_faults(&mut self) {
+        let stale = std::mem::take(&mut self.fan.stale_changes);
+        if !stale.is_empty() {
+            self.dispatch(stale);
+        }
+        for handle in self.fan.groups.values() {
+            let mut group = handle.borrow_mut();
+            match group.faulted.take() {
+                Some(true) => self.reset_group(&mut group),
+                Some(false) => {
+                    self.refresh_group(&mut group, None);
+                }
+                None => {}
+            }
+        }
     }
 
     /// Apply a commit that changed only the root rows `ids` to a result in
@@ -1270,6 +1349,10 @@ impl Inner {
     fn reset_group(&self, group: &mut Group) {
         match self.group_rows(group) {
             Err(error) if crate::large::is_missing(&error) => group.awaiting = true,
+            Err(error) if crate::pages::is_fault(&error) => {
+                group.faulted = Some(true);
+                self.latch_fault(error);
+            }
             Ok(rows) => {
                 group.awaiting = false;
                 // Rows that left the result go out as removals before the
@@ -1422,6 +1505,11 @@ impl Inner {
                     return false;
                 }
                 Some(Ok(None)) => return false,
+                Some(Err(error)) if crate::pages::is_fault(&error) => {
+                    group.faulted = Some(false);
+                    self.latch_fault(error);
+                    return false;
+                }
                 // Missing chunks: the full run below decides to wait.
                 Some(Err(error)) if crate::large::is_missing(&error) => {}
                 Some(Err(error)) => {
@@ -1439,6 +1527,11 @@ impl Inner {
             Ok(rows) => rows,
             Err(error) if crate::large::is_missing(&error) => {
                 group.awaiting = true;
+                return true;
+            }
+            Err(error) if crate::pages::is_fault(&error) => {
+                group.faulted = Some(false);
+                self.latch_fault(error);
                 return true;
             }
             Err(error) => {
@@ -1474,8 +1567,13 @@ impl Inner {
             return;
         }
         let order = group.prepared.query.order_by.clone();
-        if let Some(Ok(keys)) = self.sort_keys(group, &order, false, &group.rows) {
-            group.keys = keys;
+        match self.sort_keys(group, &order, false, &group.rows) {
+            Some(Ok(keys)) => group.keys = keys,
+            Some(Err(error)) if crate::pages::is_fault(&error) => {
+                group.faulted = Some(group.faulted.unwrap_or(false));
+                self.latch_fault(error);
+            }
+            _ => {}
         }
     }
 }

@@ -116,6 +116,7 @@ fn fixture_db() -> WasmDb {
         initial_sync_flush_every: None,
         migrations: None,
         system_node: None,
+        page_source: None,
     };
     WasmDb::open_memory(
         serde_json::to_vec(&schema).expect("encode public schema JSON"),
@@ -167,6 +168,7 @@ async fn self_signed_subscriber_admission_requires_the_exact_proof() {
         initial_sync_flush_every: None,
         migrations: None,
         system_node: None,
+        page_source: None,
     };
     let db = WasmDb::open_memory_with_self_signed_proof(
         serde_json::to_vec(&schema).expect("encode public schema JSON"),
