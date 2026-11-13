@@ -700,8 +700,10 @@ export interface Jazz {
    * if `authenticate` no longer names that user (or reconnects if it still
    * does). Call it from your sign-out handler or your auth provider's
    * session-revoked webhook, so a sign-out reaches open sessions before
-   * their `expiresAt`. Sessions served by other instances end at their
-   * `expiresAt`. Returns how many sessions it ended.
+   * their `expiresAt`. A session still signing in when you call it (its
+   * `authenticate` may have read the cookie you just ended) is refused too
+   * if it signs in as `userId`. Sessions served by other instances end at
+   * their `expiresAt`. Returns how many open sessions it ended.
    */
   revokeUser(userId: string): Promise<number>;
   /**
@@ -2099,6 +2101,13 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     close(): void;
     /** End the session as refused (`jazz.revokeUser`). */
     revoke(reason: string): void;
+    /**
+     * `jazz.revokeUser(userId)` ran while this session's sign-in was still
+     * being admitted: if it admits `userId`, refuse it as revoked instead.
+     * Its `authenticate` may have read the user's cookie before the app
+     * ended their auth session.
+     */
+    revokeWhileAdmitting(userId: string): void;
     /** The user the session was admitted as, once it is. */
     readonly userId: string | undefined;
     /** Whether a trusted backend client opened it. */
@@ -2125,6 +2134,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     let ended = false;
     let userId: string | undefined;
     let trusted = false;
+    // Users `revokeUser` named while this session's admission ran.
+    let admitting = true;
+    const revokedWhileAdmitting = new Set<string>();
     // A session that never sends its prelude ends too.
     let stopExpiry: (() => void) | undefined = startTimer(() => {
       onEvent(null, { kind: "close", code: 1008, reason: "no sign-in in time" });
@@ -2190,7 +2202,19 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       end();
     };
     const admit = async (prelude: Uint8Array): Promise<boolean> => {
-      const admitted = await admitPrelude(request, prelude);
+      const admitted = await admitPrelude(request, prelude).finally(() => (admitting = false));
+      if (
+        admitted &&
+        admitted !== UNVERIFIED_CREDENTIAL &&
+        admitted.userId !== undefined &&
+        revokedWhileAdmitting.has(admitted.userId) &&
+        !ended
+      ) {
+        // Admitted on an answer `authenticate` gave before the app revoked
+        // this user: refused as the sessions `revokeUser` ended are.
+        clientSession.revoke("revokeUser");
+        return false;
+      }
       if (!admitted || admitted === UNVERIFIED_CREDENTIAL || ended) {
         // An auth failure, not a dropped link: the client stops retrying and
         // reports `offline: auth`, and its session asks the backend whether
@@ -2358,6 +2382,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         onEvent(null, { kind: "message", data: authFailedBatch(`session revoked: ${reason}`) });
         onEvent(null, { kind: "close", code: 1008, reason: "session revoked" });
         end();
+      },
+      revokeWhileAdmitting(revoked) {
+        if (admitting && !ended) revokedWhileAdmitting.add(revoked);
       },
       get userId() {
         return userId;
@@ -3378,7 +3405,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         throw new Error("revokeUser: pass the user's id, as your authenticate names it");
       let ended = 0;
       for (const { session } of [...liveSessions]) {
-        if (session.trusted || session.userId !== userId) continue;
+        if (session.trusted) continue;
+        // A session still signing in may turn out to be theirs: its
+        // `authenticate` may have read their cookie before the app ended it.
+        if (session.userId === undefined) session.revokeWhileAdmitting(userId);
+        if (session.userId !== userId) continue;
         session.revoke("revokeUser");
         ended += 1;
       }
