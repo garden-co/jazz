@@ -400,6 +400,11 @@ jobs:
     # environment". This job only downloads built artifacts and runs
     # `npm publish`, so a standard runner is enough.
     runs-on: ubuntu-24.04
+    # A real publish runs in the protected `publish` environment, which the
+    # npm trusted publishers can be bound to. Dry-runs (including the PR
+    # preview, which calls this workflow) need no credential and run
+    # outside it.
+    environment: ${{ (inputs.mode || github.event.inputs.mode || 'publish') == 'publish' && 'publish' || '' }}
     needs:
       - release-push-gate
       - release-test-gate
