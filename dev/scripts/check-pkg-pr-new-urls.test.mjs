@@ -42,6 +42,19 @@ test("resolves retries until pkg.pr.new serves the URL, and gives up after its a
   assert.equal(calls, 3);
 });
 
+test("every attempt is bounded by a timeout signal", async () => {
+  const stalled = (_url, { signal }) =>
+    new Promise((_resolve, reject) =>
+      signal.addEventListener("abort", () => reject(signal.reason)),
+    );
+  const started = Date.now();
+  assert.equal(
+    await resolves("u", { attempts: 2, delayMs: 0, timeoutMs: 50, fetchImpl: stalled }),
+    false,
+  );
+  assert.ok(Date.now() - started < 2_000, "a stalled connection must not hold the check");
+});
+
 test("the preview workflow checks every package it publishes, right after publishing", () => {
   const workflow = readFileSync(path.join(root, ".github/workflows/preview-build.yml"), "utf8");
   const publish = workflow.indexOf("pnpm exec pkg-pr-new publish");

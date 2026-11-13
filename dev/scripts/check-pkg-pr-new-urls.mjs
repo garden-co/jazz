@@ -30,11 +30,22 @@ export function summary(urls) {
   ].join("\n");
 }
 
-/** Whether `url` serves a tarball, retrying while pkg.pr.new settles. */
-export async function resolves(url, { attempts = 12, delayMs = 10_000, fetchImpl = fetch } = {}) {
+/**
+ * Whether `url` serves a tarball, retrying while pkg.pr.new settles. Each
+ * attempt is bounded by `timeoutMs`, so one URL gives up after about
+ * attempts × (timeoutMs + delayMs) at worst (~4 minutes by default).
+ */
+export async function resolves(
+  url,
+  { attempts = 12, delayMs = 10_000, timeoutMs = 10_000, fetchImpl = fetch } = {},
+) {
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      const response = await fetchImpl(url, { method: "HEAD", redirect: "follow" });
+      const response = await fetchImpl(url, {
+        method: "HEAD",
+        redirect: "follow",
+        signal: AbortSignal.timeout(timeoutMs),
+      });
       if (response.ok) return true;
     } catch {
       // Network hiccup: retry like a non-2xx answer.
@@ -50,14 +61,12 @@ async function main([commit, ...directories]) {
   const urls = directories.map((directory) =>
     previewUrl(JSON.parse(readFileSync(path.join(directory, "package.json"), "utf8")).name, commit),
   );
-  const missing = [];
-  for (const url of urls) {
-    if (await resolves(url)) console.log(`ok      ${url}`);
-    else {
-      console.log(`missing ${url}`);
-      missing.push(url);
-    }
-  }
+  // Check all packages at once, so an outage costs one URL's retry budget
+  // rather than one per package.
+  const results = await Promise.all(urls.map((url) => resolves(url)));
+  const missing = urls.filter((_, index) => !results[index]);
+  for (const [index, url] of urls.entries())
+    console.log(`${results[index] ? "ok     " : "missing"} ${url}`);
   if (process.env.GITHUB_STEP_SUMMARY)
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary(urls));
   if (missing.length > 0) {
