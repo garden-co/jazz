@@ -341,6 +341,50 @@ describe("typed app prototype", () => {
     }
   });
 
+  it("mixes column names and partial selections in any order (#5192)", () => {
+    const rangeFirst = app.todos.select({ title: { from: 0, to: 10 } }, "done");
+    const namesFirst = app.todos.select("done", { title: { from: 0, to: 10 } });
+    const interleaved = app.todos.select({ attachment: { from: 1, to: 3 } }, "done", {
+      title: { fromUtf8: 0, toUtf8: 4 },
+    });
+
+    expect(JSON.parse(rangeFirst._build())).toMatchObject({
+      select: ["title", "done"],
+      partialSelect: { title: { from: 0, to: 10 } },
+    });
+    expect(JSON.parse(namesFirst._build())).toMatchObject({
+      select: ["done", "title"],
+      partialSelect: { title: { from: 0, to: 10 } },
+    });
+    expect(JSON.parse(interleaved._build())).toMatchObject({
+      select: ["attachment", "done", "title"],
+      partialSelect: { attachment: { from: 1, to: 3 }, title: { fromUtf8: 0, toUtf8: 4 } },
+    });
+    expectTypeOf<s.RowOf<typeof rangeFirst>>().toEqualTypeOf<{
+      id: string;
+      title: string;
+      done: boolean;
+    }>();
+    expectTypeOf<s.RowOf<typeof namesFirst>>().toEqualTypeOf<{
+      id: string;
+      title: string;
+      done: boolean;
+    }>();
+    expectTypeOf<s.RowOf<typeof interleaved>>().toEqualTypeOf<{
+      id: string;
+      attachment: Uint8Array;
+      title: string;
+      done: boolean;
+    }>();
+
+    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+      // @ts-expect-error a partial selection after a name is still schema-checked.
+      app.todos.select("done", { done: { from: 0, to: 1 } });
+      // @ts-expect-error a name after a partial selection is still checked.
+      app.todos.select({ title: { from: 0, to: 1 } }, "missing");
+    }
+  });
+
   it("serializes nested include builders as query objects", () => {
     expect(
       JSON.parse(app.projects.include({ todosViaProject: app.todos.select("title") })._build()),
