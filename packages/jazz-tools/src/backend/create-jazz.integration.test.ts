@@ -1968,6 +1968,41 @@ describe("createJazz", () => {
     expect((await jazz.db.all(app.todos.where({ id: later.id }))).length).toBe(1);
   }, 60_000);
 
+  it("lets a client end its stream session once signed out, and calls one already ended done", async () => {
+    // #5187: a client ends its stream as it signs out, when the app's
+    // sign-in is already gone. That was a 403, and a DELETE that arrived
+    // after the session ended a 404 or 410: errors the browser logs.
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    const appId = jazz.appId;
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: false });
+    const previous = (globalThis as { location?: unknown }).location;
+    (globalThis as { location?: unknown }).location = {
+      host: new URL(origin).host,
+      href: `${origin}/`,
+    };
+    cleanups.push(async () => {
+      (globalThis as { location?: unknown }).location = previous;
+    });
+    const alice = await userSession(appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "over the stream", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    const sessionPath = requestPaths.find((path) => /\/stream\/[^/]+$/.test(path))!;
+    const key = streamKeys.get(sessionPath)!;
+    const end = (headers: Record<string, string>) =>
+      statusOf(`${origin}${sessionPath}`, "DELETE", headers);
+
+    // Still refused: no key, or the key with someone else's sign-in.
+    expect(await end({})).toBe(403);
+    expect(await end({ "x-test-user": "bob", "x-jazz-stream-key": key })).toBe(403);
+    // Its own client, signed out: ends it.
+    expect(await end({ "x-jazz-stream-key": key })).toBe(204);
+    // Ended already: done, for its client only.
+    expect(await end({ "x-jazz-stream-key": key })).toBe(204);
+    expect(await end({ "x-test-user": "alice" })).toBe(403);
+  }, 60_000);
+
   for (const sockets of [false, true]) {
     it(`uploads more than a session takes at once over ${sockets ? "a socket" : "the HTTP stream"}, on one session`, async () => {
       // 24 MB local-first: three times a session's 8 MiB ingress budget,
