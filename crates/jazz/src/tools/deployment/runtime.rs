@@ -416,7 +416,10 @@ mod tests {
             )),
             "{error}"
         );
-        assert!(error.contains("npx jazz-tools migrations create"), "{error}");
+        assert!(
+            error.contains("npx jazz-tools migrations create"),
+            "{error}"
+        );
         assert!(!error.contains("not supported yet"), "{error}");
     }
 
@@ -433,6 +436,9 @@ mod tests {
             )),
             "{error}"
         );
-        assert!(error.contains("npx jazz-tools migrations create"), "{error}");
+        assert!(
+            error.contains("npx jazz-tools migrations create"),
+            "{error}"
+        );
     }
 }
