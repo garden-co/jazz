@@ -1191,7 +1191,17 @@ impl JazzClient {
     /// A [`ReadTier::Remote`] read, and a local-first read that waits for
     /// the server, return the first answer of a subscription held for the
     /// read: the server's settled result once it arrives.
-    pub async fn query_with_opts(&self, query: Query, opts: ReadOpts) -> Result<Vec<QueryResult>> {
+    pub fn query_with_opts(
+        &self,
+        query: Query,
+        opts: ReadOpts,
+    ) -> impl std::future::Future<Output = Result<Vec<QueryResult>>> + '_ {
+        // SQL-backed reads have large futures. Allocate at this boundary so
+        // concurrent queries do not embed those futures in their caller's stack.
+        Box::pin(self.read_query(query, opts))
+    }
+
+    async fn read_query(&self, query: Query, opts: ReadOpts) -> Result<Vec<QueryResult>> {
         let read = with_history_identity(&query);
         let rows = if let Some(transaction_id) = self.open_transaction()? {
             let prepared = self.prepare(&read)?;
@@ -1211,7 +1221,9 @@ impl JazzClient {
                     added.sort_by_key(|row| row.index);
                     added.into_iter().map(|row| row.row).collect()
                 }
-                SubscriptionEvent::Rejected { reason, .. } => return Err(JazzError::Query(reason)),
+                SubscriptionEvent::Rejected { reason, .. } => {
+                    return Err(JazzError::Query(reason));
+                }
                 SubscriptionEvent::Closed => {
                     return Err(JazzError::Query("the read closed before answering".into()));
                 }
