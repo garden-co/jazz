@@ -74,14 +74,14 @@ export function ChatPanel({
 
     try {
       // #region default-stack-write
-      await (
-        await db.insert(app.messages, {
+      await db
+        .insert(app.messages, {
           author_name: authorName,
           chat_id: chatId,
           text: messageText.trim(),
           sent_at: new Date(),
         })
-      ).wait({ tier: "global" });
+        .wait({ tier: "global" });
       // #endregion default-stack-write
       setMessageText("");
     } catch (error) {
@@ -96,7 +96,7 @@ export function ChatPanel({
     setDeleteError(null);
 
     try {
-      await (await db.delete(app.messages, messageId)).wait({ tier: "global" });
+      await db.delete(app.messages, messageId).wait({ tier: "global" });
     } catch (error) {
       setDeleteError(error instanceof Error ? error.message : String(error));
     } finally {
