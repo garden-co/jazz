@@ -2596,6 +2596,12 @@ struct RelayedSettle {
     /// The position the session was last told, once the result settled.
     sent: Option<u64>,
     global: bool,
+    /// The session was told its upstream read's refusal: once per
+    /// refusal, so a later link that refuses again tells it again.
+    refused: bool,
+    /// A settle withheld while the upstream read was refused: the session
+    /// is told it once a link answers that read again.
+    owed: bool,
 }
 
 /// A relayed LocalFirst subscription's first-load wait: once `until`
@@ -7399,15 +7405,21 @@ impl Client {
 }
 
 impl Client {
+    /// Why this store refused its current link (see
+    /// [`Inner::refuse_upstream`]), if it did: nothing answers a remote
+    /// read until a new link does.
+    fn refused_link(&self) -> Option<&Error> {
+        self.refusal
+            .as_ref()
+            .filter(|(connection, _)| *connection == self.connection)
+            .map(|(_, error)| error)
+    }
+
     /// The current link's refusal when it is [`ErrorCode::AuthorityChanged`]:
     /// the upstream serves another authority history than this store's.
     fn authority_changed(&self) -> Option<&Error> {
-        self.refusal
-            .as_ref()
-            .filter(|(connection, error)| {
-                *connection == self.connection && error.code == ErrorCode::AuthorityChanged
-            })
-            .map(|(_, error)| error)
+        self.refused_link()
+            .filter(|error| error.code == ErrorCode::AuthorityChanged)
     }
 }
 
@@ -8424,6 +8436,11 @@ impl Db {
             if (!strict && !answerable) || deadline.is_some_and(|d| Instant::now() >= d) {
                 return Poll::Ready(Ok(None));
             }
+            // A link this store refused answers nothing until a new one
+            // does: a Remote read fails with why (SPEC 8 §8.10).
+            if strict && let Some(error) = client.refused_link() {
+                return Poll::Ready(Err(error.clone()));
+            }
             if let Some(expired) = coverage {
                 if client.unadmitted {
                     return Poll::Ready(Err(Error::new(
@@ -9110,6 +9127,15 @@ impl Db {
                                 ReadLifetime::Live(live) => {
                                     live.answered.set(true);
                                     live.global.set(global);
+                                    // Answered, it is no longer refused (a
+                                    // relay that refused its upstream says
+                                    // so once a new one answers): reads
+                                    // attached from now on start afresh,
+                                    // while those attached under the
+                                    // refusal still report it.
+                                    if live.refused.borrow().is_some() {
+                                        live.refused = Rc::new(RefCell::new(None));
+                                    }
                                     if live.visible.is_none_or(|v| v.n != at.n || v.seq < at.seq) {
                                         live.visible = Some(at);
                                         client.visibility_moved = true;
@@ -9950,7 +9976,24 @@ impl Inner {
         let mut ready = Vec::new();
         let mut refused = Vec::new();
         let mut kept = Vec::new();
+        // A link this store refused answers nothing: a Remote read that
+        // would wait for it fails with why, as this store's own would.
+        let refused_link = client.refused_link().cloned();
         for fetch in std::mem::take(&mut client.relayed_fetches) {
+            if let (true, true, Some(error), SyncMessage::Read { id, .. }) = (
+                fetch.session == index,
+                fetch.strict,
+                &refused_link,
+                &fetch.message,
+            ) {
+                client.forget_once(fetch.upstream);
+                refused.push(SyncMessage::Refused {
+                    id: *id,
+                    code: error.code,
+                    message: error.message.clone(),
+                });
+                continue;
+            }
             let answered = matches!(client.answers.get(&fetch.upstream), Some(Some(_)));
             let given_up =
                 !fetch.strict && (!can_wait || fetch.until.is_some_and(|until| now >= until));
@@ -10004,6 +10047,90 @@ impl Inner {
             })
             .collect();
         (ready, answers)
+    }
+
+    /// Whether session `index`'s relayed live read `id` has an upstream
+    /// read this store refused (see [`Inner::refuse_upstream`]).
+    fn relayed_read_refused(&self, index: usize, id: u64) -> bool {
+        let Some(settle) = self.sessions[index].settles.get(&id) else {
+            return false;
+        };
+        self.client.as_ref().is_some_and(|client| {
+            client
+                .live_reads
+                .get(&settle.key)
+                .and_then(|read| client.reads.get(read))
+                .and_then(ActiveRead::live)
+                .is_some_and(|live| live.refused.borrow().is_some())
+        })
+    }
+
+    /// Session `index`'s relayed live reads whose upstream read this store
+    /// refused (see [`Inner::refuse_upstream`]) are refused to the session
+    /// with that error, as this store's own subscriptions are: whatever
+    /// their tier, those opened before the refusal and after it. Each is
+    /// told once per refusal. Once a new link answers the upstream read
+    /// again, a read whose opening the session already settled is told it
+    /// is settled again, which ends the refusal there (a read not yet
+    /// opened is told so by its opening).
+    fn relayed_refusals(&mut self, index: usize) {
+        let Some(client) = self.client.as_ref() else {
+            return;
+        };
+        let session = &mut self.sessions[index];
+        for (&id, settle) in session.settles.iter_mut() {
+            let Some(live) = client
+                .live_reads
+                .get(&settle.key)
+                .and_then(|read| client.reads.get(read))
+                .and_then(ActiveRead::live)
+            else {
+                continue;
+            };
+            let refusal = live.refused.borrow().clone();
+            match refusal {
+                Some(error) if !settle.refused => {
+                    settle.refused = true;
+                    session.outbox.push(SyncMessage::Refused {
+                        id,
+                        code: error.code,
+                        message: error.message,
+                    });
+                }
+                None if (settle.refused || settle.owed) && live.answered.get() => {
+                    settle.refused = false;
+                    settle.owed = false;
+                    // Its result as it stands, listed as an opening's is:
+                    // it may never have been settled at the session.
+                    let Some(sent) = settle.sent else {
+                        continue;
+                    };
+                    let Some(group) = session
+                        .subs
+                        .get(&id)
+                        .and_then(|(_, group, ..)| group.upgrade())
+                    else {
+                        continue;
+                    };
+                    let members = group
+                        .borrow()
+                        .rows
+                        .iter()
+                        .map(|row| *row.id.0.as_bytes())
+                        .collect();
+                    let through = client.settled_through(&settle.key).max(sent);
+                    settle.sent = Some(through);
+                    settle.global |= client.settled_globally(&settle.key);
+                    session.outbox.push(SyncMessage::Settled {
+                        id,
+                        through,
+                        members: Some(members),
+                        global: settle.global,
+                    });
+                }
+                _ => {}
+            }
+        }
     }
 
     /// The identity whose policies govern session `index`'s reads and
@@ -10860,6 +10987,7 @@ impl Db {
         self.serve_due_first_loads(index)?;
         // Relayed reads the upstream answered (or can no longer answer)
         // are served from this store first, in the order they came.
+        self.inner.borrow_mut().relayed_refusals(index);
         let (relayed, answers) = self.inner.borrow_mut().relayed_fetches_ready(index);
         // The upstream's answers list their results' rows: cached rows
         // they left out are not served as the reader's (INV-SYNC-14).
@@ -11690,12 +11818,22 @@ impl Db {
                         .settles
                         .get(&id)
                         .map_or(global, |settle| settle.global);
-                    settled.push(SyncMessage::Settled {
-                        id,
-                        through,
-                        members: window,
-                        global,
-                    });
+                    // Served from this store while its upstream read is
+                    // refused, it is not settled: the session is told so
+                    // once a link answers that read again (see
+                    // `relayed_refusals`), as this store's own reads are.
+                    if inner.relayed_read_refused(index, id) {
+                        if let Some(settle) = inner.sessions[index].settles.get_mut(&id) {
+                            settle.owed = true;
+                        }
+                    } else {
+                        settled.push(SyncMessage::Settled {
+                            id,
+                            through,
+                            members: window,
+                            global,
+                        });
+                    }
                     // Its first `Holds` on this connection goes with its
                     // opening, even if it holds nothing, and none before
                     // it: what the replica kept stands until then.
@@ -12215,8 +12353,15 @@ impl Db {
                 .filter(|(_, wait)| unanswerable || wait.until <= now)
                 .map(|(id, _)| *id)
                 .collect();
-            ids.into_iter()
+            let due: Vec<(u64, FirstLoadWait)> = ids
+                .into_iter()
                 .filter_map(|id| session.first_load.remove(&id).map(|wait| (id, wait)))
+                .collect();
+            // One whose upstream read this store refused is not served
+            // from this store as settled: it is refused, and settled once
+            // a link answers its upstream read again.
+            due.into_iter()
+                .filter(|(id, _)| !inner.relayed_read_refused(index, *id))
                 .collect()
         };
         for (id, wait) in due {
@@ -12398,10 +12543,17 @@ impl Db {
                     None
                 };
                 let strict = tier == ReadTier::Remote && wait.is_none();
+                // Opened while this store refuses its upstream, a read is
+                // refused (see `relayed_refusals`) and settled only once a
+                // link answers its upstream read again, whatever its tier.
+                let refused = attached
+                    .as_ref()
+                    .is_some_and(|(_, (_, refused, _))| refused.borrow().is_some());
                 let relayed = attached
                     .as_ref()
-                    .filter(|_| strict || (upstream == Some(true) && wait.is_some()));
+                    .filter(|_| strict || refused || (upstream == Some(true) && wait.is_some()));
                 if relayed.is_some()
+                    && !refused
                     && let Some(until) = wait.and_then(wait_until)
                 {
                     self.inner.borrow_mut().sessions[index].first_load.insert(
@@ -12454,6 +12606,8 @@ impl Db {
                                         key: key.clone(),
                                         sent: None,
                                         global: false,
+                                        refused: false,
+                                        owed: false,
                                     },
                                 );
                             }
