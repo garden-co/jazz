@@ -689,6 +689,149 @@ fn f4_two_pushes_of_one_row_in_one_tick() {
     }
 }
 
+/// F4, multi-version tick: a relay applies two versions of one row in one
+/// tick (the authority pushed each in its own tick; asserted below), so the
+/// row's newest history version, which dispatch reads as its old image, is
+/// the intermediate one, not the version the relay's results last saw. v1
+/// moves a held child to a parent no result holds, v2 edits another column:
+/// both the current and that history image name the unheld parent. Alice's
+/// leaf reads only the relation and a keyed thread, so it learns of the
+/// move only through the relay; bob's leaf reads every message, so both
+/// versions reach the relay. Alice loses the child from the relation and
+/// from the keyed thread alike.
+///
+/// Several things keep this correct, each enough on its own here: the
+/// relation's held-row check, the replaced version each relay install
+/// keeps for dispatch (`drop_row` into `gone`), and alice's results being
+/// read through the authority, which dispatches per commit.
+///
+/// ```
+/// authority ──m1: chat 1 → 2 ──tick──┐
+/// authority ──m1: body edited ──tick─┴─► relay: one tick, both versions
+///                                         ├─► alice: chat 1 ─► messages
+///                                         └─► bob: all messages
+/// ```
+#[test]
+fn two_versions_of_one_row_in_one_relay_tick() {
+    let schema = chat_schema(None);
+    let server = open(schema.clone(), 1);
+    let relay = open(schema.clone(), 3);
+    let alice = open(schema.clone(), 4);
+    let bob = open(schema, 5);
+    let (relay_side, server_side) = duplex();
+    let _up = block_on(relay.connect_upstream(relay_side));
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
+    relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    let mut links = Vec::new();
+    for leaf in [&alice, &bob] {
+        let (leaf_side, relay_down) = duplex();
+        links.push(block_on(leaf.connect_upstream(leaf_side)));
+        relay
+            .accept_subscriber(relay_down, AuthorSubject::SYSTEM)
+            .unwrap();
+    }
+    let pump = || {
+        for _ in 0..5 {
+            block_on(alice.tick()).unwrap();
+            block_on(bob.tick()).unwrap();
+            block_on(relay.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+            block_on(relay.tick()).unwrap();
+        }
+        block_on(alice.tick()).unwrap();
+        block_on(bob.tick()).unwrap();
+    };
+    for n in 1..=2 {
+        chat(&server, n, &format!("c{n}"));
+    }
+    for n in 1..=3 {
+        message(&server, n, 1, n as i64, None);
+    }
+    let queries = [
+        (
+            "chat 1 with its messages",
+            Query::from("chats")
+                .filter(eq(col("title"), lit(text("c1"))))
+                .array_subquery(
+                    ArraySubquery::new("messages", "messages", "chat", "id")
+                        .order_by("sent_at", OrderDirection::Asc),
+                ),
+        ),
+        (
+            "chat 1's messages, keyed",
+            Query::from("messages")
+                .filter(in_chat(1))
+                .order_by("sent_at", OrderDirection::Asc),
+        ),
+    ];
+    let mut lives: Vec<Live> = queries
+        .iter()
+        .map(|(name, query)| subscribe(&alice, name, query.clone(), None))
+        .collect();
+    let _all = subscribe(&bob, "all messages", Query::from("messages"), None);
+    let local = ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let converged = |lives: &mut [Live], after: &str| {
+        check_with(&alice, lives, after, local.clone());
+        for (live, (_, query)) in lives.iter().zip(&queries) {
+            let query = server.prepare_query(query).unwrap();
+            let truth = snapshot(
+                &block_on(server.all_nested_for_test(&query, ReadOpts::default(), None)).unwrap(),
+            );
+            assert_eq!(
+                live.rows, truth,
+                "{}: alice differs from the authority after {after}",
+                live.name
+            );
+        }
+    };
+    pump();
+    converged(&mut lives, "sync");
+    for row in [1, 2] {
+        update(
+            &server,
+            "messages",
+            id(MESSAGES, row),
+            &[("chat", uuid(id(CHATS, 2)))],
+        );
+        block_on(server.tick()).unwrap();
+        update(
+            &server,
+            "messages",
+            id(MESSAGES, row),
+            &[("body", text("edited"))],
+        );
+        block_on(server.tick()).unwrap();
+        // The relay applies both versions in one tick, then serves.
+        block_on(relay.tick()).unwrap();
+        assert_eq!(
+            history_versions(&relay, row),
+            2,
+            "m{row}: both versions in one tick"
+        );
+        pump();
+        converged(
+            &mut lives,
+            &format!("m{row} moved out, then edited, in one relay tick"),
+        );
+    }
+}
+
+/// How many history versions `store` holds of message `n`.
+fn history_versions(store: &Store, n: usize) -> i64 {
+    let conn = rusqlite::Connection::open(store._dir.path().join("store.sqlite")).unwrap();
+    conn.query_row(
+        "SELECT count(*) FROM messages__h WHERE id = ?1",
+        [id(MESSAGES, n).0.as_bytes().to_vec()],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
 /// F5. A reverse link (`inner` is not `id`): a reply in another chat,
 /// outside the result and named by none of its rows, enters a held row's
 /// `replies` because its `reply_to` names that row.
