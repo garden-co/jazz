@@ -711,7 +711,8 @@ pub(crate) enum Handshake {
     /// A client in this process, carried by the embedding host: it cannot
     /// be half-open, and its Hello waits on the host's event loop, which a
     /// burst of synchronous work can hold for longer than a network
-    /// peer's handshake may take.
+    /// peer's handshake may take. Only the embedded server opens these.
+    #[cfg(feature = "embedded-server")]
     InProcess,
 }
 
@@ -724,6 +725,7 @@ async fn within_handshake<T: Default>(
         Handshake::Network => tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, read)
             .await
             .unwrap_or_default(),
+        #[cfg(feature = "embedded-server")]
         Handshake::InProcess => read.await,
     }
 }
