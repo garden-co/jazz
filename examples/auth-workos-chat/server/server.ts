@@ -43,13 +43,7 @@ async function readSession(sealed: string | undefined) {
   const current = (await refreshed.get(sealed)) ?? sealed;
   const session = workos.userManagement.loadSealedSession({ sessionData: current, cookiePassword });
   const result = await session.authenticate();
-  if (result.authenticated)
-    return {
-      user: result.user,
-      role: result.role,
-      sealed: current,
-      expiresAt: expOf(result.accessToken),
-    };
+  if (result.authenticated) return { user: result.user, role: result.role, sealed: current };
   if (!refreshed.has(sealed)) {
     refreshed.set(
       sealed,
@@ -63,16 +57,16 @@ async function readSession(sealed: string | undefined) {
   const again = await workos.userManagement
     .loadSealedSession({ sessionData: fresh, cookiePassword })
     .authenticate();
-  return again.authenticated
-    ? { user: again.user, role: again.role, sealed: fresh, expiresAt: expOf(again.accessToken) }
-    : null;
+  return again.authenticated ? { user: again.user, role: again.role, sealed: fresh } : null;
 }
 
-/** When a WorkOS access token expires (its `exp`, Unix seconds). */
-function expOf(accessToken: string): number {
-  const payload = JSON.parse(Buffer.from(accessToken.split(".")[1]!, "base64url").toString());
-  return payload.exp as number;
-}
+// How long a sync connection's sign-in holds before Jazz asks `authenticate`
+// again. Not the access token's `exp`: that is minutes away, and Jazz's routes
+// don't run auth middleware that would refresh it, so a connection would
+// re-authenticate every few minutes for nothing. The sealed session doesn't
+// say when it ends, so an hour, which is also the longest a sync connection
+// lasts by default (`sessionTtlSeconds`).
+const SESSION_RECHECK_SECONDS = 60 * 60;
 // #endregion workos-session
 
 function setCookie(res: Response, sealed: string) {
@@ -92,7 +86,7 @@ const jazz = createJazz({
       ? {
           userId: session.user.id,
           claims: { role: session.role ?? "" },
-          expiresAt: session.expiresAt,
+          expiresAt: Math.floor(Date.now() / 1000) + SESSION_RECHECK_SECONDS,
         }
       : null;
   },
