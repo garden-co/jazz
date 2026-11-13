@@ -10,10 +10,34 @@
 //! woken groups re-run and diff. Watches are sound by construction: a key
 //! is used only where every way the table reaches the result goes through
 //! that equality; everything else watches the whole table.
+//!
+//! A table the result reads only through optional array relations is
+//! watched by correlation instead ([`Correlation`]): each such relation
+//! reads, per parent row the result holds, the rows whose `inner` column
+//! holds the parent's `outer` value. A changed row of it can move the
+//! result only if the result holds it at that level, or its old or new
+//! `inner` value is one the held parents have. Anything this cannot decide
+//! (a root that reads the table, a required relation, an offset window, a
+//! link that is not a reference) keeps the whole-table watch: refusing is
+//! always a full re-run, never a skip.
+//!
+//! A table read policies read as evidence (a membership `EXISTS`, an
+//! `INHERITS` of a referenced row) is watched by those reads
+//! ([`Occurrence`]): whatever row a policy is checked for, an `EXISTS
+//! members WHERE room = row.room AND person = claims.person` can change
+//! value only with a row whose `person` is mine, before or after the
+//! write, and only when it is inserted, deleted, or changes a column the
+//! `EXISTS` reads. This bounds grants as well as revocations, since it
+//! does not depend on what the result holds. A table read this way and
+//! through relations is watched both ways, and a change either matches
+//! wakes the group. A policy form this cannot bound (a relation `EXISTS`,
+//! an update or delete stamp, a recursive `INHERITS` chain) watches every
+//! table it reads whole, as do branch views.
 
 use super::*;
 use crate::schema::history::{history_source_table, is_history_table};
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 pub(super) type Queue = Rc<RefCell<VecDeque<SubscriptionEvent>>>;
 
@@ -23,6 +47,101 @@ enum Watch {
     Table(String),
     /// Rows of `table` whose `column` holds the canonical value.
     Key(String, String, String),
+    /// Rows of `table` that reach the result only through its array
+    /// relations: a change wakes the group when one of its
+    /// [`Correlation`]s on `table` matches it.
+    Related(String),
+    /// Rows of `table` that read policies read as evidence: a change wakes
+    /// the group when one of its [`Occurrence`]s on `table` matches it.
+    Evidence(String),
+}
+
+impl Watch {
+    fn table(&self) -> &String {
+        let (Watch::Table(table)
+        | Watch::Key(table, ..)
+        | Watch::Related(table)
+        | Watch::Evidence(table)) = self;
+        table
+    }
+}
+
+/// One array relation level whose table is watched by correlation: its
+/// rows are those of `table` whose `inner` column holds a value of their
+/// parent row's `outer` column.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Correlation {
+    /// The relation's stored table.
+    table: String,
+    /// The relation columns from the root to this relation: the parents
+    /// are the rows reached through all but the last.
+    path: Vec<String>,
+    /// The stored `inner` column, or `id`.
+    inner: String,
+    /// `inner` is a list of references (one per element).
+    inner_list: bool,
+    /// The parent's `outer` column as its rows name it, or `id`.
+    outer: String,
+}
+
+/// What a group's result holds at one [`Correlation`]'s level.
+#[derive(Clone, Debug, Default)]
+struct Held {
+    /// The parents' `outer` values, canonical, one per list element.
+    parents: HashSet<String>,
+    /// The rows the relation holds under them.
+    rows: HashSet<RowUuid>,
+    /// False when a parent's value or a row's id could not be read: then
+    /// every change to the table wakes the group.
+    complete: bool,
+}
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static CORRELATE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Turn correlation watches off (`false`: every table a relation reads
+/// is watched whole, as before them) on this thread, for A/B runs and
+/// differential tests against the full re-run path.
+#[cfg(any(test, feature = "testing"))]
+pub fn set_correlation_filter_for_test(on: bool) {
+    CORRELATE.with(|cell| cell.set(on));
+}
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static POLICY_PINS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Turn policy evidence pins off (`false`: every table a read policy of
+/// the root or of a relation's table reads is watched whole, as before
+/// them) on this thread, for A/B runs and differential tests.
+#[cfg(any(test, feature = "testing"))]
+pub fn set_policy_pins_for_test(on: bool) {
+    POLICY_PINS.with(|cell| cell.set(on));
+}
+
+fn policy_pins_enabled() -> bool {
+    #[cfg(any(test, feature = "testing"))]
+    {
+        POLICY_PINS.with(std::cell::Cell::get)
+    }
+    #[cfg(not(any(test, feature = "testing")))]
+    {
+        true
+    }
+}
+
+fn correlation_enabled() -> bool {
+    #[cfg(any(test, feature = "testing"))]
+    {
+        CORRELATE.with(std::cell::Cell::get)
+    }
+    #[cfg(not(any(test, feature = "testing")))]
+    {
+        true
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -53,10 +172,12 @@ struct Member {
     queue: Weak<RefCell<VecDeque<SubscriptionEvent>>>,
     shape: Shape,
     bound: bool,
-    /// Where this member's `settled` flag comes from, and the last value
-    /// it was told.
+    /// Where this member's `settled` flag comes from, and the tier it was
+    /// last told it settled at (`None`: not told it settled). A result a
+    /// relay settled at its own store is told again once its upstream
+    /// settles it globally.
     settled: sync::SettledBy,
-    told: std::cell::Cell<bool>,
+    told: std::cell::Cell<Option<DurabilityTier>>,
 }
 
 /// One shared live result.
@@ -70,6 +191,9 @@ pub(super) struct Group {
     pub(super) rows: Vec<CurrentRow>,
     members: Vec<Member>,
     watches: Vec<Watch>,
+    /// Per table watched as [`Watch::Evidence`], how its read policies
+    /// read it.
+    evidence: HashMap<String, Vec<Occurrence>>,
     /// A single-table result (unbounded or a first page) whose rows'
     /// membership depends only on the rows themselves: a commit that
     /// changes only root rows is applied by re-checking those ids, not by
@@ -105,6 +229,14 @@ pub(super) struct Group {
     /// its position and the own commits past it, or `None` for the
     /// current state.
     applied: Option<(sync::Pos, usize)>,
+    /// The array relation levels whose tables are watched by correlation
+    /// ([`Watch::Related`]), and what the result holds at each, parallel.
+    correlations: Vec<Correlation>,
+    held: Vec<Held>,
+    /// When the root table is watched by correlation too (a
+    /// self-relation): the root rows the result holds, which wake it
+    /// whatever their images say.
+    root_held: Option<HashSet<RowUuid>>,
 }
 
 type SortKey = Vec<(Sql, bool)>;
@@ -123,6 +255,11 @@ impl Group {
     /// The root table's stored name.
     pub(super) fn root(&self) -> &str {
         &self.root
+    }
+
+    /// The stored tables the query reads, its policies' included.
+    pub(super) fn tables(&self) -> &BTreeSet<String> {
+        &self.tables
     }
 
     /// The query this group answers.
@@ -146,6 +283,13 @@ pub struct FanoutStats {
     pub rechecked: u64,
     /// Woken groups that re-ran their query and diffed the whole result.
     pub reran: u64,
+    /// Changed rows of a correlation-watched table that a watching group
+    /// skipped: no relation level it holds matched them.
+    pub uncorrelated: u64,
+    /// Changed rows of a table read policies read that a watching group
+    /// skipped: no occurrence of it in the group's policies could see the
+    /// change.
+    pub unevidenced: u64,
 }
 
 #[derive(Default)]
@@ -156,6 +300,8 @@ pub(super) struct Fanout {
     tables: HashMap<String, BTreeSet<u64>>,
     keys: HashMap<(String, String, String), BTreeSet<u64>>,
     key_columns: HashMap<String, BTreeSet<String>>,
+    related: HashMap<String, BTreeSet<u64>>,
+    evidence: HashMap<String, BTreeSet<u64>>,
     stats: FanoutStats,
     /// Bumped by every dropped stream, so `collect` scans only when needed.
     pub(super) dropped: Rc<std::cell::Cell<usize>>,
@@ -190,6 +336,12 @@ impl Fanout {
                 Watch::Table(table) => {
                     self.tables.entry(table.clone()).or_default().insert(gid);
                 }
+                Watch::Related(table) => {
+                    self.related.entry(table.clone()).or_default().insert(gid);
+                }
+                Watch::Evidence(table) => {
+                    self.evidence.entry(table.clone()).or_default().insert(gid);
+                }
                 Watch::Key(table, column, value) => {
                     self.keys
                         .entry((table.clone(), column.clone(), value.clone()))
@@ -210,6 +362,22 @@ impl Fanout {
                 Watch::Table(table) => {
                     if let Some(set) = self.tables.get_mut(table) {
                         set.remove(&gid);
+                    }
+                }
+                Watch::Related(table) => {
+                    if let Some(set) = self.related.get_mut(table) {
+                        set.remove(&gid);
+                        if set.is_empty() {
+                            self.related.remove(table);
+                        }
+                    }
+                }
+                Watch::Evidence(table) => {
+                    if let Some(set) = self.evidence.get_mut(table) {
+                        set.remove(&gid);
+                        if set.is_empty() {
+                            self.evidence.remove(table);
+                        }
                     }
                 }
                 Watch::Key(table, column, value) => {
@@ -277,7 +445,8 @@ impl Fanout {
         }
     }
 
-    /// Tell members whose remote answered without changing their rows.
+    /// Tell members whose remote answered, or settled them at a higher
+    /// tier, without changing their rows.
     pub(super) fn flush_settled(&mut self) {
         for group in self.groups.values() {
             let group = group.borrow();
@@ -285,21 +454,22 @@ impl Fanout {
                 continue;
             }
             for member in &group.members {
+                let now = member.settled.tier();
                 if member.settled.get()
-                    && !member.told.get()
+                    && member.told.get().is_none_or(|told| told < now)
                     && let Some(queue) = member.queue.upgrade()
                 {
-                    member.told.set(true);
+                    member.told.set(Some(now));
                     tracing::debug!(
                         target: "jazz::sync",
                         table = %group.query().table,
-                        tier = ?member.settled.tier(),
+                        tier = ?now,
                         "subscription settled",
                     );
                     let mut event = delta(false, Vec::new(), Vec::new(), Vec::new());
                     if let SubscriptionEvent::Delta { settled, tier, .. } = &mut event {
                         *settled = true;
-                        *tier = member.settled.tier();
+                        *tier = now;
                     }
                     queue.borrow_mut().push_back(event);
                 }
@@ -336,7 +506,7 @@ impl Inner {
             shape: prepared.shape,
             bound: !prepared.binding.is_empty(),
             settled: settled.clone(),
-            told: std::cell::Cell::new(now),
+            told: std::cell::Cell::new(now.then(|| settled.tier())),
         };
         let tier = settled.tier();
         let open = |rows: &[CurrentRow]| {
@@ -384,7 +554,8 @@ impl Inner {
                 Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
                 Err(error) => return Err(error),
             };
-        let watches = self.watches(prepared, identity, &read, &compiled)?;
+        let (watches, correlations, evidence) =
+            self.watch_plan(prepared, identity, &read, &compiled)?;
         let root = prepared
             .schema
             .as_ref()
@@ -403,9 +574,7 @@ impl Inner {
             prepared.schema.as_ref().unwrap_or(&self.owner),
             prepared,
             &read,
-            watches
-                .iter()
-                .map(|(Watch::Table(table) | Watch::Key(table, ..))| table),
+            watches.iter().map(Watch::table),
         );
         let projected = order_projected(&prepared.query, &compiled);
         let includes = self.output_only_includes(prepared, identity, &read, &compiled)?;
@@ -427,6 +596,7 @@ impl Inner {
             rows,
             members: vec![member(&queue)],
             watches,
+            evidence,
             recheck,
             projected,
             keys: Vec::new(),
@@ -437,7 +607,11 @@ impl Inner {
             masks,
             tables,
             applied,
+            correlations,
+            held: Vec::new(),
+            root_held: None,
         }));
+        Self::hold(&mut handle.borrow_mut());
         self.read_keys(&mut handle.borrow_mut());
         let weak = Rc::downgrade(&handle);
         self.fan.groups.insert(gid, handle);
@@ -501,12 +675,8 @@ impl Inner {
     ) -> Result<BTreeSet<String>, Error> {
         let (compiled, _) = self.compile_tracked(prepared, identity, read)?;
         let mut tables = compiled.tables.clone();
-        for watch in self.watches(prepared, identity, read, &compiled)? {
-            match watch {
-                Watch::Table(table) | Watch::Key(table, ..) => {
-                    tables.insert(table);
-                }
-            }
+        for watch in self.watch_plan(prepared, identity, read, &compiled)?.0 {
+            tables.insert(watch.table().clone());
         }
         if let Some(author) = identity {
             let policies = prepared
@@ -538,14 +708,23 @@ impl Inner {
         Ok((compiled, used))
     }
 
-    /// The watches of one subscription; see the module docs for soundness.
-    fn watches(
+    /// The watches of one subscription (see the module docs for
+    /// soundness), the correlations its [`Watch::Related`] tables are
+    /// matched by, and the occurrences its [`Watch::Evidence`] tables are.
+    fn watch_plan(
         &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
         compiled: &Compiled,
-    ) -> Result<Vec<Watch>, Error> {
+    ) -> Result<
+        (
+            Vec<Watch>,
+            Vec<Correlation>,
+            HashMap<String, Vec<Occurrence>>,
+        ),
+        Error,
+    > {
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         // Watches name stored tables and columns: changed rows do.
         let stored = |name: &str| schema.stored_table(name).map(str::to_owned);
@@ -560,8 +739,9 @@ impl Inner {
         let query = &prepared.query;
         // A history read's rows are its source table's versions.
         let root = schema.table(history_source_table(&query.table).unwrap_or(&query.table))?;
-        // Tables the query itself reaches (joins, arrays, includes,
-        // reachability): these always watch the whole table.
+        // Tables the query itself reaches (joins, includes, reachability):
+        // these always watch the whole table. Array relations' tables do
+        // too unless they are watched by correlation.
         let mut structural = BTreeSet::new();
         fn joins(
             out: &mut BTreeSet<String>,
@@ -578,6 +758,7 @@ impl Inner {
             Ok(())
         }
         joins(&mut structural, &query.joins, &stored)?;
+        let mut related = BTreeSet::new();
         fn arrays(
             out: &mut BTreeSet<String>,
             list: &[crate::query::ArraySubquery],
@@ -589,7 +770,7 @@ impl Inner {
             }
             Ok(())
         }
-        arrays(&mut structural, &query.array_subqueries, &stored)?;
+        arrays(&mut related, &query.array_subqueries, &stored)?;
         for source in query.flat_join.iter().flat_map(|flat| &flat.sources) {
             let table = &source.table;
             structural.insert(stored(history_source_table(table).unwrap_or(table))?);
@@ -607,43 +788,59 @@ impl Inner {
                 structural.insert(stored(&seed.table)?);
             }
         }
-        // Policy evidence pinned by a session equality.
-        let mut pinned: HashMap<String, Option<(String, String)>> = HashMap::new();
-        let session = identity.and_then(|author| self.read_sessions(prepared, Some(author)).0);
-        if let Some(session) = session.filter(|s| !s.system) {
-            match root.policy(Operation::Select) {
-                Some(policy) if policy_pins(policy, &session, &mut pinned) => {}
-                _ => pinned.clear(),
-            }
+        // What the query's structure reads besides the root, compiled with
+        // no policy and no relations: `Compiled::tables` lists every
+        // relation's table (`validate_array` resolves them), read or not.
+        let (_, claims) = self.read_sessions(prepared, identity);
+        let mut bare = prepared.clone();
+        bare.query.array_subqueries.clear();
+        let bare = self
+            .read_ctx(&bare, None, &claims, read)
+            .compile_query(&bare.query, read.include_deleted)?;
+        structural.extend(bare.tables.iter().filter(|t| **t != root.stored).cloned());
+        let root_reread = bare.sql.matches(&quote(&root.stored)).count() != 1;
+        // What the read policies of every table read (the root's, applied
+        // by its SQL; the relations', applied by `compile_children`; the
+        // joins'), and how each `EXISTS` bounds the rows it can see.
+        let readers: BTreeSet<String> = std::iter::once(root.stored.clone())
+            .chain(related.iter().cloned())
+            .chain(structural.iter().cloned())
+            .collect();
+        let evidence = self.evidence(prepared, identity, read, &readers)?;
+        let unpinned = |table: &String| matches!(evidence.get(table), Some(None));
+        let mut refused: BTreeSet<String> = structural.clone();
+        refused.extend(evidence.keys().filter(|t| unpinned(t)).cloned());
+        if root_reread {
+            refused.insert(root.stored.clone());
         }
-        // Policies name tables and columns as the schema they come from.
-        let policies = schema.policy_schema();
-        let mut pinned = stored_pins(policies, pinned);
-        if pinned.contains_key(&root.stored) {
-            pinned.clear();
-        }
-        // A read policy that requires `column = session value` of the row
-        // itself pins the root too: other rows cannot enter the result.
-        let policy_root_key = identity
-            .and_then(|author| self.read_sessions(prepared, Some(author)).0)
-            .filter(|s| !s.system)
-            .and_then(|session| {
-                root.policy(Operation::Select)
-                    .and_then(|p| row_pin(p, &session))
-            })
-            .and_then(|(column, value)| {
-                let governing = policies.by_stored(&root.stored)?;
-                // As for a query key: only an application column is in a
-                // changed row's image (`$createdBy.account` is not).
-                governing.columns.iter().any(|c| c.name == column).then(|| {
-                    let value = stored_canon(governing.column(&column), value);
-                    (governing.stored_name(&column).to_owned(), value)
-                })
-            });
-        let mut watches = Vec::new();
-        let root_key = if structural.contains(&root.stored) {
+        let (correlated, correlations) = self.correlations(prepared, read, compiled, &refused)?;
+        let root_key = if structural.contains(&root.stored)
+            || root_reread
+            || unpinned(&root.stored)
+            || (related.contains(&root.stored) && !correlated.contains(&root.stored))
+        {
             None
         } else {
+            // A read policy that requires `column = session value` of the
+            // row itself pins the root too: other rows cannot enter the
+            // result.
+            let policies = schema.policy_schema();
+            let policy_root_key = identity
+                .and_then(|author| self.read_sessions(prepared, Some(author)).0)
+                .filter(|s| !s.system)
+                .and_then(|session| {
+                    root.policy(Operation::Select)
+                        .and_then(|p| row_pin(p, &session))
+                })
+                .and_then(|(column, value)| {
+                    let governing = policies.by_stored(&root.stored)?;
+                    // As for a query key: only an application column is in
+                    // a changed row's image (`$createdBy.account` is not).
+                    governing.columns.iter().any(|c| c.name == column).then(|| {
+                        let value = stored_canon(governing.column(&column), value);
+                        (governing.stored_name(&column).to_owned(), value)
+                    })
+                });
             root_key(query, &prepared.binding)
                 // Only an application column is in a changed row's image;
                 // a key on anything else (`$createdBy.identity.subject`,
@@ -656,33 +853,237 @@ impl Inner {
                 .or(policy_root_key)
         }
         .filter(|(column, _)| keyable(&root.stored, column));
-        watches.push(match root_key {
-            Some((column, value)) => Watch::Key(root.stored.clone(), column, value),
-            None => Watch::Table(root.stored.clone()),
-        });
-        let mut reads = compiled.tables.clone();
-        reads.extend(structural.iter().cloned());
-        for table in reads {
+        // Every table, by how it is read: whole (a table nothing narrower
+        // covers), by key (the root's filter), by correlation (a
+        // relation's table), by evidence (read policies' bounded reads of
+        // it), or several of the last three, which then all wake the group.
+        let mut tables: BTreeSet<String> = compiled.tables.clone();
+        tables.extend(structural.iter().cloned());
+        tables.extend(related.iter().cloned());
+        tables.extend(evidence.keys().cloned());
+        tables.insert(root.stored.clone());
+        let mut watches = Vec::new();
+        let mut occurrences = HashMap::new();
+        for table in tables {
+            let mut narrow = Vec::new();
+            let mut whole = structural.contains(&table);
             if table == root.stored {
-                continue;
-            }
-            watches.push(match pinned.get(&table) {
-                Some(Some((column, value)))
-                    if !structural.contains(&table) && keyable(&table, column) =>
-                {
-                    Watch::Key(table.clone(), column.clone(), value.clone())
+                match &root_key {
+                    Some((column, value)) => {
+                        narrow.push(Watch::Key(table.clone(), column.clone(), value.clone()))
+                    }
+                    None => whole = true,
                 }
-                _ => Watch::Table(table.clone()),
-            });
+            }
+            if related.contains(&table) {
+                if correlated.contains(&table) {
+                    narrow.push(Watch::Related(table.clone()));
+                } else {
+                    whole = true;
+                }
+            }
+            match evidence.get(&table) {
+                Some(Some(list)) => {
+                    narrow.push(Watch::Evidence(table.clone()));
+                    occurrences.insert(table.clone(), list.clone());
+                }
+                Some(None) => whole = true,
+                // Read only by the query itself.
+                None => {
+                    if table != root.stored && !related.contains(&table) {
+                        whole = true;
+                    }
+                }
+            }
+            if whole {
+                occurrences.remove(&table);
+                watches.push(Watch::Table(table));
+            } else {
+                watches.extend(narrow);
+            }
         }
         watches.sort();
         watches.dedup();
-        Ok(watches)
+        Ok((watches, correlations, occurrences))
+    }
+
+    /// The evidence (see [`Evidence`]) the read policies of `readers` read
+    /// for `identity`'s session, by stored table: every table one of them
+    /// reads, with how each reads it, or unbounded. Empty for a read no
+    /// policy applies to. Under a branch view, which reads policies through
+    /// its branches, every table they read is unbounded.
+    fn evidence(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        readers: &BTreeSet<String>,
+    ) -> Result<Evidence, Error> {
+        let mut evidence = Evidence::new();
+        let Some(author) = identity else {
+            return Ok(evidence);
+        };
+        let Some(session) = self.read_sessions(prepared, Some(author)).0 else {
+            return Ok(evidence);
+        };
+        if session.system {
+            return Ok(evidence);
+        }
+        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        let policies = schema.policy_schema();
+        for reader in readers {
+            let Some(protected) = policies.by_stored(reader) else {
+                continue;
+            };
+            let reads = self.policy_reads(policies, reader, author)?;
+            let mut walk = EvidenceWalk {
+                policies,
+                session: &session,
+                out: Evidence::new(),
+                through: Vec::new(),
+            };
+            let understood = policy_pins_enabled()
+                && read.view.is_none()
+                && protected.policy(Operation::Select).is_none_or(|policy| {
+                    walk.walk(
+                        policy,
+                        protected,
+                        &mut BTreeSet::new(),
+                        &mut BTreeSet::new(),
+                    )
+                });
+            // Every table the policy's SQL reads is accounted for: one the
+            // walk did not bound (or did not see) is unbounded.
+            for table in reads {
+                match walk.out.remove(&table) {
+                    Some(Some(list)) if understood => {
+                        for occurrence in list {
+                            add_evidence(&mut evidence, &table, Some(occurrence));
+                        }
+                    }
+                    _ => add_evidence(&mut evidence, &table, None),
+                }
+            }
+        }
+        Ok(evidence)
+    }
+
+    /// The array relation levels a subscription's tables can be watched
+    /// by correlation through, and those tables: a table qualifies when
+    /// every relation reading it does and nothing in `refused` reads it.
+    /// A relation level qualifies when it is optional (a required one
+    /// decides its parent's membership), reads no window past an offset
+    /// (rows before the window move it without being held), correlates a
+    /// reference with a reference, and its parent rows carry `outer`.
+    /// `refused` holds what else reads a table in a way correlation cannot
+    /// bound: the root's SQL (compiled without its policy and relations)
+    /// reading it, or reading the root again; `structural` (joins,
+    /// includes, reachability); a read policy `EXISTS` over it that no
+    /// pin bounds (one that is pinned is watched by its pins as well).
+    fn correlations(
+        &self,
+        prepared: &PreparedQuery,
+        read: &ReadSpec,
+        compiled: &Compiled,
+        refused: &BTreeSet<String>,
+    ) -> Result<(BTreeSet<String>, Vec<Correlation>), Error> {
+        let query = &prepared.query;
+        if !correlation_enabled()
+            || query.array_subqueries.is_empty()
+            || is_history_table(&query.table)
+            || query.relation.is_some()
+            || query.aggregate.is_some()
+            || read.view.is_some()
+            || read.cut.is_some()
+            || read.settled_only
+            || compiled.aggregate
+        {
+            return Ok((BTreeSet::new(), Vec::new()));
+        }
+        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        let root = schema.table(&query.table)?;
+        let mut refused = refused.clone();
+        let mut levels: Vec<(Correlation, bool)> = Vec::new();
+        let root_columns: Vec<String> = compiled
+            .projection
+            .iter()
+            .map(|(name, ..)| name.to_string())
+            .collect();
+        relation_levels(
+            schema,
+            root,
+            &root_columns,
+            &query.array_subqueries,
+            &mut Vec::new(),
+            &mut levels,
+        )?;
+        for (level, fit) in &levels {
+            if !fit {
+                refused.insert(level.table.clone());
+            }
+        }
+        let correlations: Vec<Correlation> = levels
+            .into_iter()
+            .map(|(level, _)| level)
+            .filter(|level| !refused.contains(&level.table))
+            .collect();
+        let tables = correlations.iter().map(|c| c.table.clone()).collect();
+        Ok((tables, correlations))
+    }
+
+    /// The stored tables `table`'s read policy reads, `table` itself
+    /// included when the policy reads other rows of it.
+    fn policy_reads(
+        &self,
+        policies: &Schema,
+        table: &str,
+        author: AuthorSubject,
+    ) -> Result<BTreeSet<String>, Error> {
+        let Some(protected) = policies.by_stored(table) else {
+            return Ok(BTreeSet::new());
+        };
+        let session = self.session(author);
+        let binding = BTreeMap::new();
+        let claims = Session::default();
+        let mut ctx = Ctx::new(policies, None, &claims, &binding);
+        let sql = ctx.operation_policy(protected, Operation::Select, "a", &session)?;
+        let mut tables = ctx.tables;
+        tables.remove(table);
+        if sql.contains(&quote(table)) {
+            tables.insert(table.to_owned());
+        }
+        Ok(tables)
+    }
+
+    /// Record what `group`'s result holds at each of its correlation
+    /// levels, after a run replaced its rows.
+    fn hold(group: &mut Group) {
+        group.held = group
+            .correlations
+            .iter()
+            .map(|level| held(level, &group.rows))
+            .collect();
+        group.root_held = group
+            .correlations
+            .iter()
+            .any(|level| level.table == group.root)
+            .then(|| group.rows.iter().map(|row| row.id).collect());
     }
 
     /// Wake the groups a commit's changed rows hit, re-run and diff them.
     pub(super) fn dispatch(&mut self, mut changes: Vec<(String, RowUuid, Vec<u8>)>) {
         changes.sort();
+        // Rows written more than once since the last dispatch (a
+        // transaction's repeated writes, a replica applying several
+        // pushes of one row in one tick): their history's previous version
+        // need not be the one the results last saw, so the images of a
+        // correlation or evidence match are not read for them, and every
+        // group watching their table that way wakes.
+        let repeated: BTreeSet<(String, RowUuid, Vec<u8>)> = changes
+            .windows(2)
+            .filter(|pair| pair[0] == pair[1])
+            .map(|pair| pair[0].clone())
+            .collect();
         changes.dedup();
         // Per woken group: the root rows that woke it, or `None` once any
         // other table's row did (then it re-runs).
@@ -739,7 +1140,8 @@ impl Inner {
                 }
             }
         }
-        for image in std::mem::take(&mut *self.gone.borrow_mut()) {
+        let gone = std::mem::take(&mut *self.gone.borrow_mut());
+        for image in &gone {
             let row = RowUuid::from_bytes(image.id);
             if let Some(groups) = self.fan.tables.get(&image.table) {
                 wake(groups, &image.table, row, &image.key);
@@ -759,6 +1161,117 @@ impl Inner {
                 }
             }
         }
+        // Tables watched by correlation: the groups whose relation levels
+        // hold the row, or a parent its old or new link names.
+        let mut uncorrelated = 0;
+        let mut related = |table: &str, row: RowUuid, images: Option<&[Vec<(String, Sql)>]>| {
+            for gid in self.fan.related.get(table).into_iter().flatten() {
+                if woken.get(gid).is_some_and(Option::is_none) {
+                    continue;
+                }
+                let Some(group) = self.fan.groups.get(gid) else {
+                    continue;
+                };
+                if correlated(&group.borrow(), table, row, images) {
+                    woken.insert(*gid, None);
+                } else {
+                    uncorrelated += 1;
+                }
+            }
+        };
+        for (table, row, key) in &changes {
+            let Some(gids) = self.fan.related.get(table) else {
+                continue;
+            };
+            let columns: BTreeSet<String> = gids
+                .iter()
+                .filter_map(|gid| self.fan.groups.get(gid))
+                .flat_map(|group| {
+                    group
+                        .borrow()
+                        .correlations
+                        .iter()
+                        .filter(|level| level.table == *table && level.inner != "id")
+                        .map(|level| level.inner.clone())
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            let images = if columns.is_empty() {
+                Some(Vec::new())
+            } else {
+                self.stored_images(table, *row, key, &columns)
+            };
+            let images = images.filter(|_| !repeated.contains(&(table.clone(), *row, key.clone())));
+            related(table, *row, images.as_deref());
+        }
+        for image in &gone {
+            if self.fan.related.contains_key(&image.table) {
+                let cells: Vec<(String, Sql)> = image
+                    .cells
+                    .iter()
+                    .map(|(column, cell)| (column.clone(), Sql::from(cell)))
+                    .collect();
+                related(
+                    &image.table,
+                    RowUuid::from_bytes(image.id),
+                    Some(std::slice::from_ref(&cells)),
+                );
+            }
+        }
+        // Tables read policies read as evidence: the groups one of whose
+        // occurrences on the table the row meets and changes under.
+        let mut unread = 0;
+        let mut evident = |table: &str, images: Option<&[Vec<(String, Sql)>]>, gone: bool| {
+            for gid in self.fan.evidence.get(table).into_iter().flatten() {
+                if woken.get(gid).is_some_and(Option::is_none) {
+                    continue;
+                }
+                let Some(group) = self.fan.groups.get(gid) else {
+                    continue;
+                };
+                if evidenced(&group.borrow(), table, images, gone) {
+                    woken.insert(*gid, None);
+                } else {
+                    unread += 1;
+                }
+            }
+        };
+        for (table, row, key) in &changes {
+            let Some(gids) = self.fan.evidence.get(table) else {
+                continue;
+            };
+            let mut columns: BTreeSet<String> = gids
+                .iter()
+                .filter_map(|gid| self.fan.groups.get(gid))
+                .flat_map(|group| {
+                    group
+                        .borrow()
+                        .evidence
+                        .get(table)
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|o| o.columns.iter().chain(o.pin.iter().map(|(c, _)| c)))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            columns.insert("_state".to_owned());
+            let images = self.stored_images(table, *row, key, &columns);
+            let images = images.filter(|_| !repeated.contains(&(table.clone(), *row, key.clone())));
+            evident(table, images.as_deref(), false);
+        }
+        for image in &gone {
+            if self.fan.evidence.contains_key(&image.table) {
+                let cells: Vec<(String, Sql)> = image
+                    .cells
+                    .iter()
+                    .map(|(column, cell)| (column.clone(), Sql::from(cell)))
+                    .collect();
+                evident(&image.table, Some(std::slice::from_ref(&cells)), true);
+            }
+        }
+        self.fan.stats.unevidenced += unread;
+        self.fan.stats.uncorrelated += uncorrelated;
         self.fan.stats.woken += woken.len() as u64;
         self.fan.stats.skipped += (self.fan.groups.len() - woken.len()) as u64;
         let groups: Vec<_> = woken
@@ -827,14 +1340,30 @@ impl Inner {
             }
             let old = std::mem::take(&mut group.watches);
             self.fan.unindex(gid, &old);
-            let watches = self
+            // Correlations name stored columns and compare stored values,
+            // which a schema change can rename or renumber: they are
+            // rebuilt with the watches, and dropped (the tables watched
+            // whole) when the watches cannot be.
+            let (watches, correlations, evidence) = self
                 .compile(&group.prepared, group.identity, &group.read)
                 .and_then(|compiled| {
-                    self.watches(&group.prepared, group.identity, &group.read, &compiled)
+                    self.watch_plan(&group.prepared, group.identity, &group.read, &compiled)
                 })
-                .unwrap_or(old);
+                .unwrap_or_else(|_| {
+                    let watches = old
+                        .into_iter()
+                        .map(|watch| match watch {
+                            Watch::Related(table) | Watch::Evidence(table) => Watch::Table(table),
+                            watch => watch,
+                        })
+                        .collect();
+                    (watches, Vec::new(), HashMap::new())
+                });
             self.fan.index(gid, &watches);
             group.watches = watches;
+            group.evidence = evidence;
+            group.correlations = correlations;
+            Self::hold(&mut group);
             if reset {
                 self.reset_group(&mut group);
             } else {
@@ -854,12 +1383,30 @@ impl Inner {
         key: &[u8],
         columns: &BTreeSet<String>,
     ) -> Vec<Vec<(String, String)>> {
+        self.stored_images(table, row, key, columns)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|image| {
+                image
+                    .into_iter()
+                    .map(|(column, cell)| (column, canon(&cell)))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// [`Self::images`] as stored cells; `None` when they could not be read.
+    fn stored_images(
+        &self,
+        table: &str,
+        row: RowUuid,
+        key: &[u8],
+        columns: &BTreeSet<String>,
+    ) -> Option<Vec<Vec<(String, Sql)>>> {
         let read = |sql: String,
                     params: &[&dyn rusqlite::ToSql]|
-         -> Vec<(i64, Vec<u8>, Vec<(String, String)>)> {
-            let Ok(mut statement) = self.conn.prepare_cached(&sql) else {
-                return Vec::new();
-            };
+         -> Option<Vec<(i64, Vec<u8>, Vec<(String, Sql)>)>> {
+            let mut statement = self.conn.prepare_cached(&sql).ok()?;
             // Names from the first row: a cached `SELECT *` prepared before
             // its table gained a column names the old columns until a step
             // re-prepares it.
@@ -880,19 +1427,18 @@ impl Inner {
                     } else if name == "_branch" {
                         branch = r.get(i)?;
                     } else if columns.contains(name) {
-                        out.push((name.clone(), canon(&r.get::<_, Sql>(i)?)));
+                        out.push((name.clone(), r.get::<_, Sql>(i)?));
                     }
                 }
                 Ok((seq, branch, out))
             });
-            rows.map(|rows| rows.filter_map(Result::ok).collect())
-                .unwrap_or_default()
+            rows.ok()?.collect::<Result<_, _>>().ok()
         };
         let id = row.0.as_bytes().to_vec();
         let current = read(
             format!("SELECT * FROM {} WHERE id = ?1", quote(table)),
             &[&id],
-        );
+        )?;
         let seq = current
             .iter()
             .find(|(_, branch, _)| branch.as_slice() == key)
@@ -905,12 +1451,14 @@ impl Inner {
                 crate::values::STATE_AS_SENT
             ),
             &[&id, &key, &seq],
-        );
-        current
-            .into_iter()
-            .chain(old)
-            .map(|(_, _, image)| image)
-            .collect()
+        )?;
+        Some(
+            current
+                .into_iter()
+                .chain(old)
+                .map(|(_, _, image)| image)
+                .collect(),
+        )
     }
 
     /// Apply a commit that changed only the root rows `ids` to a result in
@@ -1305,6 +1853,7 @@ impl Inner {
                 group.opened = true;
                 group.push(opening(&rows));
                 group.rows = rows;
+                Self::hold(group);
                 group.keys.clear();
                 self.read_keys(group);
             }
@@ -1468,6 +2017,7 @@ impl Inner {
         // Order keys that are not shown may have moved even when no row
         // did: read them again with the rows.
         group.rows = rows;
+        Self::hold(group);
         group.keys.clear();
         self.read_keys(group);
         true
@@ -1490,9 +2040,13 @@ impl Inner {
 /// target, so their output (built with the target) is read again.
 fn refresh_includes(group: &mut Group, changed: &BTreeSet<(String, RowUuid)>) {
     let refers = |row: &CurrentRow| {
-        row.cells.iter().any(|(name, value)| match value {
-            Some(Value::Uuid(id)) => changed.contains(&(name.clone(), RowUuid(*id))),
-            _ => false,
+        row.cells.iter().any(|(name, value)| {
+            // A nullable reference reads back wrapped.
+            let value = match value {
+                Some(Value::Nullable(Some(inner))) => Some(inner.as_ref()),
+                value => value.as_ref(),
+            };
+            matches!(value, Some(Value::Uuid(id)) if changed.contains(&(name.clone(), RowUuid(*id))))
         })
     };
     let updated: Vec<SubscriptionOutputRow> = group
@@ -1528,7 +2082,8 @@ impl Group {
                 {
                     *settled = member.settled.get();
                     *tier = member.settled.tier();
-                    if *reset || *settled != member.told.get() {
+                    let told = settled.then_some(*tier);
+                    if *reset || told != member.told.get() {
                         tracing::debug!(
                             target: "jazz::sync",
                             table = %self.query().table,
@@ -1539,7 +2094,7 @@ impl Group {
                             "subscription delivered",
                         );
                     }
-                    member.told.set(*settled);
+                    member.told.set(told);
                 }
                 queue.borrow_mut().push_back(event);
             }
@@ -1585,7 +2140,7 @@ fn view_branches(
         return out;
     };
     for watch in watches {
-        let (Watch::Table(table) | Watch::Key(table, ..)) = watch;
+        let table = watch.table();
         let Some(t) = schema.by_stored(table).filter(|t| !t.branch_by.is_empty()) else {
             continue;
         };
@@ -1988,6 +2543,264 @@ pub(super) fn policy_pins(
     }
 }
 
+/// One way a read policy reads rows of a table as evidence about another
+/// row: an `EXISTS` over the table, an `INHERITS` through a reference to
+/// it, or an `INHERITS_REFERENCING` of rows of it. Whatever row it is
+/// checked for, its value can change only with a row of the table that is
+/// inserted, deleted, or changes one of `columns`, and (with a `pin`)
+/// whose old or new image meets the pin: no other row can meet its
+/// condition, before or after the write.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct Occurrence {
+    /// `column = session value` among its conjuncts: the stored column and
+    /// the canonical value.
+    pin: Option<(String, String)>,
+    /// The stored application columns of the table's rows it reads.
+    columns: BTreeSet<String>,
+}
+
+/// The stored tables read policies read as evidence, each with every
+/// [`Occurrence`] over it, or `None` when one could not be bounded: the
+/// table is watched whole.
+type Evidence = BTreeMap<String, Option<Vec<Occurrence>>>;
+
+fn add_evidence(evidence: &mut Evidence, table: &str, occurrence: Option<Occurrence>) {
+    let entry = evidence
+        .entry(table.to_owned())
+        .or_insert_with(|| Some(Vec::new()));
+    match (entry.as_mut(), occurrence) {
+        (Some(list), Some(occurrence)) => {
+            if !list.contains(&occurrence) {
+                list.push(occurrence);
+            }
+        }
+        _ => *entry = None,
+    }
+}
+
+fn conjuncts(condition: &PolicyExpr) -> Vec<&PolicyExpr> {
+    match condition {
+        PolicyExpr::And(list) => list.iter().collect(),
+        other => vec![other],
+    }
+}
+
+/// Reads the [`Evidence`] of read policies, in the names of `policies`
+/// (the schema policies name tables and columns by), for `session`.
+struct EvidenceWalk<'a> {
+    policies: &'a Schema,
+    session: &'a Session,
+    out: Evidence,
+    /// The tables (and operations) whose policies an `INHERITS` is being
+    /// read through: a chain back to one is watched whole.
+    through: Vec<(String, Operation)>,
+}
+
+impl EvidenceWalk<'_> {
+    /// Walk `expr`, evaluated on a row of `table`: the columns of that row
+    /// it reads go to `own`, those of the enclosing row (an outer-row
+    /// reference) to `outer`. Returns false for a form this does not read
+    /// (a relation `EXISTS`, a system column other than `$createdBy` or
+    /// `$createdAt`): then everything the policy reads is unbounded.
+    fn walk(
+        &mut self,
+        expr: &PolicyExpr,
+        table: &Table,
+        own: &mut BTreeSet<String>,
+        outer: &mut BTreeSet<String>,
+    ) -> bool {
+        use crate::tools::PolicyValue;
+        let value = |value: &PolicyValue, outer: &mut BTreeSet<String>| match value {
+            PolicyValue::SessionRef(path)
+                if path.first().map(String::as_str) == Some("__jazz_outer_row") =>
+            {
+                match path.get(1) {
+                    Some(column) => {
+                        outer.insert(column.clone());
+                        true
+                    }
+                    None => false,
+                }
+            }
+            _ => true,
+        };
+        let column = |column: &str, own: &mut BTreeSet<String>| {
+            // `id` and the create stamps never change; any other system
+            // column (an update or delete stamp) is not in a row's image.
+            if column == "id" || column == "$createdAt" || column.starts_with("$createdBy") {
+                return true;
+            }
+            if column.starts_with('$') {
+                return false;
+            }
+            own.insert(column.to_owned());
+            true
+        };
+        match expr {
+            PolicyExpr::And(list) | PolicyExpr::Or(list) => {
+                list.iter().all(|p| self.walk(p, table, own, outer))
+            }
+            PolicyExpr::Not(inner) => self.walk(inner, table, own, outer),
+            PolicyExpr::Cmp {
+                column: c,
+                value: v,
+                ..
+            }
+            | PolicyExpr::Contains {
+                column: c,
+                value: v,
+            } => column(c, own) && value(v, outer),
+            PolicyExpr::InList { column: c, values } => {
+                column(c, own) && values.iter().all(|v| value(v, outer))
+            }
+            PolicyExpr::IsNull { column: c }
+            | PolicyExpr::IsNotNull { column: c }
+            | PolicyExpr::In { column: c, .. } => column(c, own),
+            PolicyExpr::SessionCmp { .. }
+            | PolicyExpr::SessionIsNull { .. }
+            | PolicyExpr::SessionIsNotNull { .. }
+            | PolicyExpr::SessionContains { .. }
+            | PolicyExpr::SessionInList { .. }
+            | PolicyExpr::True
+            | PolicyExpr::False => true,
+            PolicyExpr::Exists {
+                table: target,
+                condition,
+            } => {
+                let Ok(target) = self.policies.table(target) else {
+                    return false;
+                };
+                let mut columns = BTreeSet::new();
+                if !self.walk(condition, target, &mut columns, own) {
+                    return false;
+                }
+                let pin = conjuncts(condition)
+                    .into_iter()
+                    .find_map(|c| value_pin(target, c, self.session));
+                self.occurrence(target, pin, columns);
+                true
+            }
+            PolicyExpr::Inherits {
+                operation,
+                via_column,
+                ..
+            } => {
+                if !column(via_column, own) {
+                    return false;
+                }
+                let Some(target) = table
+                    .references
+                    .get(via_column)
+                    .and_then(|name| self.policies.table(name).ok())
+                else {
+                    return false;
+                };
+                self.inherit(target, *operation, BTreeSet::new())
+            }
+            PolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                ..
+            } => {
+                let Ok(source) = self.policies.table(source_table) else {
+                    return false;
+                };
+                let mut columns = BTreeSet::new();
+                column(via_column, &mut columns) && self.inherit(source, *operation, columns)
+            }
+            PolicyExpr::ExistsRel { .. } => false,
+        }
+    }
+
+    /// Rows of `table` are read through its `operation` policy, besides
+    /// `columns` of them: one occurrence, pinned when the policy requires
+    /// `column = session value` of the row. A chain back to a table already
+    /// being read through (a parent chain) is watched whole.
+    fn inherit(
+        &mut self,
+        table: &Table,
+        operation: Operation,
+        mut columns: BTreeSet<String>,
+    ) -> bool {
+        let key = (table.stored.clone(), operation);
+        if self.through.contains(&key) {
+            add_evidence(&mut self.out, &table.stored, None);
+            return true;
+        }
+        let Some(policy) = table.policy(operation) else {
+            // No policy: the inherited check is false whatever the rows.
+            return true;
+        };
+        self.through.push(key);
+        let read = self.walk(policy, table, &mut columns, &mut BTreeSet::new());
+        self.through.pop();
+        if !read {
+            return false;
+        }
+        let pin = conjuncts(policy)
+            .into_iter()
+            .find_map(|c| value_pin(table, c, self.session));
+        self.occurrence(table, pin, columns);
+        true
+    }
+
+    fn occurrence(&mut self, table: &Table, pin: Option<Pin>, columns: BTreeSet<String>) {
+        let columns = columns
+            .iter()
+            .map(|c| table.stored_name(c).to_owned())
+            .collect();
+        add_evidence(
+            &mut self.out,
+            &table.stored,
+            Some(Occurrence { pin, columns }),
+        );
+    }
+}
+
+/// A stored column and the canonical value it must hold.
+type Pin = (String, String);
+
+/// `column = session value` as a [`Pin`], when `column` is an application
+/// column (only those are in a changed row's image; not `$createdBy`)
+/// whose stored form the value's canonical form matches: a UUID column
+/// against a UUID (or a claim spelling one, as the policy compares it),
+/// text against text, an integer against an integer, a boolean against a
+/// boolean, an enum against a variant name.
+fn value_pin(table: &Table, conjunct: &PolicyExpr, session: &Session) -> Option<Pin> {
+    use crate::tools::PolicyValue;
+    let PolicyExpr::Cmp {
+        column,
+        op: CmpOp::Eq,
+        value: PolicyValue::SessionRef(path),
+    } = conjunct
+    else {
+        return None;
+    };
+    if path.first().map(String::as_str) == Some("__jazz_outer_row") {
+        return None;
+    }
+    let stored = table.columns.iter().find(|c| c.name == *column)?;
+    let ty = match &stored.ty {
+        ValueType::Nullable(inner) => inner.as_ref(),
+        ty => ty,
+    };
+    let value = match (ty, session.resolve(path)?) {
+        (ValueType::Uuid, Value::String(text)) => Value::Uuid(text.parse().ok()?),
+        (ValueType::Uuid, value @ Value::Uuid(_)) => value,
+        (ValueType::String, value @ Value::String(_)) => value,
+        (_, value @ Value::String(_)) if stored.tags.is_some() => value,
+        (
+            ValueType::I32 | ValueType::I64 | ValueType::U8 | ValueType::U16 | ValueType::U32,
+            value @ (Value::I32(_) | Value::I64(_) | Value::U8(_) | Value::U16(_) | Value::U32(_)),
+        ) => value,
+        (ValueType::Bool, value @ Value::Bool(_)) => value,
+        _ => return None,
+    };
+    let value = stored_canon(Some(stored), canon_value(&value)?);
+    Some((stored.stored.clone(), value))
+}
+
 /// Policy pins (see [`policy_pins`]) by stored table and column. A table
 /// the schema does not know stays unpinned (it is watched whole).
 /// `schema`'s tables and columns named other than they are stored, in a
@@ -2041,6 +2854,322 @@ fn row_pin(policy: &PolicyExpr, session: &Session) -> Option<(String, String)> {
         PolicyExpr::And(list) => list.iter().find_map(|p| row_pin(p, session)),
         _ => None,
     }
+}
+
+/// Every array relation level under a parent of `parent` (whose rows
+/// carry `columns`), depth first, each with whether it qualifies for a
+/// correlation watch on its own (see [`Inner::correlations`]).
+fn relation_levels(
+    schema: &Schema,
+    parent: &Table,
+    columns: &[String],
+    arrays: &[crate::query::ArraySubquery],
+    path: &mut Vec<String>,
+    out: &mut Vec<(Correlation, bool)>,
+) -> Result<(), Error> {
+    for array in arrays {
+        let child = schema.table(&array.table)?;
+        let inner = link_kind(child, &array.inner_column);
+        let outer = link_kind(parent, &array.outer_column);
+        let carried = array.outer_column == "id" || columns.contains(&array.outer_column);
+        let fit = array.requirement == crate::query::ArraySubqueryRequirement::Optional
+            && array.offset == 0
+            && inner.is_some()
+            && outer.is_some()
+            && carried;
+        path.push(array.column_name.clone());
+        out.push((
+            Correlation {
+                table: child.stored.clone(),
+                path: path.clone(),
+                inner: if array.inner_column == "id" {
+                    "id".to_owned()
+                } else {
+                    child.stored_name(&array.inner_column).to_owned()
+                },
+                inner_list: inner == Some(true),
+                outer: array.outer_column.clone(),
+            },
+            fit,
+        ));
+        let child_columns: Vec<String> = match &array.select {
+            Some(select) => select.clone(),
+            None => child.columns.iter().map(|c| c.name.clone()).collect(),
+        };
+        relation_levels(
+            schema,
+            child,
+            &child_columns,
+            &array.nested_arrays,
+            path,
+            out,
+        )?;
+        path.pop();
+    }
+    Ok(())
+}
+
+/// A correlation column's shape when it holds row references: `Some(false)`
+/// for `id` or a UUID column, `Some(true)` for a list of UUIDs, `None` for
+/// anything else (its stored form need not compare as its value does).
+fn link_kind(table: &Table, column: &str) -> Option<bool> {
+    if column == "id" {
+        return Some(false);
+    }
+    let column = table.column(column)?;
+    if column.tags.is_some() {
+        return None;
+    }
+    let unwrap = |ty: &ValueType| match ty {
+        ValueType::Nullable(inner) => inner.as_ref().clone(),
+        ty => ty.clone(),
+    };
+    match unwrap(&column.ty) {
+        ValueType::Uuid => Some(false),
+        ValueType::Array(element) if unwrap(&element) == ValueType::Uuid => Some(true),
+        _ => None,
+    }
+}
+
+/// A row of a result at some relation depth: a root row, or a related
+/// row's record nested in its parent's relation cell.
+enum Node<'a> {
+    Row(&'a CurrentRow),
+    Record(crate::records::OwnedRecord),
+}
+
+impl Node<'_> {
+    fn id(&self) -> Option<RowUuid> {
+        match self {
+            Node::Row(row) => Some(row.id),
+            Node::Record(record) => match record.get("row_uuid").ok()? {
+                Value::Uuid(id) => Some(RowUuid(id)),
+                _ => None,
+            },
+        }
+    }
+
+    /// The value of `column` (`id` included); `None` when absent.
+    fn value(&self, column: &str) -> Option<Value> {
+        if column == "id" {
+            return self.id().map(|id| Value::Uuid(id.0));
+        }
+        match self {
+            Node::Row(row) => row
+                .cells
+                .iter()
+                .find(|(name, _)| name == column)
+                .and_then(|(_, value)| value.clone()),
+            Node::Record(record) => record.get(column).ok(),
+        }
+    }
+
+    /// The related rows in relation cell `column`; `None` when absent.
+    fn children(&self, column: &str) -> Option<Vec<Node<'static>>> {
+        let mut value = self.value(column)?;
+        while let Value::Nullable(Some(inner)) = value {
+            value = *inner;
+        }
+        match value {
+            Value::Array(items) => items
+                .into_iter()
+                .map(|item| match item {
+                    Value::Record(record) => Some(Node::Record(record)),
+                    _ => None,
+                })
+                .collect(),
+            Value::Nullable(None) => Some(Vec::new()),
+            _ => None,
+        }
+    }
+}
+
+/// What `rows` hold at `level`.
+fn held(level: &Correlation, rows: &[CurrentRow]) -> Held {
+    let mut held = Held {
+        complete: true,
+        ..Held::default()
+    };
+    let Some((last, through)) = level.path.split_last() else {
+        held.complete = false;
+        return held;
+    };
+    let mut parents: Vec<Node> = rows.iter().map(Node::Row).collect();
+    for column in through {
+        let mut next = Vec::new();
+        for parent in &parents {
+            match parent.children(column) {
+                Some(children) => next.extend(children),
+                None => held.complete = false,
+            }
+        }
+        parents = next;
+    }
+    for parent in &parents {
+        match parent.value(&level.outer) {
+            Some(value) => {
+                if !value_atoms(&value, &mut held.parents) {
+                    held.complete = false;
+                }
+            }
+            None => held.complete = false,
+        }
+        match parent.children(last) {
+            Some(children) => {
+                for child in children {
+                    match child.id() {
+                        Some(id) => {
+                            held.rows.insert(id);
+                        }
+                        None => held.complete = false,
+                    }
+                }
+            }
+            None => held.complete = false,
+        }
+    }
+    held
+}
+
+/// Add a reference value's canonical stored forms (one per list element)
+/// to `out`; false when one has none.
+fn value_atoms(value: &Value, out: &mut HashSet<String>) -> bool {
+    match value {
+        Value::Nullable(None) => true,
+        Value::Nullable(Some(inner)) => value_atoms(inner, out),
+        Value::Array(items) => items.iter().all(|item| value_atoms(item, out)),
+        value => match canon_value(value) {
+            Some(atom) => {
+                out.insert(atom);
+                true
+            }
+            None => false,
+        },
+    }
+}
+
+/// A stored reference cell's canonical forms (one per element of a list,
+/// stored as a JSON array of UUID strings); `None` when it cannot be read
+/// as one.
+fn stored_atoms(cell: &Sql, list: bool) -> Option<Vec<String>> {
+    match cell {
+        Sql::Null => Some(Vec::new()),
+        cell if !list => Some(vec![canon(cell)]),
+        Sql::Text(json) => {
+            let items: Vec<serde_json::Value> = serde_json::from_slice(json).ok()?;
+            items
+                .iter()
+                .map(|item| match item {
+                    serde_json::Value::Null => Some(None),
+                    item => {
+                        let id = uuid::Uuid::parse_str(item.as_str()?).ok()?;
+                        Some(Some(canon(&Sql::Blob(id.as_bytes().to_vec()))))
+                    }
+                })
+                .collect::<Option<Vec<Option<String>>>>()
+                .map(|atoms| atoms.into_iter().flatten().collect())
+        }
+        _ => None,
+    }
+}
+
+/// Whether a change to row `row` of `table`, with stored images `images`
+/// (`None`: unreadable), can move `group`'s result through its
+/// correlation levels on `table`.
+/// Whether a changed row of `table`, with `images` (its current image per
+/// branch and its previous one; `None` when they could not be read) or
+/// the last image of a row that is `gone`, can change the value of an
+/// [`Occurrence`] of `table` in `group`'s read policies: the row meets the
+/// occurrence's pin in some image, and it was inserted, deleted or
+/// removed, or changed a column the occurrence reads.
+fn evidenced(
+    group: &Group,
+    table: &str,
+    images: Option<&[Vec<(String, Sql)>]>,
+    gone: bool,
+) -> bool {
+    let Some(images) = images else {
+        return true;
+    };
+    let Some(occurrences) = group.evidence.get(table) else {
+        return true;
+    };
+    let cell = |image: &[(String, Sql)], column: &str| {
+        image
+            .iter()
+            .find(|(name, _)| name == column)
+            .map(|(_, cell)| cell.clone())
+    };
+    let deleted = |image: &[(String, Sql)]| match cell(image, "_state") {
+        Some(Sql::Integer(state)) => Some(state & STATE_DELETED != 0),
+        _ => None,
+    };
+    occurrences.iter().any(|occurrence| {
+        let pinned = occurrence.pin.as_ref().is_none_or(|(column, value)| {
+            images
+                .iter()
+                .any(|image| cell(image, column).is_none_or(|cell| canon(&cell) == *value))
+        });
+        // One current image and one previous one, both read: a write that
+        // kept the row's liveness and every column the occurrence reads
+        // cannot change it.
+        let changed = gone
+            || match images {
+                [new, old] => {
+                    deleted(new).is_none()
+                        || deleted(new) != deleted(old)
+                        || occurrence.columns.iter().any(|column| {
+                            cell(new, column).is_none() || cell(new, column) != cell(old, column)
+                        })
+                }
+                _ => true,
+            };
+        pinned && changed
+    })
+}
+
+fn correlated(
+    group: &Group,
+    table: &str,
+    row: RowUuid,
+    images: Option<&[Vec<(String, Sql)>]>,
+) -> bool {
+    if group.awaiting
+        || (group.root == table
+            && group
+                .root_held
+                .as_ref()
+                .is_some_and(|held| held.contains(&row)))
+    {
+        return true;
+    }
+    group
+        .correlations
+        .iter()
+        .zip(&group.held)
+        .filter(|(level, _)| level.table == table)
+        .any(|(level, held)| {
+            if !held.complete || held.rows.contains(&row) {
+                return true;
+            }
+            if level.inner == "id" {
+                return held
+                    .parents
+                    .contains(&canon(&Sql::Blob(row.0.as_bytes().to_vec())));
+            }
+            let Some(images) = images else {
+                return true;
+            };
+            images.iter().any(|image| {
+                image
+                    .iter()
+                    .filter(|(column, _)| *column == level.inner)
+                    .any(|(_, cell)| match stored_atoms(cell, level.inner_list) {
+                        Some(atoms) => atoms.iter().any(|atom| held.parents.contains(atom)),
+                        None => true,
+                    })
+            })
+        })
 }
 
 /// The cut a run read through, as [`Group::applied`] keeps it.

@@ -667,4 +667,33 @@ describe("backend/create-jazz-context", () => {
       }),
     ).toThrow("driver.type='memory' requires serverUrl.");
   });
+
+  it("rejects a whitespace-only backendSecret before opening any transport (#2051)", () => {
+    for (const backendSecret of ["  ", "\n", " \t "]) {
+      expect(() =>
+        createJazzContext({
+          appId: "server-app",
+          app: { wasmSchema: SCHEMA_A },
+          permissions: {},
+          driver: { type: "memory" },
+          serverUrl: "http://127.0.0.1:1",
+          backendSecret,
+        }),
+      ).toThrow(/^invalid_backend_secret: backendSecret is only whitespace/);
+    }
+    // A real secret, with or without surrounding whitespace, is passed on
+    // unchanged (an opaque value), and an empty one still counts as none.
+    for (const backendSecret of ["secret", " secret ", ""]) {
+      expect(() =>
+        createJazzContext({
+          appId: "server-app",
+          app: { wasmSchema: SCHEMA_A },
+          permissions: {},
+          driver: { type: "memory" },
+          serverUrl: "http://127.0.0.1:1",
+          backendSecret,
+        }),
+      ).not.toThrow();
+    }
+  });
 });

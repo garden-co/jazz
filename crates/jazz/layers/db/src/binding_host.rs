@@ -612,7 +612,10 @@ pub fn open_identity(config: &mut OpenConfig, how: OpenAs<'_>) -> HostResult<(Db
     }
 }
 
-/// The [`DbConfig`] for `schema` under `config` and `identity`.
+/// The [`DbConfig`] for `schema` under `config` and `identity`. It has no
+/// chunk store: a binding's tick never fails for chunk-store I/O a later
+/// tick retries, and hosts treat every tick error (including local storage
+/// errors) as terminal.
 pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) -> DbConfig {
     let mut db_config = DbConfig::new(schema, identity);
     db_config.system_node = config.system_node;
@@ -1962,10 +1965,15 @@ pub enum EventChunk {
     },
     /// `{ type: "closed" }`.
     Closed,
-    /// `{ type: "rejected", reason: { type: "ServerFailure", detail } }`.
+    /// `{ type: "rejected", reason: { type: "ServerFailure", detail,
+    /// errorCode } }`.
     Rejected {
         /// Why.
         detail: String,
+        /// The rejection's core [`crate::db::ErrorCode`], as its
+        /// `as_str` spelling (`"authority_changed"`, …): what a host's
+        /// error `code` carries for the same error.
+        code: &'static str,
     },
 }
 
@@ -1987,7 +1995,10 @@ pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
             tier: format!("{tier:?}"),
         },
         SubscriptionEvent::Closed => EventChunk::Closed,
-        SubscriptionEvent::Rejected { reason, .. } => EventChunk::Rejected { detail: reason },
+        SubscriptionEvent::Rejected { code, reason, .. } => EventChunk::Rejected {
+            detail: reason,
+            code: code.as_str(),
+        },
     })
 }
 

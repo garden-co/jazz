@@ -1,6 +1,7 @@
 import { textAnchorsFrom, type TextAnchors } from "../runtime/text-anchors.js";
 import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
 import { clientScope } from "../runtime/client-scope.js";
+import { isWhitespaceOnlySecret, WHITESPACE_BACKEND_SECRET } from "../accounts/registry-client.js";
 import {
   NapiDb,
   captureTextAnchor,
@@ -559,6 +560,9 @@ class BackendDb extends Db implements BackendMutationErrorSink {
 }
 
 function assertValidBackendConfig(config: BackendContextConfig): void {
+  // Refused here, before any transport opens: a whitespace-only secret is a
+  // blank environment variable, not a secret to send.
+  if (isWhitespaceOnlySecret(config.backendSecret)) throw new Error(WHITESPACE_BACKEND_SECRET);
   if (config.driver.type === "memory" && !config.serverUrl) {
     throw new Error("driver.type='memory' requires serverUrl.");
   }

@@ -15,11 +15,15 @@ on:
 jobs:
   publish-crates:
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    # A real publish runs in the protected `publish` environment, which the
+    # crates.io trusted publisher is bound to. A dry-run needs no credential,
+    # so it runs outside it.
+    environment: ${{ inputs.mode == 'publish' && 'publish' || '' }}
     permissions:
       contents: read
-
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      # crates.io trusted publishing: the job's OIDC token is exchanged for
+      # a short-lived publish token. There is no CARGO_REGISTRY_TOKEN secret.
+      id-token: write
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -35,5 +39,13 @@ jobs:
             sudo apt-get install -y jq
           fi
 
+      - name: Get a short-lived crates.io token
+        if: ${{ inputs.mode == 'publish' }}
+        id: crates-io-auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+
       - name: Publish crates in dependency order
-        run: ./dev/scripts/publish-crates-alpha.sh "${{ inputs.mode }}"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+          MODE: ${{ inputs.mode }}
+        run: ./dev/scripts/publish-crates-alpha.sh "${MODE}"
