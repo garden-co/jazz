@@ -957,6 +957,63 @@ describe("createJazz", () => {
     await expect(jazz.forReqUser(request())).rejects.toThrow(/has no Jazz account yet/);
   });
 
+  it("answers 500 naming authenticate when it throws, without an unhandled rejection (#5263)", async () => {
+    let fail: () => never | Promise<never> = () => {
+      throw new Error("synthetic auth failure");
+    };
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: () => fail(),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    cleanups.push(async () => void process.off("unhandledRejection", unhandled));
+    const origin = await serve(jazz, { sockets: false });
+    const url = `http://app.test/jazz/apps/${jazz.appId}/accounts/backend-user`;
+
+    // Before: `next()`'s POST rejected with the app's error, which on Vercel
+    // surfaced as an unhandledRejection and the function exited.
+    const { POST } = jazz.next();
+    for (const thrower of [
+      () => {
+        throw new Error("synthetic auth failure");
+      },
+      () => Promise.reject(new Error("synthetic auth failure")),
+    ]) {
+      fail = thrower;
+      errors.mockClear();
+      for (const answer of [
+        await POST(new Request(url, { method: "POST" })),
+        await jazz.handle(new Request(url, { method: "POST" })),
+        await fetch(`${origin}/jazz/apps/${jazz.appId}/accounts/backend-sign-in`, {
+          method: "POST",
+        }),
+      ]) {
+        expect(answer.status).toBe(500);
+        expect(answer.headers.get("cache-control")).toBe("no-store");
+        // Only the code: nothing of the app's error.
+        expect(await answer.text()).toBe("authenticate_failed");
+      }
+      // Logged once per request, naming authenticate, with the app's error.
+      expect(errors).toHaveBeenCalledTimes(3);
+      for (const [message, error] of errors.mock.calls) {
+        expect(message).toMatch(/^createJazz: your authenticate threw/);
+        expect((error as Error).message).toBe("synthetic auth failure");
+      }
+    }
+    // The client reports the stable code.
+    await expect(
+      requestBackendUser(`${origin}/jazz/apps/${jazz.appId}/accounts`),
+    ).rejects.toMatchObject({ code: "authenticate_failed", status: 500 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(unhandled).not.toHaveBeenCalled();
+  });
+
   it("tells the browser by a stable code that authenticate returned no expiresAt, and the client names the fix", async () => {
     let answer: unknown = { userId: "alice", internal: "secret-session-detail" };
     const jazz = await createJazz({
