@@ -48,13 +48,17 @@ impl std::ops::Deref for Store {
 }
 
 fn open(schema: JazzSchema, node: u8) -> Store {
+    open_as(schema, node, AuthorSubject::SYSTEM)
+}
+
+fn open_as(schema: JazzSchema, node: u8, author: AuthorSubject) -> Store {
     let dir = tempfile::tempdir().unwrap();
     let path: PathBuf = dir.path().join("store.sqlite");
     let config = DbConfig::new(
         schema,
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
-            author: AuthorSubject::SYSTEM,
+            author,
         },
     );
     let db = block_on(Db::open_at(config, &path, FileOptions::default())).unwrap();
@@ -1017,6 +1021,141 @@ fn f7_a_policy_reading_other_rows_of_the_child_table() {
     check(&db, &mut lives, "alice detaches her reply");
 }
 
+/// A relation's read policy can read the root table itself: a member's
+/// rows nest their chat, readable when the chat has an owner. Another
+/// user's membership row, outside the root's `member = alice` key, makes
+/// alice's chat readable, so the root keeps no key.
+///
+/// ```
+/// alice: members WHERE member = alice, chat (chats: readable WHERE
+///        EXISTS members(chat = id, role = owner))
+/// bob ──insert members(chat 1, bob, owner)──► alice's chat 1 appears
+/// ```
+#[test]
+fn a_relation_policy_reading_the_root_table_drops_the_root_key() {
+    let owned = exists(
+        "members",
+        vec![
+            outer_eq("chat", "id"),
+            jazz::tools::policy_expr::eq("role", "owner"),
+        ],
+    );
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("chats")
+                    .column("title", ColumnType::Text)
+                    .policies(read_and_allow_all_writes(owned)),
+            )
+            .table(
+                TableSchemaBuilder::new("members")
+                    .fk_column("chat", "chats")
+                    .column("member", ColumnType::Text)
+                    .column("role", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let db = open(schema, 1);
+    chat(&db, 1, "one");
+    let member = |n: usize, who: usize, role: &str| {
+        insert(
+            &db,
+            "members",
+            id(MEMBERS, n),
+            &[
+                ("chat", uuid(id(CHATS, 1))),
+                ("member", subject(who)),
+                ("role", text(role)),
+            ],
+        );
+    };
+    member(1, 1, "guest");
+    let mut lives = vec![subscribe(
+        &db,
+        "alice: her memberships with their chats",
+        Query::from("members")
+            .filter(eq(col("member"), lit(subject(1))))
+            .array_subquery(ArraySubquery::new("chat_row", "chats", "id", "chat")),
+        Some(user(1)),
+    )];
+    check(&db, &mut lives, "subscribe");
+    member(2, 2, "owner");
+    check(&db, &mut lives, "bob becomes the chat's owner");
+    update(&db, "members", id(MEMBERS, 2), &[("role", text("guest"))]);
+    check(&db, &mut lives, "bob steps down");
+}
+
+/// A session's claims changing re-runs its results in full
+/// (`refresh_identity`) and rebuilds their watches and correlations: a
+/// relation whose rows are readable by claim shows the newly readable
+/// rows, and a later write is matched against what the re-run holds.
+///
+/// ```
+/// alice (region a): chats, messages (readable WHERE region = claims.region)
+/// claims ──alice: region b──► chat 1 shows its region-b messages
+/// writer ──insert a region-b message in chat 1──► it appears
+/// writer ──insert a region-b message in chat 2 (not held)──► skipped
+/// ```
+#[test]
+fn a_claims_change_reruns_and_rebuilds_the_correlations() {
+    let by_region = session_eq("region", &["claims", "region"]);
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("chats")
+                    .column("title", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("messages")
+                    .fk_column("chat", "chats")
+                    .column("region", ColumnType::Text)
+                    .policies(read_and_allow_all_writes(by_region)),
+            )
+            .build(),
+    );
+    let db = open(schema, 1);
+    let claims = |region: &str| BTreeMap::from([("\0claims:region".to_owned(), text(region))]);
+    let alice = user(1);
+    db.set_identity_claims(alice, claims("a"));
+    chat(&db, 1, "one");
+    chat(&db, 2, "two");
+    let note = |n: usize, chat: usize, region: &str| {
+        insert(
+            &db,
+            "messages",
+            id(MESSAGES, n),
+            &[("chat", uuid(id(CHATS, chat))), ("region", text(region))],
+        );
+    };
+    note(1, 1, "a");
+    note(2, 1, "b");
+    let mut lives = vec![subscribe(
+        &db,
+        "alice: chat one with its messages",
+        Query::from("chats")
+            .filter(eq(col("title"), lit(text("one"))))
+            .array_subquery(ArraySubquery::new("messages", "messages", "chat", "id")),
+        Some(alice),
+    )];
+    let opened = check(&db, &mut lives, "subscribe");
+    db.set_identity_claims(alice, claims("b"));
+    let now = check(&db, &mut lives, "alice moves to region b");
+    assert_ne!(opened, now, "region b shows other messages");
+    note(3, 1, "b");
+    check(&db, &mut lives, "a region-b message in chat 1");
+    let before = db.fanout_stats();
+    note(4, 2, "b");
+    check(&db, &mut lives, "a region-b message in chat 2");
+    let after = db.fanout_stats();
+    assert_eq!(
+        (after.reran, after.uncorrelated - before.uncorrelated),
+        (before.reran, 1),
+        "chat 2 is not held: the write is skipped by correlation"
+    );
+}
+
 // ---- the filter engages ----------------------------------------------------
 
 /// A chat list per member whose relations reach a read-marks table, the
@@ -1633,54 +1772,141 @@ fn a_relation_policy_table_is_watched() {
     check(&db, &mut lives, "alice leaves chat 1");
 }
 
-/// The same writes reaching a replica in batches: the server commits one
-/// to four writes, often to the same row, and the replica applies them in
-/// one tick. Its maintained results equal fresh local reads after each.
+/// How the leaf replica reaches the authority.
+#[derive(Clone, Copy, Debug)]
+enum Topology {
+    /// Connected to the authority, served as SYSTEM.
+    Direct,
+    /// Connected to the authority, served as user 0: the authority's
+    /// results for it are identity-bound, read-policy-checked groups.
+    DirectAs,
+    /// Through a relay that is served as SYSTEM and serves the leaf as
+    /// user 0: the relay's results for it are identity-bound groups over
+    /// the rows it holds.
+    RelayAs,
+}
+
+/// The same writes reaching a replica in batches: the authority commits
+/// one to four writes, often to the same row, and the replica applies them
+/// in one tick, directly or through a relay, as SYSTEM or as a user. Its
+/// maintained results equal fresh local reads after each batch, and its
+/// relation results equal what the authority reads for the same identity.
 #[test]
 fn correlated_results_match_one_shot_reads_on_a_replica_under_batched_pushes() {
-    for seed in [5, 13, 31] {
-        let server = open(differential_schema(), 1);
-        let client = open(differential_schema(), 2);
-        let (client_side, server_side) = duplex();
-        let _upstream = block_on(client.connect_upstream(client_side));
-        server
-            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-            .unwrap();
-        let pump = || {
-            for _ in 0..4 {
-                block_on(client.tick()).unwrap();
-                block_on(server.tick()).unwrap();
-            }
-            block_on(client.tick()).unwrap();
-        };
-        let mut world = seed_world(&server);
-        let mut lives: Vec<Live> = differential_queries(0)
-            .into_iter()
-            .map(|(name, query)| subscribe(&client, name, query, None))
-            .collect();
-        // Every row synced, so the local relations read what the server has.
-        for table in ["users", "chats", "members", "messages", "read_marks"] {
-            lives.push(subscribe(&client, table, Query::from(table), None));
+    for (topology, seeds) in [
+        (Topology::Direct, &[5, 13][..]),
+        (Topology::DirectAs, &[31, 47][..]),
+        (Topology::RelayAs, &[59, 71][..]),
+    ] {
+        for &seed in seeds {
+            replica_run(topology, seed);
         }
-        pump();
-        let local = ReadOpts {
-            tier: ReadTier::LocalOnly,
-            ..ReadOpts::default()
-        };
-        check_with(&client, &mut lives, "sync", local.clone());
-        let mut rng = Rng(seed);
-        for step in 0..120 {
-            let mut what = Vec::new();
-            for _ in 0..1 + rng.next(4) {
-                what.push(random_write(&server, &mut rng, &mut world, step));
+    }
+}
+
+fn replica_run(topology: Topology, seed: u64) {
+    let (served_as, identity) = match topology {
+        Topology::Direct => (AuthorSubject::SYSTEM, None),
+        Topology::DirectAs | Topology::RelayAs => (user(0), Some(user(0))),
+    };
+    let server = open(differential_schema(), 1);
+    let relay = matches!(topology, Topology::RelayAs).then(|| open(differential_schema(), 3));
+    let client = open_as(differential_schema(), 2, served_as);
+    let mut links = Vec::new();
+    match &relay {
+        None => {
+            let (client_side, server_side) = duplex();
+            links.push(block_on(client.connect_upstream(client_side)));
+            server.accept_subscriber(server_side, served_as).unwrap();
+        }
+        Some(relay) => {
+            let (relay_side, server_side) = duplex();
+            links.push(block_on(relay.connect_upstream(relay_side)));
+            server
+                .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+                .unwrap();
+            relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+            let (client_side, relay_down) = duplex();
+            links.push(block_on(client.connect_upstream(client_side)));
+            relay.accept_subscriber(relay_down, served_as).unwrap();
+        }
+    }
+    let pump = || {
+        for _ in 0..5 {
+            block_on(client.tick()).unwrap();
+            if let Some(relay) = &relay {
+                block_on(relay.tick()).unwrap();
             }
-            pump();
-            check_with(
-                &client,
-                &mut lives,
-                &format!("seed {seed} step {step}: {what:?}"),
-                local.clone(),
+            block_on(server.tick()).unwrap();
+            if let Some(relay) = &relay {
+                block_on(relay.tick()).unwrap();
+            }
+        }
+        block_on(client.tick()).unwrap();
+    };
+    let mut world = seed_world(&server);
+    let queries = differential_queries(0);
+    let mut lives: Vec<Live> = queries
+        .iter()
+        .map(|(name, query)| subscribe(&client, name, query.clone(), None))
+        .collect();
+    // Every row the leaf may read synced, so its relations read what the
+    // authority lets it read.
+    for table in ["users", "chats", "members", "messages", "read_marks"] {
+        lives.push(subscribe(&client, table, Query::from(table), None));
+    }
+    let local = ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let authority: Vec<PreparedQuery> = queries
+        .iter()
+        .map(|(_, query)| server.prepare_query(query).unwrap())
+        .collect();
+    let converged = |lives: &[Live], after: &str| {
+        for (live, query) in lives.iter().zip(&authority) {
+            // A required relation's requirement is checked without the
+            // child's read policy (`array_requirements`), so the authority
+            // keeps a row whose required child the identity cannot read,
+            // which a leaf holding only readable rows leaves out.
+            if identity.is_some() && live.name == "required reply" {
+                continue;
+            }
+            let truth = snapshot(
+                &block_on(server.all_nested_for_test(query, ReadOpts::default(), identity))
+                    .unwrap(),
+            );
+            assert_eq!(
+                live.rows, truth,
+                "{topology:?} {}: the leaf's result differs from the authority's read after {after}",
+                live.name
             );
         }
+    };
+    pump();
+    check_with(&client, &mut lives, "sync", local.clone());
+    converged(&lives, "sync");
+    let mut rng = Rng(seed);
+    for step in 0..80 {
+        let mut what = Vec::new();
+        for _ in 0..1 + rng.next(4) {
+            what.push(random_write(&server, &mut rng, &mut world, step));
+        }
+        pump();
+        let after = format!("{topology:?} seed {seed} step {step}: {what:?}");
+        check_with(&client, &mut lives, &after, local.clone());
+        converged(&lives, &after);
+    }
+    // The authority's identity-bound results for the leaf skipped rows by
+    // correlation: the run exercises the filter, not only full re-runs. (A
+    // relay's mirrors of the leaf's reads are re-woken by the parent rows
+    // its upstream re-ships with every changed result, so there the filter
+    // rarely gets to decide.)
+    if matches!(topology, Topology::DirectAs) {
+        let stats = server.fanout_stats();
+        assert!(
+            stats.uncorrelated > 0,
+            "{topology:?} seed {seed}: {stats:?}"
+        );
     }
 }

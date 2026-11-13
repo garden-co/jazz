@@ -765,6 +765,26 @@ impl Inner {
                     (governing.stored_name(&column).to_owned(), value)
                 })
             });
+        // What the relations' rows are read through: their read policies
+        // (`compile_children` applies them; the root's SQL does not). They
+        // are watched whole, the root included: a relation policy that
+        // reads the root's table lets a row outside its key change what a
+        // held row nests.
+        let mut relation_policies = BTreeSet::new();
+        if let Some(author) = identity {
+            let policies = schema.policy_schema();
+            for table in &related {
+                if policies.by_stored(table).is_some() {
+                    relation_policies.extend(self.read_policy_tables(policies, table, author)?);
+                }
+            }
+        }
+        structural.extend(
+            relation_policies
+                .iter()
+                .filter(|table| !correlated.contains(*table))
+                .cloned(),
+        );
         let mut watches = Vec::new();
         let root_key = if structural.contains(&root.stored) {
             None
@@ -787,21 +807,7 @@ impl Inner {
         });
         let mut reads = compiled.tables.clone();
         reads.extend(structural.iter().cloned());
-        // What the relations' rows are read through: their read policies
-        // (`compile_children` applies them; the root's SQL does not).
-        if let Some(author) = identity {
-            let policies = schema.policy_schema();
-            for table in &related {
-                if policies.by_stored(table).is_some() {
-                    for read in self.read_policy_tables(policies, table, author)? {
-                        if !correlated.contains(&read) {
-                            structural.insert(read.clone());
-                        }
-                        reads.insert(read);
-                    }
-                }
-            }
-        }
+        reads.extend(relation_policies);
         for table in &correlated {
             watches.push(Watch::Related(table.clone()));
         }
