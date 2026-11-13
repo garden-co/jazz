@@ -137,7 +137,7 @@ export function JazzProvider(props: JazzProviderProps) {
   const session =
     props.session ?? ownJazzSession({ ...props.config! }, openBrowserSessionCore, { start: false });
   const [snapshot, setSnapshot] = createSignal(session.getSnapshot());
-  const lease = attachJazzSessionConsumer(session);
+  const lease = attachJazzSessionConsumer(session, "Solid <JazzProvider>");
   const stop = session.subscribe(() => setSnapshot(session.getSnapshot()));
   onMount(() => {
     if (owned) void startJazzSession(session as JazzSession<unknown>).catch(() => {});

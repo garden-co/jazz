@@ -112,7 +112,7 @@ export const JazzProvider = defineComponent({
       props.session ?? ownJazzSession(props.config!, openBrowserSessionCore, { start: false });
     const snapshot = shallowRef(session.getSnapshot());
     provide(SessionKey, { session, snapshot: shallowReadonly(snapshot) });
-    const lease = attachJazzSessionConsumer(session);
+    const lease = attachJazzSessionConsumer(session, "Vue <JazzProvider>");
     const stop = session.subscribe(() => {
       const observed = session.getSnapshot();
       snapshot.value = observed;
