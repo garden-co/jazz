@@ -2596,6 +2596,12 @@ struct RelayedSettle {
     /// The position the session was last told, once the result settled.
     sent: Option<u64>,
     global: bool,
+    /// A Remote read: refused to the session when its upstream read is
+    /// (see [`Inner::relayed_refusals`]).
+    remote: bool,
+    /// The session was told its upstream read's refusal: once per
+    /// refusal, so a later link that refuses again tells it again.
+    refused: bool,
 }
 
 /// A relayed LocalFirst subscription's first-load wait: once `until`
@@ -7399,15 +7405,21 @@ impl Client {
 }
 
 impl Client {
+    /// Why this store refused its current link (see
+    /// [`Inner::refuse_upstream`]), if it did: nothing answers a remote
+    /// read until a new link does.
+    fn refused_link(&self) -> Option<&Error> {
+        self.refusal
+            .as_ref()
+            .filter(|(connection, _)| *connection == self.connection)
+            .map(|(_, error)| error)
+    }
+
     /// The current link's refusal when it is [`ErrorCode::AuthorityChanged`]:
     /// the upstream serves another authority history than this store's.
     fn authority_changed(&self) -> Option<&Error> {
-        self.refusal
-            .as_ref()
-            .filter(|(connection, error)| {
-                *connection == self.connection && error.code == ErrorCode::AuthorityChanged
-            })
-            .map(|(_, error)| error)
+        self.refused_link()
+            .filter(|error| error.code == ErrorCode::AuthorityChanged)
     }
 }
 
@@ -8424,6 +8436,11 @@ impl Db {
             if (!strict && !answerable) || deadline.is_some_and(|d| Instant::now() >= d) {
                 return Poll::Ready(Ok(None));
             }
+            // A link this store refused answers nothing until a new one
+            // does: a Remote read fails with why (SPEC 8 §8.10).
+            if strict && let Some(error) = client.refused_link() {
+                return Poll::Ready(Err(error.clone()));
+            }
             if let Some(expired) = coverage {
                 if client.unadmitted {
                     return Poll::Ready(Err(Error::new(
@@ -9072,7 +9089,15 @@ impl Db {
                                 }
                                 let client = inner.client.as_mut().expect("client");
                                 client.catalogued = true;
-                                client.uncatalogued = None;
+                                // Mirrored at last: the reads attached under
+                                // the last link's refusal are no longer
+                                // refused, before their answers come.
+                                if client.uncatalogued.take().is_some() {
+                                    for remote in client.reads.values().filter_map(ActiveRead::live)
+                                    {
+                                        remote.refused.borrow_mut().take();
+                                    }
+                                }
                             }
                             // This store cannot store rows as its upstream
                             // does: it stops syncing with it, nothing that
@@ -9110,6 +9135,13 @@ impl Db {
                                 ReadLifetime::Live(live) => {
                                     live.answered.set(true);
                                     live.global.set(global);
+                                    // Answered, it is no longer refused: a
+                                    // read attached before the link's
+                                    // `Welcome` took the last link's
+                                    // refusal (`uncatalogued`), which no
+                                    // longer applies. A stream not yet
+                                    // polled is not told it.
+                                    live.refused.borrow_mut().take();
                                     if live.visible.is_none_or(|v| v.n != at.n || v.seq < at.seq) {
                                         live.visible = Some(at);
                                         client.visibility_moved = true;
@@ -9871,6 +9903,9 @@ impl Inner {
         for read in client.reads.values_mut() {
             if let ReadLifetime::Live(remote) = &mut read.lifetime {
                 remote.answered.set(false);
+                // Whose answer it is, the next upstream says: a relink to
+                // a non-global upstream must not report the last one's.
+                remote.global.set(false);
                 // What it holds stands until the next upstream says.
                 remote.told = false;
             }
@@ -9950,7 +9985,24 @@ impl Inner {
         let mut ready = Vec::new();
         let mut refused = Vec::new();
         let mut kept = Vec::new();
+        // A link this store refused answers nothing: a Remote read that
+        // would wait for it fails with why, as this store's own would.
+        let refused_link = client.refused_link().cloned();
         for fetch in std::mem::take(&mut client.relayed_fetches) {
+            if let (true, true, Some(error), SyncMessage::Read { id, .. }) = (
+                fetch.session == index,
+                fetch.strict,
+                &refused_link,
+                &fetch.message,
+            ) {
+                client.forget_once(fetch.upstream);
+                refused.push(SyncMessage::Refused {
+                    id: *id,
+                    code: error.code,
+                    message: error.message.clone(),
+                });
+                continue;
+            }
             let answered = matches!(client.answers.get(&fetch.upstream), Some(Some(_)));
             let given_up =
                 !fetch.strict && (!can_wait || fetch.until.is_some_and(|until| now >= until));
@@ -10004,6 +10056,47 @@ impl Inner {
             })
             .collect();
         (ready, answers)
+    }
+
+    /// Session `index`'s relayed Remote live reads whose upstream read
+    /// this store refused (see [`Inner::refuse_upstream`]) are refused to
+    /// the session with that error and its code, as this store's own
+    /// remote reads are (SPEC 8 §8.10): those opened before the refusal and
+    /// after it, each once per refusal. Nothing else can answer them.
+    /// A LocalFirst read is not: the session reads this store as its local
+    /// view, which serves it as when there is no server.
+    fn relayed_refusals(&mut self, index: usize) {
+        let Some(client) = self.client.as_ref() else {
+            return;
+        };
+        // A new link not yet past its `Welcome` has not said whether this
+        // store can follow it: a read attached meanwhile carries the last
+        // link's catalogue refusal (`uncatalogued`), which the session is
+        // not told unless the new link refuses too.
+        if client.refused_link().is_none() && client.uncatalogued.is_some() {
+            return;
+        }
+        let session = &mut self.sessions[index];
+        for (&id, settle) in session.settles.iter_mut().filter(|(_, s)| s.remote) {
+            let refusal = client
+                .live_reads
+                .get(&settle.key)
+                .and_then(|read| client.reads.get(read))
+                .and_then(ActiveRead::live)
+                .and_then(|live| live.refused.borrow().clone());
+            match refusal {
+                Some(error) if !settle.refused => {
+                    settle.refused = true;
+                    session.outbox.push(SyncMessage::Refused {
+                        id,
+                        code: error.code,
+                        message: error.message,
+                    });
+                }
+                Some(_) => {}
+                None => settle.refused = false,
+            }
+        }
     }
 
     /// The identity whose policies govern session `index`'s reads and
@@ -10860,6 +10953,7 @@ impl Db {
         self.serve_due_first_loads(index)?;
         // Relayed reads the upstream answered (or can no longer answer)
         // are served from this store first, in the order they came.
+        self.inner.borrow_mut().relayed_refusals(index);
         let (relayed, answers) = self.inner.borrow_mut().relayed_fetches_ready(index);
         // The upstream's answers list their results' rows: cached rows
         // they left out are not served as the reader's (INV-SYNC-14).
@@ -12454,6 +12548,8 @@ impl Db {
                                         key: key.clone(),
                                         sent: None,
                                         global: false,
+                                        remote: tier == ReadTier::Remote,
+                                        refused: false,
                                     },
                                 );
                             }
