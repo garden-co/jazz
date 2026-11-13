@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
 import { makeFakeAccount } from "../react-core/test-utils.js";
+import { FIRST_ANSWER_DEADLINE_MS } from "../session/follow-user.js";
 import { openNativeSessionCore as createNativeSession } from "./create-jazz-session.js";
 import { openNativeSessionCore as createExpoSession } from "../expo/create-jazz-session.js";
 import { ownJazzSession } from "../session/jazz-session.js";
@@ -44,7 +45,10 @@ beforeEach(() => {
     }),
   );
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 // Each host's own options: React Native takes an account `store`, Expo keeps
 // accounts in its secure store and takes a `profile` instead. (Typed as React
 // Native's: a call through either factory type-checks against both configs.)
@@ -214,6 +218,42 @@ for (const [host, create, prepare, own] of [
       });
       expect(session.getSnapshot().status).toBe("ready");
       expect(session.getSnapshot().account).toBe(retained);
+      await session.close();
+    });
+
+    // A cold-starting or hung backend: startup must not sit on loading until
+    // the auth request deadline (30 s). It waits FIRST_ANSWER_DEADLINE_MS,
+    // opens signed out, and signs the user in when the answer arrives.
+    it("opens signed out once a slow backend passes the start deadline, then follows its answer", async () => {
+      const alice = makeFakeAccount();
+      const accounts = new AccountManager({
+        createLocalFirst: () => makeFakeAccount(),
+        restoreLocalFirst: () => makeFakeAccount(),
+        loginWithBackend: async () => alice,
+        logout: vi.fn(),
+      });
+      prepare.mockResolvedValue(accounts);
+      mocks.client.mockResolvedValue({ shutdown: async () => {} });
+      backendUser = { issuer: "jazz:backend", subject: "alice" };
+      let answer!: () => void;
+      backendUserAnswer = new Promise((resolve) => (answer = resolve));
+      vi.useFakeTimers();
+      let opened = false;
+      const opening = create({
+        scope: "app-1",
+        serverUrl: "https://jazz.example.com",
+        ...own,
+      }).finally(() => (opened = true));
+      await vi.advanceTimersByTimeAsync(FIRST_ANSWER_DEADLINE_MS - 1);
+      expect(opened).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(opened).toBe(true);
+      const session = await opening;
+      expect(session.getSnapshot().status).toBe("signed-out");
+      answer();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.waitFor(() => expect(session.getSnapshot().account).toBe(alice));
+      expect(session.getSnapshot().status).toBe("ready");
       await session.close();
     });
 
