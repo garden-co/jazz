@@ -15,6 +15,7 @@ type NativeForegroundCommand =
   | { type: "drainTickEvents" }
   | { type: "takeSlowQueryReport"; app?: string }
   | { type: "setSlowQueryThresholdMs"; ms: number }
+  | { type: "deleteStore" }
   | {
       type: "all";
       query: Uint8Array;

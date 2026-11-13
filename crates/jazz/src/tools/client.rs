@@ -174,9 +174,7 @@ fn classify_tick_driver_error(error: &CoreError) -> TickFailure {
         | TransactionConflict
         | NotObserved
         | AuthorityChanged
-        | StoreOpenedWithoutMigrations => {
-            TickFailure::Recoverable
-        }
+        | StoreOpenedWithoutMigrations => TickFailure::Recoverable,
         Storage
         | UnsupportedStorageCodecs
         | Schema
