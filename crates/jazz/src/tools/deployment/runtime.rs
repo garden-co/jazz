@@ -65,11 +65,27 @@ pub fn prepare_catalogue_change(
         .iter()
         .filter_map(|schema| schema.version)
         .collect::<BTreeSet<_>>();
-    if admitted
+    // Errors name versions by the short hashes `jazz-tools` prints.
+    let stored_hash = |id: &SchemaVersionId| {
+        stored
+            .schemas
+            .iter()
+            .find(|schema| schema.version == Some(*id))
+            .map(|schema| schema.hash.to_hex()[..12].to_owned())
+            .unwrap_or_else(|| uuid::Uuid::from_bytes(*id.as_bytes()).to_string())
+    };
+    if let Some(omitted) = admitted
         .iter()
-        .any(|id| !versions.iter().any(|schema| schema.version_id() == *id))
+        .find(|id| !versions.iter().any(|schema| schema.version_id() == **id))
     {
-        return Err("deployment cannot omit a runtime schema".into());
+        return Err(format!(
+            "deployment cannot omit a runtime schema: the store already holds schema {}, which the \
+             app's migrations don't include. The app ships no migration from it, as with \
+             `defineApp(schema, {{ migrations: \"none\" }})` or a migrations/index.ts that misses \
+             it. Snapshot that version and migrate from it: `npx jazz-tools migrations create` \
+             (see https://jazz.tools/docs/schemas/migrations)",
+            stored_hash(omitted)
+        ));
     }
     let stored_versions = stored
         .schemas
@@ -91,7 +107,25 @@ pub fn prepare_catalogue_change(
         .filter(|id| !targets.contains(id))
         .collect::<Vec<_>>();
     if !admitted.is_empty() && stored_roots != [&root.version_id()] {
-        return Err("deployment cannot replace the runtime genesis schema".into());
+        let root_hash = hashes
+            .iter()
+            .find(|(_, schema)| schema.version_id() == root.version_id())
+            .map(|(hash, _)| hash.to_hex()[..12].to_owned())
+            .unwrap_or_else(|| uuid::Uuid::from_bytes(*root.version_id().as_bytes()).to_string());
+        let store_first = stored_roots
+            .iter()
+            .map(|id| stored_hash(id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "deployment cannot replace the runtime genesis schema: this store's history starts at \
+             schema {store_first}, but the app's migrations start at {root_hash}. A store can't \
+             take another first version. Either start the app's history at {store_first} \
+             (snapshot that version, then `npx jazz-tools migrations create` from it), or open \
+             the app on a fresh store (this one keeps its rows). Starting a store \
+             under `{{ migrations: \"none\" }}` and adding migrations later leads here \
+             (see https://jazz.tools/docs/schemas/migrations)"
+        ));
     }
     // The stored lenses, compiled, by version edge: another hash of an
     // admitted predecessor (defaults and indexes do not change the version)

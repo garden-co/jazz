@@ -3296,6 +3296,51 @@ describe("createJazz", () => {
     await jazz.attach(createSecureHttp2Server({ allowHTTP1: true }));
   });
 
+  // #5053: in development the browser can't see the server log, so a Jazz
+  // route's 503 says why the store did not open (and only there).
+  it("says why its store did not open in a 503, in development only", async () => {
+    const appId = randomUUID();
+    const probe = createServer();
+    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+    const corePort = (probe.address() as AddressInfo).port;
+    await new Promise((resolve) => probe.close(resolve));
+    const coreUrl = `http://127.0.0.1:${corePort}`;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+    const answer = async (env: string) => {
+      vi.stubEnv("NODE_ENV", env);
+      cleanups.push(async () => vi.unstubAllEnvs());
+      const jazz = createJazz({
+        app,
+        permissions,
+        store: remote({ url: coreUrl, appId, secret: "down-admin" }),
+        authenticate,
+      });
+      cleanups.push(() => jazz.close());
+      const response = await jazz.handle(
+        new Request(`http://app.test/jazz/apps/${appId}/ws`, { method: "POST" }),
+      );
+      return {
+        status: response.status,
+        header: response.headers.get("x-jazz-store-error"),
+        body: await response.text(),
+      };
+    };
+
+    const dev = await answer("development");
+    expect(dev.status).toBe(503);
+    expect(dev.header).toBe("1");
+    expect(dev.body).toMatch(
+      /^Jazz is unavailable; try again shortly: the store did not open: .*could not reach the Jazz core/,
+    );
+    const prod = await answer("production");
+    expect(prod).toEqual({
+      status: 503,
+      header: null,
+      body: "Jazz is unavailable; try again shortly",
+    });
+  }, 30_000);
+
   it("attaches with its remote core down at start, names the core, and serves once it is up", async () => {
     const appId = randomUUID();
     const adminSecret = `down-admin-${randomUUID().slice(0, 8)}`;

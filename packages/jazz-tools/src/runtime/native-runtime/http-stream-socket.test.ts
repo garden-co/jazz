@@ -169,6 +169,27 @@ describe("same-origin socket fallback", () => {
     ).toHaveLength(1);
   });
 
+  // #5053: a dev backend whose store can't open says why in its 503; the
+  // browser logs it once instead of retrying silently.
+  it("logs once why a development backend's store did not open", async () => {
+    const url = "ws://dev-store.test/jazz/apps/a1/ws";
+    const why =
+      "Jazz is unavailable; try again shortly: the store did not open: Deploy failed: deployment cannot replace the runtime genesis schema";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(why, { status: 503, headers: { "x-jazz-store-error": "1" } })),
+    );
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const Socket = httpStreamFallbackWebSocket(failingNative());
+    expect(await outcome(new Socket(url))).toBe("closed");
+    expect(await outcome(new Socket(url))).toBe("closed");
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error.mock.calls[0]!.join(" ")).toContain(
+      `jazz: the backend at ${url} can't serve: ${why}`,
+    );
+    error.mockRestore();
+  });
+
   it("switches to the HTTP stream when upgrades never get through to a backend that upgrades", async () => {
     // A proxy that passes plain requests and streams on, but not upgrades.
     const url = "ws://behind-proxy.test/jazz/apps/a1/ws";

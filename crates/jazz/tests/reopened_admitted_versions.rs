@@ -382,6 +382,12 @@ fn a_replica_opened_without_the_apps_migrations_is_refused_by_name() {
         jazz::db::ErrorCode::StoreOpenedWithoutMigrations,
         "{refusal}"
     );
+    // It says what leads here and what to do, not "not supported yet"
+    // (#5053).
+    let message = refusal.to_string();
+    assert!(message.contains("migrations: \"none\""), "{message}");
+    assert!(message.contains("npx jazz-tools validate"), "{message}");
+    assert!(!message.contains("not supported yet"), "{message}");
 
     let shipped = replica(8);
     let mirrored = link(&shipped, &authority);

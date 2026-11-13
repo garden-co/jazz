@@ -3917,15 +3917,34 @@ const UNAVAILABLE_BODY = "Jazz is unavailable; try again shortly";
  * process, alive. (A Fetch response can't tell an HTTP/2 host, which drops
  * the header with a warning; nodeHandler leaves it off there.)
  */
-function storeUnavailable(retryAfter: number, closed: boolean): Response {
-  return new Response(UNAVAILABLE_BODY, {
+function storeUnavailable(retryAfter: number, closed: boolean, error?: unknown): Response {
+  const why = devStoreError(closed ? undefined : error);
+  return new Response(why ? `${UNAVAILABLE_BODY}: ${why}` : UNAVAILABLE_BODY, {
     status: 503,
     headers: {
       "content-type": "text/plain",
       "retry-after": String(retryAfter),
+      ...(why ? { [STORE_ERROR_HEADER]: "1" } : {}),
       ...(closed ? { connection: "close" } : {}),
     },
   });
+}
+
+/**
+ * Header on a 503 whose body says why the store did not open. Only in
+ * development (NODE_ENV "development"): there the reason (a deploy the store
+ * refused, say) otherwise shows only in the server log, while the browser
+ * sees a generic refusal and retries (#5053). The client's socket probe
+ * reads it and logs it in the browser console.
+ */
+const STORE_ERROR_HEADER = "x-jazz-store-error";
+
+/** Why the store did not open, for a 503's body in development; else undefined. */
+function devStoreError(error: unknown): string | undefined {
+  if (error === undefined || typeof process === "undefined") return undefined;
+  if (process.env.NODE_ENV !== "development") return undefined;
+  const message = error instanceof Error ? error.message : String(error);
+  return `the store did not open: ${message}`;
 }
 
 const storeUnavailableUpgrade = (retryAfter: number) =>
@@ -3947,7 +3966,7 @@ function facade(entry: Entry): Jazz {
       return await use();
     } catch (error) {
       logUnavailable(error);
-      return storeUnavailable(retryAfterSeconds(entry), entry.closing !== undefined);
+      return storeUnavailable(retryAfterSeconds(entry), entry.closing !== undefined, error);
     }
   };
   const handle = async (request: Request) => {
@@ -4048,7 +4067,9 @@ function facade(entry: Entry): Jazz {
           // HTTP/2 has no Connection header (Node warns and drops it).
           if (entry.closing && req.httpVersionMajor < 2) res.setHeader("connection", "close");
           res.setHeader("content-type", "text/plain");
-          res.end(UNAVAILABLE_BODY);
+          const why = devStoreError(entry.closing ? undefined : error);
+          if (why) res.setHeader(STORE_ERROR_HEADER, "1");
+          res.end(why ? `${UNAVAILABLE_BODY}: ${why}` : UNAVAILABLE_BODY);
         },
       );
     },
