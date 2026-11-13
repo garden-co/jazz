@@ -457,20 +457,29 @@ that the receiver holds, named by its seq.
   version, and nodes only beneath roots its readable versions reach. A reader
   allowed to see one version but not a later one never receives the later
   version's edits. Losing read access takes effect at once. A version is
-  readable when the reader may read the row as it stands, and an earlier
-  version only if, as history, it is also readable as of its own position
-  (INV-RLS-13 governs earlier versions). The current version is the row
-  itself, so a reader granted access after the row's last write (a share
-  made later) reads its content. A relay judges "current" by its own store,
-  which may lag its upstream: a version superseded upstream but not yet at
-  the relay is current there, and the upstream judges again when the relay
-  forwards the pull.
-- **Known gap.** A writer granted access after the row's last write bases
-  its deltas and access proofs on the version it holds. If that version is
-  superseded before the commit arrives, the base is an earlier version the
-  writer could not read as of its position, and the commit is rejected
-  (`WriteRejected`) rather than rebased. Pulls recover on the next version;
-  such writes do not.
+  readable when the reader may read the row as it stands and, as history,
+  the version as of some cut at which it was the row's version (INV-RLS-13
+  at that cut). The authority checks the ends of the span the version was
+  current over, from its own store alone: its own position, the last
+  position before the version that superseded it, and, while it is
+  current, the row as it stands. A grant that came and went within the
+  span is not seen. So a reader granted access after the row's last write
+  (a share made later) reads the current version's content, and still may
+  once a later write supersedes it; a version superseded before the grant
+  stays unreadable. A relay judges "current" by its own store, which may
+  lag its upstream: a version superseded upstream but not yet at the relay
+  is current there, and the upstream judges again when the relay forwards
+  the pull.
+- **Concurrent writes over a version read later.** The same rule governs a
+  writer's delta bases and access proofs. A writer granted access after the
+  row's last write bases its edit on the version it holds; when another
+  write supersedes that version before the commit arrives, the base was
+  readable to the writer while it was current, so the delta resolves over
+  it and the commit lands over the new version like any concurrent edit.
+  The commit's content says nothing about when it was staged: the authority
+  trusts only its own history of the base and the grants, so naming a
+  version superseded before the grant is refused (`WriteRejected`) as
+  before.
 - **No existence oracle.** The server never tells a client it already holds a
   node the client cannot read: an unreadable pull is answered as absent, and
   uploads are never skipped on the server's word. Deduplication is silent.
