@@ -100,6 +100,10 @@ harness = false
 name = "fanout_wire"
 harness = false
 
+[[bench]]
+name = "fanout_relations"
+harness = false
+
 [[test]]
 name = "integration"
 path = "tests/integration/main.rs"
