@@ -468,6 +468,9 @@ export async function createJazzSessionOwner<
     }
     if (adopt) {
       adopt(current, next);
+      // Same client, upgraded in place: observers learn of it (the session
+      // snapshot's `localFirst`) without a client change.
+      publish({ ...snapshot });
       return;
     }
     client = next;
