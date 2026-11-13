@@ -14,7 +14,7 @@ it("keeps local reads available while another transaction waits for remote cover
   const server = await startTestJazz({
     app: app,
     permissions: permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;

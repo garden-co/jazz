@@ -51,6 +51,7 @@ use rusqlite::OptionalExtension;
 use rusqlite::types::Value as SqlValue;
 use std::cell::Cell as StdCell;
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::future::poll_fn;
@@ -733,19 +734,78 @@ pub fn origin_node(author: &AuthorSubject, client_node: [u8; 16]) -> [u8; 16] {
     hasher.update(&client_node);
     let digest = hasher.finalize();
     let mut node: [u8; 16] = digest.as_bytes()[..16].try_into().expect("16 bytes");
-    node[..4].copy_from_slice(&ORIGIN_NODE_TAG);
+    node[..4].copy_from_slice(match bounds_resends(client_node) {
+        true => &BOUNDED_ORIGIN_NODE_TAG,
+        false => &ORIGIN_NODE_TAG,
+    });
+    marked_v8(node)
+}
+
+/// `node` marked as an RFC 9562 version-8 UUID.
+fn marked_v8(mut node: [u8; 16]) -> [u8; 16] {
     node[6] = (node[6] & 0x0f) | 0x80;
     node[8] = (node[8] & 0x3f) | 0x80;
     node
 }
 
-/// The first bytes of every [`origin_node`].
+fn tagged_v8(node: [u8; 16], tag: [u8; 4]) -> bool {
+    node[..4] == tag && node[6] >> 4 == 8 && node[8] >> 6 == 0b10
+}
+
+/// The first bytes of an [`origin_node`] whose client may resend its writes
+/// for as long as it lives (alpha.60 and alpha.61 thin clients).
 const ORIGIN_NODE_TAG: [u8; 4] = *b"jzTW";
+
+/// The first bytes of an [`origin_node`] whose client stops resending a
+/// write `THIN_WRITE_RESEND_WINDOW_MS` (10 minutes) after its first send:
+/// one whose own node bears [`BOUNDED_CLIENT_NODE_TAG`]. Only such a
+/// writer's entries age out ([`Inner::note_origin_entry`]).
+const BOUNDED_ORIGIN_NODE_TAG: [u8; 4] = *b"jzTB";
+
+/// The first bytes of the node a thin client names in its `writeKey`
+/// (version 8 too) when it bounds its resends: the client's promise, which
+/// lets the authority drop its writes' entries. An earlier client's
+/// random node carries it with odds of 2^-38.
+const BOUNDED_CLIENT_NODE_TAG: [u8; 4] = *b"jzRB";
+
+/// Whether a thin client naming `client_node` bounds its resends (see
+/// [`BOUNDED_CLIENT_NODE_TAG`]).
+pub fn bounds_resends(client_node: [u8; 16]) -> bool {
+    tagged_v8(client_node, BOUNDED_CLIENT_NODE_TAG)
+}
 
 /// Whether `node` is a thin client's writer node ([`origin_node`]).
 pub(crate) fn is_origin_node(node: [u8; 16]) -> bool {
-    node[..4] == ORIGIN_NODE_TAG && node[6] >> 4 == 8 && node[8] >> 6 == 0b10
+    tagged_v8(node, ORIGIN_NODE_TAG) || tagged_v8(node, BOUNDED_ORIGIN_NODE_TAG)
 }
+
+/// Whether `node` is the writer node of a thin client that bounds its
+/// resends: the only writers whose entries the authority drops.
+pub(crate) fn is_bounded_origin_node(node: [u8; 16]) -> bool {
+    tagged_v8(node, BOUNDED_ORIGIN_NODE_TAG)
+}
+
+/// How long the authority keeps a thin writer's prunable dedupe entry, on
+/// its own clock (SPEC 8 §8.14). Far longer than a thin client resends a
+/// write for (`THIN_WRITE_RESEND_WINDOW_MS`, 10 minutes, in the TypeScript
+/// thin runtime): an entry is recorded no earlier than the write's first
+/// send, so every resend inside the client's window still finds it.
+pub const ORIGIN_ENTRY_RETENTION_MS: i64 = 60 * 60 * 1000;
+
+/// The most expired thin-writer entries one recorded entry drops: more than
+/// one, so a backlog drains while thin writes keep coming, and bounded, so
+/// no write pays for the whole backlog.
+const ORIGIN_PRUNE_BATCH: i64 = 64;
+
+/// The ages of the thin-writer dedupe entries the authority may drop
+/// (storage format 1, created by the first such entry, so a store that
+/// never takes one stays byte-identical): `at` is the authority's wall
+/// clock in Unix ms when it recorded the entry of `n`'s (a
+/// `_jazz_nodes.n`) commit `tx`. Keyed by age first, so pruning reads only
+/// the expired rows.
+pub(crate) const ORIGIN_ENTRIES_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_origin_entries \
+     (at INTEGER NOT NULL, n INTEGER NOT NULL, tx INTEGER NOT NULL, PRIMARY KEY (at, n, tx)) \
+     WITHOUT ROWID";
 
 pub(crate) fn writer_bytes(node: [u8; 16], tx: u64) -> Vec<u8> {
     let mut w = node.to_vec();
@@ -5035,6 +5095,42 @@ impl Inner {
             .unwrap_or_default())
     }
 
+    /// The accepted position of the version that superseded the row's
+    /// version at `at`, current or in history: the first one after it.
+    /// `None` while `at` is current or pending, or when no accepted
+    /// version follows it here.
+    fn superseded_at(
+        &self,
+        table: &str,
+        row: RowUuid,
+        key: &[u8],
+        at: Pos,
+    ) -> Result<Option<Pos>, Error> {
+        if !at.accepted() {
+            return Ok(None);
+        }
+        let mut next: Option<i64> = None;
+        for name in [table.to_owned(), format!("{table}__h")] {
+            let found: Option<i64> = self
+                .conn
+                .cached_row(
+                    &format!(
+                        "SELECT MIN(_clock) FROM {} \
+                         WHERE id = ?1 AND _branch = ?2 AND _clock > ?3 AND _clock <= ?4",
+                        quote(&name)
+                    ),
+                    rusqlite::params![row.0.as_bytes().to_vec(), key, at.t(), Pos::SETTLED.t()],
+                    |r| r.get(0),
+                )
+                .map_err(storage)?;
+            next = match (next, found) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+        Ok(next.map(Pos::from_t))
+    }
+
     fn put_image(&self, image: &Image, history: bool) -> Result<(), Error> {
         let row = RowUuid::from_bytes(image.id);
         let w = match image.written {
@@ -6538,19 +6634,22 @@ impl Inner {
             [],
         )
         .map_err(storage)?;
-        let code = self.node_code(node)?;
         // The commit's own version decides, as for its history.
-        // A thin client's commits reach the authority through any of its
-        // servers, so out of order (`INV-HIST-23` holds per server): each
-        // keeps its exact entry, which a resend is answered from.
         let latest_only = !ops.is_empty()
-            && !is_origin_node(node)
             && !self.shard.awaits(crate::db::shard::CommitRef { node, tx })
             && ops.iter().all(|op| {
                 self.schema
                     .stored_table(op.table())
                     .is_ok_and(|stored| self.prunes(stored))
             });
+        // A thin client's commits reach the authority through any of its
+        // servers, so out of order (`INV-HIST-23` holds per server): each
+        // keeps its exact entry, which a resend is answered from, until it
+        // ages out.
+        if is_origin_node(node) {
+            return self.note_origin_entry(node, tx, latest_only);
+        }
+        let code = self.node_code(node)?;
         let waiting: Option<i64> = self
             .conn
             .cached_row(
@@ -6596,6 +6695,99 @@ impl Inner {
             rusqlite::params![code, waiting],
         )
         .map_err(storage)?;
+        Ok(())
+    }
+
+    /// Note the dedupe entry the authority just recorded for thin writer
+    /// `node`'s commit `tx` (SPEC 8 §8.14), and drop the entries that aged
+    /// out. Only a `prunable` entry of a writer that bounds its resends
+    /// ([`is_bounded_origin_node`]) ages: a refusal, or an accepted commit
+    /// that wrote only tables its version declares latest-only. Any other
+    /// accepted commit's entry is also its history's record (history reads
+    /// name versions by it, and later writes build on it), kept as every
+    /// writer's is. An entry older than [`ORIGIN_ENTRY_RETENTION_MS`] on
+    /// this store's clock is dropped, and so is its node's `_jazz_nodes`
+    /// row once the node has no entry left. A resend after that is written
+    /// again: a client stops resending well before (the known limit is a
+    /// replica that holds the upload that long). Each call reads and drops
+    /// at most [`ORIGIN_PRUNE_BATCH`] expired entries, by age.
+    pub(crate) fn note_origin_entry(
+        &self,
+        node: [u8; 16],
+        tx: u64,
+        prunable: bool,
+    ) -> Result<(), Error> {
+        // A relay's entries are its own uploads' record, not dedupe.
+        if self.client.is_some() {
+            return Ok(());
+        }
+        let now = self.now_ms();
+        // A client that does not bound its resends may resend any time:
+        // its entries are kept, as before.
+        if prunable && is_bounded_origin_node(node) {
+            self.exec(ORIGIN_ENTRIES_DDL, []).map_err(storage)?;
+            self.exec(
+                "INSERT OR IGNORE INTO _jazz_origin_entries (at, n, tx) VALUES (?1, ?2, ?3)",
+                rusqlite::params![now, self.node_code(node)?, tx as i64],
+            )
+            .map_err(storage)?;
+        } else if !self.has_table("_jazz_origin_entries")? {
+            return Ok(());
+        }
+        let expired: Vec<(i64, i64, i64)> = {
+            let mut statement = self
+                .conn
+                .prepare_cached(
+                    "SELECT at, n, tx FROM _jazz_origin_entries WHERE at < ?1 ORDER BY at LIMIT ?2",
+                )
+                .map_err(storage)?;
+            statement
+                .query_map(
+                    rusqlite::params![
+                        now.saturating_sub(ORIGIN_ENTRY_RETENTION_MS),
+                        ORIGIN_PRUNE_BATCH
+                    ],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .and_then(|rows| rows.collect())
+                .map_err(storage)?
+        };
+        let mut nodes = BTreeSet::new();
+        for (at, code, tx) in expired {
+            self.exec(
+                "DELETE FROM _jazz_origin_entries WHERE at = ?1 AND n = ?2 AND tx = ?3",
+                rusqlite::params![at, code, tx],
+            )
+            .map_err(storage)?;
+            self.exec(
+                "DELETE FROM _jazz_transactions WHERE n = ?1 AND tx = ?2",
+                rusqlite::params![code, tx],
+            )
+            .map_err(storage)?;
+            nodes.insert(code);
+        }
+        let pruned_txs = !nodes.is_empty() && self.has_pruned_txs()?;
+        for code in nodes {
+            let left: bool = self
+                .conn
+                .cached_row(
+                    "SELECT EXISTS (SELECT 1 FROM _jazz_transactions WHERE n = ?1)",
+                    [code],
+                    |r| r.get(0),
+                )
+                .map_err(storage)?;
+            if left {
+                continue;
+            }
+            // Nothing else names a node by its code: the next node interned
+            // may take it.
+            self.exec("DELETE FROM _jazz_nodes WHERE n = ?1", [code])
+                .map_err(storage)?;
+            if pruned_txs {
+                self.exec("DELETE FROM _jazz_pruned_txs WHERE n = ?1", [code])
+                    .map_err(storage)?;
+            }
+        }
         Ok(())
     }
 
@@ -13319,6 +13511,11 @@ impl Db {
                                 let result = Err(wire_error(&error));
                                 inner.record_fate(node, tx, &result)?;
                                 inner.record_settled(node, tx, None)?;
+                                // A refusal is no history's record: a thin
+                                // writer's ages out (SPEC 8 §8.14).
+                                if is_origin_node(node) {
+                                    inner.note_origin_entry(node, tx, true)?;
+                                }
                                 (result, rows, Vec::new())
                             }
                         },
@@ -14276,14 +14473,19 @@ fn readable_version(
 }
 
 /// Whether `identity` may read the version of `row` at `at`: the row as it
-/// stands, when the version is the row's current one; otherwise also the
-/// version as of its own position, as history (SPEC 19.9, INV-RLS-13).
-/// Losing read access to the row takes effect at once for every version.
+/// stands, and the version as of some cut at which it was the row's
+/// version (SPEC 19.9, INV-RLS-13). Checked at the ends of the span it was
+/// current over: now, while it is current; its own position; and the last
+/// position before it was superseded. Losing read access to the row takes
+/// effect at once for every version.
 ///
 /// So a reader granted access after the row's last write (a share row made
 /// later) reads the current version's content, though nothing granted it
-/// as of that version's position. A relay judges "current" by its own
-/// store, which may lag; its upstream judges again.
+/// as of that version's position, and still may once a later write
+/// supersedes it: a delta or access proof staged over it then counts and
+/// the commit rebases like any other (#5249). A version superseded before
+/// the grant stays unreadable. A relay judges "current" by its own store,
+/// which may lag; its upstream judges again.
 fn still_readable_version(
     inner: &Inner,
     policies: &Schema,
@@ -14302,7 +14504,23 @@ fn still_readable_version(
     {
         return Ok(true);
     }
-    readable_version(inner, policies, table, row, key, at, identity)
+    if readable_version(inner, policies, table, row, key, at, identity)? {
+        return Ok(true);
+    }
+    // The version's last position before it was superseded: the row as of
+    // there is this version, with the grants as they stood then.
+    match inner.superseded_at(table, row, key, at)? {
+        Some(next) if next.seq > at.seq + 1 => readable_version(
+            inner,
+            policies,
+            table,
+            row,
+            key,
+            Pos::at(next.seq - 1),
+            identity,
+        ),
+        _ => Ok(false),
+    }
 }
 
 /// Whether `identity` may read a row of stored table `table`, by
@@ -14720,6 +14938,29 @@ mod tests {
         assert!(!super::is_origin_node(
             *jazz_types::ids::NodeUuid::random_from([0x88; 16]).as_bytes()
         ));
+    }
+
+    /// The writer node of a client that bounds its resends, as stored and
+    /// sent (a durable encoding): a client node tagged `jzRB` derives one
+    /// tagged `jzTB`, any other one tagged `jzTW`, both pinned to the byte.
+    /// A unit test: the derivation is not reachable from a public API that
+    /// shows its bytes.
+    #[test]
+    fn a_client_that_bounds_its_resends_derives_a_writer_node_of_its_own() {
+        use jazz_types::ids::AuthorSubject;
+        let author = AuthorSubject::for_test_bytes([1; 16]);
+        let mut client = [7u8; 16];
+        client[..4].copy_from_slice(b"jzRB");
+        let client = super::marked_v8(client);
+        assert!(super::bounds_resends(client));
+        assert!(!super::bounds_resends([7; 16]));
+        let bounded = super::origin_node(&author, client);
+        let unbounded = super::origin_node(&author, [7; 16]);
+        assert!(super::is_origin_node(bounded) && super::is_bounded_origin_node(bounded));
+        assert!(super::is_origin_node(unbounded) && !super::is_bounded_origin_node(unbounded));
+        let hex = |node: [u8; 16]| node.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        assert_eq!(hex(bounded), "6a7a54420ca787b39ab8eca2ca4480e8");
+        assert_eq!(hex(unbounded), "6a7a5457cf8b8a358e3c406d91a700d7");
     }
 
     /// Only a chunk store's failure becomes a refusal, carrying the

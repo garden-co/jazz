@@ -21,7 +21,7 @@ it.each(["inline", "large"])(
       },
       { migrations: "none" },
     );
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    const server = await startLocalJazzServer({ inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     let front: TestJazz | undefined;
     try {
@@ -79,7 +79,7 @@ it.each(["local-first", "remote"] as const)(
       },
       { migrations: "none" },
     );
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    const server = await startLocalJazzServer({ inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     let front: TestJazz | undefined;
     try {

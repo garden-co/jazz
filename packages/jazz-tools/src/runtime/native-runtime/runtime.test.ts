@@ -8645,6 +8645,38 @@ it("surfaces the native slow-query report on console.warn after each core tick, 
   }
 });
 
+it("keeps the plan and SQL out of console.warn with the summary console detail (#5225)", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  const debug = vi.spyOn(console, "debug").mockImplementation(() => undefined);
+  const line =
+    "slow query in app app-1 on todos: 1 slow run(s), slowest 52 ms, 52 ms of database time in all " +
+    "(slowest run: 1 row(s) returned, 1 row(s) scanned). Plan: SEARCH t USING INDEX todos_by_id (id=?). " +
+    'SQL: SELECT "id", "title" FROM "todos" AS t WHERE t."id" = ?1';
+  const reports = [[line]];
+  const runtime = NativeRuntimeAdapter.fromDb(
+    fakeDb({ tick: () => undefined, takeSlowQueryReport: () => reports.shift() ?? [] }),
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+    { slowQueryLog: { appId: "app-1", consoleDetail: "summary" } },
+  );
+  try {
+    await runtime.progressPeerTransport();
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      "[jazz] slow query in app app-1 on todos: 1 slow run(s), slowest 52 ms, 52 ms of database time in all " +
+        '(slowest run: 1 row(s) returned, 1 row(s) scanned). Plan and SQL are logged at the debug ("Verbose") level.',
+    );
+    // Developers who ask for it still get the whole report.
+    expect(debug).toHaveBeenCalledExactlyOnceWith(`[jazz] ${line}`);
+  } finally {
+    warn.mockRestore();
+    debug.mockRestore();
+    await runtime.close();
+  }
+});
+
 it("rejects a negative slow-query threshold and leaves the native default without one", async () => {
   const setSlowQueryThresholdMs = vi.fn();
   expect(() =>

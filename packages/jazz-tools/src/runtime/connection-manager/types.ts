@@ -399,6 +399,14 @@ export abstract class ConnectionManager {
   abstract deleteClientStorage(): Promise<{ pendingUploads?: number } | void>;
 
   /**
+   * How many of the store's writes (every tab's, in the browser) the server
+   * hasn't confirmed, or `undefined` where only this client can say.
+   */
+  async storePendingUploads(): Promise<number | undefined> {
+    return undefined;
+  }
+
+  /**
    * Whether this connection can still serve its Db: no storage reset took
    * its client away. A Db whose sign-out failed before its teardown began
    * keeps serving, and its session keeps it.

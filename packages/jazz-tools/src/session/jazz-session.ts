@@ -1,10 +1,12 @@
 import {
   attachSessionCoreConsumer,
+  onJazzSessionClientUpgraded,
   type SessionCore,
   type SessionCoreConsumer,
   type SessionCoreSnapshot,
 } from "./state.js";
 import type { AccountHandle } from "../accounts/state.js";
+import { NoKeptDeviceAccountError } from "./no-kept-device-account-error.js";
 import { exportLocalFirstSecret } from "../accounts/enrollment.js";
 import { createListeners, toError } from "../runtime/util.js";
 
@@ -53,10 +55,16 @@ export function userOfAccount(account: AccountHandle | undefined): JazzUser | nu
   });
 }
 
+function clientIsLocalFirst(client: unknown): boolean {
+  const db = (client as { db?: { isLocalFirst?(): boolean } } | undefined)?.db;
+  return db?.isLocalFirst?.() === true;
+}
+
 /** An operation a session is running (`snapshot.pending`). */
 export type JazzSessionOperation =
   | "createDeviceAccount"
   | "restoreDeviceAccount"
+  | "reopenDeviceAccount"
   | "linkDeviceAccount"
   | "refresh"
   | "signOut"
@@ -65,6 +73,7 @@ export type JazzSessionOperation =
 const CORE_OPERATION: Record<string, JazzSessionOperation> = {
   createLocalFirst: "createDeviceAccount",
   restoreLocalFirst: "restoreDeviceAccount",
+  reopenLocalFirst: "reopenDeviceAccount",
   linkWithBackend: "linkDeviceAccount",
   loginWithBackend: "refresh",
   logout: "signOut",
@@ -87,6 +96,13 @@ export interface JazzSessionSnapshot<Client> {
   readonly user: JazzUser | null;
   /** Only while `status` is `ready`. */
   readonly client?: Client;
+  /**
+   * Whether `client` reads and writes through a local store, so it works
+   * offline: `client.db.isLocalFirst()`, as a field you can subscribe to. A
+   * thin client turns local-first in place when the session upgrades it (the
+   * same `client` and `db` carry on). False while there is no client.
+   */
+  readonly localFirst: boolean;
   readonly pending?: JazzSessionOperation;
   readonly error?: Error;
   /**
@@ -126,6 +142,13 @@ export interface JazzSession<Client> {
   /** Sign in as the device account a key from `exportDeviceKey()` names. */
   restoreDeviceAccount(key: string): Promise<void>;
   /**
+   * Sign in again as the device account that was signed in last on this
+   * device, with its id and its data: signing out keeps a device account's
+   * key (except with `clearOnSignOut`, which forgets it and wipes its data).
+   * Rejects when the device keeps none.
+   */
+  reopenDeviceAccount(): Promise<void>;
+  /**
    * Keep the signed-in device account and its data when its user signs up:
    * after your own sign-up, your backend links this device account to the
    * user it now names, and the session continues as that user.
@@ -143,7 +166,9 @@ export interface JazzSession<Client> {
   /**
    * The signed-in device account's key, to restore it elsewhere with
    * `restoreDeviceAccount(key)`. Anyone holding it is that account: keep it
-   * secret. Throws when the session isn't signed in as a device account.
+   * secret. While signed out, the key of the device account
+   * `reopenDeviceAccount()` would reopen. Throws when signed in as someone
+   * else, or when signed out and the device keeps no device account.
    */
   exportDeviceKey(): string;
   signOut(): Promise<void>;
@@ -209,7 +234,11 @@ export function ownJazzSession<Config, Client>(
   let pendingSignOuts = 0;
   let retrying: Promise<void> | undefined;
   let lastAccount: AccountHandle | undefined;
-  let snapshot: JazzSessionSnapshot<Client> = Object.freeze({ status: "starting", user: null });
+  let snapshot: JazzSessionSnapshot<Client> = Object.freeze({
+    status: "starting",
+    user: null,
+    localFirst: false,
+  });
   const versions = new WeakMap<object, SessionCoreSnapshot<Client>>();
   const listeners = createListeners("Jazz session observer failed");
   const consumers = new Set<{ name?: string; lease?: SessionCoreConsumer<Client> }>();
@@ -252,6 +281,7 @@ export function ownJazzSession<Config, Client>(
           ? snapshot.user
           : userOfAccount(account),
       ...(status === "ready" ? { client: current?.client } : {}),
+      localFirst: status === "ready" && clientIsLocalFirst(current?.client),
       ...(current?.pending ? { pending: CORE_OPERATION[current.pending] } : {}),
       ...(error ? { error } : {}),
       ...(recovery ? { recovery } : {}),
@@ -261,6 +291,7 @@ export function ownJazzSession<Config, Client>(
       snapshot.status === next.status &&
       snapshot.client === next.client &&
       snapshot.user === next.user &&
+      snapshot.localFirst === next.localFirst &&
       snapshot.pending === next.pending &&
       snapshot.error === next.error &&
       snapshot.recovery === next.recovery &&
@@ -335,7 +366,12 @@ export function ownJazzSession<Config, Client>(
         core = created;
         for (const consumer of consumers)
           consumer.lease = attachSessionCoreConsumer(created, consumer.name);
-        unsubscribeCore = created.subscribe(() => publish(closed));
+        const stopCore = created.subscribe(() => publish(closed));
+        const stopUpgrades = onJazzSessionClientUpgraded(created, () => publish(closed));
+        unsubscribeCore = () => {
+          stopCore();
+          stopUpgrades();
+        };
         publish();
       })
       .catch((cause) => {
@@ -371,6 +407,7 @@ export function ownJazzSession<Config, Client>(
     subscribe: listeners.subscribe,
     createDeviceAccount: action((current) => current.createLocalFirst()),
     restoreDeviceAccount: action((current, key: string) => current.restoreLocalFirst(key)),
+    reopenDeviceAccount: action((current) => current.reopenLocalFirst()),
     linkDeviceAccount: action((current) => current.linkWithBackend()),
     async refresh() {
       failure = undefined;
@@ -400,7 +437,12 @@ export function ownJazzSession<Config, Client>(
     },
     exportDeviceKey() {
       const account = core?.getSnapshot().account;
-      if (!account || account.identity.issuer !== DEVICE_ISSUER)
+      if (!account) {
+        const kept = core?.keptLocalFirstKey();
+        if (!kept) throw new NoKeptDeviceAccountError("exportDeviceKey()");
+        return kept;
+      }
+      if (account.identity.issuer !== DEVICE_ISSUER)
         throw new Error("exportDeviceKey(): this session isn't signed in as a device account");
       return exportLocalFirstSecret(account);
     },
@@ -542,6 +584,7 @@ export function jazzSessionActions<Client>(
   return {
     createDeviceAccount: session.createDeviceAccount,
     restoreDeviceAccount: session.restoreDeviceAccount,
+    reopenDeviceAccount: session.reopenDeviceAccount,
     linkDeviceAccount: session.linkDeviceAccount,
     refresh: session.refresh,
     exportDeviceKey: session.exportDeviceKey,

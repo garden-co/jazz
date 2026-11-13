@@ -475,11 +475,6 @@ function coreOptions(
             ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
           },
     trustedWorkload: { issuer: trust.issuer, audience: trust.audience, subject: trust.subject },
-    // Local-first guests (`initial: "device"`) sync with their own key.
-    // `serveCore` refuses them unless asked; here the backend decides, with
-    // `acceptDeviceAccounts`, which guests' sockets it opens, and the core
-    // admits no socket the workload didn't open.
-    allowLocalFirstAuth: true,
   };
 }
 
@@ -1375,7 +1370,16 @@ function resendable(request: Request, given?: unknown): boolean {
   return Number.isFinite(size) && size <= RESEND_MAX_BYTES;
 }
 
-/** A WebSocket that wakes the core, then connects to wherever it now runs. */
+/**
+ * A WebSocket that wakes the core, then connects to wherever it now runs.
+ *
+ * A connection to the core that fails before it opens (the core is stopping,
+ * restarting, or Vercel's router refuses the upgrade) is tried again once the
+ * core is awake, until the wake deadline: the client hears of it only as a
+ * slower open. Nothing is replayed, since a client sends nothing before
+ * `open`. A connection that opened and then dropped is reported as it is:
+ * the client's own reconnect, and the query machinery above it, take over.
+ */
 function wakingWebSocket(
   resolveOrigin: () => Promise<string>,
   onDropped: () => void,
@@ -1385,24 +1389,39 @@ function wakingWebSocket(
     readyState = 0;
     private socket: WebSocket | undefined;
     private readonly listeners = new Map<string, Array<(event?: any) => void>>();
+    private readonly path: string;
+    private readonly deadline = performance.now() + WAKE_DEADLINE_MS;
+    private pause = 100;
 
     constructor(url: string) {
-      const path = new URL(url).pathname + new URL(url).search;
+      this.path = new URL(url).pathname + new URL(url).search;
+      this.connect();
+    }
+
+    private connect(): void {
       resolveOrigin().then(
         (origin) => {
           if (this.readyState >= 2) return;
           const Socket = inProcessWebSocketFor(origin) ?? globalThis.WebSocket;
-          const socket = new Socket(`${origin.replace(/^http/, "ws")}${path}`) as WebSocket;
+          const socket = new Socket(`${origin.replace(/^http/, "ws")}${this.path}`) as WebSocket;
           socket.binaryType = "arraybuffer";
           this.socket = socket;
           socket.addEventListener("open", () => {
+            if (this.socket !== socket || this.readyState !== 0) return;
             this.readyState = 1;
             this.emit("open");
           });
-          socket.addEventListener("message", (event) => this.emit("message", { data: event.data }));
-          socket.addEventListener("error", (event) => this.emit("error", event));
+          socket.addEventListener("message", (event) => {
+            if (this.socket === socket) this.emit("message", { data: event.data });
+          });
+          socket.addEventListener("error", (event) => {
+            // A connection that never opened is retried, or reports its close.
+            if (this.socket === socket && this.readyState === 1) this.emit("error", event);
+          });
           socket.addEventListener("close", (event) => {
+            if (this.socket !== socket) return;
             if (event.code === 1006) onDropped();
+            if (this.readyState === 0 && event.code === 1006 && this.retry()) return;
             this.finish(event.code, event.reason);
           });
         },
@@ -1411,6 +1430,17 @@ function wakingWebSocket(
           this.finish(1011, "core unavailable");
         },
       );
+    }
+
+    /** Connect again after a connection that never opened, if there is time left. */
+    private retry(): boolean {
+      if (performance.now() + this.pause > this.deadline) return false;
+      this.socket = undefined;
+      setTimeout(() => {
+        if (this.readyState === 0) this.connect();
+      }, this.pause);
+      this.pause = Math.min(this.pause * 2, 1_000);
+      return true;
     }
 
     addEventListener(type: string, listener: (event?: any) => void): void {

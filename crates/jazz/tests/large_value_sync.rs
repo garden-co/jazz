@@ -3344,3 +3344,224 @@ fn a_row_shared_later_serves_only_its_current_version() {
     assert!(sent.is_empty(), "nothing is served once the grant goes");
     assert!(missing.contains(&root_b));
 }
+
+/// A writer granted access after a row's last write edits its large value
+/// with a delta over the version it holds, which another write supersedes
+/// before the commit arrives (#5249). The base was readable while it was
+/// current, so the commit lands over the new version like any concurrent
+/// edit, rather than being refused. Versions superseded before the grant
+/// stay unreadable: no pull through them, no delta over them.
+///
+/// ```text
+/// server: V0 ── V1 ── grant(bob) ─────────── V2 (alice) ── bob's commit ✓
+///                          │                                   ▲
+/// bob:                     └── holds V1 ── delta over V1 ──────┘
+///                                                 (V0: pull ✗, delta ✗)
+/// ```
+///
+/// The pull and the delta over V0 are hand-built wire messages: no public
+/// API names a version the replica never held.
+#[test]
+fn a_delta_shared_later_over_a_superseded_version_rebases() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let (zero, one) = (bytes(64, LARGE), bytes(65, LARGE));
+    // V0, then V1, both before any grant.
+    insert(
+        &server,
+        "photos",
+        1,
+        vec![
+            ("caption", Value::String("v0".into())),
+            ("image", Value::Bytes(zero.clone())),
+        ],
+    );
+    let v0 = last_seq(&server);
+    block_on(server.update(
+        "photos",
+        row(1),
+        BTreeMap::from([
+            ("caption".to_owned(), Value::String("v1".into())),
+            ("image".to_owned(), Value::Bytes(one.clone())),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    let v1 = last_seq(&server);
+    assert!(v0 < v1);
+    // Bob is granted after V1, and holds it.
+    insert(
+        &server,
+        "grants",
+        2,
+        vec![
+            ("photo", Value::Uuid(row(1).0)),
+            ("reader", Value::String(user(1).principal_parts().1)),
+        ],
+    );
+    let bob = open(1, user(1));
+    let (_, up, down) = connect_wires(&server, &bob, user(1));
+    let _stream = subscribe(&bob, Query::from("photos"));
+    pump(&server, &[&bob]);
+    assert_eq!(
+        local_cell(&bob, "photos", 1, "image").unwrap(),
+        Some(Value::Bytes(one.clone()))
+    );
+
+    // Bob stages an edit over V1; it goes as a delta naming V1.
+    let suffix = b"<bob>".to_vec();
+    block_on(bob.append_value("photos", row(1), "image", suffix.clone())).unwrap();
+    for _ in 0..4 {
+        block_on(bob.tick()).unwrap();
+    }
+    let staged = up.borrow().iter().any(|message| match message {
+        SyncMessage::Commit { ops, .. } => ops
+            .iter()
+            .any(|op| op.deltas.iter().any(|delta| delta.delta.seq == v1)),
+        _ => false,
+    });
+    assert!(staged, "bob's commit is a delta over V1: {:?}", up.borrow());
+
+    // Alice's write (V2) reaches the server first.
+    block_on(server.update(
+        "photos",
+        row(1),
+        BTreeMap::from([("caption".to_owned(), Value::String("v2".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let v2 = last_seq(&server);
+    assert!(v1 < v2);
+    down.borrow_mut().clear();
+    // The server alone takes the commit, so its fate is read off the wire
+    // before Bob's replica takes it.
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let refused: Vec<String> = down
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::Fate {
+                outcome:
+                    Outcome::Refused {
+                        error: WireError::Rejected { message, .. },
+                        ..
+                    },
+                ..
+            } => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+    let fates = down
+        .borrow()
+        .iter()
+        .filter(|message| matches!(message, SyncMessage::Fate { .. }))
+        .count();
+    assert_eq!(fates, 1, "bob's commit is decided");
+    assert!(
+        refused.is_empty(),
+        "bob's commit is not refused: {refused:?}"
+    );
+    pump(&server, &[&bob]);
+    // Landed over V2: Alice's caption and Bob's edit, on every side.
+    let mut edited = one.clone();
+    edited.extend_from_slice(&suffix);
+    for db in [&server, &bob] {
+        assert_eq!(
+            local_cell(db, "photos", 1, "caption").unwrap(),
+            Some(Value::String("v2".into()))
+        );
+        assert_eq!(
+            local_cell(db, "photos", 1, "image").unwrap(),
+            Some(Value::Bytes(edited.clone()))
+        );
+    }
+    assert!(last_seq(&server) > v2);
+
+    // V0 was superseded before the grant: Bob may neither pull it nor
+    // base a delta on it.
+    let key = Vec::new();
+    let root_zero = jazz::large_values::prepare(jazz::large_values::LargeValueKind::Bytes, &zero)
+        .unwrap()
+        .value_ref
+        .root
+        .object_hash
+        .0;
+    down.borrow_mut().clear();
+    up.borrow_mut().push_back(SyncMessage::ChunkRequests {
+        pulls: vec![WirePull {
+            table: "photos".to_owned(),
+            id: *row(1).0.as_bytes(),
+            key: key.clone(),
+            at: jazz::db::Pos::at(v0),
+            root: root_zero,
+            nodes: vec![root_zero],
+            span: Some((0, LARGE as u64)),
+        }],
+    });
+    let image_column = common::stored(&server, "photos", "image");
+    up.borrow_mut().push_back(SyncMessage::Commit {
+        clock: 0,
+        // Its own id, apart from the replica's commits.
+        id: TxId::new(TxTime(1), NodeUuid::from_bytes([7; 16])),
+        kind: WireKind::Mergeable,
+        ops: vec![WireOp {
+            deltas: vec![CellDelta {
+                column: image_column.clone(),
+                depth: 0,
+                key: key.clone(),
+                delta: WireDelta {
+                    seq: v0,
+                    base: 0,
+                    edits: Vec::new(),
+                },
+            }],
+            ..WireWrite::Update {
+                table: "photos".to_owned(),
+                row: *row(1).0.as_bytes(),
+                cells: [(image_column, Value::Nullable(None))].into(),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into()
+        }],
+        acting: Acting::Own,
+    });
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let (mut sent, mut missing, mut refused) = (BTreeSet::new(), BTreeSet::new(), false);
+    for message in down.borrow().iter() {
+        match message {
+            SyncMessage::Chunks {
+                nodes,
+                missing: absent,
+            } => {
+                sent.extend(nodes.iter().map(|node| node.hash));
+                missing.extend(absent.iter().map(|node| node.hash));
+            }
+            SyncMessage::Fate {
+                outcome:
+                    Outcome::Refused {
+                        error: WireError::Rejected { message, .. },
+                        ..
+                    },
+                ..
+            } if message.contains("large-value delta") => refused = true,
+            _ => {}
+        }
+    }
+    assert!(!sent.contains(&root_zero), "V0's value is never served");
+    assert!(missing.contains(&root_zero));
+    assert!(refused, "a delta over V0 is refused");
+}
+
+/// The position of the photo's latest accepted version at the server.
+fn last_seq(server: &Db) -> u64 {
+    server
+        .write_conflicts("photos", row(1), None)
+        .unwrap()
+        .last()
+        .expect("an accepted version")
+        .seq
+}

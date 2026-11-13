@@ -19,6 +19,8 @@ import {
   type BrowserFollowerPortRequest,
   type BrowserInspectorControlEvent,
   type BrowserWorkerInitOptions,
+  type BrowserDeleteStoreRequest,
+  type BrowserDeleteStoreResponse,
   BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN,
 } from "./browser-worker-protocol.js";
 import type {
@@ -181,6 +183,59 @@ export function createBrowserSharedWorkerBaseName(
   dbName: string,
 ): string {
   return ["jazz-runtime", dbName, createBrowserWorkerAssetScope(runtimeSources)].join(":");
+}
+
+/** How long a store delete may take before the page gives up on the worker (it tries again later). */
+export const DELETE_STORE_TIMEOUT_MS = 30_000;
+
+/**
+ * Delete `dbName`'s store through its broker worker, without opening it
+ * (#5250). `"held"`, deleting nothing, while a tab has it open or another
+ * realm owns it. Rejects when the worker fails or doesn't answer in time.
+ */
+export function deleteBrowserStore(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+  dbName: string,
+): Promise<"deleted" | "held"> {
+  const workerName = createBrowserSharedWorkerBaseName(runtimeSources, dbName);
+  const worker = createBrokerSharedWorker(
+    runtimeSources,
+    `${workerName}:generation-${readWorkerGeneration(workerName)}`,
+  );
+  const port = worker.port;
+  return new Promise<"deleted" | "held">((resolve, reject) => {
+    const timer = setTimeout(() => {
+      finish();
+      reject(new Error("Jazz's browser worker didn't answer a store delete in time"));
+    }, DELETE_STORE_TIMEOUT_MS);
+    const stopWatching = watchBrokerWorkerStart(worker, runtimeSources, (error) => {
+      finish();
+      reject(error);
+    });
+    const onMessage = (event: MessageEvent<BrowserDeleteStoreResponse>) => {
+      const answer = event.data;
+      if (answer?.type === "delete-store-result") {
+        finish();
+        resolve(answer.outcome);
+      } else if (answer?.type === "delete-store-error") {
+        finish();
+        reject(deserializeBrowserRelayError(answer.error));
+      }
+    };
+    function finish() {
+      clearTimeout(timer);
+      stopWatching();
+      port.removeEventListener("message", onMessage);
+      port.close();
+    }
+    port.addEventListener("message", onMessage);
+    port.start();
+    port.postMessage({
+      type: "delete-store",
+      dbName,
+      ...(runtimeSources ? { runtimeSources } : {}),
+    } satisfies BrowserDeleteStoreRequest);
+  });
 }
 
 function foregroundLeaseCleanupKey(workerName: string, storageOwner: string): string {
@@ -962,6 +1017,11 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   async deleteStorage(): Promise<{ pendingUploads?: number } | void> {
     await this.ready();
     return this.connection?.deleteStorage();
+  }
+
+  async storePendingUploads(): Promise<number | undefined> {
+    await this.ready();
+    return this.connection?.storePendingUploads();
   }
 
   async openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort> {
