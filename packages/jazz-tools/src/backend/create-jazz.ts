@@ -825,6 +825,12 @@ export interface CoreSocket {
    */
   sendWithRoom?(data: Uint8Array): Promise<boolean>;
   close(): void;
+  /**
+   * Resolves once the session reaches the core. A session that never does
+   * ends with its close event instead, and this stays pending. Without it,
+   * the session counts as open at once (a core in this process).
+   */
+  readonly opened?: Promise<void>;
 }
 
 /**
@@ -929,9 +935,20 @@ function inProcessWebSocket(
           this.finish(1011, error instanceof Error ? error.message : String(error));
           return;
         }
-        this.readyState = 1;
-        this.emit("open");
+        // Open only once the core's side is: a session that never reaches
+        // the core then closes without having opened, which a client (and
+        // the vercel() store's waking socket) can tell from a session that
+        // dropped.
+        const opened = this.session.opened;
+        if (!opened) return this.markOpen();
+        void opened.then(() => this.markOpen());
       });
+    }
+
+    private markOpen(): void {
+      if (this.readyState !== 0) return;
+      this.readyState = 1;
+      this.emit("open");
     }
 
     addEventListener(type: string, listener: (event?: any) => void): void {
@@ -1065,6 +1082,7 @@ export function pinnedSocket(socket: CoreSocket, bundle: () => string | undefine
       return socket.sendWithRoom ? socket.sendWithRoom(pinned) : socket.send(pinned);
     },
     close: () => socket.close(),
+    ...(socket.opened ? { opened: socket.opened } : {}),
   };
 }
 
@@ -1306,6 +1324,10 @@ function openRemoteCore(
     let ws: WebSocket | undefined;
     const queued: Uint8Array[] = [];
     let ended = false;
+    let markOpened!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      markOpened = resolve;
+    });
     const finish = (code: number, reason: string) => {
       if (ended) return;
       ended = true;
@@ -1318,6 +1340,7 @@ function openRemoteCore(
         ws.binaryType = "arraybuffer";
         ws.addEventListener("open", () => {
           for (const data of queued.splice(0)) ws!.send(data as Uint8Array<ArrayBuffer>);
+          if (!ended) markOpened();
         });
         ws.addEventListener("message", (event) => {
           const data =
@@ -1354,6 +1377,7 @@ function openRemoteCore(
         ended = true;
         ws?.close();
       },
+      opened,
     };
   }
   // This process's own clients (the backend's session) reach the core
