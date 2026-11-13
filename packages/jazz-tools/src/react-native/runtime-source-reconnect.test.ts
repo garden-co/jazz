@@ -12,7 +12,10 @@ vi.mock("../runtime/default-runtime-source.js", () => {
 });
 
 /** A source that admitted a backend user's scope, with a client open on it. */
-function admittedSource(authRejected: string | null) {
+function admittedSource(
+  authRejected: string | null,
+  bearer = vi.fn(async (): Promise<string> => "bearer-renewed"),
+) {
   const capability = new Uint8Array(32).fill(5);
   const refreshAccountSession = vi.fn();
   const reconnectNativeUpstream = vi.fn();
@@ -26,7 +29,6 @@ function admittedSource(authRejected: string | null) {
       reconnectNativeUpstream,
     },
   });
-  const bearer = vi.fn(async () => "bearer-renewed");
   const config = { appId: "app", cookieSession: { claims: {} }, bearer } as never;
   const reconnect = () =>
     (
@@ -54,5 +56,25 @@ describe("React Native reconnect of an admitted backend user", () => {
     expect(source.bearer).not.toHaveBeenCalled();
     expect(source.refreshAccountSession).not.toHaveBeenCalled();
     expect(source.reconnectNativeUpstream).toHaveBeenCalledOnce();
+  });
+
+  // The reconnect runs in the shared transport queue: a bearer that never
+  // settles (a token refresh hanging offline) must not hold it, or every
+  // later disconnect and reconnect, forever.
+  it("reconnects with the worker's bearer when the app's never answers", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = admittedSource(
+        "token expired",
+        vi.fn(() => new Promise<string>(() => {})),
+      );
+      const reconnected = source.reconnect();
+      await vi.advanceTimersByTimeAsync(30_000);
+      await reconnected;
+      expect(source.refreshAccountSession).not.toHaveBeenCalled();
+      expect(source.reconnectNativeUpstream).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

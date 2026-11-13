@@ -22,6 +22,7 @@ import {
 } from "../runtime/db-internal-session.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
 import { accountConfigBearer, assertAccountConfig } from "../accounts/config-capability.js";
+import { askBearer } from "../runtime/credentialed-transport.js";
 import {
   beginNativeAccountSession,
   attachNativeAccountSchema,
@@ -333,9 +334,13 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
     if (!config.cookieSession) return;
     const capability = this.admittedCapability ?? this.pendingCapability;
     if (!capability) return;
+    const ask = accountConfigBearer(config);
+    if (!ask) return;
     let bearer: string | null | undefined;
     try {
-      bearer = await accountConfigBearer(config)?.();
+      // Bounded: this runs in the shared transport queue, so a bearer that
+      // never settles would hold every later disconnect and reconnect.
+      bearer = await askBearer(ask);
     } catch {
       return;
     }

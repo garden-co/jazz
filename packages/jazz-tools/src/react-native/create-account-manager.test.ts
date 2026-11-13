@@ -171,7 +171,8 @@ describe("React Native account preparation", () => {
     await db.shutdown();
   });
 
-  it("hands the native worker the app's current bearer when the user reconnects, since the one it was admitted with may have expired", async () => {
+  // The bearer the worker was admitted with may have expired since.
+  it("hands the native worker the app's current bearer on reconnect", async () => {
     const identity = { issuer: "https://issuer.example", subject: "alice" };
     const account = "00000000-0000-4000-8000-00000000000b";
     vi.stubGlobal(
