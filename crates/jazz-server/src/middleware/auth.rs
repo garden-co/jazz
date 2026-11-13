@@ -802,7 +802,9 @@ pub async fn validate_jwt_with_cache_at(
         .decode(token.rsplit('.').next().unwrap_or_default())
         .map_err(|error| JwtError::Invalid(format!("invalid JWT signature encoding: {error}")))?;
     if signature.is_empty() {
-        return Err(JwtError::Invalid("JWT signature is missing".to_owned()));
+        // Not "missing": clients classify a refusal by its words, and that one
+        // means no credential was sent (`AuthFailureReason::from_message`).
+        return Err(JwtError::Invalid("JWT has no signature".to_owned()));
     }
     let cached_jwks = cache.load(false).await.map_err(|e| {
         warn!(error = %e, "failed to load cached JWKS");
@@ -1472,6 +1474,34 @@ mod tests {
             probe.requests(),
             requests_before_rotation + 1,
             "concurrent forced refreshes must share one JWKS fetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsigned_jwt_is_refused_as_invalid_not_missing() {
+        use base64::Engine as _;
+        let encode = |value: serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string())
+        };
+        let token = format!(
+            "{}.{}.",
+            encode(serde_json::json!({ "alg": "HS256", "typ": "JWT" })),
+            encode(serde_json::json!({ "sub": "alice", "exp": 2_000_000 })),
+        );
+        let cache = JwksCache::new(
+            "http://127.0.0.1:1/jwks".to_owned(),
+            reqwest::Client::new(),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        );
+        let error = validate_jwt_with_cache_at(&token, &cache, &test_expected_claims(), 1_000_000)
+            .await
+            .expect_err("an unsigned token must not verify");
+        // A token was presented and failed: the client must read `invalid`.
+        assert_eq!(
+            jazz::link::AuthFailureReason::from_message(&error.to_string()),
+            jazz::link::AuthFailureReason::Invalid,
+            "{error}"
         );
     }
 

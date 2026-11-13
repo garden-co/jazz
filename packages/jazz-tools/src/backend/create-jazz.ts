@@ -1967,14 +1967,19 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     };
     const admit = async (prelude: Uint8Array): Promise<boolean> => {
       const admitted = await admitPrelude(request, prelude);
-      if (!admitted || ended) {
+      if (!admitted || admitted === UNVERIFIED_CREDENTIAL || ended) {
         // An auth failure, not a dropped link: the client stops retrying and
         // reports `offline: auth`, and its session asks the backend whether
-        // anyone is still signed in.
+        // anyone is still signed in. A credential that was sent and not
+        // accepted is `invalid` to the client; none at all is `missing`.
         if (!ended)
           onEvent(null, {
             kind: "message",
-            data: authFailedBatch("session missing: not signed in"),
+            data: authFailedBatch(
+              admitted === UNVERIFIED_CREDENTIAL
+                ? "session invalid: this backend did not accept the credential the client sent"
+                : "session missing: not signed in",
+            ),
           });
         onEvent(null, { kind: "close", code: 1008, reason: "not signed in" });
         end();
@@ -2132,22 +2137,29 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    * the user `authenticate` finds on this request, with their account and
    * claims, vouched for with the backend secret. A local-first guest's
    * prelude passes through: the core verifies its self-signed token. Any
-   * other credential, or a prelude naming another user, is refused.
+   * other credential, or a prelude naming another user, is refused: with
+   * {@link UNVERIFIED_CREDENTIAL} when the client sent a token or backend
+   * client credential that doesn't verify here, with `null` when it sent
+   * none that names anyone.
    */
   async function admitPrelude(
     request: Request,
     prelude: Uint8Array,
-  ): Promise<{
-    prelude: Uint8Array;
-    userId: string | undefined;
-    /** The user (with the claims) `authenticate` named for a vouched session, and until when. */
-    user?: JazzUser & { expiresAt: number };
-    access: BackendAccess;
-    trusted: boolean;
-    expiresAt?: number;
-    /** A local-first guest, let in by `acceptDeviceAccounts`. */
-    guest?: true;
-  } | null> {
+  ): Promise<
+    | typeof UNVERIFIED_CREDENTIAL
+    | {
+        prelude: Uint8Array;
+        userId: string | undefined;
+        /** The user (with the claims) `authenticate` named for a vouched session, and until when. */
+        user?: JazzUser & { expiresAt: number };
+        access: BackendAccess;
+        trusted: boolean;
+        expiresAt?: number;
+        /** A local-first guest, let in by `acceptDeviceAccounts`. */
+        guest?: true;
+      }
+    | null
+  > {
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(new TextDecoder().decode(prelude)) as Record<string, unknown>;
@@ -2159,7 +2171,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       unknown
     >;
     const client = await backendClients.resolve(request);
-    if (client === "refused") return null;
+    if (client === "refused") return UNVERIFIED_CREDENTIAL;
     if (client?.kind === "backend") {
       // A trusted backend client syncs with this backend's authority: it
       // states a backend secret (any stand-in) and, to act for a user, that
@@ -2188,13 +2200,17 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       const localFirst =
         typeof token === "string" && parseJwtPayload(token)?.iss === LOCAL_FIRST_JWT_ISSUER;
       const alone = others.every((key) => parsed[key] == null && auth[key] == null);
-      if (!localFirst || !alone || parsed.local_first_audience != null) return null;
+      // A token this backend can't verify (an external JWT, a forged or
+      // malformed one), or one sent with other credentials or for another
+      // endpoint: a credential that was presented and not accepted.
+      if (!localFirst || !alone || parsed.local_first_audience != null)
+        return UNVERIFIED_CREDENTIAL;
       // A guest has no user here: its session is bound to its own key.
-      if (client) return null;
+      if (client) return UNVERIFIED_CREDENTIAL;
       const audience = guestAudience(request, token);
-      if (!audience) return null;
+      if (!audience) return UNVERIFIED_CREDENTIAL;
       // Guests are off unless the app's `authenticate` lets this one in.
-      if (!(await acceptsGuest(request))) return null;
+      if (!(await acceptsGuest(request))) return UNVERIFIED_CREDENTIAL;
       if (audience.endpoint === undefined) {
         // Its own token decides who it is; the backend's secret only vouches
         // for the bundle this socket is pinned to (see `pinnedSocket`).
@@ -3781,6 +3797,12 @@ function reauthenticateBatch(): Buffer {
   );
   return Buffer.from(encodeWebSocketFrameBatch([frame.finish()]));
 }
+
+/**
+ * What `admitPrelude` answers for a credential the client sent that doesn't
+ * verify on this backend: the client reports it as `invalid`, not `missing`.
+ */
+const UNVERIFIED_CREDENTIAL = "unverified-credential";
 
 function authFailedBatch(message: string): Buffer {
   const frame = new PostcardWriter();

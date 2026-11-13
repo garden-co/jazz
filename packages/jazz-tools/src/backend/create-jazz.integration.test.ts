@@ -42,6 +42,7 @@ import {
   type WsLikeSocket,
 } from "./index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
+import { mapAuthReason } from "../runtime/auth-state.js";
 import { requestBackendSignIn, requestBackendUser } from "../accounts/registry-client.js";
 import {
   encodeWebSocketFrameBatch,
@@ -1913,6 +1914,55 @@ describe("createJazz", () => {
     expect(closed).toEqual({ code: 1008, reason: "sign-in refused" });
     expect(messages).toHaveLength(1);
     expect(messages[0]).toContain("session refused: identity_not_authorized");
+  }, 60_000);
+
+  it("refuses a token it can't verify as invalid, and no credential as missing (#4952)", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const refusal = async (prelude: unknown) => {
+      const socket = new NodeWebSocket(
+        `${origin.replace("http", "ws")}/jazz/apps/${jazz.appId}/ws`,
+      );
+      socket.binaryType = "arraybuffer";
+      socket.addEventListener("open", () => socket.send(JSON.stringify(prelude)));
+      const messages: string[] = [];
+      socket.addEventListener("message", (event) =>
+        messages.push(new TextDecoder().decode(new Uint8Array(event.data as ArrayBuffer))),
+      );
+      const closed = await new Promise<{ code: number; reason: string }>((resolve) =>
+        socket.addEventListener("close", (event) =>
+          resolve({ code: event.code, reason: event.reason }),
+        ),
+      );
+      expect(closed.code).toBe(1008);
+      expect(messages).toHaveLength(1);
+      return messages[0]!;
+    };
+    // A structurally valid JWT from an issuer this backend doesn't verify
+    // (forged signature): a credential was presented and failed.
+    const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+    const forged = [
+      encode({ alg: "HS256", typ: "JWT" }),
+      encode({ iss: "https://issuer.example", sub: "alice", exp: inAnHour() }),
+      Buffer.from("not-a-signature").toString("base64url"),
+    ].join(".");
+    // Before: "session missing: not signed in", reported as `missing`.
+    const invalid = await refusal({ peer_identity: "forged", auth: { jwt_token: forged } });
+    expect(invalid).toContain("session invalid");
+    expect(mapAuthReason(invalid)).toBe("invalid");
+    // Not even a JWT.
+    expect(
+      mapAuthReason(await refusal({ peer_identity: "junk", auth: { jwt_token: "junk" } })),
+    ).toBe("invalid");
+
+    // No credential at all (a stated session, no cookie) stays `missing`.
+    const missing = await refusal({
+      peer_identity: "nobody",
+      backend_session: { issuer: "jazz:backend", user_id: "alice" },
+    });
+    expect(missing).toContain("session missing");
+    expect(mapAuthReason(missing)).toBe("missing");
   }, 60_000);
 
   it("syncs over the HTTP stream when the host can't upgrade sockets", async () => {
