@@ -61,6 +61,19 @@ describe("claims with `as`", () => {
     ).not.toBe(0);
     expect(out).toMatch(/--claims must be a JSON object/);
     expect(bodies).toHaveLength(sent);
+    // explain needs the user to explain for.
+    expect(await runInspectCommand(["explain", '{"table":"expenses"}', ...app], io)).not.toBe(0);
+    expect(out).toMatch(/explain needs --as/);
+    expect(
+      await runInspectCommand(
+        ["explain", '{"table":"expenses"}', "--as", "m", "--claims", '{"role":"manager"}', ...app],
+        io,
+      ),
+    ).toBe(0);
+    expect(bodies.at(-1)).toMatchObject({
+      op: "explain",
+      as: { userId: "m", claims: { role: "manager" } },
+    });
   });
 
   it("MCP tools take claims next to as", async () => {
@@ -95,11 +108,18 @@ describe("claims with `as`", () => {
         name,
       ).toHaveProperty("claims");
     }
-    expect(bodies.map((body) => body.as)).toEqual([
-      { userId: "m", claims: { role: "manager" } },
-      { userId: "m", claims: { role: "manager" } },
-      { userId: "m", claims: "manager" },
-    ]);
+    // The server answers calls concurrently, so the requests reach the
+    // backend in any order: compare them as a set.
+    const sent = bodies.map((body) => JSON.stringify([body.op, body.as])).sort();
+    expect(sent).toEqual(
+      [
+        ["query", { userId: "m", claims: { role: "manager" } }],
+        ["write", { userId: "m", claims: { role: "manager" } }],
+        ["query", { userId: "m", claims: "manager" }],
+      ]
+        .map((entry) => JSON.stringify(entry))
+        .sort(),
+    );
     expect(lines.find((line) => line.id === 4).result.isError).toBe(true);
   });
 

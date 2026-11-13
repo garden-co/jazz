@@ -102,6 +102,7 @@ pub struct ServerBuilder {
     shutdown_timeout: Duration,
     heap_profiler: Option<HeapProfileDump>,
     max_websocket_connections: usize,
+    max_websocket_connections_per_user: usize,
 }
 
 impl ServerBuilder {
@@ -121,6 +122,8 @@ impl ServerBuilder {
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             heap_profiler: None,
             max_websocket_connections: crate::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
+            max_websocket_connections_per_user:
+                crate::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS_PER_IDENTITY,
         }
     }
 
@@ -142,6 +145,15 @@ impl ServerBuilder {
     /// Cap live WebSocket connections; upgrades beyond it get `503`.
     pub fn with_max_websocket_connections(mut self, max: usize) -> Self {
         self.max_websocket_connections = max;
+        self
+    }
+
+    /// Cap live WebSocket connections of one signed-in user; past it, the
+    /// user's silent (zombie) connections are evicted, and with none a new
+    /// connection is refused with a retryable error. Live ones are never
+    /// evicted. See [`crate::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS_PER_IDENTITY`].
+    pub fn with_max_websocket_connections_per_user(mut self, max: usize) -> Self {
+        self.max_websocket_connections_per_user = max;
         self
     }
 
@@ -217,6 +229,9 @@ impl ServerBuilder {
         if self.max_websocket_connections == 0 {
             return Err("max websocket connections must be at least 1".to_owned());
         }
+        if self.max_websocket_connections_per_user == 0 {
+            return Err("max websocket connections per user must be at least 1".to_owned());
+        }
         if let StorageBackend::Persistent { path } = &self.storage_backend {
             refuse_pre_sqlite_data_dir(path)?;
         }
@@ -247,9 +262,9 @@ impl ServerBuilder {
             backend_credential,
             workload_secrets,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
-            websocket_admissions: Arc::new(
-                crate::server::routes::WebSocketAdmissionState::default(),
-            ),
+            websocket_admissions: Arc::new(crate::server::routes::WebSocketAdmissionState::new(
+                self.max_websocket_connections_per_user,
+            )),
             max_websocket_connections: self.max_websocket_connections,
             store: Some(store),
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),

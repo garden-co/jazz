@@ -294,6 +294,12 @@ impl Fanout {
                     && let Some(queue) = member.queue.upgrade()
                 {
                     member.told.set(Some(now));
+                    tracing::debug!(
+                        target: "jazz::sync",
+                        table = %group.query().table,
+                        tier = ?now,
+                        "subscription settled",
+                    );
                     let mut event = delta(false, Vec::new(), Vec::new(), Vec::new());
                     if let SubscriptionEvent::Delta { settled, tier, .. } = &mut event {
                         *settled = true;
@@ -1516,10 +1522,29 @@ impl Group {
         for member in &self.members {
             if let Some(queue) = member.queue.upgrade() {
                 let mut event = event.clone();
-                if let SubscriptionEvent::Delta { settled, tier, .. } = &mut event {
+                if let SubscriptionEvent::Delta {
+                    reset,
+                    added,
+                    settled,
+                    tier,
+                    ..
+                } = &mut event
+                {
                     *settled = member.settled.get();
                     *tier = member.settled.tier();
-                    member.told.set(settled.then_some(*tier));
+                    let told = settled.then_some(*tier);
+                    if *reset || told != member.told.get() {
+                        tracing::debug!(
+                            target: "jazz::sync",
+                            table = %self.query().table,
+                            opening = *reset,
+                            rows = added.len(),
+                            settled = *settled,
+                            tier = ?*tier,
+                            "subscription delivered",
+                        );
+                    }
+                    member.told.set(told);
                 }
                 queue.borrow_mut().push_back(event);
             }

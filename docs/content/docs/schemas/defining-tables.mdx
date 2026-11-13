@@ -133,11 +133,13 @@ schema version, so the import always looks the same:
 import { migrations } from "./migrations";
 ```
 
+For a new app, run `npx jazz-tools validate` once to create it.
+
 The file holds every schema version of your app and the migrations between them. Clients use it to
 lay out storage exactly like the server does and to read data written under older versions. A client
 whose schema is missing from it refuses to open with a message telling you to regenerate it. Commit
-the file with your schema. Apps that are never deployed, like a throwaway test app, can pass
-`{ migrations: "none" }`.
+the file with your schema. `{ migrations: "none" }` is only for an app that is never deployed, such
+as one defined inside a test.
 
 <include cwd lang="ts" meta='title="schema.ts"'>
   ../examples/docs/todo-client-localfirst-ts/schema.ts#schema-define-app-ts

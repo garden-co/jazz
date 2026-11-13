@@ -265,6 +265,7 @@ export interface Runtime {
     objectId: string,
     session?: Session,
   ): Promise<PermissionAdvice>;
+  explainReadClauses?(table: string, rows: string[], session: Session): ExplainedRows;
   requestUpdatePermissionAdvice?(
     table: string,
     objectId: string,
@@ -336,6 +337,15 @@ export interface Runtime {
  * `unknown` means that a local replica or unavailable authority cannot decide.
  */
 export type PermissionAdvice = "allowed" | "denied" | "unknown";
+
+/**
+ * The engine's answer to the Inspector's `explain`: how many clauses the
+ * table's read policy has, and for each row found which of them hold.
+ */
+export interface ExplainedRows {
+  clauses: number;
+  rows: { id: string; holds: boolean[] }[];
+}
 
 declare const openTransactionIdBrand: unique symbol;
 declare const txIdBrand: unique symbol;
@@ -2066,6 +2076,14 @@ export class JazzClient {
         session ?? this.resolvedSession ?? undefined,
       ) ?? Promise.resolve("unknown")
     );
+  }
+
+  /** For the Inspector's `explain`; see {@link Runtime.explainReadClauses}. */
+  explainReadClauses(table: string, rows: string[], session: Session): ExplainedRows {
+    if (!this.runtime.explainReadClauses) {
+      throw new Error("explain is not supported yet by this runtime");
+    }
+    return this.runtime.explainReadClauses(table, rows, session);
   }
 
   requestReadPermissionAdvice(

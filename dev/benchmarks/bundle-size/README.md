@@ -14,7 +14,7 @@ counted. It also records the `jazz-wasm` engine's size, gzipped and raw.
 A real Next.js build is used on purpose: esbuild tree-shakes and splits more
 aggressively and reports about 10% less than adopters see.
 
-`.github/workflows/bundle-sizes.yml` runs it after every publish (or by hand)
+`.github/workflows/bundle-sizes.yml` runs it after every publish, for the version just published once npm serves it (or by hand)
 and uploads `bundle-sizes.json` to the `perf-timeline-data` pre-release. The docs
 build reads that file once (`docs/lib/bundle-sizes`) and replaces `%bundle.thin%`,
 `%bundle.wasm%` and `%bundle.wasmRaw%` in pages and partials with rounded figures.

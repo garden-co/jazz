@@ -242,6 +242,17 @@ enum Commands {
         )]
         max_connections: usize,
 
+        /// Maximum live WebSocket connections of one signed-in user. Past
+        /// it, a connection silent for longer than a keepalive is replaced;
+        /// otherwise the new one is refused with a retryable error.
+        #[arg(
+            long,
+            env = "JAZZ_MAX_CONNECTIONS_PER_USER",
+            default_value_t = jazz_server::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS_PER_IDENTITY,
+            value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..),
+        )]
+        max_connections_per_user: usize,
+
         /// Memory the server sizes its caches against, in bytes. Defaults to
         /// the container's cgroup memory limit.
         #[arg(long, env = "JAZZ_MEMORY_LIMIT_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
@@ -355,6 +366,7 @@ async fn run() {
             trusted_workload_subject,
             shutdown_timeout_secs,
             max_connections,
+            max_connections_per_user,
             memory_limit_bytes,
             stored_arrangements,
             query_cache_budget_bytes,
@@ -428,6 +440,7 @@ async fn run() {
                 },
                 jazz_server::resources::ServerResourceLimits {
                     max_websocket_connections: max_connections,
+                    max_websocket_connections_per_user: max_connections_per_user,
                     memory_limit_bytes: memory_limit_bytes
                         .or_else(jazz_server::resources::detect_memory_limit_bytes),
                     stored_arrangements,
@@ -735,6 +748,7 @@ mod tests {
         match cli.command {
             Commands::Server {
                 max_connections,
+                max_connections_per_user,
                 memory_limit_bytes,
                 stored_arrangements,
                 query_cache_budget_bytes,
@@ -743,6 +757,10 @@ mod tests {
                 assert_eq!(
                     max_connections,
                     jazz_server::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS
+                );
+                assert_eq!(
+                    max_connections_per_user,
+                    jazz_server::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS_PER_IDENTITY
                 );
                 assert_eq!(memory_limit_bytes, None);
                 assert!(stored_arrangements);
