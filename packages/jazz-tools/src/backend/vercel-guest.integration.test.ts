@@ -205,7 +205,11 @@ async function deployment(
       app,
       permissions,
       authenticate: auth,
-      store: vercel({ sdk, backendCredential: () => oidcToken(issuer) }),
+      store: vercel({
+        namespace: ({ environment }) => environment,
+        sdk,
+        backendCredential: () => oidcToken(issuer),
+      }),
     }).ready();
     cleanups.push(() => jazz.close());
     return jazz;

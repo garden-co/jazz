@@ -26,10 +26,10 @@ export function useWorkOSSession() {
   return {
     ...state,
     signIn: () => window.location.assign("/auth/sign-in"),
+    /** Ends the session at WorkOS and clears the cookie, without leaving the page. */
     async signOut() {
-      const response = await fetch("/auth/sign-out", { method: "POST" });
-      const { logoutUrl } = (await response.json()) as { logoutUrl: string };
-      window.location.assign(logoutUrl);
+      await fetch("/auth/sign-out", { method: "POST" });
+      setState({ user: null, isLoading: false });
     },
   };
 }

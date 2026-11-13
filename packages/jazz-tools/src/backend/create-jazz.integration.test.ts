@@ -387,7 +387,14 @@ describe("createJazz", () => {
       );
       cleanups.push(async () => void child.kill("SIGKILL"));
       const ready = await new Promise<string>((resolve, reject) => {
-        child.stdout!.on("data", (chunk: Buffer) => resolve(`${chunk}`.trim()));
+        // The host prints "<port> <app id>" once it serves; the store's
+        // "jazz: store …" line comes before it.
+        let out = "";
+        child.stdout!.on("data", (chunk: Buffer) => {
+          out += `${chunk}`;
+          const line = out.split("\n").find((l) => /^\d+ \S+$/.test(l.trim()));
+          if (line) resolve(line.trim());
+        });
         child.on("error", reject);
         child.on("exit", () => reject(new Error("the host exited before it served")));
       });
@@ -1318,6 +1325,103 @@ describe("createJazz", () => {
     expect(unhandled).not.toHaveBeenCalled();
   });
 
+  // The identity provider being down is not the app's bug: sign-in answers
+  // 503 with Retry-After (the client retries and stays signed in), and the
+  // log names the JWKS rather than telling the developer to fix their code.
+  it("answers 503 with Retry-After when fromJWT's JWKS is down, without blaming authenticate (#5367)", async () => {
+    const jwks: Server = createServer((_req, res) => {
+      res.statusCode = 503;
+      res.end("synthetic outage");
+    });
+    await new Promise<void>((resolve) => jwks.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => jwks.close(resolve)));
+    const jwksUrl = `http://127.0.0.1:${(jwks.address() as AddressInfo).port}/jwks.json`;
+    const { privateKey } = await generateKeyPair("ES256");
+    const issuer = "https://idp.example";
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: fromJWT({ jwksUrl, issuer, audience: "my-app" }),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+    const origin = await serve(jazz, { sockets: false });
+    const token = await new SignJWT({})
+      .setProtectedHeader({ alg: "ES256", kid: "k1" })
+      .setIssuer(issuer)
+      .setAudience("my-app")
+      .setSubject("alice")
+      .setExpirationTime("5m")
+      .sign(privateKey);
+    const headers = { authorization: `Bearer ${token}` };
+    const path = `/jazz/apps/${jazz.appId}/accounts`;
+    const { POST } = jazz.next();
+    for (const answer of [
+      await POST(new Request(`http://app.test${path}/backend-user`, { method: "POST", headers })),
+      await jazz.handle(
+        new Request(`http://app.test${path}/backend-user`, { method: "POST", headers }),
+      ),
+      await fetch(`${origin}${path}/backend-sign-in`, { method: "POST", headers }),
+    ]) {
+      expect(answer.status).toBe(503);
+      expect(answer.headers.get("retry-after")).toBe("5");
+      expect(answer.headers.get("cache-control")).toBe("no-store");
+      expect(await answer.text()).toBe("authentication_unavailable");
+    }
+    expect(errors).toHaveBeenCalledTimes(3);
+    for (const [logged] of errors.mock.calls) {
+      expect(String(logged)).not.toMatch(/your authenticate threw/);
+      expect((logged as Error).message).toContain(`JWKS ${jwksUrl} is unavailable`);
+    }
+    // The client sees a retryable 503, not a refusal.
+    await expect(
+      requestBackendUser(`${origin}${path}`, (input, init) =>
+        fetch(input, { ...init, headers: { ...init?.headers, ...headers } }),
+      ),
+    ).rejects.toMatchObject({ status: 503 });
+  });
+
+  // A JWKS URL that answers, but not with a JWKS, is the app's setup and not
+  // an outage: retrying won't fix it, so it stays a 500 naming authenticate.
+  it("answers 500 naming authenticate when fromJWT's JWKS answers with something that isn't a JWKS (#5367)", async () => {
+    const jwks: Server = createServer((_req, res) => res.end("<html>not a JWKS</html>"));
+    await new Promise<void>((resolve) => jwks.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => jwks.close(resolve)));
+    const jwksUrl = `http://127.0.0.1:${(jwks.address() as AddressInfo).port}/jwks.json`;
+    const { privateKey } = await generateKeyPair("ES256");
+    const issuer = "https://idp.example";
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: fromJWT({ jwksUrl, issuer, audience: "my-app" }),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+    const token = await new SignJWT({})
+      .setProtectedHeader({ alg: "ES256", kid: "k1" })
+      .setIssuer(issuer)
+      .setAudience("my-app")
+      .setSubject("alice")
+      .setExpirationTime("5m")
+      .sign(privateKey);
+    const answer = await jazz.handle(
+      new Request(`http://app.test/jazz/apps/${jazz.appId}/accounts/backend-user`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+      }),
+    );
+    expect(answer.status).toBe(500);
+    expect(await answer.text()).toBe("authenticate_failed");
+    expect(errors).toHaveBeenCalledTimes(1);
+    const [message, error] = errors.mock.calls[0]!;
+    expect(message).toMatch(/^createJazz: your authenticate threw/);
+    expect((error as Error).message).toBe("Unable to parse JWKS response");
+  });
+
   it("tells the browser by a stable code that authenticate returned no expiresAt, and the client names the fix", async () => {
     let answer: unknown = { userId: "alice", internal: "secret-session-detail" };
     const jazz = await createJazz({
@@ -1825,6 +1929,46 @@ describe("createJazz", () => {
     },
     60_000,
   );
+
+  it("links a guest on a page that has its own window.__jazz, and leaves that global alone (#5262)", async () => {
+    // Before: the session refused to start, or (rc.2) `linkDeviceAccount()`
+    // rejected with "window.__jazz is reserved for Jazz"; on rc.1 a sealed
+    // one failed the upgrade with "object is not extensible".
+    const own = Object.seal({ mine: true });
+    vi.stubGlobal("window", { document: {}, __jazz: own });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    cleanups.push(async () => {
+      warn.mockRestore();
+      vi.unstubAllGlobals();
+    });
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+
+    const session = await createJazzClient({
+      appId: jazz.appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "device",
+    });
+    cleanups.push(() => session.close());
+    expect(session.getSnapshot().status).toBe("ready");
+    const account = session.getSnapshot().client!.session!.user!;
+
+    signInAs(origin, "alice");
+    await session.linkDeviceAccount();
+    const alice = session.getSnapshot().client!;
+    expect(alice.session!.user!).toBe(account);
+    expect(alice.session!.identity.subject).toBe("alice");
+
+    // The app's global is as it set it; Jazz said so once.
+    expect((globalThis as { window?: { __jazz?: unknown } }).window!.__jazz).toBe(own);
+    expect(own).toEqual({ mine: true });
+    const told = warn.mock.calls.filter(([message]) => String(message).includes("window.__jazz"));
+    expect(told).toHaveLength(1);
+  }, 60_000);
 
   it("links a guest only on a fresh proof for one challenge, never on its token", async () => {
     const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
@@ -2691,6 +2835,57 @@ describe("createJazz", () => {
     await expect(
       third.db.update(app.todos, randomUUID(), { title: "nope" }).wait({ tier: "global" }),
     ).rejects.toThrow(/the row does not exist or the session may not read it/);
+  }, 60_000);
+
+  it("routes an unawaited rejection only to the Db of the session that made the write (#4784)", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const notes = s.defineApp({ notes: s.table({ body: s.string() }, {}) }, { migrations: "none" });
+    // Nobody may update a note, so the core refuses every update.
+    const frozen = s.definePermissions(notes, ({ policy }) => {
+      policy.notes.allowRead.always();
+      policy.notes.allowInsert.always();
+      policy.notes.allowUpdate.never();
+    });
+    const jazz = await createJazz({
+      app: notes,
+      permissions: frozen,
+      store: remote({ url: core.url, appId, secret: core.adminSecret }),
+      authenticate,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    await jazz.createAccountFor("alice");
+    await jazz.createAccountFor("bob");
+    const as = (user: string) =>
+      jazz.forReqUser(new Request("http://app/x", { headers: { "x-test-user": user } }));
+    const note = await jazz.db.insert(notes.notes, { body: "initial" }).wait({ tier: "global" });
+
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => consoleError.mockRestore());
+    // Alice's request registers its handler first.
+    const asAlice = await as("alice");
+    const seenByAlice = vi.fn();
+    asAlice.onMutationError(seenByAlice);
+    const asBob = await as("bob");
+    const seenByBob = vi.fn();
+    asBob.onMutationError(seenByBob);
+
+    // Bob's write is refused, and nobody awaits it.
+    const bobsWrite = asBob.update(notes.notes, note.id, { body: "bob" });
+    const bobsTxId = await bobsWrite.txId;
+    await vi.waitFor(() => expect(seenByBob).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+    expect(seenByBob.mock.calls[0]![0]).toMatchObject({
+      code: "permission_denied",
+      transaction: { transactionId: bobsTxId },
+    });
+    // Alice, another user, never sees Bob's refusal.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(seenByAlice).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalledWith(
+      "Unhandled Jazz mutation error",
+      expect.anything(),
+    );
   }, 60_000);
 
   it("leaves an update under a relational read policy to the core, from a fresh backend", async () => {

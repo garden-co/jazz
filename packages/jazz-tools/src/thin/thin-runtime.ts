@@ -162,6 +162,15 @@ export class ThinTransactionLostError extends Error {
 
 const DEFAULT_RECONNECT_DELAYS_MS = [250, 500, 1_000, 2_000, 5_000];
 
+/**
+ * How long after a keyed write was first sent it may still be sent again
+ * (SPEC 8 §8.14). The authority keeps a thin write's dedupe entry for an
+ * hour on its own clock, recorded no earlier than the first send, so every
+ * resend inside this window still finds it. Past it, a write whose answer
+ * was lost ends with its fate unknown.
+ */
+export const THIN_WRITE_RESEND_WINDOW_MS = 10 * 60_000;
+
 type OneShot = {
   op: ThinOp;
   resolve(body: ThinBody): void;
@@ -175,6 +184,11 @@ type OneShot = {
   resendable?: boolean;
   /** Sent once and waiting to go out again (see `resendable`). */
   resending?: boolean;
+  /** When it was first sent (`Date.now()`): it is sent again only within
+   * {@link THIN_WRITE_RESEND_WINDOW_MS} of this. */
+  firstSentAt?: number;
+  /** Ends it once the window passes while it waits to go out again. */
+  windowTimer?: ReturnType<typeof setTimeout>;
 };
 
 /** Standalone writes the server dedups by their `writeKey` (SPEC 8 §8.14). */
@@ -287,8 +301,9 @@ export class ThinRuntime implements Runtime {
   /** This runtime's writer node: with {@link nextWriteSeq}, each write's
    * `writeKey`. The server commits the write under a node it derives from
    * this one and the session's author, so one node serves every identity
-   * the runtime writes as. */
-  private readonly writerNode = bytesToHex(runtimeRandomBytes(16));
+   * the runtime writes as. It is marked as bounding its resends
+   * ({@link boundedWriterNode}). */
+  private readonly writerNode = bytesToHex(boundedWriterNode());
   private nextWriteSeq = 1;
   /** Writes the server has not answered yet. */
   private unanswered = 0;
@@ -595,9 +610,15 @@ export class ThinRuntime implements Runtime {
       // Requests not sent yet wait for the next connection, and so does a
       // write sent once, unless this drop ends its resends.
       if (!oneShot.sent && !(oneShot.resending && !resend)) continue;
-      if (oneShot.sent && resend && oneShot.resendable) {
+      if (oneShot.sent && resend && oneShot.resendable && !resendWindowPassed(oneShot)) {
         oneShot.sent = false;
         oneShot.resending = true;
+        this.endAtResendWindow(id, oneShot);
+        continue;
+      }
+      if (oneShot.sent && resend && oneShot.resendable) {
+        this.oneShots.delete(id);
+        oneShot.reject(resendWindowEnded(error));
         continue;
       }
       this.oneShots.delete(id);
@@ -686,20 +707,48 @@ export class ThinRuntime implements Runtime {
       oneShot = { op, resolve, reject, sent: false };
       this.oneShots.set(id, oneShot);
       if (this.bound) this.transmit(id, oneShot);
-    }).then((body) => {
-      if (body.type === "error") throw new ThinRemoteError(body.code, body.message);
-      return body;
-    });
+    })
+      .finally(() => clearTimeout(oneShot?.windowTimer))
+      .then((body) => {
+        if (body.type === "error") throw new ThinRemoteError(body.code, body.message);
+        return body;
+      });
     return { answer, oneShot };
   }
 
   private transmit(id: number, oneShot: OneShot): void {
+    // Past its window, a resend could find its dedupe entry gone and be
+    // written again: it ends with its fate unknown instead.
+    if (oneShot.resending && resendWindowPassed(oneShot)) {
+      this.oneShots.delete(id);
+      oneShot.reject(resendWindowEnded());
+      return;
+    }
     const sent = this.sendFrame(this.carrier, encodeThinRequest(id, oneShot.op), (bytes) => {
       // Refused here: the server would refuse it.
       this.oneShots.delete(id);
       oneShot.reject(tooLarge(oneShot.op.type, bytes));
     });
-    if (sent) oneShot.sent = true;
+    if (sent) {
+      oneShot.sent = true;
+      oneShot.firstSentAt ??= Date.now();
+      clearTimeout(oneShot.windowTimer);
+    }
+  }
+
+  /** End `oneShot`, waiting to go out again, once its resend window passes
+   * (it may wait offline far longer). */
+  private endAtResendWindow(id: number, oneShot: OneShot): void {
+    clearTimeout(oneShot.windowTimer);
+    const left = (oneShot.firstSentAt ?? Date.now()) + THIN_WRITE_RESEND_WINDOW_MS - Date.now();
+    oneShot.windowTimer = setTimeout(
+      () => {
+        if (this.oneShots.get(id) !== oneShot || oneShot.sent) return;
+        this.oneShots.delete(id);
+        oneShot.reject(resendWindowEnded());
+      },
+      Math.max(0, left),
+    );
   }
 
   private receive(carrier: WebSocketCarrier, piece: Uint8Array): void {
@@ -1659,6 +1708,22 @@ function viewOptions(context: WriteTarget): object {
   };
 }
 
+/**
+ * A writer node marked as bounding its resends to
+ * {@link THIN_WRITE_RESEND_WINDOW_MS} (SPEC 8 §8.14): the tag `jzRB`, then
+ * random bits, as an RFC 9562 version-8 UUID. The authority drops the
+ * dedupe entries of only such a writer's writes; an unmarked node (an
+ * earlier client's, which may resend any time) keeps them.
+ */
+/** @internal Exported for its contract test. */
+export function boundedWriterNode(): Uint8Array {
+  const bytes = runtimeRandomBytes(16);
+  bytes.set([0x6a, 0x7a, 0x52, 0x42], 0);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x80;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  return bytes;
+}
+
 /** A UUIDv7: a millisecond timestamp, then random bits. */
 function uuidv7(): Uint8Array {
   const bytes = runtimeRandomBytes(16);
@@ -1712,4 +1777,22 @@ function unknownOutcome(cause: Error): ThinConnectionLostError {
         `the connection ended before the server answered: ${cause.message}`,
         { cause },
       );
+}
+
+function resendWindowPassed(oneShot: OneShot): boolean {
+  return (
+    oneShot.firstSentAt !== undefined &&
+    Date.now() - oneShot.firstSentAt >= THIN_WRITE_RESEND_WINDOW_MS
+  );
+}
+
+/** A write whose answer was lost, past its resend window: it may have
+ * committed, so its fate is unknown. */
+function resendWindowEnded(cause?: Error): ThinConnectionLostError {
+  return new ThinConnectionLostError(
+    `the connection ended before the server answered, and the write was first sent more than ${
+      THIN_WRITE_RESEND_WINDOW_MS / 60_000
+    } minutes ago, so it is not sent again: it may or may not have been made`,
+    cause ? { cause } : undefined,
+  );
 }

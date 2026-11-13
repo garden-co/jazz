@@ -225,6 +225,8 @@ mod sync_write_only;
 mod text_merge;
 #[path = "../text_splices.rs"]
 mod text_splices;
+#[path = "../thin_origin_entry_ages.rs"]
+mod thin_origin_entry_ages;
 #[path = "../thin_origin_writes.rs"]
 mod thin_origin_writes;
 #[path = "../transaction_commit_kind.rs"]

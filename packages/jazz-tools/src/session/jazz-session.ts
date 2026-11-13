@@ -1,5 +1,6 @@
 import {
   attachSessionCoreConsumer,
+  onJazzSessionClientUpgraded,
   type SessionCore,
   type SessionCoreConsumer,
   type SessionCoreSnapshot,
@@ -53,6 +54,11 @@ export function userOfAccount(account: AccountHandle | undefined): JazzUser | nu
   });
 }
 
+function clientIsLocalFirst(client: unknown): boolean {
+  const db = (client as { db?: { isLocalFirst?(): boolean } } | undefined)?.db;
+  return db?.isLocalFirst?.() === true;
+}
+
 /** An operation a session is running (`snapshot.pending`). */
 export type JazzSessionOperation =
   | "createDeviceAccount"
@@ -87,6 +93,13 @@ export interface JazzSessionSnapshot<Client> {
   readonly user: JazzUser | null;
   /** Only while `status` is `ready`. */
   readonly client?: Client;
+  /**
+   * Whether `client` reads and writes through a local store, so it works
+   * offline: `client.db.isLocalFirst()`, as a field you can subscribe to. A
+   * thin client turns local-first in place when the session upgrades it (the
+   * same `client` and `db` carry on). False while there is no client.
+   */
+  readonly localFirst: boolean;
   readonly pending?: JazzSessionOperation;
   readonly error?: Error;
   /**
@@ -209,7 +222,11 @@ export function ownJazzSession<Config, Client>(
   let pendingSignOuts = 0;
   let retrying: Promise<void> | undefined;
   let lastAccount: AccountHandle | undefined;
-  let snapshot: JazzSessionSnapshot<Client> = Object.freeze({ status: "starting", user: null });
+  let snapshot: JazzSessionSnapshot<Client> = Object.freeze({
+    status: "starting",
+    user: null,
+    localFirst: false,
+  });
   const versions = new WeakMap<object, SessionCoreSnapshot<Client>>();
   const listeners = createListeners("Jazz session observer failed");
   const consumers = new Set<{ name?: string; lease?: SessionCoreConsumer<Client> }>();
@@ -252,6 +269,7 @@ export function ownJazzSession<Config, Client>(
           ? snapshot.user
           : userOfAccount(account),
       ...(status === "ready" ? { client: current?.client } : {}),
+      localFirst: status === "ready" && clientIsLocalFirst(current?.client),
       ...(current?.pending ? { pending: CORE_OPERATION[current.pending] } : {}),
       ...(error ? { error } : {}),
       ...(recovery ? { recovery } : {}),
@@ -261,6 +279,7 @@ export function ownJazzSession<Config, Client>(
       snapshot.status === next.status &&
       snapshot.client === next.client &&
       snapshot.user === next.user &&
+      snapshot.localFirst === next.localFirst &&
       snapshot.pending === next.pending &&
       snapshot.error === next.error &&
       snapshot.recovery === next.recovery &&
@@ -335,7 +354,12 @@ export function ownJazzSession<Config, Client>(
         core = created;
         for (const consumer of consumers)
           consumer.lease = attachSessionCoreConsumer(created, consumer.name);
-        unsubscribeCore = created.subscribe(() => publish(closed));
+        const stopCore = created.subscribe(() => publish(closed));
+        const stopUpgrades = onJazzSessionClientUpgraded(created, () => publish(closed));
+        unsubscribeCore = () => {
+          stopCore();
+          stopUpgrades();
+        };
         publish();
       })
       .catch((cause) => {

@@ -1,3 +1,4 @@
+import { transportControlBrowserCommands } from "./transport-control-commands.js";
 import {
   startLocalJazzServer,
   startTestJazz,
@@ -6,6 +7,7 @@ import {
 } from "../../src/testing/index.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
+import { shipMigrations, type ClientMigrations } from "../../src/runtime/client-migrations.js";
 import {
   createTransportControl,
   type TransportControl,
@@ -99,8 +101,16 @@ export async function stopJazzServerByUrl(serverUrl: string): Promise<void> {
  */
 export async function jazzAppFront(
   coreUrl: string,
-  app: { schema: WasmSchema; permissions: CompiledPermissionsMap; pageOrigin: string },
+  app: {
+    schema: WasmSchema;
+    migrations?: ClientMigrations;
+    permissions: CompiledPermissionsMap;
+    pageOrigin: string;
+  },
 ): Promise<string> {
+  // Restore what the command's serialization dropped: the migrations the
+  // app ships, which its createJazz publishes with the schema.
+  if (app.migrations) shipMigrations(app.schema, app.migrations);
   const found = await startedFor(coreUrl);
   if (!found) throw new Error(`No Jazz test server is running at ${coreUrl}`);
   const started = found[1];
@@ -272,4 +282,21 @@ export async function stopJazzServerTransportControl(url: string): Promise<void>
   const control = transportControl(url);
   transportControls.delete(url);
   await control.stop();
+}
+
+/**
+ * Every transport-control command the browser harness needs, for a browser
+ * test project's `test.browser.commands`: spread it there instead of listing
+ * the commands one by one (see transport-control-commands.ts).
+ */
+export function jazzServerTransportControlCommands() {
+  return transportControlBrowserCommands({
+    jazzServerTransportControlCreate: createJazzServerTransportControl,
+    jazzServerTransportControlBlock: async (url, direction) =>
+      blockJazzServerTransport(url, direction),
+    jazzServerTransportControlUnblock: async (url) => unblockJazzServerTransport(url),
+    jazzServerTransportControlDown: async (url) => downJazzServerTransport(url),
+    jazzServerTransportControlUp: upJazzServerTransport,
+    jazzServerTransportControlStop: stopJazzServerTransportControl,
+  });
 }
