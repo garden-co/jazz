@@ -169,32 +169,34 @@ export function registerPageDb(db: PageDb, appId: string | null): () => void {
 const JAZZ_PAGE_HANDLE = Symbol.for("jazz-tools.window-jazz");
 
 /**
- * `window.__jazz` is reserved for Jazz: it is set by the first Db opened on
- * the page. A value the app (or another library) put there first is refused
- * by name rather than overwritten, or extended (it may be sealed or frozen).
+ * `window.__jazz` is Jazz's name: the first Db opened on the page sets it. A
+ * value the app (or another library) put there first is left alone, neither
+ * overwritten nor extended (it may be sealed or frozen), and nothing fails:
+ * Jazz says so once on the console and keeps its handle off the page.
  */
-export class WindowJazzConflictError extends Error {
-  constructor(existing: unknown) {
-    super(
-      `window.__jazz is reserved for Jazz (its page handle: window.__jazz.status(), waitForSync(), clearStorage()), and this page already has a window.__jazz that Jazz didn't set (${
-        existing === null ? "null" : typeof existing
-      }). Rename your app's global: Jazz doesn't overwrite it.`,
-    );
-    this.name = "WindowJazzConflictError";
-  }
+function windowJazzConflictMessage(existing: unknown): string {
+  return `window.__jazz is Jazz's page handle (window.__jazz.status(), waitForSync(), clearStorage()), but this page already has a window.__jazz that Jazz didn't set (${
+    existing === null ? "null" : typeof existing
+  }). Jazz leaves it as it is and works without its page handle; rename your app's global to get the handle back.`;
 }
 
+/** Pages already told, so each hears it once. */
+const warnedPages = new WeakSet<object>();
+
 /**
- * Throw {@link WindowJazzConflictError} if `page` has a `window.__jazz` Jazz
- * didn't set. A browser session checks this when it starts, so the conflict
- * shows there rather than when a Db first opens (on the thin client, which
- * doesn't install it, only at the upgrade to local-first).
+ * Whether `page` has a `window.__jazz` Jazz didn't set; warns once per page
+ * if so. A browser session checks this when it starts, so the warning shows
+ * there rather than only when a Db first opens (on the thin client, which
+ * doesn't install the handle, that is the upgrade to local-first).
  */
-export function refuseWindowJazzConflict(page: Window): void {
+export function warnWindowJazzConflict(page: Window): boolean {
   const existing = page.__jazz as unknown;
-  if (existing === undefined) return;
-  if (isJazzPageHandle(existing)) return;
-  throw new WindowJazzConflictError(existing);
+  if (existing === undefined || isJazzPageHandle(existing)) return false;
+  if (!warnedPages.has(page)) {
+    warnedPages.add(page);
+    console.warn(windowJazzConflictMessage(existing));
+  }
+  return true;
 }
 
 /**
@@ -209,10 +211,14 @@ function isJazzPageHandle(value: unknown): value is Record<string | symbol, unkn
   return legacy.version === 1 && typeof legacy.status === "function";
 }
 
-/** Install `window.__jazz` (storage and sync status), extending the one Jazz installed. */
+/**
+ * Install `window.__jazz` (storage and sync status), extending the one Jazz
+ * installed. With an app's own `window.__jazz` there, the handle is returned
+ * but not put on the page (see {@link warnWindowJazzConflict}).
+ */
 export function ensureWindowJazz(page: Window): WindowJazzClientApi & JazzPageHandle {
-  refuseWindowJazzConflict(page);
-  const existing = page.__jazz as unknown;
+  const conflict = warnWindowJazzConflict(page);
+  const existing = conflict ? undefined : (page.__jazz as unknown);
   const host = (existing as Record<string | symbol, unknown> | undefined) ?? {};
   // An older copy's handle gets the mark too, for copies after this one.
   host[JAZZ_PAGE_HANDLE] = true;
@@ -231,6 +237,6 @@ export function ensureWindowJazz(page: Window): WindowJazzClientApi & JazzPageHa
       await Promise.all(targets.map((entry) => entry.db.shutdown()));
     },
   }) as WindowJazzClientApi & JazzPageHandle;
-  page.__jazz = api;
+  if (!conflict) page.__jazz = api;
   return api;
 }
