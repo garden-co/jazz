@@ -6,14 +6,18 @@ import { setTimeout as delay } from "node:timers/promises";
 export interface RivetStoreOptions {
   /** Stable database key. Use a different key for each independent database. */
   name: string;
-  endpoint: string;
+  /** Defaults to RIVET_ENDPOINT, including Rivet’s namespace:token URL syntax. */
+  endpoint?: string;
+  /** Overrides the endpoint namespace or RIVET_NAMESPACE. Defaults to "default". */
   namespace?: string;
-  token: () => string | Promise<string>;
-  /** Server-only secret, shared with the native host. At least 32 characters. */
-  coreSecret: string;
+  /** Overrides the endpoint token or RIVET_TOKEN. Read again for each request. */
+  token?: () => string | Promise<string>;
+  /** Defaults to JAZZ_CORE_SECRET; shared with the core actor. At least 32 characters. */
+  coreSecret?: string;
   /** Existing pool name, or managed pool prefix (suffixed with its configuration digest). */
   pool: string;
-  runtime:
+  /** Defaults to an existing runner pool. */
+  runtime?:
     | { kind: "existing" }
     | {
         kind: "managed";
@@ -38,15 +42,52 @@ export function rivet(options: RivetStoreOptions): {
       "rivet(): name and pool must contain only letters, digits, underscores and hyphens",
     );
   }
-  if (options.coreSecret.length < 32)
+  if (options.coreSecret !== undefined && options.coreSecret.length < 32)
     throw new Error("rivet(): coreSecret needs at least 32 characters");
-  endpoint(options.endpoint);
-  if (options.runtime.kind === "managed") {
+  if (options.endpoint !== undefined) parseEndpoint(options.endpoint);
+  if (options.runtime?.kind === "managed") {
     endpoint(options.runtime.cloudEndpoint);
     if (!/^[a-f0-9]{64}$/.test(options.runtime.image.sha256))
       throw new Error("rivet(): image.sha256 must be a SHA-256 hex digest");
   }
   return { kind: "rivet", options };
+}
+
+// Resolve deployment configuration when opening, so importing an actor registry
+// does not require secrets or contact the control plane.
+function parseEndpoint(value: string) {
+  const url = new URL(value);
+  const namespace = url.username ? decodeURIComponent(url.username) : undefined;
+  const token = url.password ? decodeURIComponent(url.password) : undefined;
+  url.username = "";
+  url.password = "";
+  return { endpoint: endpoint(url.toString()), namespace, token };
+}
+
+function resolveOptions(options: RivetStoreOptions) {
+  function required(value: string | undefined, name: string): string {
+    if (!value) throw new Error(`rivet(): ${name} is required`);
+    return value;
+  }
+  const parsed = parseEndpoint(
+    required(options.endpoint ?? process.env.RIVET_ENDPOINT, "endpoint or RIVET_ENDPOINT"),
+  );
+  const token =
+    options.token ??
+    (() => required(parsed.token ?? process.env.RIVET_TOKEN, "endpoint token or RIVET_TOKEN"));
+  const resolved = {
+    ...options,
+    endpoint: parsed.endpoint,
+    namespace: options.namespace ?? parsed.namespace ?? process.env.RIVET_NAMESPACE,
+    token,
+    coreSecret: required(
+      options.coreSecret ?? process.env.JAZZ_CORE_SECRET,
+      "coreSecret or JAZZ_CORE_SECRET",
+    ),
+    runtime: options.runtime ?? { kind: "existing" as const },
+  };
+  rivet(resolved);
+  return resolved;
 }
 
 function endpoint(value: string): string {
@@ -76,8 +117,8 @@ type Pool = {
 };
 
 /** Internal: provision once, then use ordinary Jazz HTTP and sync sessions. */
-export async function openRivetStore(options: RivetStoreOptions) {
-  rivet(options);
+export async function openRivetStore(input: RivetStoreOptions) {
+  const options = resolveOptions(input);
   const signal = AbortSignal.timeout(options.startupTimeoutMs ?? 15 * 60_000);
   const enc = encodeURIComponent;
   async function request(
