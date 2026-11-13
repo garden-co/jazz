@@ -66,6 +66,38 @@ function editor(marked: string) {
 }
 
 describe("markdownSync", () => {
+  it.each([false, true])(
+    "maps a shared document with the active plugin's writers (custom first: %s)",
+    (customFirst) => {
+      const plain = EditorState.create({
+        doc: parse("**cat**"),
+        plugins: [markdownSync({ parse })],
+      });
+      const custom = plain.reconfigure({
+        plugins: [
+          markdownSync({
+            parse,
+            spec: {
+              marks: { strong: { open: () => "<strong>", close: () => "</strong>" } },
+            },
+          }),
+        ],
+      });
+      expect(custom.doc).toBe(plain.doc);
+      for (const state of customFirst ? [custom, plain] : [plain, custom]) {
+        const mapped = markdownOf(state);
+        const offset = state === custom ? 9 : 3;
+        expect(mapped.text).toBe(state === custom ? "<strong>cat</strong>" : "**cat**");
+        expect(textPosition(state, 2)).toBe(offset);
+        expect(docPosition(state, offset)).toBe(2);
+        expect(markdownOf(state)).toBe(mapped);
+      }
+      expect(() => markdownOf(plain.reconfigure({ plugins: [] }))).toThrow(
+        "no markdownSync plugin",
+      );
+    },
+  );
+
   it("writes only its own change, leaving text it would write differently", () => {
     const ed = editor("Every stop is a reason to stay\n\nIntro: palm muted‸");
     // Someone else is typing after "stay": the value ends that line in a

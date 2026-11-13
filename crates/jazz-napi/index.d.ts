@@ -53,7 +53,7 @@ export declare class JazzCoreSocket {
 }
 
 export declare class JazzServer {
-  static start(options: { appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }): Promise<JazzServer>
+  static start(options: { appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; maxConnectionsPerUser?: number; trustedWorkload?: { issuer: string; audience: string; subject: string } }): Promise<JazzServer>
   get appId(): string
   get url(): string
   get port(): number
@@ -154,6 +154,14 @@ export declare class NapiDb {
    * this is not a query.
    */
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
+  /**
+   * The Inspector's `explain`: for each of `rows` (uuid strings) of
+   * `table`, which clauses of its read policy (the arms of its top-level
+   * `Or`) hold for `author` with `claims`.
+   */
+  explainReadClauses(table: string, rows: Array<string>, author: Uint8Array, claims?: JsonValue | undefined | null): ExplainedReadClauses
+  /** A pool that pooled subscriptions are read through, all in one call. */
+  createSubscriptionPool(): SubscriptionPool
   subscribe(query: Uint8Array, opts?: { tier?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Subscription
   /** Apply received frames and send what is due on every link. */
   tick(): void
@@ -281,7 +289,29 @@ export declare class Subscription {
    */
   readAll(): Array<SubscriptionEvent>
   drain(): Array<SubscriptionEvent>
+  /**
+   * Move this subscription's stream into `pool`, which then reads it in
+   * [`SubscriptionPool::drain`]. Returns the id its batches carry.
+   */
+  joinPool(pool: SubscriptionPool): number
   close(): boolean
+}
+
+/**
+ * Subscriptions read together: one [`drain`](Self::drain) call returns the
+ * events of every pooled subscription that has any, instead of one
+ * `readAll` call per subscription.
+ */
+export declare class SubscriptionPool {
+  constructor()
+  /**
+   * The events of every pooled subscription that has any now, by id.
+   * Subscriptions with nothing are left out. A closed or failed stream
+   * leaves the pool after its batch.
+   */
+  drain(): Array<SubscriptionBatch>
+  /** Pooled subscriptions still open. */
+  get size(): number
 }
 
 /**
@@ -403,6 +433,18 @@ export interface E2EeSodiumStreamRecord {
 /** Verifies a detached Ed25519 signature; malformed sizes return false. */
 export declare function e2eeSodiumVerify(publicKey: Uint8Array, message: Uint8Array, signature: Uint8Array): boolean
 
+/** The Inspector's `explain`: how many clauses the read policy has, and the rows found. */
+export interface ExplainedReadClauses {
+  clauses: number
+  rows: Array<ExplainedReadRow>
+}
+
+/** One row of the Inspector's `explain`: whether each read-policy clause holds. */
+export interface ExplainedReadRow {
+  id: string
+  holds: Array<boolean>
+}
+
 export interface InsertOptions {
   rowId?: Uint8Array
   author?: Uint8Array
@@ -468,6 +510,25 @@ export interface SodiumDeviceKeyPair {
   privateKey: Uint8Array
 }
 
+/** One subscription's share of a [`SubscriptionPool::drain`]. */
+export interface SubscriptionBatch {
+  /** The id [`Subscription::join_pool`] returned. */
+  id: number
+  /** The events available now, oldest first. */
+  events: Array<SubscriptionEvent>
+  /**
+   * Set when the stream failed after `events`; the stream has left the
+   * pool. Other subscriptions in the same drain are unaffected.
+   */
+  error?: SubscriptionBatchError
+}
+
+export interface SubscriptionBatchError {
+  message: string
+  /** The stable core error code, or the napi status name. */
+  code: string
+}
+
 export interface SubscriptionClosedEvent {
   type: 'closed'
 }
@@ -495,6 +556,11 @@ export interface SubscriptionServerFailureReason {
   type: 'ServerFailure'
   /** The server's reason. */
   code: string
+  /**
+   * The rejection's core error code (`"authority_changed"`, …), as a
+   * thrown core error's `code`.
+   */
+  errorCode: string
 }
 
 export interface UpdateOptions {

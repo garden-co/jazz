@@ -3,7 +3,7 @@ title: Thin Client
 description: "Learn how to set up the thin browser client, which talks to your backend with no local database."
 ---
 
-The default browser client: about 160 KB gzipped, with no Wasm and no local storage. Your main
+The default browser client: %bundle.thin% gzipped, with no Wasm and no local storage. Your main
 backend runs every query under the signed-in user's policies and sends finished rows, and writes
 commit on the server.
 
@@ -27,6 +27,10 @@ from `jazz-tools/client`, without a `client` loader.
       );
     }
     ```
+
+    Besides `signedOut`, the provider takes `loading` (shown while Jazz starts or switches users;
+    by default a "Loading…" line) and `error` (shown when Jazz can't start; by default a message
+    with a "Try again" button). See [Framework patterns](/docs/reference/framework-patterns).
 
     In the Next.js App Router, `JazzProvider` is a client component. Put it in a file that starts
     with `"use client"` and render that from `app/layout.tsx` around `{children}`:
@@ -113,7 +117,7 @@ from `jazz-tools/client`, without a `client` loader.
 
 Each is an explicit "not supported" error:
 
-- no offline use: while the backend is unreachable, reads and subscriptions wait and are answered after the reconnect; writes are not optimistic: they show after one round trip, and `wait()` resolves when the server answered
+- no offline use: while the backend is unreachable, reads and subscriptions wait and are answered after the reconnect; writes are not optimistic: they show after one round trip, and `wait({ tier })` resolves when the server committed them, whatever the tier
 - no attributed writes
 - no streaming inside a transaction
 - text edits with `editedFrom` on merge text columns are rejected (`NotObserved`) for now; use the
@@ -139,6 +143,18 @@ A write ends with `ThinConnectionLostError` (from `jazz-tools/thin`) only when t
 for good while it waits: after `refresh()` signs in someone else, after `disconnect()`, or
 when the client closes. It may or may not have committed, so read before you retry. A transaction
 in flight when the socket drops ends the same way.
+
+When the server refuses the user, because `jazz.revokeUser` ended their session or `authenticate`
+no longer names them, the client stops: a write it hadn't sent yet ends with
+`ThinRequestNotSentError` (also from `jazz-tools/thin`), whose message names the refusal ("the
+server refused this client's sign-in (…)"). It didn't commit. The session then asks your backend
+who is signed in, and signs out. A write already sent ends with `ThinConnectionLostError` as above.
+
+When the server refuses the user's sign-in (their session ended, or your backend called
+`jazz.revokeUser`), the link shows `offline` with reason `auth`, and new writes wait in case your
+app signs them in again. Once Jazz signs them out, those writes end with `ThinRequestNotSentError`,
+whose message says the server refused the sign-in. They never reached the server. The sign-out
+logs how many it dropped.
 
 Pending writes are kept in memory, not on disk. To warn before the user leaves with unsent
 changes:

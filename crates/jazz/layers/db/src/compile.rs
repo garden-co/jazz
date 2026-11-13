@@ -315,6 +315,17 @@ pub struct View {
     pub base_cut: Option<Cut>,
 }
 
+/// How to read one cell of one row ([`Ctx::compile_cell`]).
+#[derive(Clone, Debug)]
+pub struct CellRead {
+    pub sql: String,
+    pub params: Vec<Sql>,
+    /// The parameter holding the row's id.
+    pub id_param: usize,
+    pub ty: ValueType,
+    pub tags: Option<crate::values::ColumnTags>,
+}
+
 /// A compiled root query.
 #[derive(Clone)]
 pub struct Compiled {
@@ -947,9 +958,15 @@ impl<'a> Ctx<'a> {
                 return Err(unsupported("multi-hop include paths"));
             }
             if include.require {
+                // Resolvable means readable: a target the reader may not
+                // read is as missing as a deleted one.
                 let i = self.alias("i");
+                let readable = match self.policy {
+                    Some(session) => format!(" AND {}", self.read_policy(target, &i, session)?),
+                    None => String::new(),
+                };
                 wheres.push(format!(
-                    "EXISTS (SELECT 1 FROM {} AS {i} WHERE {i}.id = {alias}.{} AND ({i}._state & {STATE_DELETED}) = 0)",
+                    "EXISTS (SELECT 1 FROM {} AS {i} WHERE {i}.id = {alias}.{} AND ({i}._state & {STATE_DELETED}) = 0{readable})",
                     self.source(target)?,
                     quote(table.stored_name(column))
                 ));
@@ -1394,6 +1411,13 @@ impl<'a> Ctx<'a> {
             for filter in &array.filters {
                 conds.push(self.predicate(filter, child, &c)?);
             }
+            // A child counts only if the relation would return it: one the
+            // reader may read, meeting its own nested requirements
+            // (`compile_children` applies both).
+            self.array_requirements(child, &c, &array.nested_arrays, &mut conds)?;
+            if let Some(session) = self.policy {
+                conds.push(self.read_policy(child, &c, session)?);
+            }
             let source = self.source(child)?;
             if is_array(table, &array.outer_column) {
                 // A forward array relation: one child per element, in the
@@ -1441,11 +1465,16 @@ impl<'a> Ctx<'a> {
     }
 
     /// One array relation for one parent row.
+    /// The rows `array` relates to `parent`, with the index of the bound
+    /// parameter that carries `parent` (`None` when it is not bound: NaN
+    /// reads as SQL `NULL`). Only that parameter depends on `parent`, so
+    /// another parent of the same shape (scalar, or an array of references)
+    /// reuses the SQL with it rebound.
     pub fn compile_children(
         mut self,
         array: &ArraySubquery,
         parent: &Value,
-    ) -> Result<Compiled, Error> {
+    ) -> Result<(Compiled, Option<usize>), Error> {
         let child = self.table(&array.table)?;
         let projection = projection(child, array.select.as_deref())?;
         let alias = "t";
@@ -1453,9 +1482,10 @@ impl<'a> Ctx<'a> {
             Value::Nullable(Some(inner)) => matches!(**inner, Value::Array(_)),
             value => matches!(value, Value::Array(_)),
         };
-        let parent = match self.value_term(parent)? {
-            Term::Bound(sql, _) => sql,
-            _ => "NULL".to_owned(),
+        let parent_param = self.params.len();
+        let (parent, parent_param) = match self.value_term(parent)? {
+            Term::Bound(sql, _) => (sql, Some(parent_param)),
+            _ => ("NULL".to_owned(), None),
         };
         // A forward array relation reads one child per array element, in
         // the array's order and with its duplicates.
@@ -1516,37 +1546,36 @@ impl<'a> Ctx<'a> {
         if !array.partial.is_empty() {
             compiled.partial = partial_projection(schema, &array.table, &array.partial, &compiled)?;
         }
-        Ok(compiled)
+        Ok((compiled, parent_param))
     }
 
     /// One cell of row `id` of `table`, read through the same view and cut
-    /// as the rows it came from: a relation's parent value. The SQL, its
-    /// params and the cell's type.
+    /// as the rows it came from: a relation's parent value. Only the bound
+    /// `id` (at [`CellRead::id_param`]) depends on the row.
     pub fn compile_cell(
         mut self,
         table: &str,
         column: &str,
         id: RowUuid,
-    ) -> Result<
-        (
-            String,
-            Vec<Sql>,
-            ValueType,
-            Option<crate::values::ColumnTags>,
-        ),
-        Error,
-    > {
+    ) -> Result<CellRead, Error> {
         let table = self.table(table)?;
         let column = table
             .column(column)
             .ok_or_else(|| unsupported("unknown correlation column"))?;
         let source = self.source(table)?;
+        let id_param = self.params.len();
         let id = self.bind(Sql::Blob(id.0.as_bytes().to_vec()));
         let sql = format!(
             "SELECT t.{} FROM {source} AS t WHERE t.id = {id}",
             quote(&column.stored)
         );
-        Ok((sql, self.params, column.ty.clone(), column.tags.clone()))
+        Ok(CellRead {
+            sql,
+            params: self.params,
+            id_param,
+            ty: column.ty.clone(),
+            tags: column.tags.clone(),
+        })
     }
 
     /// A junction traversal from the row of `table` at `alias`: some live

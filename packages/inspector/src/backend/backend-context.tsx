@@ -2,17 +2,35 @@ import type { InspectWhoami } from "jazz-tools/inspect";
 import { createContext, useContext, type PropsWithChildren } from "react";
 import type { InspectorCall } from "./api.js";
 import type { ApiDataSource } from "./api-data.js";
-import type { InspectorLinkTarget } from "jazz-tools/inspect";
+import type { InspectAs, InspectorLinkTarget } from "jazz-tools/inspect";
 
 export interface BackendContextValue {
   call: InspectorCall;
   whoami: InspectWhoami;
   data: ApiDataSource;
-  /** Whose permissions reads and writes run under; null for the backend's own. */
-  viewAs: string | null;
-  setViewAs(userId: string | null): void;
+  /**
+   * Whose permissions reads and writes run under, with the session claims
+   * given for them; null for the backend's own.
+   */
+  viewAs: ViewAs | null;
+  setViewAs(next: ViewAs | null): void;
+  /** The app's permissions read session claims, so viewing as a user needs theirs. */
+  permissionsReadClaims: boolean;
+  /** The backend's warning about the rows shown (e.g. no claims given), or null. */
+  warning: string | null;
   /** What the link this page was opened with pointed at, if anything. */
   link: InspectorLinkTarget | null;
+}
+
+export interface ViewAs {
+  userId: string;
+  claims?: Record<string, unknown>;
+}
+
+/** `viewAs` as the API takes it: the bare user id when no claims are given. */
+export function asForApi(viewAs: ViewAs | null): InspectAs | undefined {
+  if (!viewAs) return undefined;
+  return viewAs.claims ? viewAs : viewAs.userId;
 }
 
 const BackendContext = createContext<BackendContextValue | null>(null);

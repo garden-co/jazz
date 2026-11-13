@@ -100,7 +100,15 @@ export type InspectOp = InspectRequest["op"];
 export type InspectVia = "hook" | "token" | "dev";
 
 export interface InspectWhoami {
+  /** The app's id: its store's (`remote({ appId })`, or the id a store keeps). */
   appId: string;
+  /**
+   * The id this app's browser clients name it by in their sync URLs
+   * (`<basePath>/apps/<clientAppId>/…`): derived from the URL they sync with
+   * (their scope), not the store's id, which the backend maps them to. A
+   * client given an explicit `scope` names the app by that scope instead.
+   */
+  clientAppId: string;
   by: string;
   via: InspectVia;
   write: boolean;
@@ -108,6 +116,10 @@ export interface InspectWhoami {
   tables?: string[];
   /** When an agent token stops working (Unix seconds). */
   expiresAt?: number;
+  /** The agent token's label: what the agent said it asked access for. */
+  label?: string;
+  /** The longest an agent token this backend mints may live (seconds). */
+  maxTokenTtlSeconds: number;
   /** Where the Inspector UI for this backend is. */
   inspectorUrl: string;
   protocol: typeof INSPECT_PROTOCOL_VERSION;
@@ -118,6 +130,37 @@ export interface InspectRowsAnswer {
   /** More rows matched than this answer carries (the row limit, or the byte limit). */
   truncated: boolean;
   /** The Inspector, open on exactly this query. */
+  inspectorUrl: string;
+  /** Why the answer may not be what the user in `as` would see, e.g. no claims were given for them. */
+  warning?: string;
+}
+
+/** What `explain` answers: which read-policy clause let `as` see each row, or that none did. */
+export interface InspectExplainAnswer {
+  table: string;
+  /** The user the policy was checked for. */
+  as: string;
+  /**
+   * The table's read-policy clauses: the arms of its top-level `or`. `text`
+   * renders the clause; it is left out for an agent token limited to some
+   * tables, which isn't shown the app's permissions.
+   */
+  clauses: { index: number; text?: string }[];
+  /**
+   * Each row the query matches with the backend's authority: whether `as`
+   * may read it, and by which clauses (their indexes; empty when denied).
+   * `by` is left out for an agent token limited to some tables or with
+   * redacted columns in this one: a clause's verdict tells about what it
+   * reads.
+   */
+  rows: { id: string; allowed: boolean; by?: number[]; row: Record<string, unknown> }[];
+  /** More rows matched than this answer carries. */
+  truncated: boolean;
+  /** Set when the table has no read policy (every row is denied). */
+  note?: string;
+  /** Why the answer may not be what `as` would see, e.g. no claims were given for them. */
+  warning?: string;
+  /** The Inspector, open on this query as `as`. */
   inspectorUrl: string;
 }
 
@@ -369,6 +412,9 @@ export function inspectorLink(inspectorUrl: string, target: InspectorLinkTarget 
   if (target.row) params.set("row", target.row);
   if (target.as !== undefined) {
     params.set("as", typeof target.as === "string" ? target.as : target.as.userId);
+    if (typeof target.as === "object" && target.as.claims !== undefined) {
+      params.set("claims", base64UrlEncode(JSON.stringify(target.as.claims)));
+    }
   }
   const fragment = params.toString();
   return fragment ? `${inspectorUrl}#${fragment}` : inspectorUrl;
@@ -391,7 +437,20 @@ export function parseInspectorLink(fragment: string): InspectorLinkTarget & { gr
   const row = params.get("row");
   if (row) target.row = row;
   const as = params.get("as");
-  if (as) target.as = as;
+  if (as) {
+    target.as = as;
+    const claims = params.get("claims");
+    if (claims) {
+      try {
+        const parsed = JSON.parse(base64UrlDecode(claims)) as unknown;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          target.as = { userId: as, claims: parsed as Record<string, unknown> };
+        }
+      } catch {
+        // A damaged link views as the user without claims.
+      }
+    }
+  }
   const grant = params.get("grant");
   if (grant) target.grant = grant;
   return target;
@@ -461,4 +520,174 @@ export function isLoopbackCallback(callback: string): boolean {
     url.search === "" &&
     url.hash === ""
   );
+}
+
+/**
+ * Whether compiled permissions read `session.claims` anywhere: any node
+ * whose session path (`path`, `session_path`, or a `SessionRef`) starts at
+ * `claims`, whatever compares it (`SessionCmp`, `SessionInList`,
+ * `SessionContains`, `SessionIsNull`, `In`, a `SessionRef` value, ...).
+ */
+export function readsClaims(permissions: unknown): boolean {
+  const seen = new Set<object>();
+  const visit = (value: unknown): boolean => {
+    if (!value || typeof value !== "object" || seen.has(value)) return false;
+    seen.add(value);
+    const node = value as Record<string, unknown>;
+    const startsAtClaims = (path: unknown) => Array.isArray(path) && path[0] === "claims";
+    if (
+      startsAtClaims(node.path) ||
+      startsAtClaims(node.session_path) ||
+      startsAtClaims(node.SessionRef)
+    ) {
+      return true;
+    }
+    return Object.values(node).some(visit);
+  };
+  return visit(permissions);
+}
+
+/**
+ * The clauses of a read policy as `explain` numbers them: the arms of its
+ * top-level `Or`, or the whole policy when it is not one. `undefined` (no
+ * read policy) has none: every row is denied.
+ */
+export function policyClauses(policy: unknown): unknown[] {
+  if (!policy || typeof policy !== "object") return [];
+  const node = policy as { type?: unknown; exprs?: unknown };
+  if (node.type === "Or" && Array.isArray(node.exprs)) return node.exprs;
+  return [policy];
+}
+
+const CMP_TEXT: Record<string, string> = {
+  Eq: "=",
+  Ne: "≠",
+  Lt: "<",
+  Le: "≤",
+  Gt: ">",
+  Ge: "≥",
+};
+
+function sessionText(path: unknown): string {
+  return Array.isArray(path) ? `session.${path.join(".")}` : "session";
+}
+
+function literalText(value: unknown): string {
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "bigint") return `${value}n`;
+  if (Array.isArray(value)) return `[${value.map(literalText).join(", ")}]`;
+  if (!value || typeof value !== "object") return String(value);
+  const literal = value as { type?: string; value?: unknown };
+  // The compiler's literals: raw values, or a wire Value (`{ type, value }`).
+  if (literal.type === "Literal") return literalText(literal.value);
+  if (literal.type === "Null") return "null";
+  if (literal.type === "Array" && Array.isArray(literal.value)) {
+    return `[${literal.value.map(literalText).join(", ")}]`;
+  }
+  if (typeof literal.value === "bigint") return `${literal.value}n`;
+  if (literal.type === "Text" || literal.type === "Uuid") return JSON.stringify(literal.value);
+  return literal.value === undefined ? (literal.type ?? "?") : String(literal.value);
+}
+
+function valueText(value: unknown): string {
+  if (!value || typeof value !== "object") return String(value);
+  const policyValue = value as { type?: string; value?: unknown; path?: unknown };
+  if (policyValue.type === "SessionRef") {
+    const path = policyValue.path;
+    if (Array.isArray(path) && path[0] === "__jazz_outer_row")
+      return `outer.${path.slice(1).join(".")}`;
+    return sessionText(path);
+  }
+  if (policyValue.type === "Literal") return literalText(policyValue.value);
+  return literalText(value);
+}
+
+function operationText(operation: unknown): string {
+  return operation === "Select" ? "read" : String(operation).toLowerCase();
+}
+
+/**
+ * A policy expression as a person reads it, e.g. `owner = session.user`
+ * or `claims.role = "manager"`. For `explain`'s answers: a rendering, not a
+ * syntax that parses back.
+ */
+export function renderPolicy(expr: unknown): string {
+  if (!expr || typeof expr !== "object") return "?";
+  const node = expr as Record<string, any>;
+  const group = (exprs: unknown[], joiner: string, empty: string) =>
+    exprs.length === 0
+      ? empty
+      : exprs
+          .map((part) => {
+            const text = renderPolicy(part);
+            const type = (part as { type?: string })?.type;
+            return (type === "And" || type === "Or") && exprs.length > 1 ? `(${text})` : text;
+          })
+          .join(joiner);
+  switch (node.type) {
+    case "Cmp":
+      return `${node.column} ${CMP_TEXT[node.op] ?? node.op} ${valueText(node.value)}`;
+    case "SessionCmp":
+      return `${sessionText(node.path)} ${CMP_TEXT[node.op] ?? node.op} ${literalText(node.value)}`;
+    case "IsNull":
+      return `${node.column} is null`;
+    case "IsNotNull":
+      return `${node.column} is not null`;
+    case "SessionIsNull":
+      return `${sessionText(node.path)} is null`;
+    case "SessionIsNotNull":
+      return `${sessionText(node.path)} is not null`;
+    case "Contains":
+      return `${node.column} contains ${valueText(node.value)}`;
+    case "SessionContains":
+      return `${sessionText(node.path)} contains ${literalText(node.value)}`;
+    case "In":
+      return `${node.column} in ${sessionText(node.session_path)}`;
+    case "InList":
+      return `${node.column} in [${(node.values ?? []).map(valueText).join(", ")}]`;
+    case "SessionInList":
+      return `${sessionText(node.path)} in [${(node.values ?? []).map(literalText).join(", ")}]`;
+    case "Exists":
+      return `exists a ${node.table} row where ${renderPolicy(node.condition)}`;
+    case "ExistsRel":
+      return "exists a related row";
+    case "Inherits":
+      return `the row ${node.via_column} points to allows ${operationText(node.operation)}`;
+    case "InheritsReferencing":
+      return `a ${node.source_table} row whose ${node.via_column} points here allows ${operationText(node.operation)}`;
+    case "And":
+      return group(node.exprs ?? [], " and ", "always");
+    case "Or":
+      return group(node.exprs ?? [], " or ", "never");
+    case "Not":
+      return `not (${renderPolicy(node.expr)})`;
+    case "True":
+      return "always";
+    case "False":
+      return "never";
+    default:
+      return String(node.type ?? "?");
+  }
+}
+
+/** The longest an agent token's label is kept. */
+export const MAX_TOKEN_LABEL = 200;
+
+/**
+ * An agent token's label as it is kept and shown: the agent's own text,
+ * without control characters, line or paragraph separators and bidi
+ * overrides (which could forge or reorder lines where it is logged or
+ * shown), at most {@link MAX_TOKEN_LABEL} characters. Empty when none is left.
+ */
+export function cleanTokenLabel(label: unknown): string {
+  if (typeof label !== "string") return "";
+  return label
+    .replace(
+      /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g,
+      " ",
+    )
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_TOKEN_LABEL)
+    .trim();
 }

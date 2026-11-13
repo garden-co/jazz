@@ -106,6 +106,8 @@ export function createApiDataSource(options: {
   schema: WasmSchema;
   /** Whose permissions reads and writes run under; undefined for the backend's own. */
   as: () => InspectAs | undefined;
+  /** The backend's warning about the latest rows (e.g. no claims given), or null. */
+  onWarning?: (warning: string | null) => void;
   refreshIntervalMs?: number;
 }): ApiDataSource {
   const listeners = new Set<() => void>();
@@ -160,6 +162,7 @@ export function createApiDataSource(options: {
             ...(as !== undefined ? { as } : {}),
           });
           if (!stopped) {
+            options.onWarning?.(answer.warning ?? null);
             setState({
               key,
               data: answer.rows.map((row) => decodeRow(columns, row)),

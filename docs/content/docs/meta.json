@@ -31,6 +31,7 @@
     "reference/framework-patterns",
     "reference/examples",
     "reference/internals",
-    "reference/local-first-auth-internals"
+    "reference/local-first-auth-internals",
+    "changelog"
   ]
 }

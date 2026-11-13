@@ -44,6 +44,7 @@ import { deliverMutationErrorToAttachedPeers } from "./mutation-error-delivery.j
 import { toError } from "../runtime/util.js";
 import type { RemoteLinkState } from "../runtime/remote-link-state.js";
 import { sameLinkStatus, type LinkStatus } from "../runtime/sync-status.js";
+import { compareRuntimeAdmission } from "./runtime-admission.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -988,9 +989,12 @@ async function connectTab(
     if (context && !workerTelemetryCompatible(context.options, message.options)) {
       throw new Error("incompatible persistent browser telemetry configuration");
     }
-    if (context && context.fingerprint !== message.fingerprint) {
+    const admission = context
+      ? compareRuntimeAdmission(context.fingerprint, message.fingerprint, message.options.schema)
+      : "admit";
+    if (admission !== "admit") {
       throw new Error(
-        differsOnlyInSignIn(context.fingerprint, message.fingerprint)
+        admission === "held-by-another-sign-in"
           ? BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN
           : "incompatible persistent browser configuration",
       );
@@ -1590,7 +1594,15 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
   }
   if (message.type === "prepare-storage-reset") {
     peer.context.intentionalStorageReset = true;
-    result(peer, message.id);
+    // What the reset loses: every write of the store the server hasn't
+    // confirmed, whichever tab made it, recovered ones included.
+    let pendingUploads: number | undefined;
+    try {
+      pendingUploads = peer.context.runtime?.uploadStatus().pending;
+    } catch {
+      pendingUploads = undefined;
+    }
+    result(peer, message.id, undefined, { pendingUploads });
     return;
   }
   if (message.type === "abort-storage-reset") {
@@ -2037,6 +2049,7 @@ function result(
     inspectorAttachmentPhysicalDbName?: string;
     peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
     workerRealmId?: string;
+    pendingUploads?: number;
   },
 ): void {
   if (peer.context.peers.get(peer.tabId) !== peer) return;
@@ -2357,25 +2370,6 @@ function workerTelemetryCompatible(
     }
   }
   return (current.logLevel ?? DEFAULT_WASM_LOG_LEVEL) === (next.logLevel ?? DEFAULT_WASM_LOG_LEVEL);
-}
-
-/**
- * Whether two worker fingerprints of one store differ only in who is signed
- * in (`authClass`, see `createBrowserWorkerFingerprint`). The store is the
- * account's either way (the storage owner already matched), so the tab only
- * waits for the store's current sign-in to go.
- */
-function differsOnlyInSignIn(open: string, requested: string): boolean {
-  try {
-    const { authClass: openAuth, ...openRest } = JSON.parse(open) as Record<string, unknown>;
-    const { authClass: requestedAuth, ...requestedRest } = JSON.parse(requested) as Record<
-      string,
-      unknown
-    >;
-    return openAuth !== requestedAuth && JSON.stringify(openRest) === JSON.stringify(requestedRest);
-  } catch {
-    return false;
-  }
 }
 
 function runtimeKey(options: BrowserWorkerInitOptions): string {

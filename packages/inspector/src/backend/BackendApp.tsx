@@ -7,7 +7,9 @@
 import type { TablePolicies, WasmSchema } from "jazz-tools";
 import {
   decodeGrant,
+  inspectorLink,
   parseInspectorLink,
+  readsClaims,
   type InspectWhoami,
   type InspectorLinkTarget,
 } from "jazz-tools/inspect";
@@ -21,7 +23,12 @@ import { InspectorRoutes } from "../routes.js";
 import { apiUrlFor, createInspectorCall, InspectorApiError, type InspectorCall } from "./api.js";
 import { createApiDataSource } from "./api-data.js";
 import { ApprovalPage } from "./ApprovalPage.js";
-import { BackendProvider, type BackendContextValue } from "./backend-context.js";
+import {
+  BackendProvider,
+  asForApi,
+  type BackendContextValue,
+  type ViewAs,
+} from "./backend-context.js";
 
 interface SchemaAnswer {
   tables: Record<string, WasmSchema[string] & { redacted?: string[] }>;
@@ -49,6 +56,24 @@ export function initialRouteFor(link: InspectorLinkTarget, schema: WasmSchema): 
   return "/data-explorer";
 }
 
+/**
+ * Keep the address bar's fragment on whom the page views as (`#as=…&claims=…`),
+ * so a copied address opens the same view. replaceState: no reload, no new
+ * history entry.
+ */
+function keepViewAsInAddress(viewAs: ViewAs | null): void {
+  if (typeof window === "undefined") return;
+  const { grant: _grant, ...target } = parseInspectorLink(window.location.hash);
+  const base = window.location.href.split("#")[0]!;
+  const as = asForApi(viewAs);
+  const { as: _as, ...rest } = target;
+  window.history.replaceState(
+    null,
+    "",
+    inspectorLink(base, as === undefined ? rest : { ...rest, as }),
+  );
+}
+
 export function BackendApp({
   pageUrl = window.location.href,
   call: givenCall,
@@ -65,9 +90,10 @@ export function BackendApp({
   const [grantText, setGrantText] = useState(link.grant ?? null);
   const grant = useMemo(() => (grantText ? decodeGrant(grantText) : null), [grantText]);
   const [boot, setBoot] = useState<Boot>({ kind: "loading" });
-  const [viewAs, setViewAsState] = useState<string | null>(
-    typeof link.as === "string" ? link.as : (link.as?.userId ?? null),
+  const [viewAs, setViewAsState] = useState<ViewAs | null>(
+    typeof link.as === "string" ? { userId: link.as } : (link.as ?? null),
   );
+  const [warning, setWarning] = useState<string | null>(null);
   const viewAsRef = useRef(viewAs);
   viewAsRef.current = viewAs;
 
@@ -114,7 +140,8 @@ export function BackendApp({
         ? createApiDataSource({
             call,
             schema: boot.schema,
-            as: () => viewAsRef.current ?? undefined,
+            as: () => asForApi(viewAsRef.current),
+            onWarning: setWarning,
           })
         : null,
     [boot, call],
@@ -183,12 +210,16 @@ export function BackendApp({
     whoami: boot.whoami,
     data: data!,
     viewAs,
-    setViewAs: (userId) => {
-      if (userId === viewAsRef.current) return;
-      viewAsRef.current = userId;
-      setViewAsState(userId);
+    setViewAs: (next) => {
+      if (JSON.stringify(next) === JSON.stringify(viewAsRef.current)) return;
+      viewAsRef.current = next;
+      setViewAsState(next);
+      setWarning(null);
+      keepViewAsInAddress(next);
       data!.refresh();
     },
+    warning,
+    permissionsReadClaims: readsClaims(boot.permissions),
     link: link.query || link.table ? link : null,
   };
   return (

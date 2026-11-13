@@ -94,6 +94,7 @@ export abstract class ConnectionManager {
   private clientSchema: WasmSchema | null = null;
   private disposeRuntimeTelemetry: (() => void) | null = null;
   private remoteLinkHintBinding: AbortController | null = null;
+  private readonly clientCreatedListeners = new Set<() => void>();
   private readonly syncStatusListeners = new Set<() => void>();
   private syncStatusBinding: AbortController | null = null;
 
@@ -144,6 +145,7 @@ export abstract class ConnectionManager {
     this.bindRemoteLinkHint(client);
     this.bindSyncStatus();
     this.onClientCreated({ schemaKey, schema: runtimeSchema, client });
+    for (const listener of [...this.clientCreatedListeners]) listener();
     return client;
   }
 
@@ -247,7 +249,24 @@ export abstract class ConnectionManager {
   }
 
   protected onTransportLinkStateChange(listener: () => void, signal: AbortSignal): void {
-    this.getCurrentClient()?.getRuntime().onRemoteLinkStateChange?.(listener, signal);
+    if (signal.aborted) return;
+    const bind = () => {
+      this.getCurrentClient()?.getRuntime().onRemoteLinkStateChange?.(listener, signal);
+      listener();
+    };
+    if (this.getCurrentClient()) {
+      bind();
+      return;
+    }
+    // Lifecycle listeners can precede the first query's lazy runtime creation.
+    const cancel = () => this.clientCreatedListeners.delete(created);
+    const created = () => {
+      cancel();
+      signal.removeEventListener("abort", cancel);
+      if (!signal.aborted) bind();
+    };
+    this.clientCreatedListeners.add(created);
+    signal.addEventListener("abort", cancel, { once: true });
   }
 
   /** Whether this Db's writes reached the server; see {@link SyncStatus}. */
@@ -377,7 +396,7 @@ export abstract class ConnectionManager {
     this.client?.updateCookieSession(auth.cookieSession);
   }
 
-  abstract deleteClientStorage(): Promise<void>;
+  abstract deleteClientStorage(): Promise<{ pendingUploads?: number } | void>;
 
   /**
    * Whether this connection can still serve its Db: no storage reset took
@@ -428,12 +447,17 @@ export abstract class ConnectionManager {
       }) ?? null;
   }
 
-  async waitForPendingWrites(): Promise<void> {
+  /**
+   * Wait until every write committed so far is answered, for a graceful
+   * shutdown. With `inFlightStreams`, streaming writes still sending their
+   * value finish first, until that signal aborts (see `Db.letStreamsFinish`).
+   */
+  async waitForPendingWrites(options: { inFlightStreams?: AbortSignal } = {}): Promise<void> {
     const runtime = this.getCurrentClient()?.getRuntime();
     if (!runtime) return;
     if (!runtime.waitForPendingWrites)
       throw new Error("Runtime does not support graceful sync shutdown");
-    await runtime.waitForPendingWrites("global");
+    await runtime.waitForPendingWrites("global", { inFlightStreams: options.inFlightStreams });
   }
 
   async shutdown(): Promise<void> {

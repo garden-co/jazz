@@ -9,6 +9,7 @@ import {
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import type { ShutdownOptions } from "../runtime/db.js";
 import { bearerFetch } from "../runtime/credentialed-transport.js";
+import { sessionRefreshLockName } from "../runtime/native-runtime/session-renewal-wire.js";
 import {
   createRegisteredJazzClient,
   type CreateAccountDb,
@@ -27,12 +28,7 @@ import {
   type LocalFirstModule,
 } from "../runtime/local-first-upgrade.js";
 import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
-import {
-  coreInitial,
-  createStartedJazzSession,
-  refuseRemovedSessionOptions,
-  type JazzSession,
-} from "./jazz-session.js";
+import { coreInitial, createStartedJazzSession, type JazzSession } from "./jazz-session.js";
 import { DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
 import {
@@ -47,8 +43,12 @@ import {
   leftBehindReplicas,
   whileNoTabHolds,
   wipeLeftBehindReplicas,
+  replicaHeld,
+  WIPE_TIMEOUT_MS,
   type ReplicaOwner,
 } from "./left-behind-replicas.js";
+import { refuseInvalidSessionConfig } from "./config-options.js";
+import { refuseWindowJazzConflict } from "../runtime/page-handle.js";
 import { accountForgotten, type AccountStore } from "../accounts/persistence.js";
 import { rememberBackendUser } from "../accounts/enrollment.js";
 
@@ -138,6 +138,34 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
     localFirst?: "now" | "background";
   };
 
+/**
+ * Every option `createJazzClient` takes in a browser, checked against the
+ * config type both ways (`appId` and `backendSecret` are refused by type, and
+ * `appId` by name too).
+ */
+const BROWSER_SESSION_OPTIONS = {
+  serverUrl: true,
+  initial: true,
+  linkDeviceAccountOnSignUp: true,
+  onSignedOut: true,
+  clearOnSignOut: true,
+  client: true,
+  localFirst: true,
+  scope: true,
+  driver: true,
+  env: true,
+  runtimeSources: true,
+  dbName: true,
+  initialSyncFlushEvery: true,
+  logLevel: true,
+  telemetryCollectorUrl: true,
+  devMode: true,
+  slowQueryThresholdMs: true,
+  store: true,
+  fetch: true,
+  bearer: true,
+} as const satisfies Record<Exclude<keyof JazzClientConfig, "appId" | "backendSecret">, true>;
+
 /** @internal A browser session's core, which follows your auth's signed-in user. */
 export type BrowserJazzSession = UserFollowingSession<JazzClient>;
 
@@ -185,8 +213,12 @@ export function createJazzClient(config: JazzClientConfig): Promise<JazzSession<
 export async function openBrowserSessionCore(
   config: JazzClientConfig,
 ): Promise<BrowserJazzSession> {
-  refuseClientAppId(config);
-  refuseRemovedSessionOptions(config);
+  if (config && typeof config === "object") refuseClientAppId(config);
+  refuseInvalidSessionConfig(config, BROWSER_SESSION_OPTIONS);
+  // `window.__jazz` is Jazz's page handle: an app's own global there would
+  // only fail later, when the local-first client opens.
+  const page = (globalThis as { window?: Window }).window;
+  if (page && typeof page.document !== "undefined") refuseWindowJazzConflict(page);
   if (config.serverUrl === null) return createDeviceOnlySession(config);
   const serverUrl = config.serverUrl ?? DEFAULT_SERVER_URL;
   const {
@@ -217,40 +249,32 @@ export async function openBrowserSessionCore(
   const wipesOnSignOut = !!clearOnSignOut && (config.driver?.type ?? "persistent") === "persistent";
   // Local-first replicas a sign-out may leave behind (see `leftBehindReplicas`).
   const leftBehind = wipesOnSignOut && loadLocalFirst ? leftBehindReplicas(registry) : undefined;
-  // Accounts whose local-first client is (or was) the session's own in this
-  // page: signing them out here wiped their replica.
-  const inSession = new Set<string>();
   // Accounts this page is opening a local-first client for, and replicas
   // being wiped: an account's open waits for its wipe to finish.
   const opening = new Set<string>();
   const wiping = new Map<string, Promise<void>>();
-  // Accounts signed out in this page, whose entry goes once no tab holds
-  // their replica (another tab may still have it open).
-  const signedOutHere = new Set<string>();
-  const forgetSignedOut = (id: string) => {
-    if (!leftBehind || !signedOutHere.has(id)) return;
-    void whileNoTabHolds(registry, id, async () => {
-      if (!signedOutHere.delete(id) || opening.has(id) || inSession.has(id)) return;
-      leftBehind.forget(id);
-    }).catch(() => {});
-  };
-  /** Open `account`'s local-first client, recorded and held open against other tabs' wipes. */
+  /**
+   * Open `account`'s local-first client, held open against other tabs'
+   * wipes (a guest's too: its tabs share one store). A user the backend
+   * signed in is also recorded, so a later load wipes what a sign-out leaves
+   * behind.
+   */
   const openReplica = async (createDb: CreateAccountDb, account: AccountHandle) => {
-    // Only a user the backend signed in: a guest's replica is the device's own.
-    if (!leftBehind || !rememberBackendUser(account)) return openLocalFirst(createDb, account);
+    if (!leftBehind) return openLocalFirst(createDb, account);
+    // A guest's replica is the device's own: no later load wipes it.
+    const recorded = rememberBackendUser(account);
     opening.add(account.id);
-    signedOutHere.delete(account.id);
     try {
       await wiping.get(account.id)?.catch(() => {});
-      leftBehind.remember(account);
+      if (recorded) leftBehind.remember(account);
       const release = await holdReplica(registry, account.id);
-      // Again once held: another tab's forget may have run before it was.
-      leftBehind.remember(account);
+      // Again once held: another tab's wipe may have forgotten it before.
+      if (recorded) leftBehind.remember(account);
       let client: JazzClient;
       try {
         client = await openLocalFirst(createDb, account);
       } catch (error) {
-        release();
+        await release();
         throw error;
       }
       const shutdown = client.shutdown.bind(client);
@@ -258,14 +282,177 @@ export async function openBrowserSessionCore(
         try {
           await shutdown(options);
         } finally {
-          release();
-          forgetSignedOut(account.id);
+          await release();
         }
       };
       return client;
     } finally {
       opening.delete(account.id);
     }
+  };
+  /**
+   * Wipe `account`'s replica once no tab has it open, from a client opened
+   * only to delete it: never under an open client, so no tab's store is
+   * reset beneath it. `"held"` while a tab has it open (that tab's user is
+   * still signed in there; the last tab out wipes). `"given-up"` when its
+   * open hangs past the timeout before the delete began: it lets go of the
+   * lock, so an open of the account doesn't wait on it. `ownPending` is what
+   * the signing-out tab counted itself, for a worker that doesn't say.
+   */
+  const wipeReplica = async (
+    open: () => Promise<JazzClient>,
+    account: string,
+    ownPending = 0,
+  ): Promise<"wiped" | "held" | "given-up"> => {
+    let wiped = false;
+    const ran = await whileNoTabHolds(registry, account, async () => {
+      const timeout = AbortSignal.timeout(WIPE_TIMEOUT_MS);
+      let deleting = false;
+      const run = (async () => {
+        // Its socket carries the signed-out user's sign-in, or none: a
+        // write the server still accepts may upload meanwhile.
+        const client = await open();
+        let pendingUploads: number | undefined;
+        try {
+          // Given up on while it opened: leave the replica for a retry.
+          if (timeout.aborted) return;
+          deleting = true;
+          ({ pendingUploads } = await client.db.wipeClientStorage());
+        } finally {
+          await client.shutdown();
+        }
+        wiped = true;
+        leftBehind?.forget(account);
+        const lost = Math.max(pendingUploads ?? 0, ownPending);
+        if (lost > 0)
+          console.warn(
+            `Jazz signed out and wiped ${lost} write(s) the server hadn't confirmed, as clearOnSignOut asks. They are gone from this device; any the server did receive stay there.`,
+          );
+      })();
+      run.catch(() => {});
+      wiping.set(account, run);
+      // Given up on before its delete began: let go of the lock at once. A
+      // delete that began is waited for, however long it takes: an open of
+      // the account meanwhile would get half-wiped storage.
+      const givenUp = new Promise<void>((resolve) => {
+        const giveUp = () => {
+          if (!deleting) resolve();
+        };
+        if (timeout.aborted) giveUp();
+        timeout.addEventListener("abort", giveUp, { once: true });
+      });
+      try {
+        await Promise.race([run, givenUp]);
+      } finally {
+        if (wiping.get(account) === run) wiping.delete(account);
+      }
+    });
+    return !ran ? "held" : wiped ? "wiped" : "given-up";
+  };
+  // Signed-out accounts whose wipe waits for the tabs that still hold them.
+  const retrying = new Set<string>();
+  /**
+   * Try a wipe that couldn't run (a tab held the replica, or its open hung)
+   * again every `WIPE_RETRY_MS` in this page, so it doesn't wait for a
+   * reload. Only while no tab holds the replica, this page isn't on the
+   * account again, and (a user the backend signed in) the backend no longer
+   * names them: a tab that closed while still signed in leaves its unsynced
+   * writes for that user's next sign-in. `open` gives the client to delete
+   * through; `parked`, one opened for that already, is closed when it stops.
+   */
+  const retryWipe = (
+    account: AccountHandle,
+    open: () => Promise<JazzClient>,
+    ownPending: number,
+    parked?: JazzClient,
+  ) => {
+    if (retrying.has(account.id)) {
+      void parked?.shutdown().catch(() => {});
+      return;
+    }
+    retrying.add(account.id);
+    const stop = () => {
+      retrying.delete(account.id);
+      void parked?.shutdown().catch(() => {});
+    };
+    const tick = async () => {
+      const snapshot = session?.getSnapshot();
+      if (
+        !snapshot ||
+        snapshot.status === "closed" ||
+        snapshot.account?.id === account.id ||
+        opening.has(account.id)
+      )
+        return stop();
+      try {
+        if (await replicaHeld(registry, account.id)) return schedule();
+        if (rememberBackendUser(account)) {
+          const signedIn = await signedInIdentity(registry, config.fetch);
+          if (
+            signedIn?.issuer === account.identity.issuer &&
+            signedIn.subject === account.identity.subject
+          )
+            return schedule();
+        }
+        if ((await wipeReplica(open, account.id, ownPending)) === "wiped") {
+          // Its shutdown was the wipe's.
+          parked = undefined;
+          return stop();
+        }
+      } catch {
+        // The backend or the storage failed this time: try again.
+      }
+      schedule();
+    };
+    const schedule = () => void setTimeout(() => void tick(), WIPE_RETRY_MS);
+    schedule();
+  };
+  /**
+   * How this page signs a local-first account out under `clearOnSignOut`:
+   * upload what the server still accepts, close this tab's client (letting
+   * go of its hold), then wipe if no other tab has the account open, or
+   * retry until none has. Resolves whether it wiped now.
+   */
+  const wipeSignedOut = async (client: JazzClient, account: AccountHandle) => {
+    // Loaded first: a chunk that won't load fails the sign-out while the
+    // client still works, rather than after it closed.
+    const { createClient } = await loadLocalFirst!();
+    await client.db.waitForSync({ timeoutMs: 5_000 }).catch(() => {});
+    // What this tab counts itself, for a worker too old to count the store.
+    const ownPending = client.db.getSyncStatus().pendingUploads;
+    await client.shutdown();
+    const outcome = await wipeReplica(
+      () => openLocalFirst(createClient, account),
+      account.id,
+      ownPending,
+    );
+    if (outcome === "held") {
+      // The account can't be opened once signed out: open the client the
+      // retry deletes through now. It holds no replica, so it keeps no tab's
+      // wipe waiting, and it stays a client of the store the other tab has
+      // open. Without it, a later load's sweep wipes a recorded user.
+      const parked = await openLocalFirst(createClient, account).catch(() => undefined);
+      if (parked) retryWipe(account, async () => parked, ownPending, parked);
+    } else if (outcome === "given-up" && rememberBackendUser(account)) {
+      // Its open hung: reopen the user from the record, as a later load would.
+      retryWipe(account, () => reopenSignedOut(account, createClient), ownPending);
+    }
+    return outcome === "wiped";
+  };
+  /** A signed-out backend user's local-first client, reopened from what the record keeps. */
+  const reopenSignedOut = async (account: AccountHandle, createDb: CreateAccountDb) => {
+    const { issuer, subject } = account.identity;
+    const remembered = await createAccountManagerWithMinter(
+      {
+        ...config,
+        serverUrl,
+        store: rememberedUserStore({ account: account.id, identity: { issuer, subject } }),
+      },
+      mintLocalFirstTokenInJs,
+    );
+    const reopened = remembered.getLoggedIn();
+    if (!reopened) throw new Error("Jazz could not reopen the signed-out user to wipe");
+    return openLocalFirst(createDb, reopened);
   };
   let session: BrowserJazzSession | undefined;
 
@@ -293,10 +480,7 @@ export async function openBrowserSessionCore(
     );
     // Only once the session took the new client: a superseded upgrade
     // (a logout or account switch meanwhile) is not remembered.
-    if (upgraded) {
-      upgrades.remember(upgraded);
-      inSession.add(upgraded.id);
-    }
+    if (upgraded) upgrades.remember(upgraded);
   };
 
   const openThin = async (account: AccountHandle) => {
@@ -330,9 +514,7 @@ export async function openBrowserSessionCore(
         console.warn("Jazz could not load the local-first client; starting thin.", error);
         return openThin(account);
       }
-      const client = await openReplica(module.createClient, account);
-      inSession.add(account.id);
-      return client;
+      return openReplica(module.createClient, account);
     }
     return openThin(account);
   };
@@ -342,10 +524,16 @@ export async function openBrowserSessionCore(
     initial: coreInitial(initial),
     // A memory-only client has no storage to wipe.
     clearOnSignOut: wipesOnSignOut,
+    ...(leftBehind ? { wipeSignedOut } : {}),
     openClient,
     decorate: followUser({
       registry,
-      events: browserBackendWatchEvents(`jazz-account:${registry}`),
+      // Checks and the sync connection's renewals may both refresh the
+      // app's session: one lock for both, so its cookie rotates once.
+      events: browserBackendWatchEvents(
+        `jazz-account:${registry}`,
+        sessionRefreshLockName(registry),
+      ),
       linkGuest: linkDeviceAccountOnSignUp,
       forgotten: (account) => accountForgotten(accounts, account.id),
       watchAccounts: (changed) => watchStoredSelection(accounts, changed),
@@ -363,17 +551,6 @@ export async function openBrowserSessionCore(
   if (leftBehind && loadLocalFirst) {
     const record = leftBehind;
     const following = session;
-    // Signed out in this page: the session wiped the replica as it did.
-    following.subscribe(() => {
-      const { status, account } = following.getSnapshot();
-      if (status !== "ready" && status !== "signed-out") return;
-      for (const id of inSession) {
-        if (id === account?.id) continue;
-        inSession.delete(id);
-        signedOutHere.add(id);
-        forgetSignedOut(id);
-      }
-    });
     const stillLeftBehind = (account: string) =>
       following.getSnapshot().status !== "closed" &&
       !opening.has(account) &&
@@ -457,6 +634,8 @@ const LOCAL_FIRST_ISSUER = "urn:jazz:local-first";
 
 /** As the backend watch confirms a signed-out answer before it signs anyone out. */
 const CONFIRM_SIGNED_OUT_MS = 2_000;
+/** How often a page tries again a sign-out's wipe that another tab held off. */
+export const WIPE_RETRY_MS = 15_000;
 
 /** Resolves once `session` is ready or signed out. */
 function settledSession(session: BrowserJazzSession): Promise<void> {

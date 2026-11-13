@@ -5,6 +5,7 @@ import { app } from "./schema";
 const ANNOUNCEMENTS_CHAT_ID = process.env.NEXT_PUBLIC_ANNOUNCEMENTS_CHAT_ID!;
 const CHAT_ID = process.env.NEXT_PUBLIC_CHAT_ID!;
 
+// #region default-stack-permissions
 const messagePermissions = definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   const isAdmin = session.where({ "claims.role": "admin" });
   const canMutateGenericChat = { "$createdBy.account": session.user };
@@ -32,3 +33,4 @@ export default {
   ...betterAuthPermissions,
   ...messagePermissions,
 };
+// #endregion default-stack-permissions

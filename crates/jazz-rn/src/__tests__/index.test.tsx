@@ -464,13 +464,25 @@ it("decodes tick events with the current credential refusal and upstream failure
   // The bytes the Rust relay pins in tick_events_command_and_response_have_pinned_bytes.
   expect(
     relay.decodeNativeForegroundResponse(
-      Uint8Array.of(26, 2, 91, 93, 1, 0xac, 0x02, 2, 110, 111, 1, 2, 3, 116, 108, 115, 1),
+      Uint8Array.of(26, 2, 91, 93, 1, 0xac, 0x02, 2, 110, 111, 1, 2, 3, 116, 108, 115, 1, 0),
     ),
   ).toEqual({
     type: "tickEvents",
     eventsJson: "[]",
     authRejection: { sequence: 300, reason: "no" },
-    upstreamFailure: { sequence: 2, reason: "tls", retrying: true },
+    upstreamFailure: { sequence: 2, reason: "tls", retrying: true, code: null },
+  });
+  // ABI 6: a refusal ends with its error code (pinned beside the bytes above).
+  const authorityChanged = Array.from("authority_changed", (char) => char.charCodeAt(0));
+  expect(
+    relay.decodeNativeForegroundResponse(
+      Uint8Array.of(26, 2, 91, 93, 0, 1, 3, 2, 110, 111, 0, 1, 17, ...authorityChanged),
+    ),
+  ).toEqual({
+    type: "tickEvents",
+    eventsJson: "[]",
+    authRejection: null,
+    upstreamFailure: { sequence: 3, reason: "no", retrying: false, code: "authority_changed" },
   });
   expect(relay.decodeNativeForegroundResponse(Uint8Array.of(26, 2, 91, 93, 0, 0))).toEqual({
     type: "tickEvents",
@@ -479,12 +491,12 @@ it("decodes tick events with the current credential refusal and upstream failure
     upstreamFailure: null,
   });
   expect(
-    relay.decodeNativeForegroundResponse(Uint8Array.of(26, 2, 91, 93, 0, 1, 7, 1, 120, 0)),
+    relay.decodeNativeForegroundResponse(Uint8Array.of(26, 2, 91, 93, 0, 1, 7, 1, 120, 0, 0)),
   ).toEqual({
     type: "tickEvents",
     eventsJson: "[]",
     authRejection: null,
-    upstreamFailure: { sequence: 7, reason: "x", retrying: false },
+    upstreamFailure: { sequence: 7, reason: "x", retrying: false, code: null },
   });
   for (const malformed of [
     Uint8Array.of(26, 2, 91, 93),
@@ -494,6 +506,10 @@ it("decodes tick events with the current credential refusal and upstream failure
     Uint8Array.of(26, 2, 91, 93, 0, 1, 7, 1, 120),
     Uint8Array.of(26, 2, 91, 93, 0, 1, 7, 1, 120, 2),
     Uint8Array.of(26, 2, 91, 93, 1, 7, 2, 110, 111),
+    // ABI 6: an upstream failure without its code option, or a bad one.
+    Uint8Array.of(26, 2, 91, 93, 0, 1, 7, 1, 120, 0),
+    Uint8Array.of(26, 2, 91, 93, 0, 1, 7, 1, 120, 0, 2),
+    Uint8Array.of(26, 2, 91, 93, 0, 1, 7, 1, 120, 0, 1, 3, 120),
   ])
     expect(() => relay.decodeNativeForegroundResponse(malformed)).toThrow();
 });

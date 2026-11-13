@@ -5,10 +5,51 @@ interface JazzClassicApiRemoved {
   readonly [classicApiRemoved]: never;
 }
 
+const TABLES =
+  'tables: `import { schema as s } from "jazz-tools"`, `s.table({ ... })` in `s.defineApp({ ... })`';
+const QUERY_HOOKS = "`useAll(query)` or `useOne(query)` (Svelte: `QuerySubscription`)";
+const SESSION =
+  "the session: `useJazzSession()` (Svelte: `getJazzSession()`), whose `user` is who is signed in";
+const PROVIDER = '`<JazzProvider config={{ serverUrl: "/jazz" }}>`';
+
+/**
+ * The Jazz 2 replacement for a Classic name, where there is one. Not a rename:
+ * the data model differs (see the README), but it points at where to start.
+ */
+const CLASSIC_REPLACEMENTS: Record<string, string> = {
+  co: TABLES,
+  z: TABLES,
+  CoMap: TABLES,
+  CoList: TABLES,
+  Group: "row-level permission policies: `s.definePermissions(app, ...)`",
+  Account: SESSION,
+  useCoState: QUERY_HOOKS,
+  useSuspenseCoState: "`useAllSuspense(query)` or `useOneSuspense(query)`",
+  CoState: "`QuerySubscription` / `QuerySubscriptionOne`",
+  useAccount: SESSION,
+  useSuspenseAccount: SESSION,
+  useAccountOrGuest: SESSION,
+  AccountCoState: SESSION,
+  useJazzContext: "`useDb()` for the database, and " + SESSION,
+  JazzReactProvider: PROVIDER,
+  JazzReactNativeProvider: PROVIDER,
+  JazzExpoProvider: PROVIDER,
+  SyncConnectionStatus: "`syncStatus()`",
+  sync: '`config={{ serverUrl: "/jazz" }}`',
+};
+
 function failClassicApi(operation: string): never {
+  // `co.map` and `JazzProvider.sync` are named by their Classic part.
+  const [head, member] = operation.split(".");
+  const known = (name: string | undefined) =>
+    name !== undefined && Object.hasOwn(CLASSIC_REPLACEMENTS, name)
+      ? CLASSIC_REPLACEMENTS[name]
+      : undefined;
+  const replacement = known(head) ?? known(member);
   const error = new Error(
     `[JAZZ_CLASSIC_API_REMOVED] ${operation} belongs to Jazz Classic (0.x) ` +
       `and is not supported by this Jazz 2 package.\n\n` +
+      (replacement ? `In Jazz 2, start from ${replacement}.\n\n` : "") +
       `Jazz 2 uses relational tables, queries, and row-level permission policies. ` +
       `This is not a rename-only migration.\n\n` +
       `Read node_modules/jazz-tools/README.md or https://jazz.tools/llms-full.txt before continuing.`,

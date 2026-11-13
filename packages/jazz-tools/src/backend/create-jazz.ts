@@ -1,5 +1,6 @@
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { verifyChallenge } from "../local-first-auth/server.js";
+import { serverSigningKey } from "./signing-key.js";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Http2SecureServer, Http2Server } from "node:http2";
 import type { Duplex } from "node:stream";
@@ -8,14 +9,23 @@ import { join, resolve } from "node:path";
 import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
 import { registerInProcessTransport } from "../runtime/in-process-transport.js";
 import { accountAppId, localFirstAccountId } from "../accounts/local-first.js";
+import { AUTHENTICATE_EXPIRES_AT_MISSING } from "../accounts/registry-client.js";
 import { LOCAL_FIRST_JWT_ISSUER, parseJwtPayload } from "../runtime/client-session.js";
 import { verifyLocalFirstToken } from "../runtime/local-first-token.js";
 import { endpointScope } from "../runtime/client-scope.js";
 import { PostcardWriter } from "../runtime/native-runtime/native-codec.js";
 import {
+  decodeWebSocketFrameBatch,
   encodeWebSocketFrameBatch,
   REAUTHENTICATE_WIRE_MESSAGE_PREFIX,
 } from "../runtime/native-runtime/websocket.js";
+import {
+  SESSION_RENEWAL_HEADER,
+  SESSION_RENEWAL_PRELUDE_FIELD,
+  WIRE_FRAME_RENEW,
+  decodeRenewFrame,
+  encodeRenewSoonFrame,
+} from "../runtime/native-runtime/session-renewal-wire.js";
 import type {
   BrowserWebSocket,
   WebSocketConstructor,
@@ -28,17 +38,9 @@ import {
   encodeStreamRecord,
 } from "../runtime/native-runtime/http-stream-socket.js";
 import { resolveSchemaSource } from "../schema-source.js";
-import {
-  mergePermissionsIntoWasmSchema,
-  type CompiledPermissionsMap,
-} from "../schema-permissions.js";
-import { shippedMigrations } from "../runtime/client-migrations.js";
-import { computeSchemaHash } from "../schema-hash.js";
-import { validateSchemaAndPermissions } from "../dev/schema-validation.js";
-import { deployArtifacts } from "../dev/catalogue.js";
-import { fetchMigrationGraph } from "../dev/migration-graph.js";
-import { DeploymentError, type PublishedTableLens } from "../dev/catalogue-api.js";
-import type { WasmSchema } from "../drivers/types.js";
+import type { CompiledPermissionsMap } from "../schema-permissions.js";
+import { deployApp } from "../dev/catalogue.js";
+import { DeploymentError } from "../dev/catalogue-api.js";
 import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
 import type { SessionCore } from "../session/state.js";
@@ -97,7 +99,7 @@ import { NoJazzAccountError } from "./no-account-error.js";
 import { RequestAuthenticationError } from "./request-auth.js";
 import { optionalPeerImportError } from "./optional-peer.js";
 import { closingBeforeDeadline } from "./socket-deadline.js";
-import { vercelUpgradesSockets } from "./vercel-sockets.js";
+import { importWs, vercelUpgradesSockets } from "./ws-peer.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
@@ -326,12 +328,23 @@ function checkedUser(answer: unknown): JazzUser {
   );
 }
 
+/**
+ * `authenticate`'s answer for an error message: its shape, never its values,
+ * since a wrong answer may well be a token or a session.
+ */
 function describeAnswer(answer: unknown): string {
-  if (typeof answer !== "object" || answer === null) return String(answer);
+  if (typeof answer !== "object" || answer === null) return kindOf(answer);
   const keys = Reflect.ownKeys(answer).map(String);
-  const userId = (answer as { userId?: unknown }).userId;
-  const detail = "userId" in answer ? `, userId: ${JSON.stringify(userId) ?? String(userId)}` : "";
+  const detail =
+    "userId" in answer ? `, userId: ${kindOf((answer as { userId?: unknown }).userId)}` : "";
   return `an object with keys [${keys.join(", ")}]${detail}`;
+}
+
+function kindOf(value: unknown): string {
+  if (value === null || value === undefined) return String(value);
+  if (value === "") return "an empty string";
+  const type = Array.isArray(value) ? "array" : typeof value;
+  return `${/^[aeiou]/.test(type) ? "an" : "a"} ${type}`;
 }
 
 /** `request` without the credentials a browser sends with it (its cookies, an `Authorization` header). */
@@ -394,9 +407,12 @@ export interface AuthenticatedUser extends JazzUser {
    * session's expiry, or its token's `exp`. Required. Shortly before then
    * an open sync session asks its client to connect again, and
    * `authenticate` decides again on that new request, with the client's
-   * current cookies or token. Return the expiry of the session the user is
-   * signed in with (the one a sign-out ends), not of a short-lived access
-   * token your auth refreshes on its own.
+   * current cookies or token: a browser on the app's cookie renews its open
+   * session over HTTP (through `refresh`, if set) without reconnecting.
+   * With `refresh`, return the access token's `exp`, so a sign-out reaches
+   * open sessions within its lifetime. Without it, return the expiry of the
+   * session the user is signed in with (the one a sign-out ends), not of a
+   * short-lived access token nothing refreshes on Jazz's routes.
    */
   expiresAt: number;
 }
@@ -416,10 +432,13 @@ export interface CreateJazzOptions {
    * request, with the client's current cookies. Jazz only ever calls it
    * while handling a request, so your framework's request helpers work.
    *
-   * Only read and verify the session here; never refresh it. Keep auth
-   * middleware that refreshes sessions off Jazz's routes (`basePath`): a
-   * browser with several windows reaching it at once can race a single-use
-   * refresh token and lose the session.
+   * Only read and verify the session here; never refresh it. A session that
+   * needs refreshing (short access tokens, single-use refresh tokens) is
+   * refreshed in `refresh`, which Jazz runs where a response can set the
+   * rotated cookie, one window at a time. Keep other auth middleware that
+   * refreshes sessions off Jazz's routes (`basePath`): a browser with several
+   * windows reaching it at once can race a single-use refresh token and lose
+   * the session.
    *
    * ```ts
    * authenticate: async (request) => {
@@ -444,6 +463,44 @@ export interface CreateJazzOptions {
     | LocalFirstGuest
     | null
     | Promise<AuthenticatedUser | LocalFirstGuest | null>;
+  /**
+   * Refresh the app's own session, as middleware: Jazz runs it on the one
+   * ordinary request a browser makes to ask who is signed in, before a sync
+   * session expires (and on sign-in checks). Call `next` with the request
+   * `authenticate` should see (with the refreshed cookie, if you refreshed),
+   * and return its response with your rotated `Set-Cookie` added.
+   *
+   * A browser asks one window at a time, so a single-use refresh token is
+   * spent once: the next window's request already carries the new cookie.
+   * An open sync session is then renewed in place, without reconnecting,
+   * until the expiry `authenticate` returns on that request. So return the
+   * access token's `exp` from `authenticate`: a sign-out or ban reaches open
+   * sessions within one access token's lifetime (or at once with
+   * `jazz.revokeUser`).
+   *
+   * ```ts
+   * refresh: async (request, next) => {
+   *   const session = await readSession(request); // your auth's sealed session
+   *   // Refresh a token that expires within two minutes: an open session
+   *   // renews up to ~90 s before the expiry `authenticate` returned.
+   *   if (!session || session.expiresInSeconds > 120) return next(request);
+   *   const refreshed = await session.refresh(); // rotates the refresh token
+   *   if (!refreshed) return next(request); // `authenticate` then says signed out
+   *   const headers = new Headers(request.headers);
+   *   headers.set("cookie", `session=${refreshed.cookie}`);
+   *   const response = await next(new Request(request, { headers }));
+   *   response.headers.append("Set-Cookie", refreshed.setCookie);
+   *   return response;
+   * },
+   * ```
+   *
+   * Bearer-token clients (React Native, backend clients) don't use it: their
+   * token provider refreshes, and each connection asks it for a token.
+   */
+  refresh?: (
+    request: Request,
+    next: (request: Request) => Promise<Response>,
+  ) => Response | Promise<Response>;
   /** The path Jazz is mounted under. Defaults to `/jazz`. */
   basePath?: string;
   /**
@@ -459,8 +516,9 @@ export interface CreateJazzOptions {
    */
   publicUrl?: string | string[];
   /**
-   * The longest a sync session lasts before its client connects again and
-   * `authenticate` decides anew on that new request. Defaults to one hour.
+   * The longest a sync session goes without `authenticate` deciding anew:
+   * on a renewal request (a browser on your cookie renews its open session
+   * in place) or on its client's new connection. Defaults to one hour.
    * A signed-in user's session ends sooner if the `expiresAt` `authenticate`
    * returned comes first; a local-first guest is let in anew each time. So
    * a sign-out elsewhere, a ban or a changed role reaches an open session
@@ -705,6 +763,24 @@ const ACCESS_HEADER = "x-jazz-backend-access";
 // What the secret slots carry to a remote core: the access stated next to
 // the backend credential decides what a request gets, not these.
 const STAND_IN_SECRET = "stated-by-backend-credential";
+
+/**
+ * The app's secret, when this backend holds it: `remote()`'s `secret`, or
+ * an in-process core's own. A core reached with a backend credential holds
+ * only {@link STAND_IN_SECRET}, which is no secret.
+ */
+function appSecretOf(store: JazzStore, core: { adminSecret: string }): string | undefined {
+  if (store.kind === "remote" && store.secret) return store.secret;
+  return core.adminSecret === STAND_IN_SECRET ? undefined : core.adminSecret;
+}
+/** The core's refusal of every local-first identity: it admits none. */
+const LOCAL_FIRST_AUTH_DISABLED = "local_first_auth_disabled";
+/**
+ * What a core that admits no local-first identity tells a guest's session
+ * (`LOCAL_FIRST_AUTH_DISABLED_MESSAGE` in jazz-server's middleware/auth.rs;
+ * vercel-guest.integration.test.ts pins it against a real core).
+ */
+const CORE_REFUSES_GUESTS = "Local-first auth is not enabled";
 // What a browser's request to a public route carries on to a remote core:
 // never its cookies or its app session.
 const REMOTE_FORWARDED_HEADERS = ["accept", "content-type", "if-none-match"];
@@ -919,31 +995,16 @@ async function applyBundle(
     allowDroppingHistory?: boolean;
   },
 ): Promise<string> {
-  const declared = resolveSchemaSource(options.app);
-  const schema = mergePermissionsIntoWasmSchema(declared, {});
-  await validateSchemaAndPermissions(schema, options.permissions);
-  const targetSchemaHash = await computeSchemaHash(schema);
-  const shipped = shippedMigrations(declared);
-  const schemas = new Map<string, WasmSchema>();
-  for (const version of shipped?.schemas ?? []) {
-    schemas.set(version.hash, (version.schema as { tables: WasmSchema }).tables);
-  }
-  schemas.set(targetSchemaHash, schema);
-  const server = { appId: options.appId, serverUrl: origin, adminSecret: options.adminSecret };
-  const graph = await fetchMigrationGraph(server);
-  const confirm = { ...server, allowDroppingHistory: options.allowDroppingHistory };
   // Published, never activated: this backend's sessions are pinned to its
   // bundle, so deployments of the app serve side by side and a rollback is
   // publishing the older bundle again.
-  const deployed = await deployArtifacts(confirm, graph, {
-    targetSchemaHash,
-    schemas: [...schemas].map(([hash, schema]) => ({ hash, schema })),
-    migrations: (shipped?.migrations ?? []).map((edge) => ({
-      fromHash: edge.fromHash,
-      toHash: edge.toHash,
-      forward: edge.forward as PublishedTableLens[],
-    })),
+  const deployed = await deployApp({
+    appId: options.appId,
+    serverUrl: origin,
+    adminSecret: options.adminSecret,
+    app: options.app,
     permissions: options.permissions,
+    allowDroppingHistory: options.allowDroppingHistory,
   }).catch((error: unknown) => {
     // A core without `/bundles` predates per-deployment permissions; it
     // must not be handed a deployment it would activate for every backend.
@@ -1550,7 +1611,16 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
 
   async function askAuthenticate(request: Request): Promise<JazzUser | LocalFirstGuest | null> {
     if (!options.authenticate) return null;
-    return (await options.authenticate(request)) ?? null;
+    try {
+      return (await options.authenticate(request)) ?? null;
+    } catch (error) {
+      // The app's own code failed (a missing auth secret, its session store
+      // down). Its own API calls (forReqUser) get the error as it is; a Jazz
+      // route answers 500 and logs it, rather than reject (see `handle`).
+      const thrown = isObject(error) ? error : new Error(String(error));
+      thrownByAuthenticate.add(thrown);
+      throw thrown;
+    }
   }
 
   /** Whether the app lets `request` in as a device account (`acceptDeviceAccounts`). */
@@ -1572,6 +1642,16 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       );
     }
     return false;
+  }
+
+  /** Say once that the core turns every local-first guest away, whatever `authenticate` says. */
+  let warnedGuestsOffOnCore = false;
+  function warnGuestsOffOnCore() {
+    if (warnedGuestsOffOnCore) return;
+    warnedGuestsOffOnCore = true;
+    console.error(
+      "createJazz: the core refuses local-first guests (local_first_auth_disabled), so device accounts can't sync or link. Start the core with allowLocalFirstAuth: true. A vercel() core started by an older jazz-tools keeps refusing them until a deployment of a newer one restarts it.",
+    );
   }
 
   /** One admin account request to the core: this backend vouches for the identities. */
@@ -1693,12 +1773,17 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    * `authenticate` names, and whether the core already holds an account for
    * them. A browser's session asks this to follow the backend; only a sign-in
    * (`backend-sign-in`) or a link (`backend-link`) assigns an account, so a
-   * local-first guest whose user has none yet can still link to them.
+   * local-first guest whose user has none yet can still link to them. No one
+   * signed in answers 200 `{ user: null }`, not 401.
    */
   async function backendUser(request: Request): Promise<Response> {
     if (request.method !== "POST") return new Response(null, { status: 405 });
     const user = await authenticate(request);
-    if (!user) return new Response("signed_out", { status: 401 });
+    // No one signed in is an answer, not a refused request: 200, so a
+    // signed-out page load logs no red 4xx in devtools. The body has no
+    // `identity`, which every client (alpha.60 on) reads as signed out.
+    // Clients still read a 401 as signed out too, for older backends.
+    if (!user) return Response.json({ user: null }, { headers: { "Cache-Control": "no-store" } });
     let account: string | null;
     try {
       account = await existingAccountOf(user.userId);
@@ -1709,23 +1794,125 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         return new Response("identity_not_authorized", { status: 403 });
       throw error;
     }
+    // A browser renewing its open sync session in place (see
+    // `session-renewal-wire.ts`) gets a ticket for it, on this answer.
+    const renewing = request.headers.get(SESSION_RENEWAL_HEADER);
+    const renewal =
+      renewing && renewing.length <= 128 ? issueRenewalTicket(user, renewing) : undefined;
     return Response.json(
-      { account, identity: identity(user.userId), claims: user.claims ?? {} },
+      {
+        account,
+        identity: identity(user.userId),
+        claims: user.claims ?? {},
+        ...(renewal ? { renewal } : {}),
+      },
       { headers: { "Cache-Control": "no-store" } },
     );
+  }
+
+  /**
+   * Renewal tickets: what lets a sync session be extended over its open
+   * socket. The browser's ordinary request (which carried its cookies, maybe
+   * refreshed by `refresh`) may reach another instance than the one holding
+   * the socket, so the answer travels back through the browser, signed with
+   * a key every instance of this app derives from the core's admin secret
+   * (or, without one, a key of this instance's own: see below).
+   * A ticket names the user, the one session it renews, the claims it was
+   * issued with and the new expiry, and is good for a minute.
+   */
+  // A core reached with a backend credential (`vercel()`, `remote()`) holds
+  // only a public stand-in secret here; `remote()`'s own `secret`, when
+  // given, is the app's. Without either, each
+  // instance signs with a key of its own, and a ticket renews only a socket
+  // the instance that issued it holds. Elsewhere, the session reconnects at
+  // its expiry, as without renewal.
+  const appSecret =
+    store.kind === "remote" && store.secret
+      ? store.secret
+      : core.adminSecret !== STAND_IN_SECRET
+        ? core.adminSecret
+        : undefined;
+  const renewalKey =
+    appSecret === undefined
+      ? randomBytes(32)
+      : createHmac("sha256", appSecret)
+          .update(`jazz-session-renewal-v1\0${accountAppId(appId)}`)
+          .digest();
+  const RENEWAL_TICKET_TTL_SECONDS = 60;
+  const renewalMac = (payload: string) =>
+    createHmac("sha256", renewalKey).update(payload).digest("base64url");
+  const claimsDigest = (claims: unknown) =>
+    createHmac("sha256", renewalKey)
+      .update(stableJson(claims ?? {}))
+      .digest("base64url");
+
+  function issueRenewalTicket(user: JazzUser & { expiresAt: number }, session: string): string {
+    const payload = Buffer.from(
+      JSON.stringify({
+        v: 1,
+        sub: user.userId,
+        ses: session,
+        cl: claimsDigest(user.claims),
+        until: user.expiresAt,
+        exp: Math.floor(Date.now() / 1000) + RENEWAL_TICKET_TTL_SECONDS,
+      }),
+    ).toString("base64url");
+    return `${payload}.${renewalMac(payload)}`;
+  }
+
+  /**
+   * The new expiry (Unix seconds) a ticket gives session `session` of
+   * `userId` admitted with `claims`, when this backend issued it for that
+   * session and it is still fresh; else null.
+   */
+  function readRenewalTicket(
+    ticket: string,
+    session: string,
+    userId: string,
+    claims: unknown,
+  ): number | null {
+    const [payload, mac, extra] = ticket.split(".");
+    if (!payload || !mac || extra !== undefined) return null;
+    const expected = Buffer.from(renewalMac(payload));
+    const given = Buffer.from(mac);
+    if (expected.length !== given.length || !timingSafeEqual(expected, given)) return null;
+    let read: Record<string, unknown>;
+    try {
+      read = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    } catch {
+      return null;
+    }
+    const now = Date.now() / 1000;
+    if (
+      read.v !== 1 ||
+      read.sub !== userId ||
+      read.ses !== session ||
+      read.cl !== claimsDigest(claims) ||
+      typeof read.exp !== "number" ||
+      read.exp <= now ||
+      typeof read.until !== "number" ||
+      !Number.isFinite(read.until) ||
+      read.until <= now
+    ) {
+      return null;
+    }
+    return read.until;
   }
 
   /**
    * Link challenges: a guest links only on a proof made for one challenge,
    * never on its sync token, so a leaked token can't link it to someone
    * else. A challenge names the user it links to and expires quickly; it is
-   * signed with a key only this app's backend instances share (derived from
-   * the core's admin secret), and its nonce becomes the link's single-use
-   * intent id at the core, so a proof works once.
+   * signed with a key only this app's backend holds (derived from the app's
+   * secret, or, where the store has none, this instance's own: see
+   * `serverSigningKey`), and its nonce becomes the link's single-use intent
+   * id at the core, so a proof works once.
    */
-  const challengeKey = createHmac("sha256", core.adminSecret)
-    .update(`jazz-link-challenge-v1\0${accountAppId(appId)}`)
-    .digest();
+  const challengeKey = serverSigningKey(
+    "jazz-link-challenge-v1",
+    accountAppId(appId),
+    appSecretOf(store, core),
+  );
   const LINK_CHALLENGE_TTL_SECONDS = 120;
   const challengeMac = (payload: string) =>
     createHmac("sha256", challengeKey).update(payload).digest("base64url");
@@ -1817,7 +2004,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       } catch (error) {
         // A guest key an earlier link retired: only that link's own user
         // gets an answer (the retry of a link whose response was lost).
-        if ((error as { status?: number }).status !== 403 || !(await userIs(account))) throw error;
+        if (
+          (error as { status?: number }).status !== 403 ||
+          (error as { code?: string }).code === LOCAL_FIRST_AUTH_DISABLED ||
+          !(await userIs(account))
+        )
+          throw error;
         guestRevoked = true;
       }
       if (!guestRevoked) {
@@ -1838,6 +2030,14 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       }
     } catch (error) {
       const status = (error as { status?: number }).status;
+      // A core that admits no local-first accounts refuses every guest, not
+      // this user's link: say that, not that the user has another account.
+      if ((error as { code?: string }).code === LOCAL_FIRST_AUTH_DISABLED) {
+        warnGuestsOffOnCore();
+        // A setup problem on the backend's side, not a refusal of this link:
+        // 503, so the client tries again later.
+        return new Response(LOCAL_FIRST_AUTH_DISABLED, { status: 503 });
+      }
       // Only the core's own refusals refuse the link for good: an invalid
       // link intent (400), a retired or foreign identity (403), a user with
       // no account to check (404), an identity of another account (409).
@@ -1937,6 +2137,50 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       stopExpiry?.();
       socket?.close();
     };
+    // A signed-in browser's session renewed in place (see
+    // `session-renewal-wire.ts`): the id its tickets name, and the claims
+    // it was admitted with, which a ticket must match.
+    let renewal: { session: string; claims: unknown; told: boolean } | undefined;
+    // Tell the client when to renew: well before the session must end, so
+    // a background tab's throttled timer still makes it.
+    const tellRenewal = (at: number) => {
+      if (!renewal || ended) return;
+      renewal.told = true;
+      const left = at - Date.now();
+      // Too close to the expiry to renew: the session reconnects then.
+      if (left < MIN_RENEWAL_NOTICE_MS) return;
+      onEvent(null, {
+        kind: "message",
+        data: Buffer.from(
+          encodeWebSocketFrameBatch([
+            encodeRenewSoonFrame(renewal.session, Math.max(left - RENEWAL_LEAD_MS, left / 2)),
+          ]),
+        ),
+      });
+    };
+    let renewalAt = 0;
+    // A ticket the client brings back over the socket: extend the session to
+    // the expiry `authenticate` gave on the client's renewal request. A
+    // ticket that doesn't hold changes nothing, and the session ends at its
+    // expiry as before.
+    const renew = (ticket: string) => {
+      if (!renewal || !userId || ended) return;
+      const until = readRenewalTicket(ticket, renewal.session, userId, renewal.claims);
+      if (until === null) return;
+      const now = Date.now();
+      const at = reauthenticateAt(now, sessionDeadline(now, until, options.sessionTtlSeconds));
+      if (at === null) return;
+      if (at <= renewalAt) {
+        // Renewed, but no later than before (the app's `refresh` keeps a
+        // token until it nearly expires): ask again, closer to the expiry.
+        tellRenewal(renewalAt);
+        return;
+      }
+      renewalAt = at;
+      stopExpiry?.();
+      stopExpiry = startTimer(reauthenticate, at - now);
+      tellRenewal(at);
+    };
     // Ask the client to connect again, so the app's auth decides on a new
     // request: a planned reconnect the client doesn't show as an outage.
     const reauthenticate = () => {
@@ -1947,14 +2191,19 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     };
     const admit = async (prelude: Uint8Array): Promise<boolean> => {
       const admitted = await admitPrelude(request, prelude);
-      if (!admitted || ended) {
+      if (!admitted || admitted === UNVERIFIED_CREDENTIAL || ended) {
         // An auth failure, not a dropped link: the client stops retrying and
         // reports `offline: auth`, and its session asks the backend whether
-        // anyone is still signed in.
+        // anyone is still signed in. A credential that was sent and not
+        // accepted is `invalid` to the client; none at all is `missing`.
         if (!ended)
           onEvent(null, {
             kind: "message",
-            data: authFailedBatch("session missing: not signed in"),
+            data: authFailedBatch(
+              admitted === UNVERIFIED_CREDENTIAL
+                ? "session invalid: this backend did not accept the credential the client sent"
+                : "session missing: not signed in",
+            ),
           });
         onEvent(null, { kind: "close", code: 1008, reason: "not signed in" });
         end();
@@ -1987,6 +2236,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
           return false;
         }
         stopExpiry = startTimer(reauthenticate, at - admittedAt);
+        renewalAt = at;
+        // Told once the core's hello reached the client, which takes no
+        // other frame before it.
+        if (admitted.renewal)
+          renewal = { session: randomUUID(), claims: admitted.user.claims, told: false };
       } else if (admitted.guest) {
         // A guest's key is its credential; the app lets it in anew each
         // `sessionTtlSeconds`, the same way.
@@ -2001,7 +2255,21 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         );
         stopExpiry = startTimer(end, ttl);
       }
-      socket = core.openSocket(headerPairs(request.headers), onEvent, admitted.access);
+      // A guest's session the core refuses because it admits no device
+      // accounts at all: the client only goes offline, so say why here.
+      // The core refuses in its first message, so only that one is looked at.
+      let firstFromCore = admitted.guest === true;
+      const relay: typeof onEvent = (error, event) => {
+        if (firstFromCore && event.kind === "message" && event.data) {
+          firstFromCore = false;
+          const { buffer, byteOffset, byteLength } = event.data;
+          if (Buffer.from(buffer, byteOffset, byteLength).includes(CORE_REFUSES_GUESTS))
+            warnGuestsOffOnCore();
+        }
+        onEvent(error, event);
+        if (renewal && !renewal.told && event.kind === "message") tellRenewal(renewalAt);
+      };
+      socket = core.openSocket(headerPairs(request.headers), relay, admitted.access);
       return socket.send(admitted.prelude);
     };
     // Messages after the prelude wait for its admission, in order.
@@ -2012,6 +2280,14 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     let waitingBytes = 0;
     const deliver = (data: Uint8Array): Promise<boolean> => {
       if (ended) return Promise.resolve(false);
+      // A renewal ticket is for this backend, never for the core.
+      if (renewal && chain) {
+        const ticket = renewalTicketIn(data);
+        if (ticket !== null) {
+          renew(ticket);
+          return Promise.resolve(true);
+        }
+      }
       if (waitingBytes + data.byteLength > MAX_WAITING_SESSION_BYTES) {
         // 1013 (try again later): the client may come back and send at the
         // pace this host takes.
@@ -2058,6 +2334,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
                 // `authenticate` without `expiresAt` fails the same way every
                 // time: say why, once.
                 if (error instanceof AuthenticateExpiresAtError) warnMissingExpiry(error);
+                if (isThrownByAuthenticate(error)) console.error(AUTHENTICATE_THREW_MESSAGE, error);
                 onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
               }
               end();
@@ -2099,34 +2376,47 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    * the user `authenticate` finds on this request, with their account and
    * claims, vouched for with the backend secret. A local-first guest's
    * prelude passes through: the core verifies its self-signed token. Any
-   * other credential, or a prelude naming another user, is refused.
+   * other credential, or a prelude naming another user, is refused: with
+   * {@link UNVERIFIED_CREDENTIAL} when the client sent a token or backend
+   * client credential that doesn't verify here, with `null` when it sent
+   * none that names anyone.
    */
   async function admitPrelude(
     request: Request,
     prelude: Uint8Array,
-  ): Promise<{
-    prelude: Uint8Array;
-    userId: string | undefined;
-    /** The user (with the claims) `authenticate` named for a vouched session, and until when. */
-    user?: JazzUser & { expiresAt: number };
-    access: BackendAccess;
-    trusted: boolean;
-    expiresAt?: number;
-    /** A local-first guest, let in by `acceptDeviceAccounts`. */
-    guest?: true;
-  } | null> {
+  ): Promise<
+    | typeof UNVERIFIED_CREDENTIAL
+    | {
+        prelude: Uint8Array;
+        userId: string | undefined;
+        /** The user (with the claims) `authenticate` named for a vouched session, and until when. */
+        user?: JazzUser & { expiresAt: number };
+        access: BackendAccess;
+        trusted: boolean;
+        expiresAt?: number;
+        /** A local-first guest, let in by `acceptDeviceAccounts`. */
+        guest?: true;
+        /** The client renews this user's session in place (`session-renewal-wire.ts`). */
+        renewal?: true;
+      }
+    | null
+  > {
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(new TextDecoder().decode(prelude)) as Record<string, unknown>;
     } catch {
       return null;
     }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    // Between the client and this backend only: the core never sees it.
+    const renewal = parsed[SESSION_RENEWAL_PRELUDE_FIELD] === 1;
+    delete parsed[SESSION_RENEWAL_PRELUDE_FIELD];
     const auth = (parsed.auth && typeof parsed.auth === "object" ? parsed.auth : parsed) as Record<
       string,
       unknown
     >;
     const client = await backendClients.resolve(request);
-    if (client === "refused") return null;
+    if (client === "refused") return UNVERIFIED_CREDENTIAL;
     if (client?.kind === "backend") {
       // A trusted backend client syncs with this backend's authority: it
       // states a backend secret (any stand-in) and, to act for a user, that
@@ -2155,13 +2445,17 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       const localFirst =
         typeof token === "string" && parseJwtPayload(token)?.iss === LOCAL_FIRST_JWT_ISSUER;
       const alone = others.every((key) => parsed[key] == null && auth[key] == null);
-      if (!localFirst || !alone || parsed.local_first_audience != null) return null;
+      // A token this backend can't verify (an external JWT, a forged or
+      // malformed one), or one sent with other credentials or for another
+      // endpoint: a credential that was presented and not accepted.
+      if (!localFirst || !alone || parsed.local_first_audience != null)
+        return UNVERIFIED_CREDENTIAL;
       // A guest has no user here: its session is bound to its own key.
-      if (client) return null;
+      if (client) return UNVERIFIED_CREDENTIAL;
       const audience = guestAudience(request, token);
-      if (!audience) return null;
+      if (!audience) return UNVERIFIED_CREDENTIAL;
       // Guests are off unless the app's `authenticate` lets this one in.
-      if (!(await acceptsGuest(request))) return null;
+      if (!(await acceptsGuest(request))) return UNVERIFIED_CREDENTIAL;
       if (audience.endpoint === undefined) {
         // Its own token decides who it is; the backend's secret only vouches
         // for the bundle this socket is pinned to (see `pinnedSocket`).
@@ -2215,6 +2509,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       access: "backend",
       trusted: false,
       expiresAt: client?.expiresAt,
+      // A scoped backend client's session ends with its token instead.
+      ...(renewal && !client ? { renewal: true as const } : {}),
     };
   }
 
@@ -2226,6 +2522,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   >();
   // Sockets accepted for clients, so close() can end them.
   const clientSockets = new Set<WsLikeSocket>();
+  // Why stream sessions this process served lately ended, by id: a send that
+  // arrives after its session ended (refused at sign-in, say) is told that,
+  // not that it reached the wrong instance.
+  const endedStreams = new Map<string, { key: Buffer; reason: string }>();
+  const ENDED_STREAMS_KEPT = 1000;
 
   function openStream(request: Request): Response {
     const id = randomUUID();
@@ -2237,6 +2538,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       if (closed) return;
       closed = true;
       streams.delete(id);
+      endedStreams.set(id, { key, reason: reason || `closed (${code})` });
+      if (endedStreams.size > ENDED_STREAMS_KEPT) {
+        endedStreams.delete(endedStreams.keys().next().value!);
+      }
       try {
         controller.enqueue(encodeStreamClose(code, reason));
         controller.close();
@@ -2286,6 +2591,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     });
   }
 
+  function holdsKey(request: Request, key: Buffer): boolean {
+    const given = Buffer.from(request.headers.get(STREAM_KEY_HEADER) ?? "", "base64url");
+    return given.length === key.length && timingSafeEqual(given, key);
+  }
+
   /**
    * The stream session `id`, when `request` comes from the client that
    * opened it (it carries the session's key) and, once the session is
@@ -2296,14 +2606,19 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   async function ownStream(id: string, request: Request): Promise<ClientSession | Response> {
     const entry = streams.get(id);
     if (!entry) {
+      const ended = endedStreams.get(id);
+      if (ended !== undefined) {
+        if (!holdsKey(request, ended.key))
+          return new Response("not this stream's client", { status: 403 });
+        return new Response(`stream session ended: ${ended.reason}`, { status: 410 });
+      }
       // Sessions live in the process that opened them.
       return new Response(
         "unknown stream session: HTTP stream sessions need a single backend instance or sticky routing",
         { status: 404 },
       );
     }
-    const given = Buffer.from(request.headers.get(STREAM_KEY_HEADER) ?? "", "base64url");
-    if (given.length !== entry.key.length || !timingSafeEqual(given, entry.key)) {
+    if (!holdsKey(request, entry.key)) {
       return new Response("not this stream's client", { status: 403 });
     }
     const socket = entry.session;
@@ -2317,6 +2632,41 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       if (user?.userId !== socket.userId) return new Response("not signed in", { status: 403 });
     }
     return socket;
+  }
+
+  /**
+   * A client's DELETE, ending its stream session. The key alone proves the
+   * client here, unless the request is signed in as someone else: clients
+   * end their sessions as they sign out, once the app's sign-in has gone, so
+   * a signed-out request may end the session it holds the key of. A session
+   * that already ended is done (204): its client often learns that only
+   * from this answer (#5187).
+   */
+  async function endStream(id: string, request: Request): Promise<Response> {
+    const entry = streams.get(id);
+    if (!entry) {
+      const ended = endedStreams.get(id);
+      if (ended && holdsKey(request, ended.key)) return new Response(null, { status: 204 });
+      const refused = await ownStream(id, request);
+      return refused instanceof Response ? refused : new Response(null, { status: 204 });
+    }
+    if (!holdsKey(request, entry.key)) {
+      return new Response("not this stream's client", { status: 403 });
+    }
+    const socket = entry.session;
+    if (socket.trusted) {
+      const client = await backendClients.resolve(request);
+      if (client === null || client === "refused" || client.kind !== "backend") {
+        return new Response("not this backend client", { status: 403 });
+      }
+    } else if (socket.userId !== undefined) {
+      const user = await authenticate(request);
+      if (user && user.userId !== socket.userId) {
+        return new Response("signed in as someone else", { status: 403 });
+      }
+    }
+    socket.close();
+    return new Response(null, { status: 204 });
   }
 
   /**
@@ -2644,6 +2994,25 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     try {
       return await route(request, upgrades);
     } catch (error) {
+      if (error instanceof AuthenticateExpiresAtError) {
+        // The app's own setup is wrong, the same way on every request: tell
+        // the client by a stable code it explains (naming the fix), and log
+        // the detail (what `authenticate` returned) here once. The response
+        // carries nothing of the app's answer.
+        warnMissingExpiry(error);
+        return new Response(AUTHENTICATE_EXPIRES_AT_MISSING, {
+          status: 500,
+          headers: { "Cache-Control": "no-store" },
+        });
+      }
+      if (isThrownByAuthenticate(error)) {
+        // The reason (it can name the app's internals) stays in the logs.
+        console.error(AUTHENTICATE_THREW_MESSAGE, error);
+        return new Response(AUTHENTICATE_FAILED, {
+          status: 500,
+          headers: { "Cache-Control": "no-store" },
+        });
+      }
       if (!(error instanceof BackendClientsUnavailable)) throw error;
       // The reason stays in the backend's logs.
       console.error(error);
@@ -2652,6 +3021,30 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         headers: { "Retry-After": "5" },
       });
     }
+  }
+
+  /**
+   * `handle(request)`, through the app's `refresh` middleware when it has
+   * one: the one route a browser asks before its sync session expires.
+   */
+  async function refreshThen(
+    request: Request,
+    handle: (request: Request) => Promise<Response>,
+  ): Promise<Response> {
+    if (!options.refresh) return handle(request);
+    // Only the browser's own POST, which `route` checked the origin of: a
+    // cross-site navigation (a GET) must never rotate the app's session.
+    if (request.method !== "POST") return new Response(null, { status: 405 });
+    const response = await options.refresh(request, (next) => {
+      if (!isRequestLike(next)) {
+        throw new TypeError("createJazz: refresh must call next with a Request");
+      }
+      return handle(next);
+    });
+    if (!isResponseLike(response)) {
+      throw new TypeError("createJazz: refresh must return the Response next gave it (or another)");
+    }
+    return response;
   }
 
   async function route(request: Request, upgrades: boolean): Promise<Response> {
@@ -2667,7 +3060,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       return backendSignIn(request);
     }
     if (/^\/apps\/[^/]+\/accounts\/backend-user$/.test(path)) {
-      return backendUser(request);
+      return refreshThen(request, backendUser);
     }
     if (/^\/apps\/[^/]+\/backend\/admit$/.test(path)) {
       return admitBackendClient(request);
@@ -2686,12 +3079,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       const id = stream[1] && decodeURIComponent(stream[1]);
       if (!id && request.method === "POST") return openStream(request);
       if (id && request.method === "POST") return streamSend(id, request);
-      if (id && request.method === "DELETE") {
-        const socket = await ownStream(id, request);
-        if (socket instanceof Response) return socket;
-        socket.close();
-        return new Response(null, { status: 204 });
-      }
+      if (id && request.method === "DELETE") return endStream(id, request);
       return new Response(null, { status: 405 });
     }
     if (path.endsWith("/ws")) {
@@ -3441,10 +3829,11 @@ interface SocketUpgrader {
 }
 
 async function socketUpgrader(): Promise<SocketUpgrader> {
-  const { WebSocketServer } = (await import("ws" as string)) as {
-    WebSocketServer: new (options: { noServer: true; maxPayload: number }) => SocketUpgrader;
-  };
-  return new WebSocketServer({ noServer: true, maxPayload: MAX_STREAM_MESSAGE_BYTES });
+  const { WebSocketServer } = await importWs("attach()");
+  return new WebSocketServer({
+    noServer: true,
+    maxPayload: MAX_STREAM_MESSAGE_BYTES,
+  }) as SocketUpgrader;
 }
 
 /** A sync socket's path below `basePath`. */
@@ -3701,6 +4090,61 @@ function refusalCode(error: unknown): string {
   return code ?? "refused";
 }
 
+/** How long before a sync session must end its client is asked to renew it, at most. */
+const RENEWAL_LEAD_MS = 60_000;
+/** The least time before a session must end that a renewal is still asked for. */
+const MIN_RENEWAL_NOTICE_MS = 2_000;
+
+/**
+ * The ticket in `batch` when it is a client's lone renew frame (see
+ * `session-renewal-wire.ts`), else null. Looks at a few bytes before
+ * decoding anything, so sync traffic passes untouched.
+ */
+function renewalTicketIn(batch: Uint8Array): string | null {
+  if (batch.byteLength > 4096 || batch[0] !== 1) return null;
+  let offset = 1;
+  while (offset < batch.byteLength && (batch[offset]! & 0x80) !== 0) offset += 1;
+  if (batch[offset + 1] !== WIRE_FRAME_RENEW) return null;
+  try {
+    const frames = decodeWebSocketFrameBatch(batch);
+    return frames.length === 1 ? decodeRenewFrame(frames[0]!) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** JSON with object keys sorted, so equal claims always digest alike. */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/** A fetch `Request`, also from another realm or framework (Next's `NextRequest`). */
+function isRequestLike(value: unknown): value is Request {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    typeof (value as Request).url === "string" &&
+    typeof (value as Request).headers?.get === "function"
+  );
+}
+
+/** A fetch `Response`, also from another realm or framework (Next's `NextResponse`). */
+function isResponseLike(value: unknown): value is Response {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    typeof (value as Response).status === "number" &&
+    typeof (value as Response).headers?.get === "function"
+  );
+}
+
 /** A WireFrame::Error batch with code AuthFailed and retry Never. */
 /**
  * The error a session sends its client when the expiry its app's auth gave
@@ -3717,6 +4161,33 @@ function reauthenticateBatch(): Buffer {
     `${REAUTHENTICATE_WIRE_MESSAGE_PREFIX} the session reached the expiry authenticate gave it`,
   );
   return Buffer.from(encodeWebSocketFrameBatch([frame.finish()]));
+}
+
+/**
+ * What `admitPrelude` answers for a credential the client sent that doesn't
+ * verify on this backend: the client reports it as `invalid`, not `missing`.
+ */
+const UNVERIFIED_CREDENTIAL = "unverified-credential";
+
+/**
+ * What a Jazz route answers (500) when the app's `authenticate` threw. The
+ * error goes to the backend's log; the response carries only this code.
+ */
+const AUTHENTICATE_FAILED = "authenticate_failed";
+
+/** What the backend logs, before the error, when the app's `authenticate` threw. */
+const AUTHENTICATE_THREW_MESSAGE =
+  "createJazz: your authenticate threw, so Jazz answered this request with a 500. Fix the error below (a missing secret or environment variable is a common cause); authenticate should return null for a request with no signed-in user.";
+
+/** Errors the app's `authenticate` threw (or rejected with), as they reach a route. */
+const thrownByAuthenticate = new WeakSet<object>();
+
+function isThrownByAuthenticate(error: unknown): boolean {
+  return isObject(error) && thrownByAuthenticate.has(error);
+}
+
+function isObject(value: unknown): value is object {
+  return (typeof value === "object" && value !== null) || typeof value === "function";
 }
 
 function authFailedBatch(message: string): Buffer {

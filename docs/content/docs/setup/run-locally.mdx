@@ -50,7 +50,8 @@ export const jazz = createJazz({
   app,
   permissions,
   store: sqlite({ path: "./data/jazz" }),
-  authenticate: async (request) => /* your session */ null,
+  // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
+  authenticate: async (request) => null,
 });
 ```
 

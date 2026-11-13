@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+// The URL a bundler names for the binary; null for bundlers that leave it to
+// wasm-bindgen (browser-worker-assets.ts), set for Metro (its .metro.ts).
+const bundler = vi.hoisted(() => ({ wasmUrl: null as string | null }));
+vi.mock("./browser-worker-assets.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./browser-worker-assets.js")>()),
+  bundledWasmUrl: () => bundler.wasmUrl,
+}));
+
 import {
   createBrowserWorkerAssetScope,
   resolveBrowserWorkerUrl,
@@ -9,6 +17,7 @@ import {
 const originalLocation = globalThis.location;
 
 afterEach(() => {
+  bundler.wasmUrl = null;
   if (originalLocation === undefined) {
     delete (globalThis as Record<string, unknown>).location;
   } else {
@@ -102,6 +111,37 @@ describe("browser SharedWorker asset handoff", () => {
     expect(resolveBrowserWorkerUrl(runtimeSources)).toBe(
       "https://assets.test/jazz/worker/jazz-broker-worker.js?jazz-runtime-version=deploy-42",
     );
+  });
+
+  it("hands the worker the bundler's URL for the binary, which needs no version", () => {
+    // Metro: the worker chunk cannot name the asset, and its URL changes with its bytes.
+    (globalThis as Record<string, unknown>).location = { href: "http://localhost:8081/" };
+    bundler.wasmUrl = "http://localhost:8081/assets/jazz_wasm_bg.0f1e.wasm";
+
+    const resolved = resolveBrowserWorkerRuntimeSources(undefined);
+    expect(resolved).toEqual({ wasmUrl: bundler.wasmUrl });
+    // Resolved sources are resolved again when the worker realm is named.
+    expect(resolveBrowserWorkerRuntimeSources(resolved)).toEqual(resolved);
+    expect(createBrowserWorkerAssetScope(resolved)).toBe(createBrowserWorkerAssetScope(undefined));
+    expect(createBrowserWorkerAssetScope(undefined)).toContain(bundler.wasmUrl);
+
+    // A deployment with other bytes is another worker realm.
+    const firstScope = createBrowserWorkerAssetScope(undefined);
+    bundler.wasmUrl = "http://localhost:8081/assets/jazz_wasm_bg.9a8b.wasm";
+    expect(createBrowserWorkerAssetScope(undefined)).not.toBe(firstScope);
+  });
+
+  it("still requires a version for the app's own URL when the bundler names one", () => {
+    (globalThis as Record<string, unknown>).location = { href: "http://localhost:8081/" };
+    bundler.wasmUrl = "http://localhost:8081/assets/jazz_wasm_bg.0f1e.wasm";
+
+    expect(() => resolveBrowserWorkerRuntimeSources({ wasmUrl: "/own/jazz.wasm" })).toThrow(
+      "runtimeSources.wasmVersion",
+    );
+    expect(
+      resolveBrowserWorkerRuntimeSources({ wasmUrl: "/own/jazz.wasm", wasmVersion: "deploy-42" })
+        ?.wasmUrl,
+    ).toBe("http://localhost:8081/own/jazz.wasm?jazz-runtime-version=deploy-42");
   });
 
   it("versions the bundled worker when only an explicit WASM URL is configured", () => {

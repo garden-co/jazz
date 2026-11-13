@@ -26,7 +26,8 @@
     "jazz-tools": "workspace:*",
     "next": "catalog:default",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",

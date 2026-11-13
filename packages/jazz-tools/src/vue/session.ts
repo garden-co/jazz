@@ -81,7 +81,8 @@ export interface JazzProviderProps extends NoAutoAttachDevTools {
 /**
  * Jazz for a Vue app: owns a session (`config`) or shows yours (`session`),
  * renders the default slot with its client once someone is signed in, and
- * the `signedOut`, `loading` or `error` slot otherwise.
+ * the `signedOut`, `loading` or `error` slot otherwise. Once the session is
+ * closed (`session.close()`), it renders the `closed` slot: nothing by default.
  */
 export const JazzProvider = defineComponent({
   name: "JazzProvider",
@@ -111,7 +112,7 @@ export const JazzProvider = defineComponent({
       props.session ?? ownJazzSession(props.config!, openBrowserSessionCore, { start: false });
     const snapshot = shallowRef(session.getSnapshot());
     provide(SessionKey, { session, snapshot: shallowReadonly(snapshot) });
-    const lease = attachJazzSessionConsumer(session);
+    const lease = attachJazzSessionConsumer(session, "Vue <JazzProvider>");
     const stop = session.subscribe(() => {
       const observed = session.getSnapshot();
       snapshot.value = observed;
@@ -137,6 +138,8 @@ export const JazzProvider = defineComponent({
           { default: slots.default, fallback: loading },
         );
       if (state.status === "signed-out") return slots.signedOut?.() ?? null;
+      // A closed session has no client and never starts again.
+      if (state.status === "closed") return slots.closed?.() ?? null;
       if (state.status === "error")
         return (
           slots.error?.({ error: state.error, retry }) ??

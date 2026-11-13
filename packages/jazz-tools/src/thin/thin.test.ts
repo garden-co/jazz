@@ -54,11 +54,13 @@ afterEach(async () => {
   server = undefined;
 });
 
-async function startServer(): Promise<TestJazz> {
+async function startServer(
+  coreOptions: { maxConnectionsPerUser?: number } = {},
+): Promise<TestJazz> {
   server = await startTestJazz({
     app: app,
     permissions: permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true, ...coreOptions },
   });
   return server;
 }
@@ -445,6 +447,49 @@ describe("thin client", () => {
     expect(links.filter((link) => link.startsWith("offline"))).toEqual(["offline network"]);
   }, 60_000);
 
+  // R42: tabs of one user past the server's connection cap per user. Before,
+  // the server evicted the oldest tab, which reconnected and evicted the next
+  // one, in a loop of hundreds of reconnects a minute that the app never saw.
+  // Now the tab past the cap waits, reports the cap as its link's failure,
+  // and joins once a slot frees; the tabs already in are never disturbed.
+  it("a tab past the connection cap per user waits, names the cap, and joins when a tab closes", async () => {
+    const server = await startServer({ maxConnectionsPerUser: 2 });
+    const secret = formatAuthSecret(new Uint8Array(32).fill(0x42));
+    const tabs = [await thinDb(server, secret), await thinDb(server, secret)];
+    const drops: string[] = [];
+    for (const [index, tab] of tabs.entries()) {
+      await tab.insert(app.notes, { text: `tab ${index}`, done: false }).wait({ tier: "global" });
+      expect(tab.getSyncStatus().link).toEqual({ state: "connected" });
+      tab.onSyncStatusChange(({ link }) => {
+        if (link.state !== "connected") drops.push(`tab ${index}: ${link.state}`);
+      });
+    }
+
+    const extra = await thinDb(server, secret);
+    const unsubscribe = extra.subscribe(app.notes, () => undefined);
+    await expect
+      .poll(() => extra.getSyncStatus().link, { timeout: 10_000 })
+      .toEqual({ state: "offline", reason: "network", retrying: true });
+    expect(extra.getSyncStatus().lastError).toMatchObject({
+      kind: "network",
+      message: expect.stringContaining("connection cap per user"),
+    });
+    // Its retries back off and never disturb the tabs that are in.
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(drops).toEqual([]);
+    for (const tab of tabs) expect(tab.getSyncStatus().link).toEqual({ state: "connected" });
+
+    // A tab closes: the waiting one joins, and the other tab stays in.
+    const closing = tabs.pop()!;
+    opened.splice(opened.indexOf(closing), 1);
+    await closing.shutdown();
+    await expect
+      .poll(() => extra.getSyncStatus().link, { timeout: 15_000 })
+      .toEqual({ state: "connected" });
+    expect(drops.filter((drop) => drop.startsWith("tab 0"))).toEqual([]);
+    unsubscribe();
+  }, 60_000);
+
   it("sends a write again when its answer is lost with the connection, and the server writes it once", async () => {
     const server = await startServer();
     const db = await thinDb(server);
@@ -765,6 +810,64 @@ describe("thin client", () => {
     await expect.poll(() => liveError?.message).toMatch(/for good/);
     unsubscribe();
     expect(db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "stopped" });
+  }, 60_000);
+
+  // E12: a sign-out drains writes with `shutdown({ waitForSync: true })`.
+  // Once the server refuses the sign-in (the user's access was revoked),
+  // nothing answers a write that waits to go out, and nothing renews a
+  // stopping runtime's credential: the drain fails instead of hanging, and
+  // the write ends saying why, not that it timed out.
+  it("fails the shutdown drain while the server refuses its sign-in, and says so to the write", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const internals = runtime as unknown as {
+      carrier: unknown;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    internals.lost(internals.carrier, {
+      code: "auth_failed",
+      retry: "never",
+      message: "session revoked: revokeUser",
+    });
+    expect(db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "auth" });
+    const write = db.insert(app.notes, { text: "after the ban", done: false });
+    const outcome = write.wait({ tier: "global" }).catch((error: unknown) => error);
+    await expect.poll(() => db.getSyncStatus().pendingUploads).toBe(1);
+    // The upgrade's drain runs beside the app, which may still renew the
+    // credential: it waits through the refusal until the app shuts down
+    // (`endStreamWait` aborts its signal), and then fails too.
+    const appRunning = new AbortController();
+    let upgradeDrain: unknown = "pending";
+    void runtime.waitForPendingWrites("global", { inFlightStreams: appRunning.signal }).then(
+      () => (upgradeDrain = "drained"),
+      (error: unknown) => (upgradeDrain = error),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(upgradeDrain).toBe("pending");
+    appRunning.abort();
+    await expect
+      .poll(() => upgradeDrain)
+      .toMatchObject({ message: expect.stringMatching(/refused this client's sign-in/) });
+    // A drain that waits through the refusal would never settle.
+    await expect(db.shutdown({ waitForSync: true })).rejects.toMatchObject({
+      name: "GracefulShutdownSyncError",
+    });
+    // `waitForSync` still waits: the app may renew the credential.
+    let synced = false;
+    void db.waitForSync().then(
+      () => (synced = true),
+      () => (synced = true),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(synced).toBe(false);
+    await db.shutdown();
+    const error = (await outcome) as Error;
+    expect(error.name).toBe("ThinRequestNotSentError");
+    expect(error.message).toMatch(
+      /the server refused this client's sign-in \(auth_failed: session revoked: revokeUser\)/,
+    );
   }, 60_000);
 
   it("fails a transaction its connection took with it, and nothing else", async () => {

@@ -42,6 +42,7 @@ import {
   insertInSessionTab,
   openSessionTab,
   sessionTabState,
+  runInSessionTab,
   crashSessionTab,
 } from "./tests/browser/session-tab-node.js";
 import {
@@ -252,6 +253,7 @@ export default defineConfig({
         sessionTabState: async (_context, id) => sessionTabState(id),
         sessionTabInsert: async (_context, id, title) => insertInSessionTab(id, title),
         sessionTabHoldBackend: async (_context, id, hold) => holdSessionTabBackend(id, hold),
+        sessionTabRun: async (_context, id, action, title) => runInSessionTab(id, action, title),
         sessionTabClose: async (_context, id) => closeSessionTab(id),
         sessionTabCrash: async (_context, id) => crashSessionTab(id),
         jazzAppSignUp: async (_context, frontUrl, originUrl, userId) =>

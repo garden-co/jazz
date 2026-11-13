@@ -14,11 +14,12 @@ import {
   type JazzClient,
   type OpenJazzClientConfig,
 } from "../react-native/create-jazz-client.js";
+import { refuseInvalidSessionConfig } from "../session/config-options.js";
 import { refuseClientAppId } from "../runtime/client-scope.js";
+import { bearerFetch } from "../runtime/credentialed-transport.js";
 import {
   coreInitial,
   createStartedJazzSession,
-  refuseRemovedSessionOptions,
   type JazzSession,
 } from "../session/jazz-session.js";
 
@@ -64,6 +65,27 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
     onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
   };
 
+/** Every option `createJazzClient` takes on this host, checked against its config type. */
+const NATIVE_SESSION_OPTIONS = {
+  serverUrl: true,
+  initial: true,
+  linkDeviceAccountOnSignUp: true,
+  onSignedOut: true,
+  scope: true,
+  driver: true,
+  env: true,
+  runtimeSources: true,
+  dbName: true,
+  initialSyncFlushEvery: true,
+  logLevel: true,
+  telemetryCollectorUrl: true,
+  devMode: true,
+  slowQueryThresholdMs: true,
+  store: true,
+  bearer: true,
+  nativeRelay: true,
+} as const satisfies Record<Exclude<keyof JazzClientConfig, "appId" | "backendSecret">, true>;
+
 /**
  * Open a Jazz session on this device: who is signed in, and the client that
  * reads and writes as them. Resolves once it started; rejects if it can't.
@@ -78,8 +100,8 @@ export function createJazzClient(config: JazzClientConfig): Promise<JazzSession<
 export async function openNativeSessionCore(
   config: JazzClientConfig,
 ): Promise<UserFollowingSession<JazzClient>> {
-  refuseClientAppId(config);
-  refuseRemovedSessionOptions(config);
+  if (config && typeof config === "object") refuseClientAppId(config);
+  refuseInvalidSessionConfig(config, NATIVE_SESSION_OPTIONS);
   const { serverUrl } = config;
   const initial = coreInitial(config.initial);
   // Jazz on this device only: no backend names a user, so the session opens
@@ -110,6 +132,9 @@ export async function openNativeSessionCore(
       linkGuest: config.linkDeviceAccountOnSignUp,
       forgotten: (account) => accountForgotten(accounts, account.id),
       onSignedOut,
+      // Ask "who is signed in" with the app's bearer, as sign-in does: a
+      // backend that authenticates by bearer, not cookie, never answers otherwise.
+      ...(config.bearer ? { fetch: bearerFetch(config.bearer) } : {}),
     }),
   });
   await firstBackendAnswer(session);

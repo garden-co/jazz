@@ -15,7 +15,12 @@ import {
   type InspectEnv,
   type StoredToken,
 } from "./client.js";
-import { InspectError, INSPECT_TOKEN_PREFIX, type InspectRequest } from "./protocol.js";
+import {
+  InspectError,
+  INSPECT_TOKEN_PREFIX,
+  type InspectAs,
+  type InspectRequest,
+} from "./protocol.js";
 
 export interface InspectCliIo {
   stdout: (text: string) => void;
@@ -36,6 +41,8 @@ export const INSPECT_HELP = `jazz-tools inspect: read and change an app's data t
   schema                        Tables, columns, history tables and permissions
   query '<json>' [--as <user>]  Run a query: {"table":"todos","where":{"done":false},
                                 "orderBy":[["title","asc"]],"limit":20}
+  explain '<json>' --as <user>  Why the user can or can't read each row the query
+                                matches: which read-policy clause allowed it
   get <table> <id> [--as <user>]
   history <table> <id>          The row's versions, with who made each
   insert <table> '<values>' [--id <id>] [--as <user>]
@@ -52,6 +59,9 @@ Options:
                  else ${DEFAULT_APP_URL}. Jazz is assumed under /jazz unless the
                  URL names another path.
   --as <user>    Run under this user's permissions (the app's user id)
+  --claims <json>  With --as: the user's session claims, e.g. '{"role":"manager"}'.
+                 Policies that read claims see none unless you pass them; answers
+                 carry a warning when that may matter
 
 Locally (NODE_ENV=development, on this machine) no login is needed. Elsewhere,
 \`login\` asks a person who passes the app's \`inspect\` hook to approve a token.
@@ -61,6 +71,7 @@ Tokens are kept in ~/.config/jazz/inspect-tokens.json; JAZZ_INSPECT_TOKEN wins.
 const VALUE_FLAGS = new Set([
   "--app",
   "--as",
+  "--claims",
   "--ttl",
   "--tables",
   "--label",
@@ -138,9 +149,19 @@ export async function runInspectCommand(args: string[], io: InspectCliIo): Promi
       callInspector(endpoint, request, {
         token: (await store.get(endpoint))?.token,
         fetch: io.fetch,
+        withoutToken: `run \`jazz-tools inspect login --app ${endpoint}\` to ask a person for one`,
       });
     const as = flag("--as");
-    const asPart = as === undefined ? {} : { as };
+    const claimsText = flag("--claims");
+    if (claimsText !== undefined && as === undefined) {
+      throw new InspectError("bad_request", "--claims goes with --as <user>");
+    }
+    const asPart =
+      as === undefined
+        ? {}
+        : claimsText === undefined
+          ? { as }
+          : { as: { userId: as, claims: claimsObject(json(claimsText, "--claims")) } };
 
     switch (command) {
       case "login": {
@@ -210,6 +231,21 @@ export async function runInspectCommand(args: string[], io: InspectCliIo): Promi
         return 0;
       case "schema":
         print(await call({ op: "schema" }));
+        return 0;
+      case "explain":
+        if (as === undefined) {
+          throw new InspectError(
+            "bad_request",
+            "explain needs --as <user>: the user to explain for",
+          );
+        }
+        print(
+          await call({
+            op: "explain",
+            query: json(rest[0], "the query") as never,
+            ...(asPart as { as: InspectAs }),
+          }),
+        );
         return 0;
       case "query":
         print(
@@ -316,6 +352,16 @@ export async function runInspectCommand(args: string[], io: InspectCliIo): Promi
     io.stdout(`${JSON.stringify({ error: failed.code, message: failed.message })}\n`);
     return 1;
   }
+}
+
+function claimsObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new InspectError(
+      "bad_request",
+      `--claims must be a JSON object, like '{"role":"manager"}'`,
+    );
+  }
+  return value as Record<string, unknown>;
 }
 
 function need(value: string | undefined, what: string): string {

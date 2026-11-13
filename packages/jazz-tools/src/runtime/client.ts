@@ -166,10 +166,13 @@ export interface Runtime {
   /**
    * Wait until every write committed so far reaches `tier`. `throughOutage`
    * keeps the wait pending through outages until a terminal failure.
+   * `inFlightStreams` (the drain after the local-first upgrade) first lets
+   * streaming writes still sending their value finish, and waits for their
+   * writes too, until that signal aborts.
    */
   waitForPendingWrites?(
     tier?: string,
-    options?: { throughOutage?: boolean; signal?: AbortSignal },
+    options?: { throughOutage?: boolean; inFlightStreams?: AbortSignal; signal?: AbortSignal },
   ): Promise<void>;
   /** @internal Close mutation admission and report the foreground TxTime high-water. */
   quiesceForegroundTxTimeHighWater?(): Promise<bigint>;
@@ -262,6 +265,7 @@ export interface Runtime {
     objectId: string,
     session?: Session,
   ): Promise<PermissionAdvice>;
+  explainReadClauses?(table: string, rows: string[], session: Session): ExplainedRows;
   requestUpdatePermissionAdvice?(
     table: string,
     objectId: string,
@@ -333,6 +337,15 @@ export interface Runtime {
  * `unknown` means that a local replica or unavailable authority cannot decide.
  */
 export type PermissionAdvice = "allowed" | "denied" | "unknown";
+
+/**
+ * The engine's answer to the Inspector's `explain`: how many clauses the
+ * table's read policy has, and for each row found which of them hold.
+ */
+export interface ExplainedRows {
+  clauses: number;
+  rows: { id: string; holds: boolean[] }[];
+}
 
 declare const openTransactionIdBrand: unique symbol;
 declare const txIdBrand: unique symbol;
@@ -2065,6 +2078,14 @@ export class JazzClient {
     );
   }
 
+  /** For the Inspector's `explain`; see {@link Runtime.explainReadClauses}. */
+  explainReadClauses(table: string, rows: string[], session: Session): ExplainedRows {
+    if (!this.runtime.explainReadClauses) {
+      throw new Error("explain is not supported yet by this runtime");
+    }
+    return this.runtime.explainReadClauses(table, rows, session);
+  }
+
   requestReadPermissionAdvice(
     table: string,
     objectId: string,
@@ -2319,10 +2340,28 @@ export class JazzClient {
     txId: TxId | Promise<TxId>,
     timeoutMs?: number,
   ): Promise<void> {
-    txId = await txId;
     const hasAuthority =
       Boolean(this.context.serverUrl) || this.runtime.nativeUpstreamConfigured?.() === true;
-    await this.waitForTransaction(txId, hasAuthority ? "global" : "local", undefined, timeoutMs);
+    // Hand the unresolved ID to the runtime wait so `timeoutMs` also covers a
+    // commit that has not returned it yet. A commit that fails surfaces its own
+    // error unchanged, not one normalized as a runtime wait failure.
+    let commitFailure: { error: unknown } | undefined;
+    const committed = Promise.resolve(txId).catch((error: unknown) => {
+      commitFailure = { error };
+      throw error;
+    });
+    committed.catch(() => undefined);
+    try {
+      await this.waitForTransaction(
+        committed,
+        hasAuthority ? "global" : "local",
+        undefined,
+        timeoutMs,
+      );
+    } catch (error) {
+      if (commitFailure) throw commitFailure.error;
+      throw error;
+    }
   }
 
   private normalizeTransactionWaitError(error: unknown): Error {

@@ -135,6 +135,9 @@ export interface JazzSession<Client> {
    * Your auth changed: call this after your own sign-in, sign-out or account
    * switch. Jazz asks your backend who is signed in now (its `authenticate`
    * decides, from your session cookie or bearer) and follows its answer.
+   * If your backend can't be asked (offline, or its `authenticate` failed),
+   * it rejects and the snapshot shows the failure too: a usable client stays
+   * `ready`, with `error` set and `recovery: "action"` (`retry()` asks again).
    */
   refresh(): Promise<void>;
   /**
@@ -154,7 +157,7 @@ type RefreshingCore = { reauthenticate?(): Promise<void> };
 
 interface SessionInternals<Client> {
   start(): Promise<void>;
-  attachConsumer(): {
+  attachConsumer(name?: string): {
     acknowledge(snapshot: JazzSessionSnapshot<Client>): void;
     release(): void;
   };
@@ -174,10 +177,12 @@ export function startJazzSession(session: JazzSession<unknown>): Promise<void> {
  */
 export function attachJazzSessionConsumer<Client>(
   session: JazzSession<Client>,
+  /** Names the view in the warning when it misses a transition's deadline. */
+  name?: string,
 ): ReturnType<SessionInternals<Client>["attachConsumer"]> {
   const own = internals.get(session);
   if (!own) throw new Error("Unknown Jazz session");
-  return (own as SessionInternals<Client>).attachConsumer();
+  return (own as SessionInternals<Client>).attachConsumer(name);
 }
 
 /**
@@ -207,7 +212,7 @@ export function ownJazzSession<Config, Client>(
   let snapshot: JazzSessionSnapshot<Client> = Object.freeze({ status: "starting", user: null });
   const versions = new WeakMap<object, SessionCoreSnapshot<Client>>();
   const listeners = createListeners("Jazz session observer failed");
-  const consumers = new Set<{ lease?: SessionCoreConsumer<Client> }>();
+  const consumers = new Set<{ name?: string; lease?: SessionCoreConsumer<Client> }>();
 
   function publish(force = false) {
     if (closed && !force) return;
@@ -328,7 +333,8 @@ export function ownJazzSession<Config, Client>(
           return;
         }
         core = created;
-        for (const consumer of consumers) consumer.lease = attachSessionCoreConsumer(created);
+        for (const consumer of consumers)
+          consumer.lease = attachSessionCoreConsumer(created, consumer.name);
         unsubscribeCore = created.subscribe(() => publish(closed));
         publish();
       })
@@ -476,9 +482,9 @@ export function ownJazzSession<Config, Client>(
 
   internals.set(session, {
     start,
-    attachConsumer() {
+    attachConsumer(name?: string) {
       if (closed) throw new Error("Jazz session is closed");
-      const consumer = { lease: core ? attachSessionCoreConsumer(core) : undefined };
+      const consumer = { name, lease: core ? attachSessionCoreConsumer(core, name) : undefined };
       consumers.add(consumer);
       return {
         acknowledge(value: JazzSessionSnapshot<Client>) {

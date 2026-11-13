@@ -4,7 +4,9 @@ import {
   createSignal,
   onCleanup,
   onMount,
+  Match,
   Show,
+  Switch,
   useContext,
   type Accessor,
   type JSX,
@@ -74,6 +76,12 @@ export type JazzProviderProps = NoAutoAttachDevTools & {
   loading?: JSX.Element;
   /** Shown when there is no usable client (`status: "error"`). */
   error?: (error: Error, retry: () => Promise<void>) => JSX.Element;
+  /**
+   * Shown once the session is closed (`status: "closed"`, after
+   * `session.close()`): it has no client and never starts again. Nothing by
+   * default.
+   */
+  closed?: JSX.Element;
 } & (
     | {
         /** Open and own a session with this configuration (captured at creation). */
@@ -111,7 +119,8 @@ export function ActiveClient(props: { client: JazzClient; children: JSX.Element 
 /**
  * Jazz for a Solid app: owns a session (`config`) or shows yours (`session`),
  * renders `children` with its client once someone is signed in, and
- * `signedOut`, `loading` or `error` otherwise.
+ * `signedOut`, `loading` or `error` otherwise, and `closed` (nothing by
+ * default) once the session is closed.
  */
 export function JazzProvider(props: JazzProviderProps) {
   refuseAutoAttachDevTools("JazzProvider", props);
@@ -128,7 +137,7 @@ export function JazzProvider(props: JazzProviderProps) {
   const session =
     props.session ?? ownJazzSession({ ...props.config! }, openBrowserSessionCore, { start: false });
   const [snapshot, setSnapshot] = createSignal(session.getSnapshot());
-  const lease = attachJazzSessionConsumer(session);
+  const lease = attachJazzSessionConsumer(session, "Solid <JazzProvider>");
   const stop = session.subscribe(() => setSnapshot(session.getSnapshot()));
   onMount(() => {
     if (owned) void startJazzSession(session as JazzSession<unknown>).catch(() => {});
@@ -149,12 +158,10 @@ export function JazzProvider(props: JazzProviderProps) {
       when={snapshot().status === "error" ? snapshot().error : undefined}
       keyed
       fallback={
-        <Show
-          when={snapshot().status === "signed-out"}
-          fallback={props.loading ?? <p role="status">Loading...</p>}
-        >
-          {props.signedOut}
-        </Show>
+        <Switch fallback={props.loading ?? <p role="status">Loading...</p>}>
+          <Match when={snapshot().status === "signed-out"}>{props.signedOut}</Match>
+          <Match when={snapshot().status === "closed"}>{props.closed}</Match>
+        </Switch>
       }
     >
       {(error) =>

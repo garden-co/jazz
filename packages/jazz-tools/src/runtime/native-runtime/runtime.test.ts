@@ -33,6 +33,8 @@ import {
 import { encodeSchema } from "./schema-codec.js";
 import { createUpstreamLink } from "../testing/napi-runtime-test-utils.js";
 import { applySubscriptionDelta, SubscriptionManager } from "../subscription-manager.js";
+import { CoreTickFailedError } from "../core-tick-failed-error.js";
+import { isAuthorityChangedError } from "../authority-changed-error.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
 import { type TxId, type WriteReceipt } from "../client.js";
@@ -849,7 +851,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       schedule!("immediate");
       for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
       expect(authFailures).toHaveLength(1);
-      expect(thrown).toEqual([tickFailure]);
+      expect(thrown).toHaveLength(1);
+      expect(thrown[0]).toBeInstanceOf(CoreTickFailedError);
+      expect(thrown[0]).toMatchObject({ code: "core_tick_failed", cause: tickFailure });
     } finally {
       spy.mockRestore();
     }
@@ -929,6 +933,67 @@ describe("NativeRuntimeAdapter server transport", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  // #5268: a native relay whose database refused its upstream reports the
+  // refusal's code. A changed authority then reads as it does on napi and
+  // wasm: an AuthorityChangedError and an "authority-changed" offline link,
+  // not a bare "stopped".
+  it("reports a native relay's authority_changed refusal as authority-changed", async () => {
+    let schedule: ((urgency: "immediate" | "deferred") => void) | undefined;
+    let reportUpstreamFailure:
+      | ((failure: { reason: string; retrying: boolean; code?: string | null } | null) => void)
+      | undefined;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+              schedule = callback;
+            },
+            tick: () => undefined,
+            onUpstreamFailure: (callback: typeof reportUpstreamFailure) => {
+              reportUpstreamFailure = callback;
+            },
+            nativeConnectionStatus: () => ({
+              configured: true,
+              explicitlyOffline: false,
+              connected: false,
+              authRejected: null,
+            }),
+            isNativeForegroundClosed: () => false,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const transportErrors: Error[] = [];
+    runtime.onServerTransportError((error) => transportErrors.push(error));
+
+    reportUpstreamFailure!({
+      reason: "native relay upstream refused: the server serves another authority history",
+      retrying: false,
+      code: "authority_changed",
+    });
+    schedule!("immediate");
+    for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+    expect(runtime.upstreamLinkStatus()).toEqual({
+      state: "offline",
+      reason: "authority-changed",
+      retrying: false,
+    });
+    expect(transportErrors.map(isAuthorityChangedError)).toEqual([true]);
+
+    // Any other stopped failure still reads as stopped.
+    reportUpstreamFailure!({ reason: "gave up", retrying: false, code: null });
+    for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+    expect(runtime.upstreamLinkStatus()).toMatchObject({ state: "offline", reason: "stopped" });
   });
 
   // The native host stops its link on a refused credential and reports a
@@ -1203,6 +1268,76 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect((updates.mock.calls[0]![0] as Error).message).toBe("server died");
     expect(updates.mock.calls[0]).toHaveLength(1);
   });
+
+  // A subscription the core rejects keeps the rejection's core code, as a
+  // thrown core error does. A relay that refuses its upstream rejects the
+  // remote reads it relays with its refusal: a tab's remote subscription
+  // then fails with an AuthorityChangedError, through either binding's
+  // event shape. A binding that carries no code still fails it plainly.
+  it.each([
+    [
+      "WASM",
+      {
+        type: "ServerFailure",
+        detail: "AuthorityChanged: recreated",
+        errorCode: "authority_changed",
+      },
+      "authority_changed",
+    ],
+    [
+      "NAPI",
+      {
+        type: "ServerFailure",
+        code: "AuthorityChanged: recreated",
+        errorCode: "authority_changed",
+      },
+      "authority_changed",
+    ],
+    [
+      "WASM",
+      { type: "ServerFailure", detail: "Schema: cannot mirror", errorCode: "schema" },
+      "schema",
+    ],
+    ["React Native", { type: "ServerFailure", code: "AuthorityChanged: recreated" }, undefined],
+  ] as const)(
+    "fails a rejected %s subscription with its core code (%j)",
+    (_binding, reason, code) => {
+      const events: unknown[] = [{ type: "rejected", reason }];
+      const subscription = {
+        closed: false,
+        readAll: () => events.splice(0),
+        close() {
+          this.closed = true;
+          return true;
+        },
+      };
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () => fakeDb({ subscribe: () => subscription, tick: () => undefined }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+
+      const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "remote");
+      const updates = vi.fn();
+      runtime.executeSubscription(handle, updates);
+
+      expect(updates).toHaveBeenCalledTimes(1);
+      const error = updates.mock.calls[0]![0] as Error & { code?: string };
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toContain("Subscription rejected: ServerFailure");
+      expect(error.code).toBe(code);
+      expect(isAuthorityChangedError(error)).toBe(code === "authority_changed");
+      expect(subscription.closed).toBe(true);
+    },
+  );
 
   it.each(["local-first", "remote"] as const)(
     "forwards the core's ready %s subscription reset directly",
@@ -2650,6 +2785,174 @@ describe("NativeRuntimeAdapter server transport", () => {
       }
     },
   );
+
+  describe("pooled native subscriptions", () => {
+    type Batch = {
+      id: number;
+      events: unknown[];
+      error?: { message: string; code: string } | null;
+    };
+
+    /** A fake binding whose pool drains scripted per-subscription queues. */
+    function pooledRuntime() {
+      const queues = new Map<number, unknown[]>();
+      const failures = new Map<number, { message: string; code: string }>();
+      const native: Array<{ id?: number; queue: unknown[] }> = [];
+      let nextId = 0;
+      const drain = vi.fn((): Batch[] => {
+        const batches: Batch[] = [];
+        for (const [id, queue] of queues) {
+          const error = failures.get(id);
+          if (queue.length === 0 && !error) continue;
+          batches.push({ id, events: queue.splice(0), error: error ?? null });
+          if (error) {
+            failures.delete(id);
+            queues.delete(id);
+          }
+        }
+        return batches;
+      });
+      const readAll = vi.fn(() => []);
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              createSubscriptionPool: () => ({ drain }),
+              subscribe: () => {
+                const entry: { id?: number; queue: unknown[] } = { queue: [] };
+                native.push(entry);
+                return {
+                  readAll,
+                  joinPool: () => {
+                    entry.id = nextId++;
+                    queues.set(entry.id, entry.queue);
+                    return entry.id;
+                  },
+                  close: () => (entry.id === undefined ? false : queues.delete(entry.id)),
+                };
+              },
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const pump = () => (runtime as unknown as { pumpSubscriptions(): void }).pumpSubscriptions();
+      return { runtime, native, queues, failures, drain, readAll, pump };
+    }
+
+    const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+    const row = (n: number) => ({
+      table: "todos",
+      rowId: uuidBytes(`00000000-0000-0000-0000-00000000000${n}`),
+      title: `row ${n}`,
+    });
+    const change = (n: number) => ({
+      type: "delta",
+      delta: encodeSubscriptionDelta({ added: [row(n)], updated: [], removed: [] }),
+    });
+
+    it("reads every pooled subscription in one drain per pump, never per subscription", async () => {
+      const { runtime, native, drain, readAll, pump } = pooledRuntime();
+      try {
+        const callbacks = [vi.fn(), vi.fn(), vi.fn()];
+        for (const callback of callbacks) {
+          const handle = runtime.createSubscription(app.todos._build());
+          runtime.executeSubscription(handle, callback);
+        }
+        expect(native.map((entry) => entry.id)).toEqual([0, 1, 2]);
+        native[1]!.queue.push(subscriptionReset([row(1)]));
+        drain.mockClear();
+        pump();
+        expect(drain).toHaveBeenCalledTimes(1);
+        expect(readAll).not.toHaveBeenCalled();
+        expect(callbacks[0]).not.toHaveBeenCalled();
+        expect(callbacks[1]).toHaveBeenCalledWith(expect.objectContaining({ reset: true }));
+        expect(callbacks[2]).not.toHaveBeenCalled();
+      } finally {
+        await runtime.close();
+      }
+    });
+
+    it("fails only the subscription whose batch carries an error", async () => {
+      const { runtime, native, failures, queues, pump } = pooledRuntime();
+      try {
+        const broken = vi.fn();
+        const healthy = vi.fn();
+        runtime.executeSubscription(runtime.createSubscription(app.todos._build()), broken);
+        runtime.executeSubscription(runtime.createSubscription(app.todos._build()), healthy);
+        native[0]!.queue.push(subscriptionReset([row(1)]));
+        failures.set(native[0]!.id!, { message: "encode subscription delta: bad", code: "codec" });
+        native[1]!.queue.push(subscriptionReset([row(2)]));
+        pump();
+        // The events before the failure are delivered, then the error.
+        expect(broken.mock.calls).toEqual([
+          [expect.objectContaining({ reset: true })],
+          [expect.objectContaining({ message: "encode subscription delta: bad", code: "codec" })],
+        ]);
+        expect(healthy).toHaveBeenCalledTimes(1);
+        expect(healthy).toHaveBeenCalledWith(expect.objectContaining({ reset: true }));
+        // The healthy subscription keeps receiving from later drains.
+        native[1]!.queue.push(change(3));
+        pump();
+        expect(healthy).toHaveBeenCalledTimes(2);
+        expect(broken).toHaveBeenCalledTimes(2);
+        expect(queues.has(native[1]!.id!)).toBe(true);
+      } finally {
+        await runtime.close();
+      }
+    });
+
+    it("finishes one drain before a pump a callback triggers, keeping event order", async () => {
+      const { runtime, native, pump } = pooledRuntime();
+      try {
+        const seen: string[] = [];
+        const callback = vi.fn((delta: { added?: Array<{ row: { values: unknown[] } }> }) => {
+          const title = JSON.stringify(delta.added?.[0]?.row.values[0] ?? null);
+          seen.push(title);
+          if (seen.length === 1) {
+            native[0]!.queue.push(change(3));
+            pump();
+          }
+        });
+        runtime.executeSubscription(runtime.createSubscription(app.todos._build()), callback);
+        native[0]!.queue.push(subscriptionReset([row(1)]), change(2));
+        pump();
+        expect(seen).toEqual([
+          JSON.stringify({ type: "Text", value: "row 1" }),
+          JSON.stringify({ type: "Text", value: "row 2" }),
+          JSON.stringify({ type: "Text", value: "row 3" }),
+        ]);
+      } finally {
+        await runtime.close();
+      }
+    });
+
+    it("leaves the pool on unsubscribe", async () => {
+      const { runtime, native, queues, drain, pump } = pooledRuntime();
+      try {
+        const callback = vi.fn();
+        const handle = runtime.createSubscription(app.todos._build());
+        runtime.executeSubscription(handle, callback);
+        runtime.unsubscribe(handle);
+        expect(queues.size).toBe(0);
+        native[0]!.queue.push(subscriptionReset([row(1)]));
+        drain.mockClear();
+        pump();
+        // No pooled subscription remains, so the pump skips the native call.
+        expect(drain).not.toHaveBeenCalled();
+        expect(callback).not.toHaveBeenCalled();
+      } finally {
+        await runtime.close();
+      }
+    });
+  });
 
   it.each(["unsubscribe", "close"] as const)(
     "suppresses a pending stream read rejection after subscription %s",

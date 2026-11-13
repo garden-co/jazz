@@ -8,6 +8,7 @@
 // Anything else and the page shows the token to paste instead.
 
 import {
+  cleanTokenLabel,
   isLoopbackCallback,
   type InspectGrantRequest,
   type InspectWhoami,
@@ -32,6 +33,15 @@ type Step =
   | { kind: "denied" }
   | { kind: "failed"; message: string };
 
+/** Where the app is, as a person recognizes it: the host its Jazz endpoint is at. */
+function appHost(endpoint: string): string {
+  try {
+    return new URL(endpoint).host;
+  } catch {
+    return endpoint;
+  }
+}
+
 export function ApprovalPage({
   grant,
   whoami,
@@ -53,6 +63,16 @@ export function ApprovalPage({
   const ttl = grant.ttlSeconds ?? 3600;
   const loopback = grant.callback !== undefined && isLoopbackCallback(grant.callback);
   const cannotWrite = write && !whoami.write;
+  // Shown as the token will keep it.
+  const label = cleanTokenLabel(grant.label);
+  // Checked here, before anyone approves: the backend would refuse to mint it.
+  const maxTtl = whoami.maxTokenTtlSeconds;
+  const badTtl =
+    !Number.isSafeInteger(ttl) || ttl < 60
+      ? "This request asks for a token that lasts less than a minute, which this app doesn't issue."
+      : maxTtl !== undefined && ttl > maxTtl
+        ? `This request asks for a token that lasts ${describeTtl(ttl)}, but this app's tokens last at most ${describeTtl(maxTtl)}. Ask again with a shorter --ttl.`
+        : null;
 
   const approve = async () => {
     setStep({ kind: "minting" });
@@ -62,7 +82,7 @@ export function ApprovalPage({
         write,
         ttlSeconds: ttl,
         ...(grant.tables ? { tables: grant.tables } : {}),
-        ...(grant.label ? { label: grant.label } : {}),
+        ...(label ? { label } : {}),
       });
       if (loopback && grant.callback) {
         setStep({ kind: "handing-over" });
@@ -88,8 +108,10 @@ export function ApprovalPage({
           <>
             <ul className={styles.grantList}>
               <li>
-                <strong>{grant.label ?? "An agent"}</strong> asks for{" "}
-                <strong>{write ? "read and write" : "read-only"}</strong> access to {whoami.appId}.
+                <strong>{label || "An agent"}</strong> asks for{" "}
+                <strong>{write ? "read and write" : "read-only"}</strong> access to the app at{" "}
+                <strong>{appHost(endpoint)}</strong>{" "}
+                <span className={styles.note}>(app id {whoami.appId})</span>.
               </li>
               <li>Tables: {grant.tables?.length ? grant.tables.join(", ") : "all"}</li>
               <li>For {describeTtl(ttl)}, then the token stops working.</li>
@@ -112,11 +134,16 @@ export function ApprovalPage({
                 Your own access is read-only, so you can't approve write access.
               </p>
             ) : null}
+            {badTtl ? (
+              <p className={appStyles.errorText} role="alert">
+                {badTtl}
+              </p>
+            ) : null}
             <div className={appStyles.actionRow}>
               <button
                 type="button"
                 className={appStyles.actionButton}
-                disabled={cannotWrite || step.kind === "minting"}
+                disabled={cannotWrite || badTtl !== null || step.kind === "minting"}
                 onClick={() => void approve()}
               >
                 {step.kind === "minting" ? "Approving…" : "Approve"}

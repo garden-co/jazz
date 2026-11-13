@@ -440,7 +440,12 @@ function admissionManager(
       ? BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN
       : "incompatible persistent browser configuration",
   );
-  const connections: Array<BrowserWorkerConnection & { shutdown: ReturnType<typeof vi.fn> }> = [];
+  const connections: Array<
+    BrowserWorkerConnection & {
+      shutdown: ReturnType<typeof vi.fn>;
+      deleteStorage: ReturnType<typeof vi.fn>;
+    }
+  > = [];
   const host = {
     config,
     isShuttingDown: false,
@@ -455,8 +460,14 @@ function admissionManager(
           },
           canRetryInitialConfigurationAdmission: () => rejected && retryable,
           waitsForAnotherSignIn: () => rejected && held,
+          deleteStorage: vi.fn(async () => {
+            if (rejected) throw refusal;
+          }),
           shutdown: vi.fn(async () => undefined),
-        } as unknown as BrowserWorkerConnection & { shutdown: ReturnType<typeof vi.fn> };
+        } as unknown as BrowserWorkerConnection & {
+          shutdown: ReturnType<typeof vi.fn>;
+          deleteStorage: ReturnType<typeof vi.fn>;
+        };
         connections.push(connection);
         return connection;
       }),
@@ -616,6 +627,64 @@ describe("Browser configuration admission retries", () => {
       await vi.advanceTimersByTimeAsync(31_000);
       expect(connections.length).toBeGreaterThan(attempts);
       expect(status()).toEqual({ state: "offline", reason: "held-by-another-tab", retrying: true });
+    } finally {
+      host.isShuttingDown = true;
+      await manager.shutdown().catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  // #5139: a guest signed up in this tab and signs out (clearOnSignOut) while
+  // another tab is still the guest and holds the store. The wipe waits for it
+  // to let go, as reads and writes do, instead of failing at once.
+  it("waits for another sign-in to let go of the store before deleting it", async () => {
+    vi.useFakeTimers();
+    const { manager, host, connections, unpin } = admissionManager(true, true);
+    try {
+      let outcome = "pending";
+      const deleting = manager.deleteClientStorage().then(
+        () => (outcome = "fulfilled"),
+        (error: unknown) => (outcome = `rejected: ${String(error)}`),
+      );
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(outcome).toBe("pending");
+      expect(connections.length).toBeGreaterThan(1);
+      // The other tab follows the sign-out (or closes): the delete goes through.
+      unpin();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await deleting;
+      expect(outcome).toBe("fulfilled");
+      for (const refused of connections.slice(0, -1))
+        expect(refused.deleteStorage).not.toHaveBeenCalled();
+      expect(connections.at(-1)!.deleteStorage).toHaveBeenCalledOnce();
+    } finally {
+      host.isShuttingDown = true;
+      await manager.shutdown().catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails a delete held past its patience with a StoreHeldByAnotherTabError, and deletes at once when asked again after it lets go", async () => {
+    vi.useFakeTimers();
+    const { manager, host, connections, unpin } = admissionManager(true, true);
+    try {
+      const failed = expect(manager.deleteClientStorage()).rejects.toSatisfy(
+        isStoreHeldByAnotherTabError,
+      );
+      await vi.advanceTimersByTimeAsync(
+        BrowserConnectionManager.HELD_BY_ANOTHER_TAB_PATIENCE_MS + 1_000,
+      );
+      await failed;
+      // Still held: a new delete fails at once, with the same specific error.
+      await expect(manager.deleteClientStorage()).rejects.toSatisfy(isStoreHeldByAnotherTabError);
+      expect(connections.every((c) => c.deleteStorage.mock.calls.length === 0)).toBe(true);
+      // The tab is still usable: the app can try again once the other tab lets go.
+      expect(manager.isUsable()).toBe(true);
+      // Asked again once the other tab let go, it joins at once, without
+      // waiting for the next background attempt.
+      unpin();
+      await expect(manager.deleteClientStorage()).resolves.toBeUndefined();
+      expect(connections.at(-1)!.deleteStorage).toHaveBeenCalledOnce();
     } finally {
       host.isShuttingDown = true;
       await manager.shutdown().catch(() => undefined);

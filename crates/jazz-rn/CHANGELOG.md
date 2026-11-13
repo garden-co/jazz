@@ -1,5 +1,14 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.61
+
+### Patch Changes
+
+- 5be4fd9: Fix React Native clients reading no rows from a server with schema history. The native relay opened its store from the current schema alone, so it stored columns under different names than the server. It now receives the migrations the app ships, as Node and browser clients do. This raises the native relay ABI to 5, so a JavaScript bundle needs a native build from the same release.
+- 328c080: The React Native native relay is now built with a size-oriented profile (`opt-level = "s"`, fat LTO, one codegen unit, staticlib only). On iOS arm64 the relay adds about 9.9 MB to an app instead of 16.7 MB (stripped), and the device `.a` shrinks from 69.6 MB to 21.1 MB. Panics still unwind as before. Thanks to @boorad.
+  - jazz-rn-ios@2.0.0-alpha.61
+  - jazz-rn-android@2.0.0-alpha.61
+
 ## 2.0.0-alpha.60
 
 ### Major Changes

@@ -230,6 +230,70 @@ fn writes_transactions_and_attribution_go_through_one_binding() {
     );
 }
 
+/// A backend stages alice's inserts into one transaction the way the
+/// JavaScript host does: it repeats her claims before each write and lets
+/// the binding draw each row id. Neither undoes the transaction's applied
+/// overlay, so no stage replays the writes staged before it and staging N
+/// inserts costs N applies, not N²/2 (R41). Counted through the replay
+/// hook rather than timed, so the test is exact and not flaky; a read
+/// outside the transaction does undo the overlay, and the next stage then
+/// replays the batch once.
+///
+/// ```text
+/// backend ──claims(alice)──insert──claims(alice)──insert── … ──commit
+///              (overlay stays applied between stages)
+/// ```
+#[test]
+fn staging_many_inserts_replays_no_earlier_write() {
+    let db = authority();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let alice_bytes = alice.canonical();
+    let tx = &OpenTransactionId::new().to_string();
+    db.begin_transaction(tx, "mergeable", Some(alice_bytes.as_bytes()), None)
+        .unwrap();
+    const N: usize = 200;
+    for n in 0..N {
+        db.set_identity_claims(alice_bytes.as_bytes(), json!({ "role": "member" }))
+            .unwrap();
+        db.insert_in_transaction(tx, "notes", &title(&format!("note {n}")), &none())
+            .unwrap();
+    }
+    assert_eq!(db.db.overlay_replays_for_test(), 0);
+
+    // Another use of the store undoes the overlay: the next stage replays
+    // the batch once, then stays incremental.
+    assert!(titles(&db).is_empty(), "staged writes wait for the commit");
+    for n in 0..N {
+        db.insert_in_transaction(tx, "notes", &title(&format!("more {n}")), &none())
+            .unwrap();
+    }
+    assert_eq!(db.db.overlay_replays_for_test(), N);
+
+    assert!(db.commit_transaction(tx, None).unwrap().rejected.is_none());
+    assert_eq!(titles(&db).len(), 2 * N);
+    assert_eq!(db.db.evidence_copies_for_test(), 0);
+}
+
+/// The backend's own writes (no session) are checked by no policy, so
+/// their rows are trusted. Staging many of them in one transaction neither
+/// replays earlier writes nor copies the batch's written-row set for each
+/// stage's check: either would make N inserts cost O(N²) (R41).
+#[test]
+fn staging_many_unchecked_inserts_copies_nothing_per_stage() {
+    let db = authority();
+    let tx = &OpenTransactionId::new().to_string();
+    db.begin_transaction(tx, "mergeable", None, None).unwrap();
+    const N: usize = 200;
+    for n in 0..N {
+        db.insert_in_transaction(tx, "notes", &title(&format!("note {n}")), &none())
+            .unwrap();
+    }
+    assert_eq!(db.db.overlay_replays_for_test(), 0);
+    assert_eq!(db.db.evidence_copies_for_test(), 0);
+    assert!(db.commit_transaction(tx, None).unwrap().rejected.is_none());
+    assert_eq!(titles(&db).len(), N);
+}
+
 #[test]
 fn a_staged_write_refused_for_its_rows_state_rejects_the_commit() {
     let db = open(0xa2);
@@ -1748,4 +1812,70 @@ fn a_tabs_local_wait_the_worker_refuses_claims_the_refusal() {
     let told = told.borrow();
     assert!(told.iter().any(|(id, _)| *id == first.tx_id), "{told:?}");
     assert_eq!(titles(&tab), ["kept"]);
+}
+
+/// Alice's bounded local-first read falls back while Bob stays silent. The
+/// existing SDK polls pending reads between event-loop turns, so no unrelated
+/// network progress or new scheduler hook is needed to finish this read.
+#[test]
+fn a_quiet_bounded_read_finishes_under_the_existing_polling_contract() {
+    let server = authority();
+    let client = open(0xd2);
+    client.set_remote_link_hint("live").unwrap();
+    let up = client.connect_upstream();
+    let down = server
+        .accept_subscriber(client.author(), Default::default())
+        .unwrap();
+    pump(&[(&up, &down)]);
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let mut read = client
+        .all(
+            query,
+            &json!({"tier":"local-first", "first_load_remote_wait_ms":25}),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(read.as_mut().poll(&mut context).is_pending());
+    block_on(client.tick()).unwrap();
+    let started = std::time::Instant::now();
+    loop {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            let rows = jazz::binding_codec::decode_rows(&result.unwrap()).unwrap();
+            assert_eq!(rows.iter().map(|batch| batch.rows.len()).sum::<usize>(), 0);
+            break;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "bounded read outlived its polling driver"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// Client bindings open stores without a chunk store, so a client tick never
+/// runs chunk-store I/O, whose failures a later tick retries. No error a
+/// client tick returns is retryable by design, and the JavaScript
+/// runtime treats every one as terminal (`core_tick_failed`). A binding that adds a
+/// chunk store must first give the host a way to tell those apart. The native
+/// relay pins the same for its stores (`relay_configs_have_no_chunk_store`).
+#[test]
+fn binding_configs_have_no_chunk_store() {
+    let identity = identity(1);
+    let config = binding_host::OpenConfig {
+        identity: binding_host::OpenIdentity {
+            node: identity.node,
+            author: identity.author,
+        },
+        row_id_seed: Some(7),
+        history_complete: false,
+        initial_sync_flush_every: None,
+        migrations: None,
+        system_node: None,
+    };
+    let db_config = binding_host::db_config(schema(), &config, identity);
+    assert!(db_config.chunk_store.is_none());
+    assert!(!db_config.host_chunk_io);
 }

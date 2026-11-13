@@ -42,10 +42,14 @@ In practice, this lets you:
 
    This creates an initial snapshot of your schema in `migrations/snapshots/`. No migration file is created yet because there is no previous schema to diff against.
 
+   If `schema.ts` still passes `{ migrations: "none" }` to `defineApp`, switch it to
+   `{ migrations }` now, as in [Shipping migrations with your app](#shipping-migrations-with-your-app).
+
 2. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
-3. **Validate locally**&hairsp;—&hairsp;optionally run `npx jazz-tools validate` to surface
-   any policy diagnostics without publishing. Your main backend runs the same checks when it starts;
-   `validate` is most useful as a fast check before you deploy, or in CI.
+3. **Validate locally**&hairsp;—&hairsp;run `npx jazz-tools validate` after each schema change. It
+   regenerates `migrations/index.ts` and surfaces any policy diagnostics without publishing. Your
+   main backend runs the same checks when it starts, so `validate` is also a fast check before you
+   deploy, or in CI.
 4. **Create a migration stub for the updated schema**&hairsp;—&hairsp;run:
 
    ```bash
@@ -79,7 +83,9 @@ The `jazz-tools` CLI only scaffolds and checks migrations (`migrations create`, 
 ### Shipping migrations with your app
 
 `validate` and `migrations create` also regenerate `migrations/index.ts`. It bundles every schema version and
-every lens, and your app passes it to `defineApp`:
+every lens, and your app passes it to `defineApp`. They only write it once `schema.ts` imports it,
+so if your app still has `{ migrations: "none" }`, make this change first; the next `validate`
+creates the file:
 
 ```ts title="schema.ts"
 import { migrations } from "./migrations";
@@ -268,8 +274,8 @@ Both commands use the current `schema.ts` as their destination. Review the gener
 And then deploy your main backend.
 
 <Callout type="warn">
-  In alpha.60 deploying a converged schema like this is refused at startup. Until that is fixed,
-  pick one branch and add the other branch's change as a new migration on top of it.
+  For now, deploying a converged schema like this is refused at startup. Until that is fixed, pick
+  one branch and add the other branch's change as a new migration on top of it.
 </Callout>
 
 Rows written under either branch now read with both columns intact. Jazz validates that alternative forward paths agree on the values and column identities they

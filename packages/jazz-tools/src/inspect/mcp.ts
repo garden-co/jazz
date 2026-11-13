@@ -15,7 +15,8 @@ import {
   type InspectEnv,
   type PendingApproval,
 } from "./client.js";
-import { InspectError, type InspectRequest } from "./protocol.js";
+import { DEFAULT_ROW_LIMIT, InspectError, MAX_ROW_LIMIT, type InspectRequest } from "./protocol.js";
+import { WHERE_OPERATORS } from "../where-operators.js";
 
 const SERVER_INFO = { name: "jazz-inspect", version: "1" };
 const LATEST_PROTOCOL = "2025-06-18";
@@ -25,19 +26,97 @@ const AS = {
   description:
     "Run under this user's permissions (the app's user id), to see what they see. Omit to use the backend's authority (every row).",
 };
+const CLAIMS = {
+  type: "object",
+  description:
+    'With as: the user\'s session claims, as their sign-in would carry them, e.g. {"role":"manager"}. Policies that read claims see none unless you pass them; answers carry a warning when that may matter.',
+};
 const QUERY = {
   type: "object",
   description:
-    'A query: {"table":"todos","where":{"done":false,"title":{"contains":"milk"}},"orderBy":[["title","asc"]],"limit":20}. select defaults to every column; add provenance columns like "$createdBy" or "$updatedAt". Query history.<table> for row history.',
+    'A query: {"table":"todos","where":{"done":false,"title":{"contains":"milk"}},"orderBy":[["title","asc"]],"limit":20}. Query history.<table> for a row\'s versions.',
   properties: {
-    table: { type: "string" },
-    where: { type: "object" },
-    select: { type: "array", items: { type: "string" } },
-    orderBy: { type: "array", items: { type: "array" } },
-    limit: { type: "number" },
-    offset: { type: "number" },
+    table: {
+      type: "string",
+      description: 'A table from schema, or "history.<table>" for its row history.',
+    },
+    where: {
+      type: "object",
+      description: `Column → value (equals), or column → { operator: operand } with operators ${WHERE_OPERATORS.join(", ")} (which apply depends on the column's type; in/notIn take an array, isNull a boolean). Several columns must all match. Values are JSON: timestamps as ISO strings, 64-bit integers as strings, bytes as { "$bytes": "<base64>" }.`,
+      additionalProperties: true,
+    },
+    select: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        'Columns to answer with. Default: every column ("*"). Add provenance columns "$createdBy", "$createdAt", "$updatedBy" or "$updatedAt".',
+    },
+    orderBy: {
+      type: "array",
+      description: 'Sort keys, first one first: [["title","asc"], ["$createdAt","desc"]].',
+      items: {
+        type: "array",
+        prefixItems: [{ type: "string" }, { type: "string", enum: ["asc", "desc"] }],
+        minItems: 2,
+        maxItems: 2,
+      },
+    },
+    limit: {
+      type: "integer",
+      minimum: 1,
+      maximum: MAX_ROW_LIMIT,
+      description: `Rows to answer with: default ${DEFAULT_ROW_LIMIT}, at most ${MAX_ROW_LIMIT}. The answer says truncated when more matched.`,
+    },
+    offset: { type: "integer", minimum: 0, description: "Rows to skip, for paging." },
   },
   required: ["table"],
+  additionalProperties: false,
+};
+
+const VALUES = {
+  type: "object",
+  description:
+    'Column → value, as JSON (timestamps as ISO strings, 64-bit integers as strings, bytes as { "$bytes": "<base64>" }).',
+  additionalProperties: true,
+};
+const WRITE_OP = {
+  oneOf: [
+    {
+      type: "object",
+      description: "Insert a row; id is optional (a new one is made).",
+      properties: {
+        kind: { const: "insert" },
+        table: { type: "string" },
+        values: VALUES,
+        id: { type: "string" },
+      },
+      required: ["kind", "table", "values"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      description: "Change some columns of a row.",
+      properties: {
+        kind: { const: "update" },
+        table: { type: "string" },
+        id: { type: "string" },
+        values: VALUES,
+      },
+      required: ["kind", "table", "id", "values"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      description: "Delete a row.",
+      properties: {
+        kind: { const: "delete" },
+        table: { type: "string" },
+        id: { type: "string" },
+      },
+      required: ["kind", "table", "id"],
+      additionalProperties: false,
+    },
+  ],
 };
 
 interface Tool {
@@ -91,7 +170,7 @@ export const MCP_TOOLS: Tool[] = [
       "Run a query against the app's live data. Answers carry an inspectorUrl: link it to show the person exactly these rows.",
     inputSchema: {
       type: "object",
-      properties: { query: QUERY, as: AS },
+      properties: { query: QUERY, as: AS, claims: CLAIMS },
       required: ["query"],
     },
   },
@@ -100,7 +179,7 @@ export const MCP_TOOLS: Tool[] = [
     description: "One row by id, with who created and last changed it.",
     inputSchema: {
       type: "object",
-      properties: { table: { type: "string" }, id: { type: "string" }, as: AS },
+      properties: { table: { type: "string" }, id: { type: "string" }, as: AS, claims: CLAIMS },
       required: ["table", "id"],
     },
   },
@@ -123,10 +202,13 @@ export const MCP_TOOLS: Tool[] = [
         ops: {
           type: "array",
           description:
-            'e.g. [{"kind":"update","table":"todos","id":"…","values":{"done":true}}, {"kind":"insert","table":"todos","values":{…}}, {"kind":"delete","table":"todos","id":"…"}]',
-          items: { type: "object" },
+            'Between 1 and 1000 writes, each with kind insert, update or delete: [{"kind":"update","table":"todos","id":"…","values":{"done":true}}, {"kind":"insert","table":"todos","values":{…}}, {"kind":"delete","table":"todos","id":"…"}]',
+          items: WRITE_OP,
+          minItems: 1,
+          maxItems: 1000,
         },
         as: AS,
+        claims: CLAIMS,
       },
       required: ["ops"],
     },
@@ -139,10 +221,10 @@ export const MCP_TOOLS: Tool[] = [
   {
     name: "explain",
     description:
-      "Which policy allowed or denied each row of a query for a user (not supported yet).",
+      "Why a user can or can't read each row of a query: every row the query matches (with the backend's authority), whether the user may read it, and which clauses of the table's read policy allowed it. Clauses are the arms of the policy's top-level or, numbered from 0 and rendered as text. Pass the user's claims if the policy reads them.",
     inputSchema: {
       type: "object",
-      properties: { query: QUERY, as: AS },
+      properties: { query: QUERY, as: AS, claims: CLAIMS },
       required: ["query", "as"],
     },
   },
@@ -157,6 +239,7 @@ export const MCP_TOOLS: Tool[] = [
         table: { type: "string" },
         row: { type: "string" },
         as: AS,
+        claims: CLAIMS,
       },
     },
   },
@@ -182,10 +265,23 @@ export async function runMcpServer(options: {
     callInspector(endpoint, request, {
       token: (await store.get(endpoint))?.token,
       fetch: options.fetch,
+      withoutToken: "call request_access to ask a person for one",
     });
 
   async function callTool(name: string, args: Json): Promise<unknown> {
-    const as = typeof args.as === "string" ? { as: args.as } : {};
+    if (args.claims !== undefined && typeof args.as !== "string") {
+      throw new InspectError("bad_request", "claims goes with as (the user they belong to)");
+    }
+    // Claims go to the backend as given: it refuses ones that aren't an object.
+    const as =
+      typeof args.as === "string"
+        ? {
+            as:
+              args.claims === undefined
+                ? args.as
+                : { userId: args.as, claims: args.claims as Record<string, unknown> },
+          }
+        : {};
     switch (name) {
       case "whoami":
         return call({ op: "whoami" });
@@ -232,7 +328,7 @@ export async function runMcpServer(options: {
         return call({
           op: "explain",
           query: args.query as never,
-          as: String(args.as),
+          as: as.as ?? String(args.as),
         });
       case "inspector_link":
         return call({

@@ -28,7 +28,9 @@ Wrap your app in `<JazzProvider config={…}>`. `config` takes the same options 
 `createJazzClient` (`serverUrl`, `client`, `initial` and the rest; see
 [Thin Client](/docs/setup/web-client/thin-client)). The provider shows its `signedOut` view while no
 one is signed in, `loading` while Jazz starts or switches users, and `error` when there is no usable
-client. `useJazzSession()` (Svelte: `getJazzSession()`) reads the session anywhere below, including
+client. Once its session is closed (`session.close()`), it shows its `closed` view: nothing unless
+you give one. A closed session never starts again: give the provider a new session, or a new `key`
+for its `config`. `useJazzSession()` (Svelte: `getJazzSession()`) reads the session anywhere below, including
 in those views.
 
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
@@ -91,7 +93,8 @@ in those views.
     ```
 
     Call `getDb()`, `getJazzSession()` and the other `get…` helpers during component setup (the
-    top level of a component's `<script>`), not later in an event handler.
+    top level of a component's `<script>`), not later in an event handler: they read Svelte
+    context. Stores and utility modules can't, so pass them the db from there.
 
     In SvelteKit, render the provider only in the browser (`{#if browser}` from `$app/environment`)
     and load server-rendered data in `+page.server.ts` with
