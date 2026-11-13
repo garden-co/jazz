@@ -12477,10 +12477,9 @@ impl Db {
     /// The schema whose policies this handle's reads and writes are
     /// governed by: its view's, else the current schema's.
     fn view_policies(&self) -> Rc<Schema> {
-        self.view
-            .as_ref()
-            .and_then(|view| view.policies_from.clone())
-            .unwrap_or_else(|| self.inner.borrow().owner.clone())
+        let inner = self.inner.borrow();
+        let schema = self.execution_schema(&inner);
+        schema.policies_from.clone().unwrap_or(schema)
     }
 
     fn session_db(&self, index: usize) -> Db {
@@ -14482,6 +14481,12 @@ impl Db {
             ..opts
         };
         let read = || {
+            // Coverage and chunk waits may outlive a policy revision. Resolve
+            // identity-read policies on every local evaluation attempt.
+            let prepared = match identity {
+                Some(_) => self.execution_query(&prepared),
+                None => std::borrow::Cow::Borrowed(&prepared),
+            };
             let inner = self.inner();
             ReadSpec::of(&opts, &inner).and_then(|mut spec| {
                 // It reads as far as the answer it fetched settled.
