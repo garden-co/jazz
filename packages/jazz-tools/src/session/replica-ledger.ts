@@ -95,6 +95,14 @@ export function replicaLedger(registry: string) {
   return {
     key,
     legacyKey: legacy,
+    /** Whether entries persist here: without storage (disabled, or not a browser) nothing is recorded. */
+    durable(): boolean {
+      try {
+        return typeof globalThis.localStorage?.getItem === "function";
+      } catch {
+        return false;
+      }
+    },
     read,
     get,
     /** `entry`'s account is about to keep a store here. A wipe already marked stays marked. */
@@ -285,7 +293,10 @@ export function replicaLifecycle(options: {
         // Another tab wiped it first, or this page is on the account again
         // (unless this page wipes it on purpose: its own sign-out, which still
         // shows the account until it settles, or its own open finishing a wipe).
-        if (!ledger.get(account) || (!byThisPage && options.heldHere(account))) return "skipped";
+        // Without durable storage nothing was recorded, and a page's own
+        // sign-out wipes anyway: clearOnSignOut never depends on the ledger.
+        const recorded = ledger.get(account) !== undefined || (byThisPage && !ledger.durable());
+        if (!recorded || (!byThisPage && options.heldHere(account))) return "skipped";
         // A closed page wipes nothing it didn't sign out itself.
         if (!byThisPage && options.stopped?.()) return "skipped";
         ledger.markWiping(account, true);
