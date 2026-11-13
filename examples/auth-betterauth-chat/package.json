@@ -33,6 +33,7 @@
     "vite": "catalog:default",
     "vite-plugin-top-level-await": "catalog:default",
     "vite-plugin-wasm": "catalog:default",
-    "vitest": "catalog:default"
+    "vitest": "catalog:default",
+    "ws": "^8.19.0"
   }
 }
