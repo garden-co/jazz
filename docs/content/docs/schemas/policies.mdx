@@ -201,7 +201,10 @@ const schema = {
 ```
 
 ```ts title="permissions.ts"
+// Read rules only: who may book or change appointments needs insert and update policies too.
 s.definePermissions(app, ({ policy, session }) => [
+  // A doctor reads their own record.
+  policy.doctors.allowRead.where({ userId: session.identity.subject }),
   // Patients with an appointment whose doctor is the signed-in user.
   policy.patients.allowRead.where((patient) =>
     policy.exists(

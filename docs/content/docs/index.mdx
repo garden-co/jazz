@@ -17,9 +17,6 @@ export const app = s.defineApp(
 );
 ```
 
-`./migrations` is generated, not written by hand: run `npx jazz-tools validate` once after writing
-the schema to create it, and again after each change. A first app needs no migrations of its own.
-
 ```ts title="permissions.ts"
 import { schema as s } from "jazz-tools";
 import { app } from "./schema";
@@ -33,6 +30,10 @@ export default s.definePermissions(app, ({ policy, session }) => {
   policy.todos.allowDelete.where(isCreator);
 });
 ```
+
+`./migrations` is generated, not written by hand: run `npx jazz-tools validate` once after writing
+`schema.ts` and `permissions.ts` to create it, and again after each schema change. A first app needs
+no migrations of its own.
 
 Jazz runs inside your backend: no separate database server and no deploy step. The schema and permissions your code imports are the ones it enforces.
 

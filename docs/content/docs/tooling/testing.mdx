@@ -172,9 +172,11 @@ const testJazz: TestJazz = await startTestJazz({ app, permissions });
   as `bearer: () => token` on `createJazzClient`, with `serverUrl: testJazz.url`, and call
   `refresh()`, as below. There, the `serverUrl` from `testJazz.as()` doesn't sign anyone in:
   `refresh()` throws "loginWithBackend and linkWithBackend need a browser".
-- **Signed-in users where there is a DOM** (a real browser, or jsdom and happy-dom) call
+- **Signed-in users in a real browser** (Vitest browser mode, Playwright) call
   `await testJazz.as(userId, claims)` instead and point the client at its `serverUrl`: each user
-  gets their own origin, which stands in for their session cookie. `bearer` is refused there.
+  gets their own origin, which stands in for their session cookie. `bearer` is refused wherever
+  there is a DOM. jsdom and happy-dom have one too, but can't run a syncing client (see
+  [UI tests](#ui-tests)), so test signed-in sync in a real browser or in plain Node.
 - **React Native logic** runs in plain Node the same way (see
   [React Native](/docs/setup/react-native#testing-without-a-device)), not under the React Native
   Jest preset, where `bearer` on `createJazzClient` from `jazz-tools/client` is refused.
