@@ -1156,7 +1156,12 @@ async function initialize(context: RuntimeContext): Promise<void> {
       {
         selfSignedClientProof: proof,
         scopeIsolatedRelay: true,
-        slowQueryLog: { appId: options.appId, thresholdMs: options.slowQueryThresholdMs },
+        slowQueryLog: {
+          appId: options.appId,
+          thresholdMs: options.slowQueryThresholdMs,
+          // End users see a browser's console: plan and SQL go to debug.
+          consoleDetail: "summary",
+        },
       },
     );
     context.runtime = runtime;
