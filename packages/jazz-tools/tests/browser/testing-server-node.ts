@@ -1,3 +1,4 @@
+import type { JazzServerTransportControlBrowserCommands } from "./browser-commands.js";
 import {
   startLocalJazzServer,
   startTestJazz,
@@ -272,4 +273,36 @@ export async function stopJazzServerTransportControl(url: string): Promise<void>
   const control = transportControl(url);
   transportControls.delete(url);
   await control.stop();
+}
+
+/**
+ * Every transport-control command the browser harness needs
+ * (`jazzServerTransportControlBrowserCommands`), for a browser test
+ * project's `test.browser.commands`. Spread it there instead of listing the
+ * commands one by one: the `satisfies` below fails to type-check when the
+ * harness gains a command this set lacks, so projects can't drift from it.
+ */
+export function jazzServerTransportControlCommands() {
+  return {
+    jazzServerTransportControlCreate: async (_context: unknown, serverUrl: string) =>
+      createJazzServerTransportControl(serverUrl),
+    jazzServerTransportControlBlock: async (
+      _context: unknown,
+      url: string,
+      direction: "both" | "inbound",
+    ) => blockJazzServerTransport(url, direction),
+    jazzServerTransportControlUnblock: async (_context: unknown, url: string) =>
+      unblockJazzServerTransport(url),
+    jazzServerTransportControlDown: async (_context: unknown, url: string) =>
+      downJazzServerTransport(url),
+    jazzServerTransportControlUp: async (_context: unknown, url: string, serverUrl?: string) =>
+      upJazzServerTransport(url, serverUrl),
+    jazzServerTransportControlStop: async (_context: unknown, url: string) =>
+      stopJazzServerTransportControl(url),
+  } satisfies {
+    [Name in keyof JazzServerTransportControlBrowserCommands]: (
+      context: unknown,
+      ...args: Parameters<JazzServerTransportControlBrowserCommands[Name]>
+    ) => ReturnType<JazzServerTransportControlBrowserCommands[Name]>;
+  };
 }

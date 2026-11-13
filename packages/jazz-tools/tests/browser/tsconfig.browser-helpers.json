@@ -10,6 +10,7 @@
   "files": [
     "browser-commands.ts",
     "testing-server.ts",
+    "testing-server-node.ts",
     "topology-harness.ts",
     "browser-helpers.typecheck.ts",
     "account-fixtures.ts",
