@@ -3,7 +3,9 @@
 //! latest-only tables for an hour on its own clock, then drops it, and the
 //! writer node's interned row with its last entry (SPEC 8 §8.14). A thin
 //! write to a table with history keeps its entry, which is also its
-//! history's record, as every writer's is.
+//! history's record, as every writer's is. Only a client that marks its
+//! node as bounding its resends has its entries dropped: an earlier one
+//! may resend any time.
 
 use crate::common;
 
@@ -30,9 +32,24 @@ use jazz::tx::TxId;
 use common::{allow_all_policies, compile_schema};
 
 const MINUTE: i64 = 60 * 1000;
-/// The client nodes of two thin runtimes.
-const ALICE_TAB: [u8; 16] = [0x7c; 16];
-const ALICE_LAPTOP: [u8; 16] = [0x7d; 16];
+/// The client nodes of thin runtimes that bound their resends.
+const ALICE_TAB: [u8; 16] = bounded(0x7c);
+const ALICE_LAPTOP: [u8; 16] = bounded(0x7d);
+/// An alpha.60/.61 thin runtime's node: random, so unmarked.
+const ALICE_OLD_TAB: [u8; 16] = [0x7f; 16];
+
+/// A client node marked as bounding its resends (`jzRB`, version 8), as
+/// the TypeScript thin runtime mints it.
+const fn bounded(fill: u8) -> [u8; 16] {
+    let mut node = [fill; 16];
+    node[0] = b'j';
+    node[1] = b'z';
+    node[2] = b'R';
+    node[3] = b'B';
+    node[6] = (fill & 0x0f) | 0x80;
+    node[8] = (fill & 0x3f) | 0x80;
+    node
+}
 
 /// `presence`, latest-only, and `notes`, with full history.
 fn schema() -> JazzSchema {
@@ -313,7 +330,7 @@ fn entries_of(path: &Path, node: [u8; 16]) -> (bool, i64) {
 /// ```
 #[test]
 fn an_aged_out_thin_writer_leaves_no_rows_behind() {
-    const PHONE: [u8; 16] = [0x7e; 16];
+    const PHONE: [u8; 16] = bounded(0x7e);
     let path = scratch("nodes");
     let core = block_on(Db::open_at(config(0), &path, FileOptions::default())).unwrap();
     core.set_authority();
@@ -412,4 +429,47 @@ fn an_aged_out_thin_writer_leaves_no_rows_behind() {
     assert_eq!(entries_of(&path, tab), (true, 1));
     assert_eq!(entries_of(&path, phone), (true, 1));
     assert!(ORIGIN_ENTRY_RETENTION_MS == 60 * MINUTE);
+}
+
+/// An earlier thin runtime (alpha.60/.61) names an unmarked node: it may
+/// resend a write any time later, so the authority keeps its entry past
+/// the hour, and its late resend is still answered from the first write.
+#[test]
+fn an_old_clients_entry_is_kept_past_the_hour() {
+    let core = open(0);
+    let t0 = start_clock(&core);
+    insert(&core, "presence", row(1), "start");
+    assert!(written(update_as(
+        &core,
+        ALICE_OLD_TAB,
+        1,
+        "presence",
+        row(1),
+        "a"
+    )));
+    core.set_clock_for_test(Some(t0 + 2 * 60 * MINUTE));
+    assert!(written(update_as(
+        &core,
+        ALICE_TAB,
+        1,
+        "presence",
+        row(1),
+        "b"
+    )));
+    assert!(written(update_as(
+        &core,
+        ALICE_OLD_TAB,
+        2,
+        "presence",
+        row(1),
+        "c"
+    )));
+    assert!(!written(update_as(
+        &core,
+        ALICE_OLD_TAB,
+        1,
+        "presence",
+        row(1),
+        "a"
+    )));
 }

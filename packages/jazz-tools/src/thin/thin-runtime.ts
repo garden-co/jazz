@@ -301,8 +301,9 @@ export class ThinRuntime implements Runtime {
   /** This runtime's writer node: with {@link nextWriteSeq}, each write's
    * `writeKey`. The server commits the write under a node it derives from
    * this one and the session's author, so one node serves every identity
-   * the runtime writes as. */
-  private readonly writerNode = bytesToHex(runtimeRandomBytes(16));
+   * the runtime writes as. It is marked as bounding its resends
+   * ({@link boundedWriterNode}). */
+  private readonly writerNode = bytesToHex(boundedWriterNode());
   private nextWriteSeq = 1;
   /** Writes the server has not answered yet. */
   private unanswered = 0;
@@ -1705,6 +1706,22 @@ function viewOptions(context: WriteTarget): object {
     base: context.branchView?.base,
     updatedAtMs: context.updatedAtMs,
   };
+}
+
+/**
+ * A writer node marked as bounding its resends to
+ * {@link THIN_WRITE_RESEND_WINDOW_MS} (SPEC 8 §8.14): the tag `jzRB`, then
+ * random bits, as an RFC 9562 version-8 UUID. The authority drops the
+ * dedupe entries of only such a writer's writes; an unmarked node (an
+ * earlier client's, which may resend any time) keeps them.
+ */
+/** @internal Exported for its contract test. */
+export function boundedWriterNode(): Uint8Array {
+  const bytes = runtimeRandomBytes(16);
+  bytes.set([0x6a, 0x7a, 0x52, 0x42], 0);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x80;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  return bytes;
 }
 
 /** A UUIDv7: a millisecond timestamp, then random bits. */

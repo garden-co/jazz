@@ -1091,8 +1091,12 @@ those bytes are refused with it at once until the fetch backoff ends.
   `Written` with seq 0, or the first one's refusal as uploaded through a
   replica. A client resends a write for at most 10 minutes after its first
   send (the TypeScript thin client's `THIN_WRITE_RESEND_WINDOW_MS`); after
-  that the write ends with its outcome unknown. The authority drops the
-  dedupe entry of such a commit one hour after it recorded it, on its own
+  that the write ends with its outcome unknown. Such a client says so by
+  naming a node tagged `jzRB` (an RFC 9562 version-8 UUID), from which
+  every server derives a writer tagged `jzTB` instead of `jzTW`; an earlier
+  client names a random node, may resend any time, and its entries are
+  kept. The authority drops the
+  dedupe entry of a `jzTB` writer's commit one hour after it recorded it, on its own
   clock (`ORIGIN_ENTRY_RETENTION_MS`), if the commit was refused or wrote
   only latest-only tables (SPEC 4 §4.9), and the writer node's interned
   row once the node has no entry left. Any other accepted commit's entry is
@@ -1106,6 +1110,9 @@ those bytes are refused with it at once until the fetch backoff ends.
   more than an hour while the client resends the write through another
   server could apply a latest-only write twice. Entries recorded before
   the authority ran a build that records their ages are never dropped.
+  The window is measured on the client's wall clock and the hour on the
+  authority's: a client clock set back lengthens the window, and an
+  authority clock set forward drops entries early.
   The authority does not record its own refusal: a resend of a
   write it refused runs again, against current state. On a replica, seq 0
   can answer a write still pending upstream. An insert with a key names its

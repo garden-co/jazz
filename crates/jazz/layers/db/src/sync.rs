@@ -734,18 +734,55 @@ pub fn origin_node(author: &AuthorSubject, client_node: [u8; 16]) -> [u8; 16] {
     hasher.update(&client_node);
     let digest = hasher.finalize();
     let mut node: [u8; 16] = digest.as_bytes()[..16].try_into().expect("16 bytes");
-    node[..4].copy_from_slice(&ORIGIN_NODE_TAG);
+    node[..4].copy_from_slice(match bounds_resends(client_node) {
+        true => &BOUNDED_ORIGIN_NODE_TAG,
+        false => &ORIGIN_NODE_TAG,
+    });
+    marked_v8(node)
+}
+
+/// `node` marked as an RFC 9562 version-8 UUID.
+fn marked_v8(mut node: [u8; 16]) -> [u8; 16] {
     node[6] = (node[6] & 0x0f) | 0x80;
     node[8] = (node[8] & 0x3f) | 0x80;
     node
 }
 
-/// The first bytes of every [`origin_node`].
+fn tagged_v8(node: [u8; 16], tag: [u8; 4]) -> bool {
+    node[..4] == tag && node[6] >> 4 == 8 && node[8] >> 6 == 0b10
+}
+
+/// The first bytes of an [`origin_node`] whose client may resend its writes
+/// for as long as it lives (alpha.60 and alpha.61 thin clients).
 const ORIGIN_NODE_TAG: [u8; 4] = *b"jzTW";
+
+/// The first bytes of an [`origin_node`] whose client stops resending a
+/// write `THIN_WRITE_RESEND_WINDOW_MS` (10 minutes) after its first send:
+/// one whose own node bears [`BOUNDED_CLIENT_NODE_TAG`]. Only such a
+/// writer's entries age out ([`Inner::note_origin_entry`]).
+const BOUNDED_ORIGIN_NODE_TAG: [u8; 4] = *b"jzTB";
+
+/// The first bytes of the node a thin client names in its `writeKey`
+/// (version 8 too) when it bounds its resends: the client's promise, which
+/// lets the authority drop its writes' entries. An earlier client's
+/// random node carries it with odds of 2^-38.
+const BOUNDED_CLIENT_NODE_TAG: [u8; 4] = *b"jzRB";
+
+/// Whether a thin client naming `client_node` bounds its resends (see
+/// [`BOUNDED_CLIENT_NODE_TAG`]).
+pub fn bounds_resends(client_node: [u8; 16]) -> bool {
+    tagged_v8(client_node, BOUNDED_CLIENT_NODE_TAG)
+}
 
 /// Whether `node` is a thin client's writer node ([`origin_node`]).
 pub(crate) fn is_origin_node(node: [u8; 16]) -> bool {
-    node[..4] == ORIGIN_NODE_TAG && node[6] >> 4 == 8 && node[8] >> 6 == 0b10
+    tagged_v8(node, ORIGIN_NODE_TAG) || tagged_v8(node, BOUNDED_ORIGIN_NODE_TAG)
+}
+
+/// Whether `node` is the writer node of a thin client that bounds its
+/// resends: the only writers whose entries the authority drops.
+pub(crate) fn is_bounded_origin_node(node: [u8; 16]) -> bool {
+    tagged_v8(node, BOUNDED_ORIGIN_NODE_TAG)
 }
 
 /// How long the authority keeps a thin writer's prunable dedupe entry, on
@@ -6627,7 +6664,8 @@ impl Inner {
 
     /// Note the dedupe entry the authority just recorded for thin writer
     /// `node`'s commit `tx` (SPEC 8 §8.14), and drop the entries that aged
-    /// out. Only a `prunable` entry ages: a refusal, or an accepted commit
+    /// out. Only a `prunable` entry of a writer that bounds its resends
+    /// ([`is_bounded_origin_node`]) ages: a refusal, or an accepted commit
     /// that wrote only tables its version declares latest-only. Any other
     /// accepted commit's entry is also its history's record (history reads
     /// name versions by it, and later writes build on it), kept as every
@@ -6648,7 +6686,9 @@ impl Inner {
             return Ok(());
         }
         let now = self.now_ms();
-        if prunable {
+        // A client that does not bound its resends may resend any time:
+        // its entries are kept, as before.
+        if prunable && is_bounded_origin_node(node) {
             self.exec(ORIGIN_ENTRIES_DDL, []).map_err(storage)?;
             self.exec(
                 "INSERT OR IGNORE INTO _jazz_origin_entries (at, n, tx) VALUES (?1, ?2, ?3)",
@@ -14836,6 +14876,29 @@ mod tests {
         assert!(!super::is_origin_node(
             *jazz_types::ids::NodeUuid::random_from([0x88; 16]).as_bytes()
         ));
+    }
+
+    /// The writer node of a client that bounds its resends, as stored and
+    /// sent (a durable encoding): a client node tagged `jzRB` derives one
+    /// tagged `jzTB`, any other one tagged `jzTW`, both pinned to the byte.
+    /// A unit test: the derivation is not reachable from a public API that
+    /// shows its bytes.
+    #[test]
+    fn a_client_that_bounds_its_resends_derives_a_writer_node_of_its_own() {
+        use jazz_types::ids::AuthorSubject;
+        let author = AuthorSubject::for_test_bytes([1; 16]);
+        let mut client = [7u8; 16];
+        client[..4].copy_from_slice(b"jzRB");
+        let client = super::marked_v8(client);
+        assert!(super::bounds_resends(client));
+        assert!(!super::bounds_resends([7; 16]));
+        let bounded = super::origin_node(&author, client);
+        let unbounded = super::origin_node(&author, [7; 16]);
+        assert!(super::is_origin_node(bounded) && super::is_bounded_origin_node(bounded));
+        assert!(super::is_origin_node(unbounded) && !super::is_bounded_origin_node(unbounded));
+        let hex = |node: [u8; 16]| node.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        assert_eq!(hex(bounded), "6a7a54420ca787b39ab8eca2ca4480e8");
+        assert_eq!(hex(unbounded), "6a7a5457cf8b8a358e3c406d91a700d7");
     }
 
     /// Only a chunk store's failure becomes a refusal, carrying the
