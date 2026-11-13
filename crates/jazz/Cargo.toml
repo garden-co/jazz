@@ -104,6 +104,10 @@ harness = false
 name = "fanout_relations"
 harness = false
 
+[[bench]]
+name = "fanout_policy_tables"
+harness = false
+
 [[test]]
 name = "integration"
 path = "tests/integration/main.rs"

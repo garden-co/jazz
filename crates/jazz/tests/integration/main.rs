@@ -55,6 +55,8 @@ mod explain_read_clauses;
 mod fanout_correlation;
 #[path = "../fanout_differential.rs"]
 mod fanout_differential;
+#[path = "../fanout_policy_pins.rs"]
+mod fanout_policy_pins;
 #[path = "../flat_joins.rs"]
 mod flat_joins;
 #[path = "../gather_policy_double_ref.rs"]
