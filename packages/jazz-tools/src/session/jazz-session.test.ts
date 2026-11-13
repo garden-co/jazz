@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
-import { createJazzSessionOwner } from "./state.js";
+import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
 import {
   attachJazzSessionConsumer,
   coreInitial,
@@ -134,6 +134,50 @@ async function setup() {
     },
   };
 }
+
+describe("JazzSession localFirst", () => {
+  it("publishes localFirst when the session upgrades its thin client in place (#5225)", async () => {
+    let localFirst = false;
+    const client = {
+      db: { isLocalFirst: () => localFirst },
+      async shutdown() {},
+    };
+    const local = { id: "local", identity: { issuer: "urn:jazz:local-first", subject: "local" } };
+    const accounts = new AccountManager(
+      {
+        createLocalFirst: () => local as AccountHandle,
+        restoreLocalFirst: () => local as AccountHandle,
+        logout() {},
+        async loginWithBackend(): Promise<AccountHandle> {
+          throw new Error("signed_out");
+        },
+        async linkWithBackend(): Promise<AccountHandle> {
+          throw new Error("unused");
+        },
+      },
+      local as AccountHandle,
+    );
+    const core = await createJazzSessionOwner({ accounts, openClient: async () => client });
+    const app = ownJazzSession({}, async () => core);
+    await tick();
+    expect(app.getSnapshot()).toMatchObject({ status: "ready", client, localFirst: false });
+    const seen: boolean[] = [];
+    const unsubscribe = app.subscribe(() => seen.push(app.getSnapshot().localFirst));
+    // The browser session's upgrade: the same client turns local-first in place.
+    await replaceJazzSessionClient(
+      core,
+      async () => client,
+      () => {
+        localFirst = true;
+      },
+    );
+    expect(seen).toEqual([true]);
+    expect(app.getSnapshot()).toMatchObject({ status: "ready", client, localFirst: true });
+    unsubscribe();
+    await app.close();
+    expect(app.getSnapshot()).toMatchObject({ status: "closed", localFirst: false });
+  });
+});
 
 describe("JazzSession lifecycle", () => {
   it("is inert for SSR and retries asynchronous host failures", async () => {
