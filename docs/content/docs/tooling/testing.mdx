@@ -109,7 +109,7 @@ The returned `PolicyTestApp` provides:
 - `testApp.accountFor(session)`&hairsp;—&hairsp;get the account a session acts for, for example to seed rows a guest (device account) owns
 - `testApp.sessionFor(session)`&hairsp;—&hairsp;get the session `as()` acts with, including a guest's derived `user_id`
 - `testDb.expectAllowed(fn)`&hairsp;—&hairsp;check that a write can be staged locally, then roll it back; this does not prove that the server will accept it
-- `testDb.expectDenied(fn)`&hairsp;—&hairsp;check that a write is denied: either at once, as it is staged (for example a write to a row this session can't read), or by the server once it arrives
+- `testDb.expectDenied(fn)`&hairsp;—&hairsp;check that a write is denied: either at once, as it is staged (for example a write to a row deleted on this replica), or by the server once it arrives
 - `testApp.shutdown()`&hairsp;—&hairsp;stop the local client and server
 
 `as()` acts for any user, whether or not they have a Jazz account yet. Your real backend is
