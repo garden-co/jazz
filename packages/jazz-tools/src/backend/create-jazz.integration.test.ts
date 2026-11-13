@@ -1826,6 +1826,46 @@ describe("createJazz", () => {
     60_000,
   );
 
+  it("links a guest on a page that has its own window.__jazz, and leaves that global alone (#5262)", async () => {
+    // Before: the session refused to start, or (rc.2) `linkDeviceAccount()`
+    // rejected with "window.__jazz is reserved for Jazz"; on rc.1 a sealed
+    // one failed the upgrade with "object is not extensible".
+    const own = Object.seal({ mine: true });
+    vi.stubGlobal("window", { document: {}, __jazz: own });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    cleanups.push(async () => {
+      warn.mockRestore();
+      vi.unstubAllGlobals();
+    });
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+
+    const session = await createJazzClient({
+      appId: jazz.appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "device",
+    });
+    cleanups.push(() => session.close());
+    expect(session.getSnapshot().status).toBe("ready");
+    const account = session.getSnapshot().client!.session!.user!;
+
+    signInAs(origin, "alice");
+    await session.linkDeviceAccount();
+    const alice = session.getSnapshot().client!;
+    expect(alice.session!.user!).toBe(account);
+    expect(alice.session!.identity.subject).toBe("alice");
+
+    // The app's global is as it set it; Jazz said so once.
+    expect((globalThis as { window?: { __jazz?: unknown } }).window!.__jazz).toBe(own);
+    expect(own).toEqual({ mine: true });
+    const told = warn.mock.calls.filter(([message]) => String(message).includes("window.__jazz"));
+    expect(told).toHaveLength(1);
+  }, 60_000);
+
   it("links a guest only on a fresh proof for one challenge, never on its token", async () => {
     const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
     const appId = jazz.appId;
