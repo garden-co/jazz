@@ -1547,7 +1547,16 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
 
   async function askAuthenticate(request: Request): Promise<JazzUser | LocalFirstGuest | null> {
     if (!options.authenticate) return null;
-    return (await options.authenticate(request)) ?? null;
+    try {
+      return (await options.authenticate(request)) ?? null;
+    } catch (error) {
+      // The app's own code failed (a missing auth secret, its session store
+      // down). Its own API calls (forReqUser) get the error as it is; a Jazz
+      // route answers 500 and logs it, rather than reject (see `handle`).
+      const thrown = isObject(error) ? error : new Error(String(error));
+      thrownByAuthenticate.add(thrown);
+      throw thrown;
+    }
   }
 
   /** Whether the app lets `request` in as a device account (`acceptDeviceAccounts`). */
@@ -2091,6 +2100,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
                 // `authenticate` without `expiresAt` fails the same way every
                 // time: say why, once.
                 if (error instanceof AuthenticateExpiresAtError) warnMissingExpiry(error);
+                if (isThrownByAuthenticate(error)) console.error(AUTHENTICATE_THREW_MESSAGE, error);
                 onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
               }
               end();
@@ -2738,6 +2748,14 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         // carries nothing of the app's answer.
         warnMissingExpiry(error);
         return new Response(AUTHENTICATE_EXPIRES_AT_MISSING, {
+          status: 500,
+          headers: { "Cache-Control": "no-store" },
+        });
+      }
+      if (isThrownByAuthenticate(error)) {
+        // The reason (it can name the app's internals) stays in the logs.
+        console.error(AUTHENTICATE_THREW_MESSAGE, error);
+        return new Response(AUTHENTICATE_FAILED, {
           status: 500,
           headers: { "Cache-Control": "no-store" },
         });
@@ -3810,6 +3828,27 @@ function reauthenticateBatch(): Buffer {
     `${REAUTHENTICATE_WIRE_MESSAGE_PREFIX} the session reached the expiry authenticate gave it`,
   );
   return Buffer.from(encodeWebSocketFrameBatch([frame.finish()]));
+}
+
+/**
+ * What a Jazz route answers (500) when the app's `authenticate` threw. The
+ * error goes to the backend's log; the response carries only this code.
+ */
+const AUTHENTICATE_FAILED = "authenticate_failed";
+
+/** What the backend logs, before the error, when the app's `authenticate` threw. */
+const AUTHENTICATE_THREW_MESSAGE =
+  "createJazz: your authenticate threw, so Jazz answered this request with a 500. Fix the error below (a missing secret or environment variable is a common cause); authenticate should return null for a request with no signed-in user.";
+
+/** Errors the app's `authenticate` threw (or rejected with), as they reach a route. */
+const thrownByAuthenticate = new WeakSet<object>();
+
+function isThrownByAuthenticate(error: unknown): boolean {
+  return isObject(error) && thrownByAuthenticate.has(error);
+}
+
+function isObject(value: unknown): value is object {
+  return (typeof value === "object" && value !== null) || typeof value === "function";
 }
 
 function authFailedBatch(message: string): Buffer {
