@@ -44,7 +44,6 @@ it("reports a server whose store was recreated as authority-changed", async () =
     appId: randomUUID(),
     adminSecret: randomUUID(),
     backendSecret: randomUUID(),
-    allowLocalFirstAuth: true,
     inMemory: true,
   };
   const start = (port?: number) =>

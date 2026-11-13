@@ -36,7 +36,6 @@ interface LocalJazzServerOptions {
   inMemory?: boolean;
   backendSecret?: string;
   adminSecret?: string;
-  allowLocalFirstAuth?: boolean;
   telemetryCollectorUrl?: string;
   /** Live WebSocket connections one signed-in user may hold (default 128). */
   maxConnectionsPerUser?: number;
@@ -151,7 +150,6 @@ export async function startLocalJazzServer(
       inMemory: options.inMemory,
       backendSecret,
       adminSecret,
-      allowLocalFirstAuth: options.allowLocalFirstAuth,
       telemetryCollectorUrl: options.telemetryCollectorUrl,
       maxConnectionsPerUser: options.maxConnectionsPerUser,
       schema: schema ? [...schema] : undefined,

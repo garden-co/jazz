@@ -62,7 +62,7 @@ async function startServer(
   server = await startTestJazz({
     app: app,
     permissions: permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true, ...coreOptions },
+    coreOptions: { inMemory: true, ...coreOptions },
   });
   return server;
 }

@@ -109,10 +109,7 @@ impl ServerBuilder {
     pub fn new(app_id: AppId) -> Self {
         Self {
             app_id,
-            auth_config: AuthConfig {
-                allow_local_first_auth: true,
-                ..Default::default()
-            },
+            auth_config: AuthConfig::default(),
             schema_mode: ServerSchemaMode::Dynamic,
             blobs: BlobStore::Sqlite,
             storage_backend: StorageBackend::Persistent {
@@ -129,11 +126,6 @@ impl ServerBuilder {
 
     pub fn with_auth_config(mut self, auth_config: AuthConfig) -> Self {
         self.auth_config = auth_config;
-        self
-    }
-
-    pub fn with_local_first_auth(mut self, enabled: bool) -> Self {
-        self.auth_config.allow_local_first_auth = enabled;
         self
     }
 
@@ -789,8 +781,7 @@ fn validate_server_config(auth_config: &AuthConfig) -> Result<(), String> {
 
 fn log_auth_config(auth_config: &AuthConfig) {
     info!(
-        "Auth configured: local_first={}, backend={}, admin={}",
-        auth_config.allow_local_first_auth,
+        "Auth configured: backend={}, admin={}",
         auth_config.backend_secret.is_some(),
         auth_config.admin_secret.is_some()
     );
