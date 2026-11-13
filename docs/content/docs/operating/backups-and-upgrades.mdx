@@ -77,6 +77,10 @@ in: after your own sign-in or sign-out, `refresh()` follows it.
   whose key lives on the device. See [Device Accounts](/docs/setup/auth/local-first).
 - **Errors.** A failed operation that leaves the client usable keeps the session `ready`, with
   `error` set. `status: "error"` now means there is no usable client.
+- **`window.__jazz` is Jazz's page handle**, set by every browser client: `status()`,
+  `waitForSync()` and `clearStorage()` for tests and agents. An app that set its own
+  `window.__jazz` keeps it (Jazz warns once and goes without the handle); rename yours to get the
+  handle.
 - **`<JazzProvider>` refuses the old shapes** (the config as its own props, `fallback`, a config
   with an `account`) with an error that names the new one.
 
