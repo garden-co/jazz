@@ -2,6 +2,7 @@ import { schema as s } from "jazz-tools";
 import { schema as betterauthSchema } from "./schema-better-auth/schema";
 import { migrations } from "./migrations";
 
+// #region default-stack-schema
 const schema = {
   ...betterauthSchema,
   messages: s.table(
@@ -17,5 +18,6 @@ const schema = {
 
 type AppSchema = s.Schema<typeof schema>;
 export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+// #endregion default-stack-schema
 
 export type Message = s.RowOf<typeof app.messages>;
