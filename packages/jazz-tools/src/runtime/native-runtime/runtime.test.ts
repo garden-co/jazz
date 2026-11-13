@@ -290,6 +290,75 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
   });
 
+  describe("a credential refresh for another principal (#4476)", () => {
+    const jwtFor = (sub: string) =>
+      "e30." +
+      Buffer.from(JSON.stringify({ iss: "urn:jazz:test", sub })).toString("base64url") +
+      ".signature";
+
+    const connectedRuntime = async () => {
+      const sockets: FakeWebSocket[] = [];
+      globalThis.WebSocket = class extends FakeWebSocket {
+        constructor(url: string) {
+          super(url);
+          sockets.push(this);
+        }
+      } as unknown as typeof WebSocket;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              connectUpstream: () => new FakeTransport([]),
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      runtime.connect(
+        "ws://127.0.0.1:4200/apps/app-a/ws",
+        JSON.stringify({ jwt_token: jwtFor("runtime") }),
+      );
+      await runtime.waitForUpstreamServerConnection();
+      return { runtime, sockets };
+    };
+
+    it("refuses it with identity_mismatch and keeps the store's link", async () => {
+      const { runtime, sockets } = await connectedRuntime();
+
+      expect(() => runtime.updateAuth(JSON.stringify({ jwt_token: jwtFor("another") }))).toThrow(
+        expect.objectContaining({ code: "protocol", reason: "identity_mismatch" }),
+      );
+      // The worker's `reconnect` dials through connect(): refused the same way.
+      expect(() =>
+        runtime.connect(
+          "ws://127.0.0.1:4200/apps/app-a/ws",
+          JSON.stringify({ jwt_token: jwtFor("another") }),
+        ),
+      ).toThrow(expect.objectContaining({ reason: "identity_mismatch" }));
+
+      expect(sockets).toHaveLength(1);
+      expect(sockets[0]!.closed).toBe(false);
+      await runtime.close();
+    });
+
+    it("still reconnects with a renewed credential for the same principal", async () => {
+      const { runtime, sockets } = await connectedRuntime();
+
+      await runtime.updateAuth(JSON.stringify({ jwt_token: jwtFor("runtime") }));
+      await runtime.waitForUpstreamServerConnection();
+
+      expect(sockets).toHaveLength(2);
+      await runtime.close();
+    });
+  });
+
   it("moves a strict remote read from a stalled handshake to its auth-refresh replacement", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
