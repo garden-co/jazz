@@ -43,24 +43,26 @@ export interface LargeValueSummary {
   $large: { kind: "bytes" | "text" | "json"; size: number; preview: string };
 }
 
-/** `value` (as {@link toJsonValue} makes it) as a row shows it: summarized when large. */
-export function summarizeLargeValue(value: unknown): unknown {
+/**
+ * `value` (as {@link toJsonValue} makes it) as a row shows it: summarized
+ * when its JSON is longer than `limit`.
+ */
+export function summarizeLargeValue(value: unknown, limit = LARGE_VALUE_BYTES): unknown {
   if (value === null || (typeof value !== "object" && typeof value !== "string")) return value;
   if (typeof value === "string") {
-    if (value.length * 3 <= LARGE_VALUE_BYTES || JSON.stringify(value).length <= LARGE_VALUE_BYTES)
-      return value;
+    if (JSON.stringify(value).length <= limit) return value;
     return large("text", value.length, value.slice(0, LARGE_VALUE_PREVIEW));
   }
   const bytes = (value as { $bytes?: unknown }).$bytes;
   if (typeof bytes === "string" && Object.keys(value).length === 1) {
-    if (bytes.length <= LARGE_VALUE_BYTES) return value;
+    if (bytes.length <= limit) return value;
     // Base64: 4 characters per 3 bytes.
     const size =
       Math.floor((bytes.length * 3) / 4) - (bytes.endsWith("==") ? 2 : bytes.endsWith("=") ? 1 : 0);
     return large("bytes", size, bytes.slice(0, LARGE_VALUE_PREVIEW));
   }
   const json = JSON.stringify(value);
-  if (json.length <= LARGE_VALUE_BYTES) return value;
+  if (json.length <= limit) return value;
   return large("json", json.length, json.slice(0, LARGE_VALUE_PREVIEW));
 }
 

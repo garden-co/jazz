@@ -532,7 +532,7 @@ export function createInspector(deps: InspectorDeps) {
     admitted: Admitted,
     query: InspectQuery,
     as: InspectAs | undefined,
-    summarize = true,
+    options: { summarize?: boolean; part?: { column: string; from: number; to: number } } = {},
   ): Promise<{
     rows: Record<string, unknown>[];
     truncated: boolean;
@@ -560,9 +560,20 @@ export function createInspector(deps: InspectorDeps) {
     const limit = rowLimit(query.limit);
     const { columns } = tableOf(query.table);
     // One more than the limit, to tell whether more matched.
-    const json = buildQueryJson(query, limit + 1, (column, value) =>
+    let json = buildQueryJson(query, limit + 1, (column, value) =>
       fromJsonForColumn(columns.get(column), value),
     );
+    // Only `from`–`to` of one bytes or text value: the store reads just the
+    // chunks that part covers.
+    if (options.part) {
+      const { column, from, to } = options.part;
+      json = JSON.stringify({
+        ...JSON.parse(json),
+        select: [column],
+        partialSelect: { [column]: { from, to } },
+      });
+    }
+    const summarize = options.summarize ?? true;
     const { db, as: asUser, asClaims, warning } = await dbFor(as);
     const found = await db.all(queryBuilder(query.table, json), {
       tier: "remote",
@@ -580,8 +591,22 @@ export function createInspector(deps: InspectorDeps) {
           shown[column] = summarizeLargeValue(value);
         }
       }
-      bytes += JSON.stringify(shown).length;
+      let size = JSON.stringify(shown).length;
       // Always the first row: a row that exists is never answered as none.
+      // Should it alone be larger than an answer carries (many values just
+      // under the limit), summarize its largest values until it fits.
+      if (rows.length === 0 && size > MAX_ANSWER_BYTES) {
+        const bySize = Object.entries(shown)
+          .filter(([column]) => column !== "id")
+          .map(([column, value]) => [column, JSON.stringify(value)?.length ?? 0] as const)
+          .sort((a, b) => b[1] - a[1]);
+        for (const [column] of bySize) {
+          if (size <= MAX_ANSWER_BYTES) break;
+          shown[column] = summarizeLargeValue(shown[column], 0);
+          size = JSON.stringify(shown).length;
+        }
+      }
+      bytes += size;
       if (bytes > MAX_ANSWER_BYTES && rows.length > 0) {
         truncated = true;
         break;
@@ -699,51 +724,95 @@ export function createInspector(deps: InspectorDeps) {
         throw new InspectError("bad_request", "from and to must be whole numbers of at least 0");
       }
     }
-    const read = await readRows(
-      admitted,
-      { table: body.table, where: { id: body.id }, select: [column], limit: 1 },
-      body.as,
-      false,
-    );
-    const row = read.rows[0];
-    if (!row) throw new InspectError("not_found", `${body.table} has no row ${body.id} to read`);
-    const whole = row[column];
-    let value: unknown = whole;
-    let size: number | undefined;
-    const from = body.from ?? 0;
-    if (typeof whole === "string") {
-      size = whole.length;
-      value = whole.slice(from, body.to ?? whole.length);
-    } else if (
-      whole &&
-      typeof whole === "object" &&
-      typeof (whole as { $bytes?: unknown }).$bytes === "string"
-    ) {
-      const bytes = fromJsonValue(whole) as Uint8Array;
-      size = bytes.length;
-      value = toJsonValue(bytes.subarray(from, body.to ?? bytes.length));
-    } else if (body.from !== undefined || body.to !== undefined) {
-      throw new InspectError(
-        "bad_request",
-        `from and to are for a bytes or text column; ${column} is neither`,
-      );
+    const type = tableOf(body.table).columns.get(column);
+    if (!type) throw new InspectError("not_found", `${body.table} has no column ${column}`);
+    const ranged = type.type === "Bytea" || type.type === "Text";
+    const unit = type.type === "Bytea" ? "bytes" : "UTF-16 code units";
+    const partLimit = type.type === "Bytea" ? MAX_PART_BYTES : MAX_PART_TEXT;
+    const where = { table: body.table, where: { id: body.id }, select: [column], limit: 1 };
+    const read = (part?: { from: number; to: number }) =>
+      readRows(admitted, where, body.as, {
+        summarize: false,
+        ...(part ? { part: { column, ...part } } : {}),
+      }).then((answer) => {
+        const row = answer.rows[0];
+        if (!row)
+          throw new InspectError("not_found", `${body.table} has no row ${body.id} to read`);
+        return { answer, value: row[column] };
+      });
+    const answerWith = (
+      found: Awaited<ReturnType<typeof read>>,
+      extra: Record<string, unknown> = {},
+    ) => ({
+      answer: {
+        value: found.value,
+        ...extra,
+        ...(found.answer.warning ? { warning: found.answer.warning } : {}),
+        inspectorUrl: inspectorLink(url, { table: body.table, row: body.id, as: body.as }),
+      },
+      event: { table: body.table, rows: 1, as: found.answer.as, asClaims: found.answer.asClaims },
+    });
+
+    if (body.from !== undefined || body.to !== undefined) {
+      if (!ranged) {
+        throw new InspectError(
+          "bad_request",
+          `from and to are for a bytes or text column; ${column} is neither`,
+        );
+      }
+      const from = body.from ?? 0;
+      if (body.to === undefined) {
+        throw new InspectError(
+          "bad_request",
+          `give to as well: the part ends there (${column}'s size is in its row's $large summary)`,
+        );
+      }
+      if (body.to < from) throw new InspectError("bad_request", "to must not be before from");
+      if (body.to - from > partLimit) {
+        throw new InspectError(
+          "bad_request",
+          `a part is at most ${partLimit} ${unit}: ask for ${column} in smaller parts`,
+        );
+      }
+      try {
+        return answerWith(await read({ from, to: body.to }), { from, to: body.to });
+      } catch (error) {
+        if (!isOutOfBounds(error)) throw error;
+        throw new InspectError(
+          "bad_request",
+          `${from}–${body.to} is past the end of ${column} (its size is in its row's $large summary)`,
+        );
+      }
     }
-    const encoded = JSON.stringify(value) ?? "";
+
+    if (ranged) {
+      // Not the whole value to find out it's too large: a part one past what
+      // an answer carries either exists (too large) or is out of bounds.
+      try {
+        await read({ from: 0, to: partLimit + 1 });
+        throw new InspectError(
+          "bad_request",
+          `${column} is longer than one answer carries (${partLimit} ${unit}): ask for it in parts with from and to`,
+        );
+      } catch (error) {
+        if (!isOutOfBounds(error)) throw error;
+      }
+    }
+    const found = await read();
+    const encoded = JSON.stringify(found.value) ?? "";
     if (encoded.length > MAX_ANSWER_BYTES) {
       throw new InspectError(
         "bad_request",
-        `${column} is ${size ?? encoded.length} long, more than one answer carries: ask for it in parts with from and to`,
+        `${column} is larger than one answer carries; parts (from and to) are for bytes and text columns only`,
       );
     }
-    return {
-      answer: {
-        value,
-        ...(size !== undefined ? { size, from, to: Math.min(body.to ?? size, size) } : {}),
-        ...(read.warning ? { warning: read.warning } : {}),
-        inspectorUrl: inspectorLink(url, { table: body.table, row: body.id, as: body.as }),
-      },
-      event: { table: body.table, rows: 1, as: read.as, asClaims: read.asClaims },
-    };
+    const size =
+      typeof found.value === "string"
+        ? found.value.length
+        : type.type === "Bytea" && found.value
+          ? (fromJsonValue(found.value) as Uint8Array).length
+          : undefined;
+    return answerWith(found, size !== undefined ? { size } : {});
   }
 
   /**
@@ -1111,6 +1180,16 @@ export function createInspector(deps: InspectorDeps) {
 }
 
 export type Inspector = ReturnType<typeof createInspector>;
+
+/** The most of a bytes value `get` answers at once: its base64 stays within an answer. */
+const MAX_PART_BYTES = 512 * 1024;
+/** The most UTF-16 code units of a text value `get` answers at once. */
+const MAX_PART_TEXT = 256 * 1024;
+
+/** The store refused a range past the end of a value. */
+function isOutOfBounds(error: unknown): boolean {
+  return /out of bounds/.test(error instanceof Error ? error.message : String(error));
+}
 
 function asInspectError(error: unknown): InspectError {
   if (error instanceof InspectError) return error;
