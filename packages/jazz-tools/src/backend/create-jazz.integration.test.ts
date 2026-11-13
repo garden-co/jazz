@@ -911,7 +911,7 @@ describe("createJazz", () => {
             if (frame[0] === 0x40) unknownFrames += 1;
         });
       }
-      override send(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
+      override send(data: Parameters<WebSocket["send"]>[0]) {
         if (typeof data === "string" && data.includes('"jazz_renewal"')) {
           const prelude = JSON.parse(data) as Record<string, unknown>;
           delete prelude.jazz_renewal;
