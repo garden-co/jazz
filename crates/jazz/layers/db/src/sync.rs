@@ -14838,3 +14838,7 @@ mod tests {
         assert!(joiner.push(&parts[1]).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "nested_policy_dependencies_tests.rs"]
+mod nested_policy_dependencies_tests;

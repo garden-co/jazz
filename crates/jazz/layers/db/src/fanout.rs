@@ -387,7 +387,7 @@ impl Inner {
         }
         // A replica missing chunks the result needs opens it once they
         // arrive. Its cut is decided over its relations' tables too.
-        let tables = self.with_relation_tables(prepared, &compiled.tables)?;
+        let tables = self.with_relation_tables(prepared, identity, &read, &compiled.tables)?;
         let visible = self.visible_read(&read, &tables);
         let applied = cut_of(&visible);
         let run = match &visible {
@@ -480,7 +480,10 @@ impl Inner {
         let root = schema.table(&query.table)?;
         let mut bare = prepared.clone();
         bare.query.includes.retain(|include| include.require);
-        let others = self.compile_tracked(&bare, identity, read)?.0.tables;
+        let bare_compiled = self.compile_tracked(&bare, identity, read)?.0;
+        // An include can also support a nested child policy or filter. Such a
+        // change must recompute those children, not replay their cached rows.
+        let others = self.with_relation_tables(&bare, identity, read, &bare_compiled.tables)?;
         let mut out = Vec::new();
         for include in query.includes.iter().filter(|include| !include.require) {
             let column = include.path.split('.').next().unwrap_or_default();
@@ -603,18 +606,7 @@ impl Inner {
             Ok(())
         }
         joins(&mut structural, &query.joins, &stored)?;
-        fn arrays(
-            out: &mut BTreeSet<String>,
-            list: &[crate::query::ArraySubquery],
-            stored: &dyn Fn(&str) -> Result<String, Error>,
-        ) -> Result<(), Error> {
-            for array in list {
-                out.insert(stored(&array.table)?);
-                arrays(out, &array.nested_arrays, stored)?;
-            }
-            Ok(())
-        }
-        arrays(&mut structural, &query.array_subqueries, &stored)?;
+        structural.extend(self.relation_read_tables(prepared, identity, read)?);
         for source in query.flat_join.iter().flat_map(|flat| &flat.sources) {
             let table = &source.table;
             structural.insert(stored(history_source_table(table).unwrap_or(table))?);
@@ -871,7 +863,12 @@ impl Inner {
                         )?
                         .to_owned();
                     let watches = self.watches(prepared, group.identity, read, &compiled)?;
-                    let tables = self.with_relation_tables(prepared, &compiled.tables)?;
+                    let tables = self.with_relation_tables(
+                        prepared,
+                        group.identity,
+                        read,
+                        &compiled.tables,
+                    )?;
                     let includes =
                         self.output_only_includes(prepared, group.identity, read, &compiled)?;
                     let branches = view_branches(schema, read, &watches);
