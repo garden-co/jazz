@@ -40,7 +40,10 @@ async function store() {
 describe("a deploy whose migrations don't match the store's history", () => {
   // `{ migrations: "none" }` after a schema change: the app ships no
   // migration from the version the store runs.
-  it("names the version the app ships no migration from, and how to write one", async () => {
+  // The server's graph check refuses this before the store's own check
+  // would: its existing "disconnected roots" guidance already names the
+  // version and the fix, which this pins.
+  it("refuses a deploy with no migration from the stored version, naming it", async () => {
     const deploy = await store();
     await deploy(unversioned(v1));
     const refused = deploy(unversioned(v2));

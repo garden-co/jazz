@@ -364,4 +364,75 @@ mod tests {
             "{error}"
         );
     }
+
+    /// A store that admitted `stored` (in order, each the next one's lens
+    /// target), and a deployment of `deployed` with `a -> b` between them.
+    fn deploy_onto(stored: &[&Schema], deployed: &[&Schema]) -> Result<CatalogueChange, String> {
+        let hash = SchemaHash::compute;
+        let rows = CatalogueRows {
+            schemas: stored
+                .iter()
+                .enumerate()
+                .map(|(n, schema)| CatalogueSchema {
+                    hash: hash(schema),
+                    admitted: Some(n as u64),
+                    version: Some(JazzSchema::new(schema).unwrap().version_id()),
+                    published_at: Some(1),
+                    schema: (*schema).clone(),
+                })
+                .collect(),
+            lenses: Vec::new(),
+            permissions: Vec::new(),
+            bundles: Vec::new(),
+        };
+        let migrations = deployed
+            .windows(2)
+            .map(|pair| Lens::new(hash(pair[0]), hash(pair[1]), adds_a("")))
+            .collect();
+        let prepared = PreparedDeployment {
+            schemas: deployed.iter().map(|schema| (*schema).clone()).collect(),
+            migrations,
+            active_schema: JazzSchema::new(deployed.last().unwrap()).unwrap(),
+        };
+        prepare_catalogue_change(&prepared, &rows, CataloguePut::default())
+    }
+
+    fn short(schema: &Schema) -> String {
+        SchemaHash::compute(schema).to_hex()[..12].to_owned()
+    }
+
+    /// #5053: a store that started at `b` (an app on `{ migrations: "none" }`)
+    /// refuses the app's real history `a -> b`, naming both first versions by
+    /// the short hashes `jazz-tools` prints, and the ways out.
+    #[test]
+    fn a_store_that_started_elsewhere_names_both_first_versions() {
+        let (a, b) = (notes(None, false), notes(Some("a"), false));
+        let error = deploy_onto(&[&b], &[&a, &b]).unwrap_err();
+        assert!(
+            error.contains(&format!(
+                "this store's history starts at schema {}, but the app's migrations start at {}",
+                short(&b),
+                short(&a)
+            )),
+            "{error}"
+        );
+        assert!(error.contains("npx jazz-tools migrations create"), "{error}");
+        assert!(!error.contains("not supported yet"), "{error}");
+    }
+
+    /// #5053: a deployment that leaves out a version the store runs names it
+    /// and how to migrate from it.
+    #[test]
+    fn a_deployment_omitting_a_stored_version_names_it() {
+        let (a, b) = (notes(None, false), notes(Some("a"), false));
+        let error = deploy_onto(&[&a], &[&b]).unwrap_err();
+        assert!(
+            error.contains(&format!(
+                "the store already holds schema {}, which the app's migrations don't include",
+                short(&a)
+            )),
+            "{error}"
+        );
+        assert!(error.contains("npx jazz-tools migrations create"), "{error}");
+    }
 }
