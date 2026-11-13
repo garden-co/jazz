@@ -34,7 +34,7 @@ export function checkSeedFilterPublicApi(seed: ReachableSeedBuilder): void {
     {
       active: false,
       account: { isNull: false },
-      owner: session.user.account,
+      owner: session.user,
     },
   );
   // @ts-expect-error A seed principal must remain a branded session reference.
