@@ -228,6 +228,85 @@ describe("cli migrations", () => {
     );
   });
 
+  // #5056: an enum column (or an array of enums) may gain variants, declared
+  // anywhere in the list, with nothing to fill in: its rows pass unchanged.
+  // A variant missing from the new list (removed, or renamed, which reads
+  // the same) still has no migration step.
+  it("adds enum variants with a stub that needs nothing filled in, and refuses dropping one", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const tasks = (status: string, labels: string) => `
+import { schema as s } from ${JSON.stringify(fileURLToPath(new URL("./index.ts", import.meta.url)))};
+import { migrations } from "./migrations/index.ts";
+
+const schema = {
+  tasks: s.table({
+    title: s.string(),
+    status: s.enum(${status}),
+    labels: s.array(s.enum(${labels})).optional(),
+  }, {}),
+};
+
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+`;
+    await writeFile(join(root, "schema.ts"), tasks('"todo", "done"', '"bug"'));
+    await writeFile(
+      join(root, "permissions.ts"),
+      `import { schema as s } from ${JSON.stringify(fileURLToPath(new URL("./index.ts", import.meta.url)))};
+import { app } from "./schema.ts";
+
+export default s.definePermissions(app, ({ policy }) => [policy.tasks.allowRead.always()]);
+`,
+    );
+    await mkdir(join(root, "node_modules"), { recursive: true });
+    await symlink(
+      fileURLToPath(new URL("..", import.meta.url)),
+      join(root, "node_modules", "jazz-tools"),
+      "dir",
+    );
+    vi.stubGlobal("fetch", vi.fn());
+    const first = await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    assert(first.status === "initial-snapshot");
+
+    await writeFile(join(root, "schema.ts"), tasks('"blocked", "todo", "done"', '"bug", "ui"'));
+    const { result: added, logs } = await captureConsoleLogs(() =>
+      createCatalogueMigration({ schemaDir: root, migrationsDir, name: "add-blocked" }),
+    );
+    assert(added.status === "generated");
+    expect(added.unfilledSteps).toBe(0);
+    const stub = await readFile(added.filePath, "utf8");
+    expect(stub).toContain(
+      '// Column "status" gains enum variant "blocked": existing rows are unchanged, so it needs no step.',
+    );
+    expect(stub).toContain(
+      '// Column "labels" gains enum variant "ui": existing rows are unchanged, so it needs no step.',
+    );
+    expect(stub).not.toContain("TODO");
+    expect(logs.join("\n")).not.toContain("Fill in migrate");
+    await typecheckGeneratedMigration(added.filePath);
+    // validate runs the checks a deploy runs on the migrations bundle.
+    await validate({ schemaDir: root });
+
+    for (const [status, labels, column, variant] of [
+      ['"blocked", "todo"', '"bug", "ui"', "status", "done"],
+      ['"blocked", "open", "done"', '"bug", "ui"', "status", "todo"],
+      ['"blocked", "todo", "done"', '"ui"', "labels", "bug"],
+    ] as const) {
+      await writeFile(join(root, "schema.ts"), tasks(status, labels));
+      await expect(
+        createCatalogueMigration({ schemaDir: root, migrationsDir, name: "drop-variant" }),
+      ).rejects.toThrow(
+        `Changing the enum variants of column "tasks.${column}" is not supported yet: ` +
+          `it no longer declares "${variant}". A migration can add enum variants, but renaming ` +
+          "or removing one is planned for a later release.",
+      );
+    }
+    expect((await readdir(migrationsDir)).filter((name) => name.includes("drop-variant"))).toEqual(
+      [],
+    );
+  }, 60_000);
+
   it.each([false, true])(
     "uses the active server schema on first run (unchanged=%s)",
     async (unchanged) => {
@@ -605,9 +684,9 @@ describe("cli migrations", () => {
       to: { type: "Json", schema: { type: "object", required: ["state"] } },
     },
     {
-      change: "the enum variants of",
-      from: { type: "Enum", variants: ["done", "todo"] },
-      to: { type: "Enum", variants: ["done", "doing", "todo"] },
+      change: "the type of",
+      from: { type: "Text" },
+      to: { type: "Integer" },
     },
   ])(
     "refuses changing $change a kept column, which no migration step can do",

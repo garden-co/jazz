@@ -190,9 +190,36 @@ export default m.defineMigration({
 After editing a stub, run `jazz-tools validate` (and your type checker): it rejects a migration that
 doesn't cover every change, while a stub with a `TODO` left in it can still pass type checks.
 
+### Adding enum variants
+
+An enum column, or an array of enums, can gain variants, declared anywhere in its list. Rows
+written under the older schema hold only variants the new one still declares, so they read
+unchanged, and the migration needs no step. `jazz-tools migrations create` writes a stub with
+nothing to fill in, noting which column gains which variants:
+
+```ts title="migrations/20261113-add-blocked-status.ts"
+import { migration as m } from "jazz-tools";
+
+export default m.defineMigration({
+  migrate: {
+    tasks: {
+      // Column "status" gains enum variant "blocked": existing rows are unchanged, so it needs no step.
+    },
+  },
+  // fromHash, toHash, from and to as generated
+});
+```
+
+Clients still on the older schema read a row holding the new variant with its name as it is (here
+`"blocked"`), even though their own types don't list it, so handle unknown values where they read
+the column. Their own writes are still checked against the variants their schema declares: an
+older client can't write `"blocked"`.
+
 ### Changes that aren't supported yet
 
-- **Changing a column's type, or the variants of an enum.** The CLI refuses them. Adding a column
+- **Renaming or removing an enum variant.** The CLI refuses a variant missing from the new list,
+  and so does a deploy. Adding variants works, as above.
+- **Changing a column's type.** The CLI refuses it. Adding a column
   under a new name and dropping the old one works, but it does not carry values over: every row
   gets the new column's default, with no warning. There is no value-mapping step yet.
 - **Making an optional column required.** There's no step for it yet, and adding a required column

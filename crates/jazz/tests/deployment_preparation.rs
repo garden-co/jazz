@@ -510,6 +510,78 @@ fn rejects_invalid_lenses_and_policy_schema_pairs() {
     ));
 }
 
+fn tasks(status: &[&str], labels: &[&str]) -> Schema {
+    let enumeration = |variants: &[&str]| ColumnType::Enum {
+        variants: variants.iter().map(|v| (*v).to_owned()).collect(),
+    };
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("tasks")
+                .column("title", ColumnType::Text)
+                .column("status", enumeration(status))
+                .column(
+                    "labels",
+                    ColumnType::Array {
+                        element: Box::new(enumeration(labels)),
+                    },
+                ),
+        )
+        .build()
+}
+
+/// A migration with no steps may add enum variants to a kept column, also
+/// an array of enums, declared anywhere in the list: the rows it already
+/// holds pass unchanged. One that drops a variant (a removal, or a rename
+/// without a value mapping) is refused, naming the variant.
+///
+/// ```
+/// v1 status(todo, done)          ──empty lens──► v2 status(blocked, todo, done) ✓
+///    labels(bug)[]                                  labels(bug, ui)[]
+/// v1 status(todo, done)          ──empty lens──► status(todo, finished)        ✗ "done"
+/// ```
+#[test]
+fn an_empty_migration_may_add_enum_variants_but_not_drop_them() {
+    let v1 = tasks(&["todo", "done"], &["bug"]);
+    for added in [
+        tasks(&["blocked", "todo", "done"], &["bug"]),
+        tasks(&["todo", "done"], &["bug", "ui"]),
+        tasks(&["done", "blocked", "todo"], &["ui", "bug"]),
+    ] {
+        let prepared = prepare_deployment(
+            &DeploymentCatalogue::default(),
+            request(
+                &added,
+                &[v1.clone(), added.clone()],
+                vec![migration(&v1, &added, vec![])],
+            ),
+        )
+        .expect("adding enum variants needs no migration steps");
+        assert_eq!(prepared.migrations().len(), 1);
+    }
+
+    for (dropped, variant) in [
+        (tasks(&["todo"], &["bug"]), "\"done\""),
+        (tasks(&["todo", "finished"], &["bug"]), "\"done\""),
+        (tasks(&["todo", "done"], &["ui"]), "\"bug\""),
+    ] {
+        let refused = prepare_deployment(
+            &DeploymentCatalogue::default(),
+            request(
+                &dropped,
+                &[v1.clone(), dropped.clone()],
+                vec![migration(&v1, &dropped, vec![])],
+            ),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.contains(&format!("no longer declares enum variant {variant}"))
+                && refused.contains("renaming or removing them is not yet"),
+            "{refused}"
+        );
+    }
+}
+
 #[test]
 fn parallel_paths_must_preserve_table_identity() {
     let schema = |names: &[&str]| {

@@ -10146,6 +10146,32 @@ impl Inner {
 
     /// `view` governed by session `index`'s policies: unchanged unless the
     /// session is pinned to a bundle, whose policies then replace its own.
+    /// The stored view a session's commits apply under, its enum cells
+    /// checked by the variants of the version the session writes under
+    /// ([`Schema::with_enum_variants_of`]). A session without a version (a
+    /// trusted link) goes by the current schema's.
+    pub(crate) fn versioned_stored_view(&mut self, index: usize) -> Rc<Schema> {
+        let stored = self.stored_view();
+        let Some(version) = self.written_version(index) else {
+            return stored;
+        };
+        let Some(schema) = self.session_schema(index) else {
+            return stored;
+        };
+        let mut cache = self.version_stored_views.borrow_mut();
+        if let Some((built, from, view)) = cache.get(&version)
+            && Rc::ptr_eq(built, &stored)
+            && Rc::ptr_eq(from, &schema)
+        {
+            return view.clone();
+        }
+        let view = stored
+            .with_enum_variants_of(&schema)
+            .map_or_else(|| stored.clone(), Rc::new);
+        cache.insert(version, (stored, schema, view.clone()));
+        view
+    }
+
     pub(crate) fn governed_view(&self, view: &Rc<Schema>, index: usize) -> Rc<Schema> {
         let Some(bundle) = self.sessions[index].bundle else {
             return view.clone();
@@ -12464,8 +12490,9 @@ impl Db {
     /// writes apply under, governed by session `index`'s policies: its
     /// bundle's when it is pinned.
     fn stored_db_for(&self, index: usize) -> Db {
-        let inner = self.inner.borrow();
-        let view = inner.governed_view(&inner.stored_view(), index);
+        let mut inner = self.inner.borrow_mut();
+        let stored = inner.versioned_stored_view(index);
+        let view = inner.governed_view(&stored, index);
         drop(inner);
         Db {
             inner: self.inner.clone(),

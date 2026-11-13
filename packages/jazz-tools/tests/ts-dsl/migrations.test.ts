@@ -322,6 +322,69 @@ describe("typed migration object syntax", () => {
     );
   });
 
+  // #5056: an enum (or an array of enums) gaining variants, anywhere in its
+  // list, needs no step: the migration connects the versions with a table
+  // lens of no operations, also under a renamed table. Dropping a variant
+  // (or renaming one) does not typecheck.
+  it("connects a table whose enum columns gain variants with an empty lens", () => {
+    const from = {
+      tasks: s.table({ status: s.enum("todo", "done"), labels: s.array(s.enum("bug")) }, {}),
+    };
+    const to = {
+      tasks: s.table(
+        { status: s.enum("blocked", "todo", "done"), labels: s.array(s.enum("bug", "ui")) },
+        {},
+      ),
+    };
+    expect(
+      m.defineMigration({ fromHash: "aaaaaaaaaaaa", toHash: "bbbbbbbbbbbb", from, to }).forward,
+    ).toEqual([
+      {
+        table: "tasks",
+        added: undefined,
+        removed: undefined,
+        renamedFrom: undefined,
+        operations: [],
+      },
+    ]);
+    expect(
+      m.defineMigration({
+        fromHash: "aaaaaaaaaaaa",
+        toHash: "bbbbbbbbbbbb",
+        from: { legacyTasks: from.tasks },
+        to,
+        renameTables: { tasks: m.renameTableFrom("legacyTasks") },
+      }).forward,
+    ).toEqual([
+      {
+        table: "tasks",
+        added: undefined,
+        removed: undefined,
+        renamedFrom: "legacyTasks",
+        operations: [],
+      },
+    ]);
+
+    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+      // @ts-expect-error a kept enum column cannot lose a variant
+      m.defineMigration({
+        fromHash: "aaaaaaaaaaaa",
+        toHash: "bbbbbbbbbbbb",
+        from,
+        to: { tasks: s.table({ status: s.enum("todo"), labels: s.array(s.enum("bug")) }, {}) },
+      });
+      // @ts-expect-error renaming a variant drops the old one
+      m.defineMigration({
+        fromHash: "aaaaaaaaaaaa",
+        toHash: "bbbbbbbbbbbb",
+        from,
+        to: {
+          tasks: s.table({ status: s.enum("todo", "done"), labels: s.array(s.enum("issue")) }, {}),
+        },
+      });
+    }
+  });
+
   it("typechecks migrate coverage and op shapes", () => {
     if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
       m.defineMigration({

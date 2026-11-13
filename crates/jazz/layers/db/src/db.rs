@@ -628,6 +628,11 @@ struct Inner {
     /// Views governed by a bundle's policies (see `Inner::governed_view`),
     /// by bundle, with the view each was built from.
     bundle_views: RefCell<HashMap<crate::catalogue::BundleId, (Rc<Schema>, Rc<Schema>)>>,
+    /// Stored views checking enum cells by a session's version's variants
+    /// (see `Inner::versioned_stored_view`), by version, with the view and
+    /// the version schema each was built from.
+    version_stored_views:
+        RefCell<HashMap<crate::ids::SchemaVersionId, (Rc<Schema>, Rc<Schema>, Rc<Schema>)>>,
     /// Open transaction batches, by id.
     batches: HashMap<OpenTransactionId, Batch>,
     identity: DbIdentity,
@@ -1774,6 +1779,7 @@ impl Db {
                 views: BTreeMap::new(),
                 bundles: HashMap::new(),
                 bundle_views: RefCell::default(),
+                version_stored_views: RefCell::default(),
                 batches: HashMap::new(),
                 system_node: config.system_node.unwrap_or(config.identity.node),
                 identity: config.identity,
