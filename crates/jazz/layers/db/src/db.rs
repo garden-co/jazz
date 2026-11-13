@@ -902,6 +902,104 @@ impl Stamp {
 
 const STATEMENT_CACHE_CAPACITY: usize = 512;
 
+/// One read's nesting of its relations (`Inner::node`), shared by every row
+/// it nests: one read, as one identity, through one view and cut. Its
+/// relations' rows depend only on the relation and the parent value, so
+/// the run builds each relation's SQL (and each parent-cell read) once and
+/// rebinds only the parent, and reads each (relation, parent value) once
+/// where values repeat (relations keyed by a parent's column).
+///
+/// It lives for one call and dies with it, so nothing it holds outlives the
+/// read: relations are keyed by address, valid while the run borrows the
+/// query that owns them.
+struct RelationRun<'q> {
+    prepared: &'q PreparedQuery,
+    read: &'q ReadSpec,
+    sessions: (Option<Session>, Session),
+    /// Whether to reuse at all (always, outside tests that compare with the
+    /// uncached path).
+    reuse: bool,
+    /// Per relation and parent shape (an array of references or a scalar):
+    /// its compiled children and the parameter holding the parent.
+    sql: HashMap<(*const crate::query::ArraySubquery, bool), (Compiled, usize)>,
+    /// Per relation: the read of its parent cell.
+    cells: HashMap<*const crate::query::ArraySubquery, crate::compile::CellRead>,
+    /// Per relation keyed by a parent's column, parent shape and bound
+    /// parent value: its children.
+    children:
+        HashMap<(*const crate::query::ArraySubquery, bool, Option<ParentKey>), Vec<ResultNode>>,
+}
+
+impl<'q> RelationRun<'q> {
+    fn new(
+        inner: &Inner,
+        prepared: &'q PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &'q ReadSpec,
+    ) -> Self {
+        Self {
+            prepared,
+            read,
+            sessions: inner.read_sessions(prepared, identity),
+            reuse: relation_reuse(),
+            sql: HashMap::new(),
+            cells: HashMap::new(),
+            children: HashMap::new(),
+        }
+    }
+
+    fn ctx<'a>(&'a self, inner: &'a Inner) -> Ctx<'a> {
+        let (policy, claims) = &self.sessions;
+        inner.read_ctx(self.prepared, policy.as_ref(), claims, self.read)
+    }
+}
+
+/// A bound parent value as a map key: equal keys bind equal SQL values.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ParentKey {
+    Null,
+    Integer(i64),
+    Real(u64),
+    Text(Vec<u8>),
+    Blob(Vec<u8>),
+}
+
+impl ParentKey {
+    fn of(value: &Sql) -> Self {
+        match value {
+            Sql::Null => Self::Null,
+            Sql::Integer(v) => Self::Integer(*v),
+            Sql::Real(v) => Self::Real(v.to_bits()),
+            Sql::Text(v) => Self::Text(v.clone()),
+            Sql::Blob(v) => Self::Blob(v.clone()),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static RELATION_REUSE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Whether relation nesting reuses SQL and rows within a read.
+fn relation_reuse() -> bool {
+    #[cfg(any(test, feature = "testing"))]
+    {
+        RELATION_REUSE.with(std::cell::Cell::get)
+    }
+    #[cfg(not(any(test, feature = "testing")))]
+    {
+        true
+    }
+}
+
+/// Tests only: nest relations without reusing SQL or rows within a read
+/// (`false`), on this thread, to compare with the reusing path.
+#[cfg(any(test, feature = "testing"))]
+pub fn set_relation_reuse_for_test(reuse: bool) {
+    RELATION_REUSE.with(|cell| cell.set(reuse));
+}
+
 /// The application tables a store holds, by their stored columns.
 fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> {
     let names: Vec<String> = conn
@@ -2826,12 +2924,11 @@ impl Db {
         let inner = self.inner();
         let read = ReadSpec::of(&opts, &inner)?;
         let roots = inner.run(prepared, None, &read)?;
+        let mut run = RelationRun::new(&inner, prepared, None, &read);
         let mut tree = Vec::with_capacity(roots.len());
         for row in roots {
             tree.push(inner.node(
-                prepared,
-                None,
-                &read,
+                &mut run,
                 &prepared.query.table,
                 &prepared.query.array_subqueries,
                 row,
@@ -4897,13 +4994,12 @@ impl Inner {
         } else {
             read
         };
+        let mut run = RelationRun::new(self, prepared, identity, read);
         roots
             .into_iter()
             .map(|row| {
                 self.node(
-                    prepared,
-                    identity,
-                    read,
+                    &mut run,
                     &prepared.query.table,
                     &prepared.query.array_subqueries,
                     row,
@@ -4924,11 +5020,10 @@ impl Inner {
         let roots = self.run(prepared, identity, read)?;
         let mut out = versions(&roots);
         if !prepared.query.array_subqueries.is_empty() {
+            let mut run = RelationRun::new(self, prepared, identity, read);
             for row in roots {
                 let node = self.node(
-                    prepared,
-                    identity,
-                    read,
+                    &mut run,
                     &prepared.query.table,
                     &prepared.query.array_subqueries,
                     row,
@@ -4960,49 +5055,118 @@ impl Inner {
     /// read's view and cut, settled-only and members-only as it is.
     fn node(
         &self,
-        prepared: &PreparedQuery,
-        identity: Option<AuthorSubject>,
-        read: &ReadSpec,
+        run: &mut RelationRun<'_>,
         table: &str,
         arrays: &[crate::query::ArraySubquery],
         row: CurrentRow,
     ) -> Result<ResultNode, Error> {
         let mut relations = BTreeMap::new();
         for array in arrays {
-            let (policy, claims) = self.read_sessions(prepared, identity);
-            let ctx = || self.read_ctx(prepared, policy.as_ref(), &claims, read);
             let parent = if array.outer_column == "id" {
                 Value::Uuid(row.id.0)
             } else {
-                let (sql, params, ty, tags) =
-                    ctx().compile_cell(table, &array.outer_column, row.id)?;
-                let cell: Option<Sql> = self
-                    .conn
-                    .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
-                    .optional()
-                    .map_err(storage)?;
-                match cell {
-                    Some(cell) => cell_from_sql(&ty, tags.as_ref(), cell.as_ref(), &self.chunks)?
-                        .unwrap_or(Value::Nullable(None)),
-                    None => Value::Nullable(None),
-                }
+                self.relation_parent(run, table, array, row.id)?
             };
-            let compiled = ctx().compile_children(array, &parent)?;
-            let children = self.execute(&compiled, &array.table)?;
-            let mut nodes = Vec::with_capacity(children.len());
-            for child in children {
-                nodes.push(self.node(
-                    prepared,
-                    identity,
-                    read,
-                    &array.table,
-                    &array.nested_arrays,
-                    child,
-                )?);
-            }
+            let nodes = self.relation(run, array, &parent)?;
             relations.insert(array.column_name.clone(), ResultRelation::Array(nodes));
         }
         Ok(ResultNode { row, relations })
+    }
+
+    /// The value of row `id` that `array` correlates its children with
+    /// (`array.outer_column`), read through the run's view and cut.
+    fn relation_parent(
+        &self,
+        run: &mut RelationRun<'_>,
+        table: &str,
+        array: &crate::query::ArraySubquery,
+        id: RowUuid,
+    ) -> Result<Value, Error> {
+        let key = array as *const crate::query::ArraySubquery;
+        let cell = match run.reuse.then(|| run.cells.get(&key)).flatten() {
+            Some(cached) => {
+                let mut cell = cached.clone();
+                cell.params[cell.id_param] = Sql::Blob(id.0.as_bytes().to_vec());
+                cell
+            }
+            None => {
+                let cell = run.ctx(self).compile_cell(table, &array.outer_column, id)?;
+                if run.reuse {
+                    run.cells.insert(key, cell.clone());
+                }
+                cell
+            }
+        };
+        let value: Option<Sql> = self
+            .conn
+            .cached_row(&cell.sql, params_from_iter(cell.params.iter()), |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(storage)?;
+        Ok(match value {
+            Some(value) => {
+                cell_from_sql(&cell.ty, cell.tags.as_ref(), value.as_ref(), &self.chunks)?
+                    .unwrap_or(Value::Nullable(None))
+            }
+            None => Value::Nullable(None),
+        })
+    }
+
+    /// The children `array` relates to `parent`, each with its own
+    /// relations. Within one run the same relation of the same parent value
+    /// reads the same rows, so a relation keyed by a parent's column (a
+    /// forward reference, or an array of them) reads them once. One keyed
+    /// by the parent's own id meets each parent once, so it is not kept.
+    fn relation(
+        &self,
+        run: &mut RelationRun<'_>,
+        array: &crate::query::ArraySubquery,
+        parent: &Value,
+    ) -> Result<Vec<ResultNode>, Error> {
+        let key = array as *const crate::query::ArraySubquery;
+        let elements = match parent {
+            Value::Nullable(Some(inner)) => matches!(**inner, Value::Array(_)),
+            value => matches!(value, Value::Array(_)),
+        };
+        let bound = crate::values::to_sql(parent)?;
+        let memo = (key, elements, bound.as_ref().map(ParentKey::of));
+        let memoise = run.reuse && array.outer_column != "id";
+        if memoise && let Some(nodes) = run.children.get(&memo) {
+            return Ok(nodes.clone());
+        }
+        // Only the parent's own parameter differs between parents of one
+        // shape (a scalar, or an array of references).
+        let compiled = match run
+            .reuse
+            .then(|| run.sql.get(&(key, elements)))
+            .flatten()
+            .zip(bound.as_ref())
+        {
+            Some(((cached, at), bound)) => {
+                let mut compiled = cached.clone();
+                compiled.params[*at] = bound.clone();
+                compiled
+            }
+            None => {
+                let (compiled, at) = run.ctx(self).compile_children(array, parent)?;
+                if run.reuse
+                    && let Some(at) = at
+                {
+                    run.sql.insert((key, elements), (compiled.clone(), at));
+                }
+                compiled
+            }
+        };
+        let children = self.execute(&compiled, &array.table)?;
+        let mut nodes = Vec::with_capacity(children.len());
+        for child in children {
+            nodes.push(self.node(run, &array.table, &array.nested_arrays, child)?);
+        }
+        if memoise {
+            run.children.insert(memo, nodes.clone());
+        }
+        Ok(nodes)
     }
 
     // ---- write primitives ---------------------------------------------
