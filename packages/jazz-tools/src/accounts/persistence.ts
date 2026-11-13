@@ -38,6 +38,12 @@ export interface AccountStore {
 // than the link can still exist. An explicit restore of the root takes its
 // account back out.
 //
+// `signedOut` (optional) records an explicit sign-out (E7): until someone
+// signs in again, a reload stays signed out, and `initial: "device"` never
+// mints a new device account over it. Kept device keys stay (logout never
+// destroys the only key to offline data), and `reopenDeviceAccount()` resumes
+// the most recent, `recentDevice` (the account it founded, not the key).
+//
 // `backendUser` (optional, versioned on its own) remembers the user the app's
 // backend signed in, when that is the selection: their account, identity and
 // claims, never a credential. At most one of `selected` and `backendUser` is
@@ -49,6 +55,8 @@ interface StoredAccounts {
   selected: number | null;
   backendUser?: StoredBackendUser;
   forgottenAccounts?: string[];
+  signedOut?: true;
+  recentDevice?: string;
 }
 // About 45 bytes an entry: room for every link a long-open tab may outlive.
 const FORGOTTEN_ACCOUNTS_LIMIT = 1024;
@@ -112,6 +120,11 @@ function decode(value: string | null): StoredAccounts {
   )
     throw new Error("Invalid persisted account selection");
   const backendUser = decodeBackendUser(parsed.backendUser);
+  if (
+    (parsed.signedOut !== undefined && parsed.signedOut !== true) ||
+    (parsed.recentDevice !== undefined && typeof parsed.recentDevice !== "string")
+  )
+    throw new Error("Invalid persisted account selection");
   return {
     format: parsed.format,
     roots: [...parsed.roots],
@@ -119,10 +132,31 @@ function decode(value: string | null): StoredAccounts {
     selected: parsed.selected,
     ...(backendUser && parsed.selected === null ? { backendUser } : {}),
     ...(forgottenAccounts?.length ? { forgottenAccounts: [...forgottenAccounts] } : {}),
+    ...(parsed.signedOut && parsed.selected === null ? { signedOut: true as const } : {}),
+    ...(parsed.recentDevice ? { recentDevice: parsed.recentDevice } : {}),
   };
 }
 
-const automaticInitializers = new WeakMap<AccountManager<JWTAuth>, () => Promise<AccountHandle>>();
+const automaticInitializers = new WeakMap<
+  AccountManager<JWTAuth>,
+  () => Promise<AccountHandle | undefined>
+>();
+const keptKeyReaders = new WeakMap<
+  AccountManager<JWTAuth>,
+  { latest(): Promise<string | undefined>; known(): string | undefined }
+>();
+
+/**
+ * @internal The key of the device account this device keeps that signed in
+ * most recently, from the store as it is now (`latest`), or as this manager
+ * last saw it (`known`, for a synchronous export). `undefined` when the
+ * device keeps none (`clearOnSignOut` forgets a signed-out one).
+ */
+export function keptDeviceKey(accounts: AccountManager<JWTAuth>) {
+  const reader = keptKeyReaders.get(accounts);
+  if (!reader) throw new Error("Jazz can't read this device's kept device accounts");
+  return reader;
+}
 const forgottenReaders = new WeakMap<
   AccountManager<JWTAuth>,
   (account: string) => Promise<boolean>
@@ -140,6 +174,18 @@ export async function accountForgotten(
   account: string,
 ): Promise<boolean> {
   return (await forgottenReaders.get(accounts)?.(account)) ?? false;
+}
+
+const keepNextSignedOutKey = new WeakSet<AccountManager<JWTAuth>>();
+
+/**
+ * @internal The next sign-out of `accounts` keeps the device account's key,
+ * even with `clearOnSignOut`: another tab still has its store open (its
+ * wipe was held off), so that tab, the last out, decides. Its own sign-out
+ * forgets the key; if it closes instead, the key and the data stay.
+ */
+export function keepDeviceKeyOnSignOut(accounts: AccountManager<JWTAuth>): void {
+  keepNextSignedOutKey.add(accounts);
 }
 
 const keptAccountReaders = new WeakMap<
@@ -161,10 +207,15 @@ export async function storedKeepsDeviceAccount(
   return read(account);
 }
 
-/** @internal Select and adopt one durable root for automatic first startup. */
+/**
+ * @internal Select and adopt one durable root for automatic first startup
+ * (`initial: "device"`). A new device account is minted only when the device
+ * keeps no device key and no one explicitly signed out; otherwise the session
+ * starts signed out (`undefined`), and `reopenDeviceAccount()` resumes a kept one.
+ */
 export async function ensureAutomaticLocalFirst(
   accounts: AccountManager<JWTAuth>,
-): Promise<AccountHandle> {
+): Promise<AccountHandle | undefined> {
   const selected = accounts.getLoggedIn();
   if (selected) return selected;
   return automaticInitializers.get(accounts)?.() ?? accounts.createLocalFirst();
@@ -230,6 +281,8 @@ export async function prepareAccountManager(options: {
     const roots = [...stored.roots];
     const selected = stored.selected === null ? null : stored.roots[stored.selected]!;
     const backendUser = stored.backendUser;
+    const signedOut = stored.signedOut;
+    const recentDevice = stored.recentDevice;
     const forgets = [...forgetting];
     const unforgets = [...unforgetting];
     // Serialize snapshots even for an asynchronous native secure store. A
@@ -252,6 +305,10 @@ export async function prepareAccountManager(options: {
           if (latest.forgottenAccounts.length === 0) delete latest.forgottenAccounts;
           if (backendUser && selected === null) latest.backendUser = backendUser;
           else delete latest.backendUser;
+          if (signedOut && selected === null && !backendUser) latest.signedOut = true;
+          else delete latest.signedOut;
+          if (recentDevice) latest.recentDevice = recentDevice;
+          else delete latest.recentDevice;
           // Older versions kept an external account's assignment here.
           delete (latest as { assignment?: unknown }).assignment;
           return JSON.stringify(latest);
@@ -277,9 +334,36 @@ export async function prepareAccountManager(options: {
       selectionChanged(next) {
         // Creating/restoring a local handle already queued its root and selection.
         if (next?.identity.issuer === "urn:jazz:local-first") {
+          keepNextSignedOutKey.delete(manager);
           delete stored.backendUser;
+          delete stored.signedOut;
           return;
         }
+        if (next === undefined) {
+          // A sign-out: it lasts across reloads until someone signs in.
+          stored.signedOut = true;
+          // `clearOnSignOut` forgets the device account's key with it, so
+          // nothing on this device reopens it (its local data is wiped too).
+          const signedOutRoot =
+            stored.selected === null ? undefined : stored.roots[stored.selected];
+          const account = signedOutRoot === undefined ? undefined : rootAccount(signedOutRoot);
+          // Unless another tab still has the account's store open: the last
+          // tab out decides (`keepDeviceKeyOnSignOut`).
+          const keep = keepNextSignedOutKey.has(manager);
+          keepNextSignedOutKey.delete(manager);
+          if (!remembers && !keep && account !== undefined) {
+            unforgetting.delete(account);
+            forgetting.add(account);
+            stored.roots.splice(stored.selected!, 1);
+            if (stored.recentDevice === account) delete stored.recentDevice;
+          }
+          stored.selected = null;
+          delete stored.backendUser;
+          void save().catch((error) => manager.reportPersistenceError(error));
+          return;
+        }
+        keepNextSignedOutKey.delete(manager);
+        delete stored.signedOut;
         // A guest linked to this user (their sign-up): with no remembered
         // user, nothing on the device may reopen them, so forget the root.
         const guest = stored.selected === null ? undefined : stored.roots[stored.selected];
@@ -326,6 +410,9 @@ export async function prepareAccountManager(options: {
         if (index < 0) index = stored.roots.push(secret) - 1;
         stored.selected = index;
         delete stored.backendUser;
+        delete stored.signedOut;
+        const founded = rootAccount(secret);
+        if (founded !== undefined) stored.recentDevice = founded;
         // Suppress only the one retention callback caused by adoption. Any
         // re-entrant explicit selection must retain and persist normally.
         if (adoptingSecret !== secret) return save();
@@ -337,6 +424,15 @@ export async function prepareAccountManager(options: {
   forgottenReaders.set(manager, async (account) =>
     (decode(await options.store.read()).forgottenAccounts ?? []).includes(account),
   );
+  const keptKey = (accounts: StoredAccounts): string | undefined => {
+    const kept = { ...accounts, roots: [...accounts.roots] };
+    dropForgotten(kept);
+    return kept.roots.find((root) => rootAccount(root) === kept.recentDevice) ?? kept.roots.at(-1);
+  };
+  keptKeyReaders.set(manager, {
+    latest: async () => keptKey(decode(await options.store.read())),
+    known: () => keptKey(stored),
+  });
   keptAccountReaders.set(manager, async (account) => {
     const latest = decode(await options.store.read());
     dropForgotten(latest);
@@ -373,20 +469,23 @@ export async function prepareAccountManager(options: {
             const latest = decode(current);
             dropForgotten(latest);
             const selected = latest.selected === null ? undefined : latest.roots[latest.selected];
-            if (selected === undefined) {
-              const index = latest.roots.indexOf(candidate);
-              latest.selected = index >= 0 ? index : latest.roots.push(candidate) - 1;
+            if (selected !== undefined) {
+              winner = selected;
+            } else if (!latest.signedOut && latest.roots.length === 0) {
+              // A device no one used yet: start it with a new device account.
+              latest.selected = latest.roots.push(candidate) - 1;
               winner = candidate;
             } else {
-              winner = selected;
+              // Signed out on purpose, or it keeps a device account to
+              // reopen (`reopenDeviceAccount()`): start signed out.
+              winner = undefined;
             }
             return JSON.stringify(latest);
           }),
         );
       await writes;
       if (changed) return manager.getLoggedIn() ?? (await superseded());
-      if (winner === undefined)
-        throw new Error("Automatic local-first selection was not committed");
+      if (winner === undefined) return undefined;
       // Adoption only hydrates the manager; suppress its one retention callback.
       adoptingSecret = winner;
       try {

@@ -181,6 +181,7 @@ export type {
   JazzSessionOperation,
   JazzUser,
 } from "./session/jazz-session.js";
+export { NoKeptDeviceAccountError } from "./session/no-kept-device-account-error.js";
 
 export type {
   ForwardRelationship,

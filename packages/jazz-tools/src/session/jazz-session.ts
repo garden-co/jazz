@@ -6,6 +6,7 @@ import {
   type SessionCoreSnapshot,
 } from "./state.js";
 import type { AccountHandle } from "../accounts/state.js";
+import { NoKeptDeviceAccountError } from "./no-kept-device-account-error.js";
 import { exportLocalFirstSecret } from "../accounts/enrollment.js";
 import { createListeners, toError } from "../runtime/util.js";
 
@@ -63,6 +64,7 @@ function clientIsLocalFirst(client: unknown): boolean {
 export type JazzSessionOperation =
   | "createDeviceAccount"
   | "restoreDeviceAccount"
+  | "reopenDeviceAccount"
   | "linkDeviceAccount"
   | "refresh"
   | "signOut"
@@ -71,6 +73,7 @@ export type JazzSessionOperation =
 const CORE_OPERATION: Record<string, JazzSessionOperation> = {
   createLocalFirst: "createDeviceAccount",
   restoreLocalFirst: "restoreDeviceAccount",
+  reopenLocalFirst: "reopenDeviceAccount",
   linkWithBackend: "linkDeviceAccount",
   loginWithBackend: "refresh",
   logout: "signOut",
@@ -139,6 +142,13 @@ export interface JazzSession<Client> {
   /** Sign in as the device account a key from `exportDeviceKey()` names. */
   restoreDeviceAccount(key: string): Promise<void>;
   /**
+   * Sign in again as the device account that was signed in last on this
+   * device, with its id and its data: signing out keeps a device account's
+   * key (except with `clearOnSignOut`, which forgets it and wipes its data).
+   * Rejects when the device keeps none.
+   */
+  reopenDeviceAccount(): Promise<void>;
+  /**
    * Keep the signed-in device account and its data when its user signs up:
    * after your own sign-up, your backend links this device account to the
    * user it now names, and the session continues as that user.
@@ -156,7 +166,9 @@ export interface JazzSession<Client> {
   /**
    * The signed-in device account's key, to restore it elsewhere with
    * `restoreDeviceAccount(key)`. Anyone holding it is that account: keep it
-   * secret. Throws when the session isn't signed in as a device account.
+   * secret. While signed out, the key of the device account
+   * `reopenDeviceAccount()` would reopen. Throws when signed in as someone
+   * else, or when signed out and the device keeps no device account.
    */
   exportDeviceKey(): string;
   signOut(): Promise<void>;
@@ -395,6 +407,7 @@ export function ownJazzSession<Config, Client>(
     subscribe: listeners.subscribe,
     createDeviceAccount: action((current) => current.createLocalFirst()),
     restoreDeviceAccount: action((current, key: string) => current.restoreLocalFirst(key)),
+    reopenDeviceAccount: action((current) => current.reopenLocalFirst()),
     linkDeviceAccount: action((current) => current.linkWithBackend()),
     async refresh() {
       failure = undefined;
@@ -424,7 +437,12 @@ export function ownJazzSession<Config, Client>(
     },
     exportDeviceKey() {
       const account = core?.getSnapshot().account;
-      if (!account || account.identity.issuer !== DEVICE_ISSUER)
+      if (!account) {
+        const kept = core?.keptLocalFirstKey();
+        if (!kept) throw new NoKeptDeviceAccountError("exportDeviceKey()");
+        return kept;
+      }
+      if (account.identity.issuer !== DEVICE_ISSUER)
         throw new Error("exportDeviceKey(): this session isn't signed in as a device account");
       return exportLocalFirstSecret(account);
     },
@@ -566,6 +584,7 @@ export function jazzSessionActions<Client>(
   return {
     createDeviceAccount: session.createDeviceAccount,
     restoreDeviceAccount: session.restoreDeviceAccount,
+    reopenDeviceAccount: session.reopenDeviceAccount,
     linkDeviceAccount: session.linkDeviceAccount,
     refresh: session.refresh,
     exportDeviceKey: session.exportDeviceKey,
