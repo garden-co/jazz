@@ -31,7 +31,7 @@ use jazz_types::large_values::{
     self as lv, AttemptError, ChunkInputs, ChunkNode, LargeValueKind, LargeValueRef,
     chunks::ChunkRequest, epoch,
 };
-#[cfg(all(test, feature = "native"))]
+#[cfg(all(test, feature = "sqlite"))]
 use rusqlite::Connection;
 
 use crate::chunk_store::{ChunkStore, NodeKey};
@@ -2543,7 +2543,7 @@ where
     Ok(deleted)
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
 

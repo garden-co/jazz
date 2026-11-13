@@ -19,47 +19,47 @@
 //! [`FileOptions::synchronous_full`]: crate::db::FileOptions::synchronous_full
 //! [`Db`]: crate::db::Db
 
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 use std::path::Path;
 use std::path::PathBuf;
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 use std::sync::Mutex;
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 use std::time::Duration;
 
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 use rusqlite::Connection;
 #[cfg(any(test, feature = "testing"))]
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 use rusqlite::params;
 
 use crate::catalogue::{CataloguePut, CatalogueRows};
 use crate::db::Db;
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 use crate::db::{FileOptions, Journal};
 use crate::options::Error;
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 use crate::options::ErrorCode;
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 use crate::values::in_savepoint;
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 use crate::values::storage;
 
 #[cfg(not(any(test, feature = "testing")))]
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 type NativeConnectionSql<'a> = jazz_sql::native::Native<'a>;
 #[cfg(any(test, feature = "testing"))]
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 type NativeConnectionSql<'a> = crate::sql_test::ObservedSql<'a>;
 
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 pub(crate) struct OwnedConnection {
     conn: Connection,
     #[cfg(any(test, feature = "testing"))]
     pub(crate) sql_suspensions: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl From<Connection> for OwnedConnection {
     fn from(conn: Connection) -> Self {
         Self {
@@ -70,7 +70,7 @@ impl From<Connection> for OwnedConnection {
     }
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl std::ops::Deref for OwnedConnection {
     type Target = Connection;
     fn deref(&self) -> &Connection {
@@ -78,14 +78,14 @@ impl std::ops::Deref for OwnedConnection {
     }
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl std::ops::DerefMut for OwnedConnection {
     fn deref_mut(&mut self) -> &mut Connection {
         &mut self.conn
     }
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl OwnedConnection {
     pub(crate) fn sql(&self) -> NativeConnectionSql<'_> {
         #[cfg(not(any(test, feature = "testing")))]
@@ -105,7 +105,7 @@ impl OwnedConnection {
 pub use crate::backend::ConnectionSql;
 pub(crate) use crate::backend::DbConnection;
 
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl crate::values::TransactionConnection for OwnedConnection {
     fn transaction_open(&self) -> bool {
         use jazz_sql::Connection as _;
@@ -119,7 +119,7 @@ impl crate::values::TransactionConnection for OwnedConnection {
         let _ = crate::values::end_savepoint_inline(self, name, false);
     }
 }
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl crate::values::NativeTransactionConnection for OwnedConnection {
     fn sqlite(&self) -> &Connection {
         self
@@ -168,7 +168,7 @@ pub trait HostTables {
     /// For host tables with columns of their own (`_jazz_host_<name>`,
     /// created by `f` itself), which plain key-value pairs would hide from
     /// SQL.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     async fn host_sql(
         &self,
         f: &mut dyn FnMut(&Connection) -> Result<(), Error>,
@@ -187,7 +187,7 @@ pub trait HostTables {
 /// (thousands of reprepares per write on a busy client). The engine never
 /// runs `ANALYZE`, uses no `LIKE` on bound patterns and no partial indexes,
 /// so the guarantee costs no plan it would otherwise pick.
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 pub(crate) fn stable_plans(conn: &Connection) -> Result<(), Error> {
     conn.set_db_config(
         rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG,
@@ -226,7 +226,7 @@ impl StoreFile {
     /// Open (creating) the file at `path` with `options`, and admit its
     /// storage format (see [`crate::format`]); a refused file is left as it
     /// was.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     pub fn open(path: &Path, options: FileOptions) -> Result<Self, Error> {
         // SQLite cannot open a directory; one the Groove engine wrote gets
         // the typed refusal.
@@ -286,7 +286,7 @@ impl StoreFile {
     }
 
     /// A store that lives only as long as what is opened on it.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     pub fn memory() -> Result<Self, Error> {
         let conn = Connection::open_in_memory().map_err(storage)?;
         jazz_sql::inline(crate::format::admit(&mut NativeSql(&conn)))?;
@@ -299,7 +299,7 @@ impl StoreFile {
     /// An in-memory store this process shares by `name`: it lives while any
     /// connection to it is open, so a host keeping one can reopen the store
     /// (or read it with a [`HostReader`]) without losing it.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     pub fn shared_memory(name: &str) -> Result<Self, Error> {
         let conn =
             Connection::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?;
@@ -315,12 +315,12 @@ impl StoreFile {
 /// another thread never waits for work on the store's connection (a WAL
 /// file serves readers beside its writer). It sees every write that
 /// returned before the read began.
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 pub struct HostReader {
     conn: Mutex<Option<Connection>>,
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl HostReader {
     /// Read through the portable SQL interface on the native read-only connection.
     pub fn with_sql<T>(
@@ -331,7 +331,7 @@ impl HostReader {
     }
 
     /// Read the file at `path`, which a [`StoreFile`] opened already.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     pub fn open(path: &Path, vfs: Option<&'static str>) -> Result<Self, Error> {
         let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
             | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -345,7 +345,7 @@ impl HostReader {
     }
 
     /// Read the store [`StoreFile::shared_memory`] opened by `name`.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     pub fn shared_memory(name: &str) -> Result<Self, Error> {
         Self::with(
             Connection::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?,
@@ -406,12 +406,12 @@ impl HostReader {
 
 /// SQLite's `memdb` VFS shares a database whose name starts with `/`
 /// between the process's connections.
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 fn shared_memory_uri(name: &str) -> String {
     format!("file:/{name}?vfs=memdb")
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 fn uri_flags() -> rusqlite::OpenFlags {
     rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_URI
 }
@@ -487,7 +487,7 @@ impl HostTables for StoreFile {
         .await
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     async fn host_sql(
         &self,
         f: &mut dyn FnMut(&Connection) -> Result<(), Error>,
@@ -573,7 +573,7 @@ impl HostTables for Db {
         .await
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     async fn host_sql(
         &self,
         f: &mut dyn FnMut(&Connection) -> Result<(), Error>,
@@ -587,7 +587,7 @@ impl HostTables for Db {
 }
 
 #[cfg(any(test, feature = "testing"))]
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl Db {
     /// Tests: suspend a host write while it owns its SQL savepoint and store
     /// lease. Dropping this future must undo the write before another operation
@@ -638,7 +638,7 @@ impl Db {
 }
 
 #[cfg(any(test, feature = "testing"))]
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 fn create(conn: &Connection, table: HostTable) -> Result<(), Error> {
     conn.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS {} (k BLOB PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID",
@@ -647,17 +647,17 @@ fn create(conn: &Connection, table: HostTable) -> Result<(), Error> {
     .map_err(storage)
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 async fn get(conn: &Connection, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
     jazz_sql::get(&mut NativeSql(conn), table, key)
         .await
         .map_err(storage)
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 use jazz_sql::native::Native as NativeSql;
 
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 async fn prefix_scan(
     conn: &Connection,
     table: HostTable,

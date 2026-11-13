@@ -24,7 +24,7 @@ impl std::error::Error for CatalogueStorageError {}
 /// own; writes run on the store's thread, on the connection the runtime's
 /// rows use too, and wait for it.
 pub(crate) struct CatalogueStorage {
-    #[cfg_attr(not(feature = "native"), allow(dead_code))]
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
     reader: Option<Arc<HostReader>>,
     #[cfg_attr(not(any(test, feature = "embedded-server")), allow(dead_code))]
     store: crate::runtime::HostSender,
@@ -36,7 +36,7 @@ impl CatalogueStorage {
     }
 
     pub(crate) fn read(&self) -> CatalogueStorageResult<CatalogueRows> {
-        #[cfg(feature = "native")]
+        #[cfg(feature = "sqlite")]
         if let Some(reader) = &self.reader {
             return reader
                 .catalogue()

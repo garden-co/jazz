@@ -6,11 +6,12 @@ publish = false
 
 [features]
 default = []
-native = ["dep:rusqlite"]
+# Include Jazz's built-in SQLite backend; disable for host-provided storage.
+sqlite = ["dep:rusqlite"]
 
 [dependencies]
 rusqlite = { version = "0.40", optional = true, features = ["limits"] }
 
 [[example]]
 name = "native_probe"
-required-features = ["native"]
+required-features = ["sqlite"]

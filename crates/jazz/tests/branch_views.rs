@@ -18,17 +18,7 @@ use jazz::tools::{
 
 use common::{allow_all_policies, compile_schema, physical_column};
 
-fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::noop();
-    let mut context = Context::from_waker(waker);
-    let mut future = pin!(future);
-    loop {
-        match future.as_mut().poll(&mut context) {
-            Poll::Ready(value) => return value,
-            Poll::Pending => std::thread::yield_now(),
-        }
-    }
-}
+use jazz::db::block_on;
 
 trait TestResultFutureExt<T, E>: Future<Output = Result<T, E>> {
     fn unwrap(self) -> T

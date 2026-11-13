@@ -10,7 +10,7 @@
 use std::future::Future;
 use std::ops::ControlFlow;
 
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 pub mod native;
 
 /// Borrow arguments on the native path; asynchronous providers may copy them
@@ -342,12 +342,6 @@ pub trait Sql {
             Ok(out)
         }
     }
-
-    fn optional_blob(
-        &mut self,
-        sql: &str,
-        params: &[Param<'_>],
-    ) -> impl Future<Output = Result<Option<Vec<u8>>, Self::Error>>;
 }
 
 /// Validated host table name. The same identifier rules as Jazz's HostTable.
@@ -382,18 +376,20 @@ pub async fn get<S: Sql>(
 ) -> Result<Option<Vec<u8>>, S::Error> {
     let name = table.sql_name();
     if sql
-        .optional_blob(
+        .query_optional(
             "SELECT X'01' FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
             &[Param::Text(&name)],
+            |row| row.get::<Vec<u8>>(0),
         )
         .await?
         .is_none()
     {
         return Ok(None);
     }
-    sql.optional_blob(
+    sql.query_optional(
         &format!("SELECT v FROM {name} WHERE k = ?1"),
         &[Param::Blob(key)],
+        |row| row.get::<Vec<u8>>(0),
     )
     .await
 }
@@ -416,9 +412,10 @@ pub async fn put_if_absent_in_transaction<S: Sql>(
     )
     .await?;
     let existing = sql
-        .optional_blob(
+        .query_optional(
             &format!("SELECT v FROM {name} WHERE k = ?1"),
             &[Param::Blob(key)],
+            |row| row.get::<Vec<u8>>(0),
         )
         .await?;
     if existing.is_none() {
@@ -486,9 +483,10 @@ pub async fn prefix<S: Sql>(
 
 pub async fn exists<S: Sql>(sql: &mut S, table: HostTable) -> Result<bool, S::Error> {
     Ok(sql
-        .optional_blob(
+        .query_optional(
             "SELECT X'01' FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
             &[Param::Text(&table.sql_name())],
+            |row| row.get::<Vec<u8>>(0),
         )
         .await?
         .is_some())

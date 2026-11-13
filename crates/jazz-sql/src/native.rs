@@ -1,7 +1,7 @@
 //! Native SQLite completes each operation inline and returns `Ready`.
 //! Query rows and parameters borrow SQLite/caller memory; neither is copied
 //! merely to cross the async boundary.
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 
 pub struct NativeRow<'a>(&'a rusqlite::Row<'a>);
 
@@ -148,20 +148,6 @@ impl crate::Sql for Native<'_> {
             statement.execute(rusqlite::params_from_iter(
                 params.iter().copied().map(NativeParam),
             ))
-        }))
-    }
-    fn optional_blob(
-        &mut self,
-        sql: &str,
-        params: &[crate::Param<'_>],
-    ) -> impl std::future::Future<Output = rusqlite::Result<Option<Vec<u8>>>> {
-        std::future::ready(self.0.prepare_cached(sql).and_then(|mut statement| {
-            statement
-                .query_row(
-                    rusqlite::params_from_iter(params.iter().copied().map(NativeParam)),
-                    |row| row.get(0),
-                )
-                .optional()
         }))
     }
 }

@@ -1,5 +1,5 @@
 // SQL test provider that yields before every statement.
-use jazz_sql::{Param, Row, Sql, native::Native};
+use jazz_sql::{Param, Sql, native::Native};
 use std::ops::ControlFlow;
 use std::task::Poll;
 
@@ -24,13 +24,6 @@ impl Sql for Suspends<'_> {
     type Row<'a> = <Native<'a> as Sql>::Row<'a>;
     fn invalid_data(message: &'static str) -> Self::Error {
         Native::invalid_data(message)
-    }
-    async fn optional_blob(
-        &mut self,
-        sql: &str,
-        params: &[Param<'_>],
-    ) -> Result<Option<Vec<u8>>, Self::Error> {
-        self.query_optional(sql, params, |row| row.get(0)).await
     }
 
     async fn execute_script(&mut self, script: &str) -> Result<(), Self::Error> {
@@ -74,13 +67,6 @@ impl Sql for ObservedSql<'_> {
     type Row<'a> = <Native<'a> as Sql>::Row<'a>;
     fn invalid_data(message: &'static str) -> Self::Error {
         Native::invalid_data(message)
-    }
-    async fn optional_blob(
-        &mut self,
-        sql: &str,
-        params: &[Param<'_>],
-    ) -> Result<Option<Vec<u8>>, Self::Error> {
-        self.query_optional(sql, params, |row| row.get(0)).await
     }
     async fn execute_script(&mut self, script: &str) -> Result<(), Self::Error> {
         self.before().await;

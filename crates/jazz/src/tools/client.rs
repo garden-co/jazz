@@ -27,7 +27,7 @@ use serde::Deserialize;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use uuid::Uuid;
 
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 use crate::db::FileOptions;
 use crate::db::{
     CurrentRow, Db, DbConfig, DbIdentity, DeleteOptions, Error as CoreError, FirstLoad,
@@ -80,7 +80,7 @@ const TICK_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
 /// transaction-conflict failures.
 const TICK_RECOVERY_ATTEMPTS: u32 = 8;
 /// The local store under `AppContext::data_dir`.
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 const STORE_FILE: &str = "jazz.sqlite";
 /// The node id a persistent store's writes are uploaded under. It must
 /// survive restarts: the server dedupes resent commits by node.
@@ -2436,7 +2436,7 @@ fn provenance(row: &CurrentRow) -> crate::model::metadata::RowProvenance {
 }
 
 async fn open_client_db(config: DbConfig, context: &AppContext) -> Result<Db> {
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     {
         match context.storage {
             ClientStorage::Memory => Db::open(config).await,
@@ -2456,7 +2456,7 @@ async fn open_client_db(config: DbConfig, context: &AppContext) -> Result<Db> {
             _ => JazzError::Storage(error.to_string()),
         })
     }
-    #[cfg(not(feature = "native"))]
+    #[cfg(not(feature = "sqlite"))]
     {
         let _ = (config, context);
         Err(JazzError::Storage(

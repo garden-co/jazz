@@ -614,8 +614,8 @@ where
             )?,
         });
     }
-    if conn.optional_blob(
-        "SELECT X'01' FROM sqlite_master WHERE type = 'table' AND name = '_jazz_bundles' LIMIT 1", &[],
+    if conn.query_optional(
+        "SELECT X'01' FROM sqlite_master WHERE type = 'table' AND name = '_jazz_bundles' LIMIT 1", &[], |row| jazz_sql::Row::get::<Vec<u8>>(&row, 0),
     ).await.map_err(storage)?.is_some() {
         let found = conn.query_rows("SELECT id, hash, published_at, def FROM _jazz_bundles ORDER BY id", &[], |r| {
                 Ok((
@@ -839,7 +839,7 @@ where
     Ok(())
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(all(test, feature = "sqlite"))]
 mod async_tests {
     use super::*;
     use crate::sql_test::Suspends;

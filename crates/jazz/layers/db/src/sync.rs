@@ -6226,8 +6226,8 @@ impl Inner {
 
     async fn has_rejected_store(&self) -> Result<bool, Error> {
         use jazz_sql::Sql;
-        self.conn.sql().optional_blob(
-            "SELECT X'01' FROM sqlite_master WHERE type = 'table' AND name = '_jazz_rejected' LIMIT 1", &[],
+        self.conn.sql().query_optional(
+            "SELECT X'01' FROM sqlite_master WHERE type = 'table' AND name = '_jazz_rejected' LIMIT 1", &[], |row| jazz_sql::Row::get::<Vec<u8>>(&row, 0),
         ).await.map(|row| row.is_some()).map_err(storage)
     }
 
@@ -15251,7 +15251,7 @@ fn store_refusal(id: u64, event: &SubscriptionEvent) -> Option<SyncMessage> {
     }
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     /// Alice's vouched claims last only for her request, even if its future is
     /// dropped while storage is pending. A private helper test is necessary

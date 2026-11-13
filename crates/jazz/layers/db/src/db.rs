@@ -25,7 +25,7 @@ use crate::tools::Operation;
 use crate::tx::DurabilityTier;
 use jazz_sql::Cell as SqlCell;
 use jazz_sql::{Connection as _, Row as _, Sql as _};
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 use rusqlite::Connection;
 
 #[path = "owner.rs"]
@@ -1405,7 +1405,7 @@ impl Db {
         self.inner.metadata().conn.close_worker().await
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     pub async fn open(config: DbConfig) -> Result<Self, Error> {
         let conn = Connection::open_in_memory().map_err(storage)?;
         crate::format::admit(&mut jazz_sql::native::Native(&conn)).await?;
@@ -1416,7 +1416,7 @@ impl Db {
     /// says otherwise). Reopening restores rows, history, the commit seq
     /// and, for a replica, its pending uploads and history baselines; they are resent
     /// on the next connection.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     pub async fn open_at(
         config: DbConfig,
         path: &std::path::Path,
@@ -1805,7 +1805,7 @@ impl Db {
 
     /// Every SQLite store holds complete history; this one is also the
     /// global authority (see [`Db::set_authority`]).
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     pub async fn open_history_complete(config: DbConfig) -> Result<Self, Error> {
         let db = Self::open(config).await?;
         db.set_authority().await;
@@ -2614,7 +2614,7 @@ impl Db {
     /// SQLite itself does after some errors (a full disk, an I/O error).
     #[cfg(feature = "testing")]
     #[doc(hidden)]
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     pub fn rollback_sqlite_transaction_for_test(&self) {
         self.metadata()
             .conn
@@ -10690,7 +10690,7 @@ fn migration_path(
     }
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(all(test, feature = "sqlite"))]
 mod async_row_tests {
     use super::*;
 
@@ -10728,7 +10728,7 @@ mod async_row_tests {
                     .build(),
             )
             .unwrap();
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             async fn open(schema: JazzSchema, node: u8) -> (Db, Arc<AtomicUsize>) {
                 let count = Arc::new(AtomicUsize::new(0));
                 let mut conn: crate::host::OwnedConnection =

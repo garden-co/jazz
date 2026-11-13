@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["native"]
-native = ["jazz/native", "dep:rusqlite", "jazz-sql/native"]
+default = ["sqlite"]
+# Include Jazz's built-in SQLite backend; disable for host-provided storage.
+sqlite = ["jazz/sqlite", "dep:rusqlite", "jazz-sql/sqlite"]
 otel = ["dep:jazz-otel", "dep:opentelemetry"]
 embedded-server = ["jazz/runtime", "dep:tower"]
 test = ["embedded-server", "jazz/testing"]

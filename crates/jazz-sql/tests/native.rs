@@ -1,4 +1,4 @@
-#![cfg(feature = "native")]
+#![cfg(feature = "sqlite")]
 
 use jazz_sql::{Cell, HostTable, Param, Row, Sql, inline, native::Native};
 use std::ops::ControlFlow;

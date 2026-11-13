@@ -13,9 +13,9 @@
 
 use std::sync::{Arc, mpsc};
 
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 pub(crate) use jazz::host::HostReader as NativeReader;
-#[cfg(not(feature = "native"))]
+#[cfg(not(feature = "sqlite"))]
 pub(crate) enum NativeReader {}
 use NativeReader as HostReader;
 use jazz::host::ConnectionSql;
@@ -72,7 +72,7 @@ impl HostKv {
 
     pub(crate) fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
         match &self.reader {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Some(reader) => reader
                 .get(self.table, key)
                 .map_err(|error| error.to_string()),
@@ -96,7 +96,7 @@ impl HostKv {
     /// Every pair whose key starts with `prefix`, in key order.
     pub(crate) fn prefix(&self, prefix: &[u8]) -> KvResult<Vec<HostPair>> {
         match &self.reader {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Some(reader) => reader
                 .prefix(self.table, prefix)
                 .map_err(|error| error.to_string()),
@@ -151,7 +151,7 @@ impl HostSql {
             return Err("injected read failure".to_owned());
         }
         match &self.reader {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Some(reader) => reader.with_sql(f).map_err(|error| error.to_string()),
             // Run between owner jobs, after the prior transaction completed.
             _ => self.call(false, f),

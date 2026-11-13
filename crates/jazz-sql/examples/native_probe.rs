@@ -1,5 +1,5 @@
 //! Local SQL-boundary microbenchmark, not an end-to-end Jazz benchmark.
-//! cargo run --release -p jazz-sql --features native,rusqlite/bundled --example native_probe
+//! cargo run --release -p jazz-sql --features sqlite,rusqlite/bundled --example native_probe
 //! Both arms use cached statements, identical SQL/bindings, and identical
 //! owned outputs. Differences include row/parameter adapters, not just await.
 use jazz_sql::{Param, Row, Sql, inline, native::Native};

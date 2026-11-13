@@ -90,6 +90,6 @@ pub mod result_tree {
 }
 
 // Available to lower-layer tests built with the testing feature.
-#[cfg(all(feature = "native", any(test, feature = "testing")))]
+#[cfg(all(feature = "sqlite", any(test, feature = "testing")))]
 #[cfg_attr(not(test), allow(dead_code))]
 mod sql_test;

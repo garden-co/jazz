@@ -12,7 +12,7 @@ use crate::result_tree::{ResultNode, ResultRelation};
 use crate::schema::JazzSchema;
 use crate::tools::{PolicyExpr, TablePolicies};
 use jazz_sql::Cell as SqlCell;
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 use rusqlite::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput};
 
 pub(crate) fn unsupported(what: impl std::fmt::Display) -> Error {
@@ -32,7 +32,7 @@ impl From<jazz_sql::CellError> for Error {
         Error::new(ErrorCode::Storage, error.to_string())
     }
 }
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl From<rusqlite::Error> for Error {
     fn from(error: rusqlite::Error) -> Self {
         if error.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted) {
@@ -59,7 +59,7 @@ impl TransactionJournal {
         self.frames.borrow_mut().push(Vec::new());
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     pub(crate) fn rollback_counter(&self) -> Arc<std::sync::atomic::AtomicU64> {
         self.rollbacks.clone()
     }
@@ -132,12 +132,12 @@ pub(crate) trait TransactionConnection {
 
 /// Compatibility access for synchronous native hosts and native Drop cleanup.
 /// The awaitable transaction algorithm below does not require this trait.
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 pub(crate) trait NativeTransactionConnection: TransactionConnection {
     fn sqlite(&self) -> &rusqlite::Connection;
 }
 
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl TransactionConnection for rusqlite::Connection {
     fn transaction_open(&self) -> bool {
         use jazz_sql::Connection as _;
@@ -150,7 +150,7 @@ impl TransactionConnection for rusqlite::Connection {
         let _ = end_savepoint_inline(self, name, false);
     }
 }
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl NativeTransactionConnection for rusqlite::Connection {
     fn sqlite(&self) -> &rusqlite::Connection {
         self
@@ -158,7 +158,7 @@ impl NativeTransactionConnection for rusqlite::Connection {
 }
 
 /// Open a native savepoint and its owned metadata undo frame.
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 pub(crate) fn begin_savepoint_inline<C: NativeTransactionConnection + ?Sized>(
     conn: &C,
     name: &str,
@@ -196,7 +196,7 @@ pub(crate) fn tags_changing(conn: &crate::host::DbConnection, tags: &ColumnTags)
 /// Release `SAVEPOINT name` (`keep`), or roll back everything since it. SQLite
 /// rolls a whole transaction back by itself after some errors (a full disk,
 /// an I/O error); then the savepoint is gone and there is nothing to undo.
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 pub(crate) fn end_savepoint_inline<C: NativeTransactionConnection + ?Sized>(
     conn: &C,
     name: &str,
@@ -262,7 +262,7 @@ pub(crate) fn finish_savepoint<C: TransactionConnection + ?Sized>(
 }
 
 /// Run `f` inside `SAVEPOINT name`: kept if it succeeds, undone if not.
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 pub(crate) fn in_savepoint<C: NativeTransactionConnection + ?Sized, T>(
     conn: &C,
     name: &str,
@@ -372,7 +372,7 @@ impl jazz_sql::FromCell for Sql {
 
 // Compatibility with native hosts stays at this adapter boundary. Jazz's
 // decoders and parameter construction use provider-independent cells above.
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl ToSql for Sql {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         use rusqlite::types::ValueRef;
@@ -385,7 +385,7 @@ impl ToSql for Sql {
         }))
     }
 }
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl From<rusqlite::types::ValueRef<'_>> for Sql {
     fn from(value: rusqlite::types::ValueRef<'_>) -> Self {
         use rusqlite::types::ValueRef;
@@ -398,7 +398,7 @@ impl From<rusqlite::types::ValueRef<'_>> for Sql {
         }
     }
 }
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl FromSql for Sql {
     fn column_result(value: rusqlite::types::ValueRef<'_>) -> FromSqlResult<Self> {
         Ok(Self::from(value))
@@ -2439,7 +2439,7 @@ pub(crate) fn provider_error(error: impl std::fmt::Display) -> Error {
     Error::new(ErrorCode::Storage, error.to_string())
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(all(test, feature = "sqlite"))]
 mod async_savepoint_tests {
     use super::*;
     use std::future::Future;
@@ -2500,7 +2500,7 @@ mod async_savepoint_tests {
     }
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(all(test, feature = "sqlite"))]
 mod async_cell_tests {
     use super::*;
     use jazz_sql::Sql as _;

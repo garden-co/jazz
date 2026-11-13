@@ -9,8 +9,9 @@ autotests = false
 [features]
 # Jazz is the common semantic library. Process and target shells select
 # transport and compression capabilities explicitly.
-default = ["native"]
-native = ["jazz-db/native"]
+default = ["sqlite"]
+# Include Jazz's built-in SQLite backend; disable for host-provided storage.
+sqlite = ["jazz-db/sqlite"]
 runtime = ["dep:jsonwebtoken", "dep:tokio", "jazz-model/runtime"]
 # See jazz-db's `sql-trace`.
 sql-trace = ["jazz-db/sql-trace"]

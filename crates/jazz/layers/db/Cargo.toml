@@ -5,17 +5,18 @@ edition = "2024"
 description = "Jazz's database: the thread-affine Db facade over SQLite."
 
 [features]
-default = ["native"]
-native = ["dep:rusqlite", "jazz-sql/native"]
+default = ["sqlite"]
+# Include Jazz's built-in SQLite backend; disable for host-provided storage.
+sqlite = ["dep:rusqlite", "jazz-sql/sqlite"]
 # Test helpers shared with the crates above this one.
 testing = ["jazz-types/testing", "jazz-model/testing", "jazz-protocol/testing"]
 # Log every statement to the file named by JAZZ_SQL_TRACE, for checking the
 # SQL against restricted SQLite hosts (Durable Objects).
-sql-trace = ["native"]
+sql-trace = ["sqlite"]
 # Run on SQLite with Cloudflare Durable Objects' limits (bound parameters,
 # statement length, expression depth, ...), to find SQL that would fail
 # there. See `durable_object_limits.rs`.
-durable-object-limits = ["native", "rusqlite/limits"]
+durable-object-limits = ["sqlite", "rusqlite/limits"]
 
 [dependencies]
 jazz-sql = { path = "../../../jazz-sql" }

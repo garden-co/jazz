@@ -3,7 +3,7 @@
 use crate::options::{Error, ErrorCode};
 use crate::values::{TransactionConnection, TransactionJournal};
 use futures::future::LocalBoxFuture;
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 use jazz_sql::Connection as _;
 use jazz_sql::{Cell, Param, QueryStats, Row, Sql};
 use std::cell::{Cell as Flag, RefCell};
@@ -70,7 +70,7 @@ pub trait WorkerSql {
 }
 
 enum Backend {
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     Native(crate::host::OwnedConnection),
     Worker(Box<dyn WorkerSql>),
 }
@@ -89,14 +89,14 @@ struct ConnectionState {
 impl DbConnection {
     /// Configure Jazz-owned native SQLite; a worker's host owns its connection settings.
     pub(crate) fn stable_plans(&self) -> Result<(), Error> {
-        #[cfg(feature = "native")]
+        #[cfg(feature = "sqlite")]
         if let Backend::Native(native) = &self.shared.backend {
             crate::host::stable_plans(native)?;
         }
         Ok(())
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     pub(crate) fn new(native: crate::host::OwnedConnection) -> Self {
         Self::from_backend(Backend::Native(native))
     }
@@ -127,18 +127,18 @@ impl DbConnection {
     pub(crate) fn sql(&self) -> ConnectionSql<'_> {
         ConnectionSql {
             owner: Some(self),
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             reader: None,
         }
     }
     pub(crate) fn single_connection(&self) -> bool {
         match &self.shared.backend {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Backend::Native(_) => false,
             Backend::Worker(_) => true,
         }
     }
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     pub(crate) fn native(&self) -> Result<&rusqlite::Connection, Error> {
         match &self.shared.backend {
             Backend::Native(native) => Ok(native),
@@ -149,7 +149,7 @@ impl DbConnection {
         }
     }
     pub(crate) fn set_statement_cache_capacity(&self, capacity: usize) {
-        #[cfg(feature = "native")]
+        #[cfg(feature = "sqlite")]
         if let Backend::Native(native) = &self.shared.backend {
             native.set_prepared_statement_cache_capacity(capacity);
         }
@@ -159,7 +159,7 @@ impl DbConnection {
         &self,
         chunks: &Arc<crate::large::Chunks>,
     ) -> Result<(), Error> {
-        #[cfg(feature = "native")]
+        #[cfg(feature = "sqlite")]
         if let Backend::Native(native) = &self.shared.backend {
             let committed = chunks.clone();
             native.commit_hook(Some(move || {
@@ -178,7 +178,7 @@ impl DbConnection {
     }
     fn observed(&self, was_open: bool, failed: bool) {
         match &self.shared.backend {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Backend::Native(_) => {}
             Backend::Worker(worker) => {
                 if was_open && !worker.transaction_open() {
@@ -195,7 +195,7 @@ impl DbConnection {
     async fn raw_script(&self, sql: &str) -> Result<(), Error> {
         let before = self.transaction_open();
         let result = match &self.shared.backend {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Backend::Native(native) => native.sql().execute_script(sql).await.map_err(Error::from),
             Backend::Worker(worker) => worker.execute_script(sql).await,
         };
@@ -205,7 +205,7 @@ impl DbConnection {
     async fn end_savepoint_raw(&self, name: &str, keep: bool) -> Result<(), Error> {
         let before = self.transaction_open();
         let result = match &self.shared.backend {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Backend::Native(native) => {
                 let sql = if keep {
                     format!("RELEASE {name}")
@@ -243,7 +243,7 @@ impl DbConnection {
     }
     pub(crate) async fn close_worker(&self) -> Result<(), Error> {
         match &self.shared.backend {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Backend::Native(_) => {}
             Backend::Worker(worker) => {
                 worker.close().await?;
@@ -255,7 +255,7 @@ impl DbConnection {
 impl Drop for ConnectionState {
     fn drop(&mut self) {
         match &self.backend {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Backend::Native(_) => {}
             Backend::Worker(worker) => {
                 worker.request_close();
@@ -263,19 +263,19 @@ impl Drop for ConnectionState {
         }
     }
 }
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl From<crate::host::OwnedConnection> for DbConnection {
     fn from(native: crate::host::OwnedConnection) -> Self {
         Self::new(native)
     }
 }
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl From<rusqlite::Connection> for DbConnection {
     fn from(native: rusqlite::Connection) -> Self {
         Self::new(native.into())
     }
 }
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl std::ops::Deref for DbConnection {
     type Target = rusqlite::Connection;
     fn deref(&self) -> &Self::Target {
@@ -285,7 +285,7 @@ impl std::ops::Deref for DbConnection {
 impl TransactionConnection for DbConnection {
     fn transaction_open(&self) -> bool {
         match &self.shared.backend {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Backend::Native(native) => native.sql().transaction_open(),
             Backend::Worker(worker) => worker.transaction_open(),
         }
@@ -297,7 +297,7 @@ impl TransactionConnection for DbConnection {
     async fn begin_savepoint(&self, name: &str) -> Result<(), Error> {
         self.settle().await?;
         match &self.shared.backend {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Backend::Native(native) => native
                 .sql()
                 .execute_script(&format!("SAVEPOINT {name}"))
@@ -315,7 +315,7 @@ impl TransactionConnection for DbConnection {
     }
     fn abandon_savepoint(&self, name: &str) {
         match &self.shared.backend {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Backend::Native(_) => {
                 let _ = crate::values::end_savepoint_inline(self, name, false);
             }
@@ -323,7 +323,7 @@ impl TransactionConnection for DbConnection {
         }
     }
 }
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 impl crate::values::NativeTransactionConnection for DbConnection {
     fn sqlite(&self) -> &rusqlite::Connection {
         self.native().expect("native-only transaction access")
@@ -331,28 +331,28 @@ impl crate::values::NativeTransactionConnection for DbConnection {
 }
 
 pub enum ConnectionRow<'a> {
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     Native(jazz_sql::native::NativeRow<'a>),
     Worker(&'a [WorkerCell], &'a [String]),
 }
 impl Row for ConnectionRow<'_> {
     fn len(&self) -> usize {
         match self {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Self::Native(row) => row.len(),
             Self::Worker(row, _) => row.len(),
         }
     }
     fn column_name(&self, index: usize) -> Option<&str> {
         match self {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Self::Native(row) => row.column_name(index),
             Self::Worker(_, names) => names.get(index).map(String::as_str),
         }
     }
     fn cell(&self, index: usize) -> Option<Cell<'_>> {
         match self {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Self::Native(row) => row.cell(index),
             Self::Worker(row, _) => Some(match row.get(index)? {
                 WorkerCell::Null => Cell::Null,
@@ -366,11 +366,11 @@ impl Row for ConnectionRow<'_> {
 }
 pub struct ConnectionSql<'a> {
     owner: Option<&'a DbConnection>,
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     reader: Option<&'a rusqlite::Connection>,
 }
 impl<'a> ConnectionSql<'a> {
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     pub(crate) fn reader(reader: &'a rusqlite::Connection) -> Self {
         Self {
             owner: None,
@@ -388,7 +388,7 @@ impl Sql for ConnectionSql<'_> {
         Error::new(ErrorCode::Storage, message)
     }
     async fn execute_script(&mut self, sql: &str) -> Result<(), Error> {
-        #[cfg(feature = "native")]
+        #[cfg(feature = "sqlite")]
         if let Some(reader) = self.reader {
             return jazz_sql::native::Native(reader)
                 .execute_script(sql)
@@ -399,7 +399,7 @@ impl Sql for ConnectionSql<'_> {
         self.owner().raw_script(sql).await
     }
     async fn execute(&mut self, sql: &str, params: &[Param<'_>]) -> Result<usize, Error> {
-        #[cfg(feature = "native")]
+        #[cfg(feature = "sqlite")]
         if let Some(reader) = self.reader {
             return jazz_sql::native::Native(reader)
                 .execute(sql, params)
@@ -409,7 +409,7 @@ impl Sql for ConnectionSql<'_> {
         self.owner().settle().await?;
         let before = self.owner().transaction_open();
         let result = match &self.owner().shared.backend {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Backend::Native(native) => native.sql().execute(sql, params).await.map_err(Error::from),
             Backend::Worker(worker) => worker.execute(sql, params).await,
         };
@@ -431,7 +431,7 @@ impl Sql for ConnectionSql<'_> {
     where
         F: FnMut(Self::Row<'_>) -> Result<ControlFlow<()>, Error>,
     {
-        #[cfg(feature = "native")]
+        #[cfg(feature = "sqlite")]
         if let Some(reader) = self.reader {
             let mut callback_error = None;
             let result = jazz_sql::native::Native(reader)
@@ -452,7 +452,7 @@ impl Sql for ConnectionSql<'_> {
         self.owner().settle().await?;
         let before = self.owner().transaction_open();
         let result = match &self.owner().shared.backend {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Backend::Native(native) => {
                 let mut callback_error = None;
                 let result = native
@@ -486,37 +486,30 @@ impl Sql for ConnectionSql<'_> {
         self.owner().observed(before, result.is_err());
         result
     }
-    async fn optional_blob(
-        &mut self,
-        sql: &str,
-        params: &[Param<'_>],
-    ) -> Result<Option<Vec<u8>>, Error> {
-        self.query_optional(sql, params, |row| row.get(0)).await
-    }
 }
 impl jazz_sql::Connection for ConnectionSql<'_> {
     fn transaction_open(&self) -> bool {
-        #[cfg(feature = "native")]
+        #[cfg(feature = "sqlite")]
         if let Some(reader) = self.reader {
             return jazz_sql::native::Native(reader).transaction_open();
         }
         self.owner().transaction_open()
     }
     fn parameter_limit(&self) -> Result<usize, Error> {
-        #[cfg(feature = "native")]
+        #[cfg(feature = "sqlite")]
         if let Some(reader) = self.reader {
             return jazz_sql::native::Native(reader)
                 .parameter_limit()
                 .map_err(Error::from);
         }
         match &self.owner().shared.backend {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Backend::Native(native) => native.sql().parameter_limit().map_err(Error::from),
             Backend::Worker(worker) => worker.parameter_limit(),
         }
     }
     async fn total_changes(&mut self) -> Result<u64, Error> {
-        #[cfg(feature = "native")]
+        #[cfg(feature = "sqlite")]
         if let Some(reader) = self.reader {
             return jazz_sql::native::Native(reader)
                 .total_changes()
@@ -525,7 +518,7 @@ impl jazz_sql::Connection for ConnectionSql<'_> {
         }
         self.owner().settle().await?;
         match &self.owner().shared.backend {
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Backend::Native(native) => native.sql().total_changes().await.map_err(Error::from),
             Backend::Worker(_) => {
                 self.query_one("SELECT total_changes()", &[], |row| row.get(0))

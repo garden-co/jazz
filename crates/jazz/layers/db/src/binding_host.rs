@@ -627,13 +627,13 @@ pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) 
 
 /// Open an in-memory database. `history_complete` needs nothing: every
 /// SQLite store keeps full history.
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 pub async fn open_memory(db_config: DbConfig) -> Result<Db, Error> {
     Db::open(db_config).await
 }
 
 /// Open a durable store in the SQLite file at `path` (see [`open_memory`]).
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 pub async fn open_file(
     db_config: DbConfig,
     path: &std::path::Path,

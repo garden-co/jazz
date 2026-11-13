@@ -1485,7 +1485,7 @@ fn branch_default(column: &Column) -> Result<Option<Sql>, Error> {
         .transpose()
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
     use crate::protocol::TableLens;

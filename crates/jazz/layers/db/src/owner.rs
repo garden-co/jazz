@@ -187,7 +187,7 @@ async fn run(
     result.and(closed)
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
     use crate::db::{DbConfig, DbIdentity};

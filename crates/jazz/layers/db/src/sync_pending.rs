@@ -839,7 +839,7 @@ fn sql_value(row: &impl jazz_sql::Row, index: usize) -> Result<SqlValue, jazz_sq
     )
 }
 
-#[cfg(all(test, feature = "native"))]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
     use crate::ids::NodeUuid;
@@ -1217,14 +1217,6 @@ mod tests {
                 })
                 .await;
                 self.native.query(sql, params, visit).await
-            }
-
-            async fn optional_blob(
-                &mut self,
-                sql: &str,
-                params: &[Param<'_>],
-            ) -> Result<Option<Vec<u8>>, Self::Error> {
-                self.native.optional_blob(sql, params).await
             }
         }
 

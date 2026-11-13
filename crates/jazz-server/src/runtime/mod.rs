@@ -16,36 +16,8 @@ pub mod alpha59_alpha60;
 pub mod auth_admission;
 mod thin;
 
-/// Drive one complete operation on the dedicated store thread. Native SQL
-/// normally finishes on the first poll. Worker I/O parks instead of spinning;
-/// this also supports the synchronous account-state callback nested in a job.
-pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    use std::task::{Context, Poll, Wake, Waker};
-    let mut future = std::pin::pin!(future);
-    if let Poll::Ready(value) = future
-        .as_mut()
-        .poll(&mut Context::from_waker(Waker::noop()))
-    {
-        return value;
-    }
-    struct ThreadWake(std::thread::Thread);
-    impl Wake for ThreadWake {
-        fn wake(self: std::sync::Arc<Self>) {
-            self.0.unpark();
-        }
-        fn wake_by_ref(self: &std::sync::Arc<Self>) {
-            self.0.unpark();
-        }
-    }
-    let waker = Waker::from(std::sync::Arc::new(ThreadWake(std::thread::current())));
-    let mut cx = Context::from_waker(&waker);
-    loop {
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(value) => return value,
-            Poll::Pending => std::thread::park(),
-        }
-    }
-}
+pub(crate) use jazz::db::block_on;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -61,7 +33,7 @@ use crate::kv::HostKv;
 use crate::kv::HostSql;
 use crate::kv::NativeReader as HostReader;
 use jazz::catalogue::{CatalogueChange, CatalogueRows};
-#[cfg(feature = "native")]
+#[cfg(feature = "sqlite")]
 use jazz::db::FileOptions;
 use jazz::db::{
     Db, DbConfig, DbIdentity, LensEffects, SubscriberId, SyncMessage, Transport, TransportError,
@@ -356,11 +328,11 @@ enum Source {
     Worker(WorkerStore),
     /// The database file, and where its large-value bytes live.
     File(
-        #[cfg_attr(not(feature = "native"), allow(dead_code))] PathBuf,
+        #[cfg_attr(not(feature = "sqlite"), allow(dead_code))] PathBuf,
         Blobs,
     ),
     /// An in-memory store shared by name within this process.
-    Memory(#[cfg_attr(not(feature = "native"), allow(dead_code))] String),
+    Memory(#[cfg_attr(not(feature = "sqlite"), allow(dead_code))] String),
 }
 
 impl Source {
@@ -380,9 +352,9 @@ impl Source {
     fn open(&self) -> Result<StoreFile, String> {
         match self {
             Self::Worker(store) => (store.0)(),
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Self::Memory(name) => StoreFile::shared_memory(name).map_err(|e| e.to_string()),
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Self::File(path, _) => {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -396,7 +368,7 @@ impl Source {
                 )
                 .map_err(|e| e.to_string())
             }
-            #[cfg(not(feature = "native"))]
+            #[cfg(not(feature = "sqlite"))]
             _ => Err("Native storage is disabled; configure a worker store".into()),
         }
     }
@@ -424,15 +396,15 @@ impl Source {
     fn reader(&self) -> Result<Option<HostReader>, String> {
         match self {
             Self::Worker(_) => Ok(None),
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Self::Memory(name) => HostReader::shared_memory(name)
                 .map(Some)
                 .map_err(|e| e.to_string()),
-            #[cfg(feature = "native")]
+            #[cfg(feature = "sqlite")]
             Self::File(path, _) => HostReader::open(path, None)
                 .map(Some)
                 .map_err(|e| e.to_string()),
-            #[cfg(not(feature = "native"))]
+            #[cfg(not(feature = "sqlite"))]
             _ => Err("Native readers are disabled".into()),
         }
     }
@@ -950,7 +922,7 @@ impl AppStore {
         // Before the store's connection, so that one closes last and
         // checkpoints the WAL into the file. (An in-memory store is gone
         // once both are.)
-        #[cfg(feature = "native")]
+        #[cfg(feature = "sqlite")]
         if let Some(reader) = &self.inner.reader {
             reader.close();
         }
@@ -1121,7 +1093,7 @@ impl HostTables for HostAccess<'_> {
             }
         }
     }
-    #[cfg(feature = "native")]
+    #[cfg(feature = "sqlite")]
     async fn host_sql(
         &self,
         f: &mut dyn FnMut(&rusqlite::Connection) -> Result<(), jazz::db::Error>,
