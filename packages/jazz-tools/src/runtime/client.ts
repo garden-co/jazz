@@ -2340,10 +2340,28 @@ export class JazzClient {
     txId: TxId | Promise<TxId>,
     timeoutMs?: number,
   ): Promise<void> {
-    txId = await txId;
     const hasAuthority =
       Boolean(this.context.serverUrl) || this.runtime.nativeUpstreamConfigured?.() === true;
-    await this.waitForTransaction(txId, hasAuthority ? "global" : "local", undefined, timeoutMs);
+    // Hand the unresolved ID to the runtime wait so `timeoutMs` also covers a
+    // commit that has not returned it yet. A commit that fails surfaces its own
+    // error unchanged, not one normalized as a runtime wait failure.
+    let commitFailure: { error: unknown } | undefined;
+    const committed = Promise.resolve(txId).catch((error: unknown) => {
+      commitFailure = { error };
+      throw error;
+    });
+    committed.catch(() => undefined);
+    try {
+      await this.waitForTransaction(
+        committed,
+        hasAuthority ? "global" : "local",
+        undefined,
+        timeoutMs,
+      );
+    } catch (error) {
+      if (commitFailure) throw commitFailure.error;
+      throw error;
+    }
   }
 
   private normalizeTransactionWaitError(error: unknown): Error {
