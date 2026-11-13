@@ -153,8 +153,10 @@ switches in one step, a signed-out answer (confirmed by a second one) signs them
 claims refresh. Until an answer arrives, the remembered user stays signed in: while your backend is
 offline or answers with an error, a reload keeps opening their account on that device. On shared
 devices, pass `clearOnSignOut: true` to `createJazzClient`: the device then never remembers the
-user, so a reload waits for your backend's answer. After your own sign-in or sign-out, call
-`refresh()` from `useJazzSession()` and Jazz follows your backend's answer.
+user, so a reload waits for your backend's answer. That wait (the provider shows `loading`) lasts
+at most 5 seconds: a slower backend (cold-starting or hung) opens the session `signed-out`, the
+check keeps running, and the user is signed in when the answer arrives. After your own sign-in or
+sign-out, call `refresh()` from `useJazzSession()` and Jazz follows your backend's answer.
 Without React, call `refresh()` on the session `createJazzClient` returns.
 If Jazz can't ask your backend (it is offline, or `authenticate` throws or returns no `expiresAt`),
 `refresh()` rejects, and the session shows the failure too: it keeps its current user and client
