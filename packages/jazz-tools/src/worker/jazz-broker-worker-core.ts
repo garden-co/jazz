@@ -626,9 +626,9 @@ function attachBootstrapPort(
  * Delete `dbName`'s store, which no tab has open (`delete-store`, #5250): the
  * page store, the SQLite VFS beside it and the lease pool inside it. `held`,
  * deleting nothing, while a tab of this realm has it attached or is joining
- * it, or another realm (another deploy's worker) owns it: the physical
- * database lock is the fence, as for any owner. An idle context or owner
- * this realm kept is released first.
+ * it (an admission or a lease in flight), or another realm (another deploy's
+ * worker) owns it: the physical database lock is the fence, as for any owner.
+ * An idle context, owner or lease pool this realm kept is released first.
  */
 async function deleteStoreWithoutTabs(
   dbName: string,
@@ -639,19 +639,25 @@ async function deleteStoreWithoutTabs(
     if (context.peers.size !== 0 || context.pendingAdmissionTasks !== 0) return "held";
     await releaseIdleContext(context);
   }
+  const leaseOwner = foregroundLeaseOwners.get(dbName);
   if (
     [...contexts.values()].some((context) => context.options.dbName === dbName) ||
-    hasForegroundLeaseWork(dbName) ||
-    physicalDatabaseOwnerAdmissions.has(dbName)
+    physicalDatabaseOwnerAdmissions.has(dbName) ||
+    (leaseOwner &&
+      (leaseOwner.pendingLeaseAllocations > 0 || leaseOwner.pendingLeaseFinalizations > 0))
   )
     return "held";
-  const leaseOwner = foregroundLeaseOwners.get(dbName);
+  // Active leases without an attached runtime are a gone tab's: nothing
+  // notices a crashed tab's lease port. The page asks only under its
+  // exclusive per-account lock, which every tab holds before it opens the
+  // store, so no tab is joining. The delete takes the lease pool with it.
+  pendingRuntimeOwnerRetirements.delete(dbName);
+  // Its durable epoch record goes with the store; the lock is released either way.
+  await releasePhysicalDatabaseOwner(dbName).catch(() => undefined);
   if (leaseOwner) {
     foregroundLeaseOwners.delete(dbName);
     leaseOwner.pageStore.close();
   }
-  pendingRuntimeOwnerRetirements.delete(dbName);
-  await releasePhysicalDatabaseOwner(dbName);
   let epoch: BrowserPhysicalDatabaseEpoch;
   try {
     epoch = await acquireBrowserPhysicalDatabaseEpoch(dbName);
