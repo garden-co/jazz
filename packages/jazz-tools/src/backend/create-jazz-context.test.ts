@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => {
     connectTransport: ReturnType<typeof vi.fn>;
     shutdown: ReturnType<typeof vi.fn>;
     onMutationError: ReturnType<typeof vi.fn>;
+    observeCommittedWrites: ReturnType<typeof vi.fn>;
   }> = [];
   const connectWithRuntime = vi.fn((_runtime: unknown, _context: AppContext) => {
     const client = {
@@ -28,6 +29,7 @@ const mocks = vi.hoisted(() => {
       connectTransport: vi.fn(),
       shutdown: vi.fn(async () => undefined),
       onMutationError: vi.fn(),
+      observeCommittedWrites: vi.fn(),
     };
     clients.push(client);
     return client;
@@ -59,6 +61,12 @@ const mocks = vi.hoisted(() => {
 
   class MockNativeRuntimeAdapter {
     readonly close = vi.fn();
+    /** Writes stay unsettled unless a test settles them. */
+    readonly settlements = new Map<string, { resolve: () => void; reject: (e: Error) => void }>();
+    readonly waitForTransaction = vi.fn(
+      (txId: string) =>
+        new Promise<void>((resolve, reject) => this.settlements.set(txId, { resolve, reject })),
+    );
     constructor(
       Runtime: typeof MockNapiDb,
       schema: WasmSchema,
@@ -510,7 +518,7 @@ describe("backend/create-jazz-context", () => {
     expect(node).not.toEqual(options.systemNode);
   });
 
-  it("BC-U10: routes runtime mutation errors to every backend Db, including ones settled before a listener", () => {
+  it("BC-U10: routes a rejection only to the Dbs that write as the identity that made it (#4784)", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       const context = createJazzContext({
@@ -519,54 +527,149 @@ describe("backend/create-jazz-context", () => {
         permissions: {},
         driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
       });
-      const worker = context.asBackend();
-      const other = context.db();
+      const alice: Session = {
+        issuer: "https://issuer.example",
+        user_id: "alice",
+        claims: {},
+        authMode: "external",
+      };
+      const bob: Session = {
+        issuer: "https://issuer.example",
+        user_id: "bob",
+        claims: {},
+        authMode: "external",
+      };
+      // Alice's request registers its handler first.
+      const asAlice = context.forSession(alice);
+      const aliceListener = vi.fn();
+      asAlice.onMutationError(aliceListener);
+      const asBob = context.forSession(bob);
+      const bobListener = vi.fn();
+      const stopBob = asBob.onMutationError(bobListener);
+      const backend = context.db();
+      const backendListener = vi.fn();
+      backend.onMutationError(backendListener);
+
       expect(mocks.clients).toHaveLength(1);
-      expect(mocks.clients[0]!.onMutationError).toHaveBeenCalledTimes(1);
-      const emit = mocks.clients[0]!.onMutationError.mock.calls[0]![0] as (event: unknown) => void;
-      const event = (transactionId: string) => ({
-        code: "serialization_conflict",
-        reason: "Serializable transaction conflicted with another write",
-        transaction: {
-          transactionId,
-          kind: "serializable",
-          sealed: true,
-          latestSettlement: {
-            kind: "rejected",
-            transactionId,
-            code: "serialization_conflict",
-            reason: "Serializable transaction conflicted with another write",
-          },
-        },
-      });
+      const client = mocks.clients[0]!;
+      const emit = client.onMutationError.mock.calls[0]![0] as (event: unknown) => void;
+      const committed = client.observeCommittedWrites.mock.calls[0]![0] as (
+        txId: string,
+        session: Session | undefined,
+        attribution: string | undefined,
+      ) => void;
 
-      // A persisted in-flight write settled during startup replay, before the
-      // application attached its listener.
-      const replayed = event("00000000000070008000000000000001");
-      emit(replayed);
+      // Bob's write is rejected: only Bob's Db hears of it.
+      committed("00000000000070008000000000000001", bob, undefined);
+      const bobs = mutationErrorEvent("00000000000070008000000000000001");
+      emit(bobs);
+      expect(bobListener).toHaveBeenCalledExactlyOnceWith(bobs);
+      expect(aliceListener).not.toHaveBeenCalled();
+      expect(backendListener).not.toHaveBeenCalled();
 
-      const workerListener = vi.fn();
-      worker.onMutationError(workerListener);
-      expect(workerListener).toHaveBeenCalledWith(replayed);
+      // The backend's own write goes to the backend's Db only.
+      committed("00000000000070008000000000000002", undefined, undefined);
+      const own = mutationErrorEvent("00000000000070008000000000000002");
+      emit(own);
+      expect(backendListener).toHaveBeenCalledExactlyOnceWith(own);
+      expect(aliceListener).not.toHaveBeenCalled();
+      expect(bobListener).toHaveBeenCalledTimes(1);
 
-      const otherListener = vi.fn();
-      const unsubscribe = other.onMutationError(otherListener);
-      const live = event("00000000000070008000000000000002");
-      emit(live);
-      expect(workerListener).toHaveBeenLastCalledWith(live);
-      expect(otherListener).toHaveBeenCalledTimes(1);
-      expect(otherListener).toHaveBeenCalledWith(live);
-
-      unsubscribe();
-      emit(event("00000000000070008000000000000003"));
-      expect(workerListener).toHaveBeenCalledTimes(3);
-      expect(otherListener).toHaveBeenCalledTimes(1);
-      // Only the rejection that arrived with no listener is reported unhandled.
-      expect(consoleError).toHaveBeenCalledTimes(1);
-      expect(consoleError).toHaveBeenCalledWith("Unhandled Jazz mutation error", replayed);
+      // Once Bob's Db stops listening, his rejection is unhandled, not Alice's.
+      committed("00000000000070008000000000000003", bob, undefined);
+      stopBob();
+      const late = mutationErrorEvent("00000000000070008000000000000003");
+      emit(late);
+      expect(aliceListener).not.toHaveBeenCalled();
+      expect(backendListener).toHaveBeenCalledTimes(1);
+      expect(consoleError).toHaveBeenCalledExactlyOnceWith("Unhandled Jazz mutation error", late);
     } finally {
       consoleError.mockRestore();
     }
+  });
+
+  it("BC-U10b: a rejection no Db can be traced to reaches only backend-global Dbs", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const context = createJazzContext({
+        appId: "server-app",
+        app: { wasmSchema: SCHEMA_A },
+        permissions: {},
+        driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+      });
+      const perRequest = context.forSession({
+        issuer: "https://issuer.example",
+        user_id: "alice",
+        claims: {},
+        authMode: "external",
+      });
+      const emit = mocks.clients[0]!.onMutationError.mock.calls[0]![0] as (event: unknown) => void;
+
+      // A persisted in-flight write settled during startup replay, before the
+      // application attached any listener.
+      const replayed = mutationErrorEvent("00000000000070008000000000000001");
+      emit(replayed);
+      expect(consoleError).toHaveBeenCalledExactlyOnceWith(
+        "Unhandled Jazz mutation error",
+        replayed,
+      );
+
+      // A per-request Db never receives it, before or after it arrives.
+      const perRequestListener = vi.fn();
+      perRequest.onMutationError(perRequestListener);
+      const unknown = mutationErrorEvent("00000000000070008000000000000002");
+      emit(unknown);
+      expect(perRequestListener).not.toHaveBeenCalled();
+
+      // The backend's own Db drains both.
+      const worker = context.asBackend();
+      const workerListener = vi.fn();
+      worker.onMutationError(workerListener);
+      expect(workerListener.mock.calls).toEqual([[replayed], [unknown]]);
+      expect(perRequestListener).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("BC-U10c: forgets who made a write once it is accepted", async () => {
+    const context = createJazzContext({
+      appId: "server-app",
+      app: { wasmSchema: SCHEMA_A },
+      permissions: {},
+      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+    });
+    const bob: Session = {
+      issuer: "https://issuer.example",
+      user_id: "bob",
+      claims: {},
+      authMode: "external",
+    };
+    const asBob = context.forSession(bob);
+    asBob.onMutationError(vi.fn());
+    const committed = mocks.clients[0]!.observeCommittedWrites.mock.calls[0]![0] as (
+      txId: string,
+      session: Session | undefined,
+      attribution: string | undefined,
+    ) => void;
+    const runtime = mocks.runtimeInstances[0] as unknown as InstanceType<
+      typeof mocks.MockNativeRuntimeAdapter
+    >;
+    committed("00000000000070008000000000000001", bob, undefined);
+    // A persistent store with no server: this backend is the authority.
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith(
+      "00000000000070008000000000000001",
+      "local",
+      { observeOnly: true },
+    );
+    const writers = (
+      context as unknown as { coreSource: { unsettledWriters: Map<string, unknown> } }
+    ).coreSource.unsettledWriters;
+    expect(writers.size).toBe(1);
+    runtime.settlements.get("00000000000070008000000000000001")!.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(writers.size).toBe(0);
   });
 
   function mutationErrorEvent(transactionId: string) {

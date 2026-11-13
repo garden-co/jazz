@@ -463,10 +463,12 @@ it reconnects.
 keeps it so that a listener registered later can receive it.
 
 On a server, `jazz.db`, `jazz.forReqUser()` and `jazz.withAttribution()` from one `createJazz`
-share one runtime, so `onMutationError` is backend-wide. A listener sees rejections of writes made
-through any of them, for every user, so a per-request handler must match events against its own
-transaction IDs. Rejections that arrive before any listener exists, such as writes that were still in
-flight when the process stopped and are settled on restart, go to whichever `Db` registers a listener
-first. Jazz keeps up to 256 of them and reports how many it dropped beyond that. A dropped or
+share one runtime, but each rejection goes only to the `Db` that made the write, or to another `Db`
+that writes as the same session and attribution. A per-request handler never sees another user's
+rejection, so it can forward what it gets to its requester. Rejections Jazz can't trace to the `Db`
+that made them go only to `jazz.db`: writes made while no listener was registered anywhere, and writes
+that were still in flight when the process stopped and are settled on restart. Those that arrive before
+`jazz.db` has a listener wait for its first one. Jazz keeps up to 256 of them and reports how many it
+dropped beyond that. A dropped or
 shut-down `Db` releases its listeners, so register long-lived listeners on `jazz.db`: a listener on a
 per-request `Db` stops firing once that `Db` is garbage-collected.
