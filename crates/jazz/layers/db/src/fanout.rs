@@ -795,15 +795,14 @@ impl Inner {
 
     /// `author`'s claims changed: re-run only the groups whose policy or
     /// claim operands read them. A group with no policy identity takes its
-    /// claims from this node's own author; one with request claims carries
-    /// its own and is unaffected.
+    /// claims from this node's own author. Only request claims matching
+    /// that effective author are fixed; unrelated scopes still use the registry.
     pub(super) fn refresh_identity(&mut self, author: AuthorSubject) {
         let own = self.identity.author;
         self.refresh_where(
             |group| {
-                group.prepared.request_claims.is_none()
-                    && (group.identity == Some(author)
-                        || (group.identity.is_none() && author == own))
+                let effective = group.identity.unwrap_or(own);
+                effective == author && group.prepared.fixed_claims_for(effective).is_none()
             },
             false,
         );
