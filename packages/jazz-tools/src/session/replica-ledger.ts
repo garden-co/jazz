@@ -286,8 +286,8 @@ export function replicaLifecycle(options: {
         // (unless this page wipes it on purpose: its own sign-out, which still
         // shows the account until it settles, or its own open finishing a wipe).
         if (!ledger.get(account) || (!byThisPage && options.heldHere(account))) return "skipped";
-      // A closed page wipes nothing it didn't sign out itself.
-      if (!byThisPage && options.stopped?.()) return "skipped";
+        // A closed page wipes nothing it didn't sign out itself.
+        if (!byThisPage && options.stopped?.()) return "skipped";
         ledger.markWiping(account, true);
         // A delete that fails leaves the mark: whether any of it went is
         // unknown, so the account's next open or a later reconcile finishes it.
