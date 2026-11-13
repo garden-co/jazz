@@ -3,3 +3,5 @@ function unsupported(): never {
 }
 export const browserRuntimeModuleUrl = unsupported;
 export const bundledBrowserWorkerUrl = unsupported;
+export const bundledWasmUrl = unsupported;
+export const bundledBrowserWorkerType = unsupported;

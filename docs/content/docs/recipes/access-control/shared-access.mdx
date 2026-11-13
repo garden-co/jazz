@@ -17,6 +17,8 @@ Add a `todoShares` table that records which user has access to which todo.
 ## Permissions
 
 The creator can do everything. Share recipients get read access, and optionally edit access via `can_edit`.
+A share row is readable by its recipient and by the todo's creator, who needs it to list and revoke
+access.
 
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-client-localfirst-react/src/shared-access-snippets.tsx#shared-permissions
@@ -45,10 +47,21 @@ if they don't have one yet; calling it again returns the same ID. Return that ID
   user when they sign up later, so their guest data stays separate. See
   [Users without an account](/docs/setup/deployment/own-server#users-without-an-account).
 
+To share with someone without knowing who they are in your app, send them a link instead: see
+[Invite links](/docs/recipes/access-control/invite-links).
+
 ## Querying shared items
 
 <include cwd lang="tsx" meta='title="SharedWithMe.tsx"'>
   ../examples/docs/todo-client-localfirst-react/src/shared-access-snippets.tsx#shared-query
+</include>
+
+## Listing who has access
+
+The creator can list a todo's shares, since they can read them:
+
+<include cwd lang="tsx" meta='title="SharedWith.tsx"'>
+  ../examples/docs/todo-client-localfirst-react/src/shared-access-snippets.tsx#shared-list
 </include>
 
 ## Revoking access

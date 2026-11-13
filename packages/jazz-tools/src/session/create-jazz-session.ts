@@ -9,6 +9,7 @@ import {
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import type { ShutdownOptions } from "../runtime/db.js";
 import { bearerFetch } from "../runtime/credentialed-transport.js";
+import { sessionRefreshLockName } from "../runtime/native-runtime/session-renewal-wire.js";
 import {
   createRegisteredJazzClient,
   type CreateAccountDb,
@@ -47,7 +48,7 @@ import {
   type ReplicaOwner,
 } from "./left-behind-replicas.js";
 import { refuseInvalidSessionConfig } from "./config-options.js";
-import { refuseWindowJazzConflict } from "../runtime/page-handle.js";
+import { warnWindowJazzConflict } from "../runtime/page-handle.js";
 import { accountForgotten, type AccountStore } from "../accounts/persistence.js";
 import { rememberBackendUser } from "../accounts/enrollment.js";
 
@@ -214,10 +215,11 @@ export async function openBrowserSessionCore(
 ): Promise<BrowserJazzSession> {
   if (config && typeof config === "object") refuseClientAppId(config);
   refuseInvalidSessionConfig(config, BROWSER_SESSION_OPTIONS);
-  // `window.__jazz` is Jazz's page handle: an app's own global there would
-  // only fail later, when the local-first client opens.
+  // `window.__jazz` is Jazz's page handle: an app's own global there is left
+  // alone (Jazz goes without the handle), and said so now rather than at the
+  // upgrade to local-first.
   const page = (globalThis as { window?: Window }).window;
-  if (page && typeof page.document !== "undefined") refuseWindowJazzConflict(page);
+  if (page && typeof page.document !== "undefined") warnWindowJazzConflict(page);
   if (config.serverUrl === null) return createDeviceOnlySession(config);
   const serverUrl = config.serverUrl ?? DEFAULT_SERVER_URL;
   const {
@@ -527,7 +529,12 @@ export async function openBrowserSessionCore(
     openClient,
     decorate: followUser({
       registry,
-      events: browserBackendWatchEvents(`jazz-account:${registry}`),
+      // Checks and the sync connection's renewals may both refresh the
+      // app's session: one lock for both, so its cookie rotates once.
+      events: browserBackendWatchEvents(
+        `jazz-account:${registry}`,
+        sessionRefreshLockName(registry),
+      ),
       linkGuest: linkDeviceAccountOnSignUp,
       forgotten: (account) => accountForgotten(accounts, account.id),
       watchAccounts: (changed) => watchStoredSelection(accounts, changed),

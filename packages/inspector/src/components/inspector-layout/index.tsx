@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
 import { useBackendContext } from "../../backend/backend-context.js";
-import { BackendIdentity } from "../../backend/pages.js";
+import { BackendIdentity, BackendWarning } from "../../backend/pages.js";
 import {
   formatSchemaHashOptionLabel,
   type SchemaHashInfo,
@@ -244,6 +244,7 @@ export function InspectorLayout() {
         </div>
       </header>
       <section className={styles.content}>
+        {backendContext ? <BackendWarning /> : null}
         <Outlet context={{ isTablesPanelOpen, showDetachButton, setShowDetachButton }} />
       </section>
     </main>

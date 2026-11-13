@@ -71,8 +71,12 @@ const lockName = (registry: string, account: string) => `jazz-replica-v1:${regis
 /**
  * Hold `account`'s replica open in this tab until the returned release is
  * called, so no other tab wipes it meanwhile (a Web Lock). Without Web
- * Locks there is nothing to hold, and none is needed: persistent browser
- * storage requires them, so such a browser keeps no replica to protect.
+ * Locks there is nothing to hold. A browser without them keeps no replica
+ * to protect (persistent browser storage requires them). React Native has
+ * none either, but does keep one, in its native relay: there a wipe
+ * (`clearOnSignOut`, `logout({ wipeData: true })`) runs at once, and the
+ * relay closes every client of the account in the process before deleting
+ * its store.
  */
 export async function holdReplica(registry: string, account: string): Promise<() => Promise<void>> {
   const available = locks();
