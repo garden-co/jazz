@@ -396,16 +396,14 @@ pub fn encode_frames(message: SyncMessage) -> Result<Vec<Vec<u8>>, TransportErro
 }
 
 /// One whole message's bytes as a [`SyncMessage`]: exactly one postcard
-/// value, so bytes after the message are malformed rather than truncated.
+/// value, rejecting alternate varint spellings and trailing bytes.
 pub fn decode_message(frame: &[u8]) -> Result<SyncMessage, postcard::Error> {
-    match postcard::take_from_bytes(frame)? {
-        (message, []) => Ok(message),
-        _ => Err(postcard::Error::DeserializeBadEncoding),
-    }
+    jazz_types::postcard_exact::decode_postcard_exact(frame)
 }
 
 /// Joins a split message's frames (see [`encode_frames`]) back into the
 /// one message they encode.
+#[derive(Clone)]
 pub struct FrameJoiner {
     /// The bytes of the parts received since the last whole message.
     parts: Option<Vec<u8>>,
