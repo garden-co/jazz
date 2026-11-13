@@ -13,13 +13,14 @@ usage() {
 Usage: dev/t [-p PACKAGE] [--lib | --test TARGET] [--exact] FILTER [-- LIBTEST-OPTIONS...]
 
 Runs exactly one focused Jazz test with -p jazz --no-default-features --features
-test. The default target is --lib. Cargo's --list inventory is authoritative:
+testing,sqlite,transport-compression-zstd. The default target is --lib. Cargo's
+--list inventory is authoritative:
 the wrapper resolves a unique canonical module-path test name from FILTER, then
 runs that resolved name with --exact. --exact requires FILTER itself to already
 be that full canonical name; without it FILTER is a literal substring.
 -p selects one of Jazz's layer crates (for example jazz-types) instead of
-jazz; it is built with --no-default-features --features testing (jazz-server:
---features test). Without -p, a
+jazz; it is built with --no-default-features --features testing, plus sqlite
+for jazz-db (jazz-server uses test,sqlite). Without -p, a
 library filter that starts with db:: or binding_codec:: selects jazz-db.
 
 Examples:
@@ -98,10 +99,11 @@ if [[ -z "$package" ]]; then
     esac
   fi
 fi
-features="testing,transport-compression-zstd"
+features="testing,sqlite,transport-compression-zstd"
 case "$package" in
-  jazz|jazz-db) ;;
-  jazz-server) features="test" ;;
+  jazz) ;;
+  jazz-db) features="testing,sqlite" ;;
+  jazz-server) features="test,sqlite" ;;
   *) features="testing" ;;
 esac
 cargo_args=(-p "$package" --no-default-features --features "$features")

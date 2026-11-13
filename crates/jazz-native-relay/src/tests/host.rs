@@ -918,7 +918,11 @@ fn server_with_history(bundle: &serde_json::Value) -> (jazz::binding_host::Bindi
     ))
     .unwrap();
     server_db.set_authority();
-    let server = jazz::binding_host::Binding::new(server_db, server_identity, true);
+    let server = block_on(jazz::binding_host::Binding::new(
+        server_db,
+        server_identity,
+        true,
+    ));
     server
         .insert(
             "todos",
@@ -1005,9 +1009,8 @@ fn a_foreground_reads_a_server_with_schema_history() {
         Some(&bundle),
     );
     let relay = fixture.open_relay(&capability);
-    let upstream = server
-        .accept_subscriber(Fixture::author(0x47), Default::default())
-        .unwrap();
+    let upstream =
+        block_on(server.accept_subscriber(Fixture::author(0x47), Default::default())).unwrap();
     let foreground = fixture.open(&capability);
 
     for _ in 0..200 {
@@ -1109,9 +1112,8 @@ fn a_relay_attached_without_the_apps_migrations_stops_its_refused_upstream() {
         None,
     );
     let relay = fixture.open_relay(&capability);
-    let upstream = server
-        .accept_subscriber(Fixture::author(0x49), Default::default())
-        .unwrap();
+    let upstream =
+        block_on(server.accept_subscriber(Fixture::author(0x49), Default::default())).unwrap();
     let foreground = fixture.open(&capability);
     fixture.tick(foreground);
     for _ in 0..50 {
