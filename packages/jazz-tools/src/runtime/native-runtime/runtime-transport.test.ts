@@ -16,6 +16,11 @@ import { BrowserWorkerTransportPump } from "./browser-worker-transport.js";
 import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
 import { createUpstreamLink } from "../testing/napi-runtime-test-utils.js";
 import {
+  CORE_TICK_FAILED_ERROR_CODE,
+  CoreTickFailedError,
+  isCoreTickFailedError,
+} from "../core-tick-failed-error.js";
+import {
   JazzClient,
   PersistedWriteRejectedError,
   type TxId,
@@ -701,7 +706,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
   it("turns a pump failure during a parked read into one transport error without an uncaught exception or unhandled rejection", async () => {
     globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
-    const pumpFailure = new Error("core tick failed");
+    const pumpFailure = Object.assign(new Error("Storage: disk I/O error"), { code: "storage" });
     let failTicks = false;
     let polls = 0;
     const runtime = new NativeRuntimeAdapter(
@@ -746,12 +751,11 @@ describe("NativeRuntimeAdapter server transport", () => {
 
       await expect(
         runtime.query(JSON.stringify({ table: "todos" }), null, "remote"),
-      ).rejects.toThrow("core tick failed");
+      ).rejects.toThrow("core tick failed: Storage: disk I/O error");
       await waitForServerPumpTimer();
 
       expect(polls).toBeGreaterThan(0);
-      expect(terminal).toHaveBeenCalledWith(pumpFailure, { retrying: false });
-      expect(terminal).toHaveBeenCalledTimes(1);
+      expectOneCoreTickFailure(terminal, pumpFailure);
       expect(uncaught).not.toHaveBeenCalled();
       expect(unhandled).not.toHaveBeenCalled();
     } finally {
@@ -805,8 +809,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
       expect(failTicks).toBe(false);
-      expect(terminal).toHaveBeenCalledWith(tickFailure, { retrying: false });
-      expect(terminal).toHaveBeenCalledTimes(1);
+      expectOneCoreTickFailure(terminal, tickFailure);
       expect(uncaught).not.toHaveBeenCalled();
       expect(unhandled).not.toHaveBeenCalled();
     } finally {
@@ -877,6 +880,89 @@ describe("NativeRuntimeAdapter server transport", () => {
   // R42: a server at its connection cap per user refuses a new connection
   // before its hello with `backpressure` / `later`. The link reports that
   // refusal at once, naming the cap, and keeps retrying with backoff.
+
+  for (const wake of ["scheduler", "server pump"] as const) {
+    it(`publishes a ${wake} core tick failure that ends while a reconnect replaces the connection it began on`, async () => {
+      const sockets: FakeWebSocket[] = [];
+      globalThis.WebSocket = class extends FakeWebSocket {
+        constructor(url: string) {
+          super(url);
+          sockets.push(this);
+        }
+      } as unknown as typeof WebSocket;
+      const tickFailure = Object.assign(new Error("Storage: database disk image is malformed"), {
+        code: "storage",
+      });
+      let schedulerCallback: ((urgency: "immediate" | "deferred") => void) | undefined;
+      let holdTick = false;
+      let tickStarted: (() => void) | undefined;
+      let failHeldTick: (() => void) | undefined;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              setTickScheduler: (callback: typeof schedulerCallback) => {
+                schedulerCallback = callback;
+              },
+              connectUpstream: () => new FakeTransport([]),
+              tick: () => {
+                if (!holdTick) return;
+                holdTick = false;
+                tickStarted?.();
+                return new Promise<void>((_resolve, reject) => {
+                  failHeldTick = () => reject(tickFailure);
+                });
+              },
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const unhandled = vi.fn();
+      const uncaught = vi.fn();
+      process.on("unhandledRejection", unhandled);
+      process.on("uncaughtException", uncaught);
+      try {
+        const terminal = vi.fn();
+        runtime.onServerTransportError(terminal);
+        runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+        await runtime.waitForUpstreamServerConnection();
+        await waitForServerPumpTimer();
+
+        // A tick starts on the first connection, woken by the core's
+        // scheduler or by the pump an inbound frame starts...
+        holdTick = true;
+        const started = new Promise<void>((resolve) => {
+          tickStarted = resolve;
+        });
+        if (wake === "scheduler") schedulerCallback?.("immediate");
+        else sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([7, 7, 7])]));
+        await started;
+        // ...the server restarts while it runs, which retires that connection...
+        sockets[0]!.emitServerClose();
+        await waitForServerPumpTimer();
+        expect(terminal).not.toHaveBeenCalled();
+        // ...and then the tick fails. The failure is the core's, not the
+        // retired connection's, so it is still published.
+        failHeldTick!();
+        await waitForServerPumpTimer();
+
+        expectOneCoreTickFailure(terminal, tickFailure);
+        expect(uncaught).not.toHaveBeenCalled();
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        process.off("unhandledRejection", unhandled);
+        process.off("uncaughtException", uncaught);
+        await runtime.close().catch(() => undefined);
+      }
+    });
+  }
   it("publishes a pre-hello backpressure refusal with the server's reason and retries", async () => {
     const sockets: FakeWebSocket[] = [];
     let refuse = true;
@@ -4001,6 +4087,21 @@ function emptyRows(): Uint8Array {
   const writer = new PostcardWriter();
   writer.vec(() => undefined, 0);
   return writer.finish();
+}
+
+/** `terminal` heard exactly one terminal core tick failure, caused by `cause`. */
+function expectOneCoreTickFailure(terminal: ReturnType<typeof vi.fn>, cause: Error): void {
+  expect(terminal).toHaveBeenCalledTimes(1);
+  const [error, state] = terminal.mock.calls[0]!;
+  expect(state).toEqual({ retrying: false });
+  expect(error).toBeInstanceOf(CoreTickFailedError);
+  expect(error).toMatchObject({
+    name: "CoreTickFailedError",
+    code: CORE_TICK_FAILED_ERROR_CODE,
+    message: `core tick failed: ${cause.message}`,
+    cause,
+  });
+  expect(isCoreTickFailedError(error)).toBe(true);
 }
 
 function fakeDb<T extends object>(

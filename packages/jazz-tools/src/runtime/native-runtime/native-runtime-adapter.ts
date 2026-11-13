@@ -5,6 +5,7 @@ import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
 import { isAuthorityChangedError, upstreamRefusalError } from "../authority-changed-error.js";
+import { CoreTickFailedError, isCoreTickFailedError } from "../core-tick-failed-error.js";
 import { formatUuid, formatUuidAt } from "../hex.js";
 
 export { formatUuid };
@@ -3962,9 +3963,6 @@ export class NativeRuntimeAdapter implements Runtime {
         this.coreTickAgain = true;
         return;
       }
-      // Observe only a tick started here, never a predecessor's completion.
-      const hasServerTransport = this.serverTransport !== null;
-      const generation = this.serverConnectionGeneration;
       void this.runCoreTick().catch((error) => {
         // Native revocation can retire a foreground after its wake crossed
         // into the JS queue. Native liveness distinguishes that stale wake
@@ -3975,8 +3973,10 @@ export class NativeRuntimeAdapter implements Runtime {
           reportAsyncRuntimeError(livenessError);
           return;
         }
-        if (hasServerTransport) {
-          this.handleServerTransportError(error, generation);
+        // A core failure belongs to no single connection: whichever one is
+        // current when it happens (or is being reestablished) publishes it.
+        if (this.serverTransport !== null || this.serverEndpointUrl !== null) {
+          this.handleServerTransportError(error);
         } else {
           reportAsyncRuntimeError(error);
         }
@@ -4022,7 +4022,13 @@ export class NativeRuntimeAdapter implements Runtime {
     try {
       for (let round = 0; ; round += 1) {
         this.coreTickAgain = false;
-        await this.db.tick();
+        try {
+          await this.db.tick();
+        } catch (error) {
+          // Client stores have no chunk store, whose failed I/O a later tick
+          // retries, so every error a client tick returns is a core failure.
+          throw new CoreTickFailedError(error);
+        }
         // Commits and the server's verdicts change the pending count.
         this.syncStatusPublisher.changed();
         this.reportSlowQueries();
@@ -4417,7 +4423,14 @@ export class NativeRuntimeAdapter implements Runtime {
     generation = this.serverConnectionGeneration,
     reconnecting = false,
   ): void {
-    if (generation !== this.serverConnectionGeneration) return;
+    // A stale connection's errors are dropped, but a core failure belongs to
+    // no connection: one raised while a reconnect replaced the connection
+    // it began on is still the open client's failure.
+    if (
+      generation !== this.serverConnectionGeneration &&
+      (this.closed || !isCoreTickFailedError(error))
+    )
+      return;
     const message = errorMessage(error);
     if (this.serverTransportError && message === "websocket closed") {
       // Keep the more telling error already published; only its escalation
