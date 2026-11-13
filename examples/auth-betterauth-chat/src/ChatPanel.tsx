@@ -29,12 +29,14 @@ export function ChatPanel({
   const session = useSession();
   const sessionUserId = session?.user ?? null;
 
+  // #region default-stack-query
   const { data: rows = [], db } = useAll(
     app.messages
       .where({ chat_id: chatId })
       .select("id", "author_name", "text", "sent_at")
       .orderBy("sent_at", "asc"),
   );
+  // #endregion default-stack-query
 
   const [canDeleteById, setCanDeleteById] = React.useState<Record<string, boolean>>({});
   const rowIds = React.useMemo(() => rows.map((row) => row.id).join("\0"), [rows]);
@@ -71,6 +73,7 @@ export function ChatPanel({
     setDeleteError(null);
 
     try {
+      // #region default-stack-write
       await (
         await db.insert(app.messages, {
           author_name: authorName,
@@ -79,6 +82,7 @@ export function ChatPanel({
           sent_at: new Date(),
         })
       ).wait({ tier: "global" });
+      // #endregion default-stack-write
       setMessageText("");
     } catch (error) {
       setMessageError(error instanceof Error ? error.message : String(error));
