@@ -249,6 +249,8 @@ export function replicaLifecycle(options: {
   ledger: ReplicaLedger;
   /** Whether this page has `account` open, or is opening it. */
   heldHere(account: string): boolean;
+  /** Whether this page has closed its session: it reconciles nothing then. */
+  stopped?(): boolean;
   /**
    * Delete `account`'s store. `"held"` without deleting anything while a tab
    * (of any build) still has it open.
@@ -284,6 +286,8 @@ export function replicaLifecycle(options: {
         // (unless this page wipes it on purpose: its own sign-out, which still
         // shows the account until it settles, or its own open finishing a wipe).
         if (!ledger.get(account) || (!byThisPage && options.heldHere(account))) return "skipped";
+      // A closed page wipes nothing it didn't sign out itself.
+      if (!byThisPage && options.stopped?.()) return "skipped";
         ledger.markWiping(account, true);
         // A delete that fails leaves the mark: whether any of it went is
         // unknown, so the account's next open or a later reconcile finishes it.
@@ -330,6 +334,7 @@ export function replicaLifecycle(options: {
   let reconciling: Promise<void> | undefined;
   let again = false;
   const reconcileOnce = async () => {
+    if (options.stopped?.()) return;
     const orphans: ReplicaEntry[] = [];
     for (const entry of ledger.read()) {
       if (options.heldHere(entry.account)) continue;

@@ -248,6 +248,7 @@ export async function openBrowserSessionCore(
     return replicaLifecycle({
       registry,
       ledger: replicaLedger(registry),
+      stopped: () => session?.getSnapshot().status === "closed",
       heldHere: (account) => {
         if (opening.has(account)) return true;
         const snapshot = session?.getSnapshot();

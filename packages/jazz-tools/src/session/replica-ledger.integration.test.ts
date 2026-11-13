@@ -153,7 +153,11 @@ function stubWebLocks() {
         if (options.mode === "exclusive") {
           if (held.get(name)) return callback(null);
           held.set(name, -1);
-        } else held.set(name, (held.get(name) ?? 0) + 1);
+        } else {
+          // As in a browser, a shared hold waits out an exclusive one.
+          while (held.get(name) === -1) await new Promise((resolve) => setTimeout(resolve, 10));
+          held.set(name, (held.get(name) ?? 0) + 1);
+        }
         try {
           return await callback({ name });
         } finally {
