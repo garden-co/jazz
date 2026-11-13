@@ -934,3 +934,39 @@ fn correlations_deeper_than_one_nested_join_are_rejected() {
         );
     }
 }
+
+/// Past a hop, only the hop's key can be correlated with the protected row:
+/// the error names the column, what is supported, and where to correlate
+/// instead (adopter eval on alpha.61 rc.1 got only "must use its join key").
+#[test]
+fn a_correlation_past_a_hop_off_its_key_names_the_column() {
+    let joined = RelationExpr::Join {
+        left: Box::new(scan("doc_access", Some("access"))),
+        right: Box::new(scan("teams", Some("t"))),
+        on: vec![RelationJoinCondition {
+            left: column("access", "team"),
+            right: column("t", "id"),
+        }],
+        join_kind: RelationJoinKind::Inner,
+    };
+    let error = access_policy_error(filter(
+        joined,
+        RelationPredicate::And(vec![
+            outer_doc(),
+            equals(
+                "t",
+                "owner_id",
+                RelationValueRef::OuterColumn(RelationColumnRef::unscoped("workspace")),
+            ),
+        ]),
+    ));
+    for part in [
+        "`teams.owner_id`",
+        "`workspace`",
+        "not supported in policies yet",
+        "`teams.id`",
+        "`doc_access`",
+    ] {
+        assert!(error.contains(part), "{part}: {error}");
+    }
+}

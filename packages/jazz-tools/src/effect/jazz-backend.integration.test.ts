@@ -1,10 +1,22 @@
-import { Effect, Fiber, Layer, Stream } from "effect";
+import { Effect, Fiber, Layer, Schema, Stream } from "effect";
 import { HttpServerRequest } from "effect/http";
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
-import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
+import { createJazz, memory } from "../backend/index.js";
+import { createDb } from "../runtime/default-create-db.js";
 import { startTestJazz } from "../testing/index.js";
 import { Jazz, JazzBackend, JazzNoAccount, JazzWriteRejected } from "./backend/index.js";
+
+/** A device account of its own (a fresh store) for each session a test opens. */
+function memoryAccountStore() {
+  let stored: string | null = null;
+  return {
+    read: async () => stored,
+    update: async (transform: (current: string | null) => string | null) => {
+      stored = transform(stored);
+    },
+  };
+}
 
 const app = s.defineApp(
   {
@@ -49,7 +61,15 @@ describe("JazzBackend Effect layer", () => {
     });
     try {
       const backendLayer = JazzBackend.layerJazz(server.jazz);
-      const clientLayer = Jazz.layer(await localAccountConfig(server.appId, server.url));
+      const clientLayer = Jazz.layer({
+        scope: server.appId,
+        serverUrl: server.url,
+        initial: "device",
+        client: async () => ({ createClient: createDb }),
+        localFirst: "now",
+        store: memoryAccountStore(),
+        driver: { type: "memory" },
+      });
       // The reader is a user the backend serves without a client of their own.
       await server.jazz.createAccountFor("effect-reader");
       const headers = { authorization: `Bearer ${server.bearer("effect-reader")}` };
@@ -176,6 +196,49 @@ describe("JazzBackend Effect layer", () => {
       expect(seen).toEqual([["diarist-a entry"], ["diarist-b entry"]]);
     } finally {
       await server.stop();
+    }
+  }, 60_000);
+  it("leaves the request body to the handler under forCurrentReqUser", async () => {
+    const seenBodies: Array<ReadableStream | null> = [];
+    const jazz = createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        seenBodies.push(request.body);
+        return { userId: "body-reader", expiresAt: Math.floor(Date.now() / 1000) + 3600 };
+      },
+    });
+    try {
+      await jazz.createAccountFor("body-reader");
+      const handler = Effect.gen(function* () {
+        const body = yield* HttpServerRequest.schemaBodyJson(
+          Schema.Struct({ text: Schema.String }),
+        );
+        const created = yield* createPost(body.text);
+        return created;
+      });
+      const created = await Effect.runPromise(
+        handler.pipe(
+          JazzBackend.forCurrentReqUser(),
+          Effect.provideService(
+            HttpServerRequest.HttpServerRequest,
+            HttpServerRequest.fromWeb(
+              new Request("http://localhost/posts", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ text: "from the body" }),
+              }),
+            ),
+          ),
+          Effect.provide(JazzBackend.layerJazz(jazz)),
+        ),
+      );
+      expect(created).toMatchObject({ _tag: "Some", value: { text: "from the body" } });
+      // authenticate decides from the method, URL and headers; the body stays unread.
+      expect(seenBodies).toEqual([null]);
+    } finally {
+      await jazz.close();
     }
   }, 60_000);
 });

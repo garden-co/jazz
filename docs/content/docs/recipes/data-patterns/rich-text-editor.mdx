@@ -98,10 +98,10 @@ Presence rows are written a few times a second, and their past positions are wor
 declare the table latest-only with `.history("latest")`: Jazz then keeps only each row's latest
 version instead of every one. Such a table can't be read through `history`, at a snapshot or in a
 serializable transaction, and can't use `branchBy` or text-merging columns. Switching an existing
-table to latest-only drops its history for good, so the first deployment that does it must pass
-`allowDroppingHistory: true` to `createJazz`. Each write prunes by the schema its client runs, so
-rolling back to a version that keeps full history stops the pruning, but what was dropped stays
-gone and the table still can't be read through `history`. Throttle the writes, and skip them when only a merged
+table to latest-only stops history queries on it and deletes each row's earlier versions the next
+time that row is written, so the first deployment that does it must pass
+`allowDroppingHistory: true` to `createJazz` (see
+[Latest-only tables](/docs/schemas/defining-tables#latest-only-tables)). Throttle the writes, and skip them when only a merged
 value arrived: presence is stored by its text, so it
 still finds its place. Refresh the row on an interval while the editor is open and delete it on
 close. Treat a row as gone when this client has not seen it refreshed for a while (timed by this

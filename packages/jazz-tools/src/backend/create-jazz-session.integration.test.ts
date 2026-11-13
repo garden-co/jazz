@@ -72,7 +72,11 @@ describe("Node shared backend session", () => {
     };
     await expect(
       createJazzClient({ ...base, initial: { backendSecret: "secret" } } as never),
-    ).rejects.toThrow('initial is "local-first" or left out');
+    ).rejects.toThrow('initial is "device" or left out');
+    // The option check keeps webSocket's own hint.
+    await expect(createJazzClient({ ...base, webSocket: class {} } as never)).rejects.toThrow(
+      "Use credential instead of webSocket",
+    );
     for (const key of ["backendSecret", "adminSecret"]) {
       await expect(createJazzClient({ ...base, [key]: "secret" } as never)).rejects.toThrow(
         `${key} is not a createJazzClient option`,
@@ -94,6 +98,31 @@ describe("Node shared backend session", () => {
           initial: { backendSecret: "incorrect-service-secret" },
         }),
       ).rejects.toThrow("Backend admission failed (401)");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("the main backend's own client acts for a user through jazz.forReqUser, not forUser", async () => {
+    const appId = randomUUID();
+    const backendSecret = "for-user-service-secret";
+    const server = await startLocalJazzServer({ appId, backendSecret });
+    try {
+      const owner = await openJazzSession({
+        appId,
+        serverUrl: server.url,
+        app,
+        permissions,
+        driver: { type: "memory" },
+        initial: { backendSecret },
+      });
+      try {
+        await expect(owner.getSnapshot().client!.forUser("alice")).rejects.toThrow(
+          /only on a trusted backend client.*jazz\.forReqUser/,
+        );
+      } finally {
+        await owner.close();
+      }
     } finally {
       await server.stop();
     }

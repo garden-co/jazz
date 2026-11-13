@@ -452,11 +452,18 @@ impl<'a> Ctx<'a> {
                     None => ("0".to_owned(), "0".to_owned()),
                     Some(ids) => {
                         self.overlaid_rows += ids.len();
-                        let ids = ids
-                            .iter()
-                            .map(|id| self.bind(Sql::Blob(id.to_vec())))
-                            .collect::<Vec<_>>()
-                            .join(", ");
+                        // A long chain grounds many rows: past a few, the
+                        // ids bind as one JSON array (Durable Object SQLite
+                        // caps a statement at 100 parameters).
+                        let ids = if ids.len() > BOUND_LIST_MAX {
+                            let array = self.bind(json_ids(ids.iter().map(|id| id.as_slice())));
+                            format!("SELECT unhex(value) FROM json_each({array})")
+                        } else {
+                            ids.iter()
+                                .map(|id| self.bind(Sql::Blob(id.to_vec())))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
                         (
                             format!("({own} AND (_state & {STATE_DELETED}) = 0 AND id IN ({ids}))"),
                             format!(

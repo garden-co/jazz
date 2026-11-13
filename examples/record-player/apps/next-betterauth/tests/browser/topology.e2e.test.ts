@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createAccountManager, createDb, schema as s, type Db } from "jazz-tools";
+import { schema as s, type Db } from "jazz-tools";
 import type { RowRefValue } from "jazz-tools/permissions";
+import { createBrowserTestDb } from "../../../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
@@ -1560,14 +1561,16 @@ async function openClient(
   dbName = uniqueDbName(`record-player-${label}`),
 ): Promise<Db> {
   const account = await signIn(server, userUrl);
+  // Browser support utilities open Jazz source for Vite's WASM bundle, while
+  // the app's store takes the public package's Db: the same Db at runtime.
   return ctx.track(
-    await createDb({
+    await createBrowserTestDb({
       appId: server.appId,
       serverUrl: userUrl,
       account,
       driver: { type: "persistent", dbName },
     }),
-  );
+  ) as unknown as Db;
 }
 
 /**
@@ -1580,7 +1583,7 @@ async function accountIdFor(server: { appId: string }, userUrl: string): Promise
 
 /** Sign in at a user's own origin: the same account each time. */
 function signIn(server: { appId: string }, userUrl: string) {
-  return loginAtJazzAppUser(server.appId, userUrl, createAccountManager);
+  return loginAtJazzAppUser(server.appId, userUrl);
 }
 
 // #3840: after the demo library streamed in, a page reload often hung on

@@ -29,6 +29,7 @@ import {
   type BrowserSharedWorkerConnectResponse,
   type BrowserSharedWorkerBootstrapCancelRequest,
   type BrowserWorkerInitOptions,
+  BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN,
 } from "../runtime/native-runtime/browser-worker-protocol.js";
 // Worker failures cross a MessagePort boundary, so retain enough WASM frames to
 // identify the Rust call site before serializing them for the owning tab.
@@ -43,6 +44,7 @@ import { deliverMutationErrorToAttachedPeers } from "./mutation-error-delivery.j
 import { toError } from "../runtime/util.js";
 import type { RemoteLinkState } from "../runtime/remote-link-state.js";
 import { sameLinkStatus, type LinkStatus } from "../runtime/sync-status.js";
+import { compareRuntimeAdmission } from "./runtime-admission.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -73,6 +75,8 @@ type TabPeer = {
   transportWaitAbort: AbortController;
   /** True only for a port transferred through authenticated Inspector control. */
   inspectorAttachment: boolean;
+  /** The page lock this tab named, once the worker waits on it (`watchTabLiveness`). */
+  watchedLivenessLock: string | null;
   pendingInspectorBootstraps: Set<() => void>;
   inspectorSubscriptions: Map<number, number>;
   inspectorWrites: Set<TxId>;
@@ -125,6 +129,8 @@ type RuntimeContext = {
   transportStateEpoch: number;
   transportStateWaiters: Set<() => void>;
   authFailureEpoch: number;
+  /** Why writing the store to IndexedDB fails now, or null while it works. */
+  storageFailure: string | null;
 };
 
 function canonicalClaimsJson(value: unknown): string {
@@ -969,10 +975,6 @@ async function connectTab(
     assertAdmission();
     const key = runtimeKey(message.options);
     let context = contexts.get(key);
-    if (context?.idleReleaseTimer) {
-      clearTimeout(context.idleReleaseTimer);
-      context.idleReleaseTimer = null;
-    }
     if (context?.closing) {
       await context.closing;
       assertAdmission();
@@ -987,8 +989,21 @@ async function connectTab(
     if (context && !workerTelemetryCompatible(context.options, message.options)) {
       throw new Error("incompatible persistent browser telemetry configuration");
     }
-    if (context && context.fingerprint !== message.fingerprint) {
-      throw new Error("incompatible persistent browser configuration");
+    const admission = context
+      ? compareRuntimeAdmission(context.fingerprint, message.fingerprint, message.options.schema)
+      : "admit";
+    if (admission !== "admit") {
+      throw new Error(
+        admission === "held-by-another-sign-in"
+          ? BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN
+          : "incompatible persistent browser configuration",
+      );
+    }
+    // Only an admitted tab keeps an idle context: a refused one must not
+    // cancel the release that lets it in next time.
+    if (context?.idleReleaseTimer) {
+      clearTimeout(context.idleReleaseTimer);
+      context.idleReleaseTimer = null;
     }
     if (!context) {
       context = createContext(key, message.fingerprint, message.options);
@@ -1068,6 +1083,7 @@ function createContext(
     transportStateEpoch: 0,
     transportStateWaiters: new Set(),
     authFailureEpoch: 0,
+    storageFailure: null,
     initialize: Promise.resolve(),
     closing: null,
     idleReleaseTimer: null,
@@ -1148,6 +1164,12 @@ async function initialize(context: RuntimeContext): Promise<void> {
     context.runtime.onAuthFailure((reason) => {
       context.authFailureEpoch += 1;
       broadcast(context, { type: "auth-failure", reason });
+    });
+    context.runtime.onStorageFailure((message) => {
+      // Tabs reject their writes' local waits while it lasts: the worker
+      // keeps those writes in memory and acknowledges none of them.
+      context.storageFailure = message;
+      broadcast(context, { type: "storage-failure", message });
     });
     context.runtime.onMutationError((event) => {
       // A mutation error is a notification for foreground runtimes that are
@@ -1441,6 +1463,7 @@ function attachTab(
     flushObserved: false,
     transportWaitAbort: new AbortController(),
     inspectorAttachment,
+    watchedLivenessLock: null,
     pendingInspectorBootstraps: new Set(),
     inspectorSubscriptions: new Map(),
     inspectorWrites: new Set(),
@@ -1456,10 +1479,37 @@ function attachTab(
   port.start();
 }
 
+/**
+ * Detach the tab once the browser grants `lock`, which the tab holds for as
+ * long as its page lives: it went away (closed, crashed, discarded) without
+ * a `close`. Its context is then released like a closed tab's, so a tab
+ * waiting for this store under another sign-in gets in. A frozen page still
+ * holds its lock, and the waiting tab reports that after a while.
+ */
+function watchTabLiveness(peer: TabPeer, lock: string): void {
+  const { context, tabId } = peer;
+  const locks = (globalThis.navigator as Navigator | undefined)?.locks;
+  if (!locks || peer.watchedLivenessLock !== null) return;
+  peer.watchedLivenessLock = lock;
+  locks
+    .request(lock, { signal: peer.transportWaitAbort.signal }, () => {
+      if (context.peers.get(tabId) !== peer) return;
+      closeTab(context, tabId);
+      if (context.peers.size === 0 && context.pendingAdmissionTasks === 0)
+        scheduleIdleContextRelease(context);
+    })
+    // Aborted once the tab detached any other way.
+    .catch(() => undefined);
+}
+
 async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortRequest): Promise<void> {
   if (peer.context.peers.get(peer.tabId) !== peer) return;
   // Answer outside runtime, storage and transport queues: a healthy worker
   // can legitimately be waiting indefinitely for an upstream acknowledgement.
+  if (message.type === "liveness-lock") {
+    watchTabLiveness(peer, message.name);
+    return;
+  }
   if (message.type === "runtime-probe") {
     post(peer.port, {
       type: "runtime-pong",
@@ -1544,7 +1594,15 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
   }
   if (message.type === "prepare-storage-reset") {
     peer.context.intentionalStorageReset = true;
-    result(peer, message.id);
+    // What the reset loses: every write of the store the server hasn't
+    // confirmed, whichever tab made it, recovered ones included.
+    let pendingUploads: number | undefined;
+    try {
+      pendingUploads = peer.context.runtime?.uploadStatus().pending;
+    } catch {
+      pendingUploads = undefined;
+    }
+    result(peer, message.id, undefined, { pendingUploads });
     return;
   }
   if (message.type === "abort-storage-reset") {
@@ -1714,6 +1772,9 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
             post(peer.port, { type: "transport-state", explicitlyDisconnected: true });
           } else {
             ensureServerConnection(peer.context);
+          }
+          if (peer.context.storageFailure !== null) {
+            post(peer.port, { type: "storage-failure", message: peer.context.storageFailure });
           }
           post(peer.port, {
             type: "remote-link",
@@ -1988,6 +2049,7 @@ function result(
     inspectorAttachmentPhysicalDbName?: string;
     peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
     workerRealmId?: string;
+    pendingUploads?: number;
   },
 ): void {
   if (peer.context.peers.get(peer.tabId) !== peer) return;

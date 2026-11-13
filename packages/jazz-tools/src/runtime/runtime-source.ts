@@ -59,13 +59,20 @@ export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConf
 export interface BrowserWorkerConnection {
   /** Only a rejected initial configuration admission permits a later API call to retry. */
   canRetryInitialConfigurationAdmission?(): boolean;
+  /**
+   * The worker refused this connection because another tab holds the store
+   * under another sign-in to the same account: the tab tries again on its
+   * own (see `BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN`).
+   */
+  waitsForAnotherSignIn?(): boolean;
   ready(): Promise<void>;
   getWorkerRealmId?(): string | undefined;
   waitForServerConnection(): Promise<void>;
   updateAuth(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
   disconnect(): Promise<void>;
   reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
-  deleteStorage(): Promise<void>;
+  /** Delete the store; resolves with how many unconfirmed writes it took, when the worker says. */
+  deleteStorage(): Promise<{ pendingUploads?: number } | void>;
   flushLocal(): Promise<void>;
   waitForPendingWrites(): Promise<void>;
   openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort>;

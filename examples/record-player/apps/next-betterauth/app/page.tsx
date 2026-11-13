@@ -3,7 +3,7 @@
 import { AppShell } from "@astryxdesign/core/AppShell";
 import { Button } from "@astryxdesign/core/Button";
 import { TopNav, TopNavHeading } from "@astryxdesign/core/TopNav";
-import { useJazzAuth } from "jazz-tools/react";
+import { useJazzSession } from "jazz-tools/react";
 import { authClient } from "../src/lib/auth-client";
 import { JazzTheme } from "./jazz-theme";
 import { RecordPlayerClient } from "./record-player-client";
@@ -38,10 +38,10 @@ export default function Home() {
 
 function SignOut() {
   // Signs out of Better Auth, then Jazz follows the backend's answer.
-  const { reauthenticate } = useJazzAuth();
+  const { refresh } = useJazzSession();
   async function signOut() {
     await authClient.signOut();
-    await reauthenticate();
+    await refresh();
   }
   return <Button label="Sign out" variant="ghost" size="sm" onClick={() => void signOut()} />;
 }

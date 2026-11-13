@@ -8,7 +8,6 @@
 // Wake handling is adapted from garden-co/infra's v2 sync proxy (ADR 0004).
 
 import { createHash, randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
 import type { JazzCoreSocketEvent } from "jazz-napi";
 import {
   connectedBlobStore,
@@ -29,6 +28,7 @@ import type {
   BrowserWebSocket,
   WebSocketConstructor,
 } from "../runtime/native-runtime/websocket.js";
+import { optionalPeerImportError } from "./optional-peer.js";
 
 export const VERCEL_CORE_PORT = 1625;
 
@@ -163,6 +163,11 @@ const MIN_LEFT_MS = 30_000;
 const NOT_LISTENING_RECYCLE_MS = 12_000;
 // How long a wake is trusted before the next request checks again.
 const ENSURE_FRESH_MS = 10_000;
+/**
+ * Vercel's router sets this on an answer it gave itself (the Sandbox isn't
+ * listening, or is stopping): the request never reached the core.
+ */
+const ROUTER_ERROR_HEADER = "x-vercel-error";
 const KEEPALIVE_MS = 30_000;
 
 // After a start that can't succeed, requests fail fast for this long
@@ -420,10 +425,20 @@ function coreOptions(
             ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
           },
     trustedWorkload: { issuer: trust.issuer, audience: trust.audience, subject: trust.subject },
+    // Local-first guests (`initial: "device"`) sync with their own key.
+    // `serveCore` refuses them unless asked; here the backend decides, with
+    // `acceptDeviceAccounts`, which guests' sockets it opens, and the core
+    // admits no socket the workload didn't open.
+    allowLocalFirstAuth: true,
   };
 }
 
-let warnedNoBlobStore = false;
+/**
+ * Said once per process: a Next.js server bundles each route on its own, so
+ * a module-level flag would say it once per route that opens Jazz.
+ */
+const WARNED_NO_BLOB_STORE = Symbol.for("jazz-tools.vercel.warnedNoBlobStore");
+const warnedOnce = globalThis as { [WARNED_NO_BLOB_STORE]?: true };
 
 /**
  * Where a `vercel()` core keeps large values: as asked, or by default the
@@ -435,8 +450,8 @@ export function resolveCoreBlobs(
   warn: (message: string) => void = console.warn,
 ): VercelS3 | VercelBlob | undefined {
   const blobs = options.blobs ?? (connectedBlobStore(env) ? vercelBlob() : undefined);
-  if (blobs === undefined && !warnedNoBlobStore) {
-    warnedNoBlobStore = true;
+  if (blobs === undefined && !warnedOnce[WARNED_NO_BLOB_STORE]) {
+    warnedOnce[WARNED_NO_BLOB_STORE] = true;
     warn(
       "vercel(): no Blob store is connected to this project, so large values stay in the core's SQLite file. Connect one (Storage tab in the Vercel dashboard) and they go there from then on.",
     );
@@ -445,6 +460,41 @@ export function resolveCoreBlobs(
   if (blobs.kind === "vercel-blob") return resolveVercelBlob(blobs, env);
   return resolveVercelS3(blobs, options.region ?? "iad1", env);
 }
+
+/**
+ * Refuse a Blob store that another environment claimed, so a preview
+ * deployment given production's store (an API- or CLI-created store is
+ * connected to every environment) fails at start and says why. The core
+ * checks the same claim, but only at its first large value, since no token
+ * reaches it before a request does, and then it only retries in the
+ * background while writes are acknowledged. A store nobody claimed yet, or
+ * a read that fails, is left to the core's own check.
+ */
+export async function refuseOtherEnvironmentsBlobStore(
+  storeId: string,
+  environment: string | undefined,
+  token: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  if (environment === undefined) return;
+  const id = storeId.replace(/^store_/, "").toLowerCase();
+  const response = await fetchImpl(
+    `https://${id}.private.blob.vercel-storage.com/${BLOB_ENVIRONMENT_MARKER}?cache=0`,
+    { headers: { authorization: `Bearer ${token}` } },
+  ).catch(() => undefined);
+  if (!response?.ok) return;
+  const claimed = (await response.text().catch(() => "")).trim();
+  if (claimed && claimed !== environment) {
+    throw new Error(
+      `vercel(): Blob store ${storeId} serves the ${claimed} environment, not ${environment}; ` +
+        "connect a separate Blob store to each environment (a store connected through the API or " +
+        "CLI is connected to all of them)",
+    );
+  }
+}
+
+/** Where a core claims a bucket or Blob store for its environment (jazz-server's `ENVIRONMENT_OBJECT`). */
+const BLOB_ENVIRONMENT_MARKER = ".jazz-environment";
 
 /** The workload an OIDC token names: whoever holds such a token is trusted. */
 export function workloadOf(token: string): TrustedWorkload {
@@ -484,9 +534,10 @@ async function functionOidcToken(): Promise<string> {
   let fetched: string | undefined;
   let failure: unknown;
   try {
-    const { getVercelOidcToken } = (await import(
-      /* @vite-ignore */ "@vercel/functions/oidc" as string
-    )) as { getVercelOidcToken(): Promise<string> };
+    // A literal inside `try`, like `importSandboxSdk`'s.
+    const { getVercelOidcToken } = (await import(/* @vite-ignore */ "@vercel/functions/oidc")) as {
+      getVercelOidcToken(): Promise<string>;
+    };
     fetched = await getVercelOidcToken();
   } catch (error) {
     failure = error;
@@ -580,13 +631,19 @@ export function defaultCoreTarballUrl(version: string): string {
 }
 
 /**
- * The installed jazz-tools version. Read through `require` of the package's
- * own export, not `readFile(new URL(…, import.meta.url))`: webpack (Next 15)
- * rewrites `new URL(…, import.meta.url)` into an asset URL that `fs` refuses,
- * while it bundles a required JSON file as is.
+ * The installed jazz-tools version, as a JSON import of the package's own
+ * `package.json` export. Bundlers (webpack, Turbopack) inline it, and Node
+ * loads it as a module. Neither reads a path at runtime, unlike `readFile`
+ * of a URL resolved against `import.meta.url` (webpack rewrites that URL
+ * into one `fs` refuses) or `createRequire` from `import.meta.url`
+ * (bundlers bake the build machine's path into it, so a deployed function
+ * can't find it).
  */
-function installedVersion(): string {
-  return (createRequire(import.meta.url)("jazz-tools/package.json") as { version: string }).version;
+async function installedVersion(): Promise<string> {
+  const packageJson = (await import("jazz-tools/package.json", { with: { type: "json" } })) as {
+    default: { version: string };
+  };
+  return packageJson.default.version;
 }
 
 export interface OpenVercelCoreOptions {
@@ -595,19 +652,31 @@ export interface OpenVercelCoreOptions {
   sdk?: SandboxSdk;
   version?: string;
   env?: Record<string, string | undefined>;
+  /** Reads the Blob store's environment claim (tests). */
+  fetch?: typeof fetch;
+}
+
+/**
+ * `@vercel/sandbox`, an optional peer dependency. The import is a literal
+ * inside `try`: bundlers (Turbopack, webpack) then bundle the package when
+ * it's installed, and turn a missing one into an error at runtime instead
+ * of failing every route that imports jazz-tools (an app on `sqlite()`
+ * never needs it). A `.catch()` on the import isn't enough for that.
+ */
+async function importSandboxSdk(): Promise<SandboxSdk> {
+  try {
+    return (await import(/* @vite-ignore */ "@vercel/sandbox")) as unknown as SandboxSdk;
+  } catch (error) {
+    throw optionalPeerImportError("vercel()", "@vercel/sandbox", error);
+  }
 }
 
 export async function openVercelCore(params: OpenVercelCoreOptions): Promise<VercelCore> {
   const { options, openRemote } = params;
   refuseVercelAppId(options);
   const env = params.env ?? process.env;
-  const sdk =
-    params.sdk ??
-    options.sdk ??
-    ((await import(/* @vite-ignore */ "@vercel/sandbox" as string).catch(() => {
-      throw new Error("vercel() needs the @vercel/sandbox package: npm install @vercel/sandbox");
-    })) as SandboxSdk);
-  const version = params.version ?? installedVersion();
+  const sdk = params.sdk ?? options.sdk ?? (await importSandboxSdk());
+  const version = params.version ?? (await installedVersion());
   const tarballUrl = options.coreTarballUrl ?? defaultCoreTarballUrl(version);
   const project = options.credentials?.projectId ?? env.VERCEL_PROJECT_ID;
   if (!options.name && !project) {
@@ -621,7 +690,8 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   const backendCredential = options.backendCredential ?? functionOidcToken;
   // The core trusts the workload this function's token names, so every
   // instance of this project and environment reaches it, and nothing else.
-  const trust = workloadOf(await backendCredential());
+  const token = await backendCredential();
+  const trust = workloadOf(token);
   // Skipped for a `backendCredential` of your own, which names whatever
   // workload you chose.
   if (!options.backendCredential) refuseOtherEnvironment(trust, env);
@@ -632,6 +702,12 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       `vercel(): the core's workload ${trust.subject} names no Vercel environment, so its blob store is not claimed for one; make sure no other environment uses that store`,
     );
   }
+  // Read while the core wakes; refused before anything is served.
+  const storeChecked =
+    blobs && "storeId" in blobs
+      ? refuseOtherEnvironmentsBlobStore(blobs.storeId, environmentOf(trust), token, params.fetch)
+      : undefined;
+  void storeChecked?.catch(() => {});
   const script = Buffer.from(startScript(version, tarballUrl, trust, blobs));
 
   /** This instance's recent starts, by id (its script's file name). */
@@ -867,19 +943,30 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   let lastActivity = Date.now();
   let sockets = 0;
   let failed: { at: number; error: CoreStartError } | undefined;
+  /**
+   * The core `live` names stopped answering (Vercel's router refused a
+   * request, or a socket to it failed): the next `ensure` wakes it, health
+   * check included, instead of trusting it for `ENSURE_FRESH_MS`.
+   */
+  let suspect = false;
+  const distrust = () => {
+    suspect = true;
+  };
 
   const ensure = (): Promise<NonNullable<typeof live>> => {
     lastActivity = Date.now();
-    if (live && Date.now() - live.checkedAt < ENSURE_FRESH_MS) return Promise.resolve(live);
+    if (live && !suspect && Date.now() - live.checkedAt < ENSURE_FRESH_MS)
+      return Promise.resolve(live);
     if (failed && Date.now() - failed.at < START_FAILURE_HOLD_MS)
       return Promise.reject(failed.error);
     pending ??= (async () => {
       try {
-        if (live && (await getRunning())) {
+        if (live && !suspect && (await getRunning())) {
           live.checkedAt = Date.now();
           return live;
         }
         const { sbx, base } = await wake();
+        suspect = false;
         const coreAppId =
           live?.base === base
             ? live.appId
@@ -930,7 +1017,16 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   }, KEEPALIVE_MS);
   (keepalive as { unref?: () => void }).unref?.();
 
-  const first = await ensure();
+  const ensured = ensure();
+  let first: Awaited<typeof ensured>;
+  try {
+    [first] = await Promise.all([ensured, storeChecked]);
+  } catch (error) {
+    clearInterval(keepalive);
+    // The wake may still be under way: close the core it comes up with.
+    void ensured.then(({ core }) => core.close()).catch(() => {});
+    throw error;
+  }
   // Clients in this process (the backend's own session) reach the core through
   // an in-process origin, so each of their requests and reconnects wakes it;
   // they go on through the current remote core's own in-process origin, which
@@ -940,10 +1036,23 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     fetch: async (input, init) => {
       const request = new Request(input, init);
       const url = new URL(request.url);
-      const inner = (await ensure()).core.serverUrl;
-      return fetchFor(inner)(new Request(`${inner}${url.pathname}${url.search}`, request));
+      const send = async (sent: Request) => {
+        const inner = (await ensure()).core.serverUrl;
+        return fetchFor(inner)(new Request(`${inner}${url.pathname}${url.search}`, sent));
+      };
+      // Kept to send again only when that costs little: a clone tees the
+      // body, buffering a streamed upload whole while the first send runs.
+      const again = resendable(request, init?.body) ? request.clone() : undefined;
+      const response = await send(request);
+      if (!response.headers.has(ROUTER_ERROR_HEADER)) return response;
+      // Refused before it reached the core: wake it (for the next request
+      // too) and send it again.
+      distrust();
+      if (!again) return response;
+      void response.body?.cancel().catch(() => {});
+      return send(again);
     },
-    WebSocket: wakingWebSocket(async () => (await ensure()).core.serverUrl),
+    WebSocket: wakingWebSocket(async () => (await ensure()).core.serverUrl, distrust),
   });
 
   return {
@@ -952,6 +1061,12 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     adminSecret: first.core.adminSecret,
     backendSecret: first.core.backendSecret,
     async handle(method, path, headers, body, access) {
+      const response = await (await ensure()).core.handle(method, path, headers, body, access);
+      if (!response.headers.some(([name]) => name!.toLowerCase() === ROUTER_ERROR_HEADER))
+        return response;
+      // Refused before it reached the core (a core stopping or restarting
+      // while this instance still trusted it): wake it and send it again.
+      distrust();
       return (await ensure()).core.handle(method, path, headers, body, access);
     },
     openSocket(headers, onEvent, access) {
@@ -971,6 +1086,9 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
               headers,
               (error, event) => {
                 if (error || event.kind === "close") done();
+                // A dropped connection to the core: the client reconnects,
+                // and its next session finds the core awake again.
+                if (event.kind === "close" && event.code === 1006) distrust();
                 onEvent(error, event);
               },
               access,
@@ -1017,8 +1135,26 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   };
 }
 
+/** The largest request body kept to send again after the router refused it. */
+const RESEND_MAX_BYTES = 1024 * 1024;
+
+/** Whether `request` has no body, or a small one already in memory or of stated size. */
+function resendable(request: Request, given?: unknown): boolean {
+  if (request.body === null) return true;
+  const size =
+    typeof given === "string"
+      ? Buffer.byteLength(given)
+      : given instanceof ArrayBuffer || ArrayBuffer.isView(given)
+        ? given.byteLength
+        : Number(request.headers.get("content-length") ?? NaN);
+  return Number.isFinite(size) && size <= RESEND_MAX_BYTES;
+}
+
 /** A WebSocket that wakes the core, then connects to wherever it now runs. */
-function wakingWebSocket(resolveOrigin: () => Promise<string>): WebSocketConstructor {
+function wakingWebSocket(
+  resolveOrigin: () => Promise<string>,
+  onDropped: () => void,
+): WebSocketConstructor {
   return class WakingSocket implements BrowserWebSocket {
     binaryType: "arraybuffer" | "blob" = "arraybuffer";
     readyState = 0;
@@ -1040,7 +1176,10 @@ function wakingWebSocket(resolveOrigin: () => Promise<string>): WebSocketConstru
           });
           socket.addEventListener("message", (event) => this.emit("message", { data: event.data }));
           socket.addEventListener("error", (event) => this.emit("error", event));
-          socket.addEventListener("close", (event) => this.finish(event.code, event.reason));
+          socket.addEventListener("close", (event) => {
+            if (event.code === 1006) onDropped();
+            this.finish(event.code, event.reason);
+          });
         },
         (error: unknown) => {
           this.emit("error", error);

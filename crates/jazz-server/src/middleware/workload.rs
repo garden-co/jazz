@@ -281,6 +281,10 @@ impl BackendCredential {
     }
 }
 
+/// Compares two secrets without exiting at the first differing byte, so the
+/// time taken doesn't reveal how much of a secret's prefix matched. Every
+/// comparison against a configured secret or token goes through here. The
+/// length is not hidden.
 pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
@@ -453,6 +457,18 @@ mod tests {
     use super::*;
     use base64::Engine as _;
     use jsonwebtoken::{EncodingKey, Header, encode};
+
+    /// Only identical secrets match: not a prefix, not an extension, not one
+    /// that differs in the last byte or only in case.
+    #[test]
+    fn constant_time_eq_matches_only_identical_secrets() {
+        assert!(constant_time_eq("s3cret", "s3cret"));
+        assert!(constant_time_eq("", ""));
+        for other in ["s3cres", "S3cret", "s3cre", "s3crets", "", "x3cret"] {
+            assert!(!constant_time_eq("s3cret", other), "{other:?}");
+            assert!(!constant_time_eq(other, "s3cret"), "{other:?}");
+        }
+    }
 
     /// A token is kept only over one that lasts no longer, and an expired
     /// one is not handed out: the error says it expired.

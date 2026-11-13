@@ -1,11 +1,9 @@
 import { type ParentProps } from "solid-js";
-import type { DbConfig } from "jazz-tools";
-import { JazzProvider } from "jazz-tools/solid";
+import { JazzProvider, type JazzClientConfig } from "jazz-tools/solid";
 
-// Prepare a handle outside this context with createAccountManager.
-export function ProviderExample(props: ParentProps<{ config: DbConfig }>) {
+export function ProviderExample(props: ParentProps<{ config: JazzClientConfig }>) {
   return (
-    <JazzProvider config={props.config} fallback={<p>Loading...</p>}>
+    <JazzProvider config={props.config} loading={<p>Loading...</p>}>
       {props.children}
     </JazzProvider>
   );

@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { anyOf, definePermissions } from "../permissions/index.js";
-import { schema as s } from "../index.js";
+import { schema as s, migration as m } from "../index.js";
+import { appMigrations } from "./client-migrations.js";
 import {
   createPolicyTestApp,
   deploy,
@@ -413,6 +414,55 @@ describe("createPolicyTestApp", () => {
     }
   }, 10_000);
 
+  // The /docs/tooling/testing pattern broke on an app's first migration: the
+  // test server was handed only the current schema, so the app's client,
+  // opening with the lenses the app ships, disagreed with it about the app's
+  // first version (alpha.61 adopter round, E11).
+  it("serves an app that ships a migration", async () => {
+    const notesV1 = { notes: s.table({ title: s.string(), owner_id: s.uuid() }, {}) };
+    const notesV2 = {
+      notes: s.table({ title: s.string(), owner_id: s.uuid(), body: s.string().optional() }, {}),
+    };
+    const migration = m.defineMigration({
+      fromHash: await computeSchemaHash(s.defineApp(notesV1, { migrations: "none" }).wasmSchema),
+      toHash: await computeSchemaHash(s.defineApp(notesV2, { migrations: "none" }).wasmSchema),
+      from: notesV1,
+      to: notesV2,
+      migrate: { notes: { body: m.add.string({ default: null }) } },
+    });
+    const app = s.defineApp(notesV2, {
+      migrations: await appMigrations(notesV1, { to: notesV2, migration }),
+    });
+    const permissions = definePermissions(app, ({ policy, session }) => {
+      policy.notes.allowRead.where({ owner_id: session.user });
+      policy.notes.allowInsert.where({ owner_id: session.user });
+    });
+    const policyTestApp = await createPolicyTestApp(app, permissions, expect);
+
+    try {
+      const alice = policyTestApp.as({
+        issuer: "https://policy-test.example",
+        user_id: "alice",
+        account_id: "00000000-0000-4000-8000-000000000001",
+        claims: {},
+        authMode: "external",
+      });
+      const note = await alice
+        .insert(app.notes, {
+          title: "first",
+          owner_id: "00000000-0000-4000-8000-000000000001",
+          body: "hello",
+        })
+        .wait({ tier: "global" });
+
+      await expect(alice.all(app.notes, { tier: "remote" })).resolves.toEqual([
+        expect.objectContaining({ id: note.id, title: "first", body: "hello" }),
+      ]);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+
   it("rejects a seed callback that returns the inserted row instead of the write", async () => {
     const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
 
@@ -702,6 +752,84 @@ describe("createPolicyTestApp", () => {
 
       await expect(alice.all(testApp.todos)).resolves.toEqual([]);
       await expect(bob.all(testApp.todos)).resolves.toEqual([]);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+});
+
+describe("expectDenied", () => {
+  const owned = definePermissions(testApp, ({ policy, session }) => {
+    policy.todos.allowRead.where({ ownerId: session.user });
+    policy.todos.allowUpdate.where({ ownerId: session.user });
+  });
+  const session = (user_id: string, account_id: string) =>
+    ({
+      issuer: "https://policy-test.example",
+      user_id,
+      account_id,
+      claims: {},
+      authMode: "external",
+    }) as const;
+
+  it("counts an update the server denies, because the user may not read the row", async () => {
+    const policyTestApp = await createPolicyTestApp(testApp, owned, expect);
+    try {
+      const todo = await policyTestApp.seed((db) =>
+        db.insert(testApp.todos, {
+          title: "Alice's",
+          done: false,
+          ownerId: "00000000-0000-4000-8000-000000000001",
+        }),
+      );
+      const bob = policyTestApp.as(session("bob", "00000000-0000-4000-8000-000000000002"));
+      // The replica stages it, and the server's refusal counts.
+      await bob.expectDenied((db) => db.update(testApp.todos, todo.id, { title: "Bob's now" }));
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+
+  it("counts an update denied at once, of a row deleted on this replica", async () => {
+    const policyTestApp = await createPolicyTestApp(testApp, owned, expect);
+    try {
+      const todo = await policyTestApp.seed((db) =>
+        db.insert(testApp.todos, {
+          title: "Alice's",
+          done: false,
+          ownerId: "00000000-0000-4000-8000-000000000001",
+        }),
+      );
+      await policyTestApp.seed((db) => db.delete(testApp.todos, todo.id));
+      const bob = policyTestApp.as(session("bob", "00000000-0000-4000-8000-000000000002"));
+      // The local denial carries the code a server rejection carries.
+      let thrown: unknown;
+      try {
+        bob.update(testApp.todos, todo.id, { title: "Bob's now" });
+      } catch (error) {
+        thrown = error;
+      }
+      expect((thrown as { code?: string } | undefined)?.code).toBe("permission_denied");
+      await bob.expectDenied((db) => db.update(testApp.todos, todo.id, { title: "Bob's now" }));
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+
+  it("fails, saying so, when the write is accepted", async () => {
+    const policyTestApp = await createPolicyTestApp(testApp, owned, expect);
+    try {
+      const alice = policyTestApp.as(session("alice", "00000000-0000-4000-8000-000000000001"));
+      const todo = await policyTestApp.seed((db) =>
+        db.insert(testApp.todos, {
+          title: "Alice's",
+          done: false,
+          ownerId: "00000000-0000-4000-8000-000000000001",
+        }),
+      );
+      await expect(
+        alice.expectDenied((db) => db.update(testApp.todos, todo.id, { title: "still hers" })),
+      ).rejects.toThrow("expected the write to be denied, but it was accepted");
     } finally {
       await policyTestApp.shutdown();
     }

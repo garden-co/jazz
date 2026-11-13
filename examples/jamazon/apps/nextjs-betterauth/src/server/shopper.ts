@@ -4,7 +4,7 @@ import { CheckoutError } from "./orders";
 /**
  * Resolve the signed-in shopper behind a store API request from its Better
  * Auth session cookie: the store's Jazz runs `authenticate` and names the
- * account that session's user is assigned to. Guests (local-first accounts)
+ * account that session's user is assigned to. Guests (device accounts)
  * browse and fill carts, but orders need a signed-in account.
  */
 export async function requireShopper(request: Request): Promise<{ account: string }> {

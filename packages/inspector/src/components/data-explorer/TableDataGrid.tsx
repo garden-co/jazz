@@ -17,9 +17,8 @@ import {
   type QueryOptions,
   type TableProxy,
   type Value,
-  type WriteResult,
 } from "jazz-tools";
-import { useAll, useDb } from "jazz-tools/react";
+import { useInspectorData, type InspectorWrite } from "../../contexts/inspector-data.js";
 import type { DynamicTableRow } from "../../utility/generic-query-builder.js";
 import {
   useEffect,
@@ -110,6 +109,8 @@ interface GridColumn {
   hiddenByDefault?: true;
 }
 
+// Who created and last changed a row is shown by default too, as the last
+// columns, after the row's own columns and the provenance timestamps.
 const PROVENANCE_GRID_COLUMNS: readonly GridColumn[] = [
   {
     id: "$createdAt",
@@ -118,16 +119,15 @@ const PROVENANCE_GRID_COLUMNS: readonly GridColumn[] = [
     enableSorting: true,
   },
   {
-    id: "$createdBy",
-    accessorKey: "$createdBy",
-    header: "$createdBy",
-    enableSorting: true,
-    hiddenByDefault: true,
-  },
-  {
     id: "$updatedAt",
     accessorKey: "$updatedAt",
     header: "$updatedAt",
+    enableSorting: true,
+  },
+  {
+    id: "$createdBy",
+    accessorKey: "$createdBy",
+    header: "$createdBy",
     enableSorting: true,
   },
   {
@@ -135,7 +135,6 @@ const PROVENANCE_GRID_COLUMNS: readonly GridColumn[] = [
     accessorKey: "$updatedBy",
     header: "$updatedBy",
     enableSorting: true,
-    hiddenByDefault: true,
   },
 ];
 
@@ -182,7 +181,7 @@ interface SubmittedTableSave {
 }
 
 export interface PendingTableSave extends SubmittedTableSave {
-  writeResult: WriteResult<void>;
+  writeResult: InspectorWrite;
 }
 
 function createTableMutationState(): TableMutationState {
@@ -839,7 +838,8 @@ export function TableDataGrid() {
   }
 
   const { wasmSchema: schema, runtime } = useDevtoolsContext();
-  const db = useDb();
+  const inspectorData = useInspectorData();
+  const write = inspectorData.useWrite();
   const [searchParams, setSearchParams] = useSearchParams();
 
   const sorting = useMemo<readonly SortColumn[]>(() => {
@@ -1081,12 +1081,12 @@ export function TableDataGrid() {
   // Standalone always has a server; the overlay may be fully offline (its
   // whole point is to show the host's local — possibly unsynced — data), so it
   // must not wait for Core confirmation or force a server round-trip on reads.
-  const mutationDurabilityTier = runtime === "standalone" ? "global" : "local";
+  const mutationDurabilityTier = runtime === "overlay" ? "local" : "global";
   // Overlay Db construction receives an authenticated Inspector worker port.
   // Jazz Tools turns that handoff into its private local-read query source,
   // so this UI never imports or manufactures a privileged option itself.
   const queryOptions: QueryOptions = useMemo(() => ({}), []);
-  const queryResult = useAll<DynamicTableRow>(queryBuilder, queryOptions);
+  const queryResult = inspectorData.useRows(queryBuilder, queryOptions);
   // show a grid skeleton while the first result is in flight.
   const isInitialLoading = queryResult.isLoading;
   const queryError = queryResult.error;
@@ -1315,16 +1315,10 @@ export function TableDataGrid() {
           return;
         }
 
-        const writeResult = await db.transaction((tx) => {
-          for (const { rowId, updates } of rowUpdates) {
-            tx.update(tableProxy, rowId, updates);
-          }
-          for (const rowId of submittedQueuedDeletes) {
-            tx.delete(tableProxy, rowId);
-          }
-          for (const insert of inserts) {
-            tx.insert(tableProxy, insert.values, { id: insert.id });
-          }
+        const writeResult = await write(tableProxy, {
+          updates: rowUpdates,
+          deletes: [...submittedQueuedDeletes],
+          inserts,
         });
         pendingSave = { writeResult, ...submittedSave };
         const retainedSave = pendingSave;
@@ -1988,7 +1982,10 @@ function RelationCell({
     () => new GenericQueryBuilder(relationTable, schema).where({ id: relationId }).limit(1),
     [relationId, relationTable, schema],
   );
-  const { data: relationRows = EMPTY_ROWS } = useAll<DynamicTableRow>(queryBuilder, queryOptions);
+  const { data: relationRows = EMPTY_ROWS } = useInspectorData().useRows(
+    queryBuilder,
+    queryOptions,
+  );
   const relationRow = relationRows[0];
   const displayColumn = useMemo(
     () => getRelationDisplayColumn(schema, relationTable),

@@ -41,6 +41,7 @@ pub use large_ops::{
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
+pub use sync::origin_node;
 
 #[path = "shard.rs"]
 pub mod shard;
@@ -57,9 +58,9 @@ pub use sync::{
     ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
     FrameJoiner, Image, MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction,
     RelationSnapshot, RemoteLinkHint, SerializedReadResult, Since, SubscriberId, SyncMessage,
-    Transport, TransportError, TxName, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta,
-    WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport, WireTransportAdapter,
-    WireWrite, WriteConflict, decode_message, duplex, encode_frames,
+    Transport, TransportError, TxName, UploadRefusal, UploadStatus, Upstream, WireBase, WireChunk,
+    WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport,
+    WireTransportAdapter, WireWrite, WriteConflict, decode_message, duplex, encode_frames,
     validate_frame_batch_for_corpus,
 };
 
@@ -203,6 +204,26 @@ impl WriteHandle {
 /// A committed transaction's sequence number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TxReceipt(pub u64);
+
+/// What [`Db::write_as_origin`] did.
+#[derive(Debug)]
+pub enum OriginWrite {
+    /// It wrote, as the origin's commit.
+    Written(WriteHandle),
+    /// The origin's commit was already made here, or is known to the
+    /// authority's servers: nothing was written again.
+    Repeat,
+}
+
+/// What a store knows of a commit made as another writer's.
+#[derive(Debug)]
+pub(crate) enum OriginFate {
+    Unseen,
+    /// Made here, its upload not yet decided.
+    Pending,
+    Accepted,
+    Rejected(Error),
+}
 
 impl From<TxReceipt> for u64 {
     fn from(receipt: TxReceipt) -> u64 {
@@ -413,7 +434,12 @@ impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         self.dropped.set(self.dropped.get() + 1);
         if let Some((inner, query, binding, include_deleted, view, reach)) = self.remote.take() {
-            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, &view, reach);
+            Db {
+                inner,
+                view: None,
+                defer_fetches: false,
+            }
+            .detach_remote(&query, &binding, include_deleted, &view, reach);
         }
     }
 }
@@ -508,6 +534,14 @@ struct Inner {
     /// Errors the next ticks fail with, for tests of a tick driver.
     #[cfg(any(test, feature = "testing"))]
     failing_ticks: VecDeque<ErrorCode>,
+    /// Staged writes replayed into a transaction overlay so far: what tests
+    /// of staging cost count.
+    #[cfg(any(test, feature = "testing"))]
+    overlay_replays: usize,
+    /// Times a write check copied the evidence set it shares with its
+    /// batch: what tests of staging cost count.
+    #[cfg(any(test, feature = "testing"))]
+    evidence_copies: std::cell::Cell<usize>,
     /// Large-value chunks: the cache the collation and decoders read.
     chunks: Arc<crate::large::Chunks>,
     /// Nodes a large-value edit consolidated, stored when the edited cell
@@ -611,6 +645,11 @@ struct Inner {
     /// its HLC is where the commit's versions are ([`Pos::pending`]), its
     /// writer (node, tx) what history keeps them under (`_writer`).
     pub(crate) own_order: HashMap<u64, sync::Order>,
+    /// The writer id the next standalone write commits under instead of
+    /// this store's own: a thin client's write (see [`Db::write_as_origin`]).
+    pub(crate) next_origin: Option<([u8; 16], u64)>,
+    /// That id while its write runs (see `Db::write_unnotified`).
+    commit_origin: Option<([u8; 16], u64)>,
     /// A wall clock tests set (see `Db::set_clock_for_test`).
     clock_for_test: Option<i64>,
     /// The diff steps a text merge may take ([`jazz_text::MERGE_WORK_BUDGET`]
@@ -641,6 +680,9 @@ struct Inner {
     changed: RefCell<Vec<(String, RowUuid, Vec<u8>)>>,
     /// The write checks of the unit being applied, run at its end.
     deferred: RefCell<Option<Vec<DeferredCheck>>>,
+    /// Rows a unit's trusted writes (no write check) left behind, by stored
+    /// table: they need no evidence, so its grounding starts from them.
+    trusted_rows: RefCell<BTreeMap<String, BTreeSet<[u8; 16]>>>,
     /// The open transaction's seq and the tables it wrote.
     tx: Option<(u64, BTreeSet<String>)>,
     publications: Vec<SchemaPublication>,
@@ -660,6 +702,11 @@ struct Inner {
     /// whose version was not this replica's image of them (see
     /// `Inner::as_written_images`), asked for whole instead.
     pub(crate) as_written_mismatches: u64,
+    /// Pending commits a rebase replayed (see `Db::rebase`).
+    pub(crate) replayed_commits: u64,
+    /// Echoes a serving pass examined to match its images (see
+    /// `Db::echo_probes`).
+    pub(crate) echo_probes: u64,
     /// The global authority: what it settles is durable at `Global`.
     authority: bool,
     /// Every session but SYSTEM's must be pinned to a published bundle
@@ -668,8 +715,15 @@ struct Inner {
     /// Uploads the authority refused, by commit seq, kept for a host that
     /// reports them (see [`Db::track_upstream_rejections`]).
     upstream_rejections: Option<Vec<UpstreamRejection>>,
+    /// The upstream's refusals of this store's own commits, counted for
+    /// [`Db::upload_status`].
+    refusals: sync::Refusals,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
+    /// Durability acks to sessions held until the host has persisted the
+    /// store, for a host whose file writes complete after the commit
+    /// returns (see [`Db::defer_durability_acks`]).
+    held_acks: Option<sync::HeldAcks>,
     /// Each stored table's column positions, the codes authored-column
     /// bitmasks use (SPEC 4 §4.6), read on first use.
     column_codes: RefCell<HashMap<String, HashMap<String, u32>>>,
@@ -726,7 +780,7 @@ pub struct FileOptions {
     /// Page cache bound per connection, in KiB.
     pub cache_kib: u64,
     /// SQLite VFS the file lives on (`None`: the platform default). Browser
-    /// builds register theirs (IndexedDB, OPFS) before opening.
+    /// builds register theirs (IndexedDB) before opening.
     pub vfs: Option<&'static str>,
     pub journal: Journal,
     /// Page size a new file is created with (`None`: SQLite's default). A
@@ -740,7 +794,7 @@ pub enum Journal {
     /// Write-ahead log: readers never block the writer.
     #[default]
     Wal,
-    /// Rollback journal, for VFSes without shared memory (OPFS). The page
+    /// Rollback journal, for VFSes without shared memory. The page
     /// cache never spills mid-transaction, so the large-value reader
     /// connection sees only committed pages even when the VFS's locks are
     /// no-ops.
@@ -768,6 +822,11 @@ pub struct Db {
     inner: Rc<Store>,
     /// `Some` for a schema-view handle: operations run under this schema.
     view: Option<Rc<Schema>>,
+    /// On a host-run chunk store: a read that waits on offloaded nodes
+    /// returns the missing-chunks error at once, leaving them wanted for
+    /// the host's fetch lane, instead of fetching them on this thread
+    /// ([`Self::deferring_chunk_fetches`]).
+    defer_fetches: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -784,9 +843,12 @@ pub(crate) enum Who {
 
 /// How long a LocalFirst read's first load waits for a relay's upstream
 /// (`firstLoadRemoteWaitMs`), as a non-durable foreground tells its relay.
+/// A zero wait is `FirstLoad::Deliver`: no wait at all.
 pub(crate) fn first_load_wait(tier: ReadTier, first_load: &FirstLoad) -> Option<u64> {
     match (tier, first_load) {
-        (ReadTier::LocalFirst, FirstLoad::WaitForRemote { timeout_ms }) => Some(*timeout_ms),
+        (ReadTier::LocalFirst, FirstLoad::WaitForRemote { timeout_ms }) if *timeout_ms > 0 => {
+            Some(*timeout_ms)
+        }
         _ => None,
     }
 }
@@ -892,6 +954,69 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
         bundle: None,
         stored_names: false,
     })
+}
+
+/// Each column of stored table `table` that its DDL gives a default, as
+/// the default's SQL text.
+fn ddl_defaults(conn: &Connection, table: &str) -> Result<BTreeMap<String, String>, Error> {
+    let mut statement = conn
+        .prepare(&format!("PRAGMA table_info({})", quote(table)))
+        .map_err(storage)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, Option<String>>(4)?))
+        })
+        .map_err(storage)?;
+    let mut defaults = BTreeMap::new();
+    for row in rows {
+        if let (column, Some(default)) = row.map_err(storage)? {
+            defaults.insert(column, default);
+        }
+    }
+    Ok(defaults)
+}
+
+/// The value of a DDL default's SQL text. It is this store's own DDL, as
+/// `Schema::union` and `Table::ddl` wrote it: a literal.
+fn ddl_literal(conn: &Connection, literal: &str) -> Result<Sql, Error> {
+    conn.query_row(&format!("SELECT {literal}"), [], |row| row.get::<_, Sql>(0))
+        .map_err(storage)
+}
+
+/// Whether an upstream's default `value` can be column `column`'s: of its
+/// type, or, for an enum column (or a nullable one, or an array of them),
+/// its variants' names. Never a large value: it would name the upstream's
+/// chunks.
+fn default_fits(column: &crate::values::Column, value: &Value) -> bool {
+    fn names_variants(variants: &[String], ty: &ValueType, value: &Value) -> bool {
+        match (ty, value) {
+            (ValueType::Nullable(_), Value::Nullable(None)) => true,
+            (ValueType::Nullable(inner), Value::Nullable(Some(value))) => {
+                names_variants(variants, inner, value)
+            }
+            (ValueType::Array(inner), Value::Array(items)) => items
+                .iter()
+                .all(|item| names_variants(variants, inner, item)),
+            (ValueType::Nullable(_) | ValueType::Array(_), _) => false,
+            (_, Value::String(name)) => variants.iter().any(|variant| variant == name),
+            _ => false,
+        }
+    }
+    fn large(value: &Value) -> bool {
+        match value {
+            Value::Large(_) => true,
+            Value::Nullable(Some(value)) => large(value),
+            Value::Array(items) | Value::Tuple(items) => items.iter().any(large),
+            _ => false,
+        }
+    }
+    if large(value) {
+        return false;
+    }
+    match &column.variants {
+        Some(variants) => names_variants(variants, &column.ty, value),
+        None => value.check_type(&column.ty).is_ok(),
+    }
 }
 
 /// Run a script of statements one at a time. SQLite's statement length
@@ -1226,6 +1351,32 @@ fn denied(detail: impl std::fmt::Display) -> Error {
     )
 }
 
+/// A denial the commit's grounding found, which says so: each write passed
+/// its check when it was staged.
+fn refused_at_commit(mut error: Error) -> Error {
+    if error.is_authorization_denied() {
+        error
+            .message
+            .push_str(", on the state the whole transaction leaves behind");
+    }
+    error
+}
+
+/// A session's update or upsert of a row it may not read, or that does not
+/// exist: the two read alike, so the answer reveals neither.
+fn unreadable_target(verb: &str, table: &str) -> Error {
+    denied(format_args!(
+        "read policy denied {verb} on table {table}: the row does not exist or the session \
+         may not read it"
+    ))
+}
+
+/// A session's delete its DELETE policy refuses, or of a row that does not
+/// exist: the two read alike, so the answer reveals neither.
+fn delete_denied() -> Error {
+    denied("DELETE policy denied the target row, or it does not exist")
+}
+
 impl Error {
     /// Whether a policy rejected the write.
     pub fn is_authorization_denied(&self) -> bool {
@@ -1278,6 +1429,9 @@ impl Db {
         conn: Connection,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
+        // Before the first statement is prepared: the flag is read at
+        // prepare time.
+        crate::host::stable_plans(&conn)?;
         // A schema this store has not admitted is reached along the lenses
         // the app ships: from a version it admitted, else from the first
         // version, each admitted as the authority admits it.
@@ -1477,12 +1631,17 @@ impl Db {
         let owner = Rc::new(schema.clone());
         let db = Self {
             view: None,
+            defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
                 conn,
                 mutation_admission_closed: false,
                 kept_variants: BTreeMap::new(),
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),
+                #[cfg(any(test, feature = "testing"))]
+                overlay_replays: 0,
+                #[cfg(any(test, feature = "testing"))]
+                evidence_copies: std::cell::Cell::new(0),
                 chunks,
                 pending_nodes: Vec::new(),
                 merging: false,
@@ -1521,6 +1680,8 @@ impl Db {
                 last_stamp: (0, 0),
                 hlc_last: 0,
                 own_order: HashMap::new(),
+                next_origin: None,
+                commit_origin: None,
                 clock_for_test: None,
                 merge_budget: jazz_text::MERGE_WORK_BUDGET,
                 authors: RefCell::new(AuthorCodes::default()),
@@ -1540,16 +1701,21 @@ impl Db {
                 fan: fanout::Fanout::default(),
                 changed: RefCell::new(Vec::new()),
                 deferred: RefCell::new(None),
+                trusted_rows: RefCell::new(BTreeMap::new()),
                 tx: None,
                 publications: Vec::new(),
                 client: None,
                 non_durable: false,
                 reopenable: path.is_some(),
                 as_written_mismatches: 0,
+                replayed_commits: 0,
+                echo_probes: 0,
                 authority: false,
                 pins_required: false,
                 upstream_rejections: None,
+                refusals: sync::Refusals::default(),
                 sessions: Vec::new(),
+                held_acks: None,
                 column_codes: RefCell::default(),
                 closed: None,
                 slow: RefCell::default(),
@@ -1691,6 +1857,43 @@ impl Db {
         self.inner.borrow_mut().pins_required = true;
     }
 
+    /// Run `write`, one standalone write, under a thin client's own id for
+    /// it, `key` (its node and that node's counter, SPEC 8 §8.14). The
+    /// commit's writer is [`sync::origin_node`] of `author` (the session the
+    /// write runs as) and the client's node, at the client's counter: the
+    /// same on every server, and no other identity's. The authority records
+    /// the commit's fate under it; a replica uploads it under it. A resend
+    /// of the same key by the same author, here or through another server of
+    /// the same authority, is not written again: it returns what this store
+    /// knows of the first. A write that fails, or makes no commit, leaves
+    /// nothing under the id.
+    pub async fn write_as_origin(
+        &self,
+        key: crate::tx::TxId,
+        author: &AuthorSubject,
+        write: impl AsyncFnOnce() -> Result<WriteHandle, Error>,
+    ) -> Result<OriginWrite, Error> {
+        let (node, tx) = (sync::origin_node(author, *key.node.as_bytes()), key.time.0);
+        {
+            let inner = self.inner.borrow();
+            if inner.tx.is_some() {
+                return Err(unsupported(
+                    "a write as another writer's commit inside a transaction",
+                ));
+            }
+            match inner.origin_fate(node, tx, author)? {
+                OriginFate::Unseen => {}
+                OriginFate::Pending | OriginFate::Accepted => return Ok(OriginWrite::Repeat),
+                OriginFate::Rejected(error) => return Err(error),
+            }
+        }
+        self.inner.borrow_mut().next_origin = Some((node, tx));
+        let written = write().await;
+        // Read by each attempt of the write's commit.
+        self.inner.borrow_mut().next_origin = None;
+        written.map(OriginWrite::Written)
+    }
+
     /// Whether this store is the global authority.
     pub fn is_authority(&self) -> bool {
         self.inner.borrow().authority
@@ -1764,10 +1967,23 @@ impl Db {
         Query::from(table)
     }
 
-    pub fn set_identity_claims(&self, identity: AuthorSubject, claims: BTreeMap<String, Value>) {
+    /// Bind `claims` to `identity`; returns whether they changed.
+    pub fn set_identity_claims(
+        &self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> bool {
+        // A peek: a host repeats an identity's claims before each of its
+        // writes, and the store gate would undo an open transaction's
+        // cached overlay, so its next stage would replay every write it
+        // staged so far.
+        if self.inner.staging().claims.get(&identity) == Some(&claims) {
+            return false;
+        }
         let mut inner = self.inner();
         inner.claims.insert(identity, claims);
         inner.refresh_identity(identity);
+        true
     }
 
     pub async fn tick(&self) -> Result<(), Error> {
@@ -2141,6 +2357,11 @@ impl Db {
                         return Err(error);
                     };
                     if chunks.host_io() {
+                        if self.defer_fetches {
+                            // The host's fetch lane reads them, off this
+                            // thread and with its backoff.
+                            return Err(error);
+                        }
                         // Beside the host's batch, which may be out: a
                         // node a read waits on is referenced, so no
                         // delete in that batch removes it.
@@ -2262,6 +2483,20 @@ impl Db {
             .map_err(storage)
     }
 
+    /// Diagnostics: stored large-value nodes whose bytes live only in the
+    /// chunk store.
+    #[doc(hidden)]
+    pub fn offloaded_large_value_nodes_for_test(&self) -> Result<u64, Error> {
+        self.inner()
+            .conn
+            .cached_row(
+                "SELECT count(*) FROM _jazz_lv_node WHERE length(bytes) = 0",
+                [],
+                |r| r.get::<_, i64>(0).map(|n| n as u64),
+            )
+            .map_err(storage)
+    }
+
     /// Diagnostics: large-value reclaim passes this store ran.
     #[doc(hidden)]
     pub fn large_value_reclaim_passes_for_test(&self) -> u64 {
@@ -2341,6 +2576,87 @@ impl Db {
             plan.push(row.map_err(storage)?);
         }
         Ok((compiled.sql.clone(), plan.join(" | ")))
+    }
+
+    /// Diagnostics for the Inspector's `explain`: for each of `rows` of
+    /// `table` (current, not deleted), which of its read policy's clauses
+    /// hold for `author` with `claims` (as bound to an identity: see
+    /// [`crate::binding_args::policy_claims`]). The clauses are the arms of the
+    /// policy's top-level `Or` (one clause when it is not an `Or`); none when
+    /// the table has no read policy, which denies every row. The policy is
+    /// the one reads are judged by (an older schema's rows by the current
+    /// schema's policies). Answers the number of clauses and, for each row
+    /// found (current, not deleted), whether each holds. Branched tables are
+    /// not supported yet.
+    #[doc(hidden)]
+    pub fn explain_read_clauses(
+        &self,
+        table: &str,
+        rows: &[RowUuid],
+        author: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> Result<(usize, Vec<(RowUuid, Vec<bool>)>), Error> {
+        let inner = self.inner();
+        let table = inner.schema.table(table)?;
+        if !table.branch_by.is_empty() {
+            return Err(unsupported("explain for a table with branches"));
+        }
+        // As `Ctx::under_policy_schema` judges reads: by the schema whose
+        // policies govern this table's rows.
+        let governing = match inner.schema.policies_from.as_deref() {
+            None => Some(table),
+            Some(current) => current.by_stored(&table.stored),
+        };
+        let clauses: Vec<PolicyExpr> = match governing.and_then(|t| t.policy(Operation::Select)) {
+            None => Vec::new(),
+            Some(PolicyExpr::Or(exprs)) => exprs.clone(),
+            Some(policy) => vec![policy.clone()],
+        };
+        if rows.is_empty() {
+            return Ok((clauses.len(), Vec::new()));
+        }
+        let session = Session::for_author(author, claims);
+        let binding = BTreeMap::new();
+        let none = Session::default();
+        let mut ctx = Ctx::new(&inner.schema, None, &none, &binding);
+        let mut columns = Vec::with_capacity(clauses.len());
+        for clause in &clauses {
+            let condition = ctx.policy_clause(Some(clause), table, "a", &session)?;
+            columns.push(format!(", COALESCE({condition}, 0)"));
+        }
+        let source = ctx.source(table)?;
+        let mut params = ctx.params;
+        let mut ids = Vec::with_capacity(rows.len());
+        for row in rows {
+            params.push(Sql::Blob(row.0.as_bytes().to_vec()));
+            ids.push(format!("?{}", params.len()));
+        }
+        let sql = format!(
+            "SELECT a.id{} FROM {source} AS a WHERE a.id IN ({}) AND (a._state & {STATE_DELETED}) = 0",
+            columns.concat(),
+            ids.join(", "),
+        );
+        let mut statement = inner.conn.prepare(&sql).map_err(storage)?;
+        let count = clauses.len();
+        let found = statement
+            .query_map(params_from_iter(params.iter()), |r| {
+                let id: Vec<u8> = r.get(0)?;
+                let mut holds = Vec::with_capacity(count);
+                for index in 0..count {
+                    holds.push(r.get::<_, i64>(index + 1)? != 0);
+                }
+                Ok((id, holds))
+            })
+            .map_err(storage)?;
+        let mut answer = Vec::new();
+        for row in found {
+            let (id, holds) = row.map_err(storage)?;
+            let id: [u8; 16] = id
+                .try_into()
+                .map_err(|_| crate::values::query_error("a row id is not 16 bytes"))?;
+            answer.push((RowUuid::from_bytes(id), holds));
+        }
+        Ok((count, answer))
     }
 
     /// Text merges that ran past [`jazz_text::MERGE_WORK_BUDGET`] since the
@@ -2543,8 +2859,9 @@ impl Db {
 
     /// On a client a subscription also attaches remotely (unless
     /// LocalOnly); its opening is withheld while it waits for the server
-    /// (the Remote tier, or `FirstLoad::WaitForRemote` while the link could
-    /// answer), and its deltas report whether the server answered.
+    /// (the Remote tier, or `FirstLoad::WaitForRemote` with a non-zero wait
+    /// while the link could answer), and its deltas report whether the
+    /// server answered.
     fn open_subscription(
         &self,
         prepared: &PreparedQuery,
@@ -2852,14 +3169,53 @@ impl Db {
             let mut inner = self.inner();
             let (seq, standalone) = match &inner.tx {
                 Some((seq, _)) => (*seq, false),
-                None => (inner.next_seq(), true),
+                None => (inner.fresh_seq(), true),
             };
             begin_savepoint(&inner.conn, "w")?;
             let mark = inner.changed.borrow().len();
-            match apply(&mut inner, seq) {
-                Ok(handle) => {
+            // A standalone commit takes the writer id a thin client's write
+            // gave it (`Db::write_as_origin`), on every attempt of the write
+            // (`Db::fetching_with` runs one again). Its seq is not used up
+            // unless it commits, and the next commit takes it: what this one
+            // put in `own_order` for it goes back, so no other commit
+            // inherits its writer id, nor it another's (and `fresh_seq`
+            // drops whatever an exit after this one leaves).
+            let origin = if standalone { inner.next_origin } else { None };
+            let prior = standalone.then(|| inner.own_order.get(&seq).copied());
+            inner.commit_origin = origin;
+            let applied = apply(&mut inner, seq);
+            inner.commit_origin = None;
+            let restore = |inner: &mut Inner| match prior {
+                Some(Some(order)) => {
+                    inner.own_order.insert(seq, order);
+                }
+                Some(None) => {
+                    inner.own_order.remove(&seq);
+                }
+                None => {}
+            };
+            // The authority records the fate of a commit made under a
+            // client's id in the commit itself.
+            let applied = applied.and_then(|handle| {
+                let wrote = handle.seq == inner.own_pos(seq);
+                if let (true, true, Some((node, tx))) =
+                    (standalone && wrote, inner.me == sync::ACCEPTED, origin)
+                {
+                    inner.record_fate(node, tx, &Ok(()))?;
+                    inner.record_settled(node, tx, Some(Pos::at(seq)))?;
+                }
+                Ok((wrote, handle))
+            });
+            match applied {
+                Ok((wrote, handle)) => {
                     end_savepoint(&inner.conn, "w", true)?;
-                    let wrote = handle.seq == inner.own_pos(seq);
+                    if !wrote {
+                        restore(&mut inner);
+                    } else if origin.is_some() {
+                        // The client's write is made: no later commit of the
+                        // same call takes its id.
+                        inner.next_origin = None;
+                    }
                     if wrote {
                         if standalone {
                             inner.seq = inner.seq.max(seq);
@@ -2871,6 +3227,7 @@ impl Db {
                 }
                 Err(error) => {
                     inner.changed.borrow_mut().truncate(mark);
+                    restore(&mut inner);
                     end_savepoint(&inner.conn, "w", false)?;
                     return Err(error);
                 }
@@ -2915,7 +3272,7 @@ impl Db {
             }
             begin_savepoint(&inner.conn, "tx")?;
             inner.changed.borrow_mut().clear();
-            let seq = inner.next_seq();
+            let seq = inner.fresh_seq();
             inner.tx = Some((seq, BTreeSet::new()));
         }
         let mut tx = MergeableTx { db: self, identity };
@@ -3279,6 +3636,7 @@ impl Inner {
         namespace: Option<[u8; 16]>,
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
+        defaults: Vec<sync::CatalogueDefault>,
         confirmed: &[([u8; 16], [u8; 16])],
     ) -> Result<bool, Error> {
         let known = self.namespace()?;
@@ -3289,7 +3647,7 @@ impl Inner {
         }
         let mirrored = !versions.is_empty();
         if mirrored {
-            self.mirror_versions(versions, cells)?;
+            self.mirror_versions(versions, cells, defaults)?;
         }
         let learned = known.is_none() && namespace.is_some();
         if let (true, Some(namespace)) = (learned, namespace) {
@@ -3314,6 +3672,7 @@ impl Inner {
         &mut self,
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
+        defaults: Vec<sync::CatalogueDefault>,
     ) -> Result<(), Error> {
         let (physical, names, admitted) = (
             self.physical.clone(),
@@ -3322,7 +3681,7 @@ impl Inner {
         );
         let tags = self.names.tags().snapshot();
         begin_savepoint(&self.conn, "jazz_mirror")?;
-        let mirrored = self.mirror_versions_steps(versions, cells);
+        let mirrored = self.mirror_versions_steps(versions, cells, defaults);
         let ended = end_savepoint(&self.conn, "jazz_mirror", mirrored.is_ok());
         if let Err(error) = mirrored.and(ended) {
             self.physical = physical;
@@ -3343,12 +3702,120 @@ impl Inner {
         Ok(())
     }
 
+    /// Give each column of mirrored `target` this store does not store yet
+    /// the default its upstream added it with: a lens's default for a
+    /// column it adds is in no schema, and rows written before the column
+    /// read it (as on the authority) only if the `ADD COLUMN` gives it.
+    /// A default that does not fit the column is left out (the column then
+    /// reads as before) rather than refusing the whole catalogue: it only
+    /// changes how rows written before the column read.
+    fn add_with_upstream_defaults(
+        &self,
+        target: &mut Schema,
+        defaults: &BTreeMap<(&str, &str), &Value>,
+    ) {
+        if defaults.is_empty() {
+            return;
+        }
+        for table in target.tables.values_mut() {
+            let stored = self.physical.tables.get(&table.stored);
+            for column in &mut table.columns {
+                // The upstream's default wins over the schema's own, as the
+                // lens's does on the authority (see `admit`).
+                if stored.is_some_and(|stored| stored.column(&column.stored).is_some()) {
+                    continue;
+                }
+                let Some(value) = defaults.get(&(table.stored.as_str(), column.stored.as_str()))
+                else {
+                    continue;
+                };
+                if default_fits(column, value) {
+                    column.default = Some((*value).clone());
+                }
+            }
+        }
+    }
+
+    /// The defaults the columns of `versions` were added with in this
+    /// store, read from the stored tables' DDL, which is what rows written
+    /// before a column read (see [`sync::CatalogueDefault`]). An enum
+    /// default goes by its variant's name: tags are this store's own.
+    pub(crate) fn added_defaults<'a>(
+        &self,
+        versions: impl IntoIterator<Item = (&'a JazzSchema, &'a crate::values::StoredNames)>,
+    ) -> Result<Vec<sync::CatalogueDefault>, Error> {
+        let mut found = BTreeMap::new();
+        let mut ddl: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+        for (jazz, names) in versions {
+            let schema = Schema::stored_as(jazz, names, self.names.tags());
+            for table in schema.tables.values() {
+                if !ddl.contains_key(&table.stored) {
+                    let defaults = ddl_defaults(&self.conn, &table.stored)?;
+                    ddl.insert(table.stored.clone(), defaults);
+                }
+                let by_name: BTreeMap<String, String> = self
+                    .names
+                    .enum_defaults(&table.stored)
+                    .into_iter()
+                    .collect();
+                for column in &table.columns {
+                    let key = (table.stored.clone(), column.stored.clone());
+                    if found.contains_key(&key) {
+                        continue;
+                    }
+                    let Some(literal) = ddl[&table.stored].get(&column.stored) else {
+                        continue;
+                    };
+                    let value = match by_name.get(&column.stored) {
+                        Some(name) => {
+                            let name = Value::String(name.clone());
+                            Some(match column.nullable() {
+                                true => Value::Nullable(Some(Box::new(name))),
+                                false => name,
+                            })
+                        }
+                        None => {
+                            // A default this store cannot read is left out
+                            // (see `add_with_upstream_defaults`), not a
+                            // reason to send no catalogue.
+                            let Ok(cell) = ddl_literal(&self.conn, literal) else {
+                                continue;
+                            };
+                            if matches!(cell, Sql::Null) {
+                                continue;
+                            }
+                            crate::values::column_from_sql(column, cell.as_ref(), &self.chunks)
+                                .ok()
+                                .flatten()
+                        }
+                    };
+                    if let Some(value) = value {
+                        found.insert(key, value);
+                    }
+                }
+            }
+        }
+        Ok(found
+            .into_iter()
+            .map(|((table, column), default)| sync::CatalogueDefault {
+                table,
+                column,
+                default,
+            })
+            .collect())
+    }
+
     fn mirror_versions_steps(
         &mut self,
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
+        defaults: Vec<sync::CatalogueDefault>,
     ) -> Result<(), Error> {
         use crate::names::{LensCell, LensCellRule};
+        let defaults: BTreeMap<(&str, &str), &Value> = defaults
+            .iter()
+            .map(|d| ((d.table.as_str(), d.column.as_str()), &d.default))
+            .collect();
         let cells: Vec<LensCell> = cells
             .into_iter()
             .map(|cell| LensCell {
@@ -3401,7 +3868,8 @@ impl Inner {
             } else {
                 schema
             };
-            let target = Schema::stored_as(&jazz, &names, self.names.tags());
+            let mut target = Schema::stored_as(&jazz, &names, self.names.tags());
+            self.add_with_upstream_defaults(&mut target, &defaults);
             // A copy is filled once, when its version is first admitted.
             let fills = if fresh.contains(&version) {
                 cells
@@ -4977,6 +5445,7 @@ impl Inner {
         seq: u64,
     ) -> Result<(), Error> {
         let deferred = DeferredCheck {
+            schema: self.schema.clone(),
             table: table.name.clone(),
             row,
             key: key.to_vec(),
@@ -5001,11 +5470,25 @@ impl Inner {
     /// Start a unit: write checks wait for [`Inner::finish_checks`].
     pub(crate) fn defer_checks(&self) {
         *self.deferred.borrow_mut() = Some(Vec::new());
+        self.trusted_rows.borrow_mut().clear();
+    }
+
+    /// Note a unit's write that no policy checks, so its row grounds the
+    /// unit's checked writes from the first round on.
+    fn note_trusted(&self, table: &Table, row: RowUuid) {
+        if self.deferred.borrow().is_some() {
+            self.trusted_rows
+                .borrow_mut()
+                .entry(table.stored.clone())
+                .or_default()
+                .insert(*row.0.as_bytes());
+        }
     }
 
     /// Drop a unit's pending checks (it rolled back).
     pub(crate) fn abandon_checks(&self) {
         *self.deferred.borrow_mut() = None;
+        self.trusted_rows.borrow_mut().clear();
     }
 
     /// End a unit written at `seq`: ground its writes (SPEC 7). The first
@@ -5017,16 +5500,55 @@ impl Inner {
     /// unit could have taken away is checked again against the unit's
     /// whole post-state (see [`Inner::post_state_pass`]).
     pub(crate) fn finish_checks(&self, seq: u64) -> Result<(), Error> {
-        let pending = self.deferred.borrow_mut().take().unwrap_or_default();
-        self.ground(pending, seq)
+        self.finish_checks_after(seq, Arc::default())
     }
 
-    fn ground(&self, mut pending: Vec<DeferredCheck>, seq: u64) -> Result<(), Error> {
-        let schema = self.schema.clone();
+    /// [`Inner::finish_checks`] for a unit that continues writes already
+    /// grounded: `grounded` (stored table to rows) shows its end state to
+    /// the unit's checks from the first round on.
+    pub(crate) fn finish_checks_after(
+        &self,
+        seq: u64,
+        grounded: Arc<GroundedRows>,
+    ) -> Result<(), Error> {
+        let pending = self.deferred.borrow_mut().take().unwrap_or_default();
+        let trusted = std::mem::take(&mut *self.trusted_rows.borrow_mut());
+        // Nothing to ground: writes no policy checks (a backend's own, a
+        // replica's) leave only trusted rows, and merging those into the
+        // set a staged write shares with its batch would copy that set on
+        // every stage.
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let mut grounded = grounded;
+        #[cfg(any(test, feature = "testing"))]
+        if !trusted.is_empty() && Arc::strong_count(&grounded) > 1 {
+            self.evidence_copies.set(self.evidence_copies.get() + 1);
+        }
+        for (table, rows) in trusted {
+            Arc::make_mut(&mut grounded)
+                .entry(table)
+                .or_default()
+                .extend(rows);
+        }
+        self.ground_after(pending, seq, grounded)
+    }
+
+    fn ground(&self, pending: Vec<DeferredCheck>, seq: u64) -> Result<(), Error> {
+        self.ground_after(pending, seq, Arc::default())
+    }
+
+    fn ground_after(
+        &self,
+        mut pending: Vec<DeferredCheck>,
+        seq: u64,
+        mut grounded: Arc<GroundedRows>,
+    ) -> Result<(), Error> {
+        // Each check runs under the schema its write was staged with.
         let mut live = Vec::with_capacity(pending.len());
         let several = pending.len() > 1;
         for mut check in pending.drain(..) {
-            let table = schema.table(&check.table)?;
+            let table = check.schema.table(&check.table)?;
             if !self.is_deleted_version(table, check.row, &check.key)? {
                 // Only a unit of several writes has a post-state pass.
                 check.replaces = several
@@ -5036,7 +5558,6 @@ impl Inner {
             }
         }
         let mut pending = live;
-        let mut grounded: BTreeMap<String, BTreeSet<[u8; 16]>> = BTreeMap::new();
         // Each write with the round it passed in and the tables its policy
         // reads through the overlay.
         let mut rounds: Vec<(DeferredCheck, usize, BTreeSet<String>)> =
@@ -5049,11 +5570,12 @@ impl Inner {
                 seq: self.own_pos(seq.saturating_sub(1)),
                 own: self.own_rank(seq),
                 extra: Vec::new(),
-                overlay: Some(CutOverlay::Grounded(Arc::new(grounded.clone()))),
+                overlay: Some(CutOverlay::Grounded(grounded.clone())),
             };
             let mut passed = Vec::new();
             let mut failed = Vec::new();
             for check in pending {
+                let schema = check.schema.clone();
                 let (holds, tables) =
                     self.write_check_holds(&schema, &check, cut.clone(), &mut evidence)?;
                 if holds {
@@ -5065,21 +5587,28 @@ impl Inner {
             if !failed.is_empty() && passed.is_empty() {
                 return Err(write_check_denied(&failed[0]));
             }
+            drop(cut);
+            // Only a further round reads what this one grounded.
+            if failed.is_empty() {
+                rounds.extend(
+                    passed
+                        .into_iter()
+                        .map(|(check, tables)| (check, round, tables)),
+                );
+                break;
+            }
             for (check, tables) in passed {
-                let stored = schema.table(&check.table)?.stored.clone();
-                grounded
+                let stored = check.schema.table(&check.table)?.stored.clone();
+                Arc::make_mut(&mut grounded)
                     .entry(stored)
                     .or_default()
                     .insert(*check.row.0.as_bytes());
                 rounds.push((check, round, tables));
             }
-            if failed.is_empty() {
-                break;
-            }
             pending = failed;
             round += 1;
         }
-        self.post_state_pass(&schema, rounds, seq, &mut evidence)
+        self.post_state_pass(rounds, seq, &mut evidence)
     }
 
     /// Check `check`'s policy on the rows `cut` shows. Also returns the
@@ -5131,7 +5660,6 @@ impl Inner {
     /// wholesale. It is not charged to the evidence budget.
     fn post_state_pass(
         &self,
-        schema: &Schema,
         rounds: Vec<(DeferredCheck, usize, BTreeSet<String>)>,
         seq: u64,
         evidence: &mut EvidenceBudget,
@@ -5144,7 +5672,7 @@ impl Inner {
         let mut later: HashMap<String, (Vec<usize>, Vec<usize>)> = HashMap::new();
         let mut stored_of = Vec::with_capacity(rounds.len());
         for (check, round, _) in &rounds {
-            let stored = schema.table(&check.table)?.stored.clone();
+            let stored = check.schema.table(&check.table)?.stored.clone();
             let (written, replaced) = later
                 .entry(stored.clone())
                 .or_insert_with(|| (vec![0; last + 2], vec![0; last + 2]));
@@ -5183,7 +5711,7 @@ impl Inner {
                 let grows = match monotone.get(&key) {
                     Some(grows) => *grows,
                     None => {
-                        let grows = self.write_policy_is_monotone(schema, check)?;
+                        let grows = self.write_policy_is_monotone(&check.schema, check)?;
                         monotone.insert(key, grows);
                         grows
                     }
@@ -5203,7 +5731,10 @@ impl Inner {
                     key: check.key.clone(),
                 }),
             };
-            if !self.write_check_holds(schema, check, cut, evidence)?.0 {
+            if !self
+                .write_check_holds(&check.schema, check, cut, evidence)?
+                .0
+            {
                 return Err(write_check_denied(check));
             }
         }
@@ -6653,6 +7184,8 @@ impl Inner {
             .push((table.stored.clone(), row, key.clone()));
         if let Some(author) = self.checked(who) {
             self.write_check(table, row, &key, author, WriteCheck::Insert, seq)?;
+        } else {
+            self.note_trusted(table, row);
         }
         Ok(WriteHandle {
             row,
@@ -6681,15 +7214,47 @@ impl Inner {
         }
     }
 
+    /// The refusal of a write to a deleted row. At the authority, a session
+    /// that may read the row is told it is deleted, and one that may not is
+    /// told what it is told for a missing row, so a tombstone reveals no
+    /// more than a live row does. A replica evaluates no policy for a
+    /// session's write, so it gives every session the missing row's answer.
+    fn refuse_deleted(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        who: &Who,
+        verb: &str,
+    ) -> Result<Error, Error> {
+        if let Who::Session(author) = *who
+            && (self.client.is_some() || !self.check(table, row, key, author, Operation::Select)?)
+        {
+            return Ok(if verb == "DELETE" {
+                delete_denied()
+            } else {
+                unreadable_target(verb, &table.name)
+            });
+        }
+        Ok(row_already_deleted(row))
+    }
+
     /// Read-for-write (SPEC 7, INV-RLS-20): a session may update or upsert
     /// only a row it may read, and omitted cells must not be merged blind.
-    /// A replica acting for a session (a backend's request) refuses an
-    /// update at once when it holds the row hidden from that session: the
-    /// update merges into the session's view of the row. So it does an
-    /// upsert under a read policy decided by the row alone. An upsert under
-    /// a policy that reads other rows is the authority's to decide, as on
-    /// upload: the replica may lack the rows that grant access, and the
-    /// write's waits report the refusal.
+    /// Only the authority decides it, with the other write policies. A
+    /// replica acting for a session (a backend's request) stages the write
+    /// and its waits report the authority's refusal: the replica may lack
+    /// the rows that grant access (a fresh process has loaded none).
+    /// Until the authority answers, the staged version is judged by the
+    /// read policy like any other: a patch of a column the policy reads,
+    /// on a hidden row, can show the row's other cells to a read that
+    /// includes pending versions, the writer's or another session's that
+    /// the patch names (`owner = carol`). Those are `LocalFirst` and
+    /// `LocalOnly` reads, and every read inside an open transaction, which
+    /// sees its own staged writes whatever its tier. A `Remote` read
+    /// outside a transaction leaves pending versions out (it is
+    /// settled-only on a replica), so it shows only accepted rows under
+    /// their own policy; that is a backend's default read.
     fn authorize_patch(
         &self,
         table: &Table,
@@ -6698,27 +7263,10 @@ impl Inner {
         who: &Who,
         verb: &str,
     ) -> Result<(), Error> {
-        let conclusive = self.client.is_none()
-            || verb != "UPSERT"
-            || !table
-                .policy(Operation::Select)
-                .is_some_and(policy_reads_other_rows);
-        if let Who::Session(author) = *who
-            && conclusive
+        if let Some(author) = self.checked(*who)
             && !self.check(table, row, key, author, Operation::Select)?
         {
-            let detail = format!(
-                "read policy denied {verb} on table {}: the operation requires read \
-                 permission on the target row",
-                table.name
-            );
-            // A replica refuses it locally, as main does; an authority
-            // reports it as its policy rejection.
-            return Err(if self.client.is_some() {
-                rejected(detail)
-            } else {
-                denied(detail)
-            });
+            return Err(unreadable_target(verb, &table.name));
         }
         if let Some(author) = self.checked(*who)
             && !self.check_clause(
@@ -6793,9 +7341,15 @@ impl Inner {
             Located::Absent { .. } if self.client.is_some() => {
                 return Err(update_target_not_loaded(verb, table_name, row));
             }
+            // A session is told what it is told for a row it may not read,
+            // so a write doesn't reveal whether a hidden row exists.
+            Located::Absent { .. } if !upsert && self.checked(who).is_some() => {
+                return Err(unreadable_target(verb, table_name));
+            }
             Located::Absent { .. } if !upsert => {
                 return Err(rejected(format!(
-                    "{verb} target {row:?} does not exist in `{table_name}`"
+                    "{verb} target {} does not exist in `{table_name}`",
+                    row.0
                 )));
             }
             // A deleted row's id stays reserved: only a restore revives it.
@@ -6806,9 +7360,9 @@ impl Inner {
             Located::Row {
                 deleted: true,
                 seq: current,
-                ..
+                key,
             } if !self.merging && (!upsert || current != self.own_pos(seq)) => {
-                return Err(row_already_deleted(row));
+                return Err(self.refuse_deleted(table, row, &key, &who, verb)?);
             }
             Located::Row {
                 key,
@@ -6894,6 +7448,8 @@ impl Inner {
                 },
                 seq,
             )?;
+        } else {
+            self.note_trusted(table, row);
         }
         Ok(WriteHandle {
             row,
@@ -6947,7 +7503,7 @@ impl Inner {
             if let Some(author) = inner.checked(who)
                 && !inner.check(table, row, key, author, Operation::Delete)?
             {
-                return Err(denied("DELETE policy denied the target row"));
+                return Err(delete_denied());
             }
             Ok(())
         };
@@ -6996,10 +7552,16 @@ impl Inner {
             // A merged delete of a deleted row changes nothing: concurrent
             // deletes of one row all apply.
             Located::Row { deleted: true, .. } if self.merging => {}
-            Located::Row { deleted: true, .. } => return Err(row_already_deleted(row)),
+            Located::Row {
+                deleted: true, key, ..
+            } => return Err(self.refuse_deleted(table, row, &key, &who, "DELETE")?),
+            // As for an update: a session can't tell a missing row from one
+            // its DELETE policy refuses.
+            _ if self.checked(who).is_some() => return Err(delete_denied()),
             _ => {
                 return Err(rejected(format!(
-                    "DELETE target {row:?} does not exist in `{table_name}`"
+                    "DELETE target {} does not exist in `{table_name}`",
+                    row.0
                 )));
             }
         }
@@ -7034,7 +7596,8 @@ impl Inner {
             }
             Located::Absent { .. } => {
                 return Err(rejected(format!(
-                    "RESTORE target {row:?} does not exist in `{table_name}`"
+                    "RESTORE target {} does not exist in `{table_name}`",
+                    row.0
                 )));
             }
             Located::Row { .. } | Located::Inherited { .. } => return Err(row_not_deleted(row)),
@@ -7073,6 +7636,8 @@ impl Inner {
         // A restore writes an existing row back: the UPDATE policy decides.
         if let Some(author) = self.checked(who) {
             self.write_check(table, row, &key, author, WriteCheck::Restore, seq)?;
+        } else {
+            self.note_trusted(table, row);
         }
         Ok(WriteHandle {
             row,
@@ -7094,6 +7659,8 @@ enum WriteCheck {
 }
 
 struct DeferredCheck {
+    /// The schema the write was made through, which names its table.
+    schema: Rc<Schema>,
     table: String,
     row: RowUuid,
     key: Vec<u8>,
@@ -7705,7 +8272,28 @@ impl Db {
         Some(Db {
             inner: self.inner.clone(),
             view: Some(view),
+            defer_fetches: self.defer_fetches,
         })
+    }
+
+    /// Grows each time the chunk store answered fetches (or reads of nodes
+    /// it failed to fetch may ask again): a read that failed waiting on
+    /// offloaded nodes ([`Self::deferring_chunk_fetches`]) is worth trying
+    /// again only once this changed.
+    pub fn chunk_fetches_answered(&self) -> u64 {
+        self.inner.staging().chunks.answered()
+    }
+
+    /// This handle, but a read or write that waits on offloaded nodes of a
+    /// host-run chunk store ([`crate::options::DbConfig::with_host_chunk_io`])
+    /// fails at once with the missing-chunks error instead of fetching them
+    /// on this thread; they stay wanted, so the host's next fetches read
+    /// them and the caller tries again once they land. A server serving
+    /// many sessions on one thread uses it, so one session's slow chunk
+    /// store read never stalls the others.
+    pub fn deferring_chunk_fetches(mut self) -> Db {
+        self.defer_fetches = true;
+        self
     }
 
     /// [`Self::governed_view`] for a session pinned to published bundle
@@ -7732,6 +8320,7 @@ impl Db {
         Ok(Some(Db {
             inner: self.inner.clone(),
             view: Some(view),
+            defer_fetches: self.defer_fetches,
         }))
     }
 
@@ -7822,6 +8411,7 @@ impl Db {
         Ok(Db {
             inner: self.inner.clone(),
             view: Some(Rc::new(logical)),
+            defer_fetches: self.defer_fetches,
         })
     }
 
@@ -7854,6 +8444,9 @@ struct Overlay {
     /// `changed` before the overlay, restored when it is undone.
     mark: usize,
 }
+
+/// Rows a unit's checks may take as evidence, by stored table.
+pub(crate) type GroundedRows = BTreeMap<String, BTreeSet<[u8; 16]>>;
 
 /// The store behind its one gate: every borrow first undoes a transaction
 /// handle's overlay, so nothing but that handle's next stage or read sees
@@ -7889,6 +8482,11 @@ impl Store {
 struct Batch {
     kind: BatchKind,
     ops: Vec<(Rc<Schema>, StagedOp)>,
+    /// The rows `ops` write, by stored table: a later staged write's
+    /// evidence (see [`Db::in_overlay`]). Shared with that write's check
+    /// rather than copied, so a stage costs the same however many writes
+    /// came before it.
+    rows: Arc<GroundedRows>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
@@ -8132,13 +8730,33 @@ impl Inner {
         self.hlc_last = self.hlc_last.max(self.bounded_hlc(seen));
     }
 
+    /// The seq a new local commit takes ([`Inner::next_seq`]). It is above
+    /// every seq this store committed, so on a replica an `own_order` entry
+    /// already there is stale, left by a commit at it that never happened
+    /// (a write that failed, or whose upload record did): the new commit
+    /// must not inherit its HLC or its writer id.
+    fn fresh_seq(&mut self) -> u64 {
+        let seq = self.next_seq();
+        if self.me != sync::ACCEPTED {
+            self.own_order.remove(&seq);
+        }
+        seq
+    }
+
     /// Give commit `seq` its HLC if it has none yet: its writes are at it,
     /// written by this store's node as tx `seq`.
     fn stamp_commit(&mut self, seq: u64) {
-        if self.me != sync::ACCEPTED && !self.own_order.contains_key(&seq) {
+        if self.me == sync::ACCEPTED {
+            return;
+        }
+        // A commit made under a thin client's id is kept under it: a relay
+        // uploads it so, so a resend of it anywhere gets its fate (SPEC 8
+        // §8.14).
+        let origin = self.commit_origin.filter(|_| self.tx.is_none());
+        if origin.is_some() || !self.own_order.contains_key(&seq) {
             let hlc = self.next_hlc();
-            let node = *self.identity.node.as_bytes();
-            self.own_order.insert(seq, (hlc, node, seq));
+            let (node, tx) = origin.unwrap_or((*self.identity.node.as_bytes(), seq));
+            self.own_order.insert(seq, (hlc, node, tx));
         }
     }
 
@@ -8394,6 +9012,7 @@ impl Db {
             Batch {
                 kind,
                 ops: Vec::new(),
+                rows: Arc::default(),
                 edits: LargeEdits::default(),
                 uploads: Vec::new(),
             },
@@ -8401,9 +9020,31 @@ impl Db {
         Ok(())
     }
 
-    /// A fresh row id from this database's id source.
+    /// A fresh row id from this database's id source. Drawing one leaves
+    /// an open transaction's overlay applied: a host draws one per staged
+    /// insert, and undoing the overlay would make each stage replay the
+    /// batch.
     pub fn next_row_id(&self) -> RowUuid {
-        self.inner().ids.next_row_id()
+        self.inner.staging().ids.next_row_id()
+    }
+
+    /// How many staged writes have been replayed into transaction overlays:
+    /// staging a batch write by write replays each write at most once
+    /// unless something else used the store in between.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn overlay_replays_for_test(&self) -> usize {
+        // A peek: the store gate would undo the cached overlay.
+        self.inner.staging().overlay_replays
+    }
+
+    /// How many times a staged write's check copied the evidence set it
+    /// shares with its batch (see [`Batch::rows`]).
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn evidence_copies_for_test(&self) -> usize {
+        // A peek: the store gate would undo the cached overlay.
+        self.inner.staging().evidence_copies.get()
     }
 
     /// The open transaction `id`, mergeable or serializable.
@@ -8608,13 +9249,19 @@ impl Db {
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();
-            let seq = inner.next_seq();
+            let seq = inner.fresh_seq();
             begin_savepoint(&inner.conn, "commit_batch")?;
             let mark = inner.changed.borrow().len();
+            // Each write passed its check as it was staged, with the rows
+            // staged before it as evidence. The commit grounds the unit's
+            // end state as the authority will on upload (SPEC 7), so a unit
+            // commits here exactly when the authority accepts it: a row the
+            // unit deleted is no evidence, and rows can't ground each other
+            // in a cycle.
             inner.defer_checks();
             let applied = inner
-                .apply_with_edits(ops, &batch.edits, ops.len(), seq)
-                .and_then(|()| inner.finish_checks(seq));
+                .apply_with_edits(ops, &batch.edits, 0, seq)
+                .and_then(|()| inner.finish_checks(seq).map_err(refused_at_commit));
             if let Err(error) = applied {
                 inner.abandon_checks();
                 inner.changed.borrow_mut().truncate(mark);
@@ -8669,6 +9316,24 @@ impl Db {
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
         let staged = batch.ops.len();
+        // A row is never evidence for its own check.
+        let staged_rows = match extra.as_deref() {
+            Some(op) => {
+                let mut rows = batch.rows.clone();
+                if let Some(row) = op.row() {
+                    let stored = &inner.schema.table(op.table())?.stored;
+                    if rows
+                        .get(stored)
+                        .is_some_and(|set| set.contains(row.0.as_bytes()))
+                        && let Some(set) = Arc::make_mut(&mut rows).get_mut(stored)
+                    {
+                        set.remove(row.0.as_bytes());
+                    }
+                }
+                rows
+            }
+            None => Arc::default(),
+        };
         let live = inner
             .overlay
             .as_ref()
@@ -8690,6 +9355,10 @@ impl Db {
         if let Some(ops) = ops {
             inner.settle_overlay();
             begin_savepoint(&inner.conn, "overlay")?;
+            #[cfg(any(test, feature = "testing"))]
+            {
+                inner.overlay_replays += ops.len();
+            }
             let mark = inner.changed.borrow().len();
             if let Err(error) = inner.apply_all_checking(&ops, ops.len(), own) {
                 inner.clear_derived();
@@ -8713,7 +9382,18 @@ impl Db {
         let applied = match extra {
             Some(op) => inner.counter_deltas(op).and_then(|()| {
                 let schema = inner.schema.clone();
-                inner.apply_all_checking(&[(schema, op.clone())], 0, own)
+                // The write continues the unit its batch staged so far:
+                // those writes passed their checks, so their rows are
+                // evidence for this one's (SPEC 7), as at the authority
+                // that receives the unit. The commit checks the whole unit.
+                inner.defer_checks();
+                let applied = inner
+                    .apply_all_checking(&[(schema, op.clone())], 0, own)
+                    .and_then(|()| inner.finish_checks_after(own, staged_rows));
+                if applied.is_err() {
+                    inner.abandon_checks();
+                }
+                applied
             }),
             None => Ok(()),
         };
@@ -8796,6 +9476,10 @@ impl Db {
         };
         let own = inner.seq + 1;
         begin_savepoint(&inner.conn, "overlay")?;
+        #[cfg(any(test, feature = "testing"))]
+        {
+            inner.overlay_replays += ops.len();
+        }
         let mark = inner.changed.borrow().len();
         let result = inner
             .apply_with_edits(&ops, &edits, ops.len(), own)
@@ -8819,12 +9503,18 @@ impl Db {
             .map_err(|error| self.serializable_write_conflict(id, &op, error))?;
         let mut inner = self.inner.staging();
         let schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
-        inner
-            .batches
-            .get_mut(&id)
-            .expect("validated")
-            .ops
-            .push((schema, op));
+        let stored = match op.row() {
+            Some(row) => Some((schema.table(op.table())?.stored.clone(), row)),
+            None => None,
+        };
+        let batch = inner.batches.get_mut(&id).expect("validated");
+        if let Some((table, row)) = stored {
+            Arc::make_mut(&mut batch.rows)
+                .entry(table)
+                .or_default()
+                .insert(*row.0.as_bytes());
+        }
+        batch.ops.push((schema, op));
         Ok(())
     }
 
@@ -9203,15 +9893,21 @@ impl TxRef<'_> {
             }
         }
         // Relations nest inside the overlay, so they see staged rows too.
-        let rows = self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
-            let read = ReadSpec {
-                include_deleted,
-                cut,
-                ..ReadSpec::default()
-            };
-            let roots = inner.run(prepared, identity, &read)?;
-            inner.nest_relations(prepared, identity, &read, roots)
-        })?;
+        // Offloaded leaves are fetched as for any read.
+        let rows = self
+            .db
+            .fetching_with((), |()| {
+                self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
+                    let read = ReadSpec {
+                        include_deleted,
+                        cut,
+                        ..ReadSpec::default()
+                    };
+                    let roots = inner.run(prepared, identity, &read)?;
+                    inner.nest_relations(prepared, identity, &read, roots)
+                })
+            })
+            .await?;
         self.db.record_read(self.id, prepared, include_deleted)?;
         Ok(rows)
     }

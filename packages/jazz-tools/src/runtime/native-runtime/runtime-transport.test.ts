@@ -3,6 +3,8 @@ import type { WasmSchema } from "../../drivers/types.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
+  FEATURE_HEARTBEAT,
+  HEARTBEAT_SILENCE_MS,
   decodeWebSocketFrameBatch,
   encodeWireClientHello,
   encodeWebSocketPrelude,
@@ -417,6 +419,49 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.close();
   });
 
+  it("reconnects a local-first upstream whose heartbeat link went silent (R39)", async () => {
+    vi.useFakeTimers();
+    FakeWebSocket.serverFeatures = CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT;
+    try {
+      const sockets: FakeWebSocket[] = [];
+      globalThis.WebSocket = class extends FakeWebSocket {
+        constructor(url: string) {
+          super(url);
+          sockets.push(this);
+        }
+      } as unknown as typeof WebSocket;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const terminal = vi.fn();
+      runtime.onServerTransportError(terminal);
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      // The socket stays "open" but nothing arrives: no close event ever comes.
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_SILENCE_MS + 1_000);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(sockets.length).toBeGreaterThanOrEqual(2);
+      expect(sockets[0]!.closed).toBe(true);
+      await runtime.waitForUpstreamServerConnection();
+      expect(terminal).not.toHaveBeenCalled();
+      await runtime.close();
+    } finally {
+      FakeWebSocket.serverFeatures = CLIENT_WIRE_FEATURES;
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     [
       "a coverage timeout Error (NAPI)",
@@ -768,6 +813,82 @@ describe("NativeRuntimeAdapter server transport", () => {
       await runtime.close();
     },
   );
+
+  // R42: a server at its connection cap per user refuses a new connection
+  // before its hello with `backpressure` / `later`. The link reports that
+  // refusal at once, naming the cap, and keeps retrying with backoff.
+  it("publishes a pre-hello backpressure refusal with the server's reason and retries", async () => {
+    const sockets: FakeWebSocket[] = [];
+    let refuse = true;
+    const refusal =
+      "websocket connection cap per user reached: this user already has 2 open connections";
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+      override send(data: Uint8Array | string): void {
+        if (refuse && typeof data !== "string" && isClientHelloBatch(data)) {
+          const error = new PostcardWriter();
+          error.u64(1); // WireFrame::Error
+          error.u64(4); // Backpressure
+          error.u64(3); // Later
+          error.string(refusal);
+          // The server closes the socket once the error frame has been delivered.
+          queueMicrotask(() => {
+            this.emitMessage(encodeWebSocketFrameBatch([error.finish()]));
+            setTimeout(() => this.emitServerClose(), 0);
+          });
+          return;
+        }
+        super.send(data);
+      }
+    } as unknown as typeof WebSocket;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const terminal = vi.fn();
+    runtime.onServerTransportError(terminal);
+    try {
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+
+      await vi.waitFor(
+        () =>
+          expect(runtime.upstreamLinkStatus()).toEqual({
+            state: "offline",
+            reason: "network",
+            retrying: true,
+          }),
+        { timeout: 5_000 },
+      );
+      expect(runtime.lastLinkFailure()).toMatchObject({ kind: "network", message: refusal });
+
+      refuse = false;
+      await vi.waitFor(() => expect(runtime.upstreamLinkStatus()).toEqual({ state: "connected" }), {
+        timeout: 15_000,
+      });
+      expect(sockets.length).toBeGreaterThan(1);
+      // The refusal is reported once, as an outage that keeps retrying.
+      expect(terminal).toHaveBeenCalledWith(expect.objectContaining({ message: refusal }), {
+        retrying: true,
+      });
+      expect(terminal).not.toHaveBeenCalledWith(expect.anything(), { retrying: false });
+    } finally {
+      refuse = false;
+      await runtime.close();
+    }
+  }, 30_000);
 
   it.each(["disconnect", "close"] as const)(
     "cancels an established-network retry on %s",
@@ -3721,6 +3842,8 @@ class FakeTransport implements Transport {
 }
 
 class FakeWebSocket {
+  /** What the fake server's hello advertises. */
+  static serverFeatures = CLIENT_WIRE_FEATURES;
   binaryType: "arraybuffer" | "blob" = "arraybuffer";
   readonly readyState = 1;
   readonly sent: Array<Uint8Array | string> = [];
@@ -3743,7 +3866,10 @@ class FakeWebSocket {
     if (!isClientHelloBatch(data)) return;
     this.serverHelloScheduled = true;
     queueMicrotask(() => {
-      if (!this.closed) this.emitMessage(encodeWebSocketFrameBatch([encodeWireServerHello()]));
+      if (!this.closed)
+        this.emitMessage(
+          encodeWebSocketFrameBatch([encodeWireServerHello(1n, FakeWebSocket.serverFeatures)]),
+        );
     });
   }
 
@@ -3767,12 +3893,15 @@ class FakeWebSocket {
   }
 }
 
-function encodeWireServerHello(epoch: bigint = 1n): Uint8Array {
+function encodeWireServerHello(
+  epoch: bigint = 1n,
+  features: number = CLIENT_WIRE_FEATURES,
+): Uint8Array {
   const writer = new PostcardWriter();
   writer.u64(0); // WireFrame::Hello
   writer.u64(WIRE_PROTOCOL_VERSION);
   writer.u64(WIRE_PROTOCOL_VERSION);
-  writer.u64(CLIENT_WIRE_FEATURES);
+  writer.u64(features);
   writer.u64(1); // WirePeerRole::Core
   writer.some((authority) => {
     authority.bytes(Uint8Array.from({ length: 16 }, () => 0x5e));

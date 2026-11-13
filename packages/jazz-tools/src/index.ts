@@ -170,10 +170,6 @@ export * from "./permissions/index.js";
 export * from "./dev/inspector-overlay/inspector-host-types.js";
 export { installInspectorHost, type InspectorHostDb } from "./dev/inspector-overlay/host-bridge.js";
 
-export {
-  createAccountManager,
-  type AccountManagerConfig,
-} from "./accounts/create-account-manager.js";
 export * from "./accounts/exports.js";
 
 export { accountRegistryUrl } from "./accounts/context.js";
@@ -181,10 +177,10 @@ export { accountRegistryUrl } from "./accounts/context.js";
 export { createJazzClient, type JazzClientConfig } from "./session/create-jazz-session.js";
 export type {
   JazzSession,
-  JazzSessionActions,
   JazzSessionSnapshot,
   JazzSessionOperation,
-} from "./session/state.js";
+  JazzUser,
+} from "./session/jazz-session.js";
 
 export type {
   ForwardRelationship,
@@ -192,3 +188,12 @@ export type {
   Relationship,
   Relationships,
 } from "./relationships.js";
+
+// Removed in alpha.61: stubs that throw, naming the replacement (one release).
+export {
+  AccountManager,
+  BrowserAuthSecretStore,
+  createAccountManager,
+  createDb,
+  exportLocalFirstSecret,
+} from "./removed-api.js";

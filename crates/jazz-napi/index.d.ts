@@ -28,6 +28,12 @@ export declare class JazzCore {
    * each message for the client and, last, the close.
    */
   openSocket(headers: Array<Array<string>>, onEvent: (err: Error | null, event: JazzCoreSocketEvent) => void): JazzCoreSocket
+  /**
+   * Start a sync session for a client in this process. Unlike
+   * `openSocket` it has no handshake deadline: the client's Hello waits on
+   * this event loop, which synchronous work can hold for seconds.
+   */
+  openInProcessSocket(onEvent: (err: Error | null, event: JazzCoreSocketEvent) => void): JazzCoreSocket
   /** Close every session and the storage. */
   close(): Promise<void>
 }
@@ -36,12 +42,18 @@ export declare class JazzCore {
 export declare class JazzCoreSocket {
   /** Pass one binary message from the client. False once the session ended. */
   send(data: Uint8Array): boolean
+  /**
+   * `send`, resolving once the session has read enough of the messages
+   * before it. A host that awaits it before reading more from its client
+   * holds a fast client back instead of queueing all it sends.
+   */
+  sendWithRoom(data: Uint8Array): Promise<boolean>
   /** The client's socket closed. */
   close(): void
 }
 
 export declare class JazzServer {
-  static start(options: { appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }): Promise<JazzServer>
+  static start(options: { appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; maxConnectionsPerUser?: number; trustedWorkload?: { issuer: string; audience: string; subject: string } }): Promise<JazzServer>
   get appId(): string
   get url(): string
   get port(): number
@@ -142,6 +154,12 @@ export declare class NapiDb {
    * this is not a query.
    */
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
+  /**
+   * The Inspector's `explain`: for each of `rows` (uuid strings) of
+   * `table`, which clauses of its read policy (the arms of its top-level
+   * `Or`) hold for `author` with `claims`.
+   */
+  explainReadClauses(table: string, rows: Array<string>, author: Uint8Array, claims?: JsonValue | undefined | null): ExplainedReadClauses
   subscribe(query: Uint8Array, opts?: { tier?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Subscription
   /** Apply received frames and send what is due on every link. */
   tick(): void
@@ -149,8 +167,12 @@ export declare class NapiDb {
   setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
   /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
   evictExpiredStagedLargeValues(): number
-  /** How many local commits still wait for the server's verdict. */
-  pendingUploadCount(): number
+  /**
+   * This store's uploads: how many still wait for the server's verdict
+   * and since when, and what the server refused since it opened
+   * (`{ pending, oldestPendingAt, rejected, lastRejection }`).
+   */
+  uploadStatus(): JsonValue
   /**
    * The optimistic in-memory side of a client/worker pair: its
    * subscriptions open with the worker's answer.
@@ -336,6 +358,13 @@ export declare function captureTextAnchor(text: string, version: number | undefi
 /** The range `start..end` (UTF-16 code units) of `text`. */
 export declare function captureTextRange(text: string, version: number | undefined | null, start: number, end: number): JsonValue
 
+/**
+ * Check an app's shipped migrations (the `ClientMigrations` JSON) leading
+ * to the schema hash `target` as a deployment to a new authority would,
+ * without opening a database. `jazz-tools validate` runs it.
+ */
+export declare function checkClientMigrations(migrations: string, target: string): void
+
 export interface DeleteOptions {
   author?: Uint8Array
   attribution?: Uint8Array
@@ -379,6 +408,18 @@ export interface E2EeSodiumStreamRecord {
 
 /** Verifies a detached Ed25519 signature; malformed sizes return false. */
 export declare function e2eeSodiumVerify(publicKey: Uint8Array, message: Uint8Array, signature: Uint8Array): boolean
+
+/** The Inspector's `explain`: how many clauses the read policy has, and the rows found. */
+export interface ExplainedReadClauses {
+  clauses: number
+  rows: Array<ExplainedReadRow>
+}
+
+/** One row of the Inspector's `explain`: whether each read-policy clause holds. */
+export interface ExplainedReadRow {
+  id: string
+  holds: Array<boolean>
+}
 
 export interface InsertOptions {
   rowId?: Uint8Array

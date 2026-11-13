@@ -8,6 +8,7 @@
 //! `{"type": "setOffline", "offline": bool}`, `{"type": "admitted", "attempt": n}`,
 //! `{"type": "ended", "attempt": n, "failure": {"kind": k, "message": s}}` with
 //! `k` one of `network`, `refused`, `serverNotReady`, `authRejected`, `fatal`,
+//! `reauthenticate`,
 //! `{"type": "credentialUpdated"}`, `{"type": "timerFired", "token": n}`.
 //!
 //! Output: `{"actions": [...], "events": [...], "status": {...}}`, where an
@@ -81,6 +82,7 @@ enum HostFailure {
     ServerNotReady { message: String },
     AuthRejected { message: String },
     Fatal { message: String },
+    Reauthenticate { message: String },
 }
 
 impl HostInput {
@@ -100,6 +102,7 @@ impl HostInput {
                         message,
                     },
                     HostFailure::Fatal { message } => LinkFailure::Fatal(message),
+                    HostFailure::Reauthenticate { message } => LinkFailure::Reauthenticate(message),
                 },
             ),
             Self::CredentialUpdated => LinkInput::CredentialUpdated,

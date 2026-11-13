@@ -1,4 +1,4 @@
-import { createContext, useContext, type JSX, type Accessor, Show, createEffect } from "solid-js";
+import { createContext, useContext, type JSX, type Accessor, Show } from "solid-js";
 import type { PublicSession } from "../runtime/context.js";
 import {
   createSolidJazzClient,
@@ -8,29 +8,25 @@ import {
 } from "./create-solid-jazz-client.js";
 import type { Db } from "../runtime/db.js";
 import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
-import { startInspectorOnce } from "../dev-tools/auto-attach.js";
+import {
+  refuseAutoAttachDevTools,
+  type NoAutoAttachDevTools,
+} from "../runtime/removed-provider-props.js";
 
 type JazzClientContextValue = SolidJazzClient;
 
 export const JazzClientContext = createContext<JazzClientContextValue | undefined>(undefined);
 
-export type JazzClientProviderProps = {
+export type JazzClientProviderProps = NoAutoAttachDevTools & {
   client: PendingSolidJazzClient;
   fallback?: JSX.Element;
   children: JSX.Element;
-  autoAttachDevTools?: boolean;
 };
 
 export function JazzClientProvider(props: JazzClientProviderProps) {
+  refuseAutoAttachDevTools("JazzClientProvider", props);
   const clientReady = () =>
     isPendingSolidJazzClientReady(props.client) ? props.client : undefined;
-
-  if (process.env.NODE_ENV !== "production" && props.autoAttachDevTools !== false) {
-    createEffect(() => {
-      const client = clientReady();
-      if (client) startInspectorOnce(client.db);
-    });
-  }
 
   return (
     <Show when={clientReady()} keyed fallback={props.fallback ?? null}>
@@ -49,11 +45,7 @@ export function LegacyJazzProvider(props: LegacyJazzProviderProps) {
   const client = createSolidJazzClient(() => props.config);
 
   return (
-    <JazzClientProvider
-      client={client}
-      fallback={props.fallback}
-      autoAttachDevTools={props.autoAttachDevTools}
-    >
+    <JazzClientProvider client={client} fallback={props.fallback}>
       {props.children}
     </JazzClientProvider>
   );
@@ -82,4 +74,4 @@ export function useAuthState() {
   return () => client.authState;
 }
 
-export { JazzProvider, type JazzProviderProps } from "./app.js";
+export { JazzProvider, type JazzProviderProps } from "./session.js";

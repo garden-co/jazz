@@ -1,6 +1,6 @@
 {
   "name": "jazz-wasm",
-  "version": "2.0.0-alpha.59",
+  "version": "2.0.0-alpha.61",
   "description": "WebAssembly bindings for the Jazz database engine",
   "keywords": [
     "crdt",
@@ -25,7 +25,7 @@
   "types": "pkg/jazz_wasm.d.ts",
   "publishConfig": {
     "access": "public",
-    "tag": "alpha"
+    "tag": "latest"
   },
   "scripts": {
     "build": "node ../../dev/artifacts/build.mjs wasm release",

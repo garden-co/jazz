@@ -5,7 +5,7 @@
  * which makes it a prompt surface that jazz.tools controls for every
  * create-jazz version: whatever it serves is what coding agents are told.
  */
-export const BRIEF_URL = "https://jazz.tools/agent-brief.md";
+export const BRIEF_URL = "https://jazz.tools/quickstart.md";
 
 const FETCH_TIMEOUT_MS = 10_000;
 /** A brief is a page of Markdown; anything far larger is not one. */

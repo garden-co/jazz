@@ -203,6 +203,8 @@ pub fn serve_core(options: JsonValue) -> Result<ServedCore> {
                 max_websocket_connections: options
                     .max_connections
                     .unwrap_or(jazz_server::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS),
+                max_websocket_connections_per_user:
+                    jazz_server::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS_PER_IDENTITY,
                 memory_limit_bytes: options
                     .memory_limit_bytes
                     .or_else(jazz_server::resources::detect_memory_limit_bytes),

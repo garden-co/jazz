@@ -1,38 +1,211 @@
 ---
 title: Local-First Client
-description: "The local-first browser client: bundler config, Wasm loading, then one session with local storage and sync."
-reviewedAt: "20017a2694"
+description: "Learn how to set up the local-first browser client, from bundler config to local storage and sync."
 ---
 
-import CreateJazzClientReference from "../../../partials/create-jazz-client-reference.mdx";
+The local-first client keeps a replica of the data each user can read in the browser. Queries
+answer from it instantly, writes show up before they sync, and the app keeps working offline. It
+loads as its own chunk on top of the [thin client](/docs/setup/web-client/thin-client).
 
-## Bundler config
+<include>../../../partials/web-client-choose.mdx</include>
 
-Jazz needs no bundler plugin. Two settings cover the common setups:
+## Connect
 
-- **Vite:** keep the Wasm package out of dependency pre-bundling, and add `jazz-wasm` as a direct dependency of your app so pnpm's strict layout resolves it:
+Pass a loader for the local-first client. The app starts thin, then upgrades in the background
+after the first load:
 
-  ```ts title="vite.config.ts"
-  import { defineConfig } from "vite";
+<Tabs groupId="jazz-framework" items={["React", "TypeScript"]} persist updateAnchor>
+  <Tab value="React">
+    ```tsx title="App.tsx"
+    import { JazzProvider } from "jazz-tools/react";
 
-  export default defineConfig({
-    optimizeDeps: { exclude: ["jazz-wasm"] },
-  });
-  ```
+    function Root() {
+      return (
+        <JazzProvider
+          config={{ serverUrl: "/jazz", client: () => import("jazz-tools/local-first") }}
+          signedOut={<SignIn />}
+        >
+          <App />
+        </JazzProvider>
+      );
+    }
+    ```
 
-- **Next.js:** let Node load the native addon at runtime instead of bundling it:
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts
+    </include>
 
-  ```ts title="next.config.ts"
-  export default {
-    serverExternalPackages: ["jazz-napi"],
-  };
-  ```
+    The background upgrade to the local-first client keeps the same `Db`: its live queries, listeners and writes carry on. `db.isLocalFirst()` tells whether it has happened yet, and `await db.upgradeToLocalFirst(loader)` waits for it. If the app took the `Db` offline with `disconnect()`, it stays offline. In the browser, a local-first `Db` is offline for every tab of the app, so at the upgrade that also takes the app's other local-first tabs offline. Signing in, signing out and switching accounts do give the session a new `Db`. The old one then ends its live queries with a `DbReplacedError` (from `"jazz-tools"`) and throws it on writes. Follow the session to pick up the new one, and read `session.db` again for each write (it throws while no one is signed in):
 
-The browser names no app: it syncs with your backend at `/jazz` (or the `serverUrl` you pass), and the app ID belongs to the backend's store (`remote({ appId })`, `sqlite({ appId })`), read from server-only env like `JAZZ_APP_ID`. Secrets stay server-only too: `JAZZ_ADMIN_SECRET` and `BACKEND_SECRET`. Publish schema and permissions with `pnpm dlx jazz-tools@alpha deploy <appId>`; see [Migrations](/docs/schemas/migrations).
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/main.ts#follow-session-ts
+    </include>
 
-## Wasm loading
+    ```ts
+    const stop = followDb(session, (db) => db.subscribe(app.todos, renderTodos));
+    session.db.insert(app.todos, { title: "Buy milk", done: false });
+    ```
 
-Use `runtimeSources` when Jazz can't automatically find its internal assets. This usually only happens with non-standard bundler configurations. For edge runtimes like Cloudflare Workers, see [Edge-style Wasm setup](/docs/setup/backend#edge-style-wasm-setup).
+    The framework providers do this for you.
+
+  </Tab>
+</Tabs>
+
+Once an account has used the local-first client in a browser, Jazz opens it with that client on
+future visits, so it works offline. If the switch to local-first fails, Jazz keeps using the thin
+client and logs a warning; that tab tries again on its next reload. Loading the page itself offline
+is up to your app: cache the app shell, including Jazz's Wasm and worker files, with a service
+worker of your own.
+
+To open the local-first client straight away for every account, first visit included, pass
+`localFirst: "now"` next to `client` (the default is `"background"`: start thin, upgrade after the
+first load). Use it when the app must work offline from the first render, or when it uses
+`db.transaction`, which only the local-first client has. Otherwise keep the default, which renders
+sooner. With `"now"`, a loader that fails makes the session fail (`status: "error"`) instead of
+running thin, and `"now"` without `client` is refused.
+
+The `import()` stays in your code, so the Wasm engine (%bundle.wasm% gzipped, %bundle.wasmRaw% uncompressed)
+downloads only when the client upgrades. After the first render, local storage keeps filling for a
+few seconds. Writes made on the thin client before the upgrade are kept offline only when a query
+the client subscribes to covers them. The local-first chunk and Wasm load lazily, so when you deploy
+a new build, keep the previous builds' hashed assets available for a while: tabs still open on the
+old build fetch them when they upgrade. To
+upgrade only on demand, call `useDb().upgradeToLocalFirst(() => import("jazz-tools/local-first"))`
+instead; see [Upgrading to local-first](/docs/setup/web-client/thin-client#upgrading-to-local-first).
+
+<include>../../../partials/web-client-sign-in.mdx</include>
+
+<include>../../../partials/web-client-reads-writes.mdx</include>
+
+## Options
+
+<include>../../../partials/web-client-shared-options.mdx</include>
+
+The local-first client also takes:
+
+| Option           | Default                    | What it does                                                                      |
+| :--------------- | :------------------------- | :-------------------------------------------------------------------------------- |
+| `driver`         | `{ type: "persistent" }`   | Where the replica lives: IndexedDB, or `{ type: "memory" }` for nothing on disk   |
+| `localFirst`     | `"background"`             | `"now"` opens local-first from the first render instead of upgrading after it     |
+| `dbName`         | derived from your endpoint | Logical base name of the local database; Jazz keeps one per endpoint and account  |
+| `runtimeSources` | found automatically        | Where to load the Wasm and worker from; see [Wasm and workers](#wasm-and-workers) |
+| `logLevel`       | `"warn"`                   | Wasm log level, for debugging                                                     |
+
+## Local storage
+
+By default the replica lives in IndexedDB, kept apart per endpoint and account (`jazz-idb`, plus one
+database per account named with its URL-encoded account id), so two users on the same browser never
+share data. `driver: { type: "memory" }` keeps it in memory only, and it is
+gone when the tab closes. `await db.deleteClientStorage()` clears the current one; see
+[Resetting browser storage](/docs/setup/auth/backend#resetting-browser-storage).
+
+An app upgraded from alpha.59 that had local-first guests passes its old app ID as `scope`
+(`createJazzClient({ scope: "<your alpha.59 app ID>" })`), so those guests keep their accounts. New
+apps leave it out. See [Upgrading from alpha.59](/docs/operating/backups-and-upgrades#self-hosted-alpha59-servers).
+
+What stays on the device:
+
+- Signing out closes the account's client but keeps its local data, synced rows included, for that
+  user's next sign-in, and the remembered user (account, identity and claims, never a credential)
+  stays in `localStorage`. On shared devices, pass `clearOnSignOut: true`; see the
+  [shared device checklist](/docs/setup/auth/backend#shared-devices). It wipes the account's data,
+  but the empty per-account database and the list of account ids on this device remain.
+- Your schema, including tables a user can't read, ships in the app bundle. Permissions decide
+  which rows a user can read, not which tables they can see exist.
+
+### Eviction
+
+`{ type: "persistent" }` writes to [IndexedDB](https://developer.mozilla.org/docs/Web/API/IndexedDB_API). By default browsers treat this as **best-effort** storage&hairsp;—&hairsp;under disk pressure, or after long inactivity, the browser can clear it without warning. For a local-first app that means a returning user can find their identity (the device account key) and any data owned only by that user wiped.
+
+The trade-offs are:
+
+- **Best-effort (default).** No prompt, no friction. Acceptable when the server holds a copy of every row the user cares about, or when the app gracefully reseeds from sync. Anything that exists only on this device is at risk.
+- **Persistent.** Storage is only cleared by an explicit user action (clearing site data, uninstalling). Required for true offline-first apps and for any data that doesn't round-trip through a server. Browsers gate this behind [`navigator.storage.persist()`](https://developer.mozilla.org/docs/Web/API/StorageManager/persist), which may show a prompt or grant silently based on engagement heuristics.
+
+To request persistent storage, call it once after the user has signed in or interacted enough that a prompt makes sense:
+
+```ts
+if (navigator.storage?.persist) {
+  const granted = await navigator.storage.persist();
+  if (!granted) {
+    // Fall back: rely on sync, warn the user, or retry later.
+  }
+}
+```
+
+Check `navigator.storage.persisted()` on subsequent loads to see whether the grant is still in effect. Pair this with the [backup and restore](/docs/setup/auth/local-first#backing-up-and-restoring-the-key) flow so the device account key can be recovered if storage is ever cleared.
+
+## Offline and guests
+
+Reads and writes keep working offline and sync when the connection returns. A signed-out visitor
+can also start as a guest on a [device account](/docs/setup/auth/local-first)
+(`initial: "device"`): an account whose key is created on the device, which works offline and keeps
+its data when the visitor signs up later.
+
+## Wasm and workers
+
+### Bundler config
+
+There is no Jazz plugin to add. In development, run your app as usual: `createJazz` in your
+[main backend](/docs/how-jazz-works#how-a-backend-talks-to-jazz) is the dev server, and it publishes your schema, permissions
+and migrations every time it starts.
+
+The local-first client loads Jazz's Wasm in the browser, and your backend loads Jazz's native module
+(`jazz-napi`) on the server. If your bundler touches either, tell it to leave them alone:
+
+<Tabs groupId="jazz-bundler" items={["Vite", "Next.js"]} persist updateAnchor>
+  <Tab value="Vite">
+    ```ts title="vite.config.ts"
+    import { defineConfig } from "vite";
+
+    export default defineConfig({
+      // plugins: your framework's plugin (React, Vue, Svelte, Solid, SvelteKit) ...
+      // Load the Wasm as a real module instead of pre-bundling it.
+      // On Vite 6 or 7: exclude: ["jazz-wasm", "jazz-tools"] (see below).
+      optimizeDeps: { exclude: ["jazz-wasm"] },
+    });
+    ```
+
+    On Vite 6 or 7, also exclude `jazz-tools`; otherwise `vite dev` can't load Jazz's worker and the
+    client stays thin. Those versions pre-bundle `jazz-tools` without rewriting the URL of its worker,
+    so the dev server answers it with your `index.html`, and after about 10 seconds the upgrade gives
+    up ("Shared browser runtime did not issue a foreground node lease"). Vite 8 rewrites the URL, so
+    `jazz-wasm` alone is enough there; that includes SvelteKit 3, while SvelteKit 2 runs on Vite 7.
+    Production builds aren't affected.
+
+    It needs Vite 6 or later: Vite 5 answers the local-first chunk with a 500, "Vite is unable to
+    parse the worker options as the value is not static". This is the same for React, Vue, Svelte,
+    Solid and SvelteKit. With pnpm, also add `jazz-wasm` as a
+    direct dependency of your app so its strict layout resolves it.
+
+    SvelteKit also needs `ssr: { external: ["jazz-napi"] }` in the same config, because its server
+    runs Jazz too: without it, `vite build` bundles Jazz's native module and fails with "Cannot find
+    module './index.cjs'".
+
+  </Tab>
+  <Tab value="Next.js">
+    ```ts title="next.config.ts"
+    import type { NextConfig } from "next";
+
+    const nextConfig: NextConfig = {
+      // Your backend loads Jazz's native module; Next must not bundle it.
+      serverExternalPackages: ["jazz-napi"],
+    };
+
+    export default nextConfig;
+    ```
+
+  </Tab>
+</Tabs>
+
+The [thin client](/docs/setup/web-client/thin-client) has no Wasm, so it needs no Vite line. A
+Next.js app that imports `jazz-tools/backend` still needs `serverExternalPackages`.
+
+### Wasm loading
+
+Use `runtimeSources` when Jazz can't automatically find its internal assets. This usually only happens with non-standard bundler configurations.
 
 | Field                            | Use it when                                                                 |
 | -------------------------------- | --------------------------------------------------------------------------- |
@@ -51,43 +224,6 @@ Jazz resolves these in this order:
 4. `runtimeSources.baseUrl`
 5. built-in zero-config fallback
 
-### Browser asset overrides
-
-The prepared config is the same across frameworks. Plain TypeScript passes it directly to `createDb`. Prepare the account manager with the same runtime asset overrides.
-
-<Tabs
-  groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
-  persist
-  updateAnchor
->
-  <Tab value="React">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-react/src/setup-snippets.tsx#context-setup-react-runtime-sources
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/RuntimeConfigExample.vue#context-setup-vue-runtime-sources
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte" meta='title="App.svelte"'>
-      ../examples/docs/todo-client-localfirst-svelte/src/RuntimeConfigExample.svelte#context-setup-svelte-runtime-sources
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-solid/src/RuntimeConfigExample.tsx
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="app.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/src/runtime-config-snippets.ts#context-setup-ts-runtime-sources
-    </include>
-  </Tab>
-</Tabs>
-
 Use `baseUrl` when both assets live together under one public directory. Use explicit `wasmUrl` /
 `brokerWorkerUrl` when your app serves them from different places.
 
@@ -97,111 +233,9 @@ version). Jazz adds that value to both asset URLs, so a rolling deployment canno
 long-lived SharedWorker with bytes fetched from an older build at the same URL. Your asset host
 must serve these URLs with query strings intact.
 
-## Configure one session
+### Worker failures
 
-A Jazz session owns account selection and its current client. Give it the app configuration once, with `initial: "local-first"` to restore a saved account or start offline without signup. Its commands handle graceful shutdown and context replacement when authentication changes. See [Lifecycle](/docs/setup/auth/lifecycle).
-
-<Tabs
-  groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
-  persist
-  updateAnchor
->
-  <Tab value="React">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react
-    </include>
-
-    `useJazzSession()` exposes account state and bound auth commands in both the app and provider fallback.
-
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/AuthLocalfirst.vue
-    </include>
-
-    Use `useJazzSession()` to observe the shared session in Vue.
-
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte" meta='title="App.svelte"'>
-      ../examples/docs/todo-client-localfirst-svelte/src/AuthLocalfirst.svelte#auth-localfirst-svelte
-    </include>
-
-    Use `getJazzSession()` for a Svelte store with account state and bound commands.
-
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-solid/src/AuthLocalfirst.tsx
-    </include>
-
-    Use `useJazzSession()` for Solid session state and bound commands.
-
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="app.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts
-    </include>
-
-    The background upgrade to the local-first client keeps the same `Db`: its live queries, listeners and writes carry on. If the app took the `Db` offline with `disconnect()`, it stays offline. In the browser, a local-first `Db` is offline for every tab of the app, so at the upgrade that also takes the app's other local-first tabs offline. Signing in, signing out and switching accounts do give the session a new `Db`. The old one then ends its live queries with a `DbReplacedError` and throws it on writes. Follow the session to pick up the new one, and read the current `Db` for each write:
-
-    <include cwd lang="ts" meta='title="app.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/src/main.ts#follow-session-ts
-    </include>
-
-    ```ts
-    const stop = followDb(session, (db) => db.subscribe(app.todos, renderTodos));
-    session.getSnapshot().client!.db.insert(app.todos, { title: "Buy milk", done: false });
-    ```
-
-    The framework providers do this for you.
-
-  </Tab>
-</Tabs>
-
-The browser account store retains the local signing root and selection.
-
-## Client config options
-
-<CreateJazzClientReference />
-
-To sign in a user of your own auth, call `accounts.loginWithBackend()` (or `linkWithBackend()` to upgrade a local-first account); your backend's `authenticate` decides who that is. Contexts receive only the resulting handle; signing roots are not public context configuration.
-
-### Storage driver
-
-Browser clients default to `driver: { type: "persistent" }`, which stores data locally for offline support. Set `driver: { type: "memory" }` to keep data in memory only. Memory storage is also usable locally, but its data disappears when the context closes.
-
-When you supply `driver: { type: "persistent", dbName }`, the name is a logical base. Jazz derives the physical root from registry, app, environment, and account. Linked identities share that account's durable root while opening distinct live authorization sessions. A root whose recorded scope does not match is rejected.
-
-#### Browser worker failures
-
-After the shared worker acknowledges startup, runtime initialisation has a five-minute grace period. If it does not become ready, startup reports an error instead of leaving the client pending indefinitely. Suspended tabs receive fresh grace when they resume.
-
-While control requests are waiting for worker replies, Jazz probes the connection every 30 seconds and allows 30 seconds for a response. These are connection-health checks, not query or storage-operation timeouts: a responsive worker can continue a long operation, and idle connections are not continuously probed.
-
-An unresponsive-worker error does not prove that an outstanding operation failed. It may already have completed. Jazz does not automatically retry operations with an unknown outcome or clear IndexedDB. Use the existing [client and session lifecycle](/docs/setup/auth/lifecycle) to recover, and establish a mutation's outcome before retrying it. Terminal shutdown reports the causal failure without waiting indefinitely for an unresponsive worker; it does not claim that an unacknowledged durable handoff succeeded.
-
-An intentional storage reset releases the old foreground identity without returning it to the erased store. `deleteClientStorage()` waits for a fresh identity before the same application client can be used again. If shutdown starts during that acquisition, Jazz retires the unused identity instead. Inspector attachments are session-scoped: after a reset, open a new attachment rather than reusing the old one.
-
-#### Browser storage eviction
-
-`{ type: "persistent" }` writes to [IndexedDB](https://developer.mozilla.org/docs/Web/API/IndexedDB_API). By default browsers treat this as **best-effort** storage&hairsp;—&hairsp;under disk pressure, or after long inactivity, the browser can clear it without warning. For a local-first app that means a returning user can find their identity (the local-first secret) and any data owned only by that user wiped.
-
-The trade-offs are:
-
-- **Best-effort (default).** No prompt, no friction. Acceptable when the server holds a copy of every row the user cares about, or when the app gracefully reseeds from sync. Anything that exists only on this device is at risk.
-- **Persistent.** Storage is only cleared by an explicit user action (clearing site data, uninstalling). Required for true offline-first apps and for any data that doesn't round-trip through a server. Browsers gate this behind [`navigator.storage.persist()`](https://developer.mozilla.org/docs/Web/API/StorageManager/persist), which may show a prompt or grant silently based on engagement heuristics.
-
-To request persistent storage, call it once after the user has signed in or interacted enough that a prompt makes sense:
-
-```ts
-if (navigator.storage?.persist) {
-  const granted = await navigator.storage.persist();
-  if (!granted) {
-    // Fall back: rely on sync, warn the user, or retry later.
-  }
-}
-```
-
-Check `navigator.storage.persisted()` on subsequent loads to see whether the grant is still in effect. Pair this with the [backup and restore](/docs/setup/auth/local-first#backing-up-and-restoring-the-secret) flow so the local-first secret can be recovered if storage is ever cleared.
+If the browser worker stops responding, Jazz reports an error. An operation that was in progress may
+still have completed, so check its result before retrying it. Jazz never clears local storage on
+its own; if the worker stays stuck, `await db.deleteClientStorage()` recovers it (see
+[Resetting browser storage](/docs/setup/auth/backend#resetting-browser-storage)).

@@ -1,6 +1,6 @@
 ---
-title: How Jazz Works & FAQ
-description: "The mental model: SQLite underneath, what Jazz adds on top, how backends and clients use it, and frequently asked questions."
+title: How Jazz Works / FAQ
+description: "Learn the mental model behind Jazz, how backends and clients talk to it, and find answers to common questions."
 ---
 
 <Callout type="info">
@@ -12,8 +12,7 @@ description: "The mental model: SQLite underneath, what Jazz adds on top, how ba
 
 - Each Jazz server stores its data in plain SQLite: tables, rows, indexes
 - Large values (files, blobs, streams) live in S3-compatible object storage
-- Works on local disk (Turso is not supported yet)
-- Why SQLite: fast, embeddable, simple to back up and inspect
+- Works with local disk and compatible cloud storage
 
 ## What Jazz adds on top
 
@@ -27,16 +26,18 @@ description: "The mental model: SQLite underneath, what Jazz adds on top, how ba
 
 ## How a backend talks to Jazz
 
-- The backend opens one session with the app id, server URL and backend secret
-- Backend authority (`client.db`) sees everything, for admin and system work
-- `forRequest(req)` gives a user-scoped view: that user's policies and authorship apply
-- Queries and subscriptions run on the server; results come back as typed rows
+- Your main backend runs `createJazz` in its own process, with the schema and permissions it imports
+- Use `jazz.db` to read and write with backend authority. This bypasses user permission policies and is useful for admin and system work
+- Use `jazz.forReqUser(request)` to apply authorship and policies based on the user making the request
+- Backend clients (other trusted machines) reach Jazz through the main backend
 - Writes are confirmed by the server before they count as durable
 
 ## How frontends talk to Jazz
 
-- The thin client sends queries and writes to the server over the same API, with the same auth and policies
-- No local database in the browser; small bundle
+Frontends use the same query and write API as your server code. Your backend authenticates the user and applies your permission policies.
+
+- **Thin client:** sends queries and writes to your backend without a local database, keeping the bundle small
+- **Opt-in local-first client:** creates an embedded database on the device, so reads and writes work offline and sync when connected
 
 ## Sync and local-first
 
@@ -47,10 +48,12 @@ description: "The mental model: SQLite underneath, what Jazz adds on top, how ba
 
 ## Sharding
 
-- One server is enough for many apps; scale out by adding shards
+Sharding is coming soon. For many apps, one server is enough. Sharding is for apps that outgrow it:
+
+- Adding shards spreads your data across several servers
 - A stateless gateway routes queries and writes to the right shard
+- Each live query sees a consistent result, even when its data spans shards
 - Cross-shard transactions use two-phase commit
-- Per-query consistency: each subscription sees a settled snapshot
 
 ## FAQ
 
@@ -75,7 +78,7 @@ await window.__jazz.clearStorage("my-app::alice");
 
 The helper requires a live registered client on this page. Do not shut it down before calling the helper. If the client never finishes opening or no live namespace is listed, this helper cannot perform the reset.
 
-If you're working directly with a `Db` handle instead of the window helper, `await db.deleteClientStorage()` is the underlying API. See [Auth Lifecycle](/docs/setup/auth/lifecycle#storage-reset) for how this differs from logout and local-first identity storage.
+If you're working directly with a `Db` handle instead of the window helper, `await db.deleteClientStorage()` is the underlying API. See [Resetting browser storage](/docs/setup/auth/backend#resetting-browser-storage) for how this differs from logout and local-first identity storage.
 
 - Browser persistent storage only.
 - If exactly one live namespace exists, `clearStorage()` uses it automatically.
@@ -84,7 +87,13 @@ If you're working directly with a `Db` handle instead of the window helper, `awa
 - Deletes only the selected IndexedDB namespace. Preserve `localStorage`, `sessionStorage`, cookies, and other databases; default local-first credentials are stored outside this data database. Apps with custom credential stores must check those separately.
 - Reopens a clean worker/runtime so the same live client remains usable after the wipe.
 
-This is useful when iterating on your schema during development.
+This is useful when iterating on your schema during development. `window.__jazz` is registered by
+every browser client, production builds included: it resets this browser's own storage and
+closes this page's own clients, nothing more.
+
+`window.__jazz` is reserved for Jazz, as is `window.__jazzWindowStorageContexts__`. If your app
+(or another library) sets `window.__jazz` itself, the Jazz session refuses to start and says so:
+rename your own global.
 
 </Accordion>
 
@@ -96,7 +105,7 @@ This is useful when iterating on your schema during development.
 
 <Accordion id="offline-only" title="Can I use Jazz without a server?">
 
-Yes. Omit `serverUrl` from your config. Jazz will not try to sync: browser clients keep their data
+Yes. Pass `serverUrl: null`. Jazz will not try to sync: browser clients keep their data
 in local persistent storage, while other runtimes use their configured local driver.
 
 </Accordion>
@@ -104,13 +113,6 @@ in local persistent storage, while other runtimes use their configured local dri
 <Accordion id="local-first-to-external" title="Can I upgrade from local-first auth to external auth without losing data?">
 
 Yes. When a user signs up with an external provider, their identity carries over. See [Signing up with BetterAuth](/docs/setup/auth/local-first#signing-up-with-betterauth).
-
-</Accordion>
-
-<Accordion id="rust-migrations" title="Do Rust apps need separate migration files?">
-
-No. Define and publish migrations with the TypeScript tooling. The server stores the compiled
-migrations that the Rust runtime uses. See [Migrations](/docs/schemas/migrations) for details.
 
 </Accordion>
 
@@ -123,7 +125,13 @@ accepted it. A rejected write throws `PersistedWriteRejectedError`, which provid
 Use `db.onMutationError()` as a fallback for rejected writes that do not have an active `wait()`
 call. The callback receives the rejection `code`, `reason`, and local transaction record. See
 [Writing data](/docs/writing/writing-data#write-durability-tiers) for an example and
-[Permissions](/docs/schemas/policies) for how the server decides whether to accept a write.
+[Declarative Permissions](/docs/schemas/policies) for how the server decides whether to accept a write.
+
+</Accordion>
+
+<Accordion id="why-sqlite" title="Why SQLite?">
+
+It's fast, embeddable, and simple to back up and inspect.
 
 </Accordion>
 

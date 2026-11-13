@@ -1,6 +1,6 @@
 import { parseJwtPayload, type JwtPayload } from "../runtime/client-session.js";
 import { verifyExternalJwt, type BackendJwtPublicKey } from "./external-jwt.js";
-import type { JazzUser } from "./create-jazz.js";
+import type { AuthenticatedUser } from "./create-jazz.js";
 import { isRequestAuthenticationError } from "./request-auth.js";
 
 export interface FromJWTOptions {
@@ -54,6 +54,15 @@ function isReservedIssuer(issuer: string): boolean {
  * not verify, is signed out (null). A JWKS that cannot be fetched is the
  * server's problem and throws, so clients retry instead of signing out.
  *
+ * The JWKS is cached for up to five minutes, so a key your issuer drops is
+ * accepted until then. A token naming a key the cached JWKS doesn't publish
+ * fetches it again, at most once every 30 seconds, and is signed out if the
+ * JWKS still doesn't publish its key; within 30 seconds of a fetch it is
+ * signed out without one. So when rotating keys, publish the new key in
+ * your JWKS before your issuer signs with it, as issuers that rotate keys
+ * do; a key published less than 30 seconds before its first token may
+ * refuse that token.
+ *
  * ```ts
  * createJazz({
  *   app, permissions, store,
@@ -65,7 +74,9 @@ function isReservedIssuer(issuer: string): boolean {
  * });
  * ```
  */
-export function fromJWT(options: FromJWTOptions): (request: Request) => Promise<JazzUser | null> {
+export function fromJWT(
+  options: FromJWTOptions,
+): (request: Request) => Promise<AuthenticatedUser | null> {
   if (!options.issuer) throw new Error("fromJWT: issuer is required");
   if (isReservedIssuer(options.issuer)) {
     throw new Error(`fromJWT: ${options.issuer} is reserved for Jazz's own identities`);
@@ -116,6 +127,12 @@ export function fromJWT(options: FromJWTOptions): (request: Request) => Promise<
       if (isRequestAuthenticationError(error)) return null;
       throw error;
     }
-    return { userId: payload.sub, claims: readClaims(payload) };
+    // Verified with `requireExp`, so the token says until when it holds; it
+    // is accepted up to the clock tolerance past that, and so holds as long.
+    return {
+      userId: payload.sub,
+      claims: readClaims(payload),
+      expiresAt: (payload.exp as number) + lifetime.clockToleranceSeconds,
+    };
   };
 }

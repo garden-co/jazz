@@ -1,0 +1,21 @@
+## When to pick it
+
+Jazz has two browser clients. Both use the same schema, queries, permissions and `Db` API, so you
+can start thin and [upgrade to local-first](/docs/setup/web-client/thin-client#upgrading-to-local-first)
+later without changing app code.
+
+|                  | [Thin Client](/docs/setup/web-client/thin-client) | [Local-First Client](/docs/setup/web-client/local-first-client)       |
+| :--------------- | :------------------------------------------------ | :-------------------------------------------------------------------- |
+| Bundle           | %bundle.thin% gzipped                             | adds the Wasm engine (%bundle.wasm% gzipped), loaded as its own chunk |
+| Queries run      | on your backend, under the user's policies        | in the browser, against a local replica                               |
+| Writes show up   | after one round trip                              | instantly, then sync                                                  |
+| Offline          | no                                                | yes, reads and writes                                                 |
+| Local storage    | none                                              | IndexedDB, per account                                                |
+| Wasm and workers | none                                              | a Wasm engine in a shared worker                                      |
+| Setup            | nothing beyond `JazzProvider`                     | a `client` loader and a few bundler lines                             |
+
+Both need React 19 or later for the React bindings (`jazz-tools` declares `react >=19`, so npm
+refuses to install it next to React 18).
+
+Pick the thin client by default. Pick local-first when users need instant UI on every change, work
+offline, or keep large working sets that should not round-trip on every read.

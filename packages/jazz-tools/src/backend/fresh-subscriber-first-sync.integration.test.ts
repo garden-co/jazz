@@ -42,7 +42,7 @@ describe("fresh subscriber first sync", () => {
         permissions,
         serverUrl: server.url,
         driver: { type: "persistent", dataPath: join(directory, name) },
-        initial: "local-first",
+        initial: "device",
       });
       sessions.push(session);
       const snapshot = session.getSnapshot();

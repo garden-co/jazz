@@ -9,9 +9,9 @@
     "setup/deployment",
     "setup/auth",
     "---Clients---",
-    "setup/backend",
     "setup/web-client",
     "setup/react-native",
+    "setup/backend-client",
     "---Working with Data---",
     "schemas",
     "reading",
@@ -24,7 +24,6 @@
     "recipes/drafts-and-branches",
     "recipes/access-control",
     "recipes/data-patterns",
-    "recipes/auth",
     "recipes/effect",
     "---Reference---",
     "reference/where-operators",
@@ -32,6 +31,7 @@
     "reference/framework-patterns",
     "reference/examples",
     "reference/internals",
-    "reference/local-first-auth-internals"
+    "reference/local-first-auth-internals",
+    "changelog"
   ]
 }

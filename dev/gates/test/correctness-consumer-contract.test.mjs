@@ -144,6 +144,7 @@ test("every direct Jazz Tools Vitest consumer is sealed before it runs", () => {
     "test:solid",
     "test:svelte",
     "test:browser",
+    "test:browser:storage-quota",
   ])
     assert.match(
       pkg.scripts[name],

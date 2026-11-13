@@ -1,12 +1,114 @@
 ---
 title: CLI & MCP
-description: "The Jazz command line and its MCP server for agents."
+description: "Learn what the jazz-tools command line does, and how agents use your app's data through its MCP server."
 ---
 
-<Callout type="info">
-  Preview: this page is a rough outline for the server-first docs restructure. The bullets below are
-  what it will cover.
-</Callout>
+`jazz-tools` is the command line that comes with Jazz. Run it with `npx jazz-tools <command>`:
 
-- `jazz-tools` CLI: create apps, deploy schemas and permissions, run a server
-- MCP server for coding agents
+| Command                                 | What it does                                                                                                     |
+| :-------------------------------------- | :--------------------------------------------------------------------------------------------------------------- |
+| `validate`                              | Checks `schema.ts` and `permissions.ts` and compiles them (see [Defining Tables](/docs/schemas/defining-tables)) |
+| `migrations create`, `migrations graph` | Writes a migration between two schema versions, or draws the graph (see [Migrations](/docs/schemas/migrations))  |
+| `schema compile`                        | Prints the compiled schema as JSON                                                                               |
+| `inspect <command>`                     | Reads and changes your app's data through its backend, as the [Inspector](/docs/tooling/inspector) does          |
+| `inspect mcp`                           | Serves the same operations as an MCP server, for coding agents                                                   |
+
+`npx jazz-tools --help` and `npx jazz-tools inspect --help` list every option.
+
+## `jazz-tools inspect`
+
+`inspect` talks to your app's backend, through the same API as the Inspector page, so it sees
+exactly what your `inspect` hook allows. See [Who may inspect](/docs/tooling/inspector#who-may-inspect).
+Every command prints one JSON document; a failure prints `{ "error": <code>, "message": … }` and
+exits with 1, so agents can use it directly.
+
+Name the app with `--app <url>`: its URL, or the URL Jazz is served at if you changed `basePath`.
+Without `--app` it uses `$JAZZ_APP_URL`, else `http://localhost:3000`, and assumes Jazz under `/jazz`.
+
+### Signing in
+
+In local development (`NODE_ENV=development`, the CLI on the same machine) no sign-in is needed.
+Elsewhere, ask a person for a token:
+
+```bash title="Terminal"
+npx jazz-tools inspect login --app https://my-app.com
+```
+
+This prints a line with an approval URL and opens it in the browser. A person whom your `inspect`
+hook lets in approves it there, and the browser hands the token to the waiting command, which keeps
+it in `~/.config/jazz/inspect-tokens.json`, per app URL. The token is read-only, unless you ask for
+more:
+
+| Option             | Default              | What it does                                        |
+| :----------------- | :------------------- | :-------------------------------------------------- |
+| `--write`          | read-only            | Ask to write too                                    |
+| `--ttl <duration>` | `1h`                 | How long the token lasts (at most a day by default) |
+| `--tables a,b`     | every table          | Limit the token to these tables                     |
+| `--label <text>`   | `jazz-tools inspect` | Shown to the person who approves                    |
+| `--no-browser`     |                      | Only print the URL                                  |
+
+When the browser runs on another machine, the approval page shows the token instead: store it with
+`npx jazz-tools inspect login --token <token>`. A `JAZZ_INSPECT_TOKEN` environment variable wins over
+a stored token. `logout` forgets the app's token, and `whoami` shows who the backend says you are,
+whether you may write and when the token expires. Without a token, commands fail with
+`unauthorized` and say to run `login`.
+
+The CLI sends a token over plain `http://` only to this machine (`localhost` or a loopback address);
+anywhere else needs `https://`.
+
+### Reading and writing
+
+| Command                                            | What it does                                                               |
+| :------------------------------------------------- | :------------------------------------------------------------------------- |
+| `schema`                                           | Tables, columns, history tables and permissions                            |
+| `query '<json>'`                                   | Runs a query, e.g. `'{"table":"todos","where":{"done":false},"limit":20}'` |
+| `get <table> <id>`                                 | One row, with who created and last changed it                              |
+| `history <table> <id>`                             | Every version of a row, with who wrote each                                |
+| `insert <table> '<values>' [--id <id>]`            | Inserts a row                                                              |
+| `update <table> <id> '<values>'`                   | Changes a row's columns                                                    |
+| `delete <table> <id>`                              | Deletes a row                                                              |
+| `explain '<query json>' --as <user>`               | Which read policy allowed or denied each row for that user                 |
+| `sessions`                                         | Sync sessions connected to the backend instance that answers               |
+| `link ['<query json>'] [--table <t>] [--row <id>]` | An Inspector URL that opens on exactly this, with no credential in it      |
+
+Writes need a token that allows them, and change real data.
+
+Add `--as <user>` (your backend's user ID) to `query`, `get`, `insert`, `update`, `delete`,
+`explain` and `link` to run under that user's permissions, seeing and writing what they could.
+Without it, commands use the backend's authority and see every row. If your policies read
+`session.claims`, pass the user's claims too with `--claims '{"role":"manager"}'` (a JSON object;
+only with `--as`). Without them, policies see no claims, and answers carry a `warning` when that
+may matter.
+
+`explain` needs `--as`. Its answer lists the arms of the table's read policy (`clauses`, numbered
+from 0, each with its `text`, such as `owner = session.user`) and, for each row, whether it's
+`allowed` and `by` which clauses. A token limited to some tables gets neither the clauses' `text` nor `by`; for a table with redacted
+columns, `by` is left out. A table with branches, and a `history.<table>` query, can't be explained yet.
+
+## The MCP server
+
+`jazz-tools inspect mcp` serves the same operations as MCP tools over stdio. Add it to your agent,
+for example to Claude Code:
+
+```bash title="Terminal"
+claude mcp add jazz -- npx jazz-tools inspect mcp --app https://my-app.com
+```
+
+| Tool             | Arguments                                 | What it does                                                         |
+| :--------------- | :---------------------------------------- | :------------------------------------------------------------------- |
+| `whoami`         |                                           | Who the backend says the agent is, what it may do, the Inspector URL |
+| `request_access` | `write`, `ttlSeconds`, `tables`, `reason` | Asks a person to approve a token; returns the URL to give them       |
+| `schema`         |                                           | Tables, columns, history tables and permissions                      |
+| `query`          | `query`, `as`, `claims`                   | Runs a query                                                         |
+| `get`            | `table`, `id`, `as`, `claims`             | One row                                                              |
+| `history`        | `table`, `id`                             | Every version of a row                                               |
+| `write`          | `ops`, `as`, `claims`                     | Inserts, updates and deletes rows in one transaction                 |
+| `explain`        | `query`, `as`, `claims`                   | Which read policy allowed or denied each row                         |
+| `sessions`       |                                           | Connected sync sessions                                              |
+| `inspector_link` | `query`, `table`, `row`, `as`, `claims`   | An Inspector URL to show a person what the agent means               |
+
+An agent starts with `whoami`. If that fails with `unauthorized`, it calls `request_access` and gives
+the URL to a person. Once they approve in their browser, the token goes to the MCP server, which
+keeps it like `login` does, and the agent calls `whoami` again. The server shares the token store
+with the CLI, so a token approved for one works for the other. Query answers carry an
+`inspectorUrl` the agent can link to show you exactly those rows.

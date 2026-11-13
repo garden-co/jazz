@@ -9,8 +9,8 @@ import { todoCrudTest } from "../../../testing/todo-app-scenarios.js";
 import { describe, it, expect, afterEach } from "vitest";
 import { mount, unmount, type Component } from "svelte";
 import { SCOPE, SERVER_URL } from "./test-constants.js";
-import { createAccountManager, type DbConfig } from "jazz-tools";
-import { prepareTestAccount } from "../../../testing/accounts.js";
+import { memoryAccountStore } from "../../../testing/accounts.js";
+import type { SessionOverrides } from "../../src/account.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -37,25 +37,19 @@ describe("Svelte Todo App E2E", () => {
   }> = [];
 
   /** Mount the real App. Returns the container element. */
-  async function mountApp(config: Partial<DbConfig> = {}): Promise<HTMLDivElement> {
+  /** Each mount is its own user unless it shares a `store` with another. */
+  async function mountApp(config: SessionOverrides = {}): Promise<HTMLDivElement> {
     const el = document.createElement("div");
     document.body.appendChild(el);
 
     // Dynamic import so the Svelte compiler processes the component
     const { default: App } = await import("../../src/App.svelte");
 
-    const account =
-      config.account ??
-      (await prepareTestAccount(
-        createAccountManager,
-        config.appId ?? "test-app",
-        config.serverUrl ?? SERVER_URL,
-      ));
-    const resolvedConfig: Partial<DbConfig> = {
+    const resolvedConfig: SessionOverrides = {
       appId: config.appId ?? "test-app",
       driver: { type: "persistent", dbName: crypto.randomUUID() },
+      store: memoryAccountStore(),
       ...config,
-      account,
     };
     const storageNamespace =
       resolvedConfig.driver?.type === "persistent" ? resolvedConfig.driver.dbName : undefined;
@@ -65,7 +59,7 @@ describe("Svelte Todo App E2E", () => {
     });
     mounts.push({ instance, container: el, storageNamespace });
 
-    // Wait for JazzSvelteProvider to initialise and TodoList to render
+    // Wait for JazzProvider to initialise and TodoList to render
     await waitFor(
       () => el.querySelector("#todo-list") !== null,
       5000,
@@ -75,7 +69,7 @@ describe("Svelte Todo App E2E", () => {
     return el;
   }
 
-  /** Unmount a specific app instance (triggers JazzSvelteProvider shutdown). */
+  /** Unmount a specific app instance (triggers JazzProvider shutdown). */
   async function unmountApp(el: HTMLDivElement): Promise<void> {
     const idx = mounts.findIndex((m) => m.container === el);
     if (idx === -1) return;
@@ -106,10 +100,10 @@ describe("Svelte Todo App E2E", () => {
 
   it("persists todos across app unmount and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
-    const account = await prepareTestAccount(createAccountManager, "test-app", SERVER_URL);
+    const store = memoryAccountStore();
 
     // First session: mount app, add a todo via the form
-    const el1 = await mountApp({ account, driver: { type: "persistent", dbName } });
+    const el1 = await mountApp({ store, driver: { type: "persistent", dbName } });
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
     const form1 = input1.closest("form")!;
 
@@ -127,7 +121,7 @@ describe("Svelte Todo App E2E", () => {
     await unmountApp(el1);
 
     // Second session: remount with same dbName — IndexedDB data should load
-    const el2 = await mountApp({ account, driver: { type: "persistent", dbName } });
+    const el2 = await mountApp({ store, driver: { type: "persistent", dbName } });
 
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,

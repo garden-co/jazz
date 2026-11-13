@@ -2,9 +2,9 @@
 
 This directory is the native relay package for Jazz's supported React Native
 alpha. Applications use the public `jazz-tools/react-native` client API: open
-a client with `createJazzClient` (or `<JazzSessionProvider>` from
-`jazz-tools/expo`), which keeps an `AccountHandle` for its user. The
-[canonical Expo scaffold](../../examples/todo-client-localfirst-expo) shows the
+a session with `createJazzClient` (or `<JazzProvider>` from
+`jazz-tools/expo`), which signs in a device account or your backend's user. The
+[canonical Expo scaffold](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-expo) shows the
 complete client lifecycle.
 
 The alpha requires a matching native development or release build. Expo Go
@@ -21,7 +21,7 @@ ordinary full-cell transaction commands onto its existing
 and the account-scoped persistent relay; applications do not construct a
 foreground engine or exchange native capabilities directly. The complete
 ownership/threading/packaging contract and staged acceptance path are specified in
-[`jazz/SPEC/19_native_relays.md`](../jazz/SPEC/19_native_relays.md#196-foreground-native-runtime-execution).
+[`crates/jazz/SPEC/19_native_relays.md`](https://github.com/garden-co/jazz/blob/main/crates/jazz/SPEC/19_native_relays.md#196-foreground-native-runtime-execution).
 
 The package reserves a generated `JazzRelay` TurboModule boundary. Android and
 iOS autolink the module and reject relay use unless a matching development or
@@ -54,14 +54,14 @@ bearer tokens. On auth switch, trusted code revokes the old capability (closing
 all of its relay/client aliases) before admitting the new scope.
 
 The shared artifact seam is `jazz_native_relay_abi_version` from
-`jazz-native-relay`'s C ABI (`include/jazz_native_relay.h`). Android/JNI will
-link that artifact directly when the Android build pipeline exists; it must not
-route through the obsolete UniFFI library. The remaining Android runner gate is
-a real Gradle/NDK AAR build and emulator installation against that linked
-artifact.
+`jazz-native-relay`'s C ABI (`include/jazz_native_relay.h`). Android (JNI) and
+iOS link that artifact directly from the `jazz-rn-android` and `jazz-rn-ios`
+payloads; neither routes through the obsolete UniFFI library.
 
-The wrapper accepts ABI V1, which uses opaque host-generated admission
-capabilities and trusted revocation. ABI V1 defines the shared foreground
+The wrapper accepts exactly one ABI version, `NATIVE_RELAY_ABI_V1` (currently
+5, generated from `jazz-native-relay`), and refuses any other native build. That
+ABI uses opaque host-generated admission capabilities and trusted revocation.
+It defines the shared foreground
 `NativeDb` postcard seam with canonical-query prepare/read/subscribe/drain,
 plus pending-operation poll/cancel commands for chunk-backed reads. It is a
 byte-oriented native-host contract, not a new React Native row/query API:
@@ -83,8 +83,13 @@ autolinking must discover it from the application, not through `jazz-tools`.
 For an Expo development build, the minimal configuration is:
 
 ```bash
-pnpm add jazz-tools@alpha jazz-rn@alpha
+pnpm add jazz-tools jazz-rn
 ```
+
+Install the same version of both. A release candidate is not on npm: install
+`jazz-tools` and `jazz-rn` from the `.tgz` assets on its GitHub prerelease
+(`https://github.com/garden-co/jazz/releases/tag/v<version>`), whose `jazz-rn`
+already points `jazz-rn-ios` and `jazz-rn-android` at the same release's assets.
 
 ```json
 {
@@ -133,7 +138,7 @@ Native hosts must include a matching native module and open it through an
 account handle.
 
 The normative host design and its implementation ledger live in
-[`crates/jazz/SPEC/19_native_relays.md`](../jazz/SPEC/19_native_relays.md).
+[`crates/jazz/SPEC/19_native_relays.md`](https://github.com/garden-co/jazz/blob/main/crates/jazz/SPEC/19_native_relays.md).
 
 ### Native release payloads
 

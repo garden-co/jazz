@@ -1,10 +1,11 @@
 import { createHmac, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
-import { createJazz, vercel } from "./index.js";
+import { fetchFor } from "../runtime/in-process-transport.js";
+import { createJazz, vercel, vercelBlob } from "./index.js";
 import {
   defaultCoreName,
   newerVersion,
@@ -95,6 +96,8 @@ function fakeVercel(core: { appId: string; url: string }) {
     failing: false,
     /** The next `slowStarts` starts haven't run yet when the function looks. */
     slowStarts: 0,
+    /** Called when a start brings the core up. */
+    onStart: undefined as (() => void) | undefined,
   };
   const files = new Map<string, Buffer>([["/data/app-id", Buffer.from(`${core.appId}\n`)]]);
   const handle = (): SandboxHandle => ({
@@ -137,6 +140,7 @@ function fakeVercel(core: { appId: string; url: string }) {
         return;
       }
       state.failing = false;
+      state.onStart?.();
       if (!state.running || newerVersion(version, state.running)) state.running = version;
     },
     writeFiles: async (written) => {
@@ -345,6 +349,125 @@ describe("vercel() store", () => {
     expect(fake.calls).toEqual([]);
   }, 60_000);
 
+  it("sends a request Vercel's router refused again once the core is back", async () => {
+    // Vercel's router in front of the Sandbox's port: while the core is down
+    // it answers itself, with its error header.
+    const router = { down: false, served: 0 };
+    const server = createServer((request, response) => {
+      if (router.down) {
+        response.writeHead(502, { "x-vercel-error": "SANDBOX_NOT_LISTENING" });
+        return response.end("SANDBOX_NOT_LISTENING");
+      }
+      if (request.url !== "/health") router.served++;
+      response.end("ok");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => server.close(resolve)));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const appId = randomUUID();
+    const fake = fakeVercel({ appId, url });
+    // A start brings the core back up.
+    fake.state.onStart = () => {
+      router.down = false;
+    };
+    const credential = oidcToken(await startIssuer());
+    const opened = await openVercelCore({
+      options: { sdk: fake.sdk, backendCredential: () => credential, name: "jazz-test" },
+      openRemote: ({ url: base }) =>
+        ({
+          serverUrl: base,
+          async handle(method: string, path: string) {
+            const response = await fetch(`${base}${path}`, { method });
+            const headers: string[][] = [];
+            response.headers.forEach((value, name) => headers.push([name, value]));
+            return {
+              status: response.status,
+              headers,
+              body: new Uint8Array(await response.arrayBuffer()),
+            };
+          },
+          close: async () => {},
+        }) as never,
+      version: "1.2.3",
+      env: { VERCEL_ENV: "production" },
+    });
+    cleanups.push(() => opened.close());
+
+    // The core stops while the Sandbox still runs, inside the window in
+    // which this instance trusts it without a check.
+    router.down = true;
+    const starts = fake.calls.filter((call) => call.startsWith("start")).length;
+    const answer = await opened.handle("GET", "/apps/x/schemas", [], new Uint8Array());
+    expect(answer.status).toBe(200);
+    expect(fake.calls.filter((call) => call.startsWith("start")).length).toBe(starts + 1);
+    expect(router.served).toBe(1);
+
+    // The backend's own requests (in-process) are sent again too.
+    router.down = true;
+    const response = await fetchFor(opened.serverUrl)(`${opened.serverUrl}/apps/x/schemas`);
+    expect(response.status).toBe(200);
+    expect(router.served).toBe(2);
+
+    // A small buffered body is sent again as well.
+    router.down = true;
+    const posted = await fetchFor(opened.serverUrl)(`${opened.serverUrl}/apps/x/schemas`, {
+      method: "POST",
+      body: new Uint8Array(1024),
+    });
+    expect(posted.status).toBe(200);
+    expect(router.served).toBe(3);
+  }, 60_000);
+
+  it("never holds a streamed upload to send it again: the router's answer passes, and the core wakes for the next request", async () => {
+    const router = { down: false, served: 0 };
+    const server = createServer((request, response) => {
+      request.resume();
+      if (router.down) {
+        response.writeHead(502, { "x-vercel-error": "SANDBOX_NOT_LISTENING" });
+        return response.end("SANDBOX_NOT_LISTENING");
+      }
+      if (request.url !== "/health") router.served++;
+      response.end("ok");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => server.close(resolve)));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const fake = fakeVercel({ appId: randomUUID(), url });
+    fake.state.onStart = () => {
+      router.down = false;
+    };
+    const credential = oidcToken(await startIssuer());
+    const opened = await openVercelCore({
+      options: { sdk: fake.sdk, backendCredential: () => credential, name: "jazz-test" },
+      openRemote: ({ url: base }) =>
+        ({ serverUrl: base, handle: async () => ({}), close: async () => {} }) as never,
+      version: "1.2.3",
+      env: { VERCEL_ENV: "production" },
+    });
+    cleanups.push(() => opened.close());
+
+    router.down = true;
+    const clone = vi.spyOn(Request.prototype, "clone");
+    const upload = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(64 * 1024));
+        controller.close();
+      },
+    });
+    const response = await fetchFor(opened.serverUrl)(`${opened.serverUrl}/apps/x/upload`, {
+      method: "POST",
+      body: upload,
+      duplex: "half",
+    } as RequestInit);
+    expect(clone).not.toHaveBeenCalled();
+    expect(response.status).toBe(502);
+    // The core is woken for the next request, which goes through.
+    const starts = fake.calls.filter((call) => call.startsWith("start")).length;
+    const next = await fetchFor(opened.serverUrl)(`${opened.serverUrl}/apps/x/schemas`);
+    expect(next.status).toBe(200);
+    expect(fake.calls.filter((call) => call.startsWith("start")).length).toBe(starts + 1);
+  }, 60_000);
+
   it("stops the Sandbox of a core that can't start, and holds off retrying", async () => {
     const appId = randomUUID();
     const core = await startTrustedCore(appId);
@@ -381,6 +504,47 @@ describe("vercel() store", () => {
       /could not start/,
     );
     expect(fake.calls.length).toBe(calls);
+  }, 60_000);
+
+  it("refuses a Blob store another environment claimed, before serving", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const fake = fakeVercel({ ...core, appId });
+    const asked: string[] = [];
+    // The test core's workload is production's; the store says preview's.
+    // Answers at once, before the wake is done.
+    const claimedByPreview = (async (input: RequestInfo | URL) => {
+      asked.push(String(input));
+      return new Response("preview\n");
+    }) as typeof fetch;
+    let closed = 0;
+    await expect(
+      openVercelCore({
+        options: {
+          sdk: fake.sdk,
+          backendCredential: core.credential,
+          name: "jazz-test",
+          blobs: vercelBlob({ storeId: "store_Shared1" }),
+        },
+        openRemote: ({ url }) =>
+          ({
+            serverUrl: url,
+            handle: async () => ({}),
+            close: async () => {
+              closed++;
+            },
+          }) as never,
+        version: "1.2.3",
+        env: { VERCEL_ENV: "production" },
+        fetch: claimedByPreview,
+      }),
+    ).rejects.toThrow(/Blob store Shared1 serves the preview environment, not production/);
+    // The core the wake came up with is closed, though the refusal came first.
+    for (let i = 0; closed === 0 && i < 300; i++) await new Promise((r) => setTimeout(r, 100));
+    expect(closed).toBe(1);
+    expect(asked).toEqual([
+      "https://shared1.private.blob.vercel-storage.com/.jazz-environment?cache=0",
+    ]);
   }, 60_000);
 
   it("never reads an error file it didn't cause as its start's failure", async () => {

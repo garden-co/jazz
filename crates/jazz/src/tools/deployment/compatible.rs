@@ -9,7 +9,9 @@ pub fn schemas_are_compatible(left: &Schema, right: &Schema) -> bool {
     let normalize = |schema: &Schema| {
         let mut schema = structural(schema.clone());
         for table in schema.values_mut() {
+            // Indexes change how nodes find rows, not the rows.
             table.indexed_columns = None;
+            table.composite_indexes = Vec::new();
             // Retention changes what nodes keep, not the rows.
             table.history = Default::default();
             table
@@ -157,10 +159,12 @@ pub(super) fn validate_compatible_graph(
                     }
                 })
             };
-            if projection(previous)? != projection(lens)? {
+            let (first, second) = (projection(previous)?, projection(lens)?);
+            if first != second {
                 return Err(DeploymentError::ConflictingPaths {
                     first: vec![previous.source_hash, previous.target_hash],
                     second: vec![lens.source_hash, lens.target_hash],
+                    difference: super::projection_difference(&first, &second),
                 });
             }
         } else {

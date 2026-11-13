@@ -8,6 +8,11 @@ const c = JSON.parse(readFileSync(configPath, "utf8"));
 const require = createRequire(join(c.project, "package.json"));
 const { schema: s } = await import(pathToFileURL(require.resolve("jazz-tools")));
 const backendModule = await import(pathToFileURL(require.resolve("jazz-tools/backend")));
+// alpha.61 renamed local-first guests to device accounts and moved the
+// account handle off the session snapshot; older releases keep the old names.
+const deviceAccounts = typeof backendModule.acceptDeviceAccounts === "function";
+const deviceInitial = deviceAccounts ? "device" : "local-first";
+const accountIdOf = (snap) => (deviceAccounts ? snap.user?.accountId : snap.account?.id);
 const { createJazz, remote } = backendModule;
 // Baseline packages that predate the rename call it createJazzSession.
 const createJazzClient = backendModule.createJazzClient ?? backendModule.createJazzSession;
@@ -96,16 +101,17 @@ async function open(name) {
       permissions,
       driver: { type: "persistent", dataPath: join(c.state, name) },
       store: store(name),
-      initial: "local-first",
+      initial: deviceInitial,
     }),
     `open ${name}`,
   );
   sessions.add(session);
   const snap = session.getSnapshot();
   assert(snap.client, snap.error?.message ?? snap.status);
-  assert(snap.account);
-  assert.notEqual(snap.account.id, "00000000-0000-0000-0000-000000000000");
-  return { session, db: snap.client.db, account: snap.account?.id };
+  const account = accountIdOf(snap);
+  assert(account);
+  assert.notEqual(account, "00000000-0000-0000-0000-000000000000");
+  return { session, db: snap.client.db, account };
 }
 async function close(x) {
   await timeout(x.session.getSnapshot().client.shutdown({ waitForSync: false }), "shutdown");

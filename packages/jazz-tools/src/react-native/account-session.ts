@@ -71,6 +71,6 @@ export function resolveNativeSession(config: DbConfig) {
 function requireBearer(bearer: string | undefined): string {
   if (bearer) return bearer;
   throw new Error(
-    "A React Native user signed in through the app's backend syncs with the app's bearer: pass `bearer` to createAccountManager",
+    "A React Native user signed in through the app's backend syncs with the app's bearer: pass `bearer` to createJazzClient",
   );
 }

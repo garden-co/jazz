@@ -230,6 +230,70 @@ fn writes_transactions_and_attribution_go_through_one_binding() {
     );
 }
 
+/// A backend stages alice's inserts into one transaction the way the
+/// JavaScript host does: it repeats her claims before each write and lets
+/// the binding draw each row id. Neither undoes the transaction's applied
+/// overlay, so no stage replays the writes staged before it and staging N
+/// inserts costs N applies, not N²/2 (R41). Counted through the replay
+/// hook rather than timed, so the test is exact and not flaky; a read
+/// outside the transaction does undo the overlay, and the next stage then
+/// replays the batch once.
+///
+/// ```text
+/// backend ──claims(alice)──insert──claims(alice)──insert── … ──commit
+///              (overlay stays applied between stages)
+/// ```
+#[test]
+fn staging_many_inserts_replays_no_earlier_write() {
+    let db = authority();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let alice_bytes = alice.canonical();
+    let tx = &OpenTransactionId::new().to_string();
+    db.begin_transaction(tx, "mergeable", Some(alice_bytes.as_bytes()), None)
+        .unwrap();
+    const N: usize = 200;
+    for n in 0..N {
+        db.set_identity_claims(alice_bytes.as_bytes(), json!({ "role": "member" }))
+            .unwrap();
+        db.insert_in_transaction(tx, "notes", &title(&format!("note {n}")), &none())
+            .unwrap();
+    }
+    assert_eq!(db.db.overlay_replays_for_test(), 0);
+
+    // Another use of the store undoes the overlay: the next stage replays
+    // the batch once, then stays incremental.
+    assert!(titles(&db).is_empty(), "staged writes wait for the commit");
+    for n in 0..N {
+        db.insert_in_transaction(tx, "notes", &title(&format!("more {n}")), &none())
+            .unwrap();
+    }
+    assert_eq!(db.db.overlay_replays_for_test(), N);
+
+    assert!(db.commit_transaction(tx, None).unwrap().rejected.is_none());
+    assert_eq!(titles(&db).len(), 2 * N);
+    assert_eq!(db.db.evidence_copies_for_test(), 0);
+}
+
+/// The backend's own writes (no session) are checked by no policy, so
+/// their rows are trusted. Staging many of them in one transaction neither
+/// replays earlier writes nor copies the batch's written-row set for each
+/// stage's check: either would make N inserts cost O(N²) (R41).
+#[test]
+fn staging_many_unchecked_inserts_copies_nothing_per_stage() {
+    let db = authority();
+    let tx = &OpenTransactionId::new().to_string();
+    db.begin_transaction(tx, "mergeable", None, None).unwrap();
+    const N: usize = 200;
+    for n in 0..N {
+        db.insert_in_transaction(tx, "notes", &title(&format!("note {n}")), &none())
+            .unwrap();
+    }
+    assert_eq!(db.db.overlay_replays_for_test(), 0);
+    assert_eq!(db.db.evidence_copies_for_test(), 0);
+    assert!(db.commit_transaction(tx, None).unwrap().rejected.is_none());
+    assert_eq!(titles(&db).len(), N);
+}
+
 #[test]
 fn a_staged_write_refused_for_its_rows_state_rejects_the_commit() {
     let db = open(0xa2);
@@ -1558,6 +1622,91 @@ fn a_remote_subscription_never_lists_pending_local_versions() {
         .unwrap();
     assert_eq!(rows_in(&drive(&links, read).unwrap()), 2);
     assert_eq!(titles(&server), ["changed", "pending"]);
+}
+
+/// The React Native relay's shape: a non-durable foreground served by the
+/// relay's own durable store, which syncs with the server; every binding's
+/// host ticks only when asked, and is listening before anything opens.
+fn device_chain_subscribes_to_a_large_value(file: Option<&std::path::Path>) {
+    let server = authority();
+    let large = "w".repeat(300 * 1024);
+    server.insert("notes", &title(&large), &none()).unwrap();
+    let node = 0xd8;
+    let relay = match file {
+        Some(path) => {
+            let db = block_on(Db::open_at(
+                DbConfig::new(schema(), identity(node)),
+                path,
+                jazz::db::FileOptions::default(),
+            ))
+            .unwrap();
+            Binding::new(db, identity(node), false)
+        }
+        None => open(node),
+    };
+    let tab = open(0xd9);
+    let flags: Vec<(&Binding, Rc<Cell<bool>>)> = [&relay, &tab, &server]
+        .into_iter()
+        .map(|binding| {
+            let asked = Rc::new(Cell::new(false));
+            let flag = Rc::clone(&asked);
+            *binding.hooks.schedule_tick.borrow_mut() = Some(Box::new(move || flag.set(true)));
+            (binding, asked)
+        })
+        .collect();
+    relay.set_remote_link_hint("live").unwrap();
+    let up = relay.connect_upstream();
+    let down = server
+        .accept_subscriber(relay.author(), Default::default())
+        .unwrap();
+    tab.set_non_durable_client();
+    let tab_up = tab.connect_upstream();
+    let tab_down = relay
+        .accept_subscriber(relay.author(), Default::default())
+        .unwrap();
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+    let query = postcard::to_allocvec(&Query::from("notes").select(["title"])).unwrap();
+    let mut stream = tab
+        .subscribe(&query, &json!({ "tier": "local-first" }), None, None)
+        .unwrap();
+    for (binding, asked) in &flags {
+        if asked.replace(false) {
+            block_on(binding.tick()).unwrap();
+        }
+    }
+    let mut seen = Vec::new();
+    for _ in 0..6 {
+        let event = binding_host::event_chunk(drive_on_demand(&links, tab.next_event(&mut stream)))
+            .unwrap();
+        if let EventChunk::Delta { delta, .. } = event {
+            let (added, _) = jazz::binding_codec::decode_subscription_delta_rows(&delta).unwrap();
+            seen.extend(
+                added
+                    .iter()
+                    .flat_map(|batch| &batch.rows)
+                    .map(|row| row.cells["title"].clone()),
+            );
+        }
+        if !seen.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(seen, [Value::String(large)]);
+}
+
+/// A foreground subscribed through an in-memory relay receives a row whose
+/// large value the relay fetches from the server, when every host ticks
+/// only when asked (#4829).
+#[test]
+fn a_foreground_over_a_memory_relay_subscribes_to_a_large_value_on_demand() {
+    device_chain_subscribes_to_a_large_value(None);
+}
+
+/// The same through a SQLite file relay, as React Native's relay stores it.
+#[test]
+fn a_foreground_over_a_file_relay_subscribes_to_a_large_value_on_demand() {
+    let dir = tempfile::tempdir().unwrap();
+    device_chain_subscribes_to_a_large_value(Some(&dir.path().join("relay.sqlite")));
 }
 
 /// A tab's `local` wait still open when its worker refuses the write

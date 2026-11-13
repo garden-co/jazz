@@ -1,17 +1,8 @@
 export type { JazzClient } from "../web/create-jazz-client.js";
-export { BrowserAuthSecretStore } from "../runtime/auth-secret-store.js";
-export type {
-  AuthSecretStore,
-  BrowserAuthSecretStoreOptions,
-} from "../runtime/auth-secret-store.js";
 export type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 export { getSubscriptionStore } from "../subscription-store-internal.js";
 export type { CacheEntryHandle, UseAllState } from "../subscription-store-internal.js";
 
-export {
-  createAccountManager,
-  type AccountManagerConfig,
-} from "../accounts/create-account-manager.js";
 export * from "../accounts/exports.js";
 
 export { accountRegistryUrl } from "../accounts/context.js";
@@ -19,10 +10,16 @@ export { accountRegistryUrl } from "../accounts/context.js";
 export { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
 export type {
   JazzSession,
-  JazzSessionActions,
   JazzSessionSnapshot,
   JazzSessionOperation,
-} from "../session/state.js";
+  JazzUser,
+} from "../session/jazz-session.js";
 
-export { createJazzApp, type JazzAppConfig } from "../session/create-jazz-app.js";
-export type { JazzApp, JazzAppSnapshot, JazzUser } from "../session/app.js";
+// Removed in alpha.61: stubs that throw, naming the replacement (one release).
+export {
+  AccountManager,
+  BrowserAuthSecretStore,
+  createAccountManager,
+  createJazzApp,
+  exportLocalFirstSecret,
+} from "../removed-api.js";

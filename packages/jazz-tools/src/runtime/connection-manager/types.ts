@@ -16,6 +16,7 @@ import {
   LOCAL_ONLY,
   offlineLink,
   syncStatus,
+  NO_UPLOADS,
   type LinkStatus,
   type SyncStatus,
 } from "../sync-status.js";
@@ -253,8 +254,13 @@ export abstract class ConnectionManager {
   syncStatus(): SyncStatus {
     const link = this.linkStatus();
     // Without a server, local commits are never uploaded, so none wait.
-    if (link.state === "local-only") return syncStatus(link, 0);
-    return syncStatus(link, this.client?.getRuntime().pendingUploadCount?.() ?? 0);
+    if (link.state === "local-only") return syncStatus(link);
+    const runtime = this.client?.getRuntime();
+    return syncStatus(
+      link,
+      runtime?.uploadStatus?.() ?? NO_UPLOADS,
+      runtime?.lastLinkFailure?.() ?? null,
+    );
   }
 
   /** The upstream connection as the app sees it, including explicit disconnects. */
@@ -371,7 +377,16 @@ export abstract class ConnectionManager {
     this.client?.updateCookieSession(auth.cookieSession);
   }
 
-  abstract deleteClientStorage(): Promise<void>;
+  abstract deleteClientStorage(): Promise<{ pendingUploads?: number } | void>;
+
+  /**
+   * Whether this connection can still serve its Db: no storage reset took
+   * its client away. A Db whose sign-out failed before its teardown began
+   * keeps serving, and its session keeps it.
+   */
+  isUsable(): boolean {
+    return true;
+  }
 
   protected async shutdownClient(): Promise<void> {
     try {
@@ -413,12 +428,17 @@ export abstract class ConnectionManager {
       }) ?? null;
   }
 
-  async waitForPendingWrites(): Promise<void> {
+  /**
+   * Wait until every write committed so far is answered, for a graceful
+   * shutdown. With `inFlightStreams`, streaming writes still sending their
+   * value finish first, until that signal aborts (see `Db.letStreamsFinish`).
+   */
+  async waitForPendingWrites(options: { inFlightStreams?: AbortSignal } = {}): Promise<void> {
     const runtime = this.getCurrentClient()?.getRuntime();
     if (!runtime) return;
     if (!runtime.waitForPendingWrites)
       throw new Error("Runtime does not support graceful sync shutdown");
-    await runtime.waitForPendingWrites("global");
+    await runtime.waitForPendingWrites("global", { inFlightStreams: options.inFlightStreams });
   }
 
   async shutdown(): Promise<void> {

@@ -8,6 +8,7 @@ import {
 import { createListeners, toError } from "../runtime/util.js";
 import type { Db } from "../runtime/db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
+import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import type { DbReplacedReason } from "../runtime/db-replaced-error.js";
 
 export interface SessionClient {
@@ -19,25 +20,38 @@ type WipeableClient = {
     markReplaced?(reason: DbReplacedReason): void;
     waitForSync?(options?: { timeoutMs?: number }): Promise<void>;
     deleteClientStorage?(): Promise<void>;
+    getSyncStatus?(): { pendingUploads: number };
+    isUsable?(): boolean;
   };
 };
-export type JazzSessionOperation =
+
+/**
+ * Whether `client` still works after a teardown step failed: its Db says
+ * so, or (a client without one) the failure is one that stops before
+ * teardown, its sync wait or a shared client still in use elsewhere.
+ */
+function stillUsable(client: unknown, cause: unknown): boolean {
+  const usable = (client as WipeableClient | undefined)?.db?.isUsable?.();
+  if (usable !== undefined) return usable;
+  return cause instanceof GracefulShutdownSyncError || cause instanceof SharedClientShutdownError;
+}
+export type SessionCoreOperation =
   | "createLocalFirst"
   | "restoreLocalFirst"
   | "loginWithBackend"
   | "linkWithBackend"
   | "logout"
   | "retry";
-export interface JazzSessionSnapshot<Client> {
+export interface SessionCoreSnapshot<Client> {
   readonly status: "ready" | "signed-out" | "transitioning" | "error" | "closed";
   readonly account?: AccountHandle;
   readonly client?: Client;
-  readonly pending?: JazzSessionOperation;
+  readonly pending?: SessionCoreOperation;
   readonly error?: Error;
   /** Whether recovery repeats an uncommitted action or only reopens the selected account. */
   readonly recovery?: "action" | "session";
 }
-export interface JazzSessionActions {
+export interface SessionCoreActions {
   createLocalFirst(): Promise<void>;
   restoreLocalFirst(secret: string): Promise<void>;
   /**
@@ -56,15 +70,15 @@ export interface JazzSessionActions {
   retry(): Promise<void>;
   close(): Promise<void>;
 }
-export interface JazzSession<Client> extends JazzSessionActions {
-  getSnapshot(): JazzSessionSnapshot<Client>;
+export interface SessionCore<Client> extends SessionCoreActions {
+  getSnapshot(): SessionCoreSnapshot<Client>;
   subscribe(listener: () => void): () => void;
 }
-export interface JazzSessionConsumer<Client> {
-  acknowledge(snapshot: JazzSessionSnapshot<Client>): void;
+export interface SessionCoreConsumer<Client> {
+  acknowledge(snapshot: SessionCoreSnapshot<Client>): void;
   release(): void;
 }
-const consumers = new WeakMap<object, () => JazzSessionConsumer<unknown>>();
+const consumers = new WeakMap<object, () => SessionCoreConsumer<unknown>>();
 type ClientReplacer = (
   open: (current: unknown, account: AccountHandle) => Promise<unknown>,
   adopt?: (current: unknown, next: unknown) => void,
@@ -84,7 +98,7 @@ const switchers = new WeakMap<object, (from: AccountHandle) => Promise<boolean>>
  * switching when the session no longer holds `from` by then.
  */
 export function switchJazzSessionUser<Client>(
-  session: JazzSession<Client>,
+  session: SessionCore<Client>,
   from: AccountHandle,
 ): Promise<boolean> {
   const switchUser = switchers.get(session);
@@ -101,7 +115,7 @@ export function switchJazzSessionUser<Client>(
  * rejects.
  */
 export function replaceJazzSessionClient<Client>(
-  session: JazzSession<Client>,
+  session: SessionCore<Client>,
   open: (current: Client, account: AccountHandle) => Promise<Client>,
   /**
    * Hand the current client's work to `next` in place, instead of publishing
@@ -118,12 +132,12 @@ export function replaceJazzSessionClient<Client>(
   );
 }
 /** @internal Framework commit acknowledgement; never required by imperative callers. */
-export function attachJazzSessionConsumer<Client>(
-  session: JazzSession<Client>,
-): JazzSessionConsumer<Client> {
+export function attachSessionCoreConsumer<Client>(
+  session: SessionCore<Client>,
+): SessionCoreConsumer<Client> {
   const attach = consumers.get(session);
   if (!attach) throw new Error("Unknown Jazz session");
-  return attach() as JazzSessionConsumer<Client>;
+  return attach() as SessionCoreConsumer<Client>;
 }
 
 /** @internal Hosts prepare accounts and supply their client adapter once. */
@@ -145,9 +159,16 @@ export async function createJazzSessionOwner<
    * instead of keeping it for that user's next sign-in (shared devices).
    */
   clearOnSignOut?: boolean;
+  /**
+   * @internal With `clearOnSignOut`, how the host closes a signed-out
+   * account's local-first client and wipes its storage, in place of
+   * deleting it through the client: the browser closes this tab's client
+   * first and wipes only once no other tab has the account open.
+   */
+  wipeSignedOut?(client: Client, account: AccountHandle): Promise<boolean | void>;
   /** Add host methods (e.g. `reauthenticate`) to the session before it is sealed. */
-  decorate?(session: JazzSession<Client>): Extra;
-}): Promise<JazzSession<Client> & Extra> {
+  decorate?(session: SessionCore<Client>): Extra;
+}): Promise<SessionCore<Client> & Extra> {
   const { accounts, openClient } = options;
   let selected = accounts.getLoggedIn();
   if (!selected && options.initial === "local-first")
@@ -156,7 +177,7 @@ export async function createJazzSessionOwner<
     selected = await admitBackendAccount(accounts as AccountManager<unknown>, options.backend);
   await accounts.settleSelection();
   let client = selected ? await openClient(selected) : undefined;
-  let snapshot: JazzSessionSnapshot<Client> = Object.freeze({
+  let snapshot: SessionCoreSnapshot<Client> = Object.freeze({
     status: client ? "ready" : "signed-out",
     account: selected,
     client,
@@ -171,12 +192,12 @@ export async function createJazzSessionOwner<
   let closing: Promise<void> | undefined;
   let loggingOut: Promise<void> | undefined;
   let closed = false;
-  const publish = (next: JazzSessionSnapshot<Client>) => {
+  const publish = (next: SessionCoreSnapshot<Client>) => {
     snapshot = Object.freeze({ ...next });
     versions.set(snapshot, ++version);
     listeners.notify();
   };
-  const detach = (next: JazzSessionSnapshot<Client>) => {
+  const detach = (next: SessionCoreSnapshot<Client>) => {
     const waits = [...leases].map(
       (lease) =>
         new Promise<void>((resolve) => {
@@ -193,7 +214,7 @@ export async function createJazzSessionOwner<
   };
   const superseded = () => new Error("Jazz session operation was superseded");
   const perform = async (
-    operation: JazzSessionOperation,
+    operation: SessionCoreOperation,
     mutate: () => AccountHandle | undefined | Promise<AccountHandle | undefined>,
     token: number,
     detached?: Promise<void>,
@@ -203,6 +224,10 @@ export async function createJazzSessionOwner<
     if (token !== generation) throw superseded();
     // A switch has signed the previous account out: a failed sign-in can't reopen it.
     const previous = signsOut ? undefined : selected;
+    // A clearOnSignOut wipe that may not have finished, reported with the
+    // signed-out state: on a shared device the app must know.
+    let unfinishedWipe: Error | undefined;
+    let wiped = false;
     await (detached ??
       detach({ status: "transitioning", account: selected, pending: operation }).done);
     if (token !== generation) throw superseded();
@@ -210,14 +235,29 @@ export async function createJazzSessionOwner<
       if (client) {
         // A thin client keeps nothing in the browser, so there is nothing to wipe.
         const thin = isThinDb((client as WipeableClient).db as Db);
-        if (signsOut && options.clearOnSignOut && !thin) {
+        if (signsOut && options.clearOnSignOut && !thin && options.wipeSignedOut && selected) {
+          // False: another tab still has the account open, and wipes it.
+          wiped = (await options.wipeSignedOut(client, selected)) !== false;
+        } else if (signsOut && options.clearOnSignOut && !thin) {
           const db = (client as WipeableClient).db;
           // Upload what the server still accepts before wiping the rest.
           await db?.waitForSync?.({ timeoutMs: 5_000 }).catch(() => {});
+          // Say what the wipe took, as a sign-out past refused writes does.
+          const writes = db?.getSyncStatus?.().pendingUploads ?? 0;
           await db?.deleteClientStorage?.();
+          wiped = true;
+          if (writes > 0)
+            console.warn(
+              `Jazz signed out and wiped ${writes} write(s) the server hadn't confirmed, as clearOnSignOut asks. They are gone from this device; any the server did receive stay there.`,
+            );
           await client.shutdown();
         } else {
-          await client.shutdown({ waitForSync: true });
+          // A client the server refuses (this user's sign-in ended) can't
+          // upload, and the session is moving on from it either way.
+          await stopPastRefusal(
+            client,
+            signsOut ? "Jazz signed out" : "Jazz closed the previous client",
+          );
         }
         // Code that kept this client's Db learns it is gone, instead of
         // its queries going quiet.
@@ -225,20 +265,39 @@ export async function createJazzSessionOwner<
         client = undefined;
       }
     } catch (cause) {
-      if (token === generation) {
-        const usable =
-          cause instanceof GracefulShutdownSyncError || cause instanceof SharedClientShutdownError;
-        // Unknown teardown failures retain the client privately as a shutdown
-        // barrier. Never publish a potentially stopped runtime or enroll over it.
+      if (token !== generation) throw cause;
+      if (stillUsable(client, cause)) {
+        // The step failed before the client's teardown began (offline, a
+        // storage delete the worker couldn't start): it keeps working, and
+        // the app may try the operation again.
         publish({
-          status: usable ? "ready" : "error",
+          status: "ready",
           account: selected,
-          client: usable ? client : undefined,
+          client,
           error: toError(cause),
           recovery: "action",
         });
+        throw cause;
       }
-      throw cause;
+      if (operation !== "logout") {
+        // Its teardown began, so it can't be offered again. Unknown teardown
+        // failures retain the client privately as a shutdown barrier: never
+        // publish a potentially stopped runtime or enroll over it.
+        publish({ status: "error", account: selected, error: toError(cause), recovery: "action" });
+        throw cause;
+      }
+      // A sign-out whose teardown began and failed still signs out: the
+      // user asked to leave, and did. The failure is logged, and published
+      // as the session's error only when a clearOnSignOut wipe may not have
+      // finished. Code that kept the half-closed client's Db learns it is gone.
+      console.error("Jazz signed out, but closing the signed-out client failed.", cause);
+      if (options.clearOnSignOut && !wiped && !isThinDb((client as WipeableClient).db as Db))
+        unfinishedWipe = new Error(
+          "Jazz signed out, but couldn't finish wiping this device's data (clearOnSignOut). Some of the signed-out user's data may still be on this device.",
+          { cause },
+        );
+      (client as WipeableClient).db?.markReplaced?.("signed-out");
+      client = undefined;
     }
     if (token !== generation) throw superseded();
     try {
@@ -281,10 +340,15 @@ export async function createJazzSessionOwner<
       throw cause;
     }
     if (token !== generation) throw superseded();
-    publish({ status: client ? "ready" : "signed-out", account: selected, client });
+    publish({
+      status: client ? "ready" : "signed-out",
+      account: selected,
+      client,
+      ...(unfinishedWipe ? { error: unfinishedWipe, recovery: "session" as const } : {}),
+    });
   };
   const run = (
-    operation: JazzSessionOperation,
+    operation: SessionCoreOperation,
     mutate: () => AccountHandle | undefined | Promise<AccountHandle | undefined>,
     signsOut?: boolean,
   ): Promise<void> => {
@@ -309,12 +373,20 @@ export async function createJazzSessionOwner<
       .catch(() => {});
     return task;
   };
-  const session: JazzSession<Client> = {
+  const session: SessionCore<Client> = {
     getSnapshot: () => snapshot,
     subscribe: listeners.subscribe,
     createLocalFirst: () => run("createLocalFirst", () => accounts.createLocalFirst()),
-    restoreLocalFirst: (secret) =>
-      run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret)),
+    restoreLocalFirst: (secret) => {
+      // A malformed secret is the caller's mistake: refuse it before the
+      // current client is shut down, so the session goes on as it was.
+      try {
+        parseAuthSecret(secret);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret));
+    },
     loginWithBackend: () => run("loginWithBackend", () => accounts.loginWithBackend()),
     linkWithBackend: () => run("linkWithBackend", () => accounts.linkWithBackend()),
     retry: () => run("retry", () => selected),
@@ -406,7 +478,8 @@ export async function createJazzSessionOwner<
     // Children re-render onto the new client first; the old one finishes
     // uploading its writes before it stops. The swap is done either way: a
     // slow or failing shutdown of the old client neither holds nor fails it.
-    void current.shutdown({ waitForSync: true }).catch((error: unknown) => {
+    // One the server refuses can't upload them, and is closed anyway.
+    void stopPastRefusal(current, "Jazz replaced this client").catch((error: unknown) => {
       console.warn("Jazz could not shut the replaced client down cleanly.", error);
     });
   });
@@ -428,5 +501,48 @@ export async function createJazzSessionOwner<
     };
   });
   if (options.decorate) Object.assign(session, options.decorate(session));
-  return Object.freeze(session) as JazzSession<Client> & Extra;
+  return Object.freeze(session) as SessionCore<Client> & Extra;
+}
+
+type SigningOutClient = {
+  shutdown(options?: { waitForSync?: boolean }): Promise<void>;
+  db?: {
+    getAuthState?(): { error?: unknown };
+    getSyncStatus?(): { pendingUploads: number };
+    getConfig?(): { driver?: { type?: string } };
+  };
+};
+
+/**
+ * Stop `client` as the session moves on from it (a sign-out, a switch, a
+ * new sign-in, a replacement): upload what the server still accepts, then
+ * stop it. When the server refuses this user's sign-in (their session at
+ * the backend ended, or `jazz.revokeUser`), no retry uploads the rest once
+ * the session has moved on, and failing would leave the session stuck on a
+ * client it can't close, through reloads too: it stops the client anyway
+ * and says what became of those writes (`lead` names what happened). A persistent client keeps them
+ * on this device, under that account, and uploads them when it next opens;
+ * one that keeps nothing (in memory, or thin) loses them. Any refusal counts,
+ * an `expired` credential too: the user is leaving, and no one renews it once
+ * they have. Any other failure (an outage) may pass, so it still fails the
+ * sign-out for the app to retry.
+ */
+async function stopPastRefusal(client: SigningOutClient, lead: string) {
+  try {
+    await client.shutdown({ waitForSync: true });
+  } catch (cause) {
+    const db = client.db;
+    if (!(cause instanceof GracefulShutdownSyncError) || !db?.getAuthState?.().error) throw cause;
+    const writes = db.getSyncStatus?.().pendingUploads ?? 0;
+    const kept = !isThinDb(db as Db) && db.getConfig?.().driver?.type !== "memory";
+    // Warn only about writes left behind: with none, nothing was lost.
+    if (writes > 0)
+      console.warn(
+        kept
+          ? `${lead} with ${writes} write(s) the server refused, as it no longer accepts this user's sign-in. They stay on this device and upload when this account signs in again.`
+          : `${lead} and dropped ${writes} write(s) the server refused, as it no longer accepts this user's sign-in. This client keeps nothing on the device.`,
+        cause.cause,
+      );
+    await client.shutdown();
+  }
 }

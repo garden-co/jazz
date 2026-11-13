@@ -1683,6 +1683,9 @@ pub(crate) mod mock {
         pub no_bucket: AtomicBool,
         /// Requests answer only once this is unset.
         pub stalled: AtomicBool,
+        /// GETs of data objects (not the claim markers) answer only once
+        /// this is unset, as a bucket that stopped answering.
+        pub stall_gets: AtomicBool,
         /// A missing key answers 403 AccessDenied, as without s3:ListBucket.
         pub deny_missing: AtomicBool,
         /// Set: the keys may only touch objects under this prefix (an IAM
@@ -1819,6 +1822,11 @@ pub(crate) mod mock {
         }
         if state.no_bucket.load(Ordering::Relaxed) && parts.uri.path() != "/sts" {
             return error(StatusCode::NOT_FOUND, "NoSuchBucket");
+        }
+        if parts.method == axum::http::Method::GET && !parts.uri.path().contains("/.jazz-") {
+            while state.stall_gets.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         }
         if parts.uri.path() == "/sts" {
             return sts(state, &parts, &body);

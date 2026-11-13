@@ -876,6 +876,11 @@ fn is_jazz_self_signed_identity_proof(token: &str) -> Option<&'static str> {
 /// that audience. The audience also namespaces the founder's account id.
 pub const LOCAL_FIRST_AUDIENCE_HEADER: &str = "X-Jazz-Local-First-Audience";
 
+/// Why a core that admits no local-first identity refuses one. jazz-tools'
+/// `createJazz` recognises a refused guest session by this text (to log the
+/// cause), so keep it stable.
+pub const LOCAL_FIRST_AUTH_DISABLED_MESSAGE: &str = "Local-first auth is not enabled for this app";
+
 /// The audience local-first proofs on this request are verified against: the
 /// app id, or the audience a trusted backend vouches for.
 pub fn local_first_audience(
@@ -984,7 +989,7 @@ pub async fn extract_session(
         if let Some(issuer) = is_jazz_self_signed_identity_proof(token) {
             if issuer == identity::LOCAL_FIRST_ISSUER && !config.allow_local_first_auth {
                 return Err(UnauthenticatedResponse::disabled(
-                    "Local-first auth is not enabled for this app",
+                    LOCAL_FIRST_AUTH_DISABLED_MESSAGE,
                 ));
             }
             let audience = local_first_audience(headers, app_id, config)?;

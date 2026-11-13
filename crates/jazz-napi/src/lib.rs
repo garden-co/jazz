@@ -91,6 +91,15 @@ pub fn validate_schema(schema: Uint8Array) -> js::Result<()> {
     Ok(())
 }
 
+/// Check an app's shipped migrations (the `ClientMigrations` JSON) leading
+/// to the schema hash `target` as a deployment to a new authority would,
+/// without opening a database. `jazz-tools validate` runs it.
+#[napi(js_name = "checkClientMigrations")]
+pub fn check_client_migrations(migrations: String, target: String) -> napi::Result<()> {
+    jazz::tools::deployment::published::check_client_migrations(migrations.as_bytes(), &target)
+        .map_err(napi::Error::from_reason)
+}
+
 /// Exact build/ABI fingerprint for the generated native artifact.
 #[napi]
 pub fn native_artifact_fingerprint() -> String {
@@ -148,6 +157,20 @@ pub fn test_core_error_reason_names() -> Vec<String> {
 #[napi(js_name = "__testWireFrameCorpusFeatures", skip_typescript)]
 pub fn test_wire_frame_corpus_features() -> String {
     jazz::wire::current_wire_features().to_string()
+}
+
+/// One row of the Inspector's `explain`: whether each read-policy clause holds.
+#[napi(object)]
+pub struct ExplainedReadRow {
+    pub id: String,
+    pub holds: Vec<bool>,
+}
+
+/// The Inspector's `explain`: how many clauses the read policy has, and the rows found.
+#[napi(object)]
+pub struct ExplainedReadClauses {
+    pub clauses: u32,
+    pub rows: Vec<ExplainedReadRow>,
 }
 
 // ---- options -------------------------------------------------------------------------
@@ -1858,6 +1881,30 @@ impl NapiDb {
             .into())
     }
 
+    /// The Inspector's `explain`: for each of `rows` (uuid strings) of
+    /// `table`, which clauses of its read policy (the arms of its top-level
+    /// `Or`) hold for `author` with `claims`.
+    #[napi(js_name = "explainReadClauses")]
+    pub fn explain_read_clauses(
+        &self,
+        table: String,
+        rows: Vec<String>,
+        author: Uint8Array,
+        claims: Option<JsonValue>,
+    ) -> js::Result<ExplainedReadClauses> {
+        let (clauses, rows) = self
+            .binding()?
+            .explain_read_clauses(&table, &rows, &author, claims)
+            .map_err(host_error)?;
+        Ok(ExplainedReadClauses {
+            clauses: clauses as u32,
+            rows: rows
+                .into_iter()
+                .map(|(id, holds)| ExplainedReadRow { id, holds })
+                .collect(),
+        })
+    }
+
     #[napi]
     pub fn subscribe(
         &self,
@@ -1906,10 +1953,13 @@ impl NapiDb {
         Ok(evicted as u32)
     }
 
-    /// How many local commits still wait for the server's verdict.
-    #[napi(js_name = "pendingUploadCount")]
-    pub fn pending_upload_count(&self) -> js::Result<u32> {
-        Ok(self.binding()?.pending_upload_count() as u32)
+    /// This store's uploads: how many still wait for the server's verdict
+    /// and since when, and what the server refused since it opened
+    /// (`{ pending, oldestPendingAt, rejected, lastRejection }`).
+    #[napi(js_name = "uploadStatus")]
+    pub fn upload_status(&self) -> js::Result<JsonValue> {
+        serde_json::to_value(self.binding()?.upload_status())
+            .map_err(|error| napi::Error::from_reason(error.to_string()).into())
     }
 
     /// The optimistic in-memory side of a client/worker pair: its
@@ -2078,6 +2128,8 @@ struct JazzServerStartOptions {
     allow_local_first_auth: Option<bool>,
     telemetry_collector_url: Option<String>,
     schema: Option<Vec<u8>>,
+    /// Live WebSocket connections one signed-in user may hold.
+    max_connections_per_user: Option<u32>,
     /// Trust this OIDC workload instead of the shared secrets.
     trusted_workload: Option<TrustedWorkloadOptions>,
 }
@@ -2135,12 +2187,11 @@ pub(crate) fn init_jazz_server_telemetry(collector_url: Option<&str>) {
 /// passes `info`, as the standalone server logs.
 pub(crate) fn init_server_logs(level: &str) {
     use std::io::IsTerminal;
-    let filter = match std::env::var("RUST_LOG") {
-        Ok(directives) if !directives.trim().is_empty() => {
-            tracing_subscriber::EnvFilter::new(directives)
-        }
-        _ => tracing_subscriber::EnvFilter::new(format!("error,jazz={level}")),
-    };
+    // `RUST_LOG` sets the level of any target it names; the defaults cover
+    // the rest.
+    let jazz = format!("jazz={level}");
+    let jazz_tools = format!("jazz_tools={level}");
+    let filter = jazz_otel::env_filter_with_defaults(&["error", &jazz, &jazz_tools]);
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
@@ -2173,7 +2224,7 @@ impl JazzServer {
     #[napi(factory, ts_return_type = "Promise<JazzServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }"
+            ts_arg_type = "{ appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; maxConnectionsPerUser?: number; trustedWorkload?: { issuer: string; audience: string; subject: string } }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -2233,6 +2284,9 @@ impl JazzServer {
         };
 
         let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
+        if let Some(max) = opts.max_connections_per_user {
+            server_builder = server_builder.with_max_websocket_connections_per_user(max as usize);
+        }
         if let Some(schema) = core_server_shell_schema {
             server_builder = server_builder.with_core_server_shell_schema(schema);
         }

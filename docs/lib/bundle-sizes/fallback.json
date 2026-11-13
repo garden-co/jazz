@@ -1,0 +1,8 @@
+{
+  "jazzToolsVersion": "2.0.0-alpha.61",
+  "nextVersion": "16.2.11",
+  "measuredAt": "2026-11-12T23:35:42.173Z",
+  "thinClientAddedGzipBytes": 142582,
+  "wasmGzipBytes": 3118948,
+  "wasmRawBytes": 8812317
+}

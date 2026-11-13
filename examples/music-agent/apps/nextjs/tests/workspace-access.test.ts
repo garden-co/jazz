@@ -87,15 +87,15 @@ async function signIn(email: string, name: string) {
     driver: { type: "memory" },
   });
   closers.push(() => browser.close());
-  await browser.loginWithBackend();
-  const { client, status, error } = browser.getSnapshot();
+  await browser.refresh();
+  const { user, status, error } = browser.getSnapshot();
   if (status !== "ready") throw error ?? new Error(status);
   const account = await jazz.accountFor(
     new Request(`${origin}/api/bootstrap`, { headers: { cookie } }),
   );
   if (!account) throw new Error(`the app's Jazz resolves no account for ${email}`);
-  expect(client!.session!.user!).toBe(account);
-  return { db: client!.db, accountId: account, userId: session!.user.id };
+  expect(user?.accountId).toBe(account);
+  return { db: browser.db, accountId: account, userId: session!.user.id };
 }
 let userId: string;
 let otherUserId: string;
