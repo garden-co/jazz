@@ -33,7 +33,7 @@ use crate::tools::{CmpOp, PolicyExpr};
 mod fanout;
 pub use fanout::FanoutStats;
 #[cfg(any(test, feature = "testing"))]
-pub use fanout::set_correlation_filter_for_test;
+pub use fanout::{set_correlation_filter_for_test, set_policy_pins_for_test};
 #[path = "large_ops.rs"]
 mod large_ops;
 pub(crate) use large_ops::byte_splices;
