@@ -18,6 +18,8 @@
 // the point of the Inspector, and it is why the hook must be narrow.
 
 import { NoJazzAccountError } from "./no-account-error.js";
+import { accountAppId } from "../accounts/local-first.js";
+import { endpointScope } from "../runtime/client-scope.js";
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { ColumnType, TablePolicies, WasmSchema } from "../drivers/types.js";
 import type { Db, QueryBuilder, TableProxy } from "../runtime/db.js";
@@ -433,10 +435,14 @@ export function createInspector(deps: InspectorDeps) {
 
   // ---------------------------------------------------------------- reads and writes
 
+  /** Where browsers reach this Jazz: its public URL, else this request's origin and basePath. */
+  function endpointUrl(request: Request): string {
+    if (deps.publicUrls[0]) return deps.publicUrls[0];
+    return `${new URL(request.url).origin}${deps.basePath}`;
+  }
+
   function inspectorUrl(request: Request): string {
-    if (deps.publicUrls[0]) return `${deps.publicUrls[0]}${INSPECT_PATH}/`;
-    const url = new URL(request.url);
-    return `${url.origin}${deps.basePath}${INSPECT_PATH}/`;
+    return `${endpointUrl(request)}${INSPECT_PATH}/`;
   }
 
   function tableOf(name: string): {
@@ -916,6 +922,7 @@ export function createInspector(deps: InspectorDeps) {
       case "whoami": {
         const whoami: InspectWhoami = {
           appId: deps.appId,
+          clientAppId: accountAppId(endpointScope(endpointUrl(request))),
           by: admitted.by,
           via: admitted.via,
           write: admitted.write,

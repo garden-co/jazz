@@ -2725,6 +2725,174 @@ describe("NativeRuntimeAdapter server transport", () => {
     },
   );
 
+  describe("pooled native subscriptions", () => {
+    type Batch = {
+      id: number;
+      events: unknown[];
+      error?: { message: string; code: string } | null;
+    };
+
+    /** A fake binding whose pool drains scripted per-subscription queues. */
+    function pooledRuntime() {
+      const queues = new Map<number, unknown[]>();
+      const failures = new Map<number, { message: string; code: string }>();
+      const native: Array<{ id?: number; queue: unknown[] }> = [];
+      let nextId = 0;
+      const drain = vi.fn((): Batch[] => {
+        const batches: Batch[] = [];
+        for (const [id, queue] of queues) {
+          const error = failures.get(id);
+          if (queue.length === 0 && !error) continue;
+          batches.push({ id, events: queue.splice(0), error: error ?? null });
+          if (error) {
+            failures.delete(id);
+            queues.delete(id);
+          }
+        }
+        return batches;
+      });
+      const readAll = vi.fn(() => []);
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              createSubscriptionPool: () => ({ drain }),
+              subscribe: () => {
+                const entry: { id?: number; queue: unknown[] } = { queue: [] };
+                native.push(entry);
+                return {
+                  readAll,
+                  joinPool: () => {
+                    entry.id = nextId++;
+                    queues.set(entry.id, entry.queue);
+                    return entry.id;
+                  },
+                  close: () => (entry.id === undefined ? false : queues.delete(entry.id)),
+                };
+              },
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const pump = () => (runtime as unknown as { pumpSubscriptions(): void }).pumpSubscriptions();
+      return { runtime, native, queues, failures, drain, readAll, pump };
+    }
+
+    const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+    const row = (n: number) => ({
+      table: "todos",
+      rowId: uuidBytes(`00000000-0000-0000-0000-00000000000${n}`),
+      title: `row ${n}`,
+    });
+    const change = (n: number) => ({
+      type: "delta",
+      delta: encodeSubscriptionDelta({ added: [row(n)], updated: [], removed: [] }),
+    });
+
+    it("reads every pooled subscription in one drain per pump, never per subscription", async () => {
+      const { runtime, native, drain, readAll, pump } = pooledRuntime();
+      try {
+        const callbacks = [vi.fn(), vi.fn(), vi.fn()];
+        for (const callback of callbacks) {
+          const handle = runtime.createSubscription(app.todos._build());
+          runtime.executeSubscription(handle, callback);
+        }
+        expect(native.map((entry) => entry.id)).toEqual([0, 1, 2]);
+        native[1]!.queue.push(subscriptionReset([row(1)]));
+        drain.mockClear();
+        pump();
+        expect(drain).toHaveBeenCalledTimes(1);
+        expect(readAll).not.toHaveBeenCalled();
+        expect(callbacks[0]).not.toHaveBeenCalled();
+        expect(callbacks[1]).toHaveBeenCalledWith(expect.objectContaining({ reset: true }));
+        expect(callbacks[2]).not.toHaveBeenCalled();
+      } finally {
+        await runtime.close();
+      }
+    });
+
+    it("fails only the subscription whose batch carries an error", async () => {
+      const { runtime, native, failures, queues, pump } = pooledRuntime();
+      try {
+        const broken = vi.fn();
+        const healthy = vi.fn();
+        runtime.executeSubscription(runtime.createSubscription(app.todos._build()), broken);
+        runtime.executeSubscription(runtime.createSubscription(app.todos._build()), healthy);
+        native[0]!.queue.push(subscriptionReset([row(1)]));
+        failures.set(native[0]!.id!, { message: "encode subscription delta: bad", code: "codec" });
+        native[1]!.queue.push(subscriptionReset([row(2)]));
+        pump();
+        // The events before the failure are delivered, then the error.
+        expect(broken.mock.calls).toEqual([
+          [expect.objectContaining({ reset: true })],
+          [expect.objectContaining({ message: "encode subscription delta: bad", code: "codec" })],
+        ]);
+        expect(healthy).toHaveBeenCalledTimes(1);
+        expect(healthy).toHaveBeenCalledWith(expect.objectContaining({ reset: true }));
+        // The healthy subscription keeps receiving from later drains.
+        native[1]!.queue.push(change(3));
+        pump();
+        expect(healthy).toHaveBeenCalledTimes(2);
+        expect(broken).toHaveBeenCalledTimes(2);
+        expect(queues.has(native[1]!.id!)).toBe(true);
+      } finally {
+        await runtime.close();
+      }
+    });
+
+    it("finishes one drain before a pump a callback triggers, keeping event order", async () => {
+      const { runtime, native, pump } = pooledRuntime();
+      try {
+        const seen: string[] = [];
+        const callback = vi.fn((delta: { added?: Array<{ row: { values: unknown[] } }> }) => {
+          const title = JSON.stringify(delta.added?.[0]?.row.values[0] ?? null);
+          seen.push(title);
+          if (seen.length === 1) {
+            native[0]!.queue.push(change(3));
+            pump();
+          }
+        });
+        runtime.executeSubscription(runtime.createSubscription(app.todos._build()), callback);
+        native[0]!.queue.push(subscriptionReset([row(1)]), change(2));
+        pump();
+        expect(seen).toEqual([
+          JSON.stringify({ type: "Text", value: "row 1" }),
+          JSON.stringify({ type: "Text", value: "row 2" }),
+          JSON.stringify({ type: "Text", value: "row 3" }),
+        ]);
+      } finally {
+        await runtime.close();
+      }
+    });
+
+    it("leaves the pool on unsubscribe", async () => {
+      const { runtime, native, queues, drain, pump } = pooledRuntime();
+      try {
+        const callback = vi.fn();
+        const handle = runtime.createSubscription(app.todos._build());
+        runtime.executeSubscription(handle, callback);
+        runtime.unsubscribe(handle);
+        expect(queues.size).toBe(0);
+        native[0]!.queue.push(subscriptionReset([row(1)]));
+        drain.mockClear();
+        pump();
+        // No pooled subscription remains, so the pump skips the native call.
+        expect(drain).not.toHaveBeenCalled();
+        expect(callback).not.toHaveBeenCalled();
+      } finally {
+        await runtime.close();
+      }
+    });
+  });
+
   it.each(["unsubscribe", "close"] as const)(
     "suppresses a pending stream read rejection after subscription %s",
     async (termination) => {

@@ -87,13 +87,22 @@ describe("cli migrations", () => {
     expect(await fileExists(first.snapshotPath)).toBe(true);
     const index = () => readFile(join(migrationsDir, "index.ts"), "utf8");
     expect(await index()).toContain(first.hash);
+    // Unchanged schema: validate says what it found, and that permissions
+    // never need a migration (#4773).
+    const { logs: unchangedValidate } = await captureConsoleLogs(() =>
+      validate({ schemaDir: root }),
+    );
+    expect(unchangedValidate).toContain(
+      "schema.ts matches its latest snapshot, so no migration is needed. " +
+        "Changes to permissions.ts never need one: your backend publishes them when it starts.",
+    );
 
     await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithTodoNotes()));
     const { logs: changedValidate } = await captureConsoleLogs(() => validate({ schemaDir: root }));
     expect(changedValidate.join("\n")).toContain("changed since the latest snapshot");
-    expect(changedValidate).not.toContain(
-      "Permission-only changes do not create schema hashes or require migrations.",
-    );
+    // After a schema change, nothing about permissions reads as a diagnosis
+    // of it (#4773).
+    expect(changedValidate.join("\n")).not.toMatch(/Permission-only|Changes to permissions\.ts/);
 
     const second = await createCatalogueMigration({
       schemaDir: root,
@@ -721,10 +730,9 @@ describe("cli migrations", () => {
         (name) => /^\d{8}T\d{6}-/.test(name) && name.endsWith(`-${fromShortHash}.json`),
       ),
     ).toBe(true);
-    expect(logs).toContain("Migration stubs are only for schema changes.");
-    expect(logs).toContain(
-      "Permission-only changes do not create schema hashes or require migrations.",
-    );
+    // A stub is for a schema change: its output says nothing about
+    // permissions (#4773).
+    expect(logs.join("\n")).not.toMatch(/Permission-only|Changes to permissions\.ts/);
   });
 
   it("renders createTables and dropTables when inferring table add/drop steps", async () => {
