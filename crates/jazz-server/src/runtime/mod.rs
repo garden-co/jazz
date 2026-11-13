@@ -211,10 +211,10 @@ pub(crate) const IDLE_TICK: Duration = Duration::from_secs(1);
 /// Inbound messages one session may have applied per round of ticks.
 const INBOUND_MESSAGES_PER_TICK: usize = 16;
 
-/// Reads one tick takes out of turn, across all sessions (see
-/// [`SessionTransport::try_recv`]). Bounded so a session that floods reads
-/// adds at most this many reads to a tick, and the sessions whose turn it
-/// is (and their writes) are still served in it.
+/// Reads one tick may take out of turn, across all sessions (see
+/// [`start_tick`]). Bounded so sessions that flood reads add at most this
+/// many reads to a tick, and the sessions whose turn it is (and their
+/// writes) are still served in it.
 const READS_OUT_OF_TURN_PER_TICK: usize = 8;
 
 /// About how long one tick may take. Each tick serves as many sessions as
@@ -1993,6 +1993,11 @@ struct SessionQueues {
     served: std::cell::Cell<bool>,
     /// A tick of this round served this session already.
     done: std::cell::Cell<bool>,
+    /// Reads this tick may take from the session out of turn (see
+    /// [`start_tick`]).
+    early: std::cell::Cell<usize>,
+    /// This tick took some of them.
+    early_served: std::cell::Cell<bool>,
     slice: Rc<TickSlice>,
 }
 
@@ -2005,8 +2010,13 @@ struct TickSlice {
     taken: std::cell::Cell<usize>,
     /// Recent cost of a tick per session it served (a moving average).
     per_session: std::cell::Cell<Option<Duration>>,
-    /// Reads this tick took out of turn.
-    reads: std::cell::Cell<usize>,
+    /// Sessions this tick served out of turn: each counts as a session
+    /// served in the cost average, so out-of-turn reads are charged to
+    /// their own session instead of inflating the cost of the others.
+    early: std::cell::Cell<usize>,
+    /// Where the next tick's out-of-turn grants start among the sessions
+    /// that may have them, so the first sessions do not always get them.
+    cursor: std::cell::Cell<usize>,
 }
 
 impl Default for TickSlice {
@@ -2015,7 +2025,8 @@ impl Default for TickSlice {
             cap: std::cell::Cell::new(usize::MAX),
             taken: std::cell::Cell::new(0),
             per_session: std::cell::Cell::new(None),
-            reads: std::cell::Cell::new(0),
+            early: std::cell::Cell::new(0),
+            cursor: std::cell::Cell::new(0),
         }
     }
 }
@@ -2029,23 +2040,9 @@ impl TickSlice {
         open
     }
 
-    /// Whether this tick may take another read out of turn.
-    fn reads_left(&self) -> bool {
-        self.reads.get() < READS_OUT_OF_TURN_PER_TICK
-    }
-
-    fn take_read(&self) -> bool {
-        let open = self.reads_left();
-        if open {
-            self.reads.set(self.reads.get() + 1);
-        }
-        open
-    }
-
     /// Learn from a tick that took `elapsed`, and size the next one.
     fn ticked(&self, elapsed: Duration) {
-        self.reads.set(0);
-        let taken = self.taken.replace(0);
+        let taken = self.taken.replace(0) + self.early.replace(0);
         if taken == 0 {
             return;
         }
@@ -2064,17 +2061,54 @@ impl TickSlice {
 /// Before a tick: a round ends once every session with inbound messages
 /// was served in it (a time slice can end a tick mid-round); until then,
 /// only sessions it did not serve yet are served.
+///
+/// Then grant the tick's [`READS_OUT_OF_TURN_PER_TICK`] to sessions whose
+/// queues hold nothing but reads, one read at a time round-robin, starting
+/// where the last tick's grants left off. A session whose turn comes in
+/// this tick is served in turn and leaves its grant unused. Nothing is
+/// queued during a tick, so a granted queue still holds only reads when
+/// the engine asks for it.
 fn start_tick<'a>(sessions: impl Iterator<Item = &'a SessionQueues> + Clone) {
     let round_over = sessions
         .clone()
         .all(|queues| queues.done.get() || queues.inbound.borrow().is_empty());
-    for queues in sessions {
+    for queues in sessions.clone() {
         if round_over {
             queues.done.set(false);
         }
         queues.served.set(false);
+        queues.early.set(0);
+        queues.early_served.set(false);
         queues.backlog.start_tick();
     }
+    let readers: Vec<&SessionQueues> = sessions
+        .filter(|queues| !queues.inbound.borrow().is_empty() && queues.only_reads_queued())
+        .collect();
+    let Some(slice) = readers.first().map(|queues| Rc::clone(&queues.slice)) else {
+        return;
+    };
+    let start = slice.cursor.get() % readers.len();
+    let mut left = READS_OUT_OF_TURN_PER_TICK;
+    let mut granted = 0;
+    while left > 0 {
+        let before = left;
+        for queues in readers[start..].iter().chain(&readers[..start]) {
+            if left == 0 {
+                break;
+            }
+            if queues.early.get() < queues.inbound.borrow().len() {
+                if queues.early.get() == 0 {
+                    granted += 1;
+                }
+                queues.early.set(queues.early.get() + 1);
+                left -= 1;
+            }
+        }
+        if left == before {
+            break;
+        }
+    }
+    slice.cursor.set(start.wrapping_add(granted));
 }
 
 /// The engine's side of one session.
@@ -2119,6 +2153,8 @@ impl SessionQueues {
             budget: std::cell::Cell::new(0),
             served: std::cell::Cell::new(false),
             done: std::cell::Cell::new(false),
+            early: std::cell::Cell::new(0),
+            early_served: std::cell::Cell::new(false),
             slice,
         }
     }
@@ -2222,9 +2258,9 @@ impl Transport for SessionTransport {
     /// A session is served in its turn: once a round, as the tick's slice
     /// fits it, up to [`INBOUND_MESSAGES_PER_TICK`] messages. Out of turn,
     /// a session whose queue holds nothing but reads (and unsubscribes) has
-    /// them taken anyway, from the tick's [`READS_OUT_OF_TURN_PER_TICK`]: a
-    /// point read from an idle backend does not wait for every other
-    /// session's commits. A read queued behind a commit of its session, or
+    /// as many taken as [`start_tick`] granted it from the tick's
+    /// [`READS_OUT_OF_TURN_PER_TICK`]: a point read from an idle backend
+    /// does not wait for every other session's commits. A read queued behind a commit of its session, or
     /// ahead of one, waits for the session's turn as before, so it is never
     /// answered ahead of its session's earlier commits (INV-SYNC-49), and a
     /// read sent just before writes is still answered after them.
@@ -2235,11 +2271,15 @@ impl Transport for SessionTransport {
         }
         if !queues.served.get() {
             if queues.done.get() || !queues.slice.take() {
-                if queues.slice.reads_left() && queues.only_reads_queued() {
-                    queues.slice.take_read();
-                    return queues.take();
+                let early = queues.early.get();
+                if early == 0 {
+                    return None;
                 }
-                return None;
+                queues.early.set(early - 1);
+                if !queues.early_served.replace(true) {
+                    queues.slice.early.set(queues.slice.early.get() + 1);
+                }
+                return queues.take();
             }
             queues.served.set(true);
             queues.done.set(true);
@@ -3162,9 +3202,9 @@ mod tests {
                 tick.push((index, taken.len(), reads));
             }
         }
-        // What `TickSlice::ticked` resets, without resizing the slice.
-        slice.taken.set(0);
-        slice.reads.set(0);
+        // A tick far over the slice: the slice stays at one session.
+        slice.ticked(TICK_SLICE * 100);
+        assert_eq!(slice.cap.get(), 1);
         tick
     }
 
@@ -3280,6 +3320,298 @@ mod tests {
             sessions[0].inbound.borrow().is_empty(),
             "alice's writes all ran"
         );
+    }
+
+    /// Twelve backends each have reads queued while alice's commits fill
+    /// the slice. Each tick grants its `READS_OUT_OF_TURN_PER_TICK` reads
+    /// one per backend, starting where the last tick's grants ended, so no
+    /// backend waits more than two ticks for a read out of turn, whatever
+    /// its place in the order the engine asks sessions in.
+    ///
+    /// White-box for the same reason as
+    /// `an_idle_sessions_read_is_not_held_behind_other_sessions_commits`.
+    #[test]
+    fn out_of_turn_reads_rotate_across_waiting_sessions() {
+        let slice = Rc::new(TickSlice::default());
+        slice.cap.set(1);
+        let sessions = queues_on(&slice, 13);
+        sessions[0]
+            .inbound
+            .borrow_mut()
+            .extend((0..1000).map(|_| write()));
+        for backend in &sessions[1..] {
+            backend.inbound.borrow_mut().extend((0..1000).map(read));
+            // Each had its turn this round already.
+            backend.done.set(true);
+        }
+        let early = |tick: &[(usize, usize, usize)]| -> Vec<usize> {
+            tick.iter()
+                .filter(|(index, _, _)| *index != 0)
+                .map(|(index, taken, reads)| {
+                    assert_eq!((*taken, *reads), (1, 1), "one read each");
+                    *index
+                })
+                .collect()
+        };
+        let first = tick_sessions(&slice, &sessions);
+        assert_eq!(first[0].0, 0, "alice's turn");
+        assert_eq!(early(&first), (1..=8).collect::<Vec<_>>());
+        let second = tick_sessions(&slice, &sessions);
+        assert_eq!(early(&second), [1, 2, 3, 4, 9, 10, 11, 12]);
+    }
+
+    /// A tick that served alice in her turn and bob's read out of turn
+    /// costs two sessions' worth: the next slice is sized as if each cost
+    /// half the tick, not as if alice alone cost all of it.
+    ///
+    /// White-box: the slice's cost model has no public effect to observe.
+    #[test]
+    fn out_of_turn_reads_are_charged_to_their_own_session() {
+        let slice = Rc::new(TickSlice::default());
+        slice.cap.set(1);
+        let sessions = queues_on(&slice, 2);
+        sessions[0]
+            .inbound
+            .borrow_mut()
+            .extend((0..40).map(|_| write()));
+        sessions[1].inbound.borrow_mut().push_back(read(1));
+        start_tick(sessions.iter().map(|queues| &**queues));
+        for queues in &sessions {
+            let mut transport = SessionTransport(Rc::clone(queues));
+            while transport.try_recv().is_some() {}
+        }
+        assert!(
+            sessions[1].inbound.borrow().is_empty(),
+            "bob's read was taken"
+        );
+        slice.ticked(TICK_SLICE);
+        assert_eq!(slice.cap.get(), 2, "two sessions in one slice");
+        assert_eq!((slice.taken.get(), slice.early.get()), (0, 0));
+    }
+
+    /// A client `Db`'s end of a session the test drives by hand.
+    struct Pipe {
+        out: Rc<RefCell<VecDeque<SyncMessage>>>,
+        inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
+    }
+
+    impl Transport for Pipe {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            self.out.borrow_mut().push_back(message);
+            Ok(())
+        }
+
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inbound.borrow_mut().pop_front()
+        }
+    }
+
+    /// Alice uploads two large values past the server's ingress limit: the
+    /// engine applies the first and holds the second commit back. Then,
+    /// while bob's queued messages fill the tick's slice, she reads `docs`.
+    /// Her queue holds nothing but that read, so it is taken out of turn,
+    /// and the engine still keeps it behind her held commit: it is answered
+    /// only once the limit lifts, with both rows (INV-SYNC-49).
+    ///
+    /// ```text
+    /// alice ──commit 1, commit 2(held)──► engine
+    /// bob   ──…queued…──► his turn      alice ──read(docs)──► taken early
+    ///                                                         waits for commit 2
+    /// (limit lifted) ──► commit 2 ──► read answered: [1, 2]
+    /// ```
+    ///
+    /// White-box: the ingress limit and the tick's slice are not reachable
+    /// through a public server, so this drives a real client `Db` against
+    /// the owner by hand.
+    #[test]
+    fn an_early_read_still_waits_for_its_sessions_held_commits() {
+        const LARGE: usize = 300 * 1024;
+        let store = AppStore::memory().unwrap();
+        let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
+        let outcome = block_on(runtime.run(move |owner| {
+            owner
+                .db
+                .set_large_value_staging_policy(jazz::db::LargeValueStagingPolicy {
+                    incoming_bytes_per_window: LARGE as u64,
+                    window_ms: 60_000,
+                    max_age_ms: 10 * 60 * 1_000,
+                });
+            let room = Arc::new(tokio::sync::Semaphore::new(usize::MAX >> 4));
+            let (alice_out, mut alice_rx) = tokio_mpsc::unbounded_channel();
+            let (bob_out, _bob_rx) = tokio_mpsc::unbounded_channel();
+            let egress = Arc::new(AtomicUsize::new(0));
+            for (session, output, egress) in [
+                (ServerSession(1), alice_out, Arc::clone(&egress)),
+                (ServerSession(2), bob_out, Arc::default()),
+            ] {
+                owner
+                    .open_session(
+                        session,
+                        AuthorSubject::SYSTEM,
+                        BTreeMap::new(),
+                        None,
+                        output,
+                        egress,
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            let alice = block_on(Db::open(DbConfig::new(
+                docs(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([7; 16]),
+                    author: AuthorSubject::SYSTEM,
+                },
+            )))
+            .map_err(|error| error.to_string())?;
+            let up = Rc::new(RefCell::new(VecDeque::new()));
+            let down = Rc::new(RefCell::new(VecDeque::new()));
+            let _ = block_on(alice.connect_upstream(Box::new(Pipe {
+                out: Rc::clone(&up),
+                inbound: Rc::clone(&down),
+            })));
+            let mut joiner = jazz::db::FrameJoiner::default();
+            // One round trip: alice's tick, her messages to the owner, the
+            // owner's tick, its answers back to her.
+            let mut exchange = |owner: &mut Owner| {
+                block_on(alice.tick()).unwrap();
+                let frames: Vec<AbiBytes> = up
+                    .borrow_mut()
+                    .drain(..)
+                    .flat_map(|message| jazz::db::encode_frames(message).unwrap())
+                    .collect();
+                if !frames.is_empty() {
+                    let ingress = WireIngress {
+                        _room: Arc::clone(&room).try_acquire_many_owned(1).unwrap(),
+                    };
+                    owner.receive(ServerSession(1), frames, ingress);
+                }
+                owner.tick();
+                while let Ok((frames, bytes)) = alice_rx.try_recv() {
+                    egress.fetch_sub(bytes, Ordering::AcqRel);
+                    for frame in frames.unwrap() {
+                        if let Some(message) = joiner.push(&frame).unwrap() {
+                            down.borrow_mut().push_back(message);
+                        }
+                    }
+                }
+                block_on(alice.tick()).unwrap();
+            };
+            let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+            for n in [1u8, 2] {
+                let body: Vec<u8> = (0..LARGE)
+                    .map(|_| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        seed as u8
+                    })
+                    .collect();
+                block_on(alice.insert(
+                    "docs",
+                    BTreeMap::from([("body".to_owned(), Value::Bytes(body))]),
+                    jazz::db::InsertOptions {
+                        row_id: Some(jazz::ids::RowUuid::from_bytes([n; 16])),
+                        ..Default::default()
+                    },
+                ))
+                .map_err(|error| error.to_string())?;
+            }
+            for _ in 0..12 {
+                exchange(owner);
+            }
+            let on_server = |owner: &Owner| {
+                owner
+                    .db
+                    .read(
+                        &owner
+                            .db
+                            .prepare_query(&jazz::query::Query::from("docs"))
+                            .unwrap(),
+                    )
+                    .unwrap()
+                    .len()
+            };
+            let held = on_server(owner) == 1;
+
+            // Bob's turn fills the next tick, and alice had hers this round.
+            let bob = Rc::clone(&owner.sessions[&ServerSession(2)].queues);
+            bob.inbound
+                .borrow_mut()
+                .extend((0..40).map(|_| SyncMessage::ResendWhole { rows: Vec::new() }));
+            let alice_queues = Rc::clone(&owner.sessions[&ServerSession(1)].queues);
+            alice_queues.done.set(true);
+            owner.slice.cap.set(1);
+            let query = alice
+                .prepare_query(&jazz::query::Query::from("docs"))
+                .map_err(|error| error.to_string())?;
+            let mut stream = block_on(alice.subscribe(
+                &query,
+                jazz::db::ReadOpts {
+                    tier: jazz::db::ReadTier::Remote,
+                    ..Default::default()
+                },
+            ))
+            .map_err(|error| error.to_string())?;
+            let mut shown = std::collections::BTreeSet::new();
+            let mut drain = |stream: &mut jazz::db::SubscriptionStream| {
+                let mut answered = false;
+                while let Some(event) = stream.try_next_event() {
+                    if let jazz::db::SubscriptionEvent::Delta {
+                        added,
+                        removed,
+                        settled,
+                        ..
+                    } = event
+                    {
+                        for gone in removed {
+                            shown.remove(&gone.row_uuid);
+                        }
+                        shown.extend(added.iter().map(|row| row.row.row_uuid()));
+                        answered |= settled;
+                    }
+                }
+                answered
+            };
+            exchange(owner);
+            let taken_early = alice_queues.inbound.borrow().is_empty()
+                && bob.inbound.borrow().len() == 40 - INBOUND_MESSAGES_PER_TICK;
+            let answered_while_held = drain(&mut stream);
+
+            owner
+                .db
+                .set_large_value_staging_policy(jazz::db::LargeValueStagingPolicy {
+                    incoming_bytes_per_window: u64::MAX,
+                    window_ms: 60_000,
+                    max_age_ms: 10 * 60 * 1_000,
+                });
+            let mut answered = false;
+            for _ in 0..12 {
+                exchange(owner);
+                answered |= drain(&mut stream);
+            }
+            Ok((held, taken_early, answered_while_held, answered, shown))
+        }))
+        .unwrap();
+        let (held, taken_early, answered_while_held, answered, shown) = outcome;
+        assert!(held, "the ingress limit holds the second upload back");
+        assert!(
+            taken_early,
+            "alice's read was taken out of turn, beside bob's turn"
+        );
+        assert!(
+            !answered_while_held,
+            "the read waits behind the held commit"
+        );
+        assert!(answered, "the read is answered once the upload lands");
+        assert_eq!(
+            shown.into_iter().collect::<Vec<_>>(),
+            [
+                jazz::ids::RowUuid::from_bytes([1; 16]),
+                jazz::ids::RowUuid::from_bytes([2; 16])
+            ],
+            "with the writer's own held upload"
+        );
+        store.close().unwrap();
     }
 
     /// A reader that stops draining is closed once what earlier ticks left
