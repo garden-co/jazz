@@ -935,6 +935,67 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  // #5268: a native relay whose database refused its upstream reports the
+  // refusal's code. A changed authority then reads as it does on napi and
+  // wasm: an AuthorityChangedError and an "authority-changed" offline link,
+  // not a bare "stopped".
+  it("reports a native relay's authority_changed refusal as authority-changed", async () => {
+    let schedule: ((urgency: "immediate" | "deferred") => void) | undefined;
+    let reportUpstreamFailure:
+      | ((failure: { reason: string; retrying: boolean; code?: string | null } | null) => void)
+      | undefined;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+              schedule = callback;
+            },
+            tick: () => undefined,
+            onUpstreamFailure: (callback: typeof reportUpstreamFailure) => {
+              reportUpstreamFailure = callback;
+            },
+            nativeConnectionStatus: () => ({
+              configured: true,
+              explicitlyOffline: false,
+              connected: false,
+              authRejected: null,
+            }),
+            isNativeForegroundClosed: () => false,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const transportErrors: Error[] = [];
+    runtime.onServerTransportError((error) => transportErrors.push(error));
+
+    reportUpstreamFailure!({
+      reason: "native relay upstream refused: the server serves another authority history",
+      retrying: false,
+      code: "authority_changed",
+    });
+    schedule!("immediate");
+    for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+    expect(runtime.upstreamLinkStatus()).toEqual({
+      state: "offline",
+      reason: "authority-changed",
+      retrying: false,
+    });
+    expect(transportErrors.map(isAuthorityChangedError)).toEqual([true]);
+
+    // Any other stopped failure still reads as stopped.
+    reportUpstreamFailure!({ reason: "gave up", retrying: false, code: null });
+    for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+    expect(runtime.upstreamLinkStatus()).toMatchObject({ state: "offline", reason: "stopped" });
+  });
+
   // The native host stops its link on a refused credential and reports a
   // terminal upstream failure. A credential the app can renew restarts it,
   // so the refusal counts as retrying, as it does on the web socket path

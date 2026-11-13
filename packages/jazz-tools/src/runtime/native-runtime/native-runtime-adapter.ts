@@ -415,7 +415,7 @@ type NativeDb = {
    * recovered (`null`); ticks keep running.
    */
   onUpstreamFailure?(
-    callback: (failure: { reason: string; retrying: boolean } | null) => void,
+    callback: (failure: { reason: string; retrying: boolean; code?: string | null } | null) => void,
   ): void;
   setNonDurableClient?(): void;
   /** Exact wire features compiled into the native artifact backing this DB. */
@@ -1173,8 +1173,13 @@ export class NativeRuntimeAdapter implements Runtime {
         this.nativeAuthRefusalRenewable = false;
         return this.clearRemoteServerTransportError();
       }
+      // A refusal keeps the core's code, as `Transport.upstreamRefusal` does
+      // on napi and wasm: a changed authority is an AuthorityChangedError.
+      const error = failure.code
+        ? upstreamRefusalError({ code: failure.code, message: failure.reason })!
+        : new Error(failure.reason);
       this.handleServerTransportError(
-        new Error(failure.reason),
+        error,
         this.serverConnectionGeneration,
         failure.retrying || this.nativeAuthRefusalRenewable,
       );
@@ -1555,7 +1560,10 @@ export class NativeRuntimeAdapter implements Runtime {
       // The relay reports a failure only once its link machine published
       // an outage, or stopped.
       if (this.serverTransportError) {
-        return this.serverTransportErrorRetrying ? offlineLink("network") : offlineLink("stopped");
+        if (this.serverTransportErrorRetrying) return offlineLink("network");
+        return isAuthorityChangedError(this.serverTransportError)
+          ? offlineLink("authority-changed", false)
+          : offlineLink("stopped");
       }
       return CONNECTING;
     }

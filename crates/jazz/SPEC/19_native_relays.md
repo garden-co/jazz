@@ -230,7 +230,9 @@ ABI 3 (alpha.60) adds their optional reason name; see §19.6 ("Coded operation
 errors"). ABI 4 (alpha.60) ends each subscription delta with its updated rows'
 splices (`updated_splices`, SPEC 18). ABI 5 (alpha.61) attaches the app's
 migrations beside its schema's tables (see "Trusted platform admission
-codec"). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
+codec"). ABI 6 (alpha.62) ends a tick's upstream failure with the
+refusal's stable error code, when the relay's database refused its
+upstream. The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
 the current version.
 
 The ABI stays coarse and binary:

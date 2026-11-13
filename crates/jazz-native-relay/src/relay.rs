@@ -126,6 +126,16 @@ pub(crate) type MigrationsKey = (
     Vec<jazz::ids::MigrationLensId>,
 );
 
+/// An upstream the relay's database refused on its own (see
+/// [`Link::upstream_refusal`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UpstreamRefusal {
+    /// The core's stable error code (`ErrorCode::as_str`).
+    pub code: String,
+    /// The reason the relay reported the refusal with.
+    pub reason: String,
+}
+
 /// Immutable configuration used to start a relay owner thread.
 #[derive(Clone, Debug)]
 pub struct RelayOpenConfig {
@@ -450,6 +460,12 @@ impl NativeRelay {
     /// is the host's choice: a relay with a socket worker never uses it.
     pub fn wire(&self) -> Result<NativeRelayWire, RelayError> {
         self.run(|worker| Ok(worker.host_upstream()))
+    }
+
+    /// The last upstream the relay's database refused, if the connection
+    /// since has not been replaced.
+    pub(crate) fn upstream_refusal(&self) -> Result<Option<UpstreamRefusal>, RelayError> {
+        self.run(|worker| Ok(worker.refusal.clone()))
     }
 
     /// Diagnostics: attached peers and host-carried upstream queue depths.
@@ -864,6 +880,10 @@ pub(crate) struct RelayWorker {
     next_client: u64,
     /// The last drive failed; reported by the next foreground tick.
     drive_error: Option<String>,
+    /// The last upstream the relay's database refused: the core's stable
+    /// error code and the reason reported with it. Cleared when a new
+    /// upstream connection begins.
+    refusal: Option<UpstreamRefusal>,
     /// The last drive stopped at its round bound with work left.
     redrive: bool,
     /// When time-bound waits were last evaluated.
@@ -938,6 +958,7 @@ impl RelayWorker {
             clients: BTreeMap::new(),
             next_client: 0,
             drive_error: None,
+            refusal: None,
             redrive: false,
             timed: Instant::now(),
         })
@@ -1116,6 +1137,7 @@ impl RelayWorker {
     /// Connect the relay's upstream through a fresh host-carried wire,
     /// replacing any earlier connection.
     fn begin_socket_upstream(&mut self) -> (u64, NativeRelayWire) {
+        self.refusal = None;
         if let Some(mut previous) = self.upstream.take() {
             previous.link.close();
             previous.wire.retire();
@@ -1154,6 +1176,21 @@ impl RelayWorker {
             Some(upstream) => upstream.wire.clone(),
             None => self.begin_socket_upstream().1,
         }
+    }
+
+    /// Stop the current upstream connection because the relay's database
+    /// refused it, recording the refusal's code and reason for foregrounds.
+    pub(crate) fn refuse_upstream(&mut self, error: &jazz::db::Error) {
+        let Some(upstream) = &self.upstream else {
+            return;
+        };
+        let reason = format!("native relay upstream refused: {error}");
+        tracing::warn!(target: "jazz_native_relay", "{reason}");
+        upstream.wire.refuse(reason.clone());
+        self.refusal = Some(UpstreamRefusal {
+            code: error.code.as_str().to_owned(),
+            reason,
+        });
     }
 
     /// Tick what asked for a tick and move frames until nothing moves.
@@ -1207,13 +1244,13 @@ impl RelayWorker {
         }
         // A refused upstream syncs nothing: stop its connection and say why,
         // rather than keeping the socket open.
-        if let Some(upstream) = &self.upstream
-            && upstream.wire.refusal().is_none()
-            && let Some(error) = upstream.link.upstream_refusal()
+        if let Some(error) = self
+            .upstream
+            .as_ref()
+            .filter(|upstream| upstream.wire.refusal().is_none())
+            .and_then(|upstream| upstream.link.upstream_refusal())
         {
-            let reason = format!("native relay upstream refused: {error}");
-            tracing::warn!(target: "jazz_native_relay", "{reason}");
-            upstream.wire.refuse(reason);
+            self.refuse_upstream(&error);
         }
         for client in self.clients.values_mut() {
             if let Err(error) = client.collect_events() {
