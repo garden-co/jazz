@@ -70,7 +70,13 @@ export function credentialedTransport(
   };
 }
 
-/** A `fetch` that sends the app's bearer as `Authorization: Bearer`, read afresh each time. */
+/**
+ * A `fetch` that sends the app's bearer as `Authorization: Bearer`, read
+ * afresh each time. It has no origin check of its own, unlike
+ * {@link bearerWebSocket}: hand it only to a caller whose URLs are fixed to
+ * the app's backend (the account registry, which also refuses redirects),
+ * never to one that fetches arbitrary URLs.
+ */
 export function bearerFetch(bearer: AppBearer, base?: typeof fetch): typeof fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
