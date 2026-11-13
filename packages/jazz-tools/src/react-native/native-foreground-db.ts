@@ -12,7 +12,11 @@ type ForegroundResponse = Relay.NativeForegroundResponse;
 type ForegroundMutationKind = Extract<ForegroundCommand, { type: "directMutation" }>["mutation"];
 type NativeConnectionStatus = Extract<ForegroundResponse, { type: "nativeConnectionStatus" }>;
 /** An upstream connection failure other than a refused credential (#4337). */
-export type NativeUpstreamFailure = { reason: string; retrying: boolean };
+/**
+ * A native upstream failure. `code` is the core's stable error code when the
+ * relay refused its upstream (`authority_changed`, say), else null.
+ */
+export type NativeUpstreamFailure = { reason: string; retrying: boolean; code: string | null };
 type ForegroundMutationOptions = {
   rowId?: Uint8Array;
   branch?: unknown;
@@ -196,7 +200,11 @@ export class NativeForegroundDb {
         sequence: failure.sequence,
         retrying: failure.retrying,
       };
-      const change = failure && { reason: failure.reason, retrying: failure.retrying };
+      const change = failure && {
+        reason: failure.reason,
+        retrying: failure.retrying,
+        code: failure.code,
+      };
       queueMicrotask(() => {
         if (!this.closed) this.upstreamFailureCallback?.(change);
       });
