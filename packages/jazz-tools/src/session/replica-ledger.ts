@@ -200,8 +200,27 @@ const lockName = (registry: string, account: string) => `jazz-replica-v1:${regis
  * delete (`delete-store`) relies on it to know no tab is joining. Without Web Locks there is nothing to
  * hold, and none is needed: persistent browser storage requires them.
  */
-export function holdReplicaLock(registry: string, account: string) {
-  return holdLock(webLocks(), registry, account);
+/**
+ * Hold `account`'s store open, as a page without `clearOnSignOut` (or a
+ * client opened directly) does: nothing is recorded, but a wipe a crash left
+ * unfinished is finished first (through `deleteStore`), so the store is
+ * never opened half-deleted.
+ */
+export function holdReplicaStore(
+  registry: string,
+  account: string,
+  deleteStore: () => Promise<"deleted" | "held">,
+): Promise<() => Promise<void>> {
+  return replicaLifecycle({
+    registry,
+    ledger: replicaLedger(registry),
+    heldHere: () => false,
+    deleteStore,
+    backendUser: async () => {
+      throw new Error("not asked: this page only holds the store");
+    },
+    deviceKeyKept: async () => true,
+  }).hold({ account });
 }
 
 async function holdLock(
@@ -427,8 +446,15 @@ export function replicaLifecycle(options: {
      * release is called. A wipe a crash left unfinished is finished first:
      * a store is never opened half-deleted.
      */
-    async hold(entry: Omit<ReplicaEntry, "wiping">): Promise<() => Promise<void>> {
+    async hold(
+      entry: Omit<ReplicaEntry, "wiping"> | { account: string },
+    ): Promise<() => Promise<void>> {
       const { account } = entry;
+      // Only a clearOnSignOut page records what it opens; any page finishes
+      // a wipe it finds unfinished, and holds the store.
+      const record = () => {
+        if ("kind" in entry) ledger.record(entry);
+      };
       for (let attempt = 0; ; attempt++) {
         // A store marked `wiping` (a crashed delete) is finished first: it is
         // never opened half-deleted. A failing delete fails the open.
@@ -442,10 +468,10 @@ export function replicaLifecycle(options: {
           await new Promise((resolve) => setTimeout(resolve, FINISH_WIPE_RETRY_MS));
           continue;
         }
-        ledger.record(entry);
+        record();
         const release = await holdLock(locks, registry, account);
         // Again once held: another tab's wipe may have forgotten it before.
-        ledger.record(entry);
+        record();
         if (!ledger.get(account)?.wiping) return release;
         // Another tab's delete failed between the check and the lock.
         await release();
