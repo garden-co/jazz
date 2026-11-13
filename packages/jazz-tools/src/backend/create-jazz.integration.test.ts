@@ -930,6 +930,105 @@ describe("createJazz", () => {
     expect(unknownFrames).toBe(0);
   }, 30_000);
 
+  it("runs refresh only for the browser's own POST, never for a GET or another site", async () => {
+    let refreshed = 0;
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+      refresh: (request, next) => {
+        refreshed += 1;
+        return next(request);
+      },
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: false });
+    const url = `${origin}/jazz/apps/${jazz.appId}/accounts/backend-user`;
+    // A cross-site navigation carries a Lax cookie on GET.
+    expect(await statusOf(url, "GET", { "x-test-user": "alice" })).toBe(405);
+    expect(
+      await statusOf(url, "POST", { "x-test-user": "alice", origin: "https://evil.example" }),
+    ).toBe(403);
+    expect(refreshed).toBe(0);
+    expect(await statusOf(url, "POST", { "x-test-user": "alice", origin })).toBe(200);
+    expect(refreshed).toBe(1);
+  }, 30_000);
+
+  it("refuses a ticket another instance issued, falling back to reconnecting", async () => {
+    const shortAuth = (request: Request) => {
+      const userId = request.headers.get("x-test-user");
+      return userId ? { userId, expiresAt: inSeconds(6) } : null;
+    };
+    // Two backends without a shared secret (each in-process core has its own).
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: shortAuth,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const other = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: shortAuth,
+    }).ready();
+    cleanups.push(() => other.close());
+    let upgrades = 0;
+    const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
+    const otherServer = createServer((req, res) => other.nodeHandler(req, res, () => res.end()));
+    await new Promise<void>((resolve) => otherServer.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => otherServer.close(resolve)));
+    const otherOrigin = `http://127.0.0.1:${(otherServer.address() as AddressInfo).port}`;
+    const alice = await userSession(jazz.appId, origin, "alice");
+    // Renewals land on the other instance (with this app's path).
+    const viaThis = globalThis.fetch;
+    let renewals = 0;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      if (!request.headers.has("x-jazz-renew")) return viaThis(request);
+      renewals += 1;
+      const path = new URL(request.url).pathname.replace(jazz.appId, other.appId);
+      return viaThis(new Request(`${otherOrigin}${path}`, request));
+    }) as typeof fetch;
+    cleanups.push(async () => {
+      globalThis.fetch = viaThis;
+    });
+    const owner = alice.session!.user!;
+    await alice.db.insert(app.todos, { title: "before", owner }).wait({ tier: "global" });
+    const opened = upgrades;
+    await expect.poll(() => upgrades, { timeout: 15_000, interval: 50 }).toBeGreaterThan(opened);
+    expect(renewals).toBeGreaterThan(0);
+    await alice.db.insert(app.todos, { title: "after", owner }).wait({ tier: "global" });
+  }, 30_000);
+
+  it("reconnects when the renewal names another user, never extending the session", async () => {
+    let renewalUser = "alice";
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        const userId = request.headers.has("x-jazz-renew")
+          ? renewalUser
+          : request.headers.get("x-test-user");
+        return userId ? { userId, expiresAt: inSeconds(6) } : null;
+      },
+    }).ready();
+    cleanups.push(() => jazz.close());
+    let upgrades = 0;
+    const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
+    const alice = await userSession(jazz.appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "before", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    // The app's session turned into bob's (signed in as him elsewhere).
+    renewalUser = "bob";
+    const opened = upgrades;
+    await expect.poll(() => upgrades, { timeout: 15_000, interval: 50 }).toBeGreaterThan(opened);
+  }, 30_000);
+
   it("issues renewal tickets only for the session and user they name", async () => {
     const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
     cleanups.push(() => jazz.close());

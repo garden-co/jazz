@@ -96,3 +96,16 @@ export function renewalUrlFor(socketUrl: string): string | null {
     return null;
   }
 }
+
+/**
+ * The Web Lock every request that may refresh the app's session takes, in
+ * every window and worker of a browser: in-place renewals and the session's
+ * "who is signed in" checks alike. Per origin, as the cookie it refreshes is.
+ */
+export function sessionRefreshLockName(url: string): string {
+  try {
+    return `jazz-session-refresh:${new URL(url.replace(/^ws/, "http")).origin}`;
+  } catch {
+    return `jazz-session-refresh:${url}`;
+  }
+}

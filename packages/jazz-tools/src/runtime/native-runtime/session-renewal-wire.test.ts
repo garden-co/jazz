@@ -8,6 +8,7 @@ import {
   encodeRenewFrame,
   encodeRenewSoonFrame,
   renewalUrlFor,
+  sessionRefreshLockName,
 } from "./session-renewal-wire.js";
 import {
   CLIENT_WIRE_FEATURES,
@@ -36,6 +37,15 @@ describe("session renewal frames", () => {
     expect(decodeRenewFrame(Uint8Array.of(2, 0, 0))).toBeNull();
     expect(decodeRenewFrame(encodeRenewSoonFrame("ses-1", 1))).toBeNull();
     expect(() => decodeRenewSoonFrame(encodeRenewFrame("x"))).toThrow();
+  });
+
+  it("share one refresh lock between renewals and sign-in checks, per origin", () => {
+    expect(sessionRefreshLockName("wss://app.example.com/jazz/apps/a/ws")).toBe(
+      sessionRefreshLockName("https://app.example.com/jazz/apps/a/accounts"),
+    );
+    expect(sessionRefreshLockName("wss://app.example.com/jazz/apps/a/ws")).not.toBe(
+      sessionRefreshLockName("https://other.example.com/jazz/apps/a/accounts"),
+    );
   });
 
   it("renew at the backend's who-is-signed-in route next to the socket", () => {

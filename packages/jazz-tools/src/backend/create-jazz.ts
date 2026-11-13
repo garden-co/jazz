@@ -515,8 +515,9 @@ export interface CreateJazzOptions {
    */
   publicUrl?: string | string[];
   /**
-   * The longest a sync session lasts before its client connects again and
-   * `authenticate` decides anew on that new request. Defaults to one hour.
+   * The longest a sync session goes without `authenticate` deciding anew:
+   * on a renewal request (a browser on your cookie renews its open session
+   * in place) or on its client's new connection. Defaults to one hour.
    * A signed-in user's session ends sooner if the `expiresAt` `authenticate`
    * returned comes first; a local-first guest is let in anew each time. So
    * a sign-out elsewhere, a ban or a changed role reaches an open session
@@ -2978,6 +2979,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     handle: (request: Request) => Promise<Response>,
   ): Promise<Response> {
     if (!options.refresh) return handle(request);
+    // Only the browser's own POST, which `route` checked the origin of: a
+    // cross-site navigation (a GET) must never rotate the app's session.
+    if (request.method !== "POST") return new Response(null, { status: 405 });
     const response = await options.refresh(request, (next) => {
       if (!isRequestLike(next)) {
         throw new TypeError("createJazz: refresh must call next with a Request");

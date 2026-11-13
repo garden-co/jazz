@@ -9,6 +9,7 @@ import {
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import type { ShutdownOptions } from "../runtime/db.js";
 import { bearerFetch } from "../runtime/credentialed-transport.js";
+import { sessionRefreshLockName } from "../runtime/native-runtime/session-renewal-wire.js";
 import {
   createRegisteredJazzClient,
   type CreateAccountDb,
@@ -527,7 +528,12 @@ export async function openBrowserSessionCore(
     openClient,
     decorate: followUser({
       registry,
-      events: browserBackendWatchEvents(`jazz-account:${registry}`),
+      // Checks and the sync connection's renewals may both refresh the
+      // app's session: one lock for both, so its cookie rotates once.
+      events: browserBackendWatchEvents(
+        `jazz-account:${registry}`,
+        sessionRefreshLockName(registry),
+      ),
       linkGuest: linkDeviceAccountOnSignUp,
       forgotten: (account) => accountForgotten(accounts, account.id),
       watchAccounts: (changed) => watchStoredSelection(accounts, changed),

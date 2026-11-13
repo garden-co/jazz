@@ -18,6 +18,7 @@ import {
   encodeRenewFrame,
   isRenewSoonFrame,
   renewalUrlFor,
+  sessionRefreshLockName,
 } from "./session-renewal-wire.js";
 
 export type WebSocketFrameHandler = (frame: Uint8Array) => void;
@@ -682,24 +683,22 @@ function isCookieSessionAuth(authJson: string | undefined): boolean {
   }
 }
 
-/** How long a renewal request may take before it is given up. */
-const SESSION_RENEWAL_TIMEOUT_MS = 10_000;
-
 /**
- * Ask the app's backend to renew sync session `session`: the ticket it
- * answers with, or null when it doesn't renew (signed out, an older
- * backend, a failure). Same-origin cookies go along, and a refreshed
- * cookie the answer sets lands in the browser's cookie jar.
+ * How long a renewal may hold the other windows back, at most: a request
+ * that hangs longer (a frozen page) lets them ask. Its own request is never
+ * aborted, so a rotated cookie the backend already set still lands.
  */
+const SESSION_RENEWAL_TURN_MS = 30_000;
+
 async function requestSessionRenewal(url: string, session: string): Promise<string | null> {
-  return oneWindowAtATime(`jazz-session-renewal:${url}`, () => renewalRequest(url, session));
+  return oneWindowAtATime(sessionRefreshLockName(url), () => renewalRequest(url, session));
 }
 
 /**
  * Run `request` while holding a Web Lock named `name`, so the windows (and
  * workers) of one browser renew one after another: each request carries the
  * cookie the one before it refreshed, and a single-use refresh token is
- * spent once. Held for at most {@link SESSION_RENEWAL_TIMEOUT_MS}; without
+ * spent once. Held for at most {@link SESSION_RENEWAL_TURN_MS}; without
  * Web Locks, it just runs.
  */
 async function oneWindowAtATime<T>(name: string, request: () => Promise<T>): Promise<T> {
@@ -713,7 +712,7 @@ async function oneWindowAtATime<T>(name: string, request: () => Promise<T>): Pro
       return Promise.race([
         run().catch(() => undefined),
         new Promise<void>((done) => {
-          turn = setTimeout(done, SESSION_RENEWAL_TIMEOUT_MS);
+          turn = setTimeout(done, SESSION_RENEWAL_TURN_MS);
         }),
       ]).finally(() => clearTimeout(turn));
     });
@@ -724,14 +723,11 @@ async function oneWindowAtATime<T>(name: string, request: () => Promise<T>): Pro
 }
 
 async function renewalRequest(url: string, session: string): Promise<string | null> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), SESSION_RENEWAL_TIMEOUT_MS);
   try {
     const response = await fetchFor(url)(url, {
       method: "POST",
       credentials: "same-origin",
       redirect: "error",
-      signal: controller.signal,
       headers: { [SESSION_RENEWAL_HEADER]: session },
     });
     if (!response.ok) return null;
@@ -739,8 +735,6 @@ async function renewalRequest(url: string, session: string): Promise<string | nu
     return typeof answer.renewal === "string" ? answer.renewal : null;
   } catch {
     return null;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
