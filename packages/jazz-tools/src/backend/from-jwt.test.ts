@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { fromJWT } from "./from-jwt.js";
+import { isAuthenticationUnavailableError } from "./request-auth.js";
 
 const ISSUER = "https://idp.example";
 const AUDIENCE = "my-app";
@@ -225,7 +226,10 @@ describe("fromJWT", () => {
       vi.fn(async () => new Response("down", { status: 503 })),
     );
     const authenticate = fromJWT({ jwksUrl: jwksUrl(), issuer: ISSUER, audience: AUDIENCE });
-    await expect(authenticate(request(await sign({})))).rejects.toThrow(/Unable to fetch JWKS/);
+    const thrown = authenticate(request(await sign({})));
+    await expect(thrown).rejects.toThrow(/Unable to fetch JWKS/);
+    // Which createJazz answers with 503 and Retry-After.
+    await expect(thrown).rejects.toSatisfy(isAuthenticationUnavailableError);
   });
 
   // A JWKS endpoint that hangs, rather than erroring, is the same outage as

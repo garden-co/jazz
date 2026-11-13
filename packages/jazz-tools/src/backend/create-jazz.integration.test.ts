@@ -1318,6 +1318,64 @@ describe("createJazz", () => {
     expect(unhandled).not.toHaveBeenCalled();
   });
 
+  // The identity provider being down is not the app's bug: sign-in answers
+  // 503 with Retry-After (the client retries and stays signed in), and the
+  // log names the JWKS rather than telling the developer to fix their code.
+  it("answers 503 with Retry-After when fromJWT's JWKS is down, without blaming authenticate (#5367)", async () => {
+    const jwks: Server = createServer((_req, res) => {
+      res.statusCode = 503;
+      res.end("synthetic outage");
+    });
+    await new Promise<void>((resolve) => jwks.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => jwks.close(resolve)));
+    const jwksUrl = `http://127.0.0.1:${(jwks.address() as AddressInfo).port}/jwks.json`;
+    const { privateKey } = await generateKeyPair("ES256");
+    const issuer = "https://idp.example";
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: fromJWT({ jwksUrl, issuer, audience: "my-app" }),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+    const origin = await serve(jazz, { sockets: false });
+    const token = await new SignJWT({})
+      .setProtectedHeader({ alg: "ES256", kid: "k1" })
+      .setIssuer(issuer)
+      .setAudience("my-app")
+      .setSubject("alice")
+      .setExpirationTime("5m")
+      .sign(privateKey);
+    const headers = { authorization: `Bearer ${token}` };
+    const path = `/jazz/apps/${jazz.appId}/accounts`;
+    const { POST } = jazz.next();
+    for (const answer of [
+      await POST(new Request(`http://app.test${path}/backend-user`, { method: "POST", headers })),
+      await jazz.handle(
+        new Request(`http://app.test${path}/backend-user`, { method: "POST", headers }),
+      ),
+      await fetch(`${origin}${path}/backend-sign-in`, { method: "POST", headers }),
+    ]) {
+      expect(answer.status).toBe(503);
+      expect(answer.headers.get("retry-after")).toBe("5");
+      expect(answer.headers.get("cache-control")).toBe("no-store");
+      expect(await answer.text()).toBe("authentication_unavailable");
+    }
+    expect(errors).toHaveBeenCalledTimes(3);
+    for (const [logged] of errors.mock.calls) {
+      expect(String(logged)).not.toMatch(/your authenticate threw/);
+      expect((logged as Error).message).toContain(`JWKS ${jwksUrl} is unavailable`);
+    }
+    // The client sees a retryable 503, not a refusal.
+    await expect(
+      requestBackendUser(`${origin}${path}`, (input, init) =>
+        fetch(input, { ...init, headers: { ...init?.headers, ...headers } }),
+      ),
+    ).rejects.toMatchObject({ status: 503 });
+  });
+
   it("tells the browser by a stable code that authenticate returned no expiresAt, and the client names the fix", async () => {
     let answer: unknown = { userId: "alice", internal: "secret-session-detail" };
     const jazz = await createJazz({

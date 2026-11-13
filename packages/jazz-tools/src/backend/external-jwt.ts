@@ -9,7 +9,7 @@ import {
 import { withAuthRequestDeadline } from "../runtime/auth-request-deadline.js";
 import type { JwtPayload } from "../runtime/client-session.js";
 import { isRecord, toError } from "../runtime/util.js";
-import { RequestAuthenticationError } from "./request-auth.js";
+import { AuthenticationUnavailableError, RequestAuthenticationError } from "./request-auth.js";
 
 /**
  * Verifying an identity provider's JWTs, for `fromJWT`: the signature (a JWKS
@@ -442,6 +442,21 @@ function ensureJwtDomain(payload: JwtPayload, config: ExternalJwtConfig): void {
   }
 }
 
+/** The JWKS document, or `AuthenticationUnavailableError` when it can't be had. */
+async function availableJwksDocument(
+  jwksUrl: string,
+  forceRefresh = false,
+): Promise<LocalJwksDocument> {
+  try {
+    return await getRemoteJwksDocument(jwksUrl, forceRefresh);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new AuthenticationUnavailableError(`JWKS ${jwksUrl} is unavailable: ${message}`, {
+      cause: error,
+    });
+  }
+}
+
 /** @internal Verify `token`'s signature, expiry, issuer and audience. */
 export async function verifyExternalJwt(
   token: string,
@@ -460,14 +475,14 @@ export async function verifyExternalJwt(
   if (config.jwksUrl) {
     // Fetching the JWKS can fail on the server's side (a bad jwksUrl, a
     // provider outage); only a token that fails verification is the caller's.
-    let jwks = await getRemoteJwksDocument(config.jwksUrl);
+    let jwks = await availableJwksDocument(config.jwksUrl);
     try {
       await verifyJwtSignatureWithJwks(token, jwks);
     } catch {
       // A refresh that fails throws, so the client retries, and keeps
       // throwing through its cooldown; only a refresh that succeeds can
       // refuse an unknown key.
-      jwks = await getRemoteJwksDocument(config.jwksUrl, true);
+      jwks = await availableJwksDocument(config.jwksUrl, true);
       try {
         await verifyJwtSignatureWithJwks(token, jwks);
       } catch (refreshError) {
