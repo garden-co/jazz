@@ -142,6 +142,7 @@ export async function runInspectCommand(args: string[], io: InspectCliIo): Promi
       callInspector(endpoint, request, {
         token: (await store.get(endpoint))?.token,
         fetch: io.fetch,
+        withoutToken: `run \`jazz-tools inspect login --app ${endpoint}\` to ask a person for one`,
       });
     const as = flag("--as");
     const claimsText = flag("--claims");
