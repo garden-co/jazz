@@ -38,10 +38,15 @@ import {
   signedInIdentity,
   type UserFollowingSession,
 } from "./follow-user.js";
-import { replicaLedger, replicaLifecycle, type ReplicaLifecycle } from "./replica-ledger.js";
+import {
+  holdReplicaLock,
+  replicaLedger,
+  replicaLifecycle,
+  type ReplicaLifecycle,
+} from "./replica-ledger.js";
 import { refuseInvalidSessionConfig } from "./config-options.js";
 import { warnWindowJazzConflict } from "../runtime/page-handle.js";
-import { accountForgotten, storedSelectedAccount } from "../accounts/persistence.js";
+import { accountForgotten, storedKeepsDeviceAccount } from "../accounts/persistence.js";
 import { rememberBackendUser } from "../accounts/enrollment.js";
 
 export type { LocalFirstLoader };
@@ -271,23 +276,26 @@ export async function openBrowserSessionCore(
         const user = await signedInIdentity(registry, fetcher);
         return user ? { issuer: user.issuer, subject: user.subject } : null;
       },
-      selectedDeviceAccount: () => storedSelectedAccount(accounts),
+      deviceKeyKept: (account) => storedKeepsDeviceAccount(accounts, account),
     });
   }
   /**
    * Open `account`'s local-first client, held open against every tab's
-   * wipe, and recorded in the ledger so a later page wipes what a sign-out
-   * this page doesn't see leaves behind.
+   * wipe, and (with clearOnSignOut) recorded in the ledger so a later page
+   * wipes what a sign-out this page doesn't see leaves behind.
    */
   const openReplica = async (createDb: CreateAccountDb, account: AccountHandle) => {
-    if (!replicas) return openLocalFirst(createDb, account);
     opening.add(account.id);
     try {
-      const release = await replicas.hold({
-        account: account.id,
-        kind: rememberBackendUser(account) ? "backend" : "device",
-        identity: account.identity,
-      });
+      // Without clearOnSignOut nothing is recorded, but the store is held
+      // all the same: a wipe from a tab that has clearOnSignOut must wait.
+      const release = replicas
+        ? await replicas.hold({
+            account: account.id,
+            kind: rememberBackendUser(account) ? "backend" : "device",
+            identity: account.identity,
+          })
+        : await holdReplicaLock(registry, account.id);
       let client: JazzClient;
       try {
         client = await openLocalFirst(createDb, account);
@@ -442,7 +450,7 @@ function watchReplicas(session: BrowserJazzSession, replicas: ReplicaLifecycle) 
   const onStorage = (event: StorageEvent) => {
     if (
       event.key === null ||
-      event.key === replicas.ledger.key ||
+      event.key.startsWith(replicas.ledger.prefix) ||
       event.key === replicas.ledger.legacyKey
     )
       reconcile();

@@ -142,19 +142,23 @@ export async function accountForgotten(
   return (await forgottenReaders.get(accounts)?.(account)) ?? false;
 }
 
-const selectionReaders = new WeakMap<AccountManager<JWTAuth>, () => Promise<string | undefined>>();
+const keptAccountReaders = new WeakMap<
+  AccountManager<JWTAuth>,
+  (account: string) => Promise<boolean>
+>();
 
 /**
- * @internal The device account the store `accounts` keeps selects now (the
- * one this device's tabs open), as stored, not as this manager last saw it.
- * `undefined` when it selects none.
+ * @internal Whether the store `accounts` keeps still holds the key of the
+ * device account `account` (as stored now, not as this manager last saw it):
+ * while it does, that account can be opened again, so its local data is kept.
  */
-export async function storedSelectedAccount(
+export async function storedKeepsDeviceAccount(
   accounts: AccountManager<JWTAuth>,
-): Promise<string | undefined> {
-  const read = selectionReaders.get(accounts);
-  if (!read) throw new Error("Jazz can't read this account store's selection");
-  return read();
+  account: string,
+): Promise<boolean> {
+  const read = keptAccountReaders.get(accounts);
+  if (!read) throw new Error("Jazz can't read this device's account store");
+  return read(account);
 }
 
 /** @internal Select and adopt one durable root for automatic first startup. */
@@ -333,10 +337,10 @@ export async function prepareAccountManager(options: {
   forgottenReaders.set(manager, async (account) =>
     (decode(await options.store.read()).forgottenAccounts ?? []).includes(account),
   );
-  selectionReaders.set(manager, async () => {
+  keptAccountReaders.set(manager, async (account) => {
     const latest = decode(await options.store.read());
     dropForgotten(latest);
-    return latest.selected === null ? undefined : rootAccount(latest.roots[latest.selected]!);
+    return latest.roots.some((root) => rootAccount(root) === account);
   });
   const superseded = async (): Promise<never> => {
     stored.selected = null;

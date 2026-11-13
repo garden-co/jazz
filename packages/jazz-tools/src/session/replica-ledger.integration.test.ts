@@ -70,6 +70,10 @@ async function setup(options: { guests?: boolean } = {}) {
     getItem: (key: string) => storage.get(key) ?? null,
     setItem: (key: string, value: string) => void storage.set(key, value),
     removeItem: (key: string) => void storage.delete(key),
+    key: (index: number) => [...storage.keys()][index] ?? null,
+    get length() {
+      return storage.size;
+    },
   });
   const jar = { user: "alice" as string | null };
   const realFetch = globalThis.fetch;
@@ -278,7 +282,7 @@ it("lets a user who signs back in during the wipe open a fresh replica, still re
     .poll(() => second.getSnapshot().client?.session?.identity.subject, { timeout: 15_000 })
     .toBe("alice");
   // Her new replica is recorded, for a later missed sign-out.
-  const recorded = [...storage].find(([key]) => key.startsWith("jazz-replicas-v2:"));
+  const recorded = [...storage].find(([key]) => key.startsWith("jazz-replica-v2:"));
   expect(recorded?.[1]).toContain('"subject":"alice"');
   await second.close();
 }, 60_000);
@@ -300,7 +304,7 @@ it("finishes a wipe whose delete failed before the user's next sign-in opens the
     })
     .toBe(true);
   expect(wiped).toEqual([]);
-  const entry = () => [...storage].find(([key]) => key.startsWith("jazz-replicas-v2:"))?.[1] ?? "";
+  const entry = () => [...storage].find(([key]) => key.startsWith("jazz-replica-v2:"))?.[1] ?? "";
   expect(entry()).toContain('"wiping":true');
   // Alice signs back in: her half-deleted replica is finished first, then opened fresh.
   jar.user = "alice";
@@ -334,7 +338,7 @@ it("holds the user's sign-in until a delete that began finishes, however late", 
   await expect
     .poll(() => second.getSnapshot().client?.session?.identity.subject, { timeout: 15_000 })
     .toBe("alice");
-  const recorded = [...storage].find(([key]) => key.startsWith("jazz-replicas-v2:"));
+  const recorded = [...storage].find(([key]) => key.startsWith("jazz-replica-v2:"));
   expect(recorded?.[1]).toContain('"subject":"alice"');
 }, 60_000);
 
@@ -358,7 +362,7 @@ it("records a guest's replica as a device account, and keeps it while the device
   cleanups.push(() => page.close());
   await page.createLocalFirst();
   await expect.poll(() => isThinDb(page.getSnapshot().client!.db), { timeout: 15_000 }).toBe(false);
-  const entry = [...storage].find(([key]) => key.startsWith("jazz-replicas-v2:"))?.[1] ?? "";
+  const entry = [...storage].find(([key]) => key.startsWith("jazz-replica-v2:"))?.[1] ?? "";
   expect(entry).toContain('"kind":"device"');
   // Its tab closes without signing out: the guest is still the device's, and so is its data.
   await page.close();
@@ -375,7 +379,7 @@ it("leaves the replica and its entry while another tab holds it, and the last ta
   stubWebLocks();
   const { open, storage, wiped } = await setup();
   const recorded = () =>
-    [...storage].find(([key]) => key.startsWith("jazz-replicas-v2:"))?.[1] ?? "";
+    [...storage].find(([key]) => key.startsWith("jazz-replica-v2:"))?.[1] ?? "";
   const here = await signInLocalFirst(open);
   cleanups.push(() => here.close());
   const there = await signInLocalFirst(open);

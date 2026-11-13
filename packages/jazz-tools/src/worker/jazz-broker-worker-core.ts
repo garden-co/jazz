@@ -649,8 +649,9 @@ async function deleteStoreWithoutTabs(
     return "held";
   // Active leases without an attached runtime are a gone tab's: nothing
   // notices a crashed tab's lease port. The page asks only under its
-  // exclusive per-account lock, which every tab holds before it opens the
-  // store, so no tab is joining. The delete takes the lease pool with it.
+  // exclusive per-account lock, which every browser session tab with a
+  // local-first client holds before it opens the store (with clearOnSignOut
+  // or without), so no tab is joining. The delete takes the lease pool with it.
   pendingRuntimeOwnerRetirements.delete(dbName);
   // Its durable epoch record goes with the store; the lock is released either way.
   await releasePhysicalDatabaseOwner(dbName).catch(() => undefined);
