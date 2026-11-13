@@ -51,6 +51,8 @@ mod error_code_strings;
 mod existential_joins;
 #[path = "../explain_read_clauses.rs"]
 mod explain_read_clauses;
+#[path = "../fanout_correlation.rs"]
+mod fanout_correlation;
 #[path = "../fanout_differential.rs"]
 mod fanout_differential;
 #[path = "../flat_joins.rs"]
