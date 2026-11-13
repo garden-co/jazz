@@ -181,12 +181,7 @@ pub fn serve_core(options: JsonValue) -> Result<ServedCore> {
         trusted_workload,
         ..Default::default()
     };
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            // `RUST_LOG` sets the level of any target it names.
-            jazz_otel::env_filter_with_defaults(&["jazz=info", "jazz_tools=info"]),
-        )
-        .try_init();
+    crate::init_server_logs("info");
     let (stop, stop_requested) = tokio::sync::watch::channel(false);
     let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
     napi::bindgen_prelude::spawn(async move {
