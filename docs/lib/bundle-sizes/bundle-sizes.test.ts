@@ -22,7 +22,13 @@ describe("bundle sizes", () => {
   });
 
   it("replaces every token in a text", () => {
-    const sizes = parseBundleSizes(fallback)!;
+    // Fixed numbers (alpha.60's), so refreshing fallback.json doesn't touch this test.
+    const sizes = parseBundleSizes({
+      ...fallback,
+      thinClientAddedGzipBytes: 153_579,
+      wasmGzipBytes: 3_114_878,
+      wasmRawBytes: 8_800_443,
+    })!;
     expect(
       replaceBundleSizeTokens(
         "thin %bundle.thin%, Wasm %bundle.wasm% (%bundle.wasmRaw% raw)",
