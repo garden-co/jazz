@@ -17,9 +17,11 @@ fn main() {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("jazz=info".parse().unwrap())
-                .add_directive("jazz_tools=info".parse().unwrap()),
+            // A target `RUST_LOG` names takes the level it gives there.
+            tracing_subscriber::EnvFilter::new(format!(
+                "jazz=info,jazz_tools=info,{}",
+                std::env::var("RUST_LOG").unwrap_or_default().trim()
+            )),
         )
         .init();
     let code = tokio::runtime::Builder::new_multi_thread()

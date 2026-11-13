@@ -53,7 +53,12 @@ Every call is audited, allowed or refused. By default that's one `console.info` 
 
 ## The Inspector page
 
-Open `/jazz/inspect/` on your app. Besides the data grid, it has:
+Open `/jazz/inspect/` on your app. The page itself, its HTML and scripts, loads for anyone who
+reaches that URL, without your `inspect` hook: it holds no data. Everything it shows comes from
+`<basePath>/inspect/api`, which only answers requests your `inspect` hook (or an approved token)
+lets in, so a visitor without access gets no data.
+
+Besides the data grid, it has:
 
 - **View as user**: browse the data under one user's permissions. If your permissions read `session.claims`, give that user's claims too ("with claims"): without them you see what a session with no claims would, and the Inspector says so.
 - **Sessions**: who is connected right now.

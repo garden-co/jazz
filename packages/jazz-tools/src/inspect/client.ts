@@ -132,7 +132,15 @@ export type TokenStore = ReturnType<typeof tokenStore>;
 export async function callInspector<T = unknown>(
   endpoint: string,
   request: InspectRequest,
-  options: { token?: string | null; fetch?: typeof fetch } = {},
+  options: {
+    token?: string | null;
+    fetch?: typeof fetch;
+    /**
+     * What to do about a refusal when no token was sent: the app's hook
+     * refusing an anonymous call means the caller has no token yet.
+     */
+    withoutToken?: string;
+  } = {},
 ): Promise<T> {
   const doFetch = options.fetch ?? fetch;
   // A token reads every row it's scoped to: it never crosses a network in the clear.
@@ -175,7 +183,14 @@ export async function callInspector<T = unknown>(
   }
   if (!response.ok) {
     const error = body as Partial<InspectErrorAnswer>;
-    throw new InspectError(error.error ?? "failed", error.message ?? `HTTP ${response.status}`);
+    const message = error.message ?? `HTTP ${response.status}`;
+    if (!options.token && error.error === "unauthorized" && options.withoutToken) {
+      throw new InspectError(
+        "unauthorized",
+        `no Inspector token for ${endpoint}: ${options.withoutToken} (the backend said: ${message})`,
+      );
+    }
+    throw new InspectError(error.error ?? "failed", message);
   }
   return body as T;
 }
