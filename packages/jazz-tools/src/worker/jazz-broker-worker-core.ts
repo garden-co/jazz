@@ -1327,6 +1327,7 @@ async function configureServer(
     // same account's upstream connection, which already carries this tab's
     // local writes for that account.
     if (!carriesCredential(options.authJson) && carriesCredential(context.serverAuthJson)) return;
+    context.runtime?.assertCredentialKeepsPrincipal(options.authJson);
     context.serverAuthJson = options.authJson;
     if (context.serverConnectionStarted) await requireRuntime(context).updateAuth(options.authJson);
     return;
@@ -1800,6 +1801,9 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       if (!peer.subscriber) throw new Error("Browser tab is not initialized");
       let authenticationRejected = false;
       await enqueueTransportTransition(peer.context, async () => {
+        // Refuse another principal's credential before storing it or
+        // publishing its claims, even while explicitly disconnected (#4476).
+        activeRuntime.assertCredentialKeepsPrincipal(message.authJson);
         const authFailureEpoch = peer.context.authFailureEpoch;
         try {
           if (!peer.context.explicitlyDisconnected) {
@@ -1886,6 +1890,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         const own =
           carriesCredential(message.authJson) || !carriesCredential(peer.context.serverAuthJson);
         const authJson = own ? message.authJson : peer.context.serverAuthJson;
+        activeRuntime.assertCredentialKeepsPrincipal(authJson);
         const dial = carriesCredential(authJson);
         if (dial) {
           activeRuntime.connect(serverUrl, authJson);
