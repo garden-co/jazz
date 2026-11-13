@@ -79,7 +79,12 @@ So a sign-out on another device, a ban or a changed role reaches an open connect
 `sessionTtlSeconds` at the latest. To end a user's open connections at once, call
 `jazz.revokeUser(userId)` from your sign-out handler or your auth provider's session-revoked
 webhook. It ends their connections on this backend instance; connections on other instances end
-within `sessionTtlSeconds`.
+within `sessionTtlSeconds`. On Vercel and other serverless hosts, the request that signs a user out
+usually runs on a different instance than their sync connections, so `revokeUser` there rarely
+reaches them. To sign out the browser the user is in, every tab of it, call `refresh()` on the
+client after your sign-out (see [Signing out in every tab](#signing-out-in-every-tab)). A connection
+`revokeUser` does end asks your backend who is signed in; in a background tab, a "no one" answer
+then waits until the tab is in front again, since its cookies may be stale.
 
 ### Keep auth middleware off Jazz's routes
 
@@ -126,8 +131,22 @@ function SignOutButton() {
 }
 ```
 
-Jazz asks your backend who is signed in when the app starts, when the page regains focus and when
-another tab signs in or out; the identity always comes from `authenticate`. A device remembers the
+Jazz asks your backend who is signed in at these moments; the identity always comes from
+`authenticate`:
+
+- when the app starts;
+- when the page regains focus or becomes visible again;
+- when another tab of the same browser changes account (signs in, out, or as someone else);
+- when the sync server refuses the connection's sign-in, for example once `expiresAt` or
+  `sessionTtlSeconds` has passed and `authenticate` no longer names the user, or after
+  `jazz.revokeUser`;
+- when your app calls `refresh()`.
+
+A "no one is signed in" answer signs the user out only once a second answer, two seconds later,
+agrees, so one failed session refresh in `authenticate` signs no one out. After `refresh()` Jazz
+follows the first answer. After a refused connection, a tab in the background doesn't sign out on
+its own: its cookies may be stale, so it asks again when it is in front. A failed check (a network
+error, a timeout, a 5xx) is tried again with backoff. A device remembers the
 user your backend signed in (their account, identity and claims, never a credential), so a reload
 reopens their account straight away, offline too, and the first answer confirms it: another user
 switches in one step, a signed-out answer (confirmed by a second one) signs them out, and changed
@@ -145,9 +164,10 @@ again.
 - **Sign-out.** When your backend answers signed out, Jazz closes the account's client. A local-first client's
   unsynced writes stay in that account's local storage and sync the next time the same user signs
   in. On shared devices, pass `clearOnSignOut` to wipe them instead.
-- **Sign-out elsewhere.** Another tab, an expired session or a revoked one: when the connection
-  re-authenticates at its `expiresAt` (or `jazz.revokeUser` ends it) and `authenticate` returns
-  `null`, Jazz signs the user out. No client code needed.
+- **Sign-out elsewhere.** On another device, or a session that expired or was revoked: when the
+  connection re-authenticates at its `expiresAt` (or `jazz.revokeUser` ends it) and `authenticate`
+  returns `null`, Jazz signs the user out. No client code needed. Other tabs of the same browser
+  follow at once only when the tab that signed out calls `refresh()`; see below.
 - **Before a sign-out.** Pass `onSignedOut` to `createJazzClient` to hear about a confirmed
   sign-out before Jazz signs the user out. Return `"keep"` to stay signed in for now (your app
   refreshes its session itself, or shows its sign-in first); Jazz asks your backend again on the
@@ -160,6 +180,37 @@ import { createJazzClient } from "jazz-tools/client";
 
 const session = await createJazzClient({ serverUrl: "/jazz" });
 supabase.auth.onAuthStateChange(() => void session.refresh());
+```
+
+### Signing out in every tab
+
+`refresh()` is what makes the browser's other tabs follow: once this tab's session changes account,
+it tells the others, and they ask your backend at once. A sign-out that redirects skips it. That
+includes AuthKit's `signOut()`, a Next.js server action that calls `redirect()`, and Auth.js's
+default sign-out. The tab leaves before Jazz hears of it, and unless the page it lands on opens Jazz
+(AuthKit's goes through WorkOS's own sign-out page first), nothing tells the other tabs: they follow
+only when they're in front again, or when their connection's session ends (`expiresAt`, or
+`sessionTtlSeconds`, an hour by default).
+
+So sign out in three steps: clear your session without redirecting, call `refresh()`, then
+navigate:
+
+```tsx title="SignOutButton.tsx"
+"use client";
+import { useRouter } from "next/navigation";
+import { useJazzSession } from "jazz-tools/react";
+import { signOutAction } from "./actions"; // ends the session and clears its cookie, no redirect()
+
+export function SignOutButton() {
+  const { refresh } = useJazzSession();
+  const router = useRouter();
+  async function signOut() {
+    await signOutAction();
+    await refresh(); // this tab follows, and tells the browser's other tabs
+    router.push("/");
+  }
+  return <button onClick={() => void signOut()}>Sign out</button>;
+}
 ```
 
 ## In React Native

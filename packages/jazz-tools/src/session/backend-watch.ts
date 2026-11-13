@@ -646,21 +646,37 @@ export function browserBackendWatchEvents(
   /** The lock its checks take, shared with the sync connection's renewals (`sessionRefreshLockName`). */
   refreshLock = `${channelName}:probe`,
 ): BackendWatchEvents {
+  // The channel is open only while something listens: a session whose
+  // startup failed before its watch started (or after it stopped) holds
+  // none, so a provider retrying a failed createJazzClient leaks nothing.
   const crossTab =
     typeof BroadcastChannel === "function"
       ? (() => {
-          const channel = new BroadcastChannel(channelName);
+          let channel: BroadcastChannel | undefined;
           const listeners = new Set<() => void>();
-          channel.onmessage = () => {
-            for (const listener of listeners) listener();
-          };
           return {
-            post: () => channel.postMessage("account-changed"),
+            post() {
+              if (channel) return channel.postMessage("account-changed");
+              // Nothing in this tab listens: tell the others through a
+              // channel of its own (a message posted before close is sent).
+              const once = new BroadcastChannel(channelName);
+              once.postMessage("account-changed");
+              once.close();
+            },
             listen(check: () => void) {
+              if (!channel) {
+                const opened = new BroadcastChannel(channelName);
+                opened.onmessage = () => {
+                  for (const listener of listeners) listener();
+                };
+                channel = opened;
+              }
               listeners.add(check);
               return () => {
                 listeners.delete(check);
-                if (!listeners.size) channel.close();
+                if (listeners.size || !channel) return;
+                channel.close();
+                channel = undefined;
               };
             },
           };

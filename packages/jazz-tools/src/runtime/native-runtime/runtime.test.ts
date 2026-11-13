@@ -33,6 +33,8 @@ import {
 import { encodeSchema } from "./schema-codec.js";
 import { createUpstreamLink } from "../testing/napi-runtime-test-utils.js";
 import { applySubscriptionDelta, SubscriptionManager } from "../subscription-manager.js";
+import { CoreTickFailedError } from "../core-tick-failed-error.js";
+import { isAuthorityChangedError } from "../authority-changed-error.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
 import { type TxId, type WriteReceipt } from "../client.js";
@@ -849,7 +851,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       schedule!("immediate");
       for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
       expect(authFailures).toHaveLength(1);
-      expect(thrown).toEqual([tickFailure]);
+      expect(thrown).toHaveLength(1);
+      expect(thrown[0]).toBeInstanceOf(CoreTickFailedError);
+      expect(thrown[0]).toMatchObject({ code: "core_tick_failed", cause: tickFailure });
     } finally {
       spy.mockRestore();
     }
@@ -1203,6 +1207,76 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect((updates.mock.calls[0]![0] as Error).message).toBe("server died");
     expect(updates.mock.calls[0]).toHaveLength(1);
   });
+
+  // A subscription the core rejects keeps the rejection's core code, as a
+  // thrown core error does. A relay that refuses its upstream rejects the
+  // remote reads it relays with its refusal: a tab's remote subscription
+  // then fails with an AuthorityChangedError, through either binding's
+  // event shape. A binding that carries no code still fails it plainly.
+  it.each([
+    [
+      "WASM",
+      {
+        type: "ServerFailure",
+        detail: "AuthorityChanged: recreated",
+        errorCode: "authority_changed",
+      },
+      "authority_changed",
+    ],
+    [
+      "NAPI",
+      {
+        type: "ServerFailure",
+        code: "AuthorityChanged: recreated",
+        errorCode: "authority_changed",
+      },
+      "authority_changed",
+    ],
+    [
+      "WASM",
+      { type: "ServerFailure", detail: "Schema: cannot mirror", errorCode: "schema" },
+      "schema",
+    ],
+    ["React Native", { type: "ServerFailure", code: "AuthorityChanged: recreated" }, undefined],
+  ] as const)(
+    "fails a rejected %s subscription with its core code (%j)",
+    (_binding, reason, code) => {
+      const events: unknown[] = [{ type: "rejected", reason }];
+      const subscription = {
+        closed: false,
+        readAll: () => events.splice(0),
+        close() {
+          this.closed = true;
+          return true;
+        },
+      };
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () => fakeDb({ subscribe: () => subscription, tick: () => undefined }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+
+      const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "remote");
+      const updates = vi.fn();
+      runtime.executeSubscription(handle, updates);
+
+      expect(updates).toHaveBeenCalledTimes(1);
+      const error = updates.mock.calls[0]![0] as Error & { code?: string };
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toContain("Subscription rejected: ServerFailure");
+      expect(error.code).toBe(code);
+      expect(isAuthorityChangedError(error)).toBe(code === "authority_changed");
+      expect(subscription.closed).toBe(true);
+    },
+  );
 
   it.each(["local-first", "remote"] as const)(
     "forwards the core's ready %s subscription reset directly",

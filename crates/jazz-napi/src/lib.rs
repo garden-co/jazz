@@ -971,6 +971,10 @@ pub struct SubscriptionServerFailureReason {
     pub reason_type: String,
     /// The server's reason.
     pub code: String,
+    /// The rejection's core error code (`"authority_changed"`, …), as a
+    /// thrown core error's `code`.
+    #[napi(js_name = "errorCode")]
+    pub error_code: String,
 }
 
 #[napi]
@@ -998,11 +1002,12 @@ fn subscription_event(event: CoreEvent) -> napi::Result<SubscriptionEvent> {
                 settled,
                 tier,
             }),
-            EventChunk::Rejected { detail } => Either3::B(SubscriptionRejectedEvent {
+            EventChunk::Rejected { detail, code } => Either3::B(SubscriptionRejectedEvent {
                 event_type: "rejected".to_owned(),
                 reason: SubscriptionServerFailureReason {
                     reason_type: "ServerFailure".to_owned(),
                     code: detail,
+                    error_code: code.to_owned(),
                 },
             }),
             EventChunk::Closed => Either3::C(SubscriptionClosedEvent {
@@ -2147,15 +2152,56 @@ fn parse_jazz_server_start_options(options: JsonValue) -> napi::Result<JazzServe
         .map_err(|error| napi::Error::from_reason(format!("Invalid JazzServer options: {error}")))
 }
 
+/// Where a server this process runs reports: to `collector_url` when one
+/// is given, else to stderr ([`init_server_logs`]).
 pub(crate) fn init_jazz_server_telemetry(collector_url: Option<&str>) {
     let Some(collector_url) = collector_url else {
+        init_server_logs("warn");
         return;
     };
+    // The first collector this process reports to; a later core naming the
+    // same one shares it.
+    static COLLECTOR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(installed) = COLLECTOR.get() {
+        if installed != collector_url {
+            tracing::warn!(
+                "telemetry: this process already reports to {installed}; the collector at {collector_url} gets nothing"
+            );
+        }
+        return;
+    }
+    if tracing::dispatcher::has_been_set() {
+        tracing::warn!(
+            "telemetry: this process already reports its logs elsewhere; the collector at {collector_url} gets nothing"
+        );
+        return;
+    }
+    let _ = COLLECTOR.set(collector_url.to_owned());
     jazz_otel::init_process_tracing_with_endpoint_once(
         "jazz-server",
         collector_url,
         &["jazz_tools=trace", "tower_http=debug"],
     );
+}
+
+/// Print Jazz's logs at `level` and up to stderr (`RUST_LOG` replaces the
+/// filter), unless the process already reports elsewhere. Without it, a
+/// server inside a Node process says nothing: a blob store refusing its
+/// credentials, or a failing upload, goes unnoticed. An in-process core
+/// passes `warn`, to stay quiet in the app's own output; a served core
+/// passes `info`, as the standalone server logs.
+pub(crate) fn init_server_logs(level: &str) {
+    use std::io::IsTerminal;
+    // `RUST_LOG` sets the level of any target it names; the defaults cover
+    // the rest.
+    let jazz = format!("jazz={level}");
+    let jazz_tools = format!("jazz_tools={level}");
+    let filter = jazz_otel::env_filter_with_defaults(&["error", &jazz, &jazz_tools]);
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .with_env_filter(filter)
+        .try_init();
 }
 
 // ============================================================================

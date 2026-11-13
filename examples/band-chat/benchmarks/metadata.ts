@@ -157,6 +157,45 @@ bandChatBenchmarks.push(
   },
 );
 
+bandChatBenchmarks.push({
+  name: "band_chat_presence_on_nested_page",
+  title: "BandChat · a presence stamp under nested includes",
+  description:
+    "A member stamps `lastSeen` on their profile while another member has a room open. The open page is the newest 100 messages, each with its sender and its system rows, and each system row with the three people it names: forward relations nested under a reverse one, as an app's nested includes compile. The page shows whole profiles and the member appears on it, so the stamp re-reads the page and every relation under it.",
+  fixture:
+    "8 members, 4 rooms, 400 messages; half the messages carry one or two system rows. Messages and system rows are readable to room members only. The page is open and hydrated before timing.",
+  storage: "In-memory Jazz database",
+  includes: [
+    "The profile update and its commit (about 0.5% of the time)",
+    "Re-reading the open page with its nested relations, and draining the update",
+  ],
+  excludes: ["Schema compilation, seeding, opening the page and teardown"],
+  work: {
+    count: 1,
+    unit: "presence stamps/s",
+    explanation: "One stamp per iteration, delivered to the one open page.",
+  },
+  source,
+});
+
+bandChatBenchmarks.push({
+  name: "band_chat_open_nested_page",
+  title: "BandChat · open a page with nested includes",
+  description:
+    "A member opens a room page whose messages nest their people: the newest 100 messages, each with its sender and its system rows, and each system row with the three people it names, through the membership read policies, until the first published result. One full read of a nested page with no write: the read a live page repeats whenever a person on it changes.",
+  fixture:
+    "8 members, 4 rooms, 400 messages; half the messages carry one or two system rows. Messages and system rows are readable to room members only. A freshly seeded store per sample.",
+  storage: "In-memory Jazz database",
+  includes: ["subscribe_for_identity opening, runtime ticks and the first published page"],
+  excludes: ["Schema compilation, seeding and query preparation", "Subscription teardown"],
+  work: {
+    count: 1,
+    unit: "pages opened/s",
+    explanation: "One page opening per iteration, returning 100 messages with their relations.",
+  },
+  source,
+});
+
 const nightlySource = "examples/band-chat/benchmarks/benches/nightly.rs";
 const band =
   "200 members, 1,000 rooms: one room with 100,000 messages and 50 members, ten rooms of 10,000 and 989 rooms of 10–200 (303,695 messages). Every tenth message in the busy rooms has 1–3 reactions; every member has one read marker per room (a read-up-to row, updated in place). The reader is a member of 100 rooms. Declared indexes: messages (roomId, $createdAt) and readMarkers (roomId, lastReadAt). Membership read policies throughout; settled before timing.";

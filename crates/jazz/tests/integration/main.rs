@@ -137,12 +137,16 @@ mod relay_local_seqs;
 mod relay_policy_subscriptions;
 #[path = "../relay_serves_on_arrival.rs"]
 mod relay_serves_on_arrival;
+#[path = "../relayed_read_refusal.rs"]
+mod relayed_read_refusal;
 #[path = "../remote_read_after_bulk_writes.rs"]
 mod remote_read_after_bulk_writes;
 #[path = "../reopened_admitted_versions.rs"]
 mod reopened_admitted_versions;
 #[path = "../replica_lost_tail.rs"]
 mod replica_lost_tail;
+#[path = "../required_relation_policies.rs"]
+mod required_relation_policies;
 #[path = "../same_version_bundles.rs"]
 mod same_version_bundles;
 #[path = "../schema_activation.rs"]
@@ -209,6 +213,8 @@ mod sync_support_access;
 mod sync_untrusted_clients;
 #[path = "../sync_wire_corpus.rs"]
 mod sync_wire_corpus;
+#[path = "../sync_write_only.rs"]
+mod sync_write_only;
 #[path = "../text_merge.rs"]
 mod text_merge;
 #[path = "../text_splices.rs"]
