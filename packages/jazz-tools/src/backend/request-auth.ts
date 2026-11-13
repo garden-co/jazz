@@ -44,6 +44,26 @@ export function isRequestAuthenticationError(error: unknown): error is RequestAu
   );
 }
 
+/**
+ * The request's credential could not be checked because what checks it is
+ * unreachable (`fromJWT`'s JWKS is down, errors or times out): neither the
+ * caller's fault nor proof the credential is bad. createJazz answers 503
+ * with `Retry-After`, so the client retries and stays signed in.
+ */
+export class AuthenticationUnavailableError extends Error {
+  readonly name = "AuthenticationUnavailableError";
+}
+
+/** Whether `error` is an `AuthenticationUnavailableError`, from any copy of jazz-tools. */
+export function isAuthenticationUnavailableError(
+  error: unknown,
+): error is AuthenticationUnavailableError {
+  return (
+    error instanceof AuthenticationUnavailableError ||
+    (error instanceof Error && error.name === "AuthenticationUnavailableError")
+  );
+}
+
 // Only verified requests that completed account admission receive this capability.
 const localFirstProofs = new WeakMap<Session, Readonly<{ token: string; appId: string }>>();
 export function verifiedLocalFirstRequestProof(session: Session) {

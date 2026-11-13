@@ -6,6 +6,7 @@
     "how-jazz-works",
     "---Setup---",
     "setup/run-locally",
+    "setup/nextjs-better-auth",
     "setup/deployment",
     "setup/auth",
     "---Clients---",

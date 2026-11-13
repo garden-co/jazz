@@ -40,7 +40,7 @@ describe("transaction-committed rows in a hierarchical table", () => {
         const server = await startTestJazz({
           app: app,
           permissions: permissions,
-          coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+          coreOptions: { inMemory: true },
         });
         let context: ReturnType<typeof createJazzContext> | undefined;
         let client: Awaited<ReturnType<typeof createDb>> | undefined;

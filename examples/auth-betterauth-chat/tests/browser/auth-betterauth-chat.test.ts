@@ -14,7 +14,7 @@ import {
   acquireBrowserTestAccount,
   createBrowserTestDb,
 } from "../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
-import { deploy } from "../../../../packages/jazz-tools/src/dev/catalogue.js";
+import { deployApp } from "../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   getJazzServerInfo,
   jazzAppUserUrl,
@@ -39,7 +39,7 @@ type Role = "admin" | "member";
 // it. Its `authenticate` names each test user with their role claim.
 beforeAll(async () => {
   const core = await getJazzServerInfo(__APP_ID__);
-  await deploy({ ...core, schema: app, permissions });
+  await deployApp({ ...core, app: app, permissions });
   server = await startJazzApp(core, { schema: app, permissions });
 });
 

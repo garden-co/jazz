@@ -27,6 +27,62 @@ export const DEFAULT_ROW_LIMIT = 100;
 export const MAX_ROW_LIMIT = 1000;
 /** The most bytes of JSON one answer carries; rows past it are left out and the answer says so. */
 export const MAX_ANSWER_BYTES = 1024 * 1024;
+/**
+ * A value whose JSON is longer than this is summarized in rows (see
+ * {@link LargeValueSummary}): fetch it with `get` and `column`.
+ */
+export const LARGE_VALUE_BYTES = 32 * 1024;
+const LARGE_VALUE_PREVIEW = 200;
+
+/**
+ * What a row carries in place of a value too large to list: its kind, its
+ * size (bytes for bytes, UTF-16 code units for text, JSON characters for
+ * JSON), and a short preview. `get` with `column` answers the value itself.
+ */
+export interface LargeValueSummary {
+  $large: { kind: "bytes" | "text" | "json"; size: number; preview: string };
+}
+
+/**
+ * `value` (as {@link toJsonValue} makes it) as a row shows it: summarized
+ * when its JSON is longer than `limit`.
+ */
+export function summarizeLargeValue(value: unknown, limit = LARGE_VALUE_BYTES): unknown {
+  if (value === null || (typeof value !== "object" && typeof value !== "string")) return value;
+  if (typeof value === "string") {
+    if (JSON.stringify(value).length <= limit) return value;
+    return large("text", value.length, value.slice(0, LARGE_VALUE_PREVIEW));
+  }
+  const bytes = (value as { $bytes?: unknown }).$bytes;
+  if (typeof bytes === "string" && Object.keys(value).length === 1) {
+    if (bytes.length <= limit) return value;
+    // Base64: 4 characters per 3 bytes.
+    const size =
+      Math.floor((bytes.length * 3) / 4) - (bytes.endsWith("==") ? 2 : bytes.endsWith("=") ? 1 : 0);
+    return large("bytes", size, bytes.slice(0, LARGE_VALUE_PREVIEW));
+  }
+  const json = JSON.stringify(value);
+  if (json.length <= limit) return value;
+  return large("json", json.length, json.slice(0, LARGE_VALUE_PREVIEW));
+}
+
+function large(
+  kind: LargeValueSummary["$large"]["kind"],
+  size: number,
+  preview: string,
+): LargeValueSummary {
+  return { $large: { kind, size, preview } };
+}
+
+/** Whether `value` is a {@link LargeValueSummary}. */
+export function isLargeValueSummary(value: unknown): value is LargeValueSummary {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Object.keys(value).length === 1 &&
+    typeof (value as { $large?: unknown }).$large === "object"
+  );
+}
 
 /**
  * A condition on one column, written the way `where()` takes it:
@@ -74,7 +130,18 @@ export type InspectRequest =
   | { op: "whoami" }
   | { op: "schema" }
   | { op: "query"; query: InspectQuery; as?: InspectAs }
-  | { op: "get"; table: string; id: string; as?: InspectAs }
+  | {
+      op: "get";
+      table: string;
+      id: string;
+      as?: InspectAs;
+      /** Answer this one column's value whole (or `from`–`to` of it), even when rows summarize it. */
+      column?: string;
+      /** For `column`: where to start, in bytes for bytes, UTF-16 code units for text. */
+      from?: number;
+      /** For `column`: where to stop (exclusive). */
+      to?: number;
+    }
   | { op: "history"; table: string; id: string; limit?: number }
   | { op: "write"; ops: InspectWriteOp[]; as?: InspectAs }
   | { op: "sessions" }
@@ -100,7 +167,15 @@ export type InspectOp = InspectRequest["op"];
 export type InspectVia = "hook" | "token" | "dev";
 
 export interface InspectWhoami {
+  /** The app's id: its store's (`remote({ appId })`, or the id a store keeps). */
   appId: string;
+  /**
+   * The id this app's browser clients name it by in their sync URLs
+   * (`<basePath>/apps/<clientAppId>/…`): derived from the URL they sync with
+   * (their scope), not the store's id, which the backend maps them to. A
+   * client given an explicit `scope` names the app by that scope instead.
+   */
+  clientAppId: string;
   by: string;
   via: InspectVia;
   write: boolean;
@@ -108,6 +183,10 @@ export interface InspectWhoami {
   tables?: string[];
   /** When an agent token stops working (Unix seconds). */
   expiresAt?: number;
+  /** The agent token's label: what the agent said it asked access for. */
+  label?: string;
+  /** The longest an agent token this backend mints may live (seconds). */
+  maxTokenTtlSeconds: number;
   /** Where the Inspector UI for this backend is. */
   inspectorUrl: string;
   protocol: typeof INSPECT_PROTOCOL_VERSION;
@@ -656,4 +735,26 @@ export function renderPolicy(expr: unknown): string {
     default:
       return String(node.type ?? "?");
   }
+}
+
+/** The longest an agent token's label is kept. */
+export const MAX_TOKEN_LABEL = 200;
+
+/**
+ * An agent token's label as it is kept and shown: the agent's own text,
+ * without control characters, line or paragraph separators and bidi
+ * overrides (which could forge or reorder lines where it is logged or
+ * shown), at most {@link MAX_TOKEN_LABEL} characters. Empty when none is left.
+ */
+export function cleanTokenLabel(label: unknown): string {
+  if (typeof label !== "string") return "";
+  return label
+    .replace(
+      /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g,
+      " ",
+    )
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_TOKEN_LABEL)
+    .trim();
 }

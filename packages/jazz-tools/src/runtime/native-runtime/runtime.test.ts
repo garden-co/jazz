@@ -290,6 +290,132 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
   });
 
+  describe("a credential refresh for another principal (#4476)", () => {
+    const jwtFor = (sub: string) =>
+      "e30." +
+      Buffer.from(JSON.stringify({ iss: "urn:jazz:test", sub })).toString("base64url") +
+      ".signature";
+
+    const connectedRuntime = async (author = TEST_RUNTIME_AUTHOR) => {
+      const sockets: FakeWebSocket[] = [];
+      globalThis.WebSocket = class extends FakeWebSocket {
+        constructor(url: string) {
+          super(url);
+          sockets.push(this);
+        }
+      } as unknown as typeof WebSocket;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              connectUpstream: () => new FakeTransport([]),
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        author,
+        1,
+        true,
+      );
+      runtime.connect(
+        "ws://127.0.0.1:4200/apps/app-a/ws",
+        JSON.stringify({ jwt_token: jwtFor("runtime") }),
+      );
+      await runtime.waitForUpstreamServerConnection();
+      return { runtime, sockets };
+    };
+
+    it("refuses it with identity_mismatch and keeps the store's link", async () => {
+      const { runtime, sockets } = await connectedRuntime();
+
+      expect(() => runtime.updateAuth(JSON.stringify({ jwt_token: jwtFor("another") }))).toThrow(
+        expect.objectContaining({ code: "protocol", reason: "identity_mismatch" }),
+      );
+      // The worker's `reconnect` dials through connect(): refused the same way.
+      expect(() =>
+        runtime.connect(
+          "ws://127.0.0.1:4200/apps/app-a/ws",
+          JSON.stringify({ jwt_token: jwtFor("another") }),
+        ),
+      ).toThrow(expect.objectContaining({ reason: "identity_mismatch" }));
+
+      expect(sockets).toHaveLength(1);
+      expect(sockets[0]!.closed).toBe(false);
+      await runtime.close();
+    });
+
+    it("allows signing out to a credential that names no principal", async () => {
+      // A store whose own author is a local host identity, not the user.
+      const { runtime } = await connectedRuntime(
+        new TextEncoder().encode('["https://jazz.test","local-cache"]'),
+      );
+
+      await runtime.updateAuth("{}");
+      expect(() => runtime.updateAuth(JSON.stringify({ jwt_token: jwtFor("another") }))).toThrow(
+        expect.objectContaining({ reason: "identity_mismatch" }),
+      );
+      await runtime.close();
+    });
+
+    it("pins nothing for a credential the server has not admitted", async () => {
+      const sockets: FakeWebSocket[] = [];
+      globalThis.WebSocket = class extends FakeWebSocket {
+        constructor(url: string) {
+          super(url);
+          sockets.push(this);
+        }
+
+        override send(data: Uint8Array | string): void {
+          // The first credential never completes its handshake.
+          if (sockets[0] === this) {
+            this.sent.push(data);
+            return;
+          }
+          super.send(data);
+        }
+      } as unknown as typeof WebSocket;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      runtime.connect(
+        "ws://127.0.0.1:4200/apps/app-a/ws",
+        JSON.stringify({ jwt_token: jwtFor("mistyped") }),
+      );
+      await waitForFakeWebSocketNegotiation();
+
+      await runtime.updateAuth(JSON.stringify({ jwt_token: jwtFor("runtime") }));
+      await runtime.waitForUpstreamServerConnection();
+
+      expect(sockets).toHaveLength(2);
+      await runtime.close();
+    });
+
+    it("still reconnects with a renewed credential for the same principal", async () => {
+      const { runtime, sockets } = await connectedRuntime();
+
+      await runtime.updateAuth(JSON.stringify({ jwt_token: jwtFor("runtime") }));
+      await runtime.waitForUpstreamServerConnection();
+
+      expect(sockets).toHaveLength(2);
+      await runtime.close();
+    });
+  });
+
   it("moves a strict remote read from a stalled handshake to its auth-refresh replacement", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
@@ -933,6 +1059,67 @@ describe("NativeRuntimeAdapter server transport", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  // #5268: a native relay whose database refused its upstream reports the
+  // refusal's code. A changed authority then reads as it does on napi and
+  // wasm: an AuthorityChangedError and an "authority-changed" offline link,
+  // not a bare "stopped".
+  it("reports a native relay's authority_changed refusal as authority-changed", async () => {
+    let schedule: ((urgency: "immediate" | "deferred") => void) | undefined;
+    let reportUpstreamFailure:
+      | ((failure: { reason: string; retrying: boolean; code?: string | null } | null) => void)
+      | undefined;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+              schedule = callback;
+            },
+            tick: () => undefined,
+            onUpstreamFailure: (callback: typeof reportUpstreamFailure) => {
+              reportUpstreamFailure = callback;
+            },
+            nativeConnectionStatus: () => ({
+              configured: true,
+              explicitlyOffline: false,
+              connected: false,
+              authRejected: null,
+            }),
+            isNativeForegroundClosed: () => false,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const transportErrors: Error[] = [];
+    runtime.onServerTransportError((error) => transportErrors.push(error));
+
+    reportUpstreamFailure!({
+      reason: "native relay upstream refused: the server serves another authority history",
+      retrying: false,
+      code: "authority_changed",
+    });
+    schedule!("immediate");
+    for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+    expect(runtime.upstreamLinkStatus()).toEqual({
+      state: "offline",
+      reason: "authority-changed",
+      retrying: false,
+    });
+    expect(transportErrors.map(isAuthorityChangedError)).toEqual([true]);
+
+    // Any other stopped failure still reads as stopped.
+    reportUpstreamFailure!({ reason: "gave up", retrying: false, code: null });
+    for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+    expect(runtime.upstreamLinkStatus()).toMatchObject({ state: "offline", reason: "stopped" });
   });
 
   // The native host stops its link on a refused credential and reports a
@@ -8454,6 +8641,38 @@ it("surfaces the native slow-query report on console.warn after each core tick, 
     expect(warn).toHaveBeenCalledOnce();
   } finally {
     warn.mockRestore();
+    await runtime.close();
+  }
+});
+
+it("keeps the plan and SQL out of console.warn with the summary console detail (#5225)", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  const debug = vi.spyOn(console, "debug").mockImplementation(() => undefined);
+  const line =
+    "slow query in app app-1 on todos: 1 slow run(s), slowest 52 ms, 52 ms of database time in all " +
+    "(slowest run: 1 row(s) returned, 1 row(s) scanned). Plan: SEARCH t USING INDEX todos_by_id (id=?). " +
+    'SQL: SELECT "id", "title" FROM "todos" AS t WHERE t."id" = ?1';
+  const reports = [[line]];
+  const runtime = NativeRuntimeAdapter.fromDb(
+    fakeDb({ tick: () => undefined, takeSlowQueryReport: () => reports.shift() ?? [] }),
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+    { slowQueryLog: { appId: "app-1", consoleDetail: "summary" } },
+  );
+  try {
+    await runtime.progressPeerTransport();
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      "[jazz] slow query in app app-1 on todos: 1 slow run(s), slowest 52 ms, 52 ms of database time in all " +
+        '(slowest run: 1 row(s) returned, 1 row(s) scanned). Plan and SQL are logged at the debug ("Verbose") level.',
+    );
+    // Developers who ask for it still get the whole report.
+    expect(debug).toHaveBeenCalledExactlyOnceWith(`[jazz] ${line}`);
+  } finally {
+    warn.mockRestore();
+    debug.mockRestore();
     await runtime.close();
   }
 });

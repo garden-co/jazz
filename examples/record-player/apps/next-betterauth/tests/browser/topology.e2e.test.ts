@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { schema as s, type Db } from "jazz-tools";
 import type { RowRefValue } from "jazz-tools/permissions";
 import { createBrowserTestDb } from "../../../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
-import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
+import { deployApp } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
   uniqueDbName,
@@ -234,11 +234,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
 
   it("delivers RecordPlayer pending invitations outside the scenario envelope", async () => {
     const core = await getJazzServerInfo(uniqueDbName("record-player-recipient-settlement"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: app,
+      app: app,
       permissions,
     });
     const server = await startJazzApp(core, { schema: app, permissions });
@@ -300,11 +300,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
 
   it("settles an observed recipient pending-to-accepted transition at edge", async () => {
     const core = await getJazzServerInfo(uniqueDbName("record-player-acceptance-settlement"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: app,
+      app: app,
       permissions,
     });
     const server = await startJazzApp(core, { schema: app, permissions });
@@ -347,11 +347,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
 
   it("settles a RecordPlayer owner playlist at edge outside the scenario envelope", async () => {
     const core = await getJazzServerInfo(uniqueDbName("record-player-owner-settlement"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: app,
+      app: app,
       permissions,
     });
     const server = await startJazzApp(core, { schema: app, permissions });
@@ -378,11 +378,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
 
   it("settles an identical one-table write at edge", async () => {
     const core = await getJazzServerInfo(uniqueDbName("record-player-ack-probe"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: acknowledgementApp,
+      app: acknowledgementApp,
       permissions: acknowledgementPermissions,
     });
     const server = await startJazzApp(core, {
@@ -415,11 +415,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
 
   it("delivers an external-JWT row through a raw scalar recipient subject", async () => {
     const core = await getJazzServerInfo(uniqueDbName("record-player-recipient-scalar"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: recipientApp,
+      app: recipientApp,
       permissions: recipientPermissions,
     });
     const server = await startJazzApp(core, {
@@ -460,11 +460,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
 
   it("delivers a scalar recipient grant alongside a correlated playlist-owner branch", async () => {
     const core = await getJazzServerInfo(uniqueDbName("record-player-recipient-relation"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: relationalRecipientApp,
+      app: relationalRecipientApp,
       permissions: relationalRecipientPermissions,
     });
     const server = await startJazzApp(core, {
@@ -566,11 +566,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
               const core = await getJazzServerInfo(
                 uniqueDbName("record-player-recipient-full-phase"),
               );
-              await deploy({
+              await deployApp({
                 appId: core.appId,
                 serverUrl: core.serverUrl,
                 adminSecret: core.adminSecret,
-                schema: relationalRecipientApp,
+                app: relationalRecipientApp,
                 permissions: relationalRecipientPermissions,
               });
               const server = await startJazzApp(core, {
@@ -647,11 +647,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
   // accept it for themselves.
   it("rejects an owner transferring an invitation onto another owner's playlist", async () => {
     const core = await getJazzServerInfo(uniqueDbName("record-player-invitation-transfer"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: app,
+      app: app,
       permissions,
     });
     const server = await startJazzApp(core, { schema: app, permissions });
@@ -817,11 +817,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
               console.info("[record-player-topology] start server");
               const core = await getJazzServerInfo(uniqueDbName("record-player-topology"));
               console.info("[record-player-topology] deploy authority");
-              await deploy({
+              await deployApp({
                 appId: core.appId,
                 serverUrl: core.serverUrl,
                 adminSecret: core.adminSecret,
-                schema: app,
+                app: app,
                 permissions,
               });
               server = await startJazzApp(core, { schema: app, permissions });
@@ -1592,11 +1592,11 @@ function signIn(server: { appId: string }, userUrl: string) {
 describe("RecordPlayer after a streamed upload", () => {
   it("keeps an open listener live and reopens both clients", async () => {
     const core = await getJazzServerInfo(uniqueDbName("record-player-streamed-reload"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: app,
+      app: app,
       permissions,
     });
     const server = await startJazzApp(core, { schema: app, permissions });

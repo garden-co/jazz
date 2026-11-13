@@ -131,6 +131,12 @@ lasting disk (Vercel, AWS Lambda, Netlify); on Vercel, use [`vercel()`](/docs/se
 Jazz creates the directory's files readable by every user on the machine (mode 0644), so on a shared
 host restrict the directory itself to the service's user (for example `chmod 700`).
 
+Give each environment its own data directory, and its own blob directory or bucket prefix, so
+production, a staging server and your machine never share data: set `JAZZ_DATA_DIR` per
+environment, as in the example above. For a staging copy of production's data, copy a backup into a
+new directory (see [Operating Jazz](/docs/operating/backups-and-upgrades)); never point two servers
+at one directory.
+
 ```dockerfile title="Dockerfile"
 FROM node:22-slim
 WORKDIR /app

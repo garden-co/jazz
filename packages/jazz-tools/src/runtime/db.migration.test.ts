@@ -89,7 +89,6 @@ describe("schema migrations", () => {
 
   beforeEach(async () => {
     server = await startLocalJazzServer({
-      allowLocalFirstAuth: true,
       inMemory: true,
     });
     const { appId, adminSecret, url: serverUrl } = server;
@@ -205,7 +204,7 @@ it("publishes UUID reference identity lenses and relates rows written before pub
   const server = await startTestJazz({
     app: beforeApp,
     permissions: permissionsBefore,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   let oldDb: Db | undefined, newDb: Db | undefined;
   try {
@@ -297,7 +296,6 @@ it("publishes generated default-bearing relation migrations and preserves them a
   let oldDb: Db | undefined, newDb: Db | undefined;
   try {
     server = await startLocalJazzServer({
-      allowLocalFirstAuth: true,
       dataDir: join(root, "data"),
     });
     const { appId, adminSecret, backendSecret } = server;
@@ -374,7 +372,6 @@ it("publishes generated default-bearing relation migrations and preserves them a
       appId,
       adminSecret,
       backendSecret,
-      allowLocalFirstAuth: true,
       dataDir: join(root, "data"),
     });
     for (const [schemaHash, expected] of [
@@ -463,7 +460,7 @@ it("a client shipping the app's migrations writes a renamed column where the ser
   const server = await startTestJazz({
     app: beforeApp,
     permissions: allowBefore,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   let oldDb: Db | undefined, newDb: Db | undefined;
   try {

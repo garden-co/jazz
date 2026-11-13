@@ -5,15 +5,16 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
-    "build": "node ../../packages/jazz-tools/dist/cli.js validate && next build",
+    "build": "jazz-tools validate && next build",
     "start": "next start",
     "test": "pnpm test:server && pnpm test:browser",
     "test:server": "vitest run --config vitest.config.server.ts",
     "test:browser": "vitest run --config vitest.config.browser.ts",
+    "test:e2e": "playwright test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "better-auth": "1.7.1",
+    "better-auth": "1.7.22",
     "jazz-napi": "workspace:*",
     "jazz-tools": "workspace:*",
     "next": "catalog:default",
@@ -21,6 +22,7 @@
     "react-dom": "19.2.4"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@types/node": "catalog:default",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
@@ -31,6 +33,7 @@
     "vite": "catalog:default",
     "vite-plugin-top-level-await": "catalog:default",
     "vite-plugin-wasm": "catalog:default",
-    "vitest": "catalog:default"
+    "vitest": "catalog:default",
+    "ws": "^8.19.0"
   }
 }

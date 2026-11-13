@@ -14,6 +14,7 @@ export default defineConfig({
       "lib/search-include-refs.test.ts",
       "lib/bundle-sizes/**/*.test.ts",
       "lib/llm-text.test.ts",
+      "lib/quickstart-links.test.ts",
     ],
     exclude: ["**/node_modules/**", "**/.next/**"],
   },
