@@ -22,6 +22,7 @@ const host = {
 const dirs: string[] = [];
 afterEach(async () => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -36,6 +37,59 @@ function server(run: (url: URL, init: RequestInit) => unknown | Promise<unknown>
 }
 
 describe("experimental Rivet store", () => {
+  it("defers deployment configuration until opening", async () => {
+    vi.stubEnv("RIVET_ENDPOINT", undefined);
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const store = rivet({ name: "notes", pool: "jazz-test" });
+    expect(store.kind).toBe("rivet");
+    await expect(openRivetStore(store.options)).rejects.toThrow("endpoint or RIVET_ENDPOINT");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("uses Rivet's deployment endpoint and the shared core secret", async () => {
+    vi.stubEnv("RIVET_ENDPOINT", "https://test:encoded%3Atoken@engine.example");
+    vi.stubEnv("JAZZ_CORE_SECRET", "s".repeat(32));
+    const fetch = server((url, init) => {
+      expect(url.username).toBe("");
+      expect(url.password).toBe("");
+      if (url.pathname === "/actors") {
+        expect(url.searchParams.get("namespace")).toBe("test");
+        expect(new Headers(init.headers).get("authorization")).toBe("Bearer encoded:token");
+        return { actor: { actor_id: "a", pool: "jazz-test" } };
+      }
+      expect(new Headers(init.headers).get("x-jazz-backend-credential")).toBe("s".repeat(32));
+      return host;
+    });
+    const target = await openRivetStore({ name: "notes", pool: "jazz-test" });
+    expect(target.appId).toBe(appId);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("refreshes a separate environment token and honors explicit overrides", async () => {
+    vi.stubEnv("RIVET_ENDPOINT", "https://engine.example");
+    vi.stubEnv("RIVET_NAMESPACE", "environment");
+    vi.stubEnv("RIVET_TOKEN", "first");
+    vi.stubEnv("JAZZ_CORE_SECRET", "s".repeat(32));
+    server((url) => {
+      if (url.pathname === "/actors") {
+        expect(url.searchParams.get("namespace")).toBe("explicit");
+        return { actor: { actor_id: "a", pool: "jazz-test" } };
+      }
+      return host;
+    });
+    const target = await openRivetStore({
+      name: "notes",
+      pool: "jazz-test",
+      namespace: "explicit",
+    });
+    vi.stubEnv("RIVET_TOKEN", "renewed");
+    expect(await target.headers()).toEqual({ "x-rivet-token": "renewed" });
+    const explicit = await openRivetStore({ ...base, namespace: "explicit" });
+    expect(await explicit.headers()).toEqual({ "x-rivet-token": "engine-credential" });
+    expect(explicit.backendCredential()).toBe(base.coreSecret);
+  });
+
   it("refuses Rivet 2 before provisioning resources", async () => {
     const fetch = vi.fn(async () => Response.json({ version: "2.9.0" }));
     vi.stubGlobal("fetch", fetch);

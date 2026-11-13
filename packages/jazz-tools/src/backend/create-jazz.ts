@@ -1302,10 +1302,11 @@ function openRemoteCore(
     },
     WebSocket: inProcessWebSocket((url, onEvent) => {
       const { pathname, search } = new URL(url);
-      return pinnedSocket(
-        connect(`${target.url.replace(/^http/, "ws")}${pathname}${search}`, onEvent, "backend"),
-        bundle,
+      const backendSocketUrl = new URL(
+        target.socketUrl ?? `${target.url.replace(/^http/, "ws")}${pathname}`,
       );
+      backendSocketUrl.search = search;
+      return pinnedSocket(connect(backendSocketUrl.href, onEvent, "backend"), bundle);
     }),
   });
   return core;
