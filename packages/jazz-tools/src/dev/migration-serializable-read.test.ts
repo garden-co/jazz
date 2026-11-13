@@ -29,7 +29,7 @@ it("accepts a serializable read of an unchanged table after migration", async ()
   const server = await startTestJazz({
     app: oldApp,
     permissions: permissions(oldApp),
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
@@ -74,7 +74,7 @@ it("preserves serializable conflict detection after renaming the queried table",
   const server = await startTestJazz({
     app: oldApp,
     permissions: oldPermissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   let writer: Awaited<ReturnType<typeof createDb>> | undefined;

@@ -29,7 +29,6 @@ describe("fresh subscriber first sync", () => {
       dataDir: join(directory, "server"),
       adminSecret: randomUUID(),
       backendSecret: randomUUID(),
-      allowLocalFirstAuth: true,
     };
     const rowCount = 100;
     const body = "x".repeat(60_000);

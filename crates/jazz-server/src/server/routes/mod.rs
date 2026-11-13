@@ -219,7 +219,6 @@ mod tests {
         AuthConfig {
             backend_secret: None,
             admin_secret: Some("admin-secret".to_string()),
-            allow_local_first_auth: true,
             ..Default::default()
         }
     }
@@ -231,7 +230,6 @@ mod tests {
         let auth_config = AuthConfig {
             backend_secret: Some(backend_secret.to_string()),
             admin_secret: None,
-            allow_local_first_auth: false,
             ..Default::default()
         };
 
@@ -366,7 +364,6 @@ mod tests {
     async fn internal_shutdown_requires_configured_admin_secret() {
         let auth_config = AuthConfig {
             admin_secret: None,
-            allow_local_first_auth: true,
             ..Default::default()
         };
         let state = ServerBuilder::new(AppId::from_name("test-app"))
@@ -540,7 +537,6 @@ mod tests {
             .with_auth_config(AuthConfig {
                 backend_secret: None,
                 admin_secret: Some("admin-secret".to_string()),
-                allow_local_first_auth: false,
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)

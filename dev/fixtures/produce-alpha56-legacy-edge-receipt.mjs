@@ -58,7 +58,6 @@ const common = {
   inMemory: true,
   adminSecret: "alpha56-fixture-admin",
   backendSecret: "alpha56-fixture-backend",
-  allowLocalFirstAuth: true,
 };
 const core = await startLocalJazzServer({ ...common, schema, permissions: { todos: grants } });
 

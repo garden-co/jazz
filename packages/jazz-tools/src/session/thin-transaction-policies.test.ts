@@ -61,7 +61,7 @@ it("lets a thin client's transaction satisfy exists with a row it inserted itsel
   server = await startTestJazz({
     app,
     permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   const session = await createJazzClient({
     scope: server.appId,
@@ -110,7 +110,7 @@ it("lets a thin client's transaction satisfy allowedTo.update with a parent it i
   server = await startTestJazz({
     app: branches,
     permissions: branchPermissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   const session = await createJazzClient({
     scope: server.appId,

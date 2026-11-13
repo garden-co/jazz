@@ -56,7 +56,7 @@ it("preserves rows and their relationship through table and reference-column ren
   const server = await startTestJazz({
     app: oldApp,
     permissions: oldPermissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {

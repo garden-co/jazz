@@ -36,7 +36,7 @@ beforeAll(async () => {
   server = await startTestJazz({
     app: app,
     permissions: permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   const account = await localAccountConfig(server.appId, server.url);
   user = await createDb(account);
