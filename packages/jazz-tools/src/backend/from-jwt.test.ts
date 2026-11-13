@@ -228,6 +228,48 @@ describe("fromJWT", () => {
     await expect(authenticate(request(await sign({})))).rejects.toThrow(/Unable to fetch JWKS/);
   });
 
+  // A JWKS endpoint that hangs, rather than erroring, is the same outage as
+  // one that is down: sign-in fails within the deadline (so the client
+  // retries) instead of stalling, and the next sign-in fetches again.
+  it.each(["headers", "body"])(
+    "fails a sign-in within 30 seconds when the JWKS hangs on its %s, so clients retry",
+    async (phase) => {
+      vi.useFakeTimers();
+      const token = await sign({});
+      const hang = () => new Promise<never>(() => {});
+      const fetch = vi
+        .fn<typeof globalThis.fetch>()
+        .mockImplementationOnce(async () =>
+          phase === "headers" ? hang() : ({ ok: true, json: hang } as unknown as Response),
+        )
+        .mockImplementation(async () => Response.json({ keys: [jwk] }));
+      vi.stubGlobal("fetch", fetch);
+      const authenticate = fromJWT({ jwksUrl: jwksUrl(), issuer: ISSUER, audience: AUDIENCE });
+      // Two concurrent sign-ins share the one stalled fetch.
+      const alice = authenticate(request(token));
+      const bob = authenticate(request(token));
+      const settled = Promise.allSettled([alice, bob]);
+      await vi.advanceTimersByTimeAsync(29_999);
+      let done = false;
+      void settled.then(() => (done = true));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      for (const result of await settled) {
+        expect(result).toMatchObject({
+          status: "rejected",
+          reason: expect.objectContaining({ message: expect.stringMatching(/timed out/) }),
+        });
+      }
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch.mock.calls[0]![1]!.signal!.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+      // The provider answers again: the retry fetches and signs in.
+      expect((await authenticate(request(token)))?.userId).toBe("user_01");
+      expect(fetch).toHaveBeenCalledTimes(2);
+    },
+  );
+
   it("keeps an unknown key retrying through an outage instead of signing it out", async () => {
     let up = true;
     const fetch = vi.fn(async () =>
