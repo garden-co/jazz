@@ -799,7 +799,7 @@ impl Foreground {
                         tier,
                         delta,
                     },
-                    EventChunk::Rejected { detail } => {
+                    EventChunk::Rejected { detail, .. } => {
                         ForegroundSubscriptionEvent::Rejected { reason: detail }
                     }
                     EventChunk::Closed => {

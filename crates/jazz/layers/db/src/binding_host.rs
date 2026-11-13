@@ -1965,10 +1965,15 @@ pub enum EventChunk {
     },
     /// `{ type: "closed" }`.
     Closed,
-    /// `{ type: "rejected", reason: { type: "ServerFailure", detail } }`.
+    /// `{ type: "rejected", reason: { type: "ServerFailure", detail,
+    /// errorCode } }`.
     Rejected {
         /// Why.
         detail: String,
+        /// The rejection's core [`crate::db::ErrorCode`], as its
+        /// `as_str` spelling (`"authority_changed"`, …): what a host's
+        /// error `code` carries for the same error.
+        code: &'static str,
     },
 }
 
@@ -1990,7 +1995,10 @@ pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
             tier: format!("{tier:?}"),
         },
         SubscriptionEvent::Closed => EventChunk::Closed,
-        SubscriptionEvent::Rejected { reason, .. } => EventChunk::Rejected { detail: reason },
+        SubscriptionEvent::Rejected { code, reason, .. } => EventChunk::Rejected {
+            detail: reason,
+            code: code.as_str(),
+        },
     })
 }
 
