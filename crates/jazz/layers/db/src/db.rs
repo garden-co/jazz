@@ -3782,7 +3782,7 @@ pub(crate) fn store_opened_without_migrations(version: &crate::ids::SchemaVersio
     Error::new(
         ErrorCode::StoreOpenedWithoutMigrations,
         format!(
-            "this store keeps schema version {} under other names than the server, which never confirmed them: it was opened without the app's migrations (React Native before alpha.61 dropped them). Syncing a store opened without the app's migrations is not supported yet: rebuild it, or reset it with deleteClientStorage(), which drops its unsynced writes",
+            "this store keeps schema version {} under other names than the server, which never confirmed them: it was opened without the app's migrations, so it took this version as the app's first. That happens when the app ships no migration into this version: `defineApp(schema, {{ migrations: \"none\" }})`, a migrations/index.ts that misses it (run `npx jazz-tools validate`), or React Native before alpha.61. Ship the app's migrations (see https://jazz.tools/docs/schemas/migrations), then rebuild this store, or reset it with deleteClientStorage(), which drops its unsynced writes",
             uuid::Uuid::from_bytes(*version.as_bytes())
         ),
     )
@@ -4038,8 +4038,13 @@ impl Inner {
                     return Err(store_opened_without_migrations(version));
                 }
                 Some(_) => {
-                    return Err(unsupported(format!(
-                        "schema version {}, which this store stores otherwise than its upstream (it was opened without the app's lenses into it),",
+                    return Err(crate::values::query_error(format!(
+                        "this store keeps schema version {} under other names than its upstream: \
+                         the two took different histories into it, so the app's migrations \
+                         differ between them (one was opened without them, or with a \
+                         migrations/index.ts from another branch). Ship the same migrations \
+                         everywhere (`npx jazz-tools validate` regenerates migrations/index.ts; \
+                         see https://jazz.tools/docs/schemas/migrations), then reset this store",
                         uuid::Uuid::from_bytes(*version.as_bytes())
                     )));
                 }
