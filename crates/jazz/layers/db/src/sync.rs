@@ -2481,6 +2481,9 @@ pub(crate) struct Session {
     outbox: Vec<SyncMessage>,
     /// Images to send this tick: (table, id, branch key).
     touched: BTreeSet<(String, RowUuid, Vec<u8>)>,
+    /// Refused targets refresh only when currently readable. A refusal
+    /// does not create a read owner or imply an access-loss event.
+    refused: BTreeSet<(String, RowUuid, Vec<u8>)>,
     /// On a relay, rows a one-shot answer shipped at one of this store's
     /// unsettled versions (by its position), which no watch keeps
     /// current: each ships again once uploads settle and that version is no
@@ -2624,6 +2627,7 @@ impl Session {
             subs: BTreeMap::new(),
             outbox: Vec::new(),
             touched: BTreeSet::new(),
+            refused: BTreeSet::new(),
             unsettled: BTreeMap::new(),
             unreadable: HashSet::new(),
             committed: Vec::new(),
@@ -2684,6 +2688,7 @@ impl Session {
 
     fn idle(&self) -> bool {
         self.touched.is_empty()
+            && self.refused.is_empty()
             && self.outbox.is_empty()
             && self.resume.is_empty()
             && self
@@ -11393,6 +11398,7 @@ impl Db {
                 .session_schema(index)
                 .unwrap_or_else(|| inner.owner.clone());
             let mut touched = std::mem::take(&mut inner.sessions[index].touched);
+            let refused = std::mem::take(&mut inner.sessions[index].refused);
             let committed = std::mem::take(&mut inner.sessions[index].committed);
             let mut echoes = std::mem::take(&mut inner.sessions[index].echoes);
             let asked_whole = std::mem::take(&mut inner.sessions[index].asked_whole);
@@ -11829,13 +11835,95 @@ impl Db {
                     touched.insert((table, row, key));
                 }
             }
+            // This tick's versions of the client's own commits the global
+            // authority accepted and confirms as written (their echoes go
+            // with their real `Fate`s).
+            let accepted_fates: HashSet<TxId> = inner.sessions[index]
+                .outbox
+                .iter()
+                .filter_map(|message| match message {
+                    SyncMessage::Fate {
+                        id,
+                        outcome: Outcome::Accepted { .. },
+                        global: true,
+                    } => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            let own_versions: HashSet<(String, RowUuid, Vec<u8>, Pos)> = echoes
+                .iter()
+                .filter(|echo| accepted_fates.contains(&echo.id))
+                .map(|echo| (echo.table.clone(), echo.row, echo.key.clone(), echo.at))
+                .collect();
+            // The client's write-only rows: written by this tick's accepted
+            // commits, unreadable to it now, still at one of those commits'
+            // own confirmed versions, unreadable to it (or absent) both just
+            // before and just after each of them, and in a table none of its
+            // live reads reads. Its writes took no read access away, nor did
+            // anything since, and no live result of its stops matching the
+            // authority's for it (INV-SYNC-14): it keeps the exact versions
+            // it wrote, as a cold copy, rather than an eviction. Any other
+            // written row it may not read is evicted: one its write moved
+            // out of its read scope, one another writer's version
+            // superseded, one a live read of its covers, or one a relay or a
+            // replica with no server accepted. (Where a latest-only table
+            // pruned an earlier of several own versions of the row in one
+            // tick, that version counts as unreadable.)
+            let covered: BTreeSet<String> = inner.sessions[index]
+                .subs
+                .values()
+                .filter_map(|(_, group, ..)| group.upgrade())
+                .flat_map(|group| group.borrow().tables().clone())
+                .collect();
+            let mut write_only: HashSet<(String, RowUuid, Vec<u8>)> = HashSet::new();
+            {
+                let mut written: BTreeMap<(String, RowUuid, Vec<u8>), Vec<Pos>> = BTreeMap::new();
+                for (table, row, key, at) in &committed {
+                    if at.0.accepted() {
+                        written
+                            .entry((table.clone(), *row, key.clone()))
+                            .or_default()
+                            .push(at.0);
+                    }
+                }
+                'rows: for ((table, row, key), ats) in written {
+                    // A live read of the table reconciles the row: checked
+                    // first, so a burst into a read table costs no extra
+                    // store lookup per row (R62).
+                    if covered.contains(&table) {
+                        continue;
+                    }
+                    let Some(current) = inner.current_image(&table, row, &key)? else {
+                        continue;
+                    };
+                    let own = current.at.accepted()
+                        && own_versions.contains(&(table.clone(), row, key.clone(), current.at));
+                    if !own || readable(&inner, &policies, &table, row, &key, policy)? {
+                        continue;
+                    }
+                    for at in ats {
+                        let before = Pos::at(at.seq.saturating_sub(1));
+                        for cut in [before, at] {
+                            if readable_version(&inner, &policies, &table, row, &key, cut, policy)?
+                            {
+                                continue 'rows;
+                            }
+                        }
+                    }
+                    write_only.insert((table, row, key));
+                }
+            }
             // Rows that left a result, and rows a commit wrote: the current
             // image if the client may read it, else an eviction (hidden
-            // while a version of it still exists).
+            // while a version of it still exists). The client's write-only
+            // rows ship below, as written.
             // Ids the replica holds no version of any more: nobody watches
             // them.
             let mut gone = Vec::new();
             for (table, row, key) in touched {
+                if write_only.contains(&(table.clone(), row, key.clone())) {
+                    continue;
+                }
                 let hidden = match inner.current_image(&table, row, &key)? {
                     Some(image) if readable(&inner, &policies, &table, row, &key, policy)? => {
                         unreadable.remove(&(table.clone(), row, key.clone()));
@@ -11870,30 +11958,60 @@ impl Db {
                     hidden,
                 });
             }
+            // A refused commit's rows ship as they are now where the client
+            // may read them, so its replica drops the refused write's
+            // overlay for the authority's version. A refusal takes no read
+            // access away: a row the client may not read gets no eviction,
+            // so a write-only row it wrote keeps its accepted version. A
+            // cold copy of a row it lost access to stays until a covering
+            // read reconciles it (INV-SYNC-14), as without the refusal.
+            for (table, row, key) in refused {
+                if let Some(current) = inner.current_image(&table, row, &key)?
+                    && readable(&inner, &policies, &table, row, &key, policy)?
+                {
+                    unreadable.remove(&(table.clone(), row, key.clone()));
+                    images.push(current);
+                }
+            }
             // Superseded versions of the client's own commits land in its
-            // history, while the row stays readable.
+            // history, while the row stays readable. A write-only row ships
+            // each version this tick's own commits made of it, the current
+            // one included, each confirmed by its commit's `Fate` as
+            // written: a later restore can need the founder's accepted
+            // creation stamp. Echoes of superseded rows drop in one pass
+            // after the loop (R62).
             let mut superseded_rows = HashSet::new();
             for (table, row, key, at) in committed {
-                let superseded = match inner.current_image(&table, row, &key)? {
-                    Some(current) => {
-                        current.at != at.0 || at.1.is_some_and(|_| rank(&current).1 != at.1)
+                let current = inner.current_image(&table, row, &key)?;
+                let superseded = current.as_ref().is_some_and(|current| {
+                    current.at != at.0 || at.1.is_some_and(|_| rank(current).1 != at.1)
+                });
+                let own_write_only = write_only.contains(&(table.clone(), row, key.clone()));
+                if own_write_only {
+                    if !own_versions.contains(&(table.clone(), row, key.clone(), at.0)) {
+                        continue;
                     }
-                    None => false,
-                };
-                if superseded {
-                    superseded_rows.insert((table.clone(), row, key.clone()));
+                    if let Some(current) = current.filter(|_| !superseded) {
+                        images.push(current);
+                        continue;
+                    }
+                } else {
+                    if superseded {
+                        superseded_rows.insert((table.clone(), row, key.clone()));
+                    }
+                    if !(superseded && readable(&inner, &policies, &table, row, &key, policy)?) {
+                        continue;
+                    }
                 }
-                if superseded && readable(&inner, &policies, &table, row, &key, policy)? {
-                    let id = row.0.as_bytes().to_vec();
-                    let w =
-                        at.1.map_or_else(Vec::new, |(node, tx)| writer_bytes(node, tx));
-                    images.extend(inner.images_where(
-                        &table,
-                        true,
-                        "id = ?1 AND _branch = ?2 AND _clock = ?3 AND _writer = ?4",
-                        &[&id, &key, &at.0.t(), &w],
-                    )?);
-                }
+                let id = row.0.as_bytes().to_vec();
+                let w =
+                    at.1.map_or_else(Vec::new, |(node, tx)| writer_bytes(node, tx));
+                images.extend(inner.images_where(
+                    &table,
+                    true,
+                    "id = ?1 AND _branch = ?2 AND _clock = ?3 AND _writer = ?4",
+                    &[&id, &key, &at.0.t(), &w],
+                )?);
             }
             if !superseded_rows.is_empty() {
                 echoes.retain(|e| {
@@ -13240,7 +13358,14 @@ impl Db {
                             )
                         }));
                 }
-                session.touched.extend(rows.iter().cloned());
+                // An accepted commit's rows reconcile as any written row
+                // (and its write-only rows as written); a refused one's
+                // only refresh what the client may read.
+                if result.is_ok() {
+                    session.touched.extend(rows.iter().cloned());
+                } else {
+                    session.refused.extend(rows.iter().cloned());
+                }
                 // A relay's accepted commit is final once its upstream
                 // accepts the upload carrying it: the session waits for that
                 // fate, not this store's. A relay its host says has no
