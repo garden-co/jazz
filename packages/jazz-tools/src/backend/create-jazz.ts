@@ -104,7 +104,7 @@ import {
   withCheckedExpiry,
 } from "./session-expiry.js";
 import { NoJazzAccountError } from "./no-account-error.js";
-import { RequestAuthenticationError } from "./request-auth.js";
+import { isAuthenticationUnavailableError, RequestAuthenticationError } from "./request-auth.js";
 import { optionalPeerImportError } from "./optional-peer.js";
 import { closingBeforeDeadline } from "./socket-deadline.js";
 import { importWs, vercelUpgradesSockets } from "./ws-peer.js";
@@ -2380,7 +2380,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
                 // `authenticate` without `expiresAt` fails the same way every
                 // time: say why, once.
                 if (error instanceof AuthenticateExpiresAtError) warnMissingExpiry(error);
-                if (isThrownByAuthenticate(error)) console.error(AUTHENTICATE_THREW_MESSAGE, error);
+                if (isAuthenticationUnavailableError(error)) console.error(error);
+                else if (isThrownByAuthenticate(error)) {
+                  console.error(AUTHENTICATE_THREW_MESSAGE, error);
+                }
                 onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
               }
               end();
@@ -3052,6 +3055,15 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         return new Response(AUTHENTICATE_EXPIRES_AT_MISSING, {
           status: 500,
           headers: { "Cache-Control": "no-store" },
+        });
+      }
+      if (isAuthenticationUnavailableError(error)) {
+        // The identity provider is down, not the app's code: the client
+        // retries and stays signed in. The reason stays in the logs.
+        console.error(error);
+        return new Response(AUTHENTICATION_UNAVAILABLE, {
+          status: 503,
+          headers: { "Retry-After": "5", "Cache-Control": "no-store" },
         });
       }
       if (isThrownByAuthenticate(error)) {
@@ -4227,6 +4239,13 @@ const UNVERIFIED_CREDENTIAL = "unverified-credential";
  * error goes to the backend's log; the response carries only this code.
  */
 const AUTHENTICATE_FAILED = "authenticate_failed";
+
+/**
+ * What a Jazz route answers (503, with Retry-After) when the app's
+ * `authenticate` could not check a credential because its identity
+ * provider is unreachable (`fromJWT`'s JWKS).
+ */
+const AUTHENTICATION_UNAVAILABLE = "authentication_unavailable";
 
 /** What the backend logs, before the error, when the app's `authenticate` threw. */
 const AUTHENTICATE_THREW_MESSAGE =
