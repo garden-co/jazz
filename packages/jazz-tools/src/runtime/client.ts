@@ -304,7 +304,10 @@ export interface Runtime {
   close?(): void | Promise<void>;
   /** Abandon a runtime whose backing persistence epoch was invalidated. */
   discard?(): void;
-  clearClientStorage?(): Promise<void>;
+  /** Delete the local store, saying how many unconfirmed writes it dropped when it can. */
+  clearClientStorage?(): Promise<{ pendingUploads?: number } | void>;
+  /** Whether {@link clearClientStorage} works here (a React Native relay's store). */
+  canClearClientStorage?(): boolean;
   /** Connect to a Jazz server over WebSocket (Rust transport). */
   connect(url: string, auth_json: string): void;
   /**
@@ -2394,11 +2397,16 @@ export class JazzClient {
     this.runtime.discard?.();
   }
 
-  async clearClientStorage(): Promise<void> {
+  /** Whether this client's runtime can delete its local store. */
+  supportsClientStorageReset(): boolean {
+    return this.runtime.canClearClientStorage?.() === true;
+  }
+
+  async clearClientStorage(): Promise<{ pendingUploads?: number } | void> {
     if (!this.runtime.clearClientStorage) {
       throw new Error("Runtime does not support client storage reset.");
     }
 
-    await this.runtime.clearClientStorage();
+    return await this.runtime.clearClientStorage();
   }
 }

@@ -280,6 +280,19 @@ export class NativeForegroundDb {
   }
 
   /**
+   * Delete this foreground's scope store: the native relay closes every
+   * foreground of the scope (this one too) and its relay, then deletes the
+   * store's files, keeping the account. Returns how many writes the server
+   * had not confirmed it dropped.
+   */
+  deleteNativeStore(): { pendingUploads: number } {
+    const response = this.execute({ type: "deleteStore" });
+    if (response.type !== "storeDeleted") return unexpected("deleteStore", response.type);
+    this.closed = true;
+    return { pendingUploads: response.pendingUploads };
+  }
+
+  /**
    * How many of this foreground's commits still wait for the server's
    * verdict. An older native build without the command reports none.
    */

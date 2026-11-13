@@ -3614,7 +3614,7 @@ pub(crate) fn store_opened_without_migrations(version: &crate::ids::SchemaVersio
     Error::new(
         ErrorCode::StoreOpenedWithoutMigrations,
         format!(
-            "this store keeps schema version {} under other names than the server, which never confirmed them: it was opened without the app's migrations (React Native before alpha.61 dropped them). Nothing it holds syncs with this server until the store is rebuilt or reset with deleteClientStorage(), which drops its unsynced writes",
+            "this store keeps schema version {} under other names than the server, which never confirmed them: it was opened without the app's migrations (React Native before alpha.61 dropped them). Syncing a store opened without the app's migrations is not supported yet: rebuild it, or reset it with deleteClientStorage(), which drops its unsynced writes",
             uuid::Uuid::from_bytes(*version.as_bytes())
         ),
     )

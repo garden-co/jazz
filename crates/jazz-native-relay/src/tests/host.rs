@@ -1352,3 +1352,56 @@ fn a_store_opened_without_migrations_with_unsynced_writes_is_left_for_the_app() 
         .unwrap();
     assert_eq!(pending, 1, "alice's unsynced write is still there");
 }
+
+/// `deleteClientStorage()` on React Native (#5145): deleting a scope's
+/// store closes its foregrounds and relay, removes its SQLite files and
+/// reports the unconfirmed writes it dropped. The admission stays, so the
+/// next foreground opens a fresh, empty store for the same account.
+#[test]
+fn deleting_a_scopes_store_drops_it_and_counts_its_unconfirmed_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("alice.sqlite");
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&path, "alice", 0x4d);
+    let foreground = fixture.open(&capability);
+    fixture.insert_todo(foreground, [0x4d; 16], "never synced");
+    let sibling = fixture.open(&capability);
+    fixture.wait_for_row(sibling, (RowUuid::from_bytes([0x4d; 16]), "never synced"));
+    assert!(path.exists());
+
+    assert_eq!(
+        fixture.execute(foreground, ForegroundDbCommandRequest::DeleteStore),
+        ForegroundDbCommandResponse::StoreDeleted { pending_uploads: 1 },
+        "the one write no server confirmed is counted"
+    );
+    assert!(!path.exists(), "the store's file is gone");
+    assert_eq!(
+        fixture.tick_status(sibling),
+        JazzNativeRelayStatus::InvalidHandle,
+        "every foreground of the scope is closed"
+    );
+
+    let fresh = fixture.open(&capability);
+    assert_eq!(
+        fixture.rows(fresh),
+        [],
+        "the same account opens a fresh store"
+    );
+    fixture.close(fresh);
+}
+
+/// The delete command and its answer keep their ABI 6 ordinals.
+#[test]
+fn delete_store_command_and_response_have_pinned_bytes() {
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::DeleteStore).unwrap(),
+        vec![40]
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::StoreDeleted {
+            pending_uploads: 300
+        })
+        .unwrap(),
+        vec![31, 0xac, 0x02]
+    );
+}

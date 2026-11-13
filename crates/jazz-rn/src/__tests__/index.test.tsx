@@ -514,6 +514,16 @@ it("decodes tick events with the current credential refusal and upstream failure
     expect(() => relay.decodeNativeForegroundResponse(malformed)).toThrow();
 });
 
+it("encodes the store delete and decodes its answer with the native relay's pinned bytes", () => {
+  const relay = loadRelay(null);
+  // Pinned beside delete_store_command_and_response_have_pinned_bytes.
+  expect(relay.encodeNativeForegroundCommand({ type: "deleteStore" })).toEqual(Uint8Array.of(40));
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(31, 0xac, 0x02))).toEqual({
+    type: "storeDeleted",
+    pendingUploads: 300,
+  });
+});
+
 it("decodes a core operation error with its stable code and reason name beside the unchanged reason", () => {
   const relay = loadRelay(null);
   const ascii = (text: string) => Array.from(text, (char) => char.charCodeAt(0));

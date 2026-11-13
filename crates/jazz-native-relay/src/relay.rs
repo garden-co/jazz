@@ -462,6 +462,19 @@ impl NativeRelay {
         self.run(|worker| Ok(worker.host_upstream()))
     }
 
+    /// Writes the server has not confirmed. A foreground's pending write is
+    /// the relay store's too once handed to it, so this is the larger of the
+    /// store's count and any foreground's, not their sum.
+    pub(crate) fn unconfirmed_writes(&self) -> Result<usize, RelayError> {
+        self.run(|worker| {
+            Ok(worker
+                .clients
+                .values()
+                .map(|client| client.binding.pending_upload_count())
+                .fold(worker.persistent.pending_upload_count(), usize::max))
+        })
+    }
+
     /// The last upstream the relay's database refused, if the connection
     /// since has not been replaced.
     pub(crate) fn upstream_refusal(&self) -> Result<Option<UpstreamRefusal>, RelayError> {
@@ -2008,7 +2021,8 @@ fn foreground_command(
         | Request::ReconnectNativeUpstream
         | Request::NativeConnectionStatus
         | Request::NativeSessionMetadata
-        | Request::DrainTickEvents => {
+        | Request::DrainTickEvents
+        | Request::DeleteStore => {
             return Err("host command reached the relay owner".into());
         }
     })
