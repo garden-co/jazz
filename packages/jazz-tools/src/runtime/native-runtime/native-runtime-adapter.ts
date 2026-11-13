@@ -49,6 +49,7 @@ import type {
   MutationErrorEvent,
   MutationResult,
   OpenTransactionId,
+  ExplainedRows,
   PermissionAdvice,
   Runtime,
   RuntimeWriteWaitOptions,
@@ -376,6 +377,12 @@ type NativeDb = {
     author?: Uint8Array,
     claims?: Record<string, unknown>,
   ): NativePermissionAdviceResult;
+  explainReadClauses?(
+    table: string,
+    rows: string[],
+    author: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): ExplainedRows;
   requestUpdatePermissionAdvice?(
     table: string,
     rowId: Uint8Array,
@@ -626,10 +633,14 @@ function upstreamLinkFailure(error: WireError, negotiated: boolean): UpstreamLin
   // current credential (see `isReauthenticateWireError`).
   if (isReauthenticateWireError(error)) return { kind: "reauthenticate", message };
   if (wireAuthFailureReason(error)) return { kind: "authRejected", message };
-  // The server's bootstrap and overload signals. Before its hello the server
-  // is still starting; afterwards they end a link like an outage.
+  // The server's bootstrap and overload signals. Before its hello, `not_ready`
+  // means the server is still starting; `backpressure` means it answered and
+  // refused this connection for now (such as the connection cap per user),
+  // which is retried like an outage but published at once with the server's
+  // reason. After its hello both end a link like an outage.
   if (isReconnectLaterWireError(error)) {
-    return { kind: negotiated ? "network" : "serverNotReady", message };
+    if (negotiated) return { kind: "network", message };
+    return { kind: error.code === "backpressure" ? "refused" : "serverNotReady", message };
   }
   // The network or the server dropped the socket. A local-first client must
   // survive an outage of any length, including one it was opened in.
@@ -2252,6 +2263,20 @@ export class NativeRuntimeAdapter implements Runtime {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * The Inspector's `explain`: for each of `rows` of `table`, which clauses
+   * of its read policy (the arms of its top-level `Or`) hold for `session`.
+   * Backend only.
+   */
+  explainReadClauses(table: string, rows: string[], session: Session): ExplainedRows {
+    if (!this.trustedBackend) throw new Error("explain runs only on a trusted backend");
+    const explain = this.db.explainReadClauses;
+    if (!explain) throw new Error("explain is not supported yet by this runtime");
+    const native = readSession(JSON.stringify(session));
+    if (!native?.identity) throw new Error("explain needs a user to explain for");
+    return explain.call(this.db, table, rows, native.identity, native.claims);
   }
 
   requestInsertPermissionAdvice(

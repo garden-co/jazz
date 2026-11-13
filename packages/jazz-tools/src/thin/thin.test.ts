@@ -54,11 +54,13 @@ afterEach(async () => {
   server = undefined;
 });
 
-async function startServer(): Promise<TestJazz> {
+async function startServer(
+  coreOptions: { maxConnectionsPerUser?: number } = {},
+): Promise<TestJazz> {
   server = await startTestJazz({
     app: app,
     permissions: permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true, ...coreOptions },
   });
   return server;
 }
@@ -443,6 +445,49 @@ describe("thin client", () => {
     // Never offline for another reason on the way.
     expect(links.at(-1)).toBe("offline network");
     expect(links.filter((link) => link.startsWith("offline"))).toEqual(["offline network"]);
+  }, 60_000);
+
+  // R42: tabs of one user past the server's connection cap per user. Before,
+  // the server evicted the oldest tab, which reconnected and evicted the next
+  // one, in a loop of hundreds of reconnects a minute that the app never saw.
+  // Now the tab past the cap waits, reports the cap as its link's failure,
+  // and joins once a slot frees; the tabs already in are never disturbed.
+  it("a tab past the connection cap per user waits, names the cap, and joins when a tab closes", async () => {
+    const server = await startServer({ maxConnectionsPerUser: 2 });
+    const secret = formatAuthSecret(new Uint8Array(32).fill(0x42));
+    const tabs = [await thinDb(server, secret), await thinDb(server, secret)];
+    const drops: string[] = [];
+    for (const [index, tab] of tabs.entries()) {
+      await tab.insert(app.notes, { text: `tab ${index}`, done: false }).wait({ tier: "global" });
+      expect(tab.getSyncStatus().link).toEqual({ state: "connected" });
+      tab.onSyncStatusChange(({ link }) => {
+        if (link.state !== "connected") drops.push(`tab ${index}: ${link.state}`);
+      });
+    }
+
+    const extra = await thinDb(server, secret);
+    const unsubscribe = extra.subscribe(app.notes, () => undefined);
+    await expect
+      .poll(() => extra.getSyncStatus().link, { timeout: 10_000 })
+      .toEqual({ state: "offline", reason: "network", retrying: true });
+    expect(extra.getSyncStatus().lastError).toMatchObject({
+      kind: "network",
+      message: expect.stringContaining("connection cap per user"),
+    });
+    // Its retries back off and never disturb the tabs that are in.
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(drops).toEqual([]);
+    for (const tab of tabs) expect(tab.getSyncStatus().link).toEqual({ state: "connected" });
+
+    // A tab closes: the waiting one joins, and the other tab stays in.
+    const closing = tabs.pop()!;
+    opened.splice(opened.indexOf(closing), 1);
+    await closing.shutdown();
+    await expect
+      .poll(() => extra.getSyncStatus().link, { timeout: 15_000 })
+      .toEqual({ state: "connected" });
+    expect(drops.filter((drop) => drop.startsWith("tab 0"))).toEqual([]);
+    unsubscribe();
   }, 60_000);
 
   it("sends a write again when its answer is lost with the connection, and the server writes it once", async () => {

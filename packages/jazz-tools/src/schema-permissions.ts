@@ -16,6 +16,7 @@ import type {
 } from "./schema.js";
 import { isRecord } from "./runtime/util.js";
 import { mapPolicyExpr } from "./policy-expr-map.js";
+import { commonJsWrapped, commonJsWrapperError } from "./module-interop.js";
 
 export type CompiledPermissionsMap = Record<string, TablePolicies>;
 export type ExplicitPolicyOperation = "read" | "insert" | "update" | "delete";
@@ -388,11 +389,29 @@ function normalizeOperationPolicyForWasm(
   return normalized;
 }
 
+const POLICY_OPERATIONS = new Set(["select", "insert", "update", "delete"]);
+
+/**
+ * Whether `permissions` is a permissions map wrapped as a CommonJS
+ * `{ default }`: its one table, `default`, holds policies for the schema's
+ * tables. When the schema has a real `default` table, its policies name
+ * operations (`select`, `insert`, …), never tables, so the two can't be confused.
+ */
+function isCommonJsWrapper(permissions: unknown, knownTables: ReadonlySet<string>): boolean {
+  const inner = commonJsWrapped(permissions);
+  if (inner === undefined) return false;
+  const tables = Object.keys(inner);
+  if (!tables.every((table) => knownTables.has(table))) return false;
+  return !knownTables.has("default") || tables.some((table) => !POLICY_OPERATIONS.has(table));
+}
+
 function validatePermissionTables(
   schemaTableNames: readonly string[],
   compiledPermissions: CompiledPermissionsMap,
 ): void {
   const knownTables = new Set(schemaTableNames);
+  if (isCommonJsWrapper(compiledPermissions, knownTables))
+    throw commonJsWrapperError("permissions.ts");
   const unknownTables = Object.keys(compiledPermissions).filter(
     (tableName) => !knownTables.has(tableName),
   );

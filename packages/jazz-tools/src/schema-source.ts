@@ -1,5 +1,6 @@
 import type { WasmSchema } from "./drivers/types.js";
 import { assertSchemaNameAllowed } from "./schema-name.js";
+import { commonJsWrapped, commonJsWrapperError } from "./module-interop.js";
 
 export interface WasmSchemaSource {
   wasmSchema: WasmSchema;
@@ -34,6 +35,15 @@ export function isWasmSchema(value: unknown): value is WasmSchema {
   );
 }
 
+function resolvesAsSchema(value: unknown): boolean {
+  try {
+    resolveSchemaSource(value as SchemaSourceInput);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function resolveSchemaSource(input: SchemaSourceInput): WasmSchema {
   if (isWasmSchema(input)) {
     assertWasmSchemaNames(input);
@@ -52,6 +62,9 @@ export function resolveSchemaSource(input: SchemaSourceInput): WasmSchema {
       assertSchemaNameAllowed(name);
     }
   }
+  // A real table named `default` resolved above; this is a module wrapper.
+  const wrapped = commonJsWrapped(input);
+  if (wrapped !== undefined && resolvesAsSchema(wrapped)) throw commonJsWrapperError("schema.ts");
 
   throw new Error(
     "Invalid schema source. Pass a WasmSchema, a generated app object, or a generated query/table object.",

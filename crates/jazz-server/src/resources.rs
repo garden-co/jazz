@@ -19,6 +19,10 @@ const RSS_TARGET_SHARE_PERCENT: u64 = 80;
 pub struct ServerResourceLimits {
     /// Live WebSocket connections admitted before upgrades get `503`.
     pub max_websocket_connections: usize,
+    /// Live WebSocket connections one signed-in user may hold; past it, a
+    /// new one is refused with a retryable error unless one of the user's
+    /// connections has gone silent.
+    pub max_websocket_connections_per_user: usize,
     /// Memory the process may use, or `None` when nothing limits it.
     pub memory_limit_bytes: Option<u64>,
     /// Accepted for older launch configurations; the SQLite store always
@@ -33,6 +37,8 @@ impl Default for ServerResourceLimits {
     fn default() -> Self {
         Self {
             max_websocket_connections: crate::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
+            max_websocket_connections_per_user:
+                crate::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS_PER_IDENTITY,
             memory_limit_bytes: None,
             stored_arrangements: true,
             query_cache_budget_bytes: None,

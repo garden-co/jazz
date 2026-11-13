@@ -63,22 +63,19 @@ pub async fn push_catalogue_in_memory(
     Ok(())
 }
 
-/// Cap on concurrent public-session connections sharing one authenticated
-/// identity (one user). When a new connection would exceed it, the
-/// connection of that identity heard from least recently is evicted, so a
-/// reconnecting client is never locked out by its own half-open zombies.
-/// Bounds the fan-out memory described in jaz0-a803; the process-wide
-/// `DEFAULT_MAX_WEBSOCKET_CONNECTIONS` bounds the total.
+/// Default cap on live public-session WebSocket connections sharing one
+/// authenticated identity (one user).
 ///
-/// The cap was introduced as 4 per `client_id` (one runtime), sized for a
-/// reconnect briefly overlapping its old half-open socket. It is now keyed by
-/// the user, and one user legitimately holds a socket per thin-client tab
-/// (thin tabs share nothing), per browser profile or device running the
-/// local-first client (whose tabs share one SharedWorker socket), plus
-/// reconnect overlap on each. 16 covers a dozen tabs or devices opening
-/// together while still bounding one identity to a small fraction of the
-/// process cap.
-pub(crate) const PER_IDENTITY_CONNECTION_CAP: usize = 16;
+/// Connections are bounded mostly by backpressure: each holds at most its
+/// per-session ingress and egress budgets, and `DEFAULT_MAX_WEBSOCKET_CONNECTIONS`
+/// bounds the process. This cap only stops a pathological number of sockets
+/// for one user (the fan-out memory of jaz0-a803), so it sits far above any
+/// real multi-tab, multi-device use: a thin-client tab holds one socket, and a
+/// browser profile or device running the local-first client holds one for all
+/// its tabs. Past the cap a connection silent for longer than a keepalive (a
+/// zombie) is evicted to make room; live connections never are, and with none
+/// to evict the newcomer is refused with a retryable `backpressure` error.
+pub const DEFAULT_MAX_WEBSOCKET_CONNECTIONS_PER_IDENTITY: usize = 128;
 /// Default cap on live WebSocket connections per server process.
 ///
 /// Every connection may hold up to its per-session ingress and egress

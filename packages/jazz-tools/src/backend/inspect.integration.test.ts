@@ -429,12 +429,15 @@ describe("Inspector reads", () => {
       status: 400,
       message: expect.stringMatching(/query.includes is not supported/),
     });
+    // explain needs a user, and a table rather than its history.
     expect(
-      await refused(api(jazz, { op: "explain", query: { table: "todos" }, as: "alice" }, STAFF)),
-    ).toMatchObject({
-      status: 501,
-      error: "not_supported",
-    });
+      await refused(api(jazz, { op: "explain", query: { table: "todos" } }, STAFF)),
+    ).toMatchObject({ status: 400, message: expect.stringMatching(/needs as/) });
+    expect(
+      await refused(
+        api(jazz, { op: "explain", query: { table: "history.todos" }, as: "alice" }, STAFF),
+      ),
+    ).toMatchObject({ status: 400 });
     expect(await refused(api(jazz, { op: "frobnicate" }, STAFF))).toMatchObject({ status: 400 });
   });
 
@@ -1198,7 +1201,12 @@ describe("jazz-tools inspect and mcp", () => {
         arguments: { query: { table: "todos" }, as: "alice" },
       },
     });
-    expect((await answer(4)).result).toMatchObject({ isError: true });
+    const explained = JSON.parse((await answer(4)).result.content[0].text);
+    expect(explained.clauses).toEqual([{ index: 0, text: "owner = session.user" }]);
+    expect(explained.rows.map((row: any) => [row.row.title, row.allowed, row.by]).sort()).toEqual([
+      ["alice's", true, [0]],
+      ["bob's", false, []],
+    ]);
     send({
       jsonrpc: "2.0",
       id: 5,
@@ -1287,6 +1295,31 @@ describe("Viewing as a user whose permissions read claims", () => {
         api(jazz, { op: "query", query, as: { userId: "manager", claims: ["manager"] } }, STAFF),
       ),
     ).toMatchObject({ status: 400, error: "bad_request" });
+  });
+
+  it("explains which clause let each row through, with and without the claims", async () => {
+    const { jazz } = await startWithClaims();
+    const query = { table: "expenses" };
+    const asWorker = await ok(api(jazz, { op: "explain", query, as: "worker" }, STAFF));
+    expect(asWorker.clauses).toEqual([
+      { index: 0, text: "owner = session.user" },
+      { index: 1, text: 'session.claims.role = "manager"' },
+    ]);
+    expect(asWorker.rows.map((row: any) => [row.allowed, row.by])).toEqual([[true, [0]]]);
+
+    // Without claims the manager clause can't hold, and the answer says why.
+    const bare = await ok(api(jazz, { op: "explain", query, as: "manager" }, STAFF));
+    expect(bare.rows.map((row: any) => [row.allowed, row.by])).toEqual([[false, []]]);
+    expect(bare.warning).toMatch(/none were given for manager/);
+    const asManager = await ok(
+      api(
+        jazz,
+        { op: "explain", query, as: { userId: "manager", claims: { role: "manager" } } },
+        STAFF,
+      ),
+    );
+    expect(asManager.rows.map((row: any) => [row.allowed, row.by])).toEqual([[true, [1]]]);
+    expect(asManager.warning).toBeUndefined();
   });
 
   it("doesn't warn when the app's permissions read no claims", async () => {

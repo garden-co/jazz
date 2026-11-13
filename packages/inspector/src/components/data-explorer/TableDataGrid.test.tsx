@@ -273,23 +273,25 @@ describe("TableDataGrid", () => {
     expect(screen.getByRole("columnheader", { name: "title" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "done" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "meta" })).not.toBeNull();
-    // Provenance timestamps are included by default as the last two columns.
-    expect(screen.getByRole("columnheader", { name: "$createdAt" })).not.toBeNull();
-    expect(screen.getByRole("columnheader", { name: "$updatedAt" })).not.toBeNull();
-    expect(screen.queryByRole("columnheader", { name: "$createdBy" })).toBeNull();
-    expect(screen.queryByRole("columnheader", { name: "$updatedBy" })).toBeNull();
+    // Provenance is included by default after the row's own columns: the
+    // timestamps, then who created and last changed the row (#5184).
     const dataColumnHeaders = screen
       .getAllByRole("columnheader")
       .map((header) => header.textContent ?? "")
       .filter((header) => header.length > 0);
-    expect(dataColumnHeaders.slice(-2)).toEqual(["$createdAt", "$updatedAt"]);
+    expect(dataColumnHeaders.slice(-4)).toEqual([
+      "$createdAt",
+      "$updatedAt",
+      "$createdBy",
+      "$updatedBy",
+    ]);
     expect(screen.getByText("row-2")).not.toBeNull();
     expect(screen.getByText("zeta")).not.toBeNull();
     expect(screen.getByText('{"done":true}')).not.toBeNull();
     expect(screen.getByText("2026-07-17T08:00:00.000Z")).not.toBeNull();
     expect(screen.getByText("2026-07-17T09:00:00.000Z")).not.toBeNull();
-    expect(screen.queryByText("seed-user")).toBeNull();
-    expect(screen.queryByText("editor-user")).toBeNull();
+    expect(screen.getByText("seed-user")).not.toBeNull();
+    expect(screen.getByText("editor-user")).not.toBeNull();
     expect((screen.getByLabelText("Rows per page") as HTMLSelectElement).value).toBe("25");
   });
 
@@ -308,33 +310,28 @@ describe("TableDataGrid", () => {
     expect(screen.queryByText("No rows")).toBeNull();
   });
 
-  it("can show creator and updater columns", () => {
+  it("can hide the creator and updater columns", () => {
     renderGrid();
 
     fireEvent.click(screen.getByRole("button", { name: "Customize columns" }));
     const createdByCheckbox = screen.getByRole("checkbox", { name: "Show $createdBy" });
     const updatedByCheckbox = screen.getByRole("checkbox", { name: "Show $updatedBy" });
-    expect((createdByCheckbox as HTMLInputElement).checked).toBe(false);
-    expect((updatedByCheckbox as HTMLInputElement).checked).toBe(false);
+    expect((createdByCheckbox as HTMLInputElement).checked).toBe(true);
+    expect((updatedByCheckbox as HTMLInputElement).checked).toBe(true);
 
     fireEvent.click(createdByCheckbox);
     fireEvent.click(updatedByCheckbox);
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
 
-    expect(screen.getByRole("columnheader", { name: "$createdBy" })).not.toBeNull();
-    expect(screen.getByRole("columnheader", { name: "$updatedBy" })).not.toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "$createdBy" })).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "$updatedBy" })).toBeNull();
     const dataColumnHeaders = screen
       .getAllByRole("columnheader")
       .map((header) => header.textContent ?? "")
       .filter((header) => header.length > 0);
-    expect(dataColumnHeaders.slice(-4)).toEqual([
-      "$createdAt",
-      "$createdBy",
-      "$updatedAt",
-      "$updatedBy",
-    ]);
-    expect(screen.getByText("seed-user")).not.toBeNull();
-    expect(screen.getByText("editor-user")).not.toBeNull();
+    expect(dataColumnHeaders.slice(-2)).toEqual(["$createdAt", "$updatedAt"]);
+    expect(screen.queryByText("seed-user")).toBeNull();
+    expect(screen.queryByText("editor-user")).toBeNull();
   });
 
   it("can hide and show a column", () => {
@@ -437,7 +434,7 @@ describe("TableDataGrid", () => {
 
     const firstQuery = mockUseAll.mock.calls[0]?.[0] as { _build: () => string };
     expect(JSON.parse(firstQuery._build())).toMatchObject({
-      select: ["*", "$createdAt", "$createdBy", "$updatedAt", "$updatedBy"],
+      select: ["*", "$createdAt", "$updatedAt", "$createdBy", "$updatedBy"],
       orderBy: [["id", "asc"]],
       limit: 26,
       offset: 0,

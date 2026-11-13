@@ -15,7 +15,7 @@
 // Shared with jazz-testkit by path so Jazz needs no testkit dev-dependency.
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
@@ -1132,4 +1132,379 @@ fn a_foreground_one_shot_falls_back_to_its_owner_when_a_live_server_is_silent() 
     };
     assert!(started.elapsed() >= SHORT);
     assert_eq!(rows, 0, "the cold worker holds none of the server's rows");
+}
+
+/// A foreground read with no first-load wait (`FirstLoad::Deliver`, which a
+/// client sends for `firstLoadRemoteWaitMs: 0`) opens with its owner's store
+/// at once, whatever the owner's own server link is doing. A zero wait is
+/// `Deliver` (see `FirstLoad`): it must not be held for the server's answer,
+/// which a link that neither connects nor fails never gives. Measured on an
+/// RN app: with the relay's connection hanging, such a read never answered.
+///
+/// ```text
+/// server(a..j, silent) ══ worker(cache a..j, hint Attempting | Live) ══ tab (hint Live)
+/// tab: subscribe (no wait) ─► opening a..j from the owner's store, no server turn
+/// ```
+fn assert_no_wait_read_opens_from_the_owner(node: u8, owner_hint: RemoteLinkHint) {
+    let server = seeded_server();
+    let foreground = foreground_over(node, node + 1, warm_worker(node + 1, &server));
+    foreground.worker.set_remote_link_hint(owner_hint);
+    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let deliver = || ReadOpts::for_read_tier(jazz::db::ReadTier::LocalFirst);
+
+    let mut stream = subscribe(&foreground.tab, &items(), deliver());
+    let (reset, mut rows, _) = opening(foreground.first_event(&mut stream, None));
+    rows.sort();
+    assert!(reset, "the first delivery opens the stream");
+    assert_eq!(
+        rows,
+        all_rows(),
+        "a no-wait read opens with the owner's cached rows, without the server"
+    );
+
+    let bytes = postcard::to_allocvec(&items()).expect("encode query");
+    let read = foreground
+        .tab
+        .all_serialized_query(&bytes, deliver(), None, None, None);
+    let mut read = pin!(read);
+    let mut context = Context::from_waker(Waker::noop());
+    let mut rows = 'read: {
+        for _ in 0..MAX_TURNS {
+            if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+                break 'read match result.expect("foreground one-shot read") {
+                    SerializedReadResult::Rows(rows) => {
+                        rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>()
+                    }
+                    SerializedReadResult::Relation(_) => panic!("items is a row query"),
+                };
+            }
+            foreground.turn(None);
+        }
+        panic!("a no-wait one-shot read did not answer within {MAX_TURNS} owner turns");
+    };
+    rows.sort();
+    assert_eq!(
+        rows,
+        all_rows(),
+        "a no-wait one-shot read answers from the owner"
+    );
+}
+
+#[test]
+fn a_no_wait_foreground_read_opens_while_the_owner_link_attempts() {
+    assert_no_wait_read_opens_from_the_owner(0x81, RemoteLinkHint::Attempting);
+}
+
+#[test]
+fn a_no_wait_foreground_read_opens_while_the_owner_link_is_live() {
+    assert_no_wait_read_opens_from_the_owner(0x83, RemoteLinkHint::Live);
+}
+
+/// A zero first-load wait is no wait (`FirstLoad` docs): a Rust caller's
+/// `WaitForRemote { timeout_ms: 0 }` opens from the owner's store at once,
+/// as `Deliver` does, while the owner's link is live and the server silent.
+#[test]
+fn a_zero_first_load_wait_opens_from_the_owner_like_no_wait() {
+    let server = seeded_server();
+    let foreground = foreground_over(0xc5, 0xc6, warm_worker(0xc6, &server));
+    foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
+    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let mut stream = subscribe(&foreground.tab, &items(), wait_for_remote(Duration::ZERO));
+    let (reset, mut rows, _) = opening(foreground.first_event(&mut stream, None));
+    rows.sort();
+    assert!(reset, "the first delivery opens the stream");
+    assert_eq!(
+        rows,
+        all_rows(),
+        "a zero wait opens with the owner's cached rows"
+    );
+}
+
+/// Apply what a stream publishes to the rows it lists, asserting no event
+/// after the opening is a second one.
+fn follow(stream: &mut SubscriptionStream, rows: &mut BTreeSet<RowUuid>) {
+    while let Some(event) = stream.try_next_event() {
+        match event {
+            SubscriptionEvent::Delta { reset: true, .. } => {
+                panic!("a no-wait opening was published again: {event:?}")
+            }
+            SubscriptionEvent::Delta { added, removed, .. } => {
+                rows.extend(added.iter().map(|row| row.row_uuid()));
+                for gone in removed {
+                    rows.remove(&gone.row_uuid);
+                }
+            }
+            other => panic!("expected a delta, got {other:?}"),
+        }
+    }
+}
+
+/// A no-wait opening served from the owner's store is followed by the
+/// server's later rows as deltas, never a second opening: the owner keeps
+/// its upstream subscription, which fills its store, and the opened member
+/// re-settles on it. A window follows the server's rows the same way.
+///
+/// ```text
+/// server(a..j) ══ worker(cache a..j, hint Live) ══ tab (hint Live)
+/// tab: subscribe (no wait) ─► opening from the owner
+/// server: + row k ("k", and "aa" for the window) ─► worker ─► tab: a delta
+/// ```
+fn assert_no_wait_opening_follows(
+    node: u8,
+    query: Query,
+    label: &str,
+    opened: &[usize],
+    then: &[usize],
+) {
+    let server = seeded_server();
+    let foreground = foreground_over(node, node + 1, warm_worker(node + 1, &server));
+    foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
+    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let deliver = ReadOpts::for_read_tier(jazz::db::ReadTier::LocalFirst);
+    let mut stream = subscribe(&foreground.tab, &query, deliver);
+    let (reset, first, _) = opening(foreground.first_event(&mut stream, None));
+    assert!(reset, "the first delivery opens the stream");
+    let mut rows: BTreeSet<RowUuid> = first.into_iter().collect();
+    let rows_of = |indices: &[usize]| {
+        indices
+            .iter()
+            .map(|&index| row(index))
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(rows, rows_of(opened), "the opening is the owner's store");
+
+    seed(&server, LABELS.len(), label);
+    for _ in 0..MAX_TURNS {
+        foreground.turn(Some(&server));
+        follow(&mut stream, &mut rows);
+        if rows == rows_of(then) {
+            // Nothing that lands after it reopens the stream either.
+            for _ in 0..5 {
+                foreground.turn(Some(&server));
+                follow(&mut stream, &mut rows);
+            }
+            assert_eq!(rows, rows_of(then), "the stream stays on the server's rows");
+            return;
+        }
+    }
+    panic!("the stream did not follow the server's rows: {rows:?}");
+}
+
+#[test]
+fn a_no_wait_opening_follows_the_servers_later_rows_as_deltas() {
+    let every: Vec<usize> = (0..LABELS.len()).collect();
+    let with_k: Vec<usize> = (0..=LABELS.len()).collect();
+    assert_no_wait_opening_follows(0x85, items(), "k", &every, &with_k);
+}
+
+#[test]
+fn a_no_wait_window_follows_the_servers_later_rows_as_deltas() {
+    // `aa` sorts second, so the window `offset 4 limit 2` moves from e, f to d, e.
+    assert_no_wait_opening_follows(0x87, window(), "aa", &[4, 5], &[3, 4]);
+}
+
+/// The no-wait release is a LocalFirst one: a Remote read without a wait
+/// still waits for the authority's answer while the owner's link is live and
+/// the server silent, and opens with it once the server answers.
+#[test]
+fn a_remote_foreground_read_still_waits_for_the_server_through_a_live_owner() {
+    let server = seeded_server();
+    let foreground = foreground_over(0x89, 0x8a, warm_worker(0x8a, &server));
+    // Written after the owner cached a..j: only the authority's answer has k.
+    seed(&server, LABELS.len(), "k");
+    foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
+    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let remote = ReadOpts::for_read_tier(jazz::db::ReadTier::Remote);
+    let mut stream = subscribe(&foreground.tab, &items(), remote);
+    for _ in 0..6 {
+        foreground.turn(None);
+        assert!(
+            stream.try_next_event().is_none(),
+            "a Remote read must not open from the owner's store"
+        );
+    }
+    let (reset, mut rows, _) = opening(foreground.first_event(&mut stream, Some(&server)));
+    rows.sort();
+    assert!(reset);
+    assert_eq!(
+        rows,
+        (0..=LABELS.len()).map(row).collect::<Vec<_>>(),
+        "the first delivery is the authority's answer"
+    );
+}
+
+/// Differential: no-wait subscriptions opened at random moments over a warm
+/// owner whose link hint changes at random, while the server inserts and
+/// relabels and deletes rows and answers only on some turns. Model: the
+/// server's rows. Each stream must open within a few owner turns WITHOUT a
+/// server turn (whatever the owner's hint), open exactly once, never list a
+/// row the server never had (a window: never more than its two), and end and
+/// stay on the server's rows (a window: the model's labels, offset 4
+/// limit 2) once the link is live and the server answers.
+#[test]
+fn no_wait_subscriptions_follow_the_server_through_random_link_changes() {
+    type Stream = (SubscriptionStream, BTreeSet<RowUuid>, bool);
+    const OPEN_WITHIN: usize = 10;
+    let hints = [
+        RemoteLinkHint::Live,
+        RemoteLinkHint::Attempting,
+        RemoteLinkHint::Failed,
+    ];
+    // Openings by the owner's hint at the time, and window openings: the
+    // defect lives under Live and Attempting.
+    let mut opened_under = [0usize; 3];
+    let mut windows_opened = 0usize;
+    for seed_value in 1..=12u64 {
+        let mut state = seed_value.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        let mut next = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let node = 0x90 + 2 * seed_value as u8;
+        let server = seeded_server();
+        let foreground = foreground_over(node, node + 1, warm_worker(node + 1, &server));
+        foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+        let mut model: BTreeMap<usize, String> = LABELS
+            .iter()
+            .enumerate()
+            .map(|(index, label)| (index, (*label).to_owned()))
+            .collect();
+        let window_of = |model: &BTreeMap<usize, String>| -> BTreeSet<RowUuid> {
+            let mut by_label: Vec<(&String, usize)> =
+                model.iter().map(|(index, label)| (label, *index)).collect();
+            by_label.sort();
+            by_label
+                .iter()
+                .skip(4)
+                .take(2)
+                .map(|(_, index)| row(*index))
+                .collect()
+        };
+        let all_of = |model: &BTreeMap<usize, String>| -> BTreeSet<RowUuid> {
+            model.keys().map(|&index| row(index)).collect()
+        };
+        let mut streams: Vec<Stream> = Vec::new();
+        // Every row the server ever had: a stream may lag a delete, never
+        // invent a row.
+        let mut ever: BTreeSet<RowUuid> = all_of(&model);
+        let mut next_index = LABELS.len();
+        let mut hint_index = 0usize;
+        foreground.worker.set_remote_link_hint(hints[hint_index]);
+        for step in 0..60 {
+            match next(5) {
+                0 => {
+                    hint_index = next(3) as usize;
+                    foreground.worker.set_remote_link_hint(hints[hint_index]);
+                }
+                1 => {
+                    let index = next_index;
+                    next_index += 1;
+                    let label = format!("{}{step}", (b'a' + next(10) as u8) as char);
+                    seed(&server, index, &label);
+                    ever.insert(row(index));
+                    model.insert(index, label);
+                }
+                4 => {
+                    // A relabel moves a row through the window and out of
+                    // it; a delete takes it away.
+                    let keys: Vec<usize> = model.keys().copied().collect();
+                    let index = keys[next(keys.len() as u64) as usize];
+                    if next(3) == 0 && model.len() > 6 {
+                        block_on(server.delete("items", row(index), Default::default()))
+                            .expect("delete server row");
+                        model.remove(&index);
+                    } else {
+                        let label = format!("{}{step}", (b'a' + next(10) as u8) as char);
+                        block_on(server.update(
+                            "items",
+                            row(index),
+                            BTreeMap::from([("label".to_owned(), Value::String(label.clone()))]),
+                            Default::default(),
+                        ))
+                        .expect("relabel server row");
+                        model.insert(index, label);
+                    }
+                }
+                2 if streams.len() < 4 => {
+                    let windowed = next(2) == 0;
+                    let query = if windowed { window() } else { items() };
+                    let deliver = ReadOpts::for_read_tier(jazz::db::ReadTier::LocalFirst);
+                    let mut stream = subscribe(&foreground.tab, &query, deliver);
+                    let opened = (0..OPEN_WITHIN).find_map(|_| {
+                        foreground.turn(None);
+                        stream.try_next_event()
+                    });
+                    let Some(event) = opened else {
+                        panic!(
+                            "seed {seed_value} step {step}: a no-wait read did not open \
+                             within {OPEN_WITHIN} owner turns without the server"
+                        );
+                    };
+                    let (reset, rows, _) = opening(event);
+                    assert!(
+                        reset,
+                        "seed {seed_value} step {step}: the first delivery opens"
+                    );
+                    opened_under[hint_index] += 1;
+                    windows_opened += usize::from(windowed);
+                    streams.push((stream, rows.into_iter().collect(), windowed));
+                }
+                _ => {
+                    let server_turn = next(2) == 0;
+                    foreground.turn(server_turn.then_some(&server));
+                }
+            }
+            for (stream, rows, windowed) in &mut streams {
+                follow(stream, rows);
+                assert!(
+                    rows.is_subset(&ever),
+                    "seed {seed_value} step {step}: a stream lists a row the server never had"
+                );
+                assert!(
+                    !*windowed || rows.len() <= 2,
+                    "seed {seed_value} step {step}: a window lists {} rows",
+                    rows.len()
+                );
+            }
+        }
+        assert!(
+            !streams.is_empty(),
+            "seed {seed_value}: no subscription was opened"
+        );
+        foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
+        let on_model = |streams: &mut Vec<Stream>| {
+            foreground.turn(Some(&server));
+            streams.iter_mut().all(|(stream, rows, windowed)| {
+                follow(stream, rows);
+                *rows
+                    == if *windowed {
+                        window_of(&model)
+                    } else {
+                        all_of(&model)
+                    }
+            })
+        };
+        let converged = (0..MAX_TURNS).any(|_| on_model(&mut streams));
+        assert!(
+            converged,
+            "seed {seed_value}: the streams did not end on the server's rows"
+        );
+        // Nothing that lands after it moves them off again.
+        for _ in 0..5 {
+            assert!(
+                on_model(&mut streams),
+                "seed {seed_value}: a stream left the server's rows after converging"
+            );
+        }
+    }
+    assert!(
+        opened_under[0] > 0 && opened_under[1] > 0 && windows_opened > 0,
+        "the run must open reads under Live and Attempting, and windows: \
+         {opened_under:?} by hint, {windows_opened} windows"
+    );
+    eprintln!(
+        "no-wait openings by hint (Live, Attempting, Failed): {opened_under:?}, windows: {windows_opened}"
+    );
 }
