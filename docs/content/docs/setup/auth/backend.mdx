@@ -87,7 +87,8 @@ expiry, with a fresh token. On that reconnect:
 So a sign-out on another device, a ban or a changed role reaches an open connection within
 `sessionTtlSeconds` at the latest. To end a user's open connections at once, call
 `jazz.revokeUser(userId)` from your sign-out handler or your auth provider's session-revoked
-webhook. It ends their connections on this backend instance; connections on other instances end
+webhook. It ends their connections on this backend instance, including one still signing in as
+them when you call it (say a tab reconnecting); connections on other instances end
 within `sessionTtlSeconds`. On Vercel and other serverless hosts, the request that signs a user out
 usually runs on a different instance than their sync connections, so `revokeUser` there rarely
 reaches them. To sign out the browser the user is in, every tab of it, call `refresh()` on the
