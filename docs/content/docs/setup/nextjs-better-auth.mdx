@@ -67,7 +67,7 @@ to:
 import { betterAuth } from "better-auth";
 import { nextCookies } from "better-auth/next-js";
 import { admin } from "better-auth/plugins";
-import { createJazz, vercel } from "jazz-tools/backend";
+import { createJazz, perBranch, vercel } from "jazz-tools/backend";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { app } from "./schema";
 import permissions from "./permissions";
@@ -75,7 +75,11 @@ import permissions from "./permissions";
 export const jazz = createJazz({
   app,
   permissions,
-  store: vercel(), // on your own server: sqlite({ path: "./data/jazz" })
+  // Production gets one core, and each preview branch its own (on your own server: sqlite()).
+  store: vercel({
+    namespace: ({ environment, branch }) =>
+      environment === "production" ? "production" : perBranch(branch),
+  }),
   authenticate: async (request) => {
     const session = await auth.api.getSession({ headers: request.headers });
     if (!session) return null;
@@ -160,7 +164,9 @@ Under `next dev`, `vercel()` keeps its data in a SQLite file in `.jazz/local` (a
 ## 8. Deploy to Vercel
 
 Push to Git or run `vercel deploy`. Production gets its own Jazz core and data, and each preview
-branch its own. Before real users arrive:
+branch its own, as `namespace` above says; see
+[Production, previews and development](/docs/setup/deployment/vercel#production-previews-and-development)
+for sharing one preview core instead. Before real users arrive:
 
 - Connect a Vercel Blob store to production (and one per preview environment, if previews store
   files), so large values don't grow the core's database.
