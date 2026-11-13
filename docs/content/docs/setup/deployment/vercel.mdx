@@ -214,8 +214,10 @@ vercel({ namespace: ({ environment }) => environment });
 - **Production's core is never shared.** A core trusts the environment whose deployment started it
   first, so a preview can't use production's data, even with the same namespace.
 
-To reset a preview's data, delete its Sandbox and Drive in the Vercel dashboard; the next request
-starts it empty. Nothing deletes the cores of merged or deleted branches yet.
+To reset a preview's data, delete its Sandbox and the Drive attached to it (the one it mounts at
+`/data`) in the Vercel dashboard. The next request creates both again, with an empty database and a
+new app ID. Large values already in Vercel Blob or S3 stay there; delete them from the store if you
+need to. Nothing deletes the cores of merged or deleted branches yet.
 
 Blob stores follow environments, not namespaces: connect one store to production and one to preview
 (see [Large values](#large-values)).
