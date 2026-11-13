@@ -15,6 +15,7 @@ type NativeForegroundCommand =
   | { type: "drainTickEvents" }
   | { type: "takeSlowQueryReport"; app?: string }
   | { type: "setSlowQueryThresholdMs"; ms: number }
+  | { type: "deleteStore" }
   | {
       type: "all";
       query: Uint8Array;
@@ -512,6 +513,16 @@ it("decodes tick events with the current credential refusal and upstream failure
     Uint8Array.of(26, 2, 91, 93, 0, 1, 7, 1, 120, 0, 1, 3, 120),
   ])
     expect(() => relay.decodeNativeForegroundResponse(malformed)).toThrow();
+});
+
+it("encodes the store delete and decodes its answer with the native relay's pinned bytes", () => {
+  const relay = loadRelay(null);
+  // Pinned beside delete_store_command_and_response_have_pinned_bytes.
+  expect(relay.encodeNativeForegroundCommand({ type: "deleteStore" })).toEqual(Uint8Array.of(40));
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(31, 0xac, 0x02))).toEqual({
+    type: "storeDeleted",
+    pendingUploads: 300,
+  });
 });
 
 it("decodes a core operation error with its stable code and reason name beside the unchanged reason", () => {

@@ -462,6 +462,19 @@ impl NativeRelay {
         self.run(|worker| Ok(worker.host_upstream()))
     }
 
+    /// Writes the server has not confirmed. A foreground's pending write is
+    /// the relay store's too once handed to it, so this is the larger of the
+    /// store's count and any foreground's, not their sum.
+    pub(crate) fn unconfirmed_writes(&self) -> Result<usize, RelayError> {
+        self.run(|worker| {
+            Ok(worker
+                .clients
+                .values()
+                .map(|client| client.binding.pending_upload_count())
+                .fold(worker.persistent.pending_upload_count(), usize::max))
+        })
+    }
+
     /// The last upstream the relay's database refused, if the connection
     /// since has not been replaced.
     pub(crate) fn upstream_refusal(&self) -> Result<Option<UpstreamRefusal>, RelayError> {
@@ -496,6 +509,7 @@ impl NativeRelay {
     /// Report the path to the authoritative server to the relay database.
     pub(crate) fn set_remote_link_hint(&self, hint: RemoteLinkHint) -> Result<(), RelayError> {
         self.run(move |worker| {
+            worker.remote_link_hint = Some(hint);
             worker.persistent.db.set_remote_link_hint(hint);
             worker.persistent.hooks.progress.wake_all();
             worker.persistent_dirty.set(true);
@@ -884,6 +898,17 @@ pub(crate) struct RelayWorker {
     /// error code and the reason reported with it. Cleared when a new
     /// upstream connection begins.
     refusal: Option<UpstreamRefusal>,
+    /// Where the persistent store lives and whom it is, to rebuild it.
+    sqlite_path: PathBuf,
+    identity: DbIdentity,
+    /// The scope's latest claims and remote-link hint, given again to a
+    /// rebuilt store.
+    claims: Option<BTreeMap<String, Value>>,
+    remote_link_hint: Option<RemoteLinkHint>,
+    /// The store was rebuilt once in this process (see
+    /// [`RelayWorker::rebuild_stale_store`]): never again, so a bundle that
+    /// disagrees with its server cannot rebuild forever.
+    rebuilt: bool,
     /// The last drive stopped at its round bound with work left.
     redrive: bool,
     /// When time-bound waits were last evaluated.
@@ -928,6 +953,34 @@ fn ensure_sqlite_store(path: &std::path::Path) -> Result<(), RelayError> {
 /// retries) and every tick error is treated as terminal by the JavaScript
 /// runtime (`core_tick_failed`). Adding a chunk store here means first
 /// giving hosts a way to tell those failures apart.
+/// Beside a store: the schema version it was last rebuilt for (#5145).
+fn rebuilt_marker(sqlite_path: &std::path::Path) -> PathBuf {
+    let mut path = sqlite_path.as_os_str().to_owned();
+    path.push(".rebuilt-for");
+    PathBuf::from(path)
+}
+
+/// Delete a store's SQLite files: its `-wal` and `-shm` first, so a crash
+/// part-way never leaves a write-ahead log beside no main file, or one for a
+/// newer file. Missing files are fine.
+pub(crate) fn delete_store_files(sqlite_path: &std::path::Path) -> std::io::Result<()> {
+    for suffix in ["-wal", "-shm", ""] {
+        let mut path = sqlite_path.as_os_str().to_owned();
+        path.push(suffix);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// Forget that a store was rebuilt: a store deleted by the app starts over.
+pub(crate) fn forget_rebuilt_marker(sqlite_path: &std::path::Path) {
+    let _ = std::fs::remove_file(rebuilt_marker(sqlite_path));
+}
+
 fn relay_db_config(schema: JazzSchema, identity: DbIdentity, migrations: &Migrations) -> DbConfig {
     DbConfig::new(schema, identity)
         .with_migrations(migrations.schemas.clone(), migrations.lenses.clone())
@@ -959,6 +1012,11 @@ impl RelayWorker {
             next_client: 0,
             drive_error: None,
             refusal: None,
+            sqlite_path: config.sqlite_path,
+            identity: config.identity,
+            claims: None,
+            remote_link_hint: None,
+            rebuilt: false,
             redrive: false,
             timed: Instant::now(),
         })
@@ -1075,6 +1133,7 @@ impl RelayWorker {
         self.persistent
             .db
             .set_identity_claims(identity.author, claims.clone());
+        self.claims = Some(claims.clone());
         let served = self
             .persistent
             .accept_subscriber(identity.author, claims)
@@ -1119,6 +1178,7 @@ impl RelayWorker {
     }
 
     fn refresh_claims(&mut self, author: AuthorSubject, claims: BTreeMap<String, Value>) {
+        self.claims = Some(claims.clone());
         self.persistent
             .db
             .set_identity_claims(author, claims.clone());
@@ -1181,6 +1241,11 @@ impl RelayWorker {
     /// Stop the current upstream connection because the relay's database
     /// refused it, recording the refusal's code and reason for foregrounds.
     pub(crate) fn refuse_upstream(&mut self, error: &jazz::db::Error) {
+        if error.code == jazz::db::ErrorCode::StoreOpenedWithoutMigrations
+            && self.rebuild_stale_store()
+        {
+            return;
+        }
         let Some(upstream) = &self.upstream else {
             return;
         };
@@ -1191,6 +1256,119 @@ impl RelayWorker {
             code: error.code.as_str().to_owned(),
             reason,
         });
+    }
+
+    /// Writes the relay's store holds that its server has not confirmed.
+    #[cfg(test)]
+    pub(crate) fn persistent_pending_uploads(&self) -> usize {
+        self.persistent.pending_upload_count()
+    }
+
+    /// The current upstream connection's generation (tests carry the
+    /// upstream themselves, and serve each new connection afresh).
+    #[cfg(test)]
+    pub(crate) fn upstream_generation(&self) -> Option<u64> {
+        self.upstream.as_ref().map(|upstream| upstream.generation)
+    }
+
+    /// Rebuild a store an older relay opened without the app's migrations
+    /// (#5145), when nothing would be lost: neither it nor any foreground
+    /// holds a write the server has not confirmed, nor a refused one kept
+    /// for retry. The new store opens with
+    /// the migrations and syncs everything again from the server; every
+    /// foreground is served by it, and the socket worker reconnects. Once
+    /// per schema version: a marker beside the store remembers the version
+    /// it was rebuilt for, so a bundle that disagrees with its server does
+    /// not rebuild and re-sync on every launch. `false` leaves the refusal to
+    /// be reported, so the app can reset the store itself
+    /// (`deleteClientStorage()`), dropping its writes.
+    fn rebuild_stale_store(&mut self) -> bool {
+        let marker = rebuilt_marker(&self.sqlite_path);
+        let version: String = self
+            .schema
+            .version_id()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        if self.rebuilt
+            || std::fs::read_to_string(&marker).is_ok_and(|rebuilt| rebuilt == version)
+            || self.persistent.pending_upload_count() > 0
+            // Refused commits kept for the app's listeners or a retry are
+            // its writes too: a store holding any is not rebuilt.
+            || self
+                .persistent
+                .db
+                .rejected_transactions()
+                .map_or(true, |rejected| !rejected.is_empty())
+            || self
+                .clients
+                .values()
+                .any(|client| client.binding.pending_upload_count() > 0)
+        {
+            return false;
+        }
+        self.rebuilt = true;
+        match self.reopen_fresh_store() {
+            Ok(()) => {
+                // Best effort: without it, the next launch may rebuild once more.
+                let _ = std::fs::write(&marker, &version);
+                tracing::warn!(
+                    target: "jazz_native_relay",
+                    "rebuilt a store opened without the app's migrations; it syncs again from the server"
+                );
+                true
+            }
+            Err(error) => {
+                self.drive_error = Some(format!(
+                    "native relay could not rebuild its store opened without the app's migrations: {error}"
+                ));
+                false
+            }
+        }
+    }
+
+    fn reopen_fresh_store(&mut self) -> Result<(), String> {
+        // Transaction ids are (seq, node): a rebuilt store goes on above every
+        // seq this node minted, so none is reused.
+        let high_water = self.persistent.db.seq_high_water();
+        if let Some(mut upstream) = self.upstream.take() {
+            upstream.link.close();
+            // Not a refusal: the socket worker reconnects to the new store.
+            upstream.wire.retire();
+        }
+        for client in self.clients.values_mut() {
+            client.link.close();
+            client.served.close();
+        }
+        block_on(self.persistent.close()).map_err(|error| error.to_string())?;
+        delete_store_files(&self.sqlite_path).map_err(|error| error.to_string())?;
+        let db = block_on(Db::open_at(
+            relay_db_config(self.schema.clone(), self.identity, &self.migrations),
+            &self.sqlite_path,
+            FileOptions::default(),
+        ))
+        .map_err(|error| error.to_string())?;
+        db.seed_seq_floor(high_water);
+        if let Some(hint) = self.remote_link_hint {
+            db.set_remote_link_hint(hint);
+        }
+        let author = self.identity.author;
+        let claims = self.claims.clone().unwrap_or_default();
+        db.set_identity_claims(author, claims.clone());
+        self.persistent = Binding::new(db, self.identity, false);
+        self.persistent_dirty = hook(&self.persistent);
+        for client in self.clients.values_mut() {
+            client.authority = self.persistent.clone();
+            client.served = self
+                .persistent
+                .accept_subscriber(author, claims.clone())
+                .map_err(|error| error.to_string())?;
+            client.link = client.binding.connect_upstream();
+            client.dirty.set(true);
+        }
+        self.persistent_dirty.set(true);
+        Ok(())
     }
 
     /// Tick what asked for a tick and move frames until nothing moves.
@@ -1885,7 +2063,8 @@ fn foreground_command(
         | Request::ReconnectNativeUpstream
         | Request::NativeConnectionStatus
         | Request::NativeSessionMetadata
-        | Request::DrainTickEvents => {
+        | Request::DrainTickEvents
+        | Request::DeleteStore => {
             return Err("host command reached the relay owner".into());
         }
     })

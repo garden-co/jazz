@@ -847,6 +847,20 @@ function hasUsableBackendSession(auth: Record<string, unknown>): boolean {
   );
 }
 
+/**
+ * Whether a credential names the principal it connects as (a user, or the
+ * system for admin and backend secrets). Without one, the connection uses the
+ * store's own identity (see `peerIdentityForWebSocketAuth`).
+ */
+export function webSocketAuthNamesPrincipal(authJson: string): boolean {
+  const auth = JSON.parse(authJson) as Record<string, unknown>;
+  return (
+    typeof auth.admin_secret === "string" ||
+    typeof auth.backend_secret === "string" ||
+    canonicalAuthorForWebSocketAuth(auth) !== null
+  );
+}
+
 function canonicalAuthorForWebSocketAuth(auth: Record<string, unknown>): string | null {
   // Admin admission is intentionally sessionless and takes precedence over
   // every other field in the server route. Do not let an incidental (or

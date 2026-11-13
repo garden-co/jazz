@@ -1,14 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { defaultMarkdownParser } from "prosemirror-markdown";
-import { EditorState, TextSelection } from "prosemirror-state";
-import { applyMarkdown, docPosition, markdownOf, markdownSync, textPosition } from "./sync.js";
+import { EditorState, Plugin, TextSelection } from "prosemirror-state";
+import {
+  applyMarkdown,
+  docPosition,
+  isRemoteChange,
+  markdownOf,
+  markdownSync,
+  textPosition,
+} from "./sync.js";
 import { mapOffset } from "./text-map.js";
 
 const parse = (markdown: string) => defaultMarkdownParser.parse(markdown);
 
 /** An editor on `markdown` with the cursor at `‸` (or the selection
  * between `‹` and `›`), recording what it writes. */
-function editor(marked: string) {
+function editor(marked: string, ...plugins: Plugin[]) {
   const written: string[] = [];
   const editedFrom: string[] = [];
   const plugin = markdownSync({
@@ -19,7 +26,7 @@ function editor(marked: string) {
     },
   });
   const markdown = marked.replace(/[‸‹›]/g, "");
-  let state = EditorState.create({ doc: parse(markdown), plugins: [plugin] });
+  let state = EditorState.create({ doc: parse(markdown), plugins: [plugin, ...plugins] });
   const at = (marker: string) => {
     const index = marked.replace(/[‸‹›]/g, (m) => (m === marker ? m : "")).indexOf(marker);
     return index < 0 ? null : docPosition(state, index);
@@ -122,6 +129,58 @@ describe("markdownSync", () => {
     ed.local((s) => s.tr.insertText("?"));
     expect(ed.written).toEqual(["Hello!", "Hello! and more?"]);
     expect(ed.editedFrom).toEqual(["Hello", "Hello! and more"]);
+  });
+
+  it("can retry a remote change after a filter rejected it", () => {
+    let allowRemote = false;
+    const ed = editor(
+      "cat‸",
+      new Plugin({ filterTransaction: (tr) => allowRemote || !isRemoteChange(tr) }),
+    );
+    ed.remote("dog");
+    expect(markdownOf(ed.state).text).toBe("cat");
+    allowRemote = true;
+    expect(ed.remote("dog")).toBe(true);
+    expect(markdownOf(ed.state).text).toBe("dog");
+    expect(ed.written).toEqual([]);
+  });
+
+  it("edits the displayed value after a filter rejects a remote change", () => {
+    const ed = editor("cat‸", new Plugin({ filterTransaction: (tr) => !isRemoteChange(tr) }));
+    ed.remote("dog");
+    ed.local((s) => s.tr.insertText("!"));
+    expect(ed.written).toEqual(["cat!"]);
+    expect(ed.editedFrom).toEqual(["cat"]);
+  });
+
+  it("edits the exact remote source when a plugin appends a local change", () => {
+    const ed = editor(
+      "cat‸",
+      new Plugin({
+        appendTransaction: (trs, _old, state) =>
+          trs.some(isRemoteChange) ? state.tr.insertText("!", state.doc.content.size - 1) : null,
+      }),
+    );
+    ed.remote("* dog\n\nNotes");
+    expect(ed.written).toEqual(["* dog\n\nNotes!"]);
+    expect(ed.editedFrom).toEqual(["* dog\n\nNotes"]);
+  });
+
+  it("keeps an undisplayed state from changing the displayed edit base", () => {
+    const ed = editor("cat‸");
+    const candidate = ed.state.apply(applyMarkdown(ed.state, "dog")!);
+    expect(markdownOf(candidate).text).toBe("dog");
+    expect(applyMarkdown(candidate, "dog")).toBeNull();
+    ed.local((s) => s.tr.insertText("!"));
+    expect(ed.editedFrom).toEqual(["cat"]);
+  });
+
+  it("accepts empty remote Markdown without publishing a local deletion", () => {
+    const ed = editor("cat‸");
+    ed.remote("");
+    ed.local((s) => s.tr.insertText("!"));
+    expect(ed.written).toEqual(["!"]);
+    expect(ed.editedFrom).toEqual([""]);
   });
 
   it("types into an empty paragraph as plain text", () => {
