@@ -770,3 +770,88 @@ it("keeps another guest's root when a different user signs in (clearOnSignOut)",
   await accounts.settleSelection();
   expect(JSON.parse(store.value()!).roots).toHaveLength(1);
 });
+
+// E7: what signing out of a device account means.
+function deviceAccounts(store: ReturnType<typeof storeWith>, root: string, remembers = true) {
+  return prepareAccountManager({
+    appId: "test",
+    registry,
+    store,
+    mintToken: mintRootToken,
+    generateSecret: () => root,
+    rememberBackendUser: remembers,
+  });
+}
+
+it("keeps a signed-out device account's key, and a reload stays signed out (E7)", async () => {
+  const store = storeWith(null);
+  const first = await deviceAccounts(store, guestRoot(1));
+  expect((await ensureAutomaticLocalFirst(first))!.id).toBe(accountOf(guestRoot(1)));
+  await first.settleSelection();
+  first.logout();
+  await first.settleSelection();
+  expect(JSON.parse(store.value()!)).toEqual({
+    format: "jazz-account-selection-v1",
+    roots: [guestRoot(1)],
+    selected: null,
+    signedOut: true,
+    recentDevice: accountOf(guestRoot(1)),
+  });
+  // A reload with initial: "device" mints no one over the sign-out.
+  const reloaded = await deviceAccounts(store, guestRoot(2));
+  expect(reloaded.getLoggedIn()).toBeUndefined();
+  expect(await ensureAutomaticLocalFirst(reloaded)).toBeUndefined();
+  expect(JSON.parse(store.value()!).roots).toEqual([guestRoot(1)]);
+  // The kept key is the one to reopen and export.
+  expect(await keptDeviceKey(reloaded).latest()).toBe(guestRoot(1));
+  expect(keptDeviceKey(reloaded).known()).toBe(guestRoot(1));
+  // Reopening it clears the sign-out.
+  reloaded.restoreLocalFirst(guestRoot(1));
+  await reloaded.settleSelection();
+  expect(JSON.parse(store.value()!)).not.toHaveProperty("signedOut");
+  expect(reloaded.getLoggedIn()!.id).toBe(accountOf(guestRoot(1)));
+});
+
+it("reopens the device account that signed in most recently, of several kept", async () => {
+  const store = storeWith(null);
+  const accounts = await deviceAccounts(store, guestRoot(1));
+  accounts.createLocalFirst();
+  await accounts.settleSelection();
+  accounts.restoreLocalFirst(guestRoot(2));
+  await accounts.settleSelection();
+  accounts.restoreLocalFirst(guestRoot(1));
+  await accounts.settleSelection();
+  accounts.logout();
+  await accounts.settleSelection();
+  expect(JSON.parse(store.value()!).roots).toEqual([guestRoot(1), guestRoot(2)]);
+  expect(await keptDeviceKey(accounts).latest()).toBe(guestRoot(1));
+});
+
+it("forgets a signed-out device account's key with clearOnSignOut (rememberBackendUser: false)", async () => {
+  const store = storeWith(null);
+  const accounts = await deviceAccounts(store, guestRoot(1), false);
+  accounts.createLocalFirst();
+  await accounts.settleSelection();
+  accounts.logout();
+  await accounts.settleSelection();
+  expect(store.value()).not.toContain(guestRoot(1));
+  expect(JSON.parse(store.value()!)).toMatchObject({ roots: [], selected: null, signedOut: true });
+  expect(await keptDeviceKey(accounts).latest()).toBeUndefined();
+  expect(keptDeviceKey(accounts).known()).toBeUndefined();
+  const reloaded = await deviceAccounts(store, guestRoot(2), false);
+  expect(await ensureAutomaticLocalFirst(reloaded)).toBeUndefined();
+});
+
+it("mints a device account on a device no one used yet, and keeps createLocalFirst minting on purpose", async () => {
+  const store = storeWith(null);
+  const accounts = await deviceAccounts(store, guestRoot(1));
+  expect((await ensureAutomaticLocalFirst(accounts))!.id).toBe(accountOf(guestRoot(1)));
+  await accounts.settleSelection();
+  accounts.logout();
+  await accounts.settleSelection();
+  const next = await deviceAccounts(store, guestRoot(2));
+  next.createLocalFirst();
+  await next.settleSelection();
+  expect(next.getLoggedIn()!.id).toBe(accountOf(guestRoot(2)));
+  expect(JSON.parse(store.value()!).roots).toEqual([guestRoot(1), guestRoot(2)]);
+});
