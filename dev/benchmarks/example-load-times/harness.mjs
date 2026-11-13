@@ -221,10 +221,20 @@ export async function startApp(id) {
   }
   return {
     ...a,
-    /** Replaces the sync server with a fresh, empty one (same app ID and URL). */
-    async restartSync() {
-      await servers.sync?.stop();
-      servers.sync = await startSync(a);
+    /**
+     * Gives the app a fresh, empty Jazz store (same app ID and URLs). A
+     * Next.js app's backend keeps its data on the sync server, so that is
+     * replaced; a Vite app runs createJazz in memory inside `vite preview`,
+     * so the preview server is restarted instead.
+     */
+    async restartStore() {
+      if (a.kind === "vite") {
+        await servers.app?.stop();
+        servers.app = await startFramework(a);
+      } else {
+        await servers.sync?.stop();
+        servers.sync = await startSync(a);
+      }
     },
     log: () =>
       Object.entries(servers)
