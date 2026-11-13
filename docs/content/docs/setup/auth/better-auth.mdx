@@ -287,6 +287,8 @@ Upgrading from Better Auth 1.7.0–1.7.2 changes the auth schema. Before the new
 3. Run `npx jazz-tools migrations create --name remove-better-auth-issuer`, set `issuer: m.drop.string({ backwardsDefault: "" })` in the generated migration, and run `npx jazz-tools validate`.
 4. Deploy the backend with that migration in the same release as the Better Auth upgrade. Against the old schema, sign-ups and account links fail because `issuer` is still required.
 
+The adapter catches the most common mistakes: it throws when it starts if your schema still requires `issuer`, and on the first account write it logs any `(providerId, accountId)` pairs shared by more than one row.
+
 See the [Better Auth 1.7 upgrade guide](https://www.better-auth.com/docs/guides/1-7-upgrade-guide) for changes outside the adapter.
 
 | Plugin/Feature        | Compatibility |

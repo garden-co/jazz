@@ -12,4 +12,6 @@ Upgrading changes the auth schema and needs a data check. Do these in order, and
 4. **Write the migration** with `npx jazz-tools migrations create --name remove-better-auth-issuer`. In the generated file, give the dropped column a backwards default, `issuer: m.drop.string({ backwardsDefault: "" })`, then run `npx jazz-tools validate` to update `migrations/index.ts`.
 5. **Deploy the backend with the new schema and migration** in the same release that switches Better Auth version; `createJazz` publishes them when it starts. Better Auth 1.7.3 and later cannot create accounts against the old schema, because `issuer` is still required there, so sign-ups and account links fail until the migration is published.
 
+The adapter helps you catch missed steps. It refuses to start while your schema still requires `better_auth_account.issuer`, with an error that links to these steps, and on the first account write it logs any `(providerId, accountId)` pairs shared by more than one row.
+
 Existing `issuer` values stay stored. The empty backwards default only fills `issuer` for rows that new code creates when an older schema reads them; it does not reconstruct an issuer and does not make downgrading Better Auth safe. The Better Auth examples ship this migration.
