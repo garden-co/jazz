@@ -5035,6 +5035,42 @@ impl Inner {
             .unwrap_or_default())
     }
 
+    /// The accepted position of the version that superseded the row's
+    /// version at `at`, current or in history: the first one after it.
+    /// `None` while `at` is current or pending, or when no accepted
+    /// version follows it here.
+    fn superseded_at(
+        &self,
+        table: &str,
+        row: RowUuid,
+        key: &[u8],
+        at: Pos,
+    ) -> Result<Option<Pos>, Error> {
+        if !at.accepted() {
+            return Ok(None);
+        }
+        let mut next: Option<i64> = None;
+        for name in [table.to_owned(), format!("{table}__h")] {
+            let found: Option<i64> = self
+                .conn
+                .cached_row(
+                    &format!(
+                        "SELECT MIN(_clock) FROM {} \
+                         WHERE id = ?1 AND _branch = ?2 AND _clock > ?3 AND _clock <= ?4",
+                        quote(&name)
+                    ),
+                    rusqlite::params![row.0.as_bytes().to_vec(), key, at.t(), Pos::SETTLED.t()],
+                    |r| r.get(0),
+                )
+                .map_err(storage)?;
+            next = match (next, found) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+        Ok(next.map(Pos::from_t))
+    }
+
     fn put_image(&self, image: &Image, history: bool) -> Result<(), Error> {
         let row = RowUuid::from_bytes(image.id);
         let w = match image.written {
@@ -14277,14 +14313,19 @@ fn readable_version(
 }
 
 /// Whether `identity` may read the version of `row` at `at`: the row as it
-/// stands, when the version is the row's current one; otherwise also the
-/// version as of its own position, as history (SPEC 19.9, INV-RLS-13).
-/// Losing read access to the row takes effect at once for every version.
+/// stands, and the version as of some cut at which it was the row's
+/// version (SPEC 19.9, INV-RLS-13). Checked at the ends of the span it was
+/// current over: now, while it is current; its own position; and the last
+/// position before it was superseded. Losing read access to the row takes
+/// effect at once for every version.
 ///
 /// So a reader granted access after the row's last write (a share row made
 /// later) reads the current version's content, though nothing granted it
-/// as of that version's position. A relay judges "current" by its own
-/// store, which may lag; its upstream judges again.
+/// as of that version's position, and still may once a later write
+/// supersedes it: a delta or access proof staged over it then counts and
+/// the commit rebases like any other (#5249). A version superseded before
+/// the grant stays unreadable. A relay judges "current" by its own store,
+/// which may lag; its upstream judges again.
 fn still_readable_version(
     inner: &Inner,
     policies: &Schema,
@@ -14303,7 +14344,23 @@ fn still_readable_version(
     {
         return Ok(true);
     }
-    readable_version(inner, policies, table, row, key, at, identity)
+    if readable_version(inner, policies, table, row, key, at, identity)? {
+        return Ok(true);
+    }
+    // The version's last position before it was superseded: the row as of
+    // there is this version, with the grants as they stood then.
+    match inner.superseded_at(table, row, key, at)? {
+        Some(next) if next.seq > at.seq + 1 => readable_version(
+            inner,
+            policies,
+            table,
+            row,
+            key,
+            Pos::at(next.seq - 1),
+            identity,
+        ),
+        _ => Ok(false),
+    }
 }
 
 /// Whether `identity` may read a row of stored table `table`, by
