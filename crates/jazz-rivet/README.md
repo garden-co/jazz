@@ -5,7 +5,7 @@ Jazz's embedded server and supplies its public `ctx.sql()` database to Jazz's
 async storage interface. The TypeScript `createJazz({ store: rivet(...) })`
 backend continues to authenticate users and publish schema/permission bundles.
 
-See [the todo example](../../examples/rivet-todos/README.md) for deployment.
+See [the server example](../../examples/rivet-server/README.md) for deployment.
 
 ## Integration boundary
 
