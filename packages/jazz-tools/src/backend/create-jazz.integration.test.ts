@@ -387,7 +387,14 @@ describe("createJazz", () => {
       );
       cleanups.push(async () => void child.kill("SIGKILL"));
       const ready = await new Promise<string>((resolve, reject) => {
-        child.stdout!.on("data", (chunk: Buffer) => resolve(`${chunk}`.trim()));
+        // The host prints "<port> <app id>" once it serves; the store's
+        // "jazz: store …" line comes before it.
+        let out = "";
+        child.stdout!.on("data", (chunk: Buffer) => {
+          out += `${chunk}`;
+          const line = out.split("\n").find((l) => /^\d+ \S+$/.test(l.trim()));
+          if (line) resolve(line.trim());
+        });
         child.on("error", reject);
         child.on("exit", () => reject(new Error("the host exited before it served")));
       });
