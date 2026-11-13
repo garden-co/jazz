@@ -213,6 +213,8 @@ mod sync_support_access;
 mod sync_untrusted_clients;
 #[path = "../sync_wire_corpus.rs"]
 mod sync_wire_corpus;
+#[path = "../sync_write_only.rs"]
+mod sync_write_only;
 #[path = "../text_merge.rs"]
 mod text_merge;
 #[path = "../text_splices.rs"]
