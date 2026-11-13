@@ -73,6 +73,8 @@ export interface BrowserWorkerConnection {
   reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
   /** Delete the store; resolves with how many unconfirmed writes it took, when the worker says. */
   deleteStorage(): Promise<{ pendingUploads?: number } | void>;
+  /** How many of the store's writes (every tab's) the server hasn't confirmed, when the worker says. */
+  storePendingUploads?(): Promise<number | undefined>;
   flushLocal(): Promise<void>;
   waitForPendingWrites(): Promise<void>;
   openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort>;
