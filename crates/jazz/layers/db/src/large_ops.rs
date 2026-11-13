@@ -1713,15 +1713,27 @@ impl TxRef<'_> {
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
         self.db.inner().require_mutation_admission()?;
-        let edits = self.db.in_overlay(self.id, None, |inner, _| {
-            let identity = identity_of(opts.identity);
-            let lowered = inner.lower_large_mutations(table, row, &mut patch, mutations, identity);
-            let edits = crate::db::LargeEdits {
-                derived: std::mem::take(&mut inner.derived),
-                pending_nodes: std::mem::take(&mut inner.pending_nodes),
-            };
-            lowered.map(|()| edits)
-        })?;
+        let edits = self
+            .db
+            .in_overlay_on(self.id, table, Some(row), |inner, _| {
+                let identity = identity_of(opts.identity);
+                // Only what this edit builds: the batch's earlier edits are
+                // in scope too, and stay the batch's.
+                let marks = (inner.derived.len(), inner.pending_nodes.len());
+                let lowered =
+                    inner.lower_large_mutations(table, row, &mut patch, mutations, identity);
+                let edits = crate::db::LargeEdits {
+                    derived: inner
+                        .derived
+                        .drain(marks.0.min(inner.derived.len())..)
+                        .collect(),
+                    pending_nodes: inner
+                        .pending_nodes
+                        .drain(marks.1.min(inner.pending_nodes.len())..)
+                        .collect(),
+                };
+                lowered.map(|()| edits)
+            })?;
         self.db.stage_with_edits(
             self.id,
             StagedOp::Update(table.to_owned(), row, patch, opts),

@@ -566,6 +566,13 @@ struct Inner {
     /// stages (see [`Db::in_overlay`]); undone by [`Store`] before any
     /// other use of the store.
     overlay: Option<Overlay>,
+    /// SPIKE: open transactions keep their staged rows in private tables
+    /// instead of the savepoint overlay (`JAZZ_TX_PRIVATE_LAYER=1`).
+    private_mode: bool,
+    /// The private rows the read or write being run sees.
+    private: Option<crate::compile::PrivateRead>,
+    /// Each private table's columns, by stored table.
+    private_columns: RefCell<HashMap<String, Rc<BTreeSet<String>>>>,
     /// Descriptors this store's own edit derived for the write in flight:
     /// trusted as built, so binding them re-validates nothing.
     derived: Vec<jazz_types::large_values::LargeValueRef>,
@@ -1648,6 +1655,9 @@ impl Db {
                 merge_bases: HashMap::new(),
                 as_sent: RefCell::new(BTreeMap::new()),
                 overlay: None,
+                private_mode: private_mode(),
+                private: None,
+                private_columns: RefCell::default(),
                 derived: Vec::new(),
                 possession: None,
                 staging: LargeValueStagingPolicy::default(),
@@ -1739,6 +1749,9 @@ impl Db {
                 })?;
             }
             inner.seq = seq;
+            if inner.private_mode {
+                inner.drop_orphaned_private()?;
+            }
             inner.load_client()?;
             inner.load_shard()?;
         }
@@ -2407,6 +2420,39 @@ impl Db {
     #[doc(hidden)]
     pub fn set_clock_for_test(&self, ms: Option<i64>) {
         self.inner().clock_for_test = ms;
+    }
+
+    /// SPIKE: rows SQLite inserted, updated or deleted on this store's
+    /// connection so far (`sqlite3_total_changes`, rolled-back ones too),
+    /// read without undoing a transaction handle's overlay.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn sqlite_total_changes_for_test(&self) -> u64 {
+        self.inner.staging().conn.total_changes()
+    }
+
+    /// SPIKE: how many private rows open transactions hold, over every
+    /// private table.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn private_rows_for_test(&self) -> u64 {
+        let inner = self.inner.staging();
+        let names: Vec<String> = inner
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '\\_jazz\\_tx\\_%' ESCAPE '\\'")
+            .and_then(|mut s| s.query_map([], |r| r.get(0))?.collect())
+            .unwrap();
+        names
+            .iter()
+            .map(|name| {
+                inner
+                    .conn
+                    .query_row(&format!("SELECT count(*) FROM {}", quote(name)), [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                    .unwrap() as u64
+            })
+            .sum()
     }
 
     /// Let text merges take `budget` diff steps: what tests of a merge past
@@ -4619,6 +4665,7 @@ impl Inner {
         Ctx::new(schema, policy, claims, &prepared.binding)
             .with_view(read.view.clone())
             .with_withheld(self.withheld.get())
+            .with_private(self.private.clone())
             .with_cut(read.cut.clone(), read.settled_only)
             .with_history_origin(self.history_origin())
     }
@@ -5281,7 +5328,9 @@ impl Inner {
     ) -> Result<(String, Vec<Sql>, OverlayRead), Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(schema, None, &claims, &binding).with_cut(cut, false);
+        let mut ctx = Ctx::new(schema, None, &claims, &binding)
+            .with_private(self.private.clone())
+            .with_cut(cut, false);
         let condition = policy(&mut ctx)?;
         let read = OverlayRead {
             rows: ctx.overlaid_rows,
@@ -5349,7 +5398,9 @@ impl Inner {
     ) -> Result<bool, Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(schema, None, &claims, &binding).with_cut(Some(cut), false);
+        let mut ctx = Ctx::new(schema, None, &claims, &binding)
+            .with_private(self.private.clone())
+            .with_cut(Some(cut), false);
         let condition = policy(&mut ctx)?;
         let source = ctx.source(table)?;
         let mut params = ctx.params;
@@ -7199,6 +7250,229 @@ impl Inner {
     /// authority. A replica leaves them to the authority on upload: it may
     /// lack rows those policies read (hidden from it).
     /// Undo a transaction handle's overlay, if one is applied.
+    /// SPIKE: copy transaction `id`'s newest private images of `row` into
+    /// `stored`'s committed table, as versions of its open commit `own`.
+    fn materialize_private(
+        &self,
+        id: OpenTransactionId,
+        stored: &str,
+        row: RowUuid,
+        own: u64,
+    ) -> Result<(), Error> {
+        let Some(private) = self.private_columns.borrow().get(stored).cloned() else {
+            return Ok(());
+        };
+        let shadow = quote(&crate::compile::private_table(stored));
+        let name = quote(stored);
+        let committed = self.table_columns(stored)?;
+        let columns: Vec<&String> = committed
+            .iter()
+            .filter(|column| private.contains(*column))
+            .collect();
+        let pick = format!(
+            "p._tx = ?1 AND p.id = ?2 AND NOT EXISTS (SELECT 1 FROM {shadow} AS n \
+             WHERE n._tx = p._tx AND n.id = p.id AND n._branch = p._branch AND n._step > p._step)"
+        );
+        let tx = id.0.to_vec();
+        let id_bytes = row.0.as_bytes().to_vec();
+        self.exec(
+            &format!(
+                "DELETE FROM {name} WHERE id = ?2 AND _branch IN \
+                 (SELECT p._branch FROM {shadow} AS p WHERE {pick})"
+            ),
+            rusqlite::params![tx, id_bytes],
+        )
+        .map_err(storage)?;
+        let select: Vec<String> = columns
+            .iter()
+            .map(|column| match column.as_str() {
+                // A row the commit inserted got a `rid` the store may
+                // have handed out again since.
+                "rid" => format!(
+                    "CASE WHEN EXISTS (SELECT 1 FROM {name} WHERE rid = p.rid) THEN NULL ELSE p.rid END"
+                ),
+                "_clock" => "?3".to_owned(),
+                "_writer" => "?4".to_owned(),
+                column => format!("p.{}", quote(column)),
+            })
+            .collect();
+        let names: Vec<String> = columns.iter().map(|column| quote(column)).collect();
+        self.exec(
+            &format!(
+                "INSERT INTO {name} ({}) SELECT {} FROM {shadow} AS p WHERE {pick}",
+                names.join(", "),
+                select.join(", ")
+            ),
+            rusqlite::params![tx, id_bytes, self.own_pos(own).t(), self.own_writer_at(own)],
+        )
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    /// SPIKE: the rows the writes since `mark` changed, as stored now.
+    fn capture_private(&self, mark: usize) -> Result<Vec<PrivateImage>, Error> {
+        let changed: BTreeSet<(String, RowUuid, Vec<u8>)> =
+            self.changed.borrow()[mark..].iter().cloned().collect();
+        let mut images = Vec::new();
+        for (stored, row, key) in changed {
+            let sql = format!(
+                "SELECT * FROM {} WHERE id = ?1 AND _branch = ?2",
+                quote(&stored)
+            );
+            let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
+            let names: Vec<String> = statement
+                .column_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let values = statement
+                .query_row(rusqlite::params![row.0.as_bytes().to_vec(), key], |r| {
+                    (0..names.len())
+                        .map(|i| r.get::<_, rusqlite::types::Value>(i))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .optional()
+                .map_err(storage)?;
+            if let Some(values) = values {
+                images.push(PrivateImage {
+                    stored,
+                    names,
+                    values,
+                });
+            }
+        }
+        Ok(images)
+    }
+
+    /// SPIKE: keep `images` as transaction `id`'s private rows at `step`.
+    fn store_private(
+        &self,
+        id: OpenTransactionId,
+        step: usize,
+        images: Vec<PrivateImage>,
+    ) -> Result<(), Error> {
+        for image in images {
+            let columns = self.ensure_private(&image.stored, &image.names)?;
+            let mut names = vec!["_tx".to_owned(), "_step".to_owned()];
+            let mut values = vec![
+                rusqlite::types::Value::Blob(id.0.to_vec()),
+                rusqlite::types::Value::Integer(step as i64),
+            ];
+            for (name, value) in image.names.iter().zip(image.values) {
+                if columns.contains(name) {
+                    names.push(quote(name));
+                    values.push(value);
+                }
+            }
+            let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("?{i}")).collect();
+            self.exec(
+                &format!(
+                    "INSERT INTO {} ({}) VALUES ({})",
+                    quote(&crate::compile::private_table(&image.stored)),
+                    names.join(", "),
+                    placeholders.join(", ")
+                ),
+                params_from_iter(values.iter()),
+            )
+            .map_err(storage)?;
+        }
+        Ok(())
+    }
+
+    /// SPIKE: the private table of `stored`, created (or given columns
+    /// the committed table has since gained) as needed; its columns.
+    fn ensure_private(
+        &self,
+        stored: &str,
+        names: &[String],
+    ) -> Result<Rc<BTreeSet<String>>, Error> {
+        if let Some(columns) = self.private_columns.borrow().get(stored)
+            && names.iter().all(|name| columns.contains(name))
+        {
+            return Ok(columns.clone());
+        }
+        let shadow = quote(&crate::compile::private_table(stored));
+        let name = quote(stored);
+        self.conn
+            .execute_batch(&format!(
+                "CREATE TABLE IF NOT EXISTS {shadow} AS SELECT CAST(NULL AS BLOB) AS _tx, \
+                 CAST(0 AS INTEGER) AS _step, * FROM {name} WHERE 0;\n\
+                 CREATE INDEX IF NOT EXISTS {} ON {shadow}(_tx, id, _branch, _step);",
+                quote(&format!("{}__k", crate::compile::private_table(stored)))
+            ))
+            .map_err(storage)?;
+        let mut columns = self.table_columns(&crate::compile::private_table(stored))?;
+        for missing in self.table_columns(stored)? {
+            if !columns.contains(&missing) {
+                self.conn
+                    .execute_batch(&format!(
+                        "ALTER TABLE {shadow} ADD COLUMN {}",
+                        quote(&missing)
+                    ))
+                    .map_err(storage)?;
+                columns.insert(missing);
+            }
+        }
+        let columns = Rc::new(columns);
+        self.private_columns
+            .borrow_mut()
+            .insert(stored.to_owned(), columns.clone());
+        Ok(columns)
+    }
+
+    fn table_columns(&self, table: &str) -> Result<BTreeSet<String>, Error> {
+        let mut statement = self
+            .conn
+            .prepare_cached(&format!("PRAGMA table_info({})", quote(table)))
+            .map_err(storage)?;
+        let columns = statement
+            .query_map([], |r| r.get::<_, String>(1))
+            .map_err(storage)?
+            .collect::<Result<_, _>>()
+            .map_err(storage)?;
+        Ok(columns)
+    }
+
+    /// SPIKE: open transactions do not outlive the store's process, so
+    /// every private row found on open is a crashed transaction's.
+    fn drop_orphaned_private(&self) -> Result<(), Error> {
+        let names: Vec<String> = self
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '\\_jazz\\_tx\\_%' ESCAPE '\\'")
+            .and_then(|mut statement| {
+                statement
+                    .query_map([], |r| r.get(0))?
+                    .collect::<Result<_, _>>()
+            })
+            .map_err(storage)?;
+        for name in names {
+            self.conn
+                .execute_batch(&format!("DROP TABLE {}", quote(&name)))
+                .map_err(storage)?;
+        }
+        Ok(())
+    }
+
+    /// SPIKE: forget transaction `id`'s private rows.
+    fn drop_private(&self, id: OpenTransactionId, batch: &Batch) -> Result<(), Error> {
+        if !self.private_mode {
+            return Ok(());
+        }
+        for stored in batch.rows.keys() {
+            if self.private_columns.borrow().contains_key(stored) {
+                self.exec(
+                    &format!(
+                        "DELETE FROM {} WHERE _tx = ?1",
+                        quote(&crate::compile::private_table(stored))
+                    ),
+                    [id.0.to_vec()],
+                )
+                .map_err(storage)?;
+            }
+        }
+        Ok(())
+    }
+
     fn settle_overlay(&mut self) {
         let Some(overlay) = self.overlay.take() else {
             return;
@@ -8434,6 +8708,19 @@ impl Db {
 
 // ---- open transaction batches ---------------------------------------------
 
+/// SPIKE: whether open transactions keep private rows instead of a held
+/// savepoint overlay.
+fn private_mode() -> bool {
+    std::env::var("JAZZ_TX_PRIVATE_LAYER").is_ok_and(|value| value == "1")
+}
+
+/// SPIKE: one row a staged write left, as its committed table stores it.
+struct PrivateImage {
+    stored: String,
+    names: Vec<String>,
+    values: Vec<rusqlite::types::Value>,
+}
+
 /// An open, owner-wide transaction batch. Writes are staged (with the schema
 /// view that staged them) and applied at commit; reads overlay them.
 /// A batch's staged writes applied in the open `overlay` savepoint.
@@ -9053,21 +9340,25 @@ impl Db {
     }
 
     pub fn abandon_transaction_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
-        self.inner
-            .borrow_mut()
+        let mut inner = self.inner.borrow_mut();
+        let batch = inner
             .batches
             .remove(&id)
-            .map(drop)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        inner.drop_private(id, &batch)
     }
 
     fn take_batch(&self, id: OpenTransactionId) -> Result<Batch, Error> {
         self.inner().require_mutation_admission()?;
-        self.inner
-            .borrow_mut()
+        let mut inner = self.inner.borrow_mut();
+        let batch = inner
             .batches
             .remove(&id)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        // The commit applies the staged writes themselves; the private
+        // rows were only the transaction's view of them.
+        inner.drop_private(id, &batch)?;
+        Ok(batch)
     }
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
@@ -9309,6 +9600,9 @@ impl Db {
         extra: Option<&mut StagedOp>,
         read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
+        if self.inner.staging().private_mode {
+            return self.in_private(id, None, None, extra, read);
+        }
         let mut inner = self.inner.staging();
         inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
         let batch = inner
@@ -9428,6 +9722,9 @@ impl Db {
         prefix: BatchPrefix,
         read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
+        if self.inner.staging().private_mode {
+            return self.in_private(id, Some(prefix), None, None, read);
+        }
         // Peek without the store gate, which would undo the cached overlay.
         let grown = self
             .inner
@@ -9490,6 +9787,168 @@ impl Db {
         inner.changed.borrow_mut().truncate(mark);
         end_savepoint(&inner.conn, "overlay", false)?;
         result
+    }
+
+    /// SPIKE: [`Self::in_overlay`] over the transaction's private rows
+    /// instead of a held savepoint. The private rows are read over the
+    /// committed ones ([`crate::compile::PrivateRead`]); a write's (or
+    /// `target`'s) own row is copied into its committed table inside a
+    /// short savepoint, the write applies and is checked there as before,
+    /// the rows it changed are kept as private rows at the next step, and
+    /// the savepoint is rolled back. Nothing is replayed: the work is the
+    /// rows the call touches. `prefix` reads only steps staged before it.
+    fn in_private<R>(
+        &self,
+        id: OpenTransactionId,
+        prefix: Option<BatchPrefix>,
+        target: Option<(&str, RowUuid)>,
+        mut extra: Option<&mut StagedOp>,
+        read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        let mut inner = self.inner.staging();
+        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        let batch = inner
+            .batches
+            .get(&id)
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        let staged = batch.ops.len();
+        let unavailable = || {
+            Error::new(
+                ErrorCode::NotObserved,
+                "transaction staged prefix is no longer available",
+            )
+        };
+        let prefix = prefix.unwrap_or_else(|| batch.prefix());
+        if prefix.ops > staged {
+            return Err(unavailable());
+        }
+        // A row is never evidence for its own check.
+        let staged_rows = match extra.as_deref() {
+            Some(op) => {
+                let mut rows = batch.rows.clone();
+                if let Some(row) = op.row() {
+                    let stored = &inner.schema.table(op.table())?.stored;
+                    if let Some(set) = rows.get_mut(stored) {
+                        set.remove(row.0.as_bytes());
+                    }
+                }
+                rows
+            }
+            None => BTreeMap::new(),
+        };
+        let edits = LargeEdits {
+            derived: batch
+                .edits
+                .derived
+                .get(..prefix.derived)
+                .ok_or_else(unavailable)?
+                .to_vec(),
+            pending_nodes: batch
+                .edits
+                .pending_nodes
+                .get(..prefix.pending_nodes)
+                .ok_or_else(unavailable)?
+                .to_vec(),
+        };
+        let tables: BTreeSet<String> = batch.rows.keys().cloned().collect();
+        let snapshot = match &batch.kind {
+            BatchKind::Mergeable => None,
+            BatchKind::Serializable { snapshot, own, .. } => {
+                Some(inner.serializable_cut(*snapshot, own)?)
+            }
+        };
+        let own = inner.seq + 1;
+        // The row a write (or `target`) is about: read from the committed
+        // table, where its private image is copied for the call.
+        let held = match extra
+            .as_deref()
+            .map_or(target, |op| op.row().map(|row| (op.table(), row)))
+        {
+            Some((table, row)) => Some((inner.schema.table(table)?.stored.clone(), row)),
+            None => None,
+        };
+        // A schema view registered since may read columns the private
+        // table does not have yet.
+        for stored in &tables {
+            if let Some(table) = inner.schema.by_stored(stored) {
+                let names: Vec<String> = table.stored().map(|c| c.stored.clone()).collect();
+                inner.ensure_private(stored, &names)?;
+            }
+        }
+        inner.derived.extend(edits.derived);
+        inner.pending_nodes.extend(edits.pending_nodes);
+        if let Err(error) = begin_savepoint(&inner.conn, "private_step") {
+            inner.clear_derived();
+            return Err(error);
+        }
+        let mark = inner.changed.borrow().len();
+        inner.private = Some(crate::compile::PrivateRead {
+            tx: id.0,
+            tables: tables.clone(),
+            before: (prefix.ops < staged).then_some(prefix.ops),
+            except: held
+                .as_ref()
+                .map(|(stored, row)| (stored.clone(), *row.0.as_bytes())),
+        });
+        let run = || -> Result<R, Error> {
+            if let Some((stored, row)) = &held
+                && tables.contains(stored)
+            {
+                inner.stamp_commit(own);
+                inner.materialize_private(id, stored, *row, own)?;
+            }
+            if let Some(op) = extra.as_deref_mut() {
+                inner.counter_deltas(op)?;
+                let schema = inner.schema.clone();
+                // As in `in_overlay`: the batch's earlier writes are
+                // evidence for this one's checks; the commit checks all.
+                inner.defer_checks();
+                let applied = inner
+                    .apply_all_checking(&[(schema, op.clone())], 0, own)
+                    .and_then(|()| inner.finish_checks_after(own, staged_rows));
+                if applied.is_err() {
+                    inner.abandon_checks();
+                }
+                applied?;
+            }
+            let own = inner.own_rank(own);
+            read(&mut inner, snapshot.map(|cut| Cut { own, ..cut }))
+        };
+        let result = run();
+        let captured = match (&result, extra.is_some()) {
+            (Ok(_), true) => inner.capture_private(mark),
+            _ => Ok(Vec::new()),
+        };
+        inner.private = None;
+        inner.clear_derived();
+        inner.changed.borrow_mut().truncate(mark);
+        end_savepoint(&inner.conn, "private_step", false)?;
+        let result = result?;
+        let captured = captured?;
+        let written: BTreeSet<String> = captured.iter().map(|image| image.stored.clone()).collect();
+        inner.store_private(id, staged, captured)?;
+        if let Some(batch) = inner.batches.get_mut(&id) {
+            for stored in written {
+                batch.rows.entry(stored).or_default();
+            }
+        }
+        Ok(result)
+    }
+
+    /// [`Self::in_overlay`] for a read of `row` of `table` (when given)
+    /// that goes straight to its stored row.
+    fn in_overlay_on<R>(
+        &self,
+        id: OpenTransactionId,
+        table: &str,
+        row: Option<RowUuid>,
+        read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        if self.inner.staging().private_mode {
+            let target = row.map(|row| (table, row));
+            return self.in_private(id, None, target, None, read);
+        }
+        self.in_overlay(id, None, read)
     }
 
     fn stage(&self, id: OpenTransactionId, op: StagedOp) -> Result<(), Error> {
@@ -9563,7 +10022,10 @@ impl Db {
     ) -> Result<(), Error> {
         // A whole write over a chunked value becomes its edit of the value
         // the batch sees: its earlier writes applied, no other batch's.
-        let chunked = self.in_overlay(id, None, |inner, _| inner.chunk_large_cells(&mut op))?;
+        let target = (op.table().to_owned(), op.row());
+        let chunked = self.in_overlay_on(id, &target.0, target.1, |inner, _| {
+            inner.chunk_large_cells(&mut op)
+        })?;
         let marks = {
             let mut inner = self.inner.staging();
             inner.require_mutation_admission()?;

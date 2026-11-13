@@ -231,6 +231,8 @@ pub struct Ctx<'a> {
     pub view: Option<View>,
     /// An as-of cut every table is read through.
     pub cut: Option<Cut>,
+    /// An open transaction's private rows, read over committed ones.
+    pub private: Option<PrivateRead>,
     /// The cut is a replica's last server seq: the read leaves out its
     /// pending local versions (which history reads do anyway).
     pub settled_only: bool,
@@ -306,6 +308,27 @@ impl Cut {
     }
 }
 
+/// SPIKE (private transaction layer): an open transaction's staged rows,
+/// kept as row images in a private table per stored table
+/// ([`private_table`]) keyed by the transaction and the step that wrote
+/// them, read over the committed rows by the transaction alone.
+#[derive(Clone, Debug)]
+pub struct PrivateRead {
+    pub tx: [u8; 16],
+    /// The stored tables the transaction holds private rows in.
+    pub tables: BTreeSet<String>,
+    /// Only rows staged before this step (a read's prefix).
+    pub before: Option<usize>,
+    /// A row read from the committed table instead: a write being applied
+    /// holds its private image there.
+    pub except: Option<(String, [u8; 16])>,
+}
+
+/// The private table holding open transactions' rows of `stored`.
+pub fn private_table(stored: &str) -> String {
+    format!("_jazz_tx_{stored}")
+}
+
 /// A head branch, optionally composed over a base branch that is live or
 /// frozen at `base_cut`.
 #[derive(Clone, Debug)]
@@ -360,6 +383,7 @@ impl<'a> Ctx<'a> {
             withheld: false,
             view: None,
             cut: None,
+            private: None,
             settled_only: false,
             history_origin: None,
             overlaid_rows: 0,
@@ -376,6 +400,11 @@ impl<'a> Ctx<'a> {
 
     pub fn with_view(mut self, view: Option<View>) -> Self {
         self.view = view;
+        self
+    }
+
+    pub fn with_private(mut self, private: Option<PrivateRead>) -> Self {
+        self.private = private;
         self
     }
 
@@ -554,6 +583,121 @@ impl<'a> Ctx<'a> {
         for column in table.stored() {
             columns.push_str(&format!(", {}", quote(&column.stored)));
         }
+        let committed = self.committed_source(table, &columns)?;
+        let private = self
+            .private
+            .clone()
+            .filter(|private| private.tables.contains(&table.stored));
+        match private {
+            None => Ok(committed),
+            Some(private) => self.private_source(table, &columns, committed, &private),
+        }
+    }
+
+    /// An open transaction's private rows over `committed` (SPIKE, see
+    /// [`PrivateRead`]): the transaction's newest private image of each
+    /// row it wrote, then the committed rows it did not write. Under a
+    /// branch view only head-key private rows count; under a cut, private
+    /// rows are versions at the cut's `own` and a write check's overlay
+    /// filters them as it does those.
+    fn private_source(
+        &mut self,
+        table: &Table,
+        columns: &str,
+        committed: String,
+        private: &PrivateRead,
+    ) -> Result<String, Error> {
+        let shadow = quote(&private_table(&table.stored));
+        let tx = self.bind(Sql::Blob(private.tx.to_vec()));
+        let limit = private
+            .before
+            .map(|before| self.bind(Sql::Integer(before as i64)));
+        let mut pick = format!("p._tx = {tx}");
+        let mut newer = format!(
+            "SELECT 1 FROM {shadow} AS n WHERE n._tx = p._tx AND n.id = p.id \
+             AND n._branch = p._branch AND n._step > p._step"
+        );
+        if let Some(limit) = &limit {
+            pick.push_str(&format!(" AND p._step < {limit}"));
+            newer.push_str(&format!(" AND n._step < {limit}"));
+        }
+        pick.push_str(&format!(" AND NOT EXISTS ({newer})"));
+        if let Some((stored, row)) = &private.except
+            && *stored == table.stored
+        {
+            let row = self.bind(Sql::Blob(row.to_vec()));
+            pick.push_str(&format!(" AND p.id <> {row}"));
+        }
+        if let Some(view) = self.view.clone().filter(|_| !table.branch_by.is_empty()) {
+            let head = self.bind(Sql::Blob(table.selector_key(&view.head)?));
+            pick.push_str(&format!(" AND p._branch = {head}"));
+        }
+        let (clock, writer) = match self.cut.as_ref().map(|cut| cut.own) {
+            Some((pos, writer)) => {
+                let t = self.bind(Sql::Integer(pos.t()));
+                let w = match writer {
+                    Some((node, tx)) => {
+                        self.bind(Sql::Blob(crate::db::sync::writer_bytes(node, tx)))
+                    }
+                    None => "p._writer".to_owned(),
+                };
+                (format!("CAST({t} AS INTEGER)"), w)
+            }
+            None => ("p._clock".to_owned(), "p._writer".to_owned()),
+        };
+        // A write check's evidence: which private rows it overlays.
+        let overlay = self.cut.as_ref().and_then(|cut| cut.overlay.clone());
+        let visible = match overlay {
+            None => "1".to_owned(),
+            Some(Overlay::Grounded(grounded)) => {
+                match grounded.get(&table.stored).filter(|ids| !ids.is_empty()) {
+                    None => "0".to_owned(),
+                    Some(ids) => {
+                        let ids = if ids.len() > BOUND_LIST_MAX {
+                            let array = self.bind(json_ids(ids.iter().map(|id| id.as_slice())));
+                            format!("SELECT unhex(value) FROM json_each({array})")
+                        } else {
+                            ids.iter()
+                                .map(|id| self.bind(Sql::Blob(id.to_vec())))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+                        format!("((p._state & {STATE_DELETED}) = 0 AND p.id IN ({ids}))")
+                    }
+                }
+            }
+            Some(Overlay::Except {
+                table: except,
+                row,
+                key,
+            }) if except == table.stored => {
+                let row = self.bind(Sql::Blob(row.to_vec()));
+                let key = self.bind(Sql::Blob(key));
+                format!(
+                    "((p._state & {STATE_DELETED}) = 0 AND (p.id <> {row} OR p._branch <> {key}))"
+                )
+            }
+            Some(Overlay::Except { .. }) => format!("((p._state & {STATE_DELETED}) = 0)"),
+        };
+        let private_columns = columns
+            .split(", ")
+            .map(|column| match column {
+                "_clock" => format!("{clock} AS _clock"),
+                "_writer" => format!("{writer} AS _writer"),
+                column => format!("p.{column}"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(format!(
+            "(SELECT {columns} FROM {committed} AS m WHERE NOT EXISTS (SELECT 1 FROM {shadow} AS p \
+             WHERE p.id = m.id AND p._branch = m._branch AND {pick} AND {visible}) \
+             UNION ALL SELECT {private_columns} FROM {shadow} AS p WHERE {pick} AND {visible})"
+        ))
+    }
+
+    /// [`Self::source`] without an open transaction's private rows.
+    fn committed_source(&mut self, table: &Table, columns: &str) -> Result<String, Error> {
+        let columns = columns.to_owned();
         let view = self.view.clone().filter(|_| !table.branch_by.is_empty());
         let Some(view) = view else {
             if self.cut.is_none() {

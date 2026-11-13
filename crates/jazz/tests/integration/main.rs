@@ -225,6 +225,8 @@ mod transaction_handles;
 mod transaction_policy_exists;
 #[path = "../transaction_read_tiers.rs"]
 mod transaction_read_tiers;
+#[path = "../tx_private_layer.rs"]
+mod tx_private_layer;
 #[path = "../union_queries.rs"]
 mod union_queries;
 #[path = "../uuid_page_probe.rs"]
