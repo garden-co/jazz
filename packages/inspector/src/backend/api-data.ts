@@ -12,6 +12,7 @@ import {
   type InspectRowsAnswer,
   type InspectWhere,
   type InspectWriteOp,
+  isLargeValueSummary,
 } from "jazz-tools/inspect";
 import { useEffect, useState } from "react";
 import type {
@@ -58,7 +59,10 @@ export function decodeRow(
 ): DynamicTableRow {
   const decoded: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(row)) {
-    if (PROVENANCE_TIMESTAMPS.has(key) && typeof value === "string") {
+    if (isLargeValueSummary(value)) {
+      // Not the value: a summary of one too large to list. Shown as such.
+      decoded[key] = value;
+    } else if (PROVENANCE_TIMESTAMPS.has(key) && typeof value === "string") {
       decoded[key] = new Date(value);
     } else {
       decoded[key] = fromJsonForColumn(columns.get(key)?.column_type, value);
