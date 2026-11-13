@@ -29,17 +29,47 @@ import type {
   WebSocketConstructor,
 } from "../runtime/native-runtime/websocket.js";
 import { optionalPeerImportError } from "./optional-peer.js";
+import { logStoreOpened } from "./store-log.js";
 
 export const VERCEL_CORE_PORT = 1625;
 
+/** What a `vercel()` namespace function is called with, for each deployment. */
+export interface VercelNamespaceContext {
+  /**
+   * The deployment's Vercel environment: `"production"`, `"preview"` or a
+   * custom environment's slug (`VERCEL_TARGET_ENV`, else `VERCEL_ENV`).
+   */
+  environment: string;
+  /** The deployment's Git branch (`VERCEL_GIT_COMMIT_REF`); `undefined` without one. */
+  branch: string | undefined;
+}
+
+/**
+ * A core's name within its Vercel project: its Sandbox is
+ * `jazz-<project>-<namespace>`. A string names one core; a function picks
+ * one per deployment.
+ */
+export type VercelNamespace = string | ((context: VercelNamespaceContext) => string | undefined);
+
 export interface VercelStoreOptions {
   /**
-   * Sandbox name. Defaults to `jazz-<VERCEL_PROJECT_ID>-production` for
-   * production and `jazz-<VERCEL_PROJECT_ID>-preview-<branch>-<hash>` for
-   * each Git branch's previews. Required for a preview deployment without
-   * a Git branch (from the CLI outside a Git checkout, or through the API).
+   * Which core this deployment runs: its Sandbox is
+   * `jazz-<VERCEL_PROJECT_ID>-<namespace>` (lowercase, characters other than
+   * `a-z`, `0-9` and `-` become `-`). Required. The usual choices:
+   *
+   * - `({ environment }) => environment`: one core per environment
+   *   (production, preview, each custom environment).
+   * - `({ environment, branch }) => environment === "production" ? "production" : perBranch(branch)`:
+   *   production's core, and one per preview branch, so a branch's schema
+   *   and permissions never apply to another branch's data. These are the
+   *   names earlier versions gave cores by default.
+   *
+   * A deployment only reaches cores of its own environment: a core trusts
+   * the environment whose deployment started it first.
    */
-  name?: string;
+  namespace: VercelNamespace;
+  /** Replaced by `namespace`; passing it throws, saying how to migrate. */
+  name?: never;
   /**
    * Not an option: the core generates its app id on its Drive at first
    * start and keeps it there.
@@ -586,36 +616,164 @@ export function onVercelHost(env: Record<string, string | undefined> = process.e
   return !!env.VERCEL && env.VERCEL_ENV !== "development";
 }
 
+/** Vercel's limit on a Sandbox name. */
+export const SANDBOX_NAME_MAX = 128;
+/** Vercel's limit on a Drive name. */
+export const DRIVE_NAME_MAX = 64;
+
+// Project ids are mixed case with an underscore; names stay [a-z0-9-].
+const safeProject = (project: string) => project.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+// Runs of other characters become one "-"; a "-" stays as it is, so
+// `perBranch`'s names pass through unchanged.
+const safeNamespace = (namespace: string) => namespace.toLowerCase().replace(/[^a-z0-9-]+/g, "-");
+/** A project id as Vercel issues them (`prj_` and 28 characters), when the real one isn't known yet. */
+const TYPICAL_PROJECT_ID = `prj_${"x".repeat(28)}`;
+
+const PER_BRANCH_RECIPE =
+  'namespace: ({ environment, branch }) => environment === "production" ? "production" : perBranch(branch)';
+
+/** Why `vercel()` needs a namespace, with the usual choices to copy. */
+export function missingNamespaceError(): Error {
+  return new Error(
+    "vercel(): pass `namespace`, which names this deployment's core (its Sandbox is jazz-<project>-<namespace>). The usual choices:\n" +
+      "  vercel({ namespace: ({ environment }) => environment }) // one core per Vercel environment\n" +
+      `  vercel({ ${PER_BRANCH_RECIPE} }) // production's core and one per preview branch, the cores earlier versions created (perBranch is exported by jazz-tools/backend)`,
+  );
+}
+
+/** `name` became `namespace`; refused with the migration rather than ignored. */
+export function refuseVercelName(options: object): void {
+  if (!("name" in options)) return;
+  throw new Error(
+    "vercel(): `name` is now `namespace`, the part after `jazz-<project>-`. " +
+      "To keep the cores earlier versions created by default (production's and one per preview branch), pass " +
+      `vercel({ ${PER_BRANCH_RECIPE} }) with perBranch from jazz-tools/backend. ` +
+      'A full Sandbox name you passed as `name: "jazz-<project>-<rest>"` is `namespace: "<rest>"`.',
+  );
+}
+
 /**
- * The core for this deployment: one for production, and one per Git branch
- * for previews, so a branch's schema and permissions never apply to
- * another branch's data. This keeps honest branches apart; it is not a
- * security boundary: every preview deployment's OIDC token names the same
- * workload (`…:environment:preview`), so any preview function can reach any
- * branch's core. Production is its own workload.
+ * The namespace earlier versions gave a preview branch's core by default:
+ * `preview-<slug>-<hash>`, the branch's first 24 safe characters and a hash
+ * of its full name, so `feat/a` and `feat-a` get cores of their own. For a
+ * deployment without a branch (from the CLI outside a Git checkout, or
+ * through the API) it is `""`, which `vercel()` refuses: those deployments
+ * would all share one core, so give them a namespace of their own.
  */
-export function defaultCoreName(project: string, env: Record<string, string | undefined>): string {
-  const target = env.VERCEL_ENV ?? "development";
-  // Project ids are mixed case with an underscore; names stay [a-z0-9-].
-  const safe = (part: string) => part.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-  if (target !== "preview") return `jazz-${safe(project)}-${safe(target)}`;
-  // Deploys from the CLI outside a Git checkout, or through the API, have an
-  // empty branch. They'd all share one core, so ask for a name instead.
-  const branch = env.VERCEL_GIT_COMMIT_REF;
-  if (!branch) {
-    throw new Error(
-      "vercel(): this preview deployment has no Git branch (VERCEL_GIT_COMMIT_REF is empty, " +
-        "as for deploys from the CLI outside a Git checkout or through the API); " +
-        "pass vercel({ name }) to choose its core",
-    );
-  }
+export function perBranch(branch: string | undefined): string {
+  if (!branch) return "";
   const slug = branch
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 24);
   const hash = createHash("sha256").update(branch).digest("hex").slice(0, 8);
-  return `jazz-${safe(project)}-preview-${slug}-${hash}`;
+  return `preview-${slug}-${hash}`;
+}
+
+/** The context a namespace function gets for the deployment `env` describes. */
+export function namespaceContext(env: Record<string, string | undefined>): VercelNamespaceContext {
+  return {
+    environment: env.VERCEL_TARGET_ENV || env.VERCEL_ENV || "development",
+    branch: env.VERCEL_GIT_COMMIT_REF || undefined,
+  };
+}
+
+/**
+ * Check a namespace that is already a string (`vercel({ namespace })` at
+ * call time, or a function's result): what it becomes in the Sandbox's
+ * name, refused when empty or too long for `project`.
+ */
+export function checkNamespace(
+  namespace: unknown,
+  project: string,
+  context?: VercelNamespaceContext,
+): string {
+  if (namespace !== undefined && namespace !== null && typeof namespace !== "string") {
+    throw new Error(
+      `vercel(): namespace must be a string, or a function returning one; got ${typeof namespace}`,
+    );
+  }
+  if (!namespace) {
+    // Deploys from the CLI outside a Git checkout, or through the API, have
+    // an empty branch: `perBranch` gives them no namespace, since they'd
+    // all share one core.
+    if (context && context.environment !== "production" && context.branch === undefined) {
+      throw new Error(
+        `vercel(): this ${context.environment} deployment has no Git branch (VERCEL_GIT_COMMIT_REF is empty, ` +
+          "as for deploys from the CLI outside a Git checkout or through the API), and its namespace function returned none; " +
+          'return a namespace for it, e.g. `perBranch(branch) || "cli-previews"`',
+      );
+    }
+    throw new Error(
+      context
+        ? `vercel(): the namespace function returned no namespace for this ${context.environment} deployment (branch ${context.branch})`
+        : "vercel(): namespace is empty",
+    );
+  }
+  const safe = safeNamespace(namespace);
+  if (!/[a-z0-9]/.test(safe)) {
+    throw new Error(`vercel(): namespace ${JSON.stringify(namespace)} has no letters or digits`);
+  }
+  const prefix = `jazz-${safeProject(project)}-`;
+  const max = SANDBOX_NAME_MAX - prefix.length;
+  if (safe.length > max) {
+    throw new Error(
+      `vercel(): namespace ${JSON.stringify(namespace)} is ${safe.length} characters; with this project's prefix ${prefix} it may have at most ${max} (Vercel's Sandbox names have at most ${SANDBOX_NAME_MAX})`,
+    );
+  }
+  return safe;
+}
+
+/**
+ * Check a string namespace when `vercel()` is called, so `next dev` reports
+ * it too: against the project's id when it's known, else a typical one.
+ */
+export function checkNamespaceOption(options: {
+  namespace?: unknown;
+  credentials?: { projectId: string };
+}): void {
+  if (options.namespace === undefined) throw missingNamespaceError();
+  if (typeof options.namespace === "function") return;
+  checkNamespace(
+    options.namespace,
+    options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID ?? TYPICAL_PROJECT_ID,
+  );
+}
+
+/**
+ * This deployment's core: `jazz-<project>-<namespace>`, with the namespace
+ * the option names for it. Cores are kept apart by name, not secured from
+ * each other: every preview deployment's OIDC token names the same
+ * workload (`…:environment:preview`), so any preview function can reach
+ * any preview core. Production is its own workload.
+ */
+export function coreName(
+  project: string,
+  namespace: VercelNamespace | undefined,
+  env: Record<string, string | undefined>,
+): { name: string; namespace: string } {
+  if (namespace === undefined) throw missingNamespaceError();
+  const context = namespaceContext(env);
+  const chosen = typeof namespace === "function" ? namespace(context) : namespace;
+  const safe = checkNamespace(
+    chosen,
+    project,
+    typeof namespace === "function" ? context : undefined,
+  );
+  return { name: `jazz-${safeProject(project)}-${safe}`, namespace: safe };
+}
+
+/**
+ * The Drive a core keeps its data on: `<name>-data`, or, for a name too
+ * long for Vercel's Drive names, its first part and a hash of the whole.
+ */
+export function driveName(name: string): string {
+  const drive = `${name}-data`;
+  if (drive.length <= DRIVE_NAME_MAX) return drive;
+  const hash = createHash("sha256").update(name).digest("hex").slice(0, 8);
+  const head = name.slice(0, DRIVE_NAME_MAX - "-data".length - hash.length - 1);
+  return `${head}-${hash}-data`;
 }
 
 /**
@@ -680,12 +838,15 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   const version = params.version ?? (await installedVersion());
   const tarballUrl = options.coreTarballUrl ?? defaultCoreTarballUrl(version);
   const project = options.credentials?.projectId ?? env.VERCEL_PROJECT_ID;
-  if (!options.name && !project) {
+  refuseVercelName(options);
+  if (options.namespace === undefined) throw missingNamespaceError();
+  if (!project) {
     throw new Error(
-      "vercel(): VERCEL_PROJECT_ID is not set; enable system environment variables or pass a name",
+      "vercel(): VERCEL_PROJECT_ID is not set; enable system environment variables, or pass credentials with its projectId",
     );
   }
-  const name = options.name ?? defaultCoreName(project!, env);
+  const { name, namespace } = coreName(project, options.namespace, env);
+  const drive = driveName(name);
   const creds = options.credentials ?? {};
   const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
   const backendCredential = options.backendCredential ?? functionOidcToken;
@@ -792,7 +953,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
 
   const provision = async () => {
     await sdk.Drive.getOrCreate({
-      name: `${name}-data`,
+      name: drive,
       region: options.region ?? "iad1",
       maxSize: options.maxDriveBytes ?? 10 * 1024 ** 3,
       ...creds,
@@ -806,7 +967,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       timeout: idleMs,
       persistent: true,
       keepLastSnapshots: { count: 1 },
-      mounts: { "/data": { drive: `${name}-data`, mode: "read-write" } },
+      mounts: { "/data": { drive, mode: "read-write" } },
       ...creds,
     });
     await startServer(sbx);
@@ -1028,6 +1189,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     void ensured.then(({ core }) => core.close()).catch(() => {});
     throw error;
   }
+  logStoreOpened(`jazz: store vercel namespace ${JSON.stringify(namespace)} (core ${name})`);
   // Clients in this process (the backend's own session) reach the core through
   // an in-process origin, so each of their requests and reconnects wakes it;
   // they go on through the current remote core's own in-process origin, which
