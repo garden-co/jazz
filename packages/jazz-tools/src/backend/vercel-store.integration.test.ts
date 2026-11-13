@@ -1,6 +1,9 @@
 import { createHmac, randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
@@ -614,6 +617,72 @@ describe("vercel() store", () => {
     expect(fake.calls.filter((call) => call.startsWith("start ")).length).toBeGreaterThanOrEqual(3);
   }, 60_000);
 
+  it("answers a backend read made while its core restarts, instead of failing it with 1006", async () => {
+    // A core that keeps its data on disk, so it can stop and start again
+    // on the same address, as a Sandbox's core does across a restart.
+    const appId = randomUUID();
+    const issuer = await startIssuer();
+    const dataDir = await mkdtemp(join(tmpdir(), "jazz-vercel-restart-"));
+    cleanups.push(() => rm(dataDir, { recursive: true, force: true }));
+    const serve = (port?: number) =>
+      startLocalJazzServer({
+        appId,
+        dataDir,
+        port,
+        trustedWorkload: { issuer, audience: AUDIENCE, subject: SUBJECT },
+      });
+    let core = await serve();
+    cleanups.push(() => core.stop());
+    const port = Number(new URL(core.url).port);
+    const fake = fakeVercel({ appId, url: core.url });
+    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: vercel({
+        namespace: legacyNamespace,
+        sdk: fake.sdk,
+        backendCredential: () => oidcToken(issuer),
+      }),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const row = await jazz.db.insert(app.notes, { text: "kept" }).wait({ tier: "global" });
+
+    // Each restart: the core stops under the backend's live session. While
+    // it is down, connections to its address hang for a moment and then
+    // fail, as through Vercel's router; the wake that a failed connection
+    // triggers starts the core again. A read made while a reconnect is
+    // failing waits for the core instead of failing with it.
+    const down = () => {
+      const held = new Set<Socket>();
+      const server = createNetServer((socket) => {
+        held.add(socket);
+        setTimeout(() => socket.destroy(), 400);
+      });
+      return {
+        listening: new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve)),
+        up: async () => {
+          for (const socket of held) socket.destroy();
+          await new Promise((resolve) => server.close(resolve));
+          core = await serve(port);
+        },
+      };
+    };
+    let restarting: Promise<unknown> | undefined;
+    for (let restart = 0; restart < 3; restart++) {
+      restarting = undefined;
+      await core.stop();
+      const router = down();
+      await router.listening;
+      fake.state.onStart = () => {
+        restarting ??= router.up();
+      };
+      await sleep(300);
+      const seen = await jazz.db.all(app.notes.where({ id: row.id }), { tier: "remote" });
+      expect(seen.map((note) => note.text)).toEqual(["kept"]);
+      await restarting;
+    }
+  }, 60_000);
   it.each([400, 409, 422])(
     "opens every concurrent first request on a cold deploy: losing the race to create the Sandbox waits for the winner's (%i)",
     async (status) => {
