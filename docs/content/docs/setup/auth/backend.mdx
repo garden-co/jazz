@@ -107,6 +107,11 @@ export const config = {
 The same matcher works for AuthKit, Clerk and Auth.js middleware. In `authenticate`, read the
 session without refreshing it, and return its expiry as `expiresAt`.
 
+To refresh the session for Jazz, pass `refresh` to `createJazz`: middleware that runs only on the
+request a browser makes to ask who is signed in, one tab at a time. Refresh there, call `next` with
+the refreshed cookie, and add your rotated `Set-Cookie` to its response. See
+[WorkOS](/docs/setup/auth/workos) for a complete example.
+
 ## In the browser
 
 ```tsx title="App.tsx"
