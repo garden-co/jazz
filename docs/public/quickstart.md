@@ -51,6 +51,10 @@
    - For existing apps migrating from another data store, the existing data should constrain this
      enough.
    - Write permission tests next to the policies: /docs/tooling/testing
+   - Before the first change to a schema the app has already run with data, run
+     `npx jazz-tools migrations create`, and keep `defineApp(schema, { migrations })` importing
+     `./migrations` (/docs/schemas/migrations). Never delete or move the store to get past a schema
+     error: it means a migration is missing, and the user's data is in that store.
    - In either case, use these Jazz features instead of modeling them yourself:
      - Built-in metadata columns like `$createdBy`, `$createdAt`, `$updatedBy` and `$updatedAt`:
        /docs/reading/metadata
