@@ -349,3 +349,45 @@ fn a_replica_file_reopened_with_the_apps_migrations_keeps_writing_the_added_tabl
         assert_eq!(rows(&db, "children", CHILD).len(), n as usize);
     }
 }
+
+/// A replica opened without the app's migrations (React Native's relay
+/// before alpha.61) minted its own names for v2's columns, which no
+/// authority ever confirmed. The authority's catalogue is then refused with
+/// the typed `store_opened_without_migrations`, which a host can act on (a
+/// rebuild, a reset), not a free-form "not supported yet". A replica opened
+/// with the migrations mirrors the same catalogue.
+///
+/// ```text
+/// authority (v1 + lens → v2) ──catalogue──► replica (v2 alone)      ✗ store_opened_without_migrations
+///                            ──catalogue──► replica (v2 + migrations) ✓ mirrors
+/// ```
+#[test]
+fn a_replica_opened_without_the_apps_migrations_is_refused_by_name() {
+    let authority = block_on(Db::open_history_complete(
+        config(v2(), 0).with_migrations(vec![v1()], vec![v1_to_v2()]),
+    ))
+    .unwrap();
+    authority.set_authority();
+    insert_parent(&authority, 1, 1);
+
+    let head_only = block_on(Db::open(config(v2(), 7))).unwrap();
+    head_only.track_upstream_rejections();
+    let refused = link(&head_only, &authority);
+    pump(&authority, &[&head_only]);
+    let refusal = head_only
+        .upstream_refusal(&refused)
+        .expect("the authority's catalogue is refused");
+    assert_eq!(
+        refusal.code,
+        jazz::db::ErrorCode::StoreOpenedWithoutMigrations,
+        "{refusal}"
+    );
+
+    let shipped = replica(8);
+    let mirrored = link(&shipped, &authority);
+    pump(&authority, &[&shipped]);
+    assert!(
+        shipped.upstream_refusal(&mirrored).is_none(),
+        "a replica with the app's migrations mirrors the catalogue"
+    );
+}

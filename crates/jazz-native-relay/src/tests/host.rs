@@ -4,7 +4,7 @@
 //! foregrounds, the upstream socket) and its lifecycle.
 use super::*;
 use jazz::binding_codec::{decode_rows, decode_subscription_delta_rows};
-use jazz::db::{Db, DbConfig, block_on};
+use jazz::db::{Db, DbConfig, Migrations, block_on};
 use jazz::ids::{AuthorSubject, RowUuid};
 use jazz::query::Query;
 use jazz::records::{OwnedRecord, RecordDescriptor, ValueType};
@@ -1134,4 +1134,221 @@ fn a_relay_attached_without_the_apps_migrations_stops_its_refused_upstream() {
         }
     }
     panic!("the relay kept carrying a connection its database refused");
+}
+
+/// #5145: a store an alpha.60 relay created without the app's migrations,
+/// holding no unsynced writes, is rebuilt by a relay that now has them. Its
+/// server refuses it by name (`store_opened_without_migrations`); the relay
+/// reopens a fresh store with the migrations and reconnects, so alice's
+/// foreground reads the server's rows again without the app doing anything.
+///
+/// Through the Rust relay handle rather than the C ABI: the test carries the
+/// upstream itself, and must serve the rebuilt store's new connection with a
+/// fresh server session, as a socket's reconnect would.
+///
+/// ```text
+/// alpha.60 relay (v2 alone) ──creates──► alice.sqlite (head-only names)
+/// relay (v2 + bundle) ──opens alice.sqlite──► server refuses by name
+///                     ──rebuilds fresh──► reconnects ──► foreground reads
+/// ```
+#[test]
+fn a_store_opened_without_migrations_is_rebuilt_when_nothing_is_pending() {
+    let bundle = renamed_label_bundle();
+    let (server, head) = server_with_history(&bundle);
+    let (schemas, lenses) =
+        jazz::tools::deployment::published::client_migrations(bundle.to_string().as_bytes())
+            .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let author = AuthorSubject::for_test_bytes([0x4b; 16]);
+    let identity = |byte: u8| DbIdentity {
+        node: NodeUuid::from_bytes([byte; 16]),
+        author,
+    };
+    let open = |migrations: Migrations| {
+        NativeRelay::spawn(RelayOpenConfig {
+            supported_abi: NativeRelayAbiRange {
+                minimum: NATIVE_RELAY_ABI_V1,
+                maximum: NATIVE_RELAY_ABI_V1,
+            },
+            scope: RelayScope {
+                app_namespace: "app".to_owned(),
+                storage_namespace: "default".to_owned(),
+                auth_scope: Some("alice".to_owned()),
+            },
+            sqlite_path: directory.path().join("alice.sqlite"),
+            schema: head.clone(),
+            migrations,
+            identity: identity(0x01),
+        })
+        .unwrap()
+    };
+    // As alpha.60 did: the head schema alone.
+    let older = open(Migrations::default());
+    older
+        .attach_client(identity(0x02), BTreeMap::new())
+        .unwrap();
+    older.pump().unwrap();
+    drop(older);
+
+    let relay = open(Migrations { schemas, lenses });
+    let alice = relay
+        .attach_client(identity(0x03), BTreeMap::new())
+        .unwrap();
+    let mut generation = None;
+    let mut upstream = None;
+    let mut connections = 0;
+    for _ in 0..300 {
+        let wire = relay.wire().unwrap();
+        let current = relay
+            .run(|worker| Ok(worker.upstream_generation()))
+            .unwrap();
+        if generation != current {
+            // A new connection: the server serves it afresh, as on a socket.
+            generation = current;
+            connections += 1;
+            upstream = Some(
+                server
+                    .accept_subscriber(author, Default::default())
+                    .unwrap(),
+            );
+        }
+        let server_link = upstream.as_ref().unwrap();
+        if let Ok(frames) = wire.take_outbound_encoded() {
+            server_link.receive(frames);
+        }
+        block_on(server.tick()).unwrap();
+        for frame in server_link.take_outbound() {
+            let _ = wire.push_inbound_encoded(&frame);
+        }
+        relay.pump().unwrap();
+        let response = alice
+            .execute(ForegroundDbCommandRequest::All {
+                query: todos_query(),
+                options_json: "{}".into(),
+                transaction: None,
+            })
+            .unwrap();
+        let response = match response {
+            ForegroundDbCommandResponse::Pending { operation } => alice
+                .execute(ForegroundDbCommandRequest::Poll { operation })
+                .unwrap(),
+            response => response,
+        };
+        if let ForegroundDbCommandResponse::Rows { rows } = response
+            && titles(&rows)
+                .iter()
+                .any(|(_, title)| title == "from the server")
+        {
+            assert_eq!(
+                connections, 2,
+                "refused once, then served by the rebuilt store"
+            );
+            return;
+        }
+    }
+    panic!("the rebuilt store never served the server's row");
+}
+
+/// #5145: a store opened without the app's migrations that holds a write
+/// the server never confirmed is not rebuilt, which would drop the write.
+/// The refusal stays reported by name, so the app can choose to reset it
+/// (`deleteClientStorage()`), and the write is still there meanwhile.
+#[test]
+fn a_store_opened_without_migrations_with_unsynced_writes_is_left_for_the_app() {
+    let bundle = renamed_label_bundle();
+    let (server, head) = server_with_history(&bundle);
+    let (schemas, lenses) =
+        jazz::tools::deployment::published::client_migrations(bundle.to_string().as_bytes())
+            .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let author = AuthorSubject::for_test_bytes([0x4c; 16]);
+    let identity = |byte: u8| DbIdentity {
+        node: NodeUuid::from_bytes([byte; 16]),
+        author,
+    };
+    let open = |migrations: Migrations| {
+        NativeRelay::spawn(RelayOpenConfig {
+            supported_abi: NativeRelayAbiRange {
+                minimum: NATIVE_RELAY_ABI_V1,
+                maximum: NATIVE_RELAY_ABI_V1,
+            },
+            scope: RelayScope {
+                app_namespace: "app".to_owned(),
+                storage_namespace: "default".to_owned(),
+                auth_scope: Some("alice".to_owned()),
+            },
+            sqlite_path: directory.path().join("alice.sqlite"),
+            schema: head.clone(),
+            migrations,
+            identity: identity(0x01),
+        })
+        .unwrap()
+    };
+    {
+        // alpha.60: alice wrote while the relay could never sync it.
+        let older = open(Migrations::default());
+        let writer = older
+            .attach_client(identity(0x02), BTreeMap::new())
+            .unwrap();
+        let ForegroundDbCommandResponse::TransactionOpened { transaction } = writer
+            .execute(ForegroundDbCommandRequest::BeginTransaction {
+                kind: ForegroundTransactionKind::Mergeable,
+            })
+            .unwrap()
+        else {
+            panic!("transaction opens");
+        };
+        writer
+            .execute(ForegroundDbCommandRequest::Insert {
+                transaction,
+                table: "todos".to_owned(),
+                cells: title_cells("unsynced"),
+                row_id: Some([0x4c; 16]),
+            })
+            .unwrap();
+        writer
+            .execute(ForegroundDbCommandRequest::CommitTransaction { transaction })
+            .unwrap();
+        for _ in 0..5 {
+            older.pump().unwrap();
+        }
+    }
+
+    let relay = open(Migrations { schemas, lenses });
+    let _alice = relay
+        .attach_client(identity(0x03), BTreeMap::new())
+        .unwrap();
+    let wire = relay.wire().unwrap();
+    let first = relay
+        .run(|worker| Ok(worker.upstream_generation()))
+        .unwrap();
+    let server_link = server
+        .accept_subscriber(author, Default::default())
+        .unwrap();
+    for _ in 0..50 {
+        if let Ok(frames) = wire.take_outbound_encoded() {
+            server_link.receive(frames);
+        }
+        block_on(server.tick()).unwrap();
+        for frame in server_link.take_outbound() {
+            let _ = wire.push_inbound_encoded(&frame);
+        }
+        relay.pump().unwrap();
+    }
+    let refusal = relay
+        .upstream_refusal()
+        .unwrap()
+        .expect("the refusal is reported, not acted on");
+    assert_eq!(refusal.code, "store_opened_without_migrations");
+    assert!(
+        relay
+            .run(|worker| Ok(worker.upstream_generation()))
+            .unwrap()
+            == first,
+        "the store was not rebuilt"
+    );
+    let pending = relay
+        .run(|worker| Ok(worker.persistent_pending_uploads()))
+        .unwrap();
+    assert_eq!(pending, 1, "alice's unsynced write is still there");
 }
