@@ -1833,6 +1833,46 @@ describe("createJazz", () => {
     60_000,
   );
 
+  it("links a guest on a page that has its own window.__jazz, and leaves that global alone (#5262)", async () => {
+    // Before: the session refused to start, or (rc.2) `linkDeviceAccount()`
+    // rejected with "window.__jazz is reserved for Jazz"; on rc.1 a sealed
+    // one failed the upgrade with "object is not extensible".
+    const own = Object.seal({ mine: true });
+    vi.stubGlobal("window", { document: {}, __jazz: own });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    cleanups.push(async () => {
+      warn.mockRestore();
+      vi.unstubAllGlobals();
+    });
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+
+    const session = await createJazzClient({
+      appId: jazz.appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "device",
+    });
+    cleanups.push(() => session.close());
+    expect(session.getSnapshot().status).toBe("ready");
+    const account = session.getSnapshot().client!.session!.user!;
+
+    signInAs(origin, "alice");
+    await session.linkDeviceAccount();
+    const alice = session.getSnapshot().client!;
+    expect(alice.session!.user!).toBe(account);
+    expect(alice.session!.identity.subject).toBe("alice");
+
+    // The app's global is as it set it; Jazz said so once.
+    expect((globalThis as { window?: { __jazz?: unknown } }).window!.__jazz).toBe(own);
+    expect(own).toEqual({ mine: true });
+    const told = warn.mock.calls.filter(([message]) => String(message).includes("window.__jazz"));
+    expect(told).toHaveLength(1);
+  }, 60_000);
+
   it("links a guest only on a fresh proof for one challenge, never on its token", async () => {
     const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
     const appId = jazz.appId;
@@ -2698,6 +2738,57 @@ describe("createJazz", () => {
     await expect(
       third.db.update(app.todos, randomUUID(), { title: "nope" }).wait({ tier: "global" }),
     ).rejects.toThrow(/the row does not exist or the session may not read it/);
+  }, 60_000);
+
+  it("routes an unawaited rejection only to the Db of the session that made the write (#4784)", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const notes = s.defineApp({ notes: s.table({ body: s.string() }, {}) }, { migrations: "none" });
+    // Nobody may update a note, so the core refuses every update.
+    const frozen = s.definePermissions(notes, ({ policy }) => {
+      policy.notes.allowRead.always();
+      policy.notes.allowInsert.always();
+      policy.notes.allowUpdate.never();
+    });
+    const jazz = await createJazz({
+      app: notes,
+      permissions: frozen,
+      store: remote({ url: core.url, appId, secret: core.adminSecret }),
+      authenticate,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    await jazz.createAccountFor("alice");
+    await jazz.createAccountFor("bob");
+    const as = (user: string) =>
+      jazz.forReqUser(new Request("http://app/x", { headers: { "x-test-user": user } }));
+    const note = await jazz.db.insert(notes.notes, { body: "initial" }).wait({ tier: "global" });
+
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => consoleError.mockRestore());
+    // Alice's request registers its handler first.
+    const asAlice = await as("alice");
+    const seenByAlice = vi.fn();
+    asAlice.onMutationError(seenByAlice);
+    const asBob = await as("bob");
+    const seenByBob = vi.fn();
+    asBob.onMutationError(seenByBob);
+
+    // Bob's write is refused, and nobody awaits it.
+    const bobsWrite = asBob.update(notes.notes, note.id, { body: "bob" });
+    const bobsTxId = await bobsWrite.txId;
+    await vi.waitFor(() => expect(seenByBob).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+    expect(seenByBob.mock.calls[0]![0]).toMatchObject({
+      code: "permission_denied",
+      transaction: { transactionId: bobsTxId },
+    });
+    // Alice, another user, never sees Bob's refusal.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(seenByAlice).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalledWith(
+      "Unhandled Jazz mutation error",
+      expect.anything(),
+    );
   }, 60_000);
 
   it("leaves an update under a relational read policy to the core, from a fresh backend", async () => {

@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
+use std::task::{Poll, Waker};
 
 use crate::ids::{AuthorSubject, GlobalPhysicalColumnId, GlobalPhysicalTableId, RowUuid};
 use crate::protocol::{
@@ -2059,8 +2060,49 @@ impl Db {
     /// The shared state, set up to run under this handle's schema.
     fn inner(&self) -> std::cell::RefMut<'_, Inner> {
         let mut inner = self.inner.borrow_mut();
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        inner.schema = self.execution_schema(&inner);
         inner
+    }
+
+    /// Retained current-governed views keep their names, but not an old owner
+    /// policy. Exact registered views and published bundle pins stay fixed.
+    fn execution_schema(&self, inner: &Inner) -> Rc<Schema> {
+        let Some(view) = &self.view else {
+            return inner.owner.clone();
+        };
+        match &view.policies_from {
+            Some(policies) if policies.bundle.is_none() => {
+                if Rc::ptr_eq(policies, &inner.owner) {
+                    view.clone()
+                } else {
+                    Rc::new((**view).clone().with_policies_of(inner.owner.clone()))
+                }
+            }
+            _ => view.clone(),
+        }
+    }
+
+    /// Keep prepared names while selecting policy from the executing handle.
+    fn execution_query<'a>(
+        &self,
+        prepared: &'a PreparedQuery,
+    ) -> std::borrow::Cow<'a, PreparedQuery> {
+        // A peek: choosing policies must not settle an open transaction's
+        // overlay; `inner()` would, on every identity read in the batch.
+        let inner = self.inner.staging();
+        let schema = self.execution_schema(&inner);
+        let names = prepared.schema.as_ref().unwrap_or(&inner.owner);
+        let governing = schema.policies_from.as_ref().unwrap_or(&schema);
+        let prior = names.policies_from.as_ref().unwrap_or(names);
+        if Rc::ptr_eq(prior, governing) {
+            return std::borrow::Cow::Borrowed(prepared);
+        }
+        std::borrow::Cow::Owned(PreparedQuery {
+            schema: Some(Rc::new(
+                (**names).clone().with_policies_of(governing.clone()),
+            )),
+            ..prepared.clone()
+        })
     }
 
     pub fn table(&self, table: impl Into<String>) -> Query {
@@ -2912,8 +2954,9 @@ impl Db {
         opts: ReadOpts,
         identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let prepared = self.execution_query(prepared);
         let inner = self.inner();
-        inner.run(prepared, Some(identity), &ReadSpec::of(&opts, &inner)?)
+        inner.run(&prepared, Some(identity), &ReadSpec::of(&opts, &inner)?)
     }
 
     pub async fn all_result_tree(
@@ -8663,6 +8706,7 @@ impl Store {
 
 struct Batch {
     kind: BatchKind,
+    reads_state: Rc<RefCell<TransactionReads>>,
     ops: Vec<(Rc<Schema>, StagedOp)>,
     /// The rows `ops` write, by stored table: a later staged write's
     /// evidence (see [`Db::in_overlay`]). Shared with that write's check
@@ -8676,6 +8720,60 @@ struct Batch {
     /// Leases of the streamed values the batch's writes hold: their chunks
     /// stay until the batch commits or is dropped.
     uploads: Vec<crate::db::large_ops::UploadLease>,
+}
+
+/// Per-batch identity and admission order; an old future never observes a reused ID.
+#[derive(Default)]
+struct TransactionReads {
+    queue: VecDeque<Rc<TransactionReadTicket>>,
+    closed: bool,
+}
+
+impl TransactionReads {
+    fn take_wakers(&self) -> Vec<Waker> {
+        self.queue
+            .iter()
+            .filter_map(|ticket| ticket.waker.borrow_mut().take())
+            .collect()
+    }
+}
+
+/// Keep at most the current task's waker for each admitted read.
+#[derive(Default)]
+struct TransactionReadTicket {
+    waker: RefCell<Option<Waker>>,
+}
+
+struct TransactionRead {
+    state: Rc<RefCell<TransactionReads>>,
+    ticket: Rc<TransactionReadTicket>,
+}
+
+impl Drop for TransactionRead {
+    fn drop(&mut self) {
+        let wakers = {
+            let mut state = self.state.borrow_mut();
+            let wakers = state.take_wakers();
+            state
+                .queue
+                .retain(|ticket| !Rc::ptr_eq(ticket, &self.ticket));
+            wakers
+        };
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+}
+
+fn close_transaction_reads(state: &Rc<RefCell<TransactionReads>>) {
+    let wakers = {
+        let mut state = state.borrow_mut();
+        state.closed = true;
+        state.take_wakers()
+    };
+    for waker in wakers {
+        waker.wake();
+    }
 }
 
 #[derive(Default)]
@@ -9193,6 +9291,7 @@ impl Db {
             id,
             Batch {
                 kind,
+                reads_state: Rc::default(),
                 ops: Vec::new(),
                 rows: Arc::default(),
                 edits: LargeEdits::default(),
@@ -9235,21 +9334,34 @@ impl Db {
     }
 
     pub fn abandon_transaction_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
-        self.inner
+        let batch = self
+            .inner
             .borrow_mut()
             .batches
             .remove(&id)
-            .map(drop)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        close_transaction_reads(&batch.reads_state);
+        Ok(())
     }
 
     fn take_batch(&self, id: OpenTransactionId) -> Result<Batch, Error> {
         self.inner().require_mutation_admission()?;
-        self.inner
+        let batch = self
+            .inner
             .borrow_mut()
             .batches
             .remove(&id)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        // Refuse before publication, and wake futures only after releasing Inner.
+        let unfinished = !batch.reads_state.borrow().queue.is_empty();
+        close_transaction_reads(&batch.reads_state);
+        if unfinished {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "transaction has unfinished reads",
+            ));
+        }
+        Ok(batch)
     }
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
@@ -9265,7 +9377,8 @@ impl Db {
     /// same rows at the same versions now as it did at the snapshot (this
     /// catches phantoms: rows that entered or left a predicate or window).
     /// The check and the apply run under one store borrow, so nothing can
-    /// commit in between.
+    /// commit in between. An unfinished admitted read refuses and consumes the
+    /// handle before any writes are published.
     pub async fn commit_serializable_handle(
         &self,
         id: OpenTransactionId,
@@ -9492,7 +9605,7 @@ impl Db {
         read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
         let mut inner = self.inner.staging();
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        inner.schema = self.execution_schema(&inner);
         let batch = inner
             .batches
             .get(&id)
@@ -9684,7 +9797,7 @@ impl Db {
         self.in_overlay(id, Some(&mut op), |_, _| Ok(()))
             .map_err(|error| self.serializable_write_conflict(id, &op, error))?;
         let mut inner = self.inner.staging();
-        let schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        let schema = self.execution_schema(&inner);
         let stored = match op.row() {
             Some(row) => Some((schema.table(op.table())?.stored.clone(), row)),
             None => None,
@@ -9749,7 +9862,7 @@ impl Db {
         let marks = {
             let mut inner = self.inner.staging();
             inner.require_mutation_admission()?;
-            inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+            inner.schema = self.execution_schema(&inner);
             edits.derived.extend(chunked.derived);
             edits.pending_nodes.extend(chunked.pending_nodes);
             let batch = inner
@@ -9967,6 +10080,7 @@ impl TxRef<'_> {
     /// As [`Self::all_prepared_as`], at `tier`: a `Remote` read waits for
     /// the authority's answer, offline too. `LocalOnly` never asks the
     /// authority; `LocalFirst` can answer offline from the replica's known cut.
+    /// Reads run in first-poll order, retaining the writes staged at that poll.
     /// The first successful serializable read fixes its snapshot for later reads.
     pub async fn all_prepared_at(
         &self,
@@ -9975,17 +10089,63 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
     ) -> Result<Vec<CurrentRow>, Error> {
-        // Capture before hydration: later writes must not leak into an
-        // already admitted read, including when another read is cancelled.
-        // Peeks skip the store gate, which would undo the cached overlay.
-        let prefix = self
-            .db
-            .inner
-            .staging()
-            .batches
-            .get(&self.id)
-            .ok_or_else(|| rejected("transaction is not open"))?
-            .prefix();
+        // Capture staging before queueing: later writes must not leak into
+        // the prefix this read admitted, even when its predecessor is cancelled.
+        let (prefix, state) = {
+            let inner = self.db.inner.staging();
+            let batch = inner
+                .batches
+                .get(&self.id)
+                .ok_or_else(|| rejected("transaction is not open"))?;
+            (batch.prefix(), batch.reads_state.clone())
+        };
+        let guard = TransactionRead {
+            state,
+            ticket: Rc::default(),
+        };
+        guard
+            .state
+            .borrow_mut()
+            .queue
+            .push_back(guard.ticket.clone());
+        let reading = self.read_admitted(prepared, include_deleted, identity, tier, prefix);
+        let mut reading = std::pin::pin!(reading);
+        std::future::poll_fn(|cx| {
+            {
+                let state = guard.state.borrow();
+                if state.closed {
+                    return Poll::Ready(Err(rejected("transaction is no longer open")));
+                }
+                {
+                    let mut waker = guard.ticket.waker.borrow_mut();
+                    if waker
+                        .as_ref()
+                        .is_none_or(|prior| !prior.will_wake(cx.waker()))
+                    {
+                        *waker = Some(cx.waker().clone());
+                    }
+                }
+                if !state
+                    .queue
+                    .front()
+                    .is_some_and(|ticket| Rc::ptr_eq(ticket, &guard.ticket))
+                {
+                    return Poll::Pending;
+                }
+            }
+            reading.as_mut().poll(cx)
+        })
+        .await
+    }
+
+    async fn read_admitted(
+        &self,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+        identity: Option<AuthorSubject>,
+        tier: ReadTier,
+        prefix: BatchPrefix,
+    ) -> Result<Vec<CurrentRow>, Error> {
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
         // the replica when the link cannot answer.
@@ -10076,21 +10236,28 @@ impl TxRef<'_> {
         }
         // Relations nest inside the overlay, so they see staged rows too.
         // Offloaded leaves are fetched as for any read.
-        let rows = self
+        let (rows, prepared) = self
             .db
             .fetching_with((), |()| {
-                self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
+                // Both remote hydration and offloaded chunks may yield while
+                // owner policies change. Resolve policy at each evaluation.
+                let prepared = match identity {
+                    Some(_) => self.db.execution_query(prepared),
+                    None => std::borrow::Cow::Borrowed(prepared),
+                };
+                let rows = self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
                     let read = ReadSpec {
                         include_deleted,
                         cut,
                         ..ReadSpec::default()
                     };
-                    let roots = inner.run(prepared, identity, &read)?;
-                    inner.nest_relations(prepared, identity, &read, roots)
-                })
+                    let roots = inner.run(&prepared, identity, &read)?;
+                    inner.nest_relations(&prepared, identity, &read, roots)
+                })?;
+                Ok((rows, prepared))
             })
             .await?;
-        self.db.record_read(self.id, prepared, include_deleted)?;
+        self.db.record_read(self.id, &prepared, include_deleted)?;
         Ok(rows)
     }
 
