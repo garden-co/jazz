@@ -1,14 +1,23 @@
 <script lang="ts">
+  import type { Db } from 'jazz-tools';
   import { getDb, getJazzSession, getSession } from 'jazz-tools/svelte';
   import { app } from '../schema.js';
 
   // #region db-access-svelte
-  // Callable anywhere — component, store, or utility module
+  // During component setup: getDb() reads Svelte context.
   const db = getDb();
 
   async function addTodo(title: string) {
     await db.insert(app.todos, { title, done: false });
   }
+
+  // Stores and utility modules can't read context: pass them the db from here.
+  function createTodoActions(database: Db) {
+    return {
+      complete: (id: string) => database.update(app.todos, id, { done: true }),
+    };
+  }
+  const todoActions = createTodoActions(db);
   // #endregion db-access-svelte
 
   // #region session-svelte
@@ -19,6 +28,7 @@
   // #endregion session-svelte
 
   void addTodo;
+  void todoActions;
   void jazzSession;
   void session;
 </script>

@@ -31,6 +31,20 @@ export const LINK_GUEST_KEY_MISSING_MESSAGE =
   "local_first_account_required: this device account's key isn't held by this client any more (it signed out, or comes from another Jazz client), so it can't prove itself to link. Link from the client where it is signed in, or call refresh() instead.";
 
 /**
+ * A backend secret of only whitespace (`"  "`, a stray newline): usually an
+ * environment variable that is set but blank. Refused before any transport
+ * opens, so the mistake isn't reported later as a refused connection. (An
+ * empty secret already counts as none.)
+ */
+export const WHITESPACE_BACKEND_SECRET =
+  "invalid_backend_secret: backendSecret is only whitespace. Pass your app's backend secret (check that the environment variable it comes from holds a value).";
+
+/** Whether `secret` is a non-empty string of only whitespace. */
+export function isWhitespaceOnlySecret(secret: unknown): boolean {
+  return typeof secret === "string" && secret !== "" && secret.trim() === "";
+}
+
+/**
  * What `createJazz` answers a sign-in or `backend-user` request with when the
  * app's `authenticate` named a user without a valid `expiresAt` (none, not a
  * finite number, or in milliseconds). The backend

@@ -53,10 +53,12 @@ struct Member {
     queue: Weak<RefCell<VecDeque<SubscriptionEvent>>>,
     shape: Shape,
     bound: bool,
-    /// Where this member's `settled` flag comes from, and the last value
-    /// it was told.
+    /// Where this member's `settled` flag comes from, and the tier it was
+    /// last told it settled at (`None`: not told it settled). A result a
+    /// relay settled at its own store is told again once its upstream
+    /// settles it globally.
     settled: sync::SettledBy,
-    told: std::cell::Cell<bool>,
+    told: std::cell::Cell<Option<DurabilityTier>>,
 }
 
 /// One shared live result.
@@ -277,7 +279,8 @@ impl Fanout {
         }
     }
 
-    /// Tell members whose remote answered without changing their rows.
+    /// Tell members whose remote answered, or settled them at a higher
+    /// tier, without changing their rows.
     pub(super) fn flush_settled(&mut self) {
         for group in self.groups.values() {
             let group = group.borrow();
@@ -285,21 +288,22 @@ impl Fanout {
                 continue;
             }
             for member in &group.members {
+                let now = member.settled.tier();
                 if member.settled.get()
-                    && !member.told.get()
+                    && member.told.get().is_none_or(|told| told < now)
                     && let Some(queue) = member.queue.upgrade()
                 {
-                    member.told.set(true);
+                    member.told.set(Some(now));
                     tracing::debug!(
                         target: "jazz::sync",
                         table = %group.query().table,
-                        tier = ?member.settled.tier(),
+                        tier = ?now,
                         "subscription settled",
                     );
                     let mut event = delta(false, Vec::new(), Vec::new(), Vec::new());
                     if let SubscriptionEvent::Delta { settled, tier, .. } = &mut event {
                         *settled = true;
-                        *tier = member.settled.tier();
+                        *tier = now;
                     }
                     queue.borrow_mut().push_back(event);
                 }
@@ -336,7 +340,7 @@ impl Inner {
             shape: prepared.shape,
             bound: !prepared.binding.is_empty(),
             settled: settled.clone(),
-            told: std::cell::Cell::new(now),
+            told: std::cell::Cell::new(now.then(|| settled.tier())),
         };
         let tier = settled.tier();
         let open = |rows: &[CurrentRow]| {
@@ -1490,9 +1494,13 @@ impl Inner {
 /// target, so their output (built with the target) is read again.
 fn refresh_includes(group: &mut Group, changed: &BTreeSet<(String, RowUuid)>) {
     let refers = |row: &CurrentRow| {
-        row.cells.iter().any(|(name, value)| match value {
-            Some(Value::Uuid(id)) => changed.contains(&(name.clone(), RowUuid(*id))),
-            _ => false,
+        row.cells.iter().any(|(name, value)| {
+            // A nullable reference reads back wrapped.
+            let value = match value {
+                Some(Value::Nullable(Some(inner))) => Some(inner.as_ref()),
+                value => value.as_ref(),
+            };
+            matches!(value, Some(Value::Uuid(id)) if changed.contains(&(name.clone(), RowUuid(*id))))
         })
     };
     let updated: Vec<SubscriptionOutputRow> = group
@@ -1528,7 +1536,8 @@ impl Group {
                 {
                     *settled = member.settled.get();
                     *tier = member.settled.tier();
-                    if *reset || *settled != member.told.get() {
+                    let told = settled.then_some(*tier);
+                    if *reset || told != member.told.get() {
                         tracing::debug!(
                             target: "jazz::sync",
                             table = %self.query().table,
@@ -1539,7 +1548,7 @@ impl Group {
                             "subscription delivered",
                         );
                     }
-                    member.told.set(*settled);
+                    member.told.set(told);
                 }
                 queue.borrow_mut().push_back(event);
             }

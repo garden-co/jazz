@@ -189,6 +189,7 @@ export async function runMcpServer(options: {
     callInspector(endpoint, request, {
       token: (await store.get(endpoint))?.token,
       fetch: options.fetch,
+      withoutToken: "call request_access to ask a person for one",
     });
 
   async function callTool(name: string, args: Json): Promise<unknown> {

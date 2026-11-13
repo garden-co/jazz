@@ -28,6 +28,10 @@ from `jazz-tools/client`, without a `client` loader.
     }
     ```
 
+    Besides `signedOut`, the provider takes `loading` (shown while Jazz starts or switches users;
+    by default a "Loading…" line) and `error` (shown when Jazz can't start; by default a message
+    with a "Try again" button). See [Framework patterns](/docs/reference/framework-patterns).
+
     In the Next.js App Router, `JazzProvider` is a client component. Put it in a file that starts
     with `"use client"` and render that from `app/layout.tsx` around `{children}`:
 
@@ -113,7 +117,7 @@ from `jazz-tools/client`, without a `client` loader.
 
 Each is an explicit "not supported" error:
 
-- no offline use: while the backend is unreachable, reads and subscriptions wait and are answered after the reconnect; writes are not optimistic: they show after one round trip, and `wait()` resolves when the server answered
+- no offline use: while the backend is unreachable, reads and subscriptions wait and are answered after the reconnect; writes are not optimistic: they show after one round trip, and `wait({ tier })` resolves when the server committed them, whatever the tier
 - no attributed writes
 - no streaming inside a transaction
 - text edits with `editedFrom` on merge text columns are rejected (`NotObserved`) for now; use the

@@ -49,6 +49,10 @@ Apps that do not need user-scoped filtering must still declare every required op
 
 Use the policy helpers `allowRead`, `allowInsert`, `allowUpdate`, and `allowDelete` with [`.where(...)`](/docs/reference/where-operators) to restrict access based on column values.
 
+Policies decide which rows a user may read or write, not which columns. To keep a column from some
+users, move it to its own table with a one-to-one relation to the row, and give that table its own
+policies.
+
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-simple-ts
 </include>
@@ -148,11 +152,13 @@ The callback form `(todo) => ...` gives you access to the current row, so you ca
 
 A `where(...)` key can also reach one hop through a relation, qualified with the relation's name:
 `policy.docs.allowRead.where({ "author.uid": session.identity.subject })` reads `uid` on the
-row `author` leads to. The name of the table a relation leads to works too, when only one of the
-table's relations leads there.
+row `author` leads to (from alpha.62). The name of the table a relation leads to works too, when
+only one of the table's relations leads there, also before alpha.62.
 
-A column you correlate on must be declared as a relation with `s.rel` in your schema. Correlating on
-a plain UUID column fails validation with `JoinNotRefCompatible`.
+One correlation links the two rows: the one on the other table's `id`, if there is one. It must
+follow a relation, either `id` against a column declared with `s.rel` to that table, or two columns
+that are relations to the same table; otherwise validation fails with `JoinNotRefCompatible`.
+Further correlations, such as `authUserId: row.authUserId`, only need comparable column types.
 
 To match the `userId` your `authenticate` returned (for example an `assignee` text column holding
 your auth's user ids), compare with `session.identity.subject`: `session.user` is the Jazz account,
@@ -175,6 +181,50 @@ each other (for example, thousands of folders nested inside one another in the s
 is rejected with the `write_rejected` code and a reason ending in "is not supported yet" once its
 checks would have to read more than 262,144 of its own rows. Split such an import into smaller
 transactions.
+
+### Access through related rows
+
+When access depends on rows in another table, check that a matching path exists with
+`policy.exists(...)` around a relation: start from a table, filter it, follow a relation with
+`hopTo`, and filter again. For example, a doctor may read the patients they have an appointment
+with:
+
+```ts title="schema.ts"
+const schema = {
+  doctors: s.table({ userId: s.string(), name: s.string() }, {}),
+  patients: s.table({ name: s.string() }, {}),
+  appointments: s.table(
+    { doctorId: s.uuid(), patientId: s.uuid(), at: s.timestamp() },
+    { doctor: s.rel("doctors", "doctorId"), patient: s.rel("patients", "patientId") },
+  ),
+};
+```
+
+```ts title="permissions.ts"
+// Read rules only: who may book or change appointments needs insert and update policies too.
+s.definePermissions(app, ({ policy, session }) => [
+  // A doctor reads their own record.
+  policy.doctors.allowRead.where({ userId: session.identity.subject }),
+  // Patients with an appointment whose doctor is the signed-in user.
+  policy.patients.allowRead.where((patient) =>
+    policy.exists(
+      policy.appointments
+        .where({ patientId: patient.id })
+        .hopTo("doctor")
+        .where({ userId: session.identity.subject }),
+    ),
+  ),
+  // A doctor's own appointments: "doctors.userId" filters the related doctor.
+  policy.appointments.allowRead.where({ "doctors.userId": session.identity.subject }),
+]);
+```
+
+`hopTo` takes a relation name declared with `s.rel` or `s.reverse`, and the `where` after it
+filters the rows it reaches. A relation takes one `hopTo`: chaining a second one is not supported
+yet. A qualified key filters a related table directly: `"doctors.userId"` is qualified with the
+table's name, which works because only one relation leads from `appointments` to `doctors`. From
+alpha.62 the relation's name, `"doctor.userId"`, works as well (see
+[Share-based access](#share-based-access)).
 
 <Accordions type="single">
 <Accordion title="Recursive inheritance">

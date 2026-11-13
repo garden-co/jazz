@@ -32,6 +32,15 @@ type Step =
   | { kind: "denied" }
   | { kind: "failed"; message: string };
 
+/** Where the app is, as a person recognizes it: the host its Jazz endpoint is at. */
+function appHost(endpoint: string): string {
+  try {
+    return new URL(endpoint).host;
+  } catch {
+    return endpoint;
+  }
+}
+
 export function ApprovalPage({
   grant,
   whoami,
@@ -89,7 +98,9 @@ export function ApprovalPage({
             <ul className={styles.grantList}>
               <li>
                 <strong>{grant.label ?? "An agent"}</strong> asks for{" "}
-                <strong>{write ? "read and write" : "read-only"}</strong> access to {whoami.appId}.
+                <strong>{write ? "read and write" : "read-only"}</strong> access to the app at{" "}
+                <strong>{appHost(endpoint)}</strong>{" "}
+                <span className={styles.note}>(app id {whoami.appId})</span>.
               </li>
               <li>Tables: {grant.tables?.length ? grant.tables.join(", ") : "all"}</li>
               <li>For {describeTtl(ttl)}, then the token stops working.</li>

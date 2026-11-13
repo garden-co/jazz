@@ -6680,7 +6680,7 @@ impl Inner {
 
     /// Whether a relay owes session `index` a position its upstream
     /// moved: the connection's (`at`), once the session was told one, or
-    /// a settled result's upstream read's.
+    /// a settled result's upstream read's, or that read's global answer.
     fn owes_positions(&self, index: usize, at: u64) -> bool {
         let session = &self.sessions[index];
         let Some(client) = &self.client else {
@@ -6689,9 +6689,10 @@ impl Inner {
         session.connection_settled.is_some_and(|sent| sent != at)
             || self.relays_upstream()
                 && session.settles.values().any(|settle| {
-                    settle
-                        .sent
-                        .is_some_and(|sent| sent < client.settled_through(&settle.key))
+                    settle.sent.is_some_and(|sent| {
+                        sent < client.settled_through(&settle.key)
+                            || !settle.global && client.settled_globally(&settle.key)
+                    })
                 })
     }
 
@@ -7306,6 +7307,16 @@ impl Client {
             return Some(id.time.0);
         }
         self.pending.iter().find(|p| p.id == *id).map(|p| p.tx)
+    }
+
+    /// Whether the upstream live read under `key` was answered by the
+    /// global authority.
+    fn settled_globally(&self, key: &str) -> bool {
+        self.live_reads
+            .get(key)
+            .and_then(|id| self.reads.get(id))
+            .and_then(ActiveRead::live)
+            .is_some_and(|live| live.global.get())
     }
 
     /// How far the live read `key` is settled: its own settle, or the
@@ -11645,16 +11656,20 @@ impl Db {
                     let relaying = inner.relays_upstream();
                     let through = match inner.sessions[index].settles.get(&id) {
                         Some(settle) if relaying => {
-                            let at = inner
-                                .client
-                                .as_ref()
+                            let client = inner.client.as_ref();
+                            let at = client
                                 .map_or(through, |client| client.settled_through(&settle.key));
+                            // Served from this store, the result settles
+                            // at this store's tier; its upstream read's
+                            // global answer settles it globally too.
+                            let upstream =
+                                client.is_some_and(|client| client.settled_globally(&settle.key));
                             let settle = inner.sessions[index]
                                 .settles
                                 .get_mut(&id)
                                 .expect("just read");
                             settle.sent = Some(at);
-                            settle.global = global;
+                            settle.global |= global || upstream;
                             at
                         }
                         // Served here with no server: once relaying
@@ -11666,11 +11681,15 @@ impl Db {
                                 .get_mut(&id)
                                 .expect("just read");
                             settle.sent.get_or_insert(0);
-                            settle.global = global;
+                            settle.global |= global;
                             through
                         }
                         None => through,
                     };
+                    let global = inner.sessions[index]
+                        .settles
+                        .get(&id)
+                        .map_or(global, |settle| settle.global);
                     settled.push(SyncMessage::Settled {
                         id,
                         through,
@@ -11814,16 +11833,21 @@ impl Db {
             // A relayed result whose upstream read settled further, with no
             // change to its rows here, is told so: its rows may have arrived
             // through another read, held back until this one settled them.
+            // One this store served is told once its upstream read's answer
+            // is the global authority's, and is never downgraded.
             let relaying = inner.relays_upstream();
             let state = &mut *inner;
             if let Some(client) = state.client.as_ref().filter(|_| relaying) {
                 for (&id, settle) in state.sessions[index].settles.iter_mut() {
                     let at = client.settled_through(&settle.key);
-                    if settle.sent.is_some_and(|sent| sent < at) {
-                        settle.sent = Some(at);
+                    let global = !settle.global && client.settled_globally(&settle.key);
+                    if let Some(sent) = settle.sent.filter(|&sent| sent < at || global) {
+                        let through = at.max(sent);
+                        settle.global |= global;
+                        settle.sent = Some(through);
                         settled.push(SyncMessage::Settled {
                             id,
-                            through: at,
+                            through,
                             members: None,
                             global: settle.global,
                         });
@@ -12352,12 +12376,17 @@ impl Db {
                 // upstream answers: its own store may be cold. A Remote
                 // read waits for that answer however long it takes, its
                 // link down or no server at all: only the authority
-                // confirms a remote result. A LocalFirst one whose upstream
-                // cannot answer yet (its link is down, or still to come)
-                // serves this store, settled at once, while the upstream
-                // subscription it keeps fills the store once the link is
-                // up; one with a first-load wait is served so once the wait
-                // runs out.
+                // confirms a remote result. A LocalFirst one with a
+                // first-load wait waits for it while the upstream may
+                // answer, and is served from this store once the wait runs
+                // out or the upstream can no longer answer. Any other
+                // LocalFirst read serves this store, settled at once, as a
+                // one-shot one does: a zero wait is `FirstLoad::Deliver`,
+                // never "until the upstream answers". The upstream
+                // subscription it keeps fills the store, and the read
+                // follows it as deltas. Settled here, it stays at this
+                // store's tier: the upstream's global answer is not
+                // forwarded to it.
                 let upstream = db
                     .inner()
                     .client
@@ -12371,7 +12400,7 @@ impl Db {
                 let strict = tier == ReadTier::Remote && wait.is_none();
                 let relayed = attached
                     .as_ref()
-                    .filter(|_| upstream == Some(true) || strict);
+                    .filter(|_| strict || (upstream == Some(true) && wait.is_some()));
                 if relayed.is_some()
                     && let Some(until) = wait.and_then(wait_until)
                 {

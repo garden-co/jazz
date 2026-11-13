@@ -641,7 +641,7 @@ describe("browser session against the app's backend", () => {
     // bounds, loose for a loaded runner; the exact timing is unit-tested
     // with fake timers in backend-watch.test.ts.)
     const after = answers.slice(before);
-    expect(after.map((answer) => answer.status)).toEqual([401, 401]);
+    expect(after.map((answer) => answer.status)).toEqual([200, 200]);
     expect(after[1]!.at - after[0]!.at).toBeGreaterThanOrEqual(1_000);
     expect(signedOutAt - revokedAt).toBeLessThan(20_000);
     expect(onSignedOut).toHaveBeenCalledOnce();

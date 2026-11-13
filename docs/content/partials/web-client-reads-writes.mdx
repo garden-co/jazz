@@ -3,8 +3,11 @@
 Both clients return the same `Db`: [queries](/docs/reading/queries), `subscribe`, insert, update,
 upsert, delete, [transactions](/docs/writing/transactions) and the framework hooks work unchanged.
 
-- **Thin client.** A write shows after one round trip to your backend, and `wait()` resolves when
-  the server has answered.
-- **Local-first client.** A write shows instantly in every local query, then syncs. `wait()`
+- **Thin client.** A write shows after one round trip to your backend. `wait({ tier })` resolves
+  once the server has committed the write, whichever tier you pass: that already meets every tier.
+- **Local-first client.** A write shows instantly in every local query, then syncs. `wait({ tier })`
   takes a [durability tier](/docs/reference/durability-tiers) (`local` or `global`) to
   wait for the point you need.
+
+Both take the same call, for example `await db.insert(app.todos, todo).wait({ tier: "global" })`,
+so code that waits works on either client.
