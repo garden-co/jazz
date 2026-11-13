@@ -298,6 +298,28 @@ export function unwrapValue(v: WasmValue, columnType?: ColumnType, columnName?: 
       return toByteArray((v as { value: unknown }).value);
     case "Null":
       return null;
+    case "Enum": {
+      if (columnType?.type !== "EnumPayload") {
+        // Untyped paths (generic Row/Array fallbacks, direct runtime callers) have no
+        // field names to decode against; keep the case and values positionally.
+        return {
+          type: v.value.case,
+          values: v.value.values.map((entry) => unwrapValue(entry)),
+        };
+      }
+      const entry = columnType.cases.find((candidate) => candidate.name === v.value.case);
+      if (!entry || entry.fields.length !== v.value.values.length)
+        throw new Error("Invalid payload enum result");
+      return {
+        type: entry.name,
+        ...Object.fromEntries(
+          entry.fields.map((field, index) => [
+            field.name,
+            unwrapValue(v.value.values[index]!, field.column_type, field.name),
+          ]),
+        ),
+      };
+    }
     case "Array":
       if (columnType?.type === "Array") {
         return v.value.map((entry) => unwrapValue(entry, columnType.element));
