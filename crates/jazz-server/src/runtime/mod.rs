@@ -211,6 +211,12 @@ pub(crate) const IDLE_TICK: Duration = Duration::from_secs(1);
 /// Inbound messages one session may have applied per round of ticks.
 const INBOUND_MESSAGES_PER_TICK: usize = 16;
 
+/// Reads one tick takes out of turn, across all sessions (see
+/// [`SessionTransport::try_recv`]). Bounded so a session that floods reads
+/// adds at most this many reads to a tick, and the sessions whose turn it
+/// is (and their writes) are still served in it.
+const READS_OUT_OF_TURN_PER_TICK: usize = 8;
+
 /// About how long one tick may take. Each tick serves as many sessions as
 /// the recent per-session cost fits in it (at least one). A round serves
 /// every session with inbound messages once, over as many ticks as that
@@ -220,6 +226,8 @@ const INBOUND_MESSAGES_PER_TICK: usize = 16;
 /// [`INBOUND_MESSAGES_PER_TICK`]) are taken in one tick: clients rely on a
 /// read sent just before their writes being answered after them. Smaller
 /// ticks cost no throughput: each message commits on its own either way.
+/// A session with nothing but reads queued does not wait for its turn: its
+/// reads are taken out of turn, up to [`READS_OUT_OF_TURN_PER_TICK`] a tick.
 const TICK_SLICE: Duration = Duration::from_millis(4);
 
 type Job = Box<dyn FnOnce(&mut Owner) + Send>;
@@ -1997,6 +2005,8 @@ struct TickSlice {
     taken: std::cell::Cell<usize>,
     /// Recent cost of a tick per session it served (a moving average).
     per_session: std::cell::Cell<Option<Duration>>,
+    /// Reads this tick took out of turn.
+    reads: std::cell::Cell<usize>,
 }
 
 impl Default for TickSlice {
@@ -2005,6 +2015,7 @@ impl Default for TickSlice {
             cap: std::cell::Cell::new(usize::MAX),
             taken: std::cell::Cell::new(0),
             per_session: std::cell::Cell::new(None),
+            reads: std::cell::Cell::new(0),
         }
     }
 }
@@ -2018,8 +2029,22 @@ impl TickSlice {
         open
     }
 
+    /// Whether this tick may take another read out of turn.
+    fn reads_left(&self) -> bool {
+        self.reads.get() < READS_OUT_OF_TURN_PER_TICK
+    }
+
+    fn take_read(&self) -> bool {
+        let open = self.reads_left();
+        if open {
+            self.reads.set(self.reads.get() + 1);
+        }
+        open
+    }
+
     /// Learn from a tick that took `elapsed`, and size the next one.
     fn ticked(&self, elapsed: Duration) {
+        self.reads.set(0);
         let taken = self.taken.replace(0);
         if taken == 0 {
             return;
@@ -2056,6 +2081,24 @@ fn start_tick<'a>(sessions: impl Iterator<Item = &'a SessionQueues> + Clone) {
 struct SessionTransport(Rc<SessionQueues>);
 
 impl SessionQueues {
+    /// Whether every queued inbound message only reads: nothing a read
+    /// taken now could overtake.
+    fn only_reads_queued(&self) -> bool {
+        self.inbound.borrow().iter().all(|message| {
+            matches!(
+                message,
+                SyncMessage::Read { .. } | SyncMessage::Unsubscribe { .. }
+            )
+        })
+    }
+
+    fn take(&self) -> Option<SyncMessage> {
+        let message = self.inbound.borrow_mut().pop_front()?;
+        self.taken.set(self.taken.get() + 1);
+        self.release_taken_ingress();
+        Some(message)
+    }
+
     /// Free the room of every batch whose messages the engine has all taken.
     fn release_taken_ingress(&self) {
         let taken = self.taken.get();
@@ -2176,6 +2219,15 @@ impl Transport for SessionTransport {
         self.0.queue(message)
     }
 
+    /// A session is served in its turn: once a round, as the tick's slice
+    /// fits it, up to [`INBOUND_MESSAGES_PER_TICK`] messages. Out of turn,
+    /// a session whose queue holds nothing but reads (and unsubscribes) has
+    /// them taken anyway, from the tick's [`READS_OUT_OF_TURN_PER_TICK`]: a
+    /// point read from an idle backend does not wait for every other
+    /// session's commits. A read queued behind a commit of its session, or
+    /// ahead of one, waits for the session's turn as before, so it is never
+    /// answered ahead of its session's earlier commits (INV-SYNC-49), and a
+    /// read sent just before writes is still answered after them.
     fn try_recv(&mut self) -> Option<SyncMessage> {
         let queues = &self.0;
         if queues.inbound.borrow().is_empty() {
@@ -2183,6 +2235,10 @@ impl Transport for SessionTransport {
         }
         if !queues.served.get() {
             if queues.done.get() || !queues.slice.take() {
+                if queues.slice.reads_left() && queues.only_reads_queued() {
+                    queues.slice.take_read();
+                    return queues.take();
+                }
                 return None;
             }
             queues.served.set(true);
@@ -2193,11 +2249,8 @@ impl Transport for SessionTransport {
         if budget == 0 {
             return None;
         }
-        let message = queues.inbound.borrow_mut().pop_front()?;
         queues.budget.set(budget - 1);
-        queues.taken.set(queues.taken.get() + 1);
-        queues.release_taken_ingress();
-        Some(message)
+        queues.take()
     }
 }
 
@@ -3035,7 +3088,7 @@ mod tests {
             sessions[session]
                 .inbound
                 .borrow_mut()
-                .extend((0..count).map(|id| SyncMessage::Unsubscribe { id }));
+                .extend((0..count).map(|_| write()));
         };
         push(1, 1);
         push(2, 20);
@@ -3066,6 +3119,166 @@ mod tests {
                 // A new round: session 0's messages waited only one round.
                 vec![(0, 6)],
             ]
+        );
+    }
+
+    /// A message the out-of-turn rule treats as a write: anything but a
+    /// read or an unsubscribe.
+    fn write() -> SyncMessage {
+        SyncMessage::ResendWhole { rows: Vec::new() }
+    }
+
+    fn read(id: u64) -> SyncMessage {
+        SyncMessage::Read {
+            id,
+            query: Box::new(jazz::query::Query::from("todos")),
+            binding: BTreeMap::new(),
+            include_deleted: false,
+            tier: jazz::db::ReadTier::Remote,
+            wait: None,
+            view: Box::new(jazz::protocol::ReadViewSourceSpec::Current),
+            since: None,
+            span: jazz::db::ReadSpan::Once { at: None },
+        }
+    }
+
+    /// Run one tick over `sessions` as the engine does (it asks every
+    /// session, in a fixed order) and list what each gave: (session, how
+    /// many messages, how many of them reads).
+    fn tick_sessions(
+        slice: &TickSlice,
+        sessions: &[Rc<SessionQueues>],
+    ) -> Vec<(usize, usize, usize)> {
+        start_tick(sessions.iter().map(|queues| &**queues));
+        let mut tick = Vec::new();
+        for (index, queues) in sessions.iter().enumerate() {
+            let mut transport = SessionTransport(Rc::clone(queues));
+            let taken: Vec<SyncMessage> = std::iter::from_fn(|| transport.try_recv()).collect();
+            if !taken.is_empty() {
+                let reads = taken
+                    .iter()
+                    .filter(|message| matches!(message, SyncMessage::Read { .. }))
+                    .count();
+                tick.push((index, taken.len(), reads));
+            }
+        }
+        // What `TickSlice::ticked` resets, without resizing the slice.
+        slice.taken.set(0);
+        slice.reads.set(0);
+        tick
+    }
+
+    fn queues_on(slice: &Rc<TickSlice>, count: usize) -> Vec<Rc<SessionQueues>> {
+        (0..count)
+            .map(|_| {
+                Rc::new(SessionQueues::new(
+                    Rc::clone(slice),
+                    Arc::new(AtomicUsize::new(0)),
+                ))
+            })
+            .collect()
+    }
+
+    /// Bob's backend sends a point read while alice and carol have commits
+    /// queued and the slice fits one session a tick. Bob's read is taken in
+    /// the next tick, beside whichever writer's turn it is, instead of after
+    /// every writer's turn.
+    ///
+    /// ```text
+    /// tick 1: alice (her turn)            bob idle
+    /// tick 2: carol (her turn)  ◄── bob's read arrives, taken out of turn
+    /// ```
+    ///
+    /// White-box: which tick takes a message is not observable through
+    /// public clients without timing, so this drives the session queues
+    /// the engine reads from, as `every_waiting_session_is_served_once_per_round`.
+    #[test]
+    fn an_idle_sessions_read_is_not_held_behind_other_sessions_commits() {
+        let slice = Rc::new(TickSlice::default());
+        slice.cap.set(1);
+        let sessions = queues_on(&slice, 3);
+        let (alice, carol, bob) = (&sessions[0], &sessions[1], &sessions[2]);
+        alice.inbound.borrow_mut().extend((0..40).map(|_| write()));
+        carol.inbound.borrow_mut().extend((0..40).map(|_| write()));
+
+        assert_eq!(
+            tick_sessions(&slice, &sessions),
+            vec![(0, INBOUND_MESSAGES_PER_TICK, 0)]
+        );
+        bob.inbound.borrow_mut().push_back(read(1));
+        assert_eq!(
+            tick_sessions(&slice, &sessions),
+            vec![(1, INBOUND_MESSAGES_PER_TICK, 0), (2, 1, 1)],
+            "carol's turn, and bob's read beside it"
+        );
+        // Bob kept his own turn: the round still ends once he has had it.
+        assert!(!bob.done.get());
+    }
+
+    /// A read queued behind a commit of its own session, or ahead of one,
+    /// waits for the session's turn: it is never answered ahead of the
+    /// session's earlier commits (INV-SYNC-49), and a read sent just before
+    /// writes is still answered after them.
+    ///
+    /// White-box for the same reason as
+    /// `an_idle_sessions_read_is_not_held_behind_other_sessions_commits`.
+    #[test]
+    fn a_read_queued_with_its_sessions_writes_waits_for_its_turn() {
+        let slice = Rc::new(TickSlice::default());
+        slice.cap.set(1);
+        let sessions = queues_on(&slice, 3);
+        sessions[0]
+            .inbound
+            .borrow_mut()
+            .extend((0..40).map(|_| write()));
+        // Alice wrote, then read; bob read, then wrote.
+        sessions[1].inbound.borrow_mut().extend([write(), read(1)]);
+        sessions[2].inbound.borrow_mut().extend([read(1), write()]);
+
+        assert_eq!(
+            tick_sessions(&slice, &sessions),
+            vec![(0, INBOUND_MESSAGES_PER_TICK, 0)],
+            "neither read is taken out of turn"
+        );
+        assert_eq!(tick_sessions(&slice, &sessions), vec![(1, 2, 1)]);
+        assert_eq!(tick_sessions(&slice, &sessions), vec![(2, 2, 1)]);
+    }
+
+    /// Mallory floods reads. Each tick takes at most
+    /// `READS_OUT_OF_TURN_PER_TICK` of them out of turn, and alice, whose
+    /// commits are queued, is served every round as she would be without
+    /// the flood: one tick her turn, the next mallory's.
+    ///
+    /// White-box for the same reason as
+    /// `an_idle_sessions_read_is_not_held_behind_other_sessions_commits`.
+    #[test]
+    fn reads_out_of_turn_are_bounded_per_tick_and_writers_keep_their_turns() {
+        let slice = Rc::new(TickSlice::default());
+        slice.cap.set(1);
+        let sessions = queues_on(&slice, 2);
+        sessions[0]
+            .inbound
+            .borrow_mut()
+            .extend((0..48).map(|_| write()));
+        sessions[1].inbound.borrow_mut().extend((0..1000).map(read));
+
+        let turn = INBOUND_MESSAGES_PER_TICK;
+        let flood = READS_OUT_OF_TURN_PER_TICK;
+        let ticks: Vec<_> = (0..6).map(|_| tick_sessions(&slice, &sessions)).collect();
+        assert_eq!(
+            ticks,
+            vec![
+                vec![(0, turn, 0), (1, flood, flood)],
+                vec![(1, turn, turn)],
+                vec![(0, turn, 0), (1, flood, flood)],
+                vec![(1, turn, turn)],
+                vec![(0, turn, 0), (1, flood, flood)],
+                vec![(1, turn, turn)],
+            ]
+        );
+        assert!(
+            sessions[0].inbound.borrow().is_empty(),
+            "alice's writes all ran"
         );
     }
 
