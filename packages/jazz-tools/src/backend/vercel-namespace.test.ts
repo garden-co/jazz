@@ -164,6 +164,20 @@ describe("vercel() namespace", () => {
       expect(drive).toMatch(/^jazz-prj-abc123def456ghi789jkl012mno3-.*-data$/);
     }
     expect(new Set(drives).size).toBe(new Set(branchCores).size);
+    // A pure function of the core's name: a core always finds its Drive
+    // again. Pinned literally, for a name that fits and one that doesn't.
+    expect(driveName("jazz-prj-abc123def456ghi789jkl012mno3-production")).toBe(
+      "jazz-prj-abc123def456ghi789jkl012mno3-production-data",
+    );
+    const long = coreName(project, legacy, {
+      VERCEL_ENV: "preview",
+      VERCEL_GIT_COMMIT_REF: "feature/login-page",
+    }).name;
+    expect(long).toBe("jazz-prj-abc123def456ghi789jkl012mno3-preview-feature-login-page-a0e5be53");
+    expect(driveName(long)).toBe(
+      "jazz-prj-abc123def456ghi789jkl012mno3-preview-feat-d8996cfa-data",
+    );
+    expect(driveName(long)).toBe(driveName(long));
   });
 
   it("logs each store it opens once per process", () => {
