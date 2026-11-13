@@ -3,13 +3,20 @@ import { commands } from "vitest/browser";
 import type { JazzServerInfo } from "./testing-server.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
+import type { ClientMigrations } from "../../src/runtime/client-migrations.js";
 
 export interface JazzServerBrowserCommands {
   jazzServerInfo(appId?: string): Promise<JazzServerInfo>;
   jazzServerStop(serverUrl: string): Promise<void>;
   jazzAppFront(
     coreUrl: string,
-    app: { schema: WasmSchema; permissions: CompiledPermissionsMap; pageOrigin: string },
+    app: {
+      schema: WasmSchema;
+      /** What the app ships (`defineApp(schema, { migrations })`): a command drops the schema's own record of it. */
+      migrations?: ClientMigrations;
+      permissions: CompiledPermissionsMap;
+      pageOrigin: string;
+    },
   ): Promise<string>;
   jazzAppUser(frontUrl: string, userId: string, claims?: Record<string, unknown>): Promise<string>;
   /** Optional: only configs whose tests sign users out register it. */
