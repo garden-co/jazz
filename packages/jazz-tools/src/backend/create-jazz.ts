@@ -2372,6 +2372,41 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   }
 
   /**
+   * A client's DELETE, ending its stream session. The key alone proves the
+   * client here, unless the request is signed in as someone else: clients
+   * end their sessions as they sign out, once the app's sign-in has gone, so
+   * a signed-out request may end the session it holds the key of. A session
+   * that already ended is done (204): its client often learns that only
+   * from this answer (#5187).
+   */
+  async function endStream(id: string, request: Request): Promise<Response> {
+    const entry = streams.get(id);
+    if (!entry) {
+      const ended = endedStreams.get(id);
+      if (ended && holdsKey(request, ended.key)) return new Response(null, { status: 204 });
+      const refused = await ownStream(id, request);
+      return refused instanceof Response ? refused : new Response(null, { status: 204 });
+    }
+    if (!holdsKey(request, entry.key)) {
+      return new Response("not this stream's client", { status: 403 });
+    }
+    const socket = entry.session;
+    if (socket.trusted) {
+      const client = await backendClients.resolve(request);
+      if (client === null || client === "refused" || client.kind !== "backend") {
+        return new Response("not this backend client", { status: 403 });
+      }
+    } else if (socket.userId !== undefined) {
+      const user = await authenticate(request);
+      if (user && user.userId !== socket.userId) {
+        return new Response("signed in as someone else", { status: 403 });
+      }
+    }
+    socket.close();
+    return new Response(null, { status: 204 });
+  }
+
+  /**
    * Pass a send's records to the session as they arrive, each once the core
    * has room for it: the body is not read ahead of the core, so a client
    * sending faster than the core takes is held back by the request itself.
@@ -2749,12 +2784,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       const id = stream[1] && decodeURIComponent(stream[1]);
       if (!id && request.method === "POST") return openStream(request);
       if (id && request.method === "POST") return streamSend(id, request);
-      if (id && request.method === "DELETE") {
-        const socket = await ownStream(id, request);
-        if (socket instanceof Response) return socket;
-        socket.close();
-        return new Response(null, { status: 204 });
-      }
+      if (id && request.method === "DELETE") return endStream(id, request);
       return new Response(null, { status: 405 });
     }
     if (path.endsWith("/ws")) {
