@@ -1429,6 +1429,9 @@ impl Db {
         conn: Connection,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
+        // Before the first statement is prepared: the flag is read at
+        // prepare time.
+        crate::host::stable_plans(&conn)?;
         // A schema this store has not admitted is reached along the lenses
         // the app ships: from a version it admitted, else from the first
         // version, each admitted as the authority admits it.
