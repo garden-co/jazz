@@ -33,6 +33,12 @@
      current bundle sizes.
    - Which frontend framework? React, Vue, Svelte, Solid, Effect or plain TypeScript.
      Default: thin client, React.
+   - `<JazzProvider>` gives you the thin client. For local-first, pass
+     `client: () => import("jazz-tools/local-first")` in its `config`.
+   - With the thin client, writes aren't optimistic: they show after one round trip to your
+     backend, so a controlled checkbox or toggle flips a moment after the click. For controls like
+     that, show the clicked state at once (local UI state until the write lands), or make that
+     screen local-first.
 
 ## Design the data
 
