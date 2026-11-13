@@ -941,6 +941,105 @@ mod batched {
         }
     }
 
+    /// Levels split into several statements (tiny limits here): parent
+    /// cells per few rows, children per few parent values, and values
+    /// too large to share a list (some arrays of references) read alone.
+    /// Each parent still gets exactly its own children.
+    #[test]
+    fn a_level_split_into_chunks_reads_the_same() {
+        let db = seeded();
+        for limits in [(1, 40), (3, 120), (7, 300)] {
+            jazz::db::set_relation_batch_limits_for_test(Some(limits));
+            for (what, query) in super::queries() {
+                let prepared = db.prepare_query(&query).unwrap();
+                agree(&format!("{what}, limits {limits:?}"), || {
+                    block_on(db.all_result_tree(&prepared, ReadOpts::default())).unwrap()
+                });
+                agree(&format!("{what}, limits {limits:?}, as member"), || {
+                    super::as_member(&db, &query)
+                });
+            }
+        }
+        jazz::db::set_relation_batch_limits_for_test(None);
+    }
+
+    /// Children as wide as a statement may be read per parent: the batched
+    /// statement's extra columns would pass Durable Object SQLite's limit.
+    #[test]
+    fn children_too_wide_to_batch_read_per_parent() {
+        let mut wide = TableSchemaBuilder::new("wide")
+            .column("owner", ColumnType::Uuid)
+            .column("rank", ColumnType::Integer);
+        for c in 0..WIDE {
+            wide = wide.column(&format!("c{c}"), ColumnType::Text);
+        }
+        let schema = compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("owners")
+                        .column("name", ColumnType::Text)
+                        .policies(read_and_allow_all_writes(PolicyExpr::True)),
+                )
+                .table(wide.policies(read_and_allow_all_writes(PolicyExpr::True)))
+                .build(),
+        );
+        let db = block_on(Db::open(DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x44; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        let insert = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
+            block_on(db.insert(
+                table,
+                values,
+                InsertOptions {
+                    row_id: Some(row),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        };
+        for o in 0..3 {
+            insert(
+                "owners",
+                id(9, o),
+                cells(vec![("name", Value::String(format!("owner {o}")))]),
+            );
+        }
+        for w in 0..9 {
+            let mut values = vec![
+                ("owner", Value::Uuid(id(9, w % 3).0)),
+                ("rank", Value::I32((w % 2) as i32)),
+            ];
+            let names: Vec<String> = (0..WIDE).map(|c| format!("c{c}")).collect();
+            for name in &names {
+                values.push((name.as_str(), Value::String(format!("{name} {w}"))));
+            }
+            insert("wide", id(10, w), cells(values));
+        }
+        block_on(db.tick()).unwrap();
+        // Every text column twice, and the rank.
+        let mut select: Vec<String> = (0..2 * WIDE).map(|c| format!("c{}", c % WIDE)).collect();
+        select.push("rank".to_owned());
+        let paged = ArraySubquery::new("wide", "wide", "owner", "id")
+            .select(select)
+            .order_by("rank", OrderDirection::Asc)
+            .offset(1)
+            .limit(1);
+        let read = tree(&db, &Query::from("owners").array_subquery(paged));
+        assert!(read.roots.iter().all(|o| relation(o, "wide").len() == 1));
+    }
+
+    /// Text columns of [`children_too_wide_to_batch_read_per_parent`]'s
+    /// child. A Durable Object table holds at most 100 columns, system
+    /// ones included, so a projection this wide selects columns twice:
+    /// with id, `_clock`, `_state` and `_writer`, the per-parent statement
+    /// returns 99 columns, and the batched page would return 101.
+    const WIDE: usize = 47;
+
     /// Parents keyed by a real number have no exact JSON form, so they are
     /// read per parent; a part of a text cell reads the same either way.
     #[test]

@@ -326,6 +326,10 @@ pub struct CellRead {
     pub tags: Option<crate::values::ColumnTags>,
 }
 
+/// The most columns a batched relation statement returns: Durable Object
+/// SQLite's `SQLITE_LIMIT_COLUMN` (see `durable_object_limits.rs`).
+pub(crate) const BATCH_COLUMNS_MAX: usize = 100;
+
 /// Whose children [`Ctx::children`] reads: one parent's, or a batch's.
 enum Parents<'p> {
     One(&'p Value),
@@ -1499,15 +1503,27 @@ impl<'a> Ctx<'a> {
     /// `elements`: every parent is an array of references. Returns the
     /// index of the parameter holding `parents`, the only one that depends
     /// on them.
+    ///
+    /// `None` when the batched statement would return more columns than
+    /// [`BATCH_COLUMNS_MAX`] where the per-parent one fits: it adds the
+    /// parent's index, and a page its row number.
     pub fn compile_children_batch(
         self,
         array: &ArraySubquery,
         elements: bool,
         parents: Sql,
         blobs: bool,
-    ) -> Result<(Compiled, usize), Error> {
+    ) -> Result<Option<(Compiled, usize)>, Error> {
+        let child = self.schema.table(&array.table)?;
+        let paged = array.limit.is_some() || array.offset > 0;
+        // id, _clock, _state, the projection, _writer, the parent's index
+        // and, paged, the row number.
+        let width = projection(child, array.select.as_deref())?.len() + 5 + usize::from(paged);
+        if width > BATCH_COLUMNS_MAX {
+            return Ok(None);
+        }
         let (compiled, at) = self.children(array, elements, Parents::Batch { parents, blobs })?;
-        Ok((compiled, at.expect("a batch binds its parents")))
+        Ok(Some((compiled, at.expect("a batch binds its parents"))))
     }
 
     fn children(

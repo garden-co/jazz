@@ -908,10 +908,50 @@ const STATEMENT_CACHE_CAPACITY: usize = 512;
 /// about 35 bytes each, well under Durable Object SQLite's 2 MiB string.
 const BATCH_IDS: usize = 4096;
 
-/// About how many bytes of parent values one batched relation statement
+/// At most how many bytes of parent values one batched relation statement
 /// binds ([`Inner::relation_level`]), as one JSON array: well under
 /// Durable Object SQLite's 2 MiB string.
 const BATCH_BYTES: usize = 256 * 1024;
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static BATCH_LIMITS: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((BATCH_IDS, BATCH_BYTES)) };
+}
+
+/// [`BATCH_IDS`] and [`BATCH_BYTES`], or smaller in tests that cross them.
+fn batch_limits() -> (usize, usize) {
+    #[cfg(any(test, feature = "testing"))]
+    {
+        BATCH_LIMITS.with(std::cell::Cell::get)
+    }
+    #[cfg(not(any(test, feature = "testing")))]
+    {
+        (BATCH_IDS, BATCH_BYTES)
+    }
+}
+
+/// Tests only: split batched relation reads at `ids` rows per parent-cell
+/// read and `bytes` of bound parent values per children read, on this
+/// thread; `None` restores the defaults.
+#[cfg(any(test, feature = "testing"))]
+pub fn set_relation_batch_limits_for_test(limits: Option<(usize, usize)>) {
+    BATCH_LIMITS.with(|cell| cell.set(limits.unwrap_or((BATCH_IDS, BATCH_BYTES))));
+}
+
+/// The length of `value` as an item of [`crate::compile::json_list`]'s
+/// array; `None` when it has no exact JSON form.
+fn json_item_len(value: &Sql) -> Option<usize> {
+    match value {
+        Sql::Null => Some(4),
+        Sql::Blob(bytes) => Some(2 * bytes.len() + 2),
+        Sql::Integer(n) => Some(n.to_string().len()),
+        Sql::Text(text) => serde_json::to_string(std::str::from_utf8(text).ok()?)
+            .ok()
+            .map(|json| json.len()),
+        Sql::Real(_) => None,
+    }
+}
 
 /// One read's nesting of its relations (`Inner::node`), shared by every row
 /// it nests: one read, as one identity, through one view and cut. Its
@@ -5258,7 +5298,7 @@ impl Inner {
         rows: &[CurrentRow],
     ) -> Result<Vec<Value>, Error> {
         let mut found: HashMap<RowUuid, Value> = HashMap::with_capacity(rows.len());
-        for chunk in rows.chunks(BATCH_IDS) {
+        for chunk in rows.chunks(batch_limits().0.max(1)) {
             let ids =
                 crate::compile::json_ids(chunk.iter().map(|row| row.id.0.as_bytes().as_slice()));
             let (cell, _) = run
@@ -5293,10 +5333,13 @@ impl Inner {
     /// The children `array` relates to each of `parents`, each with its own
     /// relations: what [`Inner::relation`] returns for each, read with one
     /// statement for all distinct parent values (per [`BATCH_BYTES`] of
-    /// them). A parent that binds as SQL `NULL` (or not at all, NaN) has
-    /// no children, as `= NULL` matches no row. Parents with no exact
-    /// shared JSON form (reals, text that is not UTF-8, blobs mixed with
-    /// other values) or of mixed shapes fall back to [`Inner::relation`].
+    /// them, as bound). A parent that binds as SQL `NULL` (or not at all,
+    /// NaN) has no children, as `= NULL` matches no row. These fall back
+    /// to [`Inner::relation`]: a parent value too large to share a bound
+    /// list (over [`BATCH_BYTES`] encoded), and for the whole level,
+    /// parents with no exact shared JSON form (reals, text that is not
+    /// UTF-8, blobs mixed with other values), of mixed shapes, or children
+    /// too wide to batch (see [`crate::compile::Ctx::compile_children_batch`]).
     fn relation_level(
         &self,
         run: &mut RelationRun<'_>,
@@ -5304,7 +5347,8 @@ impl Inner {
         parents: &[Value],
     ) -> Result<Vec<Vec<ResultNode>>, Error> {
         let mut index: HashMap<ParentKey, usize> = HashMap::new();
-        let mut values: Vec<Sql> = Vec::new();
+        // Each distinct bound value, and a parent that binds it.
+        let mut values: Vec<(Sql, &Value)> = Vec::new();
         let mut of_parent: Vec<Option<usize>> = Vec::with_capacity(parents.len());
         let mut shape = None;
         let mut batchable = true;
@@ -5320,37 +5364,70 @@ impl Inner {
                     let next = values.len();
                     let at = *index.entry(ParentKey::of(&sql)).or_insert(next);
                     if at == next {
-                        values.push(sql);
+                        values.push((sql, parent));
                     }
                     of_parent.push(Some(at));
                 }
             }
         }
         let elements = shape.unwrap_or(false);
-        let blobs = values.iter().any(|value| matches!(value, Sql::Blob(_)));
-        let mut lists = Vec::new();
+        let (_, max_bytes) = batch_limits();
+        // Chunks of distinct values, each bound as one list of at most
+        // `max_bytes` (as encoded); values alone over it read per parent.
+        let mut chunks: Vec<Vec<usize>> = Vec::new();
+        let mut alone: Vec<usize> = Vec::new();
         if batchable {
-            let mut start = 0;
-            while start < values.len() {
-                let mut end = start;
-                let mut bytes = 0;
-                while end < values.len() && (end == start || bytes < BATCH_BYTES) {
-                    bytes += match &values[end] {
-                        Sql::Blob(v) => 2 * v.len() + 3,
-                        Sql::Text(v) => 2 * v.len() + 3,
-                        _ => 24,
-                    };
-                    end += 1;
+            let mut chunk = Vec::new();
+            let mut bytes = 2;
+            for (at, (value, _)) in values.iter().enumerate() {
+                let Some(size) = json_item_len(value) else {
+                    batchable = false;
+                    break;
+                };
+                if size + 3 > max_bytes {
+                    alone.push(at);
+                    continue;
                 }
-                let chunk: Vec<&Sql> = values[start..end].iter().collect();
-                match crate::compile::json_list(&chunk, "?") {
-                    Some((_, list)) => lists.push((start, list)),
-                    None => {
-                        batchable = false;
-                        break;
-                    }
+                if !chunk.is_empty() && bytes + size + 1 > max_bytes {
+                    chunks.push(std::mem::take(&mut chunk));
+                    bytes = 2;
                 }
-                start = end;
+                chunk.push(at);
+                bytes += size + 1;
+            }
+            if !chunk.is_empty() {
+                chunks.push(chunk);
+            }
+        }
+        let mut rows = Vec::new();
+        let mut keys = Vec::new();
+        for (n, chunk) in chunks.iter().enumerate() {
+            if !batchable {
+                break;
+            }
+            let list: Vec<&Sql> = chunk.iter().map(|at| &values[*at].0).collect();
+            let blobs = list.iter().any(|value| matches!(value, Sql::Blob(_)));
+            let Some((_, list)) = crate::compile::json_list(&list, "?") else {
+                batchable = false;
+                break;
+            };
+            let Some((compiled, _)) = run
+                .ctx(self)
+                .compile_children_batch(array, elements, list, blobs)?
+            else {
+                // The children's width does not depend on the chunk.
+                debug_assert_eq!(n, 0);
+                batchable = false;
+                break;
+            };
+            let mut local = Vec::new();
+            rows.extend(self.execute_keyed(&compiled, &array.table, Some(&mut local))?);
+            for key in local {
+                let at = usize::try_from(key)
+                    .ok()
+                    .and_then(|key| chunk.get(key))
+                    .ok_or_else(|| Error::new(ErrorCode::Storage, "batched relation parent key"))?;
+                keys.push(*at);
             }
         }
         if !batchable {
@@ -5359,24 +5436,13 @@ impl Inner {
                 .map(|parent| self.relation(run, array, parent))
                 .collect();
         }
-        let mut rows = Vec::new();
-        let mut keys = Vec::new();
-        for (start, list) in lists {
-            let (compiled, _) = run
-                .ctx(self)
-                .compile_children_batch(array, elements, list, blobs)?;
-            let mut local = Vec::new();
-            rows.extend(self.execute_keyed(&compiled, &array.table, Some(&mut local))?);
-            keys.extend(local.into_iter().map(|key| start as i64 + key));
-        }
         let nodes = self.nest(run, &array.table, &array.nested_arrays, rows)?;
         let mut groups: Vec<Vec<ResultNode>> = (0..values.len()).map(|_| Vec::new()).collect();
-        for (key, node) in keys.into_iter().zip(nodes) {
-            let group = usize::try_from(key)
-                .ok()
-                .and_then(|key| groups.get_mut(key))
-                .ok_or_else(|| Error::new(ErrorCode::Storage, "batched relation parent key"))?;
-            group.push(node);
+        for (at, node) in keys.into_iter().zip(nodes) {
+            groups[at].push(node);
+        }
+        for at in alone {
+            groups[at] = self.relation(run, array, values[at].1)?;
         }
         // A value shared by several parents gives each a copy; its last
         // parent takes the original.
