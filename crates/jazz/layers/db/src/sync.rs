@@ -2481,6 +2481,9 @@ pub(crate) struct Session {
     outbox: Vec<SyncMessage>,
     /// Images to send this tick: (table, id, branch key).
     touched: BTreeSet<(String, RowUuid, Vec<u8>)>,
+    /// Refused targets refresh only when currently readable. A refusal
+    /// does not create a read owner or imply an access-loss event.
+    refused: BTreeSet<(String, RowUuid, Vec<u8>)>,
     /// On a relay, rows a one-shot answer shipped at one of this store's
     /// unsettled versions (by its position), which no watch keeps
     /// current: each ships again once uploads settle and that version is no
@@ -2596,6 +2599,12 @@ struct RelayedSettle {
     /// The position the session was last told, once the result settled.
     sent: Option<u64>,
     global: bool,
+    /// A Remote read: refused to the session when its upstream read is
+    /// (see [`Inner::relayed_refusals`]).
+    remote: bool,
+    /// The session was told its upstream read's refusal: once per
+    /// refusal, so a later link that refuses again tells it again.
+    refused: bool,
 }
 
 /// A relayed LocalFirst subscription's first-load wait: once `until`
@@ -2618,6 +2627,7 @@ impl Session {
             subs: BTreeMap::new(),
             outbox: Vec::new(),
             touched: BTreeSet::new(),
+            refused: BTreeSet::new(),
             unsettled: BTreeMap::new(),
             unreadable: HashSet::new(),
             committed: Vec::new(),
@@ -2678,6 +2688,7 @@ impl Session {
 
     fn idle(&self) -> bool {
         self.touched.is_empty()
+            && self.refused.is_empty()
             && self.outbox.is_empty()
             && self.resume.is_empty()
             && self
@@ -7399,15 +7410,21 @@ impl Client {
 }
 
 impl Client {
+    /// Why this store refused its current link (see
+    /// [`Inner::refuse_upstream`]), if it did: nothing answers a remote
+    /// read until a new link does.
+    fn refused_link(&self) -> Option<&Error> {
+        self.refusal
+            .as_ref()
+            .filter(|(connection, _)| *connection == self.connection)
+            .map(|(_, error)| error)
+    }
+
     /// The current link's refusal when it is [`ErrorCode::AuthorityChanged`]:
     /// the upstream serves another authority history than this store's.
     fn authority_changed(&self) -> Option<&Error> {
-        self.refusal
-            .as_ref()
-            .filter(|(connection, error)| {
-                *connection == self.connection && error.code == ErrorCode::AuthorityChanged
-            })
-            .map(|(_, error)| error)
+        self.refused_link()
+            .filter(|error| error.code == ErrorCode::AuthorityChanged)
     }
 }
 
@@ -8424,6 +8441,11 @@ impl Db {
             if (!strict && !answerable) || deadline.is_some_and(|d| Instant::now() >= d) {
                 return Poll::Ready(Ok(None));
             }
+            // A link this store refused answers nothing until a new one
+            // does: a Remote read fails with why (SPEC 8 §8.10).
+            if strict && let Some(error) = client.refused_link() {
+                return Poll::Ready(Err(error.clone()));
+            }
             if let Some(expired) = coverage {
                 if client.unadmitted {
                     return Poll::Ready(Err(Error::new(
@@ -9072,7 +9094,15 @@ impl Db {
                                 }
                                 let client = inner.client.as_mut().expect("client");
                                 client.catalogued = true;
-                                client.uncatalogued = None;
+                                // Mirrored at last: the reads attached under
+                                // the last link's refusal are no longer
+                                // refused, before their answers come.
+                                if client.uncatalogued.take().is_some() {
+                                    for remote in client.reads.values().filter_map(ActiveRead::live)
+                                    {
+                                        remote.refused.borrow_mut().take();
+                                    }
+                                }
                             }
                             // This store cannot store rows as its upstream
                             // does: it stops syncing with it, nothing that
@@ -9110,6 +9140,13 @@ impl Db {
                                 ReadLifetime::Live(live) => {
                                     live.answered.set(true);
                                     live.global.set(global);
+                                    // Answered, it is no longer refused: a
+                                    // read attached before the link's
+                                    // `Welcome` took the last link's
+                                    // refusal (`uncatalogued`), which no
+                                    // longer applies. A stream not yet
+                                    // polled is not told it.
+                                    live.refused.borrow_mut().take();
                                     if live.visible.is_none_or(|v| v.n != at.n || v.seq < at.seq) {
                                         live.visible = Some(at);
                                         client.visibility_moved = true;
@@ -9871,6 +9908,9 @@ impl Inner {
         for read in client.reads.values_mut() {
             if let ReadLifetime::Live(remote) = &mut read.lifetime {
                 remote.answered.set(false);
+                // Whose answer it is, the next upstream says: a relink to
+                // a non-global upstream must not report the last one's.
+                remote.global.set(false);
                 // What it holds stands until the next upstream says.
                 remote.told = false;
             }
@@ -9950,7 +9990,24 @@ impl Inner {
         let mut ready = Vec::new();
         let mut refused = Vec::new();
         let mut kept = Vec::new();
+        // A link this store refused answers nothing: a Remote read that
+        // would wait for it fails with why, as this store's own would.
+        let refused_link = client.refused_link().cloned();
         for fetch in std::mem::take(&mut client.relayed_fetches) {
+            if let (true, true, Some(error), SyncMessage::Read { id, .. }) = (
+                fetch.session == index,
+                fetch.strict,
+                &refused_link,
+                &fetch.message,
+            ) {
+                client.forget_once(fetch.upstream);
+                refused.push(SyncMessage::Refused {
+                    id: *id,
+                    code: error.code,
+                    message: error.message.clone(),
+                });
+                continue;
+            }
             let answered = matches!(client.answers.get(&fetch.upstream), Some(Some(_)));
             let given_up =
                 !fetch.strict && (!can_wait || fetch.until.is_some_and(|until| now >= until));
@@ -10004,6 +10061,47 @@ impl Inner {
             })
             .collect();
         (ready, answers)
+    }
+
+    /// Session `index`'s relayed Remote live reads whose upstream read
+    /// this store refused (see [`Inner::refuse_upstream`]) are refused to
+    /// the session with that error and its code, as this store's own
+    /// remote reads are (SPEC 8 §8.10): those opened before the refusal and
+    /// after it, each once per refusal. Nothing else can answer them.
+    /// A LocalFirst read is not: the session reads this store as its local
+    /// view, which serves it as when there is no server.
+    fn relayed_refusals(&mut self, index: usize) {
+        let Some(client) = self.client.as_ref() else {
+            return;
+        };
+        // A new link not yet past its `Welcome` has not said whether this
+        // store can follow it: a read attached meanwhile carries the last
+        // link's catalogue refusal (`uncatalogued`), which the session is
+        // not told unless the new link refuses too.
+        if client.refused_link().is_none() && client.uncatalogued.is_some() {
+            return;
+        }
+        let session = &mut self.sessions[index];
+        for (&id, settle) in session.settles.iter_mut().filter(|(_, s)| s.remote) {
+            let refusal = client
+                .live_reads
+                .get(&settle.key)
+                .and_then(|read| client.reads.get(read))
+                .and_then(ActiveRead::live)
+                .and_then(|live| live.refused.borrow().clone());
+            match refusal {
+                Some(error) if !settle.refused => {
+                    settle.refused = true;
+                    session.outbox.push(SyncMessage::Refused {
+                        id,
+                        code: error.code,
+                        message: error.message,
+                    });
+                }
+                Some(_) => {}
+                None => settle.refused = false,
+            }
+        }
     }
 
     /// The identity whose policies govern session `index`'s reads and
@@ -10860,6 +10958,7 @@ impl Db {
         self.serve_due_first_loads(index)?;
         // Relayed reads the upstream answered (or can no longer answer)
         // are served from this store first, in the order they came.
+        self.inner.borrow_mut().relayed_refusals(index);
         let (relayed, answers) = self.inner.borrow_mut().relayed_fetches_ready(index);
         // The upstream's answers list their results' rows: cached rows
         // they left out are not served as the reader's (INV-SYNC-14).
@@ -11299,6 +11398,7 @@ impl Db {
                 .session_schema(index)
                 .unwrap_or_else(|| inner.owner.clone());
             let mut touched = std::mem::take(&mut inner.sessions[index].touched);
+            let refused = std::mem::take(&mut inner.sessions[index].refused);
             let committed = std::mem::take(&mut inner.sessions[index].committed);
             let mut echoes = std::mem::take(&mut inner.sessions[index].echoes);
             let asked_whole = std::mem::take(&mut inner.sessions[index].asked_whole);
@@ -11735,13 +11835,95 @@ impl Db {
                     touched.insert((table, row, key));
                 }
             }
+            // This tick's versions of the client's own commits the global
+            // authority accepted and confirms as written (their echoes go
+            // with their real `Fate`s).
+            let accepted_fates: HashSet<TxId> = inner.sessions[index]
+                .outbox
+                .iter()
+                .filter_map(|message| match message {
+                    SyncMessage::Fate {
+                        id,
+                        outcome: Outcome::Accepted { .. },
+                        global: true,
+                    } => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            let own_versions: HashSet<(String, RowUuid, Vec<u8>, Pos)> = echoes
+                .iter()
+                .filter(|echo| accepted_fates.contains(&echo.id))
+                .map(|echo| (echo.table.clone(), echo.row, echo.key.clone(), echo.at))
+                .collect();
+            // The client's write-only rows: written by this tick's accepted
+            // commits, unreadable to it now, still at one of those commits'
+            // own confirmed versions, unreadable to it (or absent) both just
+            // before and just after each of them, and in a table none of its
+            // live reads reads. Its writes took no read access away, nor did
+            // anything since, and no live result of its stops matching the
+            // authority's for it (INV-SYNC-14): it keeps the exact versions
+            // it wrote, as a cold copy, rather than an eviction. Any other
+            // written row it may not read is evicted: one its write moved
+            // out of its read scope, one another writer's version
+            // superseded, one a live read of its covers, or one a relay or a
+            // replica with no server accepted. (Where a latest-only table
+            // pruned an earlier of several own versions of the row in one
+            // tick, that version counts as unreadable.)
+            let covered: BTreeSet<String> = inner.sessions[index]
+                .subs
+                .values()
+                .filter_map(|(_, group, ..)| group.upgrade())
+                .flat_map(|group| group.borrow().tables().clone())
+                .collect();
+            let mut write_only: HashSet<(String, RowUuid, Vec<u8>)> = HashSet::new();
+            {
+                let mut written: BTreeMap<(String, RowUuid, Vec<u8>), Vec<Pos>> = BTreeMap::new();
+                for (table, row, key, at) in &committed {
+                    if at.0.accepted() {
+                        written
+                            .entry((table.clone(), *row, key.clone()))
+                            .or_default()
+                            .push(at.0);
+                    }
+                }
+                'rows: for ((table, row, key), ats) in written {
+                    // A live read of the table reconciles the row: checked
+                    // first, so a burst into a read table costs no extra
+                    // store lookup per row (R62).
+                    if covered.contains(&table) {
+                        continue;
+                    }
+                    let Some(current) = inner.current_image(&table, row, &key)? else {
+                        continue;
+                    };
+                    let own = current.at.accepted()
+                        && own_versions.contains(&(table.clone(), row, key.clone(), current.at));
+                    if !own || readable(&inner, &policies, &table, row, &key, policy)? {
+                        continue;
+                    }
+                    for at in ats {
+                        let before = Pos::at(at.seq.saturating_sub(1));
+                        for cut in [before, at] {
+                            if readable_version(&inner, &policies, &table, row, &key, cut, policy)?
+                            {
+                                continue 'rows;
+                            }
+                        }
+                    }
+                    write_only.insert((table, row, key));
+                }
+            }
             // Rows that left a result, and rows a commit wrote: the current
             // image if the client may read it, else an eviction (hidden
-            // while a version of it still exists).
+            // while a version of it still exists). The client's write-only
+            // rows ship below, as written.
             // Ids the replica holds no version of any more: nobody watches
             // them.
             let mut gone = Vec::new();
             for (table, row, key) in touched {
+                if write_only.contains(&(table.clone(), row, key.clone())) {
+                    continue;
+                }
                 let hidden = match inner.current_image(&table, row, &key)? {
                     Some(image) if readable(&inner, &policies, &table, row, &key, policy)? => {
                         unreadable.remove(&(table.clone(), row, key.clone()));
@@ -11776,30 +11958,60 @@ impl Db {
                     hidden,
                 });
             }
+            // A refused commit's rows ship as they are now where the client
+            // may read them, so its replica drops the refused write's
+            // overlay for the authority's version. A refusal takes no read
+            // access away: a row the client may not read gets no eviction,
+            // so a write-only row it wrote keeps its accepted version. A
+            // cold copy of a row it lost access to stays until a covering
+            // read reconciles it (INV-SYNC-14), as without the refusal.
+            for (table, row, key) in refused {
+                if let Some(current) = inner.current_image(&table, row, &key)?
+                    && readable(&inner, &policies, &table, row, &key, policy)?
+                {
+                    unreadable.remove(&(table.clone(), row, key.clone()));
+                    images.push(current);
+                }
+            }
             // Superseded versions of the client's own commits land in its
-            // history, while the row stays readable.
+            // history, while the row stays readable. A write-only row ships
+            // each version this tick's own commits made of it, the current
+            // one included, each confirmed by its commit's `Fate` as
+            // written: a later restore can need the founder's accepted
+            // creation stamp. Echoes of superseded rows drop in one pass
+            // after the loop (R62).
             let mut superseded_rows = HashSet::new();
             for (table, row, key, at) in committed {
-                let superseded = match inner.current_image(&table, row, &key)? {
-                    Some(current) => {
-                        current.at != at.0 || at.1.is_some_and(|_| rank(&current).1 != at.1)
+                let current = inner.current_image(&table, row, &key)?;
+                let superseded = current.as_ref().is_some_and(|current| {
+                    current.at != at.0 || at.1.is_some_and(|_| rank(current).1 != at.1)
+                });
+                let own_write_only = write_only.contains(&(table.clone(), row, key.clone()));
+                if own_write_only {
+                    if !own_versions.contains(&(table.clone(), row, key.clone(), at.0)) {
+                        continue;
                     }
-                    None => false,
-                };
-                if superseded {
-                    superseded_rows.insert((table.clone(), row, key.clone()));
+                    if let Some(current) = current.filter(|_| !superseded) {
+                        images.push(current);
+                        continue;
+                    }
+                } else {
+                    if superseded {
+                        superseded_rows.insert((table.clone(), row, key.clone()));
+                    }
+                    if !(superseded && readable(&inner, &policies, &table, row, &key, policy)?) {
+                        continue;
+                    }
                 }
-                if superseded && readable(&inner, &policies, &table, row, &key, policy)? {
-                    let id = row.0.as_bytes().to_vec();
-                    let w =
-                        at.1.map_or_else(Vec::new, |(node, tx)| writer_bytes(node, tx));
-                    images.extend(inner.images_where(
-                        &table,
-                        true,
-                        "id = ?1 AND _branch = ?2 AND _clock = ?3 AND _writer = ?4",
-                        &[&id, &key, &at.0.t(), &w],
-                    )?);
-                }
+                let id = row.0.as_bytes().to_vec();
+                let w =
+                    at.1.map_or_else(Vec::new, |(node, tx)| writer_bytes(node, tx));
+                images.extend(inner.images_where(
+                    &table,
+                    true,
+                    "id = ?1 AND _branch = ?2 AND _clock = ?3 AND _writer = ?4",
+                    &[&id, &key, &at.0.t(), &w],
+                )?);
             }
             if !superseded_rows.is_empty() {
                 echoes.retain(|e| {
@@ -12454,6 +12666,8 @@ impl Db {
                                         key: key.clone(),
                                         sent: None,
                                         global: false,
+                                        remote: tier == ReadTier::Remote,
+                                        refused: false,
                                     },
                                 );
                             }
@@ -13144,7 +13358,14 @@ impl Db {
                             )
                         }));
                 }
-                session.touched.extend(rows.iter().cloned());
+                // An accepted commit's rows reconcile as any written row
+                // (and its write-only rows as written); a refused one's
+                // only refresh what the client may read.
+                if result.is_ok() {
+                    session.touched.extend(rows.iter().cloned());
+                } else {
+                    session.refused.extend(rows.iter().cloned());
+                }
                 // A relay's accepted commit is final once its upstream
                 // accepts the upload carrying it: the session waits for that
                 // fate, not this store's. A relay its host says has no

@@ -32,6 +32,8 @@ use crate::tools::{CmpOp, PolicyExpr};
 #[path = "fanout.rs"]
 mod fanout;
 pub use fanout::FanoutStats;
+#[cfg(any(test, feature = "testing"))]
+pub use fanout::{set_correlation_filter_for_test, set_policy_pins_for_test};
 #[path = "large_ops.rs"]
 mod large_ops;
 pub(crate) use large_ops::byte_splices;
@@ -3157,6 +3159,22 @@ impl Db {
 
     pub fn fanout_stats(&self) -> fanout::FanoutStats {
         self.inner().fan.stats()
+    }
+
+    /// A one-shot read with array relations nested as a subscription nests
+    /// them, as `identity` (`None`: unchecked): the full re-run a live
+    /// result is compared with in tests.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn all_nested_for_test(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        identity: Option<AuthorSubject>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let inner = self.inner();
+        let read = ReadSpec::of(&opts, &inner)?;
+        let rows = inner.run(prepared, identity, &read)?;
+        inner.nest_relations(prepared, identity, &read, rows)
     }
 
     /// Deliver the rows written since the last dispatch to the groups they

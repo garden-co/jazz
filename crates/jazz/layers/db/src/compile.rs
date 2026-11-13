@@ -964,9 +964,15 @@ impl<'a> Ctx<'a> {
                 return Err(unsupported("multi-hop include paths"));
             }
             if include.require {
+                // Resolvable means readable: a target the reader may not
+                // read is as missing as a deleted one.
                 let i = self.alias("i");
+                let readable = match self.policy {
+                    Some(session) => format!(" AND {}", self.read_policy(target, &i, session)?),
+                    None => String::new(),
+                };
                 wheres.push(format!(
-                    "EXISTS (SELECT 1 FROM {} AS {i} WHERE {i}.id = {alias}.{} AND ({i}._state & {STATE_DELETED}) = 0)",
+                    "EXISTS (SELECT 1 FROM {} AS {i} WHERE {i}.id = {alias}.{} AND ({i}._state & {STATE_DELETED}) = 0{readable})",
                     self.source(target)?,
                     quote(table.stored_name(column))
                 ));
@@ -1410,6 +1416,13 @@ impl<'a> Ctx<'a> {
             let mut conds = vec![format!("({c}._state & {STATE_DELETED}) = 0")];
             for filter in &array.filters {
                 conds.push(self.predicate(filter, child, &c)?);
+            }
+            // A child counts only if the relation would return it: one the
+            // reader may read, meeting its own nested requirements
+            // (`compile_children` applies both).
+            self.array_requirements(child, &c, &array.nested_arrays, &mut conds)?;
+            if let Some(session) = self.policy {
+                conds.push(self.read_policy(child, &c, session)?);
             }
             let source = self.source(child)?;
             if is_array(table, &array.outer_column) {

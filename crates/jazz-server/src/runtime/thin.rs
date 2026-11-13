@@ -756,7 +756,7 @@ fn event_body(event: SubscriptionEvent) -> (ThinBody, bool) {
             false,
         ),
         Ok(EventChunk::Closed) => (ThinBody::Closed, true),
-        Ok(EventChunk::Rejected { detail }) => (
+        Ok(EventChunk::Rejected { detail, .. }) => (
             ThinBody::Error {
                 code: "Rejected".to_owned(),
                 message: detail,

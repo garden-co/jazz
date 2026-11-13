@@ -339,9 +339,10 @@ if [ ! -s "$addon" ]; then
   mv "$addon.tmp" "$addon"
 fi
 # The pid file may be stale (a resumed snapshot): trust it only if that
-# process runs one of our cores.
+# process runs one of our cores. Its stderr is silenced before the input
+# redirect, which fails for a missing pid file or a process that is gone.
 pid=$(cat "$run/jazz.pid" 2>/dev/null || true)
-cmdline=$(tr '\\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+cmdline=$(tr '\\0' ' ' 2>/dev/null < "/proc/$pid/cmdline" || true)
 if [ -n "$pid" ] && [[ "$cmdline" == *"$data/bin/jazz-napi-"* ]]; then
   [ "$(cat "$run/jazz.version" 2>/dev/null)" = "$version" ] && exit 0
   kill -TERM "$pid" 2>/dev/null || true
