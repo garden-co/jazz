@@ -92,8 +92,12 @@ export function resolveRuntimeConfigSyncInitInput(
   return null;
 }
 
+/**
+ * `runtimeModuleUrl` may be a function, read only when no URL is configured:
+ * a worker that was handed its URL then never asks where its own module is.
+ */
 export function resolveRuntimeConfigWasmUrl(
-  runtimeModuleUrl: string,
+  runtimeModuleUrl: string | (() => string),
   locationHref: string | undefined,
   runtime?: RuntimeSourcesConfig,
 ): string | null {
@@ -115,7 +119,11 @@ export function resolveRuntimeConfigWasmUrl(
   // We only fall through to compute a root-relative URL when the page is served
   // from a non-HTTP origin (e.g. file://) — a static HTML page with the WASM
   // copied to the same directory.
-  return resolveDerivedWasmUrl(runtimeModuleUrl, locationHref, false);
+  return resolveDerivedWasmUrl(
+    typeof runtimeModuleUrl === "function" ? runtimeModuleUrl() : runtimeModuleUrl,
+    locationHref,
+    false,
+  );
 }
 
 export function resolveRuntimeConfigBrokerWorkerUrl(

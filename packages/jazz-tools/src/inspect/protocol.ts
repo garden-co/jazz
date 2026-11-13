@@ -100,7 +100,15 @@ export type InspectOp = InspectRequest["op"];
 export type InspectVia = "hook" | "token" | "dev";
 
 export interface InspectWhoami {
+  /** The app's id: its store's (`remote({ appId })`, or the id a store keeps). */
   appId: string;
+  /**
+   * The id this app's browser clients name it by in their sync URLs
+   * (`<basePath>/apps/<clientAppId>/…`): derived from the URL they sync with
+   * (their scope), not the store's id, which the backend maps them to. A
+   * client given an explicit `scope` names the app by that scope instead.
+   */
+  clientAppId: string;
   by: string;
   via: InspectVia;
   write: boolean;
@@ -108,6 +116,10 @@ export interface InspectWhoami {
   tables?: string[];
   /** When an agent token stops working (Unix seconds). */
   expiresAt?: number;
+  /** The agent token's label: what the agent said it asked access for. */
+  label?: string;
+  /** The longest an agent token this backend mints may live (seconds). */
+  maxTokenTtlSeconds: number;
   /** Where the Inspector UI for this backend is. */
   inspectorUrl: string;
   protocol: typeof INSPECT_PROTOCOL_VERSION;
@@ -656,4 +668,26 @@ export function renderPolicy(expr: unknown): string {
     default:
       return String(node.type ?? "?");
   }
+}
+
+/** The longest an agent token's label is kept. */
+export const MAX_TOKEN_LABEL = 200;
+
+/**
+ * An agent token's label as it is kept and shown: the agent's own text,
+ * without control characters, line or paragraph separators and bidi
+ * overrides (which could forge or reorder lines where it is logged or
+ * shown), at most {@link MAX_TOKEN_LABEL} characters. Empty when none is left.
+ */
+export function cleanTokenLabel(label: unknown): string {
+  if (typeof label !== "string") return "";
+  return label
+    .replace(
+      /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g,
+      " ",
+    )
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_TOKEN_LABEL)
+    .trim();
 }

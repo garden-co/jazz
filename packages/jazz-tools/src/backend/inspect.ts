@@ -18,6 +18,8 @@
 // the point of the Inspector, and it is why the hook must be narrow.
 
 import { NoJazzAccountError } from "./no-account-error.js";
+import { accountAppId } from "../accounts/local-first.js";
+import { endpointScope } from "../runtime/client-scope.js";
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { ColumnType, TablePolicies, WasmSchema } from "../drivers/types.js";
 import type { Db, QueryBuilder, TableProxy } from "../runtime/db.js";
@@ -33,6 +35,7 @@ import {
   buildQueryJson,
   fromJsonForColumn,
   inspectorLink,
+  cleanTokenLabel,
   isLoopbackHost,
   policyClauses,
   readsClaims,
@@ -87,6 +90,8 @@ export interface InspectEvent {
   write: boolean;
   /** The id of the agent token, when one was used. */
   tokenId?: string;
+  /** The agent token's label (what the agent asked access for), when one was used. */
+  label?: string;
   /** Set when the call was refused or failed. */
   error?: InspectErrorCode;
 }
@@ -148,6 +153,7 @@ interface Admitted {
   tables?: string[];
   expiresAt?: number;
   tokenId?: string;
+  label?: string;
 }
 
 interface TokenClaims {
@@ -170,7 +176,8 @@ const PROVENANCE = ["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"];
 
 function defaultAudit(event: InspectEvent): void {
   const parts = [
-    `jazz inspect: ${event.by} (${event.via})`,
+    // The label is the agent's own text: quoted, so it can't forge a line.
+    `jazz inspect: ${event.by} (${event.via}${event.label ? ` ${JSON.stringify(event.label)}` : ""})`,
     event.op,
     event.table,
     event.as && `as ${event.as}`,
@@ -339,7 +346,7 @@ export function createInspector(deps: InspectorDeps) {
   async function mintToken(
     admitted: Admitted,
     request: Extract<InspectRequest, { op: "mint_token" }>,
-  ): Promise<{ token: string; expiresAt: number; tokenId: string }> {
+  ): Promise<{ token: string; expiresAt: number; tokenId: string; label?: string }> {
     // A token is a person's delegation: another token can't make one.
     if (admitted.via === "token") {
       throw new InspectError(
@@ -381,7 +388,7 @@ export function createInspector(deps: InspectorDeps) {
       by: admitted.by,
       write: request.write === true,
       ...(tables ? { tables: [...new Set(tables)] } : {}),
-      ...(request.label ? { label: String(request.label).slice(0, 200) } : {}),
+      ...(cleanTokenLabel(request.label) ? { label: cleanTokenLabel(request.label) } : {}),
       iat,
       exp: iat + ttl,
       jti: randomUUID(),
@@ -392,6 +399,7 @@ export function createInspector(deps: InspectorDeps) {
       token: `${INSPECT_TOKEN_PREFIX}${payload}.${mac}`,
       expiresAt: claims.exp,
       tokenId: claims.jti,
+      ...(claims.label ? { label: claims.label } : {}),
     };
   }
 
@@ -426,15 +434,20 @@ export function createInspector(deps: InspectorDeps) {
       ...(claims.tables ? { tables: claims.tables } : {}),
       expiresAt: claims.exp,
       tokenId: claims.jti,
+      ...(typeof claims.label === "string" && claims.label ? { label: claims.label } : {}),
     };
   }
 
   // ---------------------------------------------------------------- reads and writes
 
+  /** Where browsers reach this Jazz: its public URL, else this request's origin and basePath. */
+  function endpointUrl(request: Request): string {
+    if (deps.publicUrls[0]) return deps.publicUrls[0];
+    return `${new URL(request.url).origin}${deps.basePath}`;
+  }
+
   function inspectorUrl(request: Request): string {
-    if (deps.publicUrls[0]) return `${deps.publicUrls[0]}${INSPECT_PATH}/`;
-    const url = new URL(request.url);
-    return `${url.origin}${deps.basePath}${INSPECT_PATH}/`;
+    return `${endpointUrl(request)}${INSPECT_PATH}/`;
   }
 
   function tableOf(name: string): {
@@ -604,7 +617,10 @@ export function createInspector(deps: InspectorDeps) {
     }
     const prepared = ops.map((op) => {
       if (!op || typeof op !== "object" || !["insert", "update", "delete"].includes(op.kind)) {
-        throw new InspectError("bad_request", "each op is an insert, update or delete");
+        throw new InspectError(
+          "bad_request",
+          `each op needs kind: "insert", "update" or "delete" (got ${String(JSON.stringify(op && typeof op === "object" ? ((op as { kind?: unknown }).kind ?? null) : op)).slice(0, 60)})`,
+        );
       }
       if (typeof op.table !== "string" || !op.table) {
         throw new InspectError("bad_request", `${op.kind} needs a table`);
@@ -774,11 +790,14 @@ export function createInspector(deps: InspectorDeps) {
       case "whoami": {
         const whoami: InspectWhoami = {
           appId: deps.appId,
+          clientAppId: accountAppId(endpointScope(endpointUrl(request))),
           by: admitted.by,
           via: admitted.via,
           write: admitted.write,
           ...(admitted.tables ? { tables: admitted.tables } : {}),
           ...(admitted.expiresAt ? { expiresAt: admitted.expiresAt } : {}),
+          ...(admitted.label ? { label: admitted.label } : {}),
+          maxTokenTtlSeconds: settings().maxTtl,
           inspectorUrl: url,
           protocol: INSPECT_PROTOCOL_VERSION,
         };
@@ -923,7 +942,11 @@ export function createInspector(deps: InspectorDeps) {
         const minted = await mintToken(admitted, body);
         return {
           answer: { token: minted.token, expiresAt: minted.expiresAt },
-          event: { tokenId: minted.tokenId, write: body.write === true },
+          event: {
+            tokenId: minted.tokenId,
+            write: body.write === true,
+            ...(minted.label ? { label: minted.label } : {}),
+          },
         };
       }
       default:
@@ -992,6 +1015,7 @@ export function createInspector(deps: InspectorDeps) {
       op: body.op,
       write: false,
       ...(admitted.tokenId ? { tokenId: admitted.tokenId } : {}),
+      ...(admitted.label ? { label: admitted.label } : {}),
     };
     try {
       const { answer: result, event } = await answer(request, admitted, body);

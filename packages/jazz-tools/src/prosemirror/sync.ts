@@ -37,6 +37,7 @@ interface SyncState {
 }
 
 interface SyncConfig {
+  readonly mappedDocs: WeakMap<Node, MappedMarkdown>;
   options: MarkdownSyncOptions;
   /** The column's value as this editor last wrote or applied it. A value
    * read from the column that equals it is that write's echo. */
@@ -45,7 +46,6 @@ interface SyncConfig {
 
 const key = new PluginKey<SyncState>("jazzMarkdownSync");
 const configs = new WeakMap<Plugin, SyncConfig>();
-const mappedDocs = new WeakMap<Node, MappedMarkdown>();
 
 /**
  * Keeps a ProseMirror editor and a markdown text column in step, with no
@@ -55,7 +55,7 @@ const mappedDocs = new WeakMap<Node, MappedMarkdown>();
  * text went.
  */
 export function markdownSync(options: MarkdownSyncOptions): Plugin<SyncState> {
-  const config: SyncConfig = { options, base: null };
+  const config: SyncConfig = { options, base: null, mappedDocs: new WeakMap() };
   const plugin: Plugin<SyncState> = new Plugin<SyncState>({
     key,
     state: {
@@ -109,9 +109,10 @@ export function isRemoteChange(tr: Transaction): boolean {
 
 /** The document's canonical markdown and its position map. */
 export function markdownOf(state: EditorState): MappedMarkdown {
+  const { options, mappedDocs } = configOf(state);
   let mapped = mappedDocs.get(state.doc);
   if (!mapped) {
-    mapped = toMarkdown(state.doc, configOf(state).options.spec);
+    mapped = toMarkdown(state.doc, options.spec);
     mappedDocs.set(state.doc, mapped);
   }
   return mapped;
@@ -154,7 +155,7 @@ export function applyMarkdown(state: EditorState, markdown: string): Transaction
   config.base = markdown;
   const doc = config.options.parse(markdown);
   const next = toMarkdown(doc, config.options.spec);
-  mappedDocs.set(doc, next);
+  config.mappedDocs.set(doc, next);
   if (next.text === current.text) return null;
 
   const old = state.doc;

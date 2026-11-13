@@ -9,6 +9,7 @@ const BETTER_AUTH_SECRET = "auth-betterauth-chat-development-secret";
 const APP_ORIGIN = process.env.NEXT_PUBLIC_APP_ORIGIN!;
 
 async function createBetterAuth() {
+  // #region default-stack-better-auth
   const auth = betterAuth({
     baseURL: APP_ORIGIN,
     database: jazzAdapter({
@@ -31,6 +32,7 @@ async function createBetterAuth() {
       nextCookies(),
     ],
   });
+  // #endregion default-stack-better-auth
 
   await auth.api
     .createUser({
