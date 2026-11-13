@@ -14,17 +14,22 @@ fan-out.
 
 ## Cases and former names
 
-| Case                                          | Former case                                                           |
-| --------------------------------------------- | --------------------------------------------------------------------- |
-| `band_chat_open_room[10000]`                  | `chat_open_chat[10000]` (Chat example)                                |
-| `band_chat_send_100[10000]`                   | `chat_send_100[10000]` (Chat example)                                 |
-| `band_chat_post_announcements[10000]`         | `auth_chat_send[10000]` and `auth_chat_open_room` (auth chat example) |
-| `band_chat_new_message_rooms_open[100]`       | `matching_write_fanout` (`crates/jazz` route subscription curve)      |
-| `band_chat_timeline_second_page[4096]`        | unchanged (the 1,024 point was dropped)                               |
-| `band_chat_unread_recent_rooms[4096]`         | unchanged (the 1,024 point was dropped)                               |
-| `band_chat_caught_up_fast_resume[100, 10000]` | unchanged (the 1,000 point was dropped)                               |
-| `band_chat_presence_on_nested_page`           | new                                                                   |
-| `band_chat_open_nested_page`                  | new                                                                   |
+| Case                                                               | Former case                                                           |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------- |
+| `band_chat_open_room[10000]`                                       | `chat_open_chat[10000]` (Chat example)                                |
+| `band_chat_send_100[10000]`                                        | `chat_send_100[10000]` (Chat example)                                 |
+| `band_chat_post_announcements[10000]`                              | `auth_chat_send[10000]` and `auth_chat_open_room` (auth chat example) |
+| `band_chat_new_message_rooms_open[100]`                            | `matching_write_fanout` (`crates/jazz` route subscription curve)      |
+| `band_chat_timeline_second_page[4096]`                             | unchanged (the 1,024 point was dropped)                               |
+| `band_chat_unread_recent_rooms[4096]`                              | unchanged (the 1,024 point was dropped)                               |
+| `band_chat_caught_up_fast_resume[100, 10000]`                      | unchanged (the 1,000 point was dropped)                               |
+| `band_chat_presence_on_nested_page`                                | new                                                                   |
+| `band_chat_open_nested_page`                                       | new                                                                   |
+| `band_chat_read_mark_chat_lists_open[100]`                         | new (`crates/jazz/benches/fanout_relations.rs`, local only)           |
+| `band_chat_membership_change_chat_lists_open[100]`                 | new (`crates/jazz/benches/fanout_policy_tables.rs`, local only)       |
+| `band_chat_membership_change_relation_policy_chat_lists_open[100]` | new                                                                   |
+| `band_chat_thread_reply_to_rooms_open[100]`                        | new (`crates/jazz/benches/fanout_relations.rs`, local only)           |
+| `band_chat_typing_drafts_rooms_open[100]`                          | new                                                                   |
 
 `band_chat_author_history` was dropped: StagePlan's bounded activity page
 measures the same indexed, ordered, bounded read. The route subscription curve
@@ -43,6 +48,30 @@ claim, posting announcements needs `admin`, and the admin's open view is the
 room's whole history, so every post updates a 10,000-message view (#2086).
 The auth chat room opening itself (`auth_chat_open_room`) happens untimed in
 its fixture; `band_chat_open_room` measures opening a policy-protected room.
+
+## A hundred members online
+
+`src/chat_fanout.rs` measures one write while 100 members each keep a live
+result open, shaped like an adopter's chat app that was load-tested with 100
+users. Each case is the CodSpeed receipt for one fan-out behaviour: which live
+results a write wakes. The timed write's own commit is a small part of the
+time; most of it is dispatch and re-running the woken results.
+
+| Case                                                               | Write, and what it protects                                                                                  |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `band_chat_read_mark_chat_lists_open[100]`                         | A read mark; correlation watches (#5333) wake the 5 lists holding its chat, not all 100                      |
+| `band_chat_membership_change_chat_lists_open[100]`                 | A join under `chat_members.exists.where({ chatId, userId: session })`; evidence watches (#5341) wake about 6 |
+| `band_chat_membership_change_relation_policy_chat_lists_open[100]` | The same join under a relation-style `exists(...)` through `users`: still all 100 (the gap it tracks)        |
+| `band_chat_thread_reply_to_rooms_open[100]`                        | A reply in one of 100 open rooms that include `replyTo`; the self-relation keeps the `chatId` key (#5333)    |
+| `band_chat_typing_drafts_rooms_open[100]`                          | 13 draft upserts and a message, with 100 rooms and 100 composers open: fan-out per commit                    |
+
+The chat list is the adopter's: a member's memberships, each with its chat,
+the chat's roster with users and their unique names, its open group call, the
+latest read mark of someone else and its agents. The typing case runs on one
+store, so it does not include the server's per-tick pass over every connected
+session; that needs a server with 100 sessions. `tests/chat_fanout.rs` checks
+that each case wakes what its fix promises, and every result without the fix
+(the engine's `testing` switches).
 
 ## A band after years of use
 
