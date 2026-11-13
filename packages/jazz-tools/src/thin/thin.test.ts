@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
@@ -14,7 +14,7 @@ import {
   prefetchThinQueries,
   upgradeToLocalFirst,
 } from "./index.js";
-import { ThinRuntime } from "./thin-runtime.js";
+import { THIN_WRITE_RESEND_WINDOW_MS, ThinRuntime } from "./thin-runtime.js";
 
 /** The account manager the thin entry used to export: it signs in JavaScript. */
 const createAccountManager = (config: AccountManagerConfig) =>
@@ -49,6 +49,8 @@ const opened: Db[] = [];
 let server: TestJazz | undefined;
 
 afterEach(async () => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   for (const db of opened.splice(0)) await db.shutdown();
   await server?.stop();
   server = undefined;
@@ -527,6 +529,118 @@ describe("thin client", () => {
       ["in flight", true],
     ]);
     expect(runtime.pendingUploadCount()).toBe(0);
+  }, 60_000);
+
+  it("still sends a write again just inside its resend window, and the server writes it once", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    // The runtime's clock, moved by the test: the answer is lost a moment
+    // before the window closes.
+    const realNow = Date.now.bind(Date);
+    let skew = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skew);
+    const internals = runtime as unknown as {
+      receive(carrier: unknown, piece: Uint8Array): void;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    const receive = internals.receive.bind(runtime);
+    let dropped = false;
+    internals.receive = (carrier, piece) => {
+      if (!dropped && isThinResponse(piece) && decodeThinResponse(piece).body.type === "written") {
+        dropped = true;
+        skew = THIN_WRITE_RESEND_WINDOW_MS - 5_000;
+        internals.lost(carrier, { code: "websocket_closed", retry: "later", message: "lost" });
+        return;
+      }
+      receive(carrier, piece);
+    };
+
+    const inserted = db.insert(app.notes, { text: "in flight", done: false });
+    await inserted.wait({ tier: "global" });
+    expect(dropped).toBe(true);
+    const rows = await db.all(app.notes);
+    expect(rows.map((row) => row.text).sort()).toEqual(["first", "in flight"]);
+    expect(runtime.pendingUploadCount()).toBe(0);
+  }, 60_000);
+
+  it("does not send a write again once its resend window has passed, and its fate is unknown", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const realNow = Date.now.bind(Date);
+    let skew = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skew);
+    const internals = runtime as unknown as {
+      receive(carrier: unknown, piece: Uint8Array): void;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    // The write's answer is lost with a connection that drops ten minutes
+    // after it was first sent.
+    const receive = internals.receive.bind(runtime);
+    let written = 0;
+    internals.receive = (carrier, piece) => {
+      if (isThinResponse(piece) && decodeThinResponse(piece).body.type === "written") {
+        written += 1;
+        skew = THIN_WRITE_RESEND_WINDOW_MS;
+        internals.lost(carrier, { code: "websocket_closed", retry: "later", message: "lost" });
+        return;
+      }
+      receive(carrier, piece);
+    };
+
+    const write = db.insert(app.notes, { text: "in flight", done: false });
+    const error = await write.wait({ tier: "global" }).catch((cause: unknown) => cause);
+    expect(error).toMatchObject({
+      name: "ThinConnectionLostError",
+      message: expect.stringContaining("not sent again"),
+    });
+    // Sent once only: no resend came back answered.
+    expect(written).toBe(1);
+    expect(runtime.pendingUploadCount()).toBe(0);
+  }, 60_000);
+
+  it("ends a write waiting offline to go out again once its resend window passes", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const internals = runtime as unknown as {
+      open(): void;
+      receive(carrier: unknown, piece: Uint8Array): void;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    // The answer is lost, and the client stays offline: it never connects
+    // again while the test's clock moves past the window.
+    const receive = internals.receive.bind(runtime);
+    let lost!: () => void;
+    const answerLost = new Promise<void>((resolve) => (lost = resolve));
+    internals.receive = (carrier, piece) => {
+      if (isThinResponse(piece) && decodeThinResponse(piece).body.type === "written") {
+        internals.open = () => undefined;
+        vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+        internals.lost(carrier, { code: "websocket_closed", retry: "later", message: "lost" });
+        lost();
+        return;
+      }
+      receive(carrier, piece);
+    };
+
+    const write = db.insert(app.notes, { text: "in flight", done: false });
+    const outcome = write.wait({ tier: "global" }).catch((cause: unknown) => cause);
+    await answerLost;
+    let settled = false;
+    void outcome.then(() => (settled = true));
+    await vi.advanceTimersByTimeAsync(THIN_WRITE_RESEND_WINDOW_MS - 1_000);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    vi.useRealTimers();
+    expect(await outcome).toMatchObject({
+      name: "ThinConnectionLostError",
+      message: expect.stringContaining("not sent again"),
+    });
   }, 60_000);
 
   it("does not send a write again under a new credential, which may name another user", async () => {
