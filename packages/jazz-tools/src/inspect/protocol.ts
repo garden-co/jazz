@@ -100,7 +100,15 @@ export type InspectOp = InspectRequest["op"];
 export type InspectVia = "hook" | "token" | "dev";
 
 export interface InspectWhoami {
+  /** The app's id: its store's (`remote({ appId })`, or the id a store keeps). */
   appId: string;
+  /**
+   * The id this app's browser clients name it by in their sync URLs
+   * (`<basePath>/apps/<clientAppId>/…`): derived from the URL they sync with
+   * (their scope), not the store's id, which the backend maps them to. A
+   * client given an explicit `scope` names the app by that scope instead.
+   */
+  clientAppId: string;
   by: string;
   via: InspectVia;
   write: boolean;
