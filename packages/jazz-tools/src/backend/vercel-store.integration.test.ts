@@ -27,6 +27,8 @@ const permissions = s.definePermissions(app, ({ policy }) => {
   policy.notes.allowDelete.never();
 });
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
   while (cleanups.length) await cleanups.pop()!().catch(() => undefined);
@@ -593,6 +595,53 @@ describe("vercel() store", () => {
     expect(fake.calls).not.toContain("stop");
     expect(fake.calls.filter((call) => call.startsWith("start ")).length).toBeGreaterThanOrEqual(3);
   }, 60_000);
+
+  it.each([400, 409, 422])(
+    "opens every concurrent first request on a cold deploy: losing the race to create the Sandbox waits for the winner's (%i)",
+    async (status) => {
+      const server = createServer((_request, response) => response.end("ok"));
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      cleanups.push(() => new Promise((resolve) => server.close(resolve)));
+      const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const fake = fakeVercel({ appId: randomUUID(), url });
+      // The real API: the name is taken as soon as the first create is
+      // accepted, and the Sandbox runs a moment later. A second create gets
+      // `@vercel/sandbox`'s APIError (the API's answer and its message).
+      const create = fake.sdk.Sandbox.create;
+      let creating = false;
+      fake.sdk.Sandbox.create = async (params) => {
+        if (creating || fake.state.exists) {
+          const message = `A sandbox with the name '${String(params.name)}' already exists for this project`;
+          throw Object.assign(new Error(`Status code ${status} is not ok: ${message}`), {
+            response: new Response(null, { status }),
+            json: { error: { code: "bad_request", message } },
+          });
+        }
+        creating = true;
+        await sleep(300);
+        return create(params);
+      };
+      const credential = oidcToken(await startIssuer());
+      // Separate function instances, each opening the store at once.
+      const opened = await Promise.allSettled(
+        Array.from({ length: 5 }, () =>
+          openVercelCore({
+            options: { sdk: fake.sdk, backendCredential: () => credential, name: "jazz-test" },
+            openRemote: ({ url: base }) =>
+              ({ serverUrl: base, handle: async () => ({}), close: async () => {} }) as never,
+            version: "1.2.3",
+            env: { VERCEL_ENV: "production" },
+          }),
+        ),
+      );
+      for (const result of opened) {
+        if (result.status === "fulfilled") cleanups.push(() => result.value.close());
+      }
+      expect(opened.filter((result) => result.status === "rejected")).toEqual([]);
+      expect(fake.calls.filter((call) => call.startsWith("create"))).toEqual(["create jazz-test"]);
+    },
+    60_000,
+  );
 
   it("resumes a stopped Sandbox instead of creating another", async () => {
     const appId = randomUUID();
