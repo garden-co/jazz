@@ -70,15 +70,25 @@ describe("the agent token's label (#5181)", () => {
     expect((await call({ op: "whoami" })).body.label).toBeUndefined();
   });
 
+  it("is kept without control, separator or bidi characters, at most 200 long", async () => {
+    const events: InspectEvent[] = [];
+    const call = inspector({ audit: (event: InspectEvent) => events.push(event) });
+    const label = `fix\u2028jazz inspect: admin\u0085(hook)\u202e write\u0007 ${"x".repeat(300)}`;
+    const minted = await call({ op: "mint_token", label });
+    const kept = (await call({ op: "whoami" }, minted.body.token)).body.label;
+    expect(kept).toHaveLength(200);
+    expect(kept.startsWith("fix jazz inspect: admin (hook) write x")).toBe(true);
+    expect(kept).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/);
+    expect(events.every((event) => event.label === undefined || event.label === kept)).toBe(true);
+  });
+
   it("is quoted in the default audit line, so it can't forge one", async () => {
     const info = vi.spyOn(console, "info").mockImplementation(() => {});
     const call = inspector();
-    const minted = await call({ op: "mint_token", label: "fix\njazz inspect: admin (hook) write" });
+    const minted = await call({ op: "mint_token", label: 'fix "it" \\ now' });
     await call({ op: "whoami" }, minted.body.token);
     const line = info.mock.calls.at(-1)![0] as string;
-    expect(line).toBe(
-      'jazz inspect: ops@example.com (token "fix\\njazz inspect: admin (hook) write") whoami',
-    );
+    expect(line).toBe('jazz inspect: ops@example.com (token "fix \\"it\\" \\\\ now") whoami');
   });
 });
 

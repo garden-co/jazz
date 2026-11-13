@@ -71,4 +71,32 @@ describe("the agent approval page", () => {
       true,
     );
   });
+
+  it("shows the label as the token keeps it: cleaned and at most 200 long", () => {
+    render(
+      <ApprovalPage
+        grant={{
+          state: "st4te",
+          label: `\u202edebug\u2028${"y".repeat(300)}`,
+          callback: "http://127.0.0.1:5123/callback",
+        }}
+        whoami={
+          {
+            appId: APP_ID,
+            by: "ops@example.com",
+            via: "hook",
+            write: false,
+            maxTokenTtlSeconds: 86400,
+            inspectorUrl: "https://app.example.com/jazz/inspect/",
+            protocol: 1,
+          } as never
+        }
+        call={vi.fn() as never}
+        endpoint="https://app.example.com/jazz"
+        navigate={vi.fn()}
+      />,
+    );
+    const shown = screen.getByText(/^debug y+$/);
+    expect(shown.textContent).toHaveLength(200);
+  });
 });

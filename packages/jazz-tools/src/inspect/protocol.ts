@@ -661,3 +661,25 @@ export function renderPolicy(expr: unknown): string {
       return String(node.type ?? "?");
   }
 }
+
+/** The longest an agent token's label is kept. */
+export const MAX_TOKEN_LABEL = 200;
+
+/**
+ * An agent token's label as it is kept and shown: the agent's own text,
+ * without control characters, line or paragraph separators and bidi
+ * overrides (which could forge or reorder lines where it is logged or
+ * shown), at most {@link MAX_TOKEN_LABEL} characters. Empty when none is left.
+ */
+export function cleanTokenLabel(label: unknown): string {
+  if (typeof label !== "string") return "";
+  return label
+    .replace(
+      /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g,
+      " ",
+    )
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_TOKEN_LABEL)
+    .trim();
+}

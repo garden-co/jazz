@@ -8,6 +8,7 @@
 // Anything else and the page shows the token to paste instead.
 
 import {
+  cleanTokenLabel,
   isLoopbackCallback,
   type InspectGrantRequest,
   type InspectWhoami,
@@ -62,6 +63,8 @@ export function ApprovalPage({
   const ttl = grant.ttlSeconds ?? 3600;
   const loopback = grant.callback !== undefined && isLoopbackCallback(grant.callback);
   const cannotWrite = write && !whoami.write;
+  // Shown as the token will keep it.
+  const label = cleanTokenLabel(grant.label);
   // Checked here, before anyone approves: the backend would refuse to mint it.
   const maxTtl = whoami.maxTokenTtlSeconds;
   const badTtl =
@@ -79,7 +82,7 @@ export function ApprovalPage({
         write,
         ttlSeconds: ttl,
         ...(grant.tables ? { tables: grant.tables } : {}),
-        ...(grant.label ? { label: grant.label } : {}),
+        ...(label ? { label } : {}),
       });
       if (loopback && grant.callback) {
         setStep({ kind: "handing-over" });
@@ -105,7 +108,7 @@ export function ApprovalPage({
           <>
             <ul className={styles.grantList}>
               <li>
-                <strong>{grant.label ?? "An agent"}</strong> asks for{" "}
+                <strong>{label || "An agent"}</strong> asks for{" "}
                 <strong>{write ? "read and write" : "read-only"}</strong> access to the app at{" "}
                 <strong>{appHost(endpoint)}</strong>{" "}
                 <span className={styles.note}>(app id {whoami.appId})</span>.
