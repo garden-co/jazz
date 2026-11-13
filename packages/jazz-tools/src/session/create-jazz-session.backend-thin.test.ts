@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -673,16 +673,29 @@ describe("browser session against the app's backend", () => {
       const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
       cleanups.push(async () => warned.mockRestore());
       const localFirst = variant !== "thin";
+      // The wipe runs only for storage that persists.
+      const driver =
+        variant === "local-first, clearOnSignOut"
+          ? persistentStore("jazz-e12-")
+          : ({ type: "memory" } as const);
       const session = await createJazzClient({
         serverUrl: `${served.origin}/jazz`,
         store: memoryStore(),
-        // The wipe runs only for storage that persists.
-        driver:
-          variant === "local-first, clearOnSignOut"
-            ? persistentStore("jazz-e12-")
-            : { type: "memory" },
+        driver,
         clearOnSignOut: variant === "local-first, clearOnSignOut",
-        ...(localFirst ? { client: async () => ({ createClient: createLocalFirstDb }) } : {}),
+        ...(localFirst
+          ? {
+              client: async () => ({
+                createClient: createLocalFirstDb,
+                // A browser deletes the store through its worker; here, its directory.
+                deleteLocalFirstStore: async () => {
+                  const { dataPath } = driver as { dataPath?: string };
+                  if (dataPath) rmSync(dataPath, { recursive: true, force: true });
+                  return "deleted" as const;
+                },
+              }),
+            }
+          : {}),
       });
       cleanups.push(() => session.close());
       await session.loginWithBackend();
@@ -969,6 +982,12 @@ describe("a shared device (clearOnSignOut)", () => {
       client: async () => ({ createClient: createLocalFirstDb }),
     });
     cleanups.push(() => next.close());
+    // A sign-out lasts across reloads (E7), and nothing on the device holds
+    // Kim's root to reopen her with.
+    expect(next.getSnapshot().status).toBe("signed-out");
+    await expect(next.reopenLocalFirst()).rejects.toThrow(/keeps no device account/);
+    // The next person starts a guest of their own.
+    await next.createLocalFirst();
     expect(next.getSnapshot().client!.session!.user).not.toBe(account);
     expect(stored).not.toContain(root);
   }, 60_000);

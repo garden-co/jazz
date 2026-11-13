@@ -1,4 +1,5 @@
-import { ensureAutomaticLocalFirst } from "../accounts/persistence.js";
+import { ensureAutomaticLocalFirst, keptDeviceKey } from "../accounts/persistence.js";
+import { NoKeptDeviceAccountError } from "./no-kept-device-account-error.js";
 import { admitBackendAccount, type AccountHandle, type AccountManager } from "../accounts/state.js";
 import type { JWTAuth, BackendAuth } from "../accounts/enrollment.js";
 import {
@@ -38,6 +39,7 @@ function stillUsable(client: unknown, cause: unknown): boolean {
 export type SessionCoreOperation =
   | "createLocalFirst"
   | "restoreLocalFirst"
+  | "reopenLocalFirst"
   | "loginWithBackend"
   | "linkWithBackend"
   | "logout"
@@ -54,6 +56,14 @@ export interface SessionCoreSnapshot<Client> {
 export interface SessionCoreActions {
   createLocalFirst(): Promise<void>;
   restoreLocalFirst(secret: string): Promise<void>;
+  /**
+   * Sign in again as the device account this device keeps that signed in
+   * most recently (a sign-out keeps its key; `clearOnSignOut` doesn't).
+   * Rejects with {@link NoKeptDeviceAccountError} when it keeps none.
+   */
+  reopenLocalFirst(): Promise<void>;
+  /** That kept device account's key, as this session last saw the device's store; `undefined` without one. */
+  keptLocalFirstKey(): string | undefined;
   /**
    * Sign in as whoever the app's own backend says is signed in. For apps that
    * mount Jazz with `createJazz`: the backend's `authenticate` decides, from
@@ -428,6 +438,13 @@ export async function createJazzSessionOwner<
       }
       return run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret));
     },
+    reopenLocalFirst: async () => {
+      // Looked up first: with none kept, the session goes on as it was.
+      const key = await keptDeviceKey(accounts).latest();
+      if (!key) throw new NoKeptDeviceAccountError("reopenDeviceAccount()");
+      return run("reopenLocalFirst", () => accounts.restoreLocalFirst(key));
+    },
+    keptLocalFirstKey: () => keptDeviceKey(accounts).known(),
     loginWithBackend: () => run("loginWithBackend", () => accounts.loginWithBackend()),
     linkWithBackend: () => run("linkWithBackend", () => accounts.linkWithBackend()),
     retry: () => run("retry", () => selected),

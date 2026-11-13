@@ -2,6 +2,7 @@ import { expect, it, vi } from "vitest";
 import {
   accountForgotten,
   ensureAutomaticLocalFirst,
+  keptDeviceKey,
   prepareAccountManager,
 } from "./persistence.js";
 import { createJazzSessionOwner } from "../session/state.js";
@@ -338,7 +339,7 @@ it("keeps the durable automatic selection when a persistence error is reported d
   finish();
   const adopted = await pending;
   expect(adopted).toBe(manager.getLoggedIn());
-  expect(exportLocalFirstSecret(adopted)).toBe(automaticSecret);
+  expect(exportLocalFirstSecret(adopted!)).toBe(automaticSecret);
   expect(JSON.parse(value!)).toMatchObject({
     selected: 0,
     roots: [automaticSecret],
@@ -408,8 +409,10 @@ it("reopens the remembered user from the fixture bytes, and forgets them on logo
   );
   accounts.logout();
   await accounts.settleSelection();
-  // The bytes a store without a remembered user always had.
-  expect(store.value()).toBe('{"format":"jazz-account-selection-v1","roots":[],"selected":null}');
+  // No remembered user, and a sign-out that lasts until someone signs in (E7).
+  expect(store.value()).toBe(
+    '{"format":"jazz-account-selection-v1","roots":[],"selected":null,"signedOut":true}',
+  );
 });
 
 it("a local-first selection replaces the remembered user", async () => {
@@ -439,7 +442,7 @@ it("an automatic local-first start keeps a remembered user instead of minting a 
     mintToken,
   });
   const selected = await ensureAutomaticLocalFirst(accounts);
-  expect(selected.identity.subject).toBe("alice");
+  expect(selected!.identity.subject).toBe("alice");
   expect(JSON.parse(store.value()!).roots).toEqual([]);
 });
 
@@ -575,7 +578,12 @@ it("forgets a guest's root once it is linked to a user, with rememberBackendUser
   expect(store.value()).not.toContain(kim);
   const next = await sharedDevice(store, guestRoot(2));
   expect(next.getLoggedIn()).toBeUndefined();
-  expect((await ensureAutomaticLocalFirst(next)).id).toBe(accountOf(guestRoot(2)));
+  // Signed out on purpose: the automatic start mints no one (E7).
+  expect(await ensureAutomaticLocalFirst(next)).toBeUndefined();
+  expect(await keptDeviceKey(next).latest()).toBeUndefined();
+  next.createLocalFirst();
+  await next.settleSelection();
+  expect(JSON.parse(store.value()!).roots).toEqual([guestRoot(2)]);
   expect(store.value()).not.toContain(kim);
 });
 
@@ -644,10 +652,13 @@ it("never reopens a forgotten root written back while the tombstone stayed", asy
   );
   const accounts = await sharedDevice(store, guestRoot(3));
   expect(accounts.getLoggedIn()).toBeUndefined();
-  // The automatic start mints a fresh guest instead of adopting Kim's root,
-  // and its write drops that root from the store.
-  expect((await ensureAutomaticLocalFirst(accounts)).id).toBe(accountOf(guestRoot(3)));
+  // The device keeps a device account (guestRoot(2)), so the automatic
+  // start mints no one (E7); the kept key it would reopen is never Kim's.
+  expect(await ensureAutomaticLocalFirst(accounts)).toBeUndefined();
+  expect(await keptDeviceKey(accounts).latest()).toBe(guestRoot(2));
+  accounts.createLocalFirst();
   await accounts.settleSelection();
+  // Its write drops Kim's root from the store.
   expect(JSON.parse(store.value()!).roots).toEqual([guestRoot(2), guestRoot(3)]);
   expect(store.value()).not.toContain(kim);
 });
@@ -669,6 +680,7 @@ it("an explicit restore takes a forgotten root back, and a stale tab keeps it", 
     format: "jazz-account-selection-v1",
     roots: [kim],
     selected: 0,
+    recentDevice: accountOf(kim),
   });
   // Tab B never forgot anything itself, so its writes keep the restored root.
   tabB.createLocalFirst();
