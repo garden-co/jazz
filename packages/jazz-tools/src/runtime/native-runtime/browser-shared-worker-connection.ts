@@ -4,7 +4,7 @@ import {
   resolveBrowserWorkerUrl,
 } from "../browser-worker-config.js";
 import { bundledBrowserWorkerType } from "../browser-worker-assets.js";
-import { METRO_SETUP_ERROR } from "../metro-setup-error.js";
+import { isMetroBundle, METRO_SETUP_ERROR } from "../metro-setup-error.js";
 import {
   BrowserWorkerUnresponsiveError,
   deserializeBrowserRelayError,
@@ -50,7 +50,9 @@ function createBrokerSharedWorker(
   if (usesJazzResolvedWorkerUrl(runtimeSources)) {
     return new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), {
       // Metro cannot build the worker from the expression below. It names
-      // the worker it built by URL instead, as a classic script.
+      // the worker it built by URL instead, as a classic script. A URL the
+      // app sets is started as a module, and the type is not part of the
+      // worker's name: under Metro, leave brokerWorkerUrl unset (documented).
       type: (appServesWorker(runtimeSources) ? null : bundledBrowserWorkerType()) ?? "module",
       name,
     });
@@ -109,6 +111,7 @@ function watchBrokerWorkerStart(
         ? resolveBrowserWorkerUrl(runtimeSources)
         : undefined,
       moduleUrl: import.meta.url,
+      metro: isMetroBundle(),
     }).then(onFailure);
   };
   const stop = () => {

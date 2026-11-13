@@ -208,7 +208,8 @@ The local-first client loads Jazz's Wasm in the browser, and your backend loads 
     ```
 
     This is for the web target of an Expo app. After adding it, start Metro with
-    `npx expo start --clear`.
+    `npx expo start --clear`. Don't set `runtimeSources.brokerWorkerUrl` there:
+    the worker is the chunk Metro builds.
 
   </Tab>
 </Tabs>

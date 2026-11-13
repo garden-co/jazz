@@ -15,6 +15,8 @@
  * for its own module's URL only when it has none.
  */
 
+import { METRO_WORKER_API_ERROR } from "./metro-setup-error.js";
+
 // Metro's module-scoped `require`. `unstable_resolveWorker` is how Expo names
 // a worker chunk without constructing the worker.
 declare const require: {
@@ -35,6 +37,10 @@ export function browserRuntimeModuleUrl(): string {
   return location.href;
 }
 export function bundledBrowserWorkerUrl(): string {
+  // Undocumented in Expo: fail by name, not with a TypeError, if it's gone.
+  if (typeof require === "undefined" || typeof require.unstable_resolveWorker !== "function") {
+    throw new Error(METRO_WORKER_API_ERROR);
+  }
   return pageUrl(require.unstable_resolveWorker("../worker/jazz-broker-worker.js"));
 }
 
