@@ -185,6 +185,8 @@ mod streaming_transaction;
 mod streaming_upload_ownership;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
+#[path = "../subscription_refresh_metadata.rs"]
+mod subscription_refresh_metadata;
 #[path = "../subscription_scope_sharing.rs"]
 mod subscription_scope_sharing;
 #[path = "../sync_access_loss.rs"]
@@ -245,3 +247,6 @@ mod transaction_read_prefix;
 
 #[path = "../governance_claims_composition.rs"]
 mod governance_claims_composition;
+
+#[path = "../governance_ordinary_composition.rs"]
+mod governance_ordinary_composition;
