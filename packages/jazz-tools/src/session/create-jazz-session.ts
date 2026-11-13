@@ -39,7 +39,7 @@ import {
   type UserFollowingSession,
 } from "./follow-user.js";
 import {
-  holdReplicaLock,
+  holdReplicaStore,
   replicaLedger,
   replicaLifecycle,
   type ReplicaLifecycle,
@@ -245,10 +245,23 @@ export async function openBrowserSessionCore(
   const upgrades = localFirstMemory(registry);
   // A memory-only client has no storage to wipe.
   const wipesOnSignOut = !!clearOnSignOut && (config.driver?.type ?? "persistent") === "persistent";
-  // The lifecycle of this device's per-account stores (see `replicaLifecycle`).
-  const replicas = wipesOnSignOut && loadLocalFirst ? openReplicaLifecycle() : undefined;
   // Accounts this page is opening a local-first client for.
   const opening = new Set<string>();
+  /** Delete `account`'s store through its worker, without opening it. */
+  const deleteStore = async (account: string) => {
+    // `jazz-tools/local-first` brings it in the app's own chunk; a loader
+    // that gives only `createClient` gets it loaded here.
+    const deleteLocalFirstStore =
+      (await loadLocalFirst!()).deleteLocalFirstStore ??
+      (await import("../runtime/delete-local-first-store.js")).deleteLocalFirstStore;
+    return deleteLocalFirstStore({
+      ...clientConfig,
+      accountId: account,
+      accountRegistryAuthority: registry,
+    });
+  };
+  // The lifecycle of this device's per-account stores (see `replicaLifecycle`).
+  const replicas = wipesOnSignOut && loadLocalFirst ? openReplicaLifecycle() : undefined;
   function openReplicaLifecycle() {
     const fetcher = bearer ? bearerFetch(bearer, config.fetch) : config.fetch;
     return replicaLifecycle({
@@ -260,18 +273,7 @@ export async function openBrowserSessionCore(
         const snapshot = session?.getSnapshot();
         return snapshot?.status !== "closed" && snapshot?.account?.id === account;
       },
-      deleteStore: async (account) => {
-        // `jazz-tools/local-first` brings it in the app's own chunk; a loader
-        // that gives only `createClient` gets it loaded here.
-        const deleteLocalFirstStore =
-          (await loadLocalFirst!()).deleteLocalFirstStore ??
-          (await import("../runtime/delete-local-first-store.js")).deleteLocalFirstStore;
-        return deleteLocalFirstStore({
-          ...clientConfig,
-          accountId: account,
-          accountRegistryAuthority: registry,
-        });
-      },
+      deleteStore,
       backendUser: async () => {
         const user = await signedInIdentity(registry, fetcher);
         return user ? { issuer: user.issuer, subject: user.subject } : null;
@@ -295,7 +297,7 @@ export async function openBrowserSessionCore(
             kind: rememberBackendUser(account) ? "backend" : "device",
             identity: account.identity,
           })
-        : await holdReplicaLock(registry, account.id);
+        : await holdReplicaStore(registry, account.id, () => deleteStore(account.id));
       let client: JazzClient;
       try {
         client = await openLocalFirst(createDb, account);

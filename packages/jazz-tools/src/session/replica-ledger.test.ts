@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  holdReplicaStore,
   replicaLedger,
   replicaLifecycle,
   type Locks,
@@ -513,6 +514,28 @@ describe("the lifecycle, scenario by scenario", () => {
     expect(b.violations).toEqual([]);
     expect(b.ledger.get(alice.id)).toBeDefined();
     expect(b.stores.get(alice.id)).toBeDefined();
+  });
+
+  it("a page without clearOnSignOut records nothing, and finishes a crashed wipe before it opens", async () => {
+    vi.stubGlobal("navigator", { locks: new LockManager().view("A") });
+    const deletes: string[] = [];
+    // Nothing recorded for a page that keeps its data.
+    const release = await holdReplicaStore(REGISTRY, alice.id, async () => "deleted");
+    expect(replicaLedger(REGISTRY).read()).toEqual([]);
+    await release();
+    // A clearOnSignOut tab's delete crashed: the mark is there.
+    const ledger = replicaLedger(REGISTRY);
+    ledger.record({ account: alice.id, kind: "backend", identity: alice.identity });
+    ledger.markWiping(alice.id, true);
+    let held = 2;
+    const opened = await holdReplicaStore(REGISTRY, alice.id, async () => {
+      deletes.push(alice.id);
+      // The worker is still closing for the first two tries.
+      return held-- > 0 ? "held" : "deleted";
+    });
+    expect(deletes).toHaveLength(3);
+    expect(ledger.get(alice.id)).toBeUndefined();
+    await opened();
   });
 
   it("a delete another build's worker holds deletes nothing and keeps the entry unmarked", async () => {
