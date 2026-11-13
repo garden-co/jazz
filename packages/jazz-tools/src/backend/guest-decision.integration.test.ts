@@ -186,7 +186,11 @@ async function deployedVercel(): Promise<JazzStore> {
       },
     },
   };
-  return vercel({ sdk, backendCredential: () => oidcToken(issuer) });
+  return vercel({
+    sdk,
+    backendCredential: () => oidcToken(issuer),
+    namespace: ({ environment }) => environment,
+  });
 }
 
 const stores: Array<[string, () => Promise<JazzStore>]> = [
