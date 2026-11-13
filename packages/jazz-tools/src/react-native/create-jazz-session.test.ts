@@ -142,7 +142,7 @@ for (const [host, create, prepare, own] of [
       const session = await create({
         scope: "app-1",
         serverUrl: "https://jazz.example.com",
-        store: { read: async () => null, update: async () => {} },
+        ...own,
         bearer: async () => "bearer-of-alice",
       });
       const asked = vi
