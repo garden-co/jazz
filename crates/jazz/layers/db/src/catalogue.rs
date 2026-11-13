@@ -500,19 +500,17 @@ where
     use jazz_sql::Row;
     let storage = |error: S::Error| Error::new(ErrorCode::Storage, error.to_string());
     let mut rows = CatalogueRows::default();
-    if !conn.query_rows(
-        "SELECT count(*) = 3 FROM sqlite_master WHERE type = 'table' AND name IN ('_jazz_schemas', '_jazz_lenses', '_jazz_permissions')",
-        &[], |row| row.get::<bool>(0),
-    ).await.map_err(storage)?.first().copied().ok_or_else(|| Error::new(ErrorCode::Storage, "catalogue existence query returned no row"))? {
+    if !exists(conn).await? {
         return Ok(rows);
     }
     let has_versions = conn
-        .query_rows(
+        .query_one(
             "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '_jazz_versions'",
             &[],
             |r| r.get::<bool>(0),
         )
-        .await.map_err(storage)?.first().copied().ok_or_else(|| Error::new(ErrorCode::Storage, "catalogue existence query returned no row"))?;
+        .await
+        .map_err(storage)?;
     let sql = if has_versions {
         "SELECT s.hash, v.version, s.published_at, s.def, v.n FROM _jazz_schemas s \
          LEFT JOIN _jazz_versions v ON v.n = s.n ORDER BY s.hash"
@@ -614,18 +612,22 @@ where
             )?,
         });
     }
-    if conn.query_optional(
-        "SELECT X'01' FROM sqlite_master WHERE type = 'table' AND name = '_jazz_bundles' LIMIT 1", &[], |row| jazz_sql::Row::get::<Vec<u8>>(&row, 0),
-    ).await.map_err(storage)?.is_some() {
-        let found = conn.query_rows("SELECT id, hash, published_at, def FROM _jazz_bundles ORDER BY id", &[], |r| {
-                Ok((
-                    r.get::<Vec<u8>>(0)?,
-                    r.get::<Vec<u8>>(1)?,
-                    r.get::<i64>(2)?,
-                    r.get::<String>(3)?,
-                ))
-            })
-            .await.map_err(storage)?;
+    if has_bundles(conn).await? {
+        let found = conn
+            .query_rows(
+                "SELECT id, hash, published_at, def FROM _jazz_bundles ORDER BY id",
+                &[],
+                |r| {
+                    Ok((
+                        r.get::<Vec<u8>>(0)?,
+                        r.get::<Vec<u8>>(1)?,
+                        r.get::<i64>(2)?,
+                        r.get::<String>(3)?,
+                    ))
+                },
+            )
+            .await
+            .map_err(storage)?;
         for row in found {
             let (id, hash, published_at, def) = row;
             let id = BundleId(*hash_of(id, "_jazz_bundles")?.as_bytes());

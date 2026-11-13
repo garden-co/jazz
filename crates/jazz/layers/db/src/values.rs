@@ -51,10 +51,6 @@ pub(crate) struct TransactionJournal {
 }
 
 impl TransactionJournal {
-    pub(crate) fn depth(&self) -> usize {
-        self.frames.borrow().len()
-    }
-
     fn begin(&self) {
         self.frames.borrow_mut().push(Vec::new());
     }

@@ -11,7 +11,3 @@ sqlite = ["dep:rusqlite"]
 
 [dependencies]
 rusqlite = { version = "0.40", optional = true, features = ["limits"] }
-
-[[example]]
-name = "native_probe"
-required-features = ["sqlite"]

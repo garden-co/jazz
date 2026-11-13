@@ -1,4 +1,4 @@
-//! Experimental SQL execution boundary. The default build has no SQLite
+//! SQL execution boundary. The default build has no SQLite
 //! dependency. The optional native adapter executes inline on its owner thread;
 //! neither interface requires a runtime, boxed futures, or Send.
 //! Jazz Db uses this boundary for SQL execution; connection ownership and
@@ -374,18 +374,10 @@ pub async fn get<S: Sql>(
     table: HostTable,
     key: &[u8],
 ) -> Result<Option<Vec<u8>>, S::Error> {
-    let name = table.sql_name();
-    if sql
-        .query_optional(
-            "SELECT X'01' FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
-            &[Param::Text(&name)],
-            |row| row.get::<Vec<u8>>(0),
-        )
-        .await?
-        .is_none()
-    {
+    if !exists(sql, table).await? {
         return Ok(None);
     }
+    let name = table.sql_name();
     sql.query_optional(
         &format!("SELECT v FROM {name} WHERE k = ?1"),
         &[Param::Blob(key)],
@@ -482,14 +474,12 @@ pub async fn prefix<S: Sql>(
 }
 
 pub async fn exists<S: Sql>(sql: &mut S, table: HostTable) -> Result<bool, S::Error> {
-    Ok(sql
-        .query_optional(
-            "SELECT X'01' FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
-            &[Param::Text(&table.sql_name())],
-            |row| row.get::<Vec<u8>>(0),
-        )
-        .await?
-        .is_some())
+    sql.query_one(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        &[Param::Text(&table.sql_name())],
+        |row| row.get::<bool>(0),
+    )
+    .await
 }
 
 /// Caller owns the transaction through commit or rollback, including Drop.

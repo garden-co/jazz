@@ -369,7 +369,7 @@ impl Source {
                 .map_err(|e| e.to_string())
             }
             #[cfg(not(feature = "sqlite"))]
-            _ => Err("Native storage is disabled; configure a worker store".into()),
+            _ => Err("Built-in SQLite storage is disabled; configure a worker store".into()),
         }
     }
 

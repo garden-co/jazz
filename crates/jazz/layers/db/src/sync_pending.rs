@@ -786,8 +786,7 @@ where
         }).await
 }
 
-/// Keep malformed stored rows distinct from execution failures, without
-/// copying borrowed rows into an intermediate SQL-value collection.
+/// Keep row decoding failures distinct from SQL execution failures.
 async fn read_rows<S: jazz_sql::Sql, T>(
     sql: &mut S,
     statement: &str,
@@ -798,25 +797,12 @@ async fn read_rows<S: jazz_sql::Sql, T>(
 where
     S::Error: std::fmt::Display,
 {
-    let mut out = Vec::new();
-    let mut invalid = false;
-    sql.query(statement, params, |row| match decode(row) {
-        Ok(value) => {
-            out.push(value);
-            Ok(std::ops::ControlFlow::Continue(()))
-        }
-        Err(_) => {
-            invalid = true;
-            Ok(std::ops::ControlFlow::Break(()))
-        }
-    })
-    .await
-    .map_err(|error| Error::new(ErrorCode::Storage, error.to_string()))?;
-    if invalid {
-        Err(bad(malformed))
-    } else {
-        Ok(out)
-    }
+    sql.query_rows(statement, params, |row| Ok(decode(row)))
+        .await
+        .map_err(crate::values::provider_error)?
+        .into_iter()
+        .map(|row| row.map_err(|_| bad(malformed)))
+        .collect()
 }
 
 fn sql_value(row: &impl jazz_sql::Row, index: usize) -> Result<SqlValue, jazz_sql::CellError> {

@@ -1,7 +1,7 @@
 //! The `Db` facade: Jazz's public database API over one SQLite connection.
 
 // A complete operation exclusively owns this thread-affine database while SQL
-// suspends. DbOwner serializes async-worker callers; native SQL completes inline.
+// suspends. Hosts serialize async-worker callers; native SQL completes inline.
 // State and fanout borrows deliberately span SQL awaits so another operation
 // cannot observe partially updated state. These internal awaits must not reenter
 // Db or invoke application callbacks that borrow the same state.
@@ -27,10 +27,6 @@ use jazz_sql::Cell as SqlCell;
 use jazz_sql::{Connection as _, Row as _, Sql as _};
 #[cfg(feature = "sqlite")]
 use rusqlite::Connection;
-
-#[path = "owner.rs"]
-mod owner;
-pub use owner::DbOwner;
 
 pub use crate::options::{
     DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, InsertOptions,
@@ -1389,18 +1385,6 @@ impl Error {
 }
 
 impl Db {
-    /// Open on an exclusively owned asynchronous SQLite worker. Hosts should
-    /// submit complete operations through DbOwner and await its close before
-    /// stopping the runtime. No native SQLite connection is created here.
-    pub async fn open_worker(
-        config: DbConfig,
-        worker: impl crate::backend::WorkerSql + 'static,
-    ) -> Result<Self, Error> {
-        let conn = crate::host::DbConnection::worker(worker);
-        crate::format::admit(&mut conn.sql()).await?;
-        Self::open_on(config, conn, None).await
-    }
-
     pub async fn close_worker(&self) -> Result<(), Error> {
         self.inner.metadata().conn.close_worker().await
     }

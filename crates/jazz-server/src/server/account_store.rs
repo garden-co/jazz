@@ -139,8 +139,8 @@ impl StoredAccountRegistry {
 struct Sql<'a>(ConnectionSql<'a>);
 
 // AccountState is synchronous, but only runs inside the server's dedicated
-// connection owner (or an inline native read). Park that thread while Rivet's
-// worker finishes; request cancellation never drops this admitted operation.
+// connection owner (or an inline native read). Park that thread while the storage
+// provider finishes; request cancellation never drops this admitted operation.
 impl AccountState for Sql<'_> {
     type Error = RegistryError;
     fn assignment(&mut self, principal: &Principal) -> Result<Option<Assignment>, RegistryError> {

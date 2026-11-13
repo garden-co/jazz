@@ -126,9 +126,7 @@ impl DbConnection {
     }
     pub(crate) fn sql(&self) -> ConnectionSql<'_> {
         ConnectionSql {
-            owner: Some(self),
-            #[cfg(feature = "sqlite")]
-            reader: None,
+            source: ConnectionSource::Owned(self),
         }
     }
     pub(crate) fn single_connection(&self) -> bool {
@@ -365,20 +363,49 @@ impl Row for ConnectionRow<'_> {
     }
 }
 pub struct ConnectionSql<'a> {
-    owner: Option<&'a DbConnection>,
-    #[cfg(feature = "sqlite")]
-    reader: Option<&'a rusqlite::Connection>,
+    source: ConnectionSource<'a>,
 }
-impl<'a> ConnectionSql<'a> {
+enum ConnectionSource<'a> {
+    Owned(&'a DbConnection),
     #[cfg(feature = "sqlite")]
-    pub(crate) fn reader(reader: &'a rusqlite::Connection) -> Self {
-        Self {
-            owner: None,
-            reader: Some(reader),
+    Reader(&'a rusqlite::Connection),
+}
+impl ConnectionSql<'_> {
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn reader(reader: &rusqlite::Connection) -> ConnectionSql<'_> {
+        ConnectionSql {
+            source: ConnectionSource::Reader(reader),
         }
     }
-    fn owner(&self) -> &'a DbConnection {
-        self.owner.expect("owned SQL connection")
+}
+
+/// Preserve Jazz callback errors while adapting native SQLite's row and error types.
+#[cfg(feature = "sqlite")]
+async fn query_native<S, F>(
+    native: &mut S,
+    sql: &str,
+    params: &[Param<'_>],
+    mut visit: F,
+) -> Result<QueryStats, Error>
+where
+    S: Sql<Error = rusqlite::Error>,
+    for<'a> S: Sql<Row<'a> = jazz_sql::native::NativeRow<'a>>,
+    F: FnMut(ConnectionRow<'_>) -> Result<ControlFlow<()>, Error>,
+{
+    let mut callback_error = None;
+    let result = native
+        .query_with_stats(sql, params, |row| match visit(ConnectionRow::Native(row)) {
+            Ok(flow) => Ok(flow),
+            Err(error) => {
+                callback_error = Some(error);
+                Ok(ControlFlow::Break(()))
+            }
+        })
+        .await
+        .map_err(Error::from);
+    match callback_error {
+        Some(error) => Err(error),
+        None => result,
     }
 }
 impl Sql for ConnectionSql<'_> {
@@ -388,33 +415,39 @@ impl Sql for ConnectionSql<'_> {
         Error::new(ErrorCode::Storage, message)
     }
     async fn execute_script(&mut self, sql: &str) -> Result<(), Error> {
-        #[cfg(feature = "sqlite")]
-        if let Some(reader) = self.reader {
-            return jazz_sql::native::Native(reader)
+        match self.source {
+            #[cfg(feature = "sqlite")]
+            ConnectionSource::Reader(reader) => jazz_sql::native::Native(reader)
                 .execute_script(sql)
                 .await
-                .map_err(Error::from);
+                .map_err(Error::from),
+            ConnectionSource::Owned(owner) => {
+                owner.settle().await?;
+                owner.raw_script(sql).await
+            }
         }
-        self.owner().settle().await?;
-        self.owner().raw_script(sql).await
     }
     async fn execute(&mut self, sql: &str, params: &[Param<'_>]) -> Result<usize, Error> {
-        #[cfg(feature = "sqlite")]
-        if let Some(reader) = self.reader {
-            return jazz_sql::native::Native(reader)
+        match self.source {
+            #[cfg(feature = "sqlite")]
+            ConnectionSource::Reader(reader) => jazz_sql::native::Native(reader)
                 .execute(sql, params)
                 .await
-                .map_err(Error::from);
+                .map_err(Error::from),
+            ConnectionSource::Owned(owner) => {
+                owner.settle().await?;
+                let before = owner.transaction_open();
+                let result = match &owner.shared.backend {
+                    #[cfg(feature = "sqlite")]
+                    Backend::Native(native) => {
+                        native.sql().execute(sql, params).await.map_err(Error::from)
+                    }
+                    Backend::Worker(worker) => worker.execute(sql, params).await,
+                };
+                owner.observed(before, result.is_err());
+                result
+            }
         }
-        self.owner().settle().await?;
-        let before = self.owner().transaction_open();
-        let result = match &self.owner().shared.backend {
-            #[cfg(feature = "sqlite")]
-            Backend::Native(native) => native.sql().execute(sql, params).await.map_err(Error::from),
-            Backend::Worker(worker) => worker.execute(sql, params).await,
-        };
-        self.owner().observed(before, result.is_err());
-        result
     }
     async fn query<F>(&mut self, sql: &str, params: &[Param<'_>], visit: F) -> Result<(), Error>
     where
@@ -431,98 +464,77 @@ impl Sql for ConnectionSql<'_> {
     where
         F: FnMut(Self::Row<'_>) -> Result<ControlFlow<()>, Error>,
     {
-        #[cfg(feature = "sqlite")]
-        if let Some(reader) = self.reader {
-            let mut callback_error = None;
-            let result = jazz_sql::native::Native(reader)
-                .query_with_stats(sql, params, |row| match visit(ConnectionRow::Native(row)) {
-                    Ok(flow) => Ok(flow),
-                    Err(error) => {
-                        callback_error = Some(error);
-                        Ok(ControlFlow::Break(()))
-                    }
-                })
-                .await
-                .map_err(Error::from);
-            return match callback_error {
-                Some(error) => Err(error),
-                None => result,
-            };
-        }
-        self.owner().settle().await?;
-        let before = self.owner().transaction_open();
-        let result = match &self.owner().shared.backend {
+        match self.source {
             #[cfg(feature = "sqlite")]
-            Backend::Native(native) => {
-                let mut callback_error = None;
-                let result = native
-                    .sql()
-                    .query_with_stats(sql, params, |row| match visit(ConnectionRow::Native(row)) {
-                        Ok(flow) => Ok(flow),
-                        Err(error) => {
-                            callback_error = Some(error);
-                            Ok(ControlFlow::Break(()))
-                        }
-                    })
-                    .await
-                    .map_err(Error::from);
-                match callback_error {
-                    Some(error) => Err(error),
-                    None => result,
-                }
+            ConnectionSource::Reader(reader) => {
+                query_native(&mut jazz_sql::native::Native(reader), sql, params, visit).await
             }
-            Backend::Worker(worker) => match worker.query(sql, params).await {
-                Err(error) => Err(error),
-                Ok(rows) => (|| {
-                    for row in &rows.rows {
-                        if visit(ConnectionRow::Worker(row, &rows.columns))?.is_break() {
-                            break;
-                        }
+            ConnectionSource::Owned(owner) => {
+                owner.settle().await?;
+                let before = owner.transaction_open();
+                let result = match &owner.shared.backend {
+                    #[cfg(feature = "sqlite")]
+                    Backend::Native(native) => {
+                        query_native(&mut native.sql(), sql, params, visit).await
                     }
-                    Ok(QueryStats::default())
-                })(),
-            },
-        };
-        self.owner().observed(before, result.is_err());
-        result
+                    Backend::Worker(worker) => match worker.query(sql, params).await {
+                        Err(error) => Err(error),
+                        Ok(rows) => (|| {
+                            for row in &rows.rows {
+                                if visit(ConnectionRow::Worker(row, &rows.columns))?.is_break() {
+                                    break;
+                                }
+                            }
+                            Ok(QueryStats::default())
+                        })(),
+                    },
+                };
+                owner.observed(before, result.is_err());
+                result
+            }
+        }
     }
 }
 impl jazz_sql::Connection for ConnectionSql<'_> {
     fn transaction_open(&self) -> bool {
-        #[cfg(feature = "sqlite")]
-        if let Some(reader) = self.reader {
-            return jazz_sql::native::Native(reader).transaction_open();
+        match self.source {
+            #[cfg(feature = "sqlite")]
+            ConnectionSource::Reader(reader) => jazz_sql::native::Native(reader).transaction_open(),
+            ConnectionSource::Owned(owner) => owner.transaction_open(),
         }
-        self.owner().transaction_open()
     }
     fn parameter_limit(&self) -> Result<usize, Error> {
-        #[cfg(feature = "sqlite")]
-        if let Some(reader) = self.reader {
-            return jazz_sql::native::Native(reader)
-                .parameter_limit()
-                .map_err(Error::from);
-        }
-        match &self.owner().shared.backend {
+        match self.source {
             #[cfg(feature = "sqlite")]
-            Backend::Native(native) => native.sql().parameter_limit().map_err(Error::from),
-            Backend::Worker(worker) => worker.parameter_limit(),
+            ConnectionSource::Reader(reader) => jazz_sql::native::Native(reader)
+                .parameter_limit()
+                .map_err(Error::from),
+            ConnectionSource::Owned(owner) => match &owner.shared.backend {
+                #[cfg(feature = "sqlite")]
+                Backend::Native(native) => native.sql().parameter_limit().map_err(Error::from),
+                Backend::Worker(worker) => worker.parameter_limit(),
+            },
         }
     }
     async fn total_changes(&mut self) -> Result<u64, Error> {
-        #[cfg(feature = "sqlite")]
-        if let Some(reader) = self.reader {
-            return jazz_sql::native::Native(reader)
+        match self.source {
+            #[cfg(feature = "sqlite")]
+            ConnectionSource::Reader(reader) => jazz_sql::native::Native(reader)
                 .total_changes()
                 .await
-                .map_err(Error::from);
-        }
-        self.owner().settle().await?;
-        match &self.owner().shared.backend {
-            #[cfg(feature = "sqlite")]
-            Backend::Native(native) => native.sql().total_changes().await.map_err(Error::from),
-            Backend::Worker(_) => {
-                self.query_one("SELECT total_changes()", &[], |row| row.get(0))
-                    .await
+                .map_err(Error::from),
+            ConnectionSource::Owned(owner) => {
+                owner.settle().await?;
+                match &owner.shared.backend {
+                    #[cfg(feature = "sqlite")]
+                    Backend::Native(native) => {
+                        native.sql().total_changes().await.map_err(Error::from)
+                    }
+                    Backend::Worker(_) => {
+                        self.query_one("SELECT total_changes()", &[], |row| row.get(0))
+                            .await
+                    }
+                }
             }
         }
     }

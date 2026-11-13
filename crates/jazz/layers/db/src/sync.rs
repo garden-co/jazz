@@ -6225,10 +6225,7 @@ impl Inner {
     }
 
     async fn has_rejected_store(&self) -> Result<bool, Error> {
-        use jazz_sql::Sql;
-        self.conn.sql().query_optional(
-            "SELECT X'01' FROM sqlite_master WHERE type = 'table' AND name = '_jazz_rejected' LIMIT 1", &[], |row| jazz_sql::Row::get::<Vec<u8>>(&row, 0),
-        ).await.map(|row| row.is_some()).map_err(storage)
+        self.has_table("_jazz_rejected").await
     }
 
     /// Forget settled commit `tx`: its items, rows and version go with it
