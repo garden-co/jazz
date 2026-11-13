@@ -1113,12 +1113,26 @@ export function beginClientTransactionAfter(
   return client.openTransaction(kind, session, attribution, reservedId, prerequisite);
 }
 
+/** @internal Sees a committed write's id and the identity it was made with. */
+export type CommittedWriteObserver = (
+  txId: TxId,
+  session: Session | undefined,
+  attribution: string | undefined,
+) => void;
+
 /** High-level Jazz client. */
 export class JazzClient {
   private readonly transactionPreparations = new Map<
     OpenTransactionId,
-    { pending?: Promise<void>; committing: boolean; unopened?: boolean }
+    {
+      pending?: Promise<void>;
+      committing: boolean;
+      unopened?: boolean;
+      session?: Session;
+      attribution?: string;
+    }
   >();
+  private committedWriteObserver: CommittedWriteObserver | undefined;
   private runtime: Runtime;
   private scheduler: (task: () => void) => void;
   private context: AppContext;
@@ -1243,9 +1257,17 @@ export class JazzClient {
     const id = reservedId ?? createOpenTransactionId();
     if (prerequisite) {
       const context = this.writeContext(session, attribution);
-      const state: { pending?: Promise<void>; committing: boolean; unopened?: boolean } = {
+      const state: {
+        pending?: Promise<void>;
+        committing: boolean;
+        unopened?: boolean;
+        session?: Session;
+        attribution?: string;
+      } = {
         committing: false,
         unopened: true,
+        session,
+        attribution,
       };
       this.transactionPreparations.set(id, state);
       state.pending = Promise.resolve().then(async () => {
@@ -1266,7 +1288,7 @@ export class JazzClient {
       return id;
     }
     const opened = this.runtime.beginTransaction(kind, id, this.writeContext(session, attribution));
-    this.transactionPreparations.set(opened, { committing: false });
+    this.transactionPreparations.set(opened, { committing: false, session, attribution });
     return opened;
   }
 
@@ -1288,6 +1310,33 @@ export class JazzClient {
 
   onMutationError(listener: (event: MutationErrorEvent) => void): void {
     this.runtime.onMutationError(listener);
+  }
+
+  /**
+   * @internal Observe every write this client commits, with the explicit
+   * session and attribution it was made with. A backend context shares one
+   * client between many `Db`s and uses this to route each rejection back to
+   * the `Db` that made the write.
+   */
+  observeCommittedWrites(observer: CommittedWriteObserver): void {
+    this.committedWriteObserver = observer;
+  }
+
+  private reportCommittedWrite<T extends TxId | Promise<TxId>>(
+    txId: T,
+    writer?: { session?: Session; attribution?: string },
+  ): T {
+    const observer = this.committedWriteObserver;
+    if (!observer) return txId;
+    const session = writer?.session;
+    const attribution = writer?.attribution;
+    if (typeof txId === "string") observer(txId, session, attribution);
+    else
+      txId.then(
+        (committed) => observer(committed, session, attribution),
+        () => undefined,
+      );
+    return txId;
   }
 
   /**
@@ -1408,7 +1457,7 @@ export class JazzClient {
       : runtime.commitTransaction(id);
     if (typeof submitted === "string") {
       this.transactionPreparations.delete(id);
-      return new WriteHandle(submitted, this);
+      return new WriteHandle(this.reportCommittedWrite(submitted, state), this);
     }
     if (state) state.committing = true;
     const txId = Promise.resolve(submitted).then(
@@ -1421,7 +1470,7 @@ export class JazzClient {
         throw error;
       },
     );
-    return new WriteHandle(txId, this);
+    return new WriteHandle(this.reportCommittedWrite(txId, state), this);
   }
 
   rollbackTransaction(id: OpenTransactionId): Promise<boolean> {
@@ -1595,7 +1644,11 @@ export class JazzClient {
     attribution?: string,
   ): WriteResult<Row> {
     const row = this.insertInternal(table, values, options, session, attribution);
-    return new WriteResult(row, committedTxId(row), this);
+    return new WriteResult(
+      row,
+      this.reportCommittedWrite(committedTxId(row), { session, attribution }),
+      this,
+    );
   }
 
   /**
@@ -1695,7 +1748,9 @@ export class JazzClient {
     if (result.kind !== "committed") {
       throw new Error("Streaming mutations cannot be staged inside an open transaction");
     }
-    return new WriteHandle(result.txId, this, { id: result.id });
+    return new WriteHandle(this.reportCommittedWrite(result.txId, { session, attribution }), this, {
+      id: result.id,
+    });
   }
 
   /**
@@ -1796,7 +1851,11 @@ export class JazzClient {
     attribution?: string,
   ): WriteResult<Row> {
     const row = this.restoreInternal(table, objectId, values, options, session, attribution);
-    return new WriteResult(row, committedTxId(row), this);
+    return new WriteResult(
+      row,
+      this.reportCommittedWrite(committedTxId(row), { session, attribution }),
+      this,
+    );
   }
 
   /**
@@ -1833,7 +1892,10 @@ export class JazzClient {
     attribution?: string,
   ): WriteHandle {
     const result = this.upsertInternal(table, objectId, values, options, session, attribution);
-    return new WriteHandle(committedTxId(result), this);
+    return new WriteHandle(
+      this.reportCommittedWrite(committedTxId(result), { session, attribution }),
+      this,
+    );
   }
 
   /**
@@ -1919,7 +1981,10 @@ export class JazzClient {
       undefined,
       options?.branch,
     );
-    return new WriteHandle(committedTxId(result), this);
+    return new WriteHandle(
+      this.reportCommittedWrite(committedTxId(result), { session, attribution }),
+      this,
+    );
   }
 
   /** @internal Typed `Db.update` diff lowering; not exposed as an imperative API. */
@@ -1943,7 +2008,10 @@ export class JazzClient {
       undefined,
       options?.branch,
     );
-    return new WriteHandle(committedTxId(result), this);
+    return new WriteHandle(
+      this.reportCommittedWrite(committedTxId(result), { session, attribution }),
+      this,
+    );
   }
 
   /** @internal */
@@ -2011,7 +2079,10 @@ export class JazzClient {
       undefined,
       options?.branch,
     );
-    return new WriteHandle(committedTxId(result), this);
+    return new WriteHandle(
+      this.reportCommittedWrite(committedTxId(result), { session, attribution }),
+      this,
+    );
   }
 
   canInsertLocally(table: string, values: InsertValues, session?: Session): PermissionAdvice {
