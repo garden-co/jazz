@@ -5093,8 +5093,17 @@ function updatedAtMsFromWriteContext(writeContext?: string | null): number | und
   return parsed.updated_at;
 }
 
+/**
+ * The explicit `$updatedAt` a write names (a backfill or import), or
+ * `null` for an ordinary write. An ordinary write carries no time: the
+ * replica's clock stamps it while it is pending, and the authority's clock
+ * stamps it when it accepts it, so `$updatedAt` and `$acceptedAt` are the
+ * acceptance time, not the device clock at authoring (an offline edit
+ * synced later is stamped when it syncs), and a device with a fast clock
+ * is not refused for writing in the future.
+ */
 export function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
-  return updatedAtMsFromWriteContext(writeContext) ?? Date.now();
+  return updatedAtMsFromWriteContext(writeContext) ?? null;
 }
 
 function txStateMessage(
