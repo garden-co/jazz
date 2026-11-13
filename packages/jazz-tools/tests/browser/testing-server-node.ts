@@ -6,6 +6,7 @@ import {
 } from "../../src/testing/index.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
+import { shipMigrations, type ClientMigrations } from "../../src/runtime/client-migrations.js";
 import {
   createTransportControl,
   type TransportControl,
@@ -99,8 +100,16 @@ export async function stopJazzServerByUrl(serverUrl: string): Promise<void> {
  */
 export async function jazzAppFront(
   coreUrl: string,
-  app: { schema: WasmSchema; permissions: CompiledPermissionsMap; pageOrigin: string },
+  app: {
+    schema: WasmSchema;
+    migrations?: ClientMigrations;
+    permissions: CompiledPermissionsMap;
+    pageOrigin: string;
+  },
 ): Promise<string> {
+  // Restore what the command's serialization dropped: the migrations the
+  // app ships, which its createJazz publishes with the schema.
+  if (app.migrations) shipMigrations(app.schema, app.migrations);
   const found = await startedFor(coreUrl);
   if (!found) throw new Error(`No Jazz test server is running at ${coreUrl}`);
   const started = found[1];
