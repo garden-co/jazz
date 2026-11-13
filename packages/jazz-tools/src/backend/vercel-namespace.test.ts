@@ -131,10 +131,24 @@ describe("vercel() namespace", () => {
 
   it("refuses `name`, saying how to migrate", () => {
     expect(() => vercel({ name: "jazz-prj-1-production" } as never)).toThrow(
-      /`name` is now `namespace`.*perBranch.*namespace: "<rest>"/,
+      /`name` is now `namespace`.*namespace: "<rest>".*perBranch/,
     );
     expect(() => vercel({ namespace: "production", name: "x" } as never)).toThrow(
       /`name` is now `namespace`/,
+    );
+    // With the project known, the namespace that keeps the core, exactly.
+    const credentials = { token: "t", teamId: "team_1", projectId: "prj_AbC1" };
+    expect(() => vercel({ name: "jazz-prj-abc1-staging-eu", credentials } as never)).toThrow(
+      'To keep the core jazz-prj-abc1-staging-eu, pass `namespace: "staging-eu"`.',
+    );
+    // Any other name can't be reached, and the error says so.
+    for (const name of ["myapp-core", "jazz-prj_AbC1-prod", "jazz-prj-abc1-Prod"]) {
+      expect(() => vercel({ name, credentials } as never)).toThrow(
+        /is not of that form \(for this project it would start with jazz-prj-abc1-\), so no namespace reaches it/,
+      );
+    }
+    expect(() => vercel({ name: "myapp-core" } as never)).toThrow(
+      /lowercased with each run of characters other than a-z and 0-9 as one `-` \(prj_AbC1 is prj-abc1\).*a name of any other form can't be reached/,
     );
   });
 

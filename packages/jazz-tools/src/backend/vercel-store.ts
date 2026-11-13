@@ -65,7 +65,10 @@ export interface VercelStoreOptions {
    *   names earlier versions gave cores by default.
    *
    * A deployment only reaches cores of its own environment: a core trusts
-   * the environment whose deployment started it first.
+   * the environment whose deployment started it first. So a plain string,
+   * one core for every environment, serves only the environment that
+   * deploys first, and the others are refused: give each environment a
+   * namespace of its own, as the functions above do.
    */
   namespace: VercelNamespace;
   /** Replaced by `namespace`; passing it throws, saying how to migrate. */
@@ -658,14 +661,34 @@ export function missingNamespaceError(): Error {
 }
 
 /** `name` became `namespace`; refused with the migration rather than ignored. */
-export function refuseVercelName(options: object): void {
+export function refuseVercelName(options: {
+  name?: unknown;
+  credentials?: { projectId?: string };
+}): void {
   if (!("name" in options)) return;
-  throw new Error(
-    "vercel(): `name` is now `namespace`, the part after `jazz-<project>-`. " +
-      "To keep the cores earlier versions created by default (production's and one per preview branch), pass " +
-      `vercel({ ${PER_BRANCH_RECIPE} }) with perBranch from jazz-tools/backend. ` +
-      'A full Sandbox name you passed as `name: "jazz-<project>-<rest>"` is `namespace: "<rest>"`.',
-  );
+  const defaults =
+    "To keep the cores earlier versions created by default (production's and one per preview branch), pass " +
+    `vercel({ ${PER_BRANCH_RECIPE} }) with perBranch from jazz-tools/backend.`;
+  const project = options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID;
+  const name = options.name;
+  // The Sandbox a namespace names: "jazz-", the project id lowercased with
+  // each run of other characters as "-", "-", and the namespace.
+  const rule =
+    "A core is now always the Sandbox jazz-<project>-<namespace>, where <project> is the project id lowercased with each run of characters other than a-z and 0-9 as one `-` (prj_AbC1 is prj-abc1).";
+  let keep: string;
+  if (typeof name !== "string") {
+    keep = `${rule} A Sandbox you named \`jazz-<project>-<rest>\` is \`namespace: "<rest>"\`.`;
+  } else if (!project) {
+    keep = `${rule} If ${JSON.stringify(name)} is jazz-<project>-<rest> for this project, pass \`namespace: "<rest>"\`; a name of any other form can't be reached by a namespace.`;
+  } else {
+    const prefix = `jazz-${safeProject(project)}-`;
+    const rest = name.startsWith(prefix) ? name.slice(prefix.length) : undefined;
+    keep =
+      rest && safeNamespace(rest) === rest && /[a-z0-9]/.test(rest)
+        ? `To keep the core ${name}, pass \`namespace: ${JSON.stringify(rest)}\`.`
+        : `${rule} The core ${name} is not of that form (for this project it would start with ${prefix}), so no namespace reaches it: its Sandbox and Drive keep their data, but this version opens another core.`;
+  }
+  throw new Error(`vercel(): \`name\` is now \`namespace\`. ${keep} ${defaults}`);
 }
 
 /**
