@@ -176,10 +176,23 @@ export const MCP_TOOLS: Tool[] = [
   },
   {
     name: "get",
-    description: "One row by id, with who created and last changed it.",
+    description:
+      'One row by id, with who created and last changed it. A value too large to list shows as {"$large": {kind, size, preview}}: pass column to get that value (from/to for part of a bytes or text value).',
     inputSchema: {
       type: "object",
-      properties: { table: { type: "string" }, id: { type: "string" }, as: AS, claims: CLAIMS },
+      properties: {
+        table: { type: "string" },
+        id: { type: "string" },
+        column: { type: "string", description: "Answer only this column's value, whole." },
+        from: {
+          type: "integer",
+          minimum: 0,
+          description: "With column: where to start (bytes for bytes, UTF-16 code units for text).",
+        },
+        to: { type: "integer", minimum: 0, description: "With column: where to stop (exclusive)." },
+        as: AS,
+        claims: CLAIMS,
+      },
       required: ["table", "id"],
     },
   },
@@ -312,6 +325,9 @@ export async function runMcpServer(options: {
           op: "get",
           table: String(args.table),
           id: String(args.id),
+          ...(typeof args.column === "string" ? { column: args.column } : {}),
+          ...(typeof args.from === "number" ? { from: args.from } : {}),
+          ...(typeof args.to === "number" ? { to: args.to } : {}),
           ...as,
         });
       case "history":

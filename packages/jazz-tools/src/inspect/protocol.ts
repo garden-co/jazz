@@ -27,6 +27,62 @@ export const DEFAULT_ROW_LIMIT = 100;
 export const MAX_ROW_LIMIT = 1000;
 /** The most bytes of JSON one answer carries; rows past it are left out and the answer says so. */
 export const MAX_ANSWER_BYTES = 1024 * 1024;
+/**
+ * A value whose JSON is longer than this is summarized in rows (see
+ * {@link LargeValueSummary}): fetch it with `get` and `column`.
+ */
+export const LARGE_VALUE_BYTES = 32 * 1024;
+const LARGE_VALUE_PREVIEW = 200;
+
+/**
+ * What a row carries in place of a value too large to list: its kind, its
+ * size (bytes for bytes, UTF-16 code units for text, JSON characters for
+ * JSON), and a short preview. `get` with `column` answers the value itself.
+ */
+export interface LargeValueSummary {
+  $large: { kind: "bytes" | "text" | "json"; size: number; preview: string };
+}
+
+/**
+ * `value` (as {@link toJsonValue} makes it) as a row shows it: summarized
+ * when its JSON is longer than `limit`.
+ */
+export function summarizeLargeValue(value: unknown, limit = LARGE_VALUE_BYTES): unknown {
+  if (value === null || (typeof value !== "object" && typeof value !== "string")) return value;
+  if (typeof value === "string") {
+    if (JSON.stringify(value).length <= limit) return value;
+    return large("text", value.length, value.slice(0, LARGE_VALUE_PREVIEW));
+  }
+  const bytes = (value as { $bytes?: unknown }).$bytes;
+  if (typeof bytes === "string" && Object.keys(value).length === 1) {
+    if (bytes.length <= limit) return value;
+    // Base64: 4 characters per 3 bytes.
+    const size =
+      Math.floor((bytes.length * 3) / 4) - (bytes.endsWith("==") ? 2 : bytes.endsWith("=") ? 1 : 0);
+    return large("bytes", size, bytes.slice(0, LARGE_VALUE_PREVIEW));
+  }
+  const json = JSON.stringify(value);
+  if (json.length <= limit) return value;
+  return large("json", json.length, json.slice(0, LARGE_VALUE_PREVIEW));
+}
+
+function large(
+  kind: LargeValueSummary["$large"]["kind"],
+  size: number,
+  preview: string,
+): LargeValueSummary {
+  return { $large: { kind, size, preview } };
+}
+
+/** Whether `value` is a {@link LargeValueSummary}. */
+export function isLargeValueSummary(value: unknown): value is LargeValueSummary {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Object.keys(value).length === 1 &&
+    typeof (value as { $large?: unknown }).$large === "object"
+  );
+}
 
 /**
  * A condition on one column, written the way `where()` takes it:
@@ -74,7 +130,18 @@ export type InspectRequest =
   | { op: "whoami" }
   | { op: "schema" }
   | { op: "query"; query: InspectQuery; as?: InspectAs }
-  | { op: "get"; table: string; id: string; as?: InspectAs }
+  | {
+      op: "get";
+      table: string;
+      id: string;
+      as?: InspectAs;
+      /** Answer this one column's value whole (or `from`–`to` of it), even when rows summarize it. */
+      column?: string;
+      /** For `column`: where to start, in bytes for bytes, UTF-16 code units for text. */
+      from?: number;
+      /** For `column`: where to stop (exclusive). */
+      to?: number;
+    }
   | { op: "history"; table: string; id: string; limit?: number }
   | { op: "write"; ops: InspectWriteOp[]; as?: InspectAs }
   | { op: "sessions" }

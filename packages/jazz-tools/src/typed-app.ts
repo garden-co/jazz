@@ -1154,6 +1154,60 @@ type TableLargeValueSelection<
 export type LargeValueSelection<TMeta extends AnyTableMeta> =
   TableLargeValueSelectionFromMeta<TMeta>;
 
+/**
+ * One argument of `select(...)`: a column name, or an object-form partial
+ * projection. Names and partial projections may be mixed in any order.
+ */
+type TableSelectionArg<TMeta extends AnyTableMeta, TDeleted extends boolean> =
+  | TableSelectableFromMeta<TMeta>
+  | DeletedColumn<TDeleted>
+  | LargeValueSelection<TMeta>;
+
+/**
+ * Split `select(...)` arguments into whole-column names and per-column partial
+ * projections. A column may be selected once: whole (by name, or through
+ * `"*"`), or in part. Selecting it both ways, or with two ranges, is ambiguous
+ * and throws instead of letting one silently win.
+ */
+function splitSelection(selection: readonly unknown[]): {
+  /** Every selected column, in argument order. */
+  columns: string[];
+  names: string[];
+  partial: Record<string, LargeValuePage>;
+} {
+  const columns: string[] = [];
+  const names: string[] = [];
+  const partial: Record<string, LargeValuePage> = {};
+  for (const arg of selection) {
+    if (typeof arg === "string") {
+      if (Object.hasOwn(partial, arg))
+        throw new TypeError(
+          `select(...): column "${arg}" is selected both whole and in part; selecting a column both ways is not supported. Select it either by name or with a range.`,
+        );
+      names.push(arg);
+      columns.push(arg);
+    } else if (typeof arg === "object" && arg !== null && !Array.isArray(arg)) {
+      for (const [column, page] of Object.entries(arg as Record<string, LargeValuePage>)) {
+        if (Object.hasOwn(partial, column))
+          throw new TypeError(
+            `select(...): column "${column}" has more than one partial selection; selecting several parts of one column is not supported yet.`,
+          );
+        if (names.includes(column))
+          throw new TypeError(
+            `select(...): column "${column}" is selected both whole and in part; selecting a column both ways is not supported. Select it either by name or with a range.`,
+          );
+        partial[column] = page;
+        columns.push(column);
+      }
+    } else {
+      throw new TypeError(
+        `select(...) takes column names and partial-selection objects, got ${arg === null ? "null" : Array.isArray(arg) ? "an array" : typeof arg}.`,
+      );
+    }
+  }
+  return { columns, names, partial };
+}
+
 type TableOrderableFromMeta<TMeta extends AnyTableMeta> =
   | Extract<keyof TMeta["where"], string>
   | ProvenanceMagicColumn;
@@ -1391,43 +1445,29 @@ export class TypedTableQueryBuilder<
   }
 
   select<
-    FirstSelection extends
-      | (TableSelectableFromMeta<TMeta> | DeletedColumn<TDeleted>)
-      | LargeValueSelection<TMeta>,
-    RestSelection extends readonly (TableSelectableFromMeta<TMeta> | DeletedColumn<TDeleted>)[] =
-      [],
+    FirstSelection extends TableSelectionArg<TMeta, TDeleted>,
+    RestSelection extends readonly TableSelectionArg<TMeta, TDeleted>[] = [],
   >(
     first: FirstSelection,
     ...rest: RestSelection
-  ): MetaQueryHandle<TMeta, TInclude, FirstSelection | RestSelection[number], TRequired, TDeleted>;
-  select<
-    NewSelection extends
-      | (TableSelectableFromMeta<TMeta> | DeletedColumn<TDeleted>)
-      | LargeValueSelection<TMeta>,
-  >(
-    ...selection: [NewSelection] | [NewSelection, ...NewSelection[]]
-  ): MetaQueryHandle<TMeta, TInclude, NewSelection, TRequired, TDeleted> {
+  ): MetaQueryHandle<TMeta, TInclude, FirstSelection | RestSelection[number], TRequired, TDeleted> {
     this._rejectUnsupportedUnionModifier("select(...)");
-    const clone = this._clone<TInclude, NewSelection, TRequired, TDeleted>();
-    const first = selection[0];
-    if (typeof first === "object" && first !== null) {
-      const transforms = this._outputColumnTransforms();
-      for (const column of Object.keys(first))
-        if (transforms?.[column]?.computed)
-          throw new TypeError(`Computed field "${column}" cannot have a stored partial selection.`);
-    }
-    clone._select =
-      typeof first === "object" && first !== null
-        ? selection.length > 1
-          ? [...Object.keys(first), ...selection.slice(1).map(String)]
-          : ({ ...first } as Record<string, LargeValuePage>)
-        : (selection as (TableSelectableFromMeta<TMeta> | DeletedColumn<TDeleted>)[]).map(
-            (column) => String(column),
-          );
-    clone._partialSelect =
-      typeof first === "object" && first !== null && selection.length > 1
-        ? ({ ...first } as Record<string, LargeValuePage>)
-        : undefined;
+    const clone = this._clone<
+      TInclude,
+      FirstSelection | RestSelection[number],
+      TRequired,
+      TDeleted
+    >();
+    const { columns, names, partial } = splitSelection([first, ...rest]);
+    const transforms = this._outputColumnTransforms();
+    for (const column of Object.keys(partial))
+      if (transforms?.[column]?.computed)
+        throw new TypeError(`Computed field "${column}" cannot have a stored partial selection.`);
+    const hasPartial = Object.keys(partial).length > 0;
+    // A range-only selection keeps the object form; a mix lists every
+    // selected column by name and carries the ranges in `partialSelect`.
+    clone._select = hasPartial && names.length === 0 ? partial : columns;
+    clone._partialSelect = hasPartial && names.length > 0 ? partial : undefined;
     return clone;
   }
 
@@ -1773,13 +1813,8 @@ export interface Query<
       DeletedWhere<TDeleted>,
   ): Query<TTable, TInclude, TSelection, TSchema, TRequired, TDeleted>;
   select<
-    FirstSelection extends
-      | (TableSelectableFromMeta<SchemaMeta<TTable, TSchema>> | DeletedColumn<TDeleted>)
-      | LargeValueSelection<SchemaMeta<TTable, TSchema>>,
-    RestSelection extends readonly (
-      | TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>
-      | DeletedColumn<TDeleted>
-    )[] = [],
+    FirstSelection extends TableSelectionArg<SchemaMeta<TTable, TSchema>, TDeleted>,
+    RestSelection extends readonly TableSelectionArg<SchemaMeta<TTable, TSchema>, TDeleted>[] = [],
   >(
     first: FirstSelection,
     ...rest: RestSelection

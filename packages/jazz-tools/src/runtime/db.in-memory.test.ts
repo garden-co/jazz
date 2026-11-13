@@ -338,6 +338,66 @@ describe("createDb in-memory driver", () => {
     });
   });
 
+  it("mixes column names and partial selections in any order (#5192)", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-select-mix-test")),
+      driver: { type: "memory" },
+    });
+    const { value: inserted } = db.insert(largeValues.documents, {
+      payload: new Uint8Array([0, 1, 2, 3, 4, 5]),
+      body: "abcdefgh",
+      metadata: { nested: { answer: 42 }, other: "x" },
+      done: true,
+    });
+    const documents = largeValues.documents.where({ id: inserted.id });
+
+    const [rangeFirst] = await db.all(documents.select({ body: { from: 2, to: 5 } }, "done"));
+    expect(rangeFirst).toEqual({ id: inserted.id, body: "cde", done: true });
+
+    const [namesFirst] = await db.all(documents.select("done", { body: { from: 2, to: 5 } }));
+    expect(namesFirst).toEqual({ id: inserted.id, done: true, body: "cde" });
+
+    const [interleaved] = await db.all(
+      documents.select(
+        { payload: { from: 1, to: 3 } },
+        "done",
+        { metadata: { at: "/nested/answer" } },
+        { body: { from: 0, to: 2 } },
+      ),
+    );
+    expect(interleaved).toEqual({
+      id: inserted.id,
+      payload: new Uint8Array([1, 2]),
+      done: true,
+      metadata: 42,
+      body: "ab",
+    });
+
+    const [everythingBodyInPart] = await db.all(
+      documents.select("*", { body: { from: 6, to: 8 } }),
+    );
+    expect(everythingBodyInPart).toMatchObject({
+      id: inserted.id,
+      payload: new Uint8Array([0, 1, 2, 3, 4, 5]),
+      body: "gh",
+      metadata: { nested: { answer: 42 }, other: "x" },
+      done: true,
+    });
+  });
+
+  it("refuses a select that names a column both whole and in part (#5192)", () => {
+    const documents = largeValues.documents;
+    expect(() => documents.select({ body: { from: 0, to: 2 } }, "body")).toThrow(
+      'select(...): column "body" is selected both whole and in part',
+    );
+    expect(() => documents.select("body", { body: { from: 0, to: 2 } })).toThrow(
+      'select(...): column "body" is selected both whole and in part',
+    );
+    expect(() =>
+      documents.select({ body: { from: 0, to: 2 } }, { body: { from: 4, to: 6 } }),
+    ).toThrow('select(...): column "body" has more than one partial selection');
+  });
+
   it("composes page-relative diffs inside mergeable and serializable transactions", async () => {
     db = await createDb({
       ...(await localAccountConfig("in-memory-large-value-transaction-diff-test")),

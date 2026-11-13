@@ -77,6 +77,10 @@ in: after your own sign-in or sign-out, `refresh()` follows it.
   whose key lives on the device. See [Device Accounts](/docs/setup/auth/local-first).
 - **Errors.** A failed operation that leaves the client usable keeps the session `ready`, with
   `error` set. `status: "error"` now means there is no usable client.
+- **`window.__jazz` is Jazz's page handle**, set by every browser client: `status()`,
+  `waitForSync()` and `clearStorage()` for tests and agents. An app that set its own
+  `window.__jazz` keeps it (Jazz warns once and goes without the handle); rename yours to get the
+  handle.
 - **`<JazzProvider>` refuses the old shapes** (the config as its own props, `fallback`, a config
   with an `account`) with an error that names the new one.
 
@@ -133,6 +137,27 @@ if (secret && session.getSnapshot().user?.kind !== "device") {
 ```
 
 On Expo, read the same key with `SecureStore.getItemAsync(legacyKey)` instead of `localStorage`.
+
+### React Native devices whose store alpha.60 opened without migrations
+
+On alpha.60, a React Native app whose schema had already changed (an app that ships migrations)
+opened each device's local store without them. Those devices read nothing from your server, and
+their own writes never uploaded. Alpha.61 fixed this for new stores. From alpha.62 the device
+repairs an existing one when it can:
+
+- **No unsynced or refused writes:** the store is rebuilt from scratch on the first connection and syncs
+  everything again from your server. Nothing is lost, and the app doesn't need to do anything.
+- **Writes the server never received:** the device keeps them and stays offline: its sync status
+  shows the link `{ state: "offline", reason: "stopped" }`, and `lastError.message` names
+  `StoreOpenedWithoutMigrations`. `await db.deleteClientStorage()` resets the store, and it syncs
+  again, but **those writes are lost**, along with any the server refused that the app kept for a
+  retry: everything the user created on that device while it
+  couldn't sync. On a device that was affected from its first install, that is everything they
+  created there.
+
+The account itself is never touched: a device account's key lives in the account store (Expo
+SecureStore, or your own), not in the local store. Don't clear the app's data or reinstall to fix
+a store: on Android that also deletes SecureStore, and with it a device account.
 
 ## Upgrading from alpha.59
 

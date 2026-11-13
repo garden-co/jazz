@@ -532,6 +532,13 @@ pub enum ForegroundDbCommandRequest {
     /// refused since it opened (append-only: an older native build answers
     /// it with an error and the host falls back to `PendingUploadCount`).
     UploadStatus,
+    /// Delete the scope's local store (`deleteClientStorage()` in
+    /// jazz-tools, ABI 6): close every foreground, the socket worker and the
+    /// relay of this foreground's scope, then delete its SQLite files. The
+    /// account and the admitted scope stay, so the next open starts a fresh
+    /// store that syncs everything again. Writes the server had not confirmed
+    /// are dropped, and counted in the answer.
+    DeleteStore,
 }
 
 /// One refusal of a scope's credential by its upstream. Every refusal gets a
@@ -741,6 +748,11 @@ pub enum ForegroundDbCommandResponse {
     /// lastRejection }`).
     UploadStatus {
         status_json: String,
+    },
+    /// Answer to [`ForegroundDbCommandRequest::DeleteStore`]: how many writes
+    /// the server had not confirmed were dropped with the store.
+    StoreDeleted {
+        pending_uploads: u64,
     },
 }
 
@@ -2121,6 +2133,63 @@ impl NativeRelayHost {
         Ok(admitted)
     }
 
+    /// Delete the local store of `foreground`'s scope (see
+    /// [`ForegroundDbCommandRequest::DeleteStore`]). Returns how many writes
+    /// the server had not confirmed it dropped.
+    fn delete_scope_store(&mut self, foreground: u64) -> Result<u64, JazzNativeRelayStatus> {
+        let scope = self
+            .foregrounds
+            .get(&foreground)
+            .ok_or(JazzNativeRelayStatus::InvalidHandle)?
+            .scope
+            .clone();
+        let sqlite_path = self
+            .admitted_scopes
+            .values()
+            .find(|admitted| admitted.config.scope == scope)
+            .map(|admitted| admitted.config.sqlite_path.clone())
+            .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
+        let relay_handles = self
+            .relays
+            .iter()
+            .filter_map(|(handle, opened)| (opened.scope == scope).then_some(*handle))
+            .collect::<Vec<_>>();
+        let pending = relay_handles
+            .first()
+            .and_then(|handle| self.relays.get(handle))
+            .and_then(|opened| opened.relay.unconfirmed_writes().ok())
+            .unwrap_or(0);
+        // The socket worker first: dropping it cancels and joins its socket.
+        self.private_scope_workers.remove(&scope);
+        let foregrounds = self
+            .foregrounds
+            .iter()
+            .filter_map(|(handle, opened)| (opened.scope == scope).then_some(*handle))
+            .collect::<Vec<_>>();
+        for handle in foregrounds {
+            let _ = self.teardown_foreground(handle, ForegroundTeardown::Retire);
+        }
+        for relay_handle in relay_handles {
+            self.relays.remove(&relay_handle);
+            let client_handles = self
+                .clients
+                .iter()
+                .filter_map(|(handle, (owner, _))| (*owner == relay_handle).then_some(*handle))
+                .collect::<Vec<_>>();
+            for client_handle in client_handles {
+                if let Some((_, client)) = self.clients.remove(&client_handle) {
+                    let _ = client.close();
+                }
+            }
+        }
+        // Closes the store synchronously, before its files go.
+        self.registry.close(&scope).map_err(relay_status)?;
+        relay::delete_store_files(&sqlite_path)
+            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        relay::forget_rebuilt_marker(&sqlite_path);
+        Ok(pending as u64)
+    }
+
     fn revoke_scope(
         &mut self,
         admitted_scope: AdmissionCapability,
@@ -2963,6 +3032,9 @@ impl NativeRelayHost {
             }
             Request::Close => Response::Closed {
                 closed: self.close_foreground(foreground)?,
+            },
+            Request::DeleteStore => Response::StoreDeleted {
+                pending_uploads: self.delete_scope_store(foreground)?,
             },
             Request::DrainTickEvents => {
                 let scope = self

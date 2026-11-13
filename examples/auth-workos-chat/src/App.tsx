@@ -79,7 +79,8 @@ function SignedInChat({ user, onSignIn, onSignOut }: ChatShellProps) {
       user={user}
       onSignIn={onSignIn}
       onSignOut={async () => {
-        // Clears the AuthKit cookie and heads to WorkOS's logout page.
+        // Ends the WorkOS session and clears its cookie without redirecting,
+        // then `refresh()` signs this tab and the browser's other tabs out.
         await onSignOut();
         await refresh();
       }}

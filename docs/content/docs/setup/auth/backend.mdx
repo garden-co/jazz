@@ -60,9 +60,18 @@ that ID from your `authenticate` function.
 ### When a session expires
 
 A sync connection lasts until the `expiresAt` its `authenticate` answer gave, and at most
-`sessionTtlSeconds` (one hour by default). Shortly before then, the connection asks its client to
-connect again, and Jazz calls `authenticate` on that new request, with the cookies (or token) the
-client has now:
+`sessionTtlSeconds` (one hour by default). Shortly before then, a browser on your app's cookie asks
+your backend again over an ordinary request, one tab at a time (through
+[`refresh`](#keep-auth-middleware-off-jazzs-routes), if you set it). If `authenticate` still names
+the same user with the same claims, the open connection continues to the new `expiresAt`, without
+reconnecting.
+
+Otherwise the client reconnects shortly before `expiresAt`, and `authenticate` decides on the new
+connection's request. That happens when the renewal request fails (a network error, a 5xx, `refresh`
+throwing), when the user's claims changed, and when the renewal reaches another instance than the
+one holding the connection (`vercel()`, or `remote()` without a `secret`). Token-based clients
+(React Native, apps passing a token, backend clients) and device-account guests always reconnect at
+expiry, with a fresh token. On that reconnect:
 
 - **Still the same user:** the client carries on. It swaps connections underneath, and your app sees
   no change: no reconnecting status, no event, and queries and writes continue.
@@ -106,6 +115,11 @@ export const config = {
 
 The same matcher works for AuthKit, Clerk and Auth.js middleware. In `authenticate`, read the
 session without refreshing it, and return its expiry as `expiresAt`.
+
+To refresh the session for Jazz, pass `refresh` to `createJazz`: middleware that runs only on the
+request a browser makes to ask who is signed in, one tab at a time. Refresh there, call `next` with
+the refreshed cookie, and add your rotated `Set-Cookie` to its response. See
+[WorkOS](/docs/setup/auth/workos) for a complete example.
 
 ## In the browser
 
