@@ -5,7 +5,8 @@ import { createDb } from "./default-create-db.js";
 import type { Db } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
-import { createAccountManager, createClient } from "../thin/index.js";
+import { createAccountManagerWithMinter } from "../accounts/account-manager-core.js";
+import { createClient, mintLocalFirstTokenInJs } from "../thin/index.js";
 
 // An ordinary write names no time (R19): the server stamps it when it accepts
 // it. So a device clock running ahead is never refused as a write "in the
@@ -35,7 +36,7 @@ async function startServer(): Promise<TestJazz> {
   server = await startTestJazz({
     app,
     permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   return server;
 }
@@ -48,18 +49,22 @@ async function localFirstDb(server: TestJazz): Promise<Db> {
 
 async function thinDb(server: TestJazz): Promise<Db> {
   let stored: string | null = null;
-  const accounts = await createAccountManager({
-    appId: server.appId,
-    serverUrl: server.url,
-    store: {
-      async read() {
-        return stored;
-      },
-      async update(transform) {
-        stored = transform(stored);
+  // The account manager the thin entry used to export: it signs in JavaScript.
+  const accounts = await createAccountManagerWithMinter(
+    {
+      appId: server.appId,
+      serverUrl: server.url,
+      store: {
+        async read() {
+          return stored;
+        },
+        async update(transform: (current: string | null) => string | null) {
+          stored = transform(stored);
+        },
       },
     },
-  });
+    mintLocalFirstTokenInJs,
+  );
   const db = await createClient({
     appId: server.appId,
     serverUrl: server.url,
