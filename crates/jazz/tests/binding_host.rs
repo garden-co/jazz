@@ -1815,10 +1815,11 @@ fn a_tabs_local_wait_the_worker_refuses_claims_the_refusal() {
 }
 
 /// Client bindings open stores without a chunk store, so a client tick never
-/// runs chunk-store I/O, whose failures a later tick retries. Every error a
-/// client tick returns is therefore a core failure, and the JavaScript
-/// runtime treats it as terminal (`core_tick_failed`). A binding that adds a
-/// chunk store must first give the host a way to tell those apart.
+/// runs chunk-store I/O, whose failures a later tick retries. No error a
+/// client tick returns is retryable by design, and the JavaScript
+/// runtime treats every one as terminal (`core_tick_failed`). A binding that adds a
+/// chunk store must first give the host a way to tell those apart. The native
+/// relay pins the same for its stores (`relay_configs_have_no_chunk_store`).
 #[test]
 fn binding_configs_have_no_chunk_store() {
     let identity = identity(1);

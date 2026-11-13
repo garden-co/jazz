@@ -613,9 +613,9 @@ pub fn open_identity(config: &mut OpenConfig, how: OpenAs<'_>) -> HostResult<(Db
 }
 
 /// The [`DbConfig`] for `schema` under `config` and `identity`. It has no
-/// chunk store: a binding's tick then fails only for core failures, never
-/// for chunk-store I/O a later tick retries, and hosts treat every tick error
-/// as terminal.
+/// chunk store: a binding's tick never fails for chunk-store I/O a later
+/// tick retries, and hosts treat every tick error (including local storage
+/// errors) as terminal.
 pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) -> DbConfig {
     let mut db_config = DbConfig::new(schema, identity);
     db_config.system_node = config.system_node;

@@ -11,8 +11,10 @@ export const CORE_TICK_FAILED_ERROR_CODE = "core_tick_failed";
  * with it and waits for the server fail with it instead of hanging. A client
  * without a server connection gets it as an uncaught error.
  *
- * Client stores have no chunk store, so a client tick has no retryable
- * failure: every error a client tick returns is a core failure.
+ * Client stores have no chunk store, so no client tick error is one a later
+ * tick retries by design. Every error a client tick returns, including local
+ * storage errors (a full disk, I/O, an OPFS quota) after the tick consumed
+ * what the server sent, is treated as terminal.
  *
  * Class identity does not survive native bindings or browser worker
  * messages, so detect it with {@link isCoreTickFailedError}, which checks

@@ -4026,7 +4026,10 @@ export class NativeRuntimeAdapter implements Runtime {
           await this.db.tick();
         } catch (error) {
           // Client stores have no chunk store, whose failed I/O a later tick
-          // retries, so every error a client tick returns is a core failure.
+          // retries, so no client tick error is retryable by design. The rest
+          // (core failures, and local storage errors such as a full disk or
+          // OPFS quota after the tick consumed its input) are treated as
+          // terminal.
           throw new CoreTickFailedError(error);
         }
         // Commits and the server's verdicts change the pending count.
