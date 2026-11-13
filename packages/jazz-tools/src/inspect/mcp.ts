@@ -145,7 +145,7 @@ export const MCP_TOOLS: Tool[] = [
   {
     name: "explain",
     description:
-      "Which policy allowed or denied each row of a query for a user (not supported yet).",
+      "Why a user can or can't read each row of a query: every row the query matches (with the backend's authority), whether the user may read it, and which clauses of the table's read policy allowed it. Clauses are the arms of the policy's top-level or, numbered from 0 and rendered as text. Pass the user's claims if the policy reads them.",
     inputSchema: {
       type: "object",
       properties: { query: QUERY, as: AS, claims: CLAIMS },

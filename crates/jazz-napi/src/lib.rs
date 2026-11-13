@@ -159,6 +159,20 @@ pub fn test_wire_frame_corpus_features() -> String {
     jazz::wire::current_wire_features().to_string()
 }
 
+/// One row of the Inspector's `explain`: whether each read-policy clause holds.
+#[napi(object)]
+pub struct ExplainedReadRow {
+    pub id: String,
+    pub holds: Vec<bool>,
+}
+
+/// The Inspector's `explain`: how many clauses the read policy has, and the rows found.
+#[napi(object)]
+pub struct ExplainedReadClauses {
+    pub clauses: u32,
+    pub rows: Vec<ExplainedReadRow>,
+}
+
 // ---- options -------------------------------------------------------------------------
 
 #[napi(object)]
@@ -1865,6 +1879,30 @@ impl NapiDb {
             .local_current_row(&table, &row_id)
             .map_err(host_error)?
             .into())
+    }
+
+    /// The Inspector's `explain`: for each of `rows` (uuid strings) of
+    /// `table`, which clauses of its read policy (the arms of its top-level
+    /// `Or`) hold for `author` with `claims`.
+    #[napi(js_name = "explainReadClauses")]
+    pub fn explain_read_clauses(
+        &self,
+        table: String,
+        rows: Vec<String>,
+        author: Uint8Array,
+        claims: Option<JsonValue>,
+    ) -> js::Result<ExplainedReadClauses> {
+        let (clauses, rows) = self
+            .binding()?
+            .explain_read_clauses(&table, &rows, &author, claims)
+            .map_err(host_error)?;
+        Ok(ExplainedReadClauses {
+            clauses: clauses as u32,
+            rows: rows
+                .into_iter()
+                .map(|(id, holds)| ExplainedReadRow { id, holds })
+                .collect(),
+        })
     }
 
     #[napi]

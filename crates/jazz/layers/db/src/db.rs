@@ -2572,6 +2572,87 @@ impl Db {
         Ok((compiled.sql.clone(), plan.join(" | ")))
     }
 
+    /// Diagnostics for the Inspector's `explain`: for each of `rows` of
+    /// `table` (current, not deleted), which of its read policy's clauses
+    /// hold for `author` with `claims` (as bound to an identity: see
+    /// [`crate::binding_args::policy_claims`]). The clauses are the arms of the
+    /// policy's top-level `Or` (one clause when it is not an `Or`); none when
+    /// the table has no read policy, which denies every row. The policy is
+    /// the one reads are judged by (an older schema's rows by the current
+    /// schema's policies). Answers the number of clauses and, for each row
+    /// found (current, not deleted), whether each holds. Branched tables are
+    /// not supported yet.
+    #[doc(hidden)]
+    pub fn explain_read_clauses(
+        &self,
+        table: &str,
+        rows: &[RowUuid],
+        author: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> Result<(usize, Vec<(RowUuid, Vec<bool>)>), Error> {
+        let inner = self.inner();
+        let table = inner.schema.table(table)?;
+        if !table.branch_by.is_empty() {
+            return Err(unsupported("explain for a table with branches"));
+        }
+        // As `Ctx::under_policy_schema` judges reads: by the schema whose
+        // policies govern this table's rows.
+        let governing = match inner.schema.policies_from.as_deref() {
+            None => Some(table),
+            Some(current) => current.by_stored(&table.stored),
+        };
+        let clauses: Vec<PolicyExpr> = match governing.and_then(|t| t.policy(Operation::Select)) {
+            None => Vec::new(),
+            Some(PolicyExpr::Or(exprs)) => exprs.clone(),
+            Some(policy) => vec![policy.clone()],
+        };
+        if rows.is_empty() {
+            return Ok((clauses.len(), Vec::new()));
+        }
+        let session = Session::for_author(author, claims);
+        let binding = BTreeMap::new();
+        let none = Session::default();
+        let mut ctx = Ctx::new(&inner.schema, None, &none, &binding);
+        let mut columns = Vec::with_capacity(clauses.len());
+        for clause in &clauses {
+            let condition = ctx.policy_clause(Some(clause), table, "a", &session)?;
+            columns.push(format!(", COALESCE({condition}, 0)"));
+        }
+        let source = ctx.source(table)?;
+        let mut params = ctx.params;
+        let mut ids = Vec::with_capacity(rows.len());
+        for row in rows {
+            params.push(Sql::Blob(row.0.as_bytes().to_vec()));
+            ids.push(format!("?{}", params.len()));
+        }
+        let sql = format!(
+            "SELECT a.id{} FROM {source} AS a WHERE a.id IN ({}) AND (a._state & {STATE_DELETED}) = 0",
+            columns.concat(),
+            ids.join(", "),
+        );
+        let mut statement = inner.conn.prepare(&sql).map_err(storage)?;
+        let count = clauses.len();
+        let found = statement
+            .query_map(params_from_iter(params.iter()), |r| {
+                let id: Vec<u8> = r.get(0)?;
+                let mut holds = Vec::with_capacity(count);
+                for index in 0..count {
+                    holds.push(r.get::<_, i64>(index + 1)? != 0);
+                }
+                Ok((id, holds))
+            })
+            .map_err(storage)?;
+        let mut answer = Vec::new();
+        for row in found {
+            let (id, holds) = row.map_err(storage)?;
+            let id: [u8; 16] = id
+                .try_into()
+                .map_err(|_| crate::values::query_error("a row id is not 16 bytes"))?;
+            answer.push((RowUuid::from_bytes(id), holds));
+        }
+        Ok((count, answer))
+    }
+
     /// Text merges that ran past [`jazz_text::MERGE_WORK_BUDGET`] since the
     /// last call, so the incoming write stood as sent and the held value's
     /// concurrent edits left the current text (history keeps them), and
