@@ -5,6 +5,7 @@ import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
 import { isAuthorityChangedError, upstreamRefusalError } from "../authority-changed-error.js";
+import { CoreTickFailedError, isCoreTickFailedError } from "../core-tick-failed-error.js";
 import { formatUuid, formatUuidAt } from "../hex.js";
 
 export { formatUuid };
@@ -300,6 +301,8 @@ type NativeDb = {
   /** Native bindings answer synchronously; the browser binding resolves on the event loop. */
   foregroundTxTimeHighWater?(): bigint | Promise<bigint>;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
+  /** A pool whose single `drain()` reads every subscription that joined it. */
+  createSubscriptionPool?(): SubscriptionPool;
   subscribe?(
     query: Uint8Array,
     opts: unknown,
@@ -491,7 +494,21 @@ type NativePermissionAdviceResult =
 type Subscription = {
   readAll(): unknown[] | PendingNativeSubscriptionBatch;
   drain?(): unknown[] | PendingNativeSubscriptionBatch;
+  /** Move this subscription into `pool`; returns the id its batches carry. */
+  joinPool?(pool: SubscriptionPool): number;
   close?(): boolean;
+};
+
+/** One pooled subscription's events from a `SubscriptionPool.drain()`. */
+type SubscriptionPoolBatch = {
+  id: number;
+  events: unknown[];
+  /** The subscription failed after `events`; it has left the pool. */
+  error?: { message: string; code: string } | null;
+};
+
+type SubscriptionPool = {
+  drain(): SubscriptionPoolBatch[];
 };
 
 type Write = {
@@ -704,6 +721,8 @@ function isPendingNativeOperation<T>(value: unknown): value is PendingNativeOper
 
 type SubscriptionState = {
   openingAbort?: AbortController;
+  /** Set once the subscription's native stream joined the runtime's pool. */
+  poolId?: number;
   terminalError?: Error;
   terminalErrorDelivered?: boolean;
   source?: SubscriptionSource;
@@ -725,6 +744,8 @@ type SubscriptionSourceRead =
   | { type: "closed" };
 
 type SubscriptionSource = {
+  /** Native pull sources can join a pool and be read in one drain. */
+  joinPool?(pool: SubscriptionPool): number;
   pull(
     ready: (read: SubscriptionSourceRead) => void,
     failed: (error: unknown) => void,
@@ -907,6 +928,11 @@ export class NativeRuntimeAdapter implements Runtime {
   }
   private readonly readAuthorizationHost: ReadAuthorizationHost;
   private readonly subscriptions = new Map<number, SubscriptionState>();
+  /** Pooled native subscriptions, by pool id: one native call reads them all. */
+  private subscriptionPool: SubscriptionPool | null | undefined;
+  private readonly pooledSubscriptions = new Map<number, number>();
+  private drainingSubscriptionPool = false;
+  private subscriptionPoolDirty = false;
   private authFailureCallback: ((reason: string) => void) | null = null;
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
   private serverTransportErrorCallback:
@@ -3831,9 +3857,76 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private pumpSubscriptions(): void {
+    this.drainSubscriptionPool();
     for (const [handle, subscription] of this.subscriptions) {
+      if (subscription.poolId !== undefined) continue;
       this.startSubscriptionReader(handle, subscription);
     }
+  }
+
+  private nativeSubscriptionPool(): SubscriptionPool | null {
+    if (this.subscriptionPool === undefined) {
+      this.subscriptionPool = this.db.createSubscriptionPool?.() ?? null;
+    }
+    return this.subscriptionPool;
+  }
+
+  /**
+   * Read every pooled subscription in one native call. Events are applied in
+   * order per subscription; a drain requested while one is applying events
+   * (a callback that writes) runs after it, so no subscription sees a later
+   * batch before an earlier one finishes.
+   */
+  private drainSubscriptionPool(): void {
+    const pool = this.subscriptionPool;
+    if (!pool || this.pooledSubscriptions.size === 0) return;
+    if (this.drainingSubscriptionPool) {
+      this.subscriptionPoolDirty = true;
+      return;
+    }
+    this.drainingSubscriptionPool = true;
+    try {
+      do {
+        this.subscriptionPoolDirty = false;
+        for (const batch of pool.drain()) this.applyPooledBatch(batch);
+      } while (this.subscriptionPoolDirty && !this.closed);
+    } finally {
+      this.drainingSubscriptionPool = false;
+    }
+  }
+
+  private applyPooledBatch(batch: SubscriptionPoolBatch): void {
+    const handle = this.pooledSubscriptions.get(batch.id);
+    if (handle === undefined) return;
+    const subscription = this.subscriptions.get(handle);
+    const isActive = () =>
+      subscription !== undefined &&
+      !subscription.cancelled &&
+      this.subscriptions.get(handle) === subscription;
+    if (!subscription || !isActive()) {
+      this.pooledSubscriptions.delete(batch.id);
+      return;
+    }
+    for (const event of batch.events) {
+      if (!isActive()) break;
+      try {
+        this.applySubscriptionChunk(handle, subscription, event);
+      } catch (error) {
+        this.failSubscription(
+          subscription,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
+    }
+    if (batch.error) {
+      this.pooledSubscriptions.delete(batch.id);
+      if (!this.closed && isActive()) {
+        const error = new Error(batch.error.message) as Error & { code?: string };
+        error.code = batch.error.code;
+        this.failSubscription(subscription, error);
+      }
+    }
+    if (!isActive()) this.pooledSubscriptions.delete(batch.id);
   }
 
   private withPermissionAdviceTimeout(
@@ -3957,6 +4050,11 @@ export class NativeRuntimeAdapter implements Runtime {
     this.coreTickScheduled = true;
     queueMicrotask(() => {
       this.coreTickScheduled = false;
+      if (!this.coreProgressAllowed()) return;
+      if (this.coreOperation) {
+        this.coreTickAgain = true;
+        return;
+      }
       void this.runCoreTick().catch((error) => {
         // Native revocation can retire a foreground after its wake crossed
         // into the JS queue. Native liveness distinguishes that stale wake
@@ -3967,7 +4065,13 @@ export class NativeRuntimeAdapter implements Runtime {
           reportAsyncRuntimeError(livenessError);
           return;
         }
-        reportAsyncRuntimeError(error);
+        // A core failure belongs to no single connection: whichever one is
+        // current when it happens (or is being reestablished) publishes it.
+        if (this.serverTransport !== null || this.serverEndpointUrl !== null) {
+          this.handleServerTransportError(error);
+        } else {
+          reportAsyncRuntimeError(error);
+        }
       });
     });
   }
@@ -4010,7 +4114,16 @@ export class NativeRuntimeAdapter implements Runtime {
     try {
       for (let round = 0; ; round += 1) {
         this.coreTickAgain = false;
-        await this.db.tick();
+        try {
+          await this.db.tick();
+        } catch (error) {
+          // Client stores have no chunk store, whose failed I/O a later tick
+          // retries, so no client tick error is retryable by design. The rest
+          // (core failures, and local storage errors such as a full disk or
+          // OPFS quota after the tick consumed its input) are treated as
+          // terminal.
+          throw new CoreTickFailedError(error);
+        }
         // Commits and the server's verdicts change the pending count.
         this.syncStatusPublisher.changed();
         this.reportSlowQueries();
@@ -4048,6 +4161,20 @@ export class NativeRuntimeAdapter implements Runtime {
   private startSubscriptionReader(handle: number, subscription: SubscriptionState): void {
     const source = subscription.source;
     if (subscription.cancelled || subscription.reading || !subscription.callback || !source) return;
+    if (subscription.poolId !== undefined) {
+      this.drainSubscriptionPool();
+      return;
+    }
+    // A native subscription with a callback joins the pool: from then on
+    // one drain per pump reads it with every other pooled subscription.
+    const pool = source.joinPool ? this.nativeSubscriptionPool() : null;
+    if (pool && source.joinPool) {
+      const id = source.joinPool(pool);
+      subscription.poolId = id;
+      this.pooledSubscriptions.set(id, handle);
+      this.drainSubscriptionPool();
+      return;
+    }
     subscription.reading = true;
     this.readSubscription(handle, subscription, source);
   }
@@ -4405,7 +4532,14 @@ export class NativeRuntimeAdapter implements Runtime {
     generation = this.serverConnectionGeneration,
     reconnecting = false,
   ): void {
-    if (generation !== this.serverConnectionGeneration) return;
+    // A stale connection's errors are dropped, but a core failure belongs to
+    // no connection: one raised while a reconnect replaced the connection
+    // it began on is still the open client's failure.
+    if (
+      generation !== this.serverConnectionGeneration &&
+      (this.closed || !isCoreTickFailedError(error))
+    )
+      return;
     const message = errorMessage(error);
     if (this.serverTransportError && message === "websocket closed") {
       // Keep the more telling error already published; only its escalation
@@ -4531,6 +4665,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private retireSubscriptionResources(subscription: SubscriptionState): void {
     if (subscription.cancelled) return;
     subscription.cancelled = true;
+    if (subscription.poolId !== undefined) this.pooledSubscriptions.delete(subscription.poolId);
     subscription.openingAbort?.abort();
     const source = subscription.source;
     subscription.source = undefined;
@@ -7210,7 +7345,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       type: "rejected";
       reason:
         | { type: "UnsupportedShapeCapability"; detail: string }
-        | { type: "ServerFailure"; code: string }
+        | { type: "ServerFailure"; code: string; errorCode?: string }
         | { type: "InvalidAuthoritySourceClosure"; transition: string }
         | { type: "ShapeRegistrationPendingCatalogueAdmission" };
     }
@@ -7251,7 +7386,7 @@ function normalizeSubscriptionRejectionReason(
   reason: unknown,
 ):
   | { type: "UnsupportedShapeCapability"; detail: string }
-  | { type: "ServerFailure"; code: string }
+  | { type: "ServerFailure"; code: string; errorCode?: string }
   | { type: "InvalidAuthoritySourceClosure"; transition: string }
   | { type: "ShapeRegistrationPendingCatalogueAdmission" } {
   if (!reason || typeof reason !== "object") {
@@ -7261,6 +7396,7 @@ function normalizeSubscriptionRejectionReason(
     type?: unknown;
     detail?: unknown;
     code?: unknown;
+    errorCode?: unknown;
     transition?: unknown;
   };
   if (record.type === "UnsupportedShapeCapability" && typeof record.detail === "string") {
@@ -7272,7 +7408,10 @@ function normalizeSubscriptionRejectionReason(
   // NAPI names the server's reason `code`, WASM `detail`.
   const failure = record.code ?? record.detail;
   if (record.type === "ServerFailure" && typeof failure === "string") {
-    return { type: "ServerFailure", code: failure };
+    // The core error code, when the binding carries it (NAPI and WASM).
+    return typeof record.errorCode === "string"
+      ? { type: "ServerFailure", code: failure, errorCode: record.errorCode }
+      : { type: "ServerFailure", code: failure };
   }
   if (record.type === "InvalidAuthoritySourceClosure" && typeof record.transition === "string") {
     return {
@@ -7286,7 +7425,7 @@ function normalizeSubscriptionRejectionReason(
 function subscriptionRejectionError(
   reason:
     | { type: "UnsupportedShapeCapability"; detail: string }
-    | { type: "ServerFailure"; code: string }
+    | { type: "ServerFailure"; code: string; errorCode?: string }
     | { type: "InvalidAuthoritySourceClosure"; transition: string }
     | { type: "ShapeRegistrationPendingCatalogueAdmission" },
 ): Error {
@@ -7298,7 +7437,12 @@ function subscriptionRejectionError(
         : reason.type === "InvalidAuthoritySourceClosure"
           ? reason.transition
           : "catalogue admission pending";
-  return new Error(`Subscription rejected: ${reason.type}: ${detail}`);
+  const message = `Subscription rejected: ${reason.type}: ${detail}`;
+  // A core rejection keeps its code, as a thrown core error does: a
+  // refused upstream's `authority_changed` reads as AuthorityChangedError.
+  const code = reason.type === "ServerFailure" ? reason.errorCode : undefined;
+  if (code === undefined) return new Error(message);
+  return upstreamRefusalError({ code, message }) ?? new Error(message);
 }
 
 function subscriptionSource(
@@ -7325,6 +7469,7 @@ function subscriptionSource(
   }
   const native = subscription as Subscription;
   return {
+    joinPool: native.joinPool ? (pool) => native.joinPool!(pool) : undefined,
     pull() {
       const batch = native.readAll();
       return Array.isArray(batch)

@@ -23,6 +23,8 @@ fan-out.
 | `band_chat_timeline_second_page[4096]`        | unchanged (the 1,024 point was dropped)                               |
 | `band_chat_unread_recent_rooms[4096]`         | unchanged (the 1,024 point was dropped)                               |
 | `band_chat_caught_up_fast_resume[100, 10000]` | unchanged (the 1,000 point was dropped)                               |
+| `band_chat_presence_on_nested_page`           | new                                                                   |
+| `band_chat_open_nested_page`                  | new                                                                   |
 
 `band_chat_author_history` was dropped: StagePlan's bounded activity page
 measures the same indexed, ordered, bounded read. The route subscription curve

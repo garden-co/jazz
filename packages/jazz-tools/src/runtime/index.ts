@@ -25,6 +25,7 @@ export {
   isUnsupportedStorageCodecsError,
 } from "./unsupported-storage-codecs-error.js";
 export { AuthorityChangedError, isAuthorityChangedError } from "./authority-changed-error.js";
+export { CoreTickFailedError, isCoreTickFailedError } from "./core-tick-failed-error.js";
 export {
   StoreHeldByAnotherTabError,
   isStoreHeldByAnotherTabError,

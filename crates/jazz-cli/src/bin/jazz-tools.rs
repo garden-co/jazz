@@ -510,11 +510,15 @@ fn validate_removed_user_auth_environment<'a>(
     ))
 }
 
+/// The defaults, under `RUST_LOG`: a later directive replaces an earlier
+/// one for the same target, so a target `RUST_LOG` names takes the level it
+/// gives there (`RUST_LOG=jazz=debug` logs `jazz` at debug).
 fn make_env_filter() -> tracing_subscriber::EnvFilter {
-    tracing_subscriber::EnvFilter::from_default_env()
-        .add_directive("jazz=info".parse().unwrap())
-        .add_directive("jazz_tools=info".parse().unwrap())
-        .add_directive("tower_http=debug".parse().unwrap())
+    let env = std::env::var("RUST_LOG").unwrap_or_default();
+    tracing_subscriber::EnvFilter::new(format!(
+        "jazz=info,jazz_tools=info,tower_http=debug,{}",
+        env.trim()
+    ))
 }
 
 #[cfg(feature = "otel")]

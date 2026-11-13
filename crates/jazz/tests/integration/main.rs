@@ -51,8 +51,12 @@ mod error_code_strings;
 mod existential_joins;
 #[path = "../explain_read_clauses.rs"]
 mod explain_read_clauses;
+#[path = "../fanout_correlation.rs"]
+mod fanout_correlation;
 #[path = "../fanout_differential.rs"]
 mod fanout_differential;
+#[path = "../fanout_policy_pins.rs"]
+mod fanout_policy_pins;
 #[path = "../flat_joins.rs"]
 mod flat_joins;
 #[path = "../gather_policy_double_ref.rs"]
@@ -93,6 +97,8 @@ mod maybe_conflicting;
 mod mirrored_lens_defaults;
 #[path = "../mutation_admission.rs"]
 mod mutation_admission;
+#[path = "../nested_relation_reuse.rs"]
+mod nested_relation_reuse;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
 #[path = "../parameterized_subscription_routing.rs"]
@@ -137,12 +143,16 @@ mod relay_local_seqs;
 mod relay_policy_subscriptions;
 #[path = "../relay_serves_on_arrival.rs"]
 mod relay_serves_on_arrival;
+#[path = "../relayed_read_refusal.rs"]
+mod relayed_read_refusal;
 #[path = "../remote_read_after_bulk_writes.rs"]
 mod remote_read_after_bulk_writes;
 #[path = "../reopened_admitted_versions.rs"]
 mod reopened_admitted_versions;
 #[path = "../replica_lost_tail.rs"]
 mod replica_lost_tail;
+#[path = "../required_relation_policies.rs"]
+mod required_relation_policies;
 #[path = "../same_version_bundles.rs"]
 mod same_version_bundles;
 #[path = "../schema_activation.rs"]
@@ -209,6 +219,8 @@ mod sync_support_access;
 mod sync_untrusted_clients;
 #[path = "../sync_wire_corpus.rs"]
 mod sync_wire_corpus;
+#[path = "../sync_write_only.rs"]
+mod sync_write_only;
 #[path = "../text_merge.rs"]
 mod text_merge;
 #[path = "../text_splices.rs"]

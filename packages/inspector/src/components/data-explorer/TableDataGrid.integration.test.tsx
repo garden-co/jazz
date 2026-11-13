@@ -578,7 +578,7 @@ describe("TableDataGrid real Db save retries", () => {
       if (!query) throw new Error("TableDataGrid did not issue a query");
       expect(JSON.parse(query._build())).toMatchObject({
         conditions: [{ column: "payload", op: "eq", value: [0, 255] }],
-        select: ["*", "$createdAt", "$createdBy", "$updatedAt", "$updatedBy"],
+        select: ["*", "$createdAt", "$updatedAt", "$createdBy", "$updatedBy"],
         orderBy: [["id", "asc"]],
         limit: 26,
         offset: 0,

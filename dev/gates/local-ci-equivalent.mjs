@@ -102,6 +102,7 @@ export const ciPartitions = Object.freeze({
     command("SPEC issue links", "node", ["dev/gates/spec-open-questions.mjs"]),
     command("changesets release plan", "node", ["dev/gates/changesets.mjs"]),
     command("jazz module layers", "node", ["dev/gates/jazz-module-layers.mjs"]),
+    command("actions pinned to commit SHAs", "node", ["dev/gates/actions-pinned.mjs"]),
     // The exhaustive target-class compile lives here rather than in front of
     // the TypeScript artifact build: it gates the same push, but no longer
     // delays the longest job's native artifacts by a serial workspace check.
