@@ -141,12 +141,13 @@ opened each device's local store without them. Those devices read nothing from y
 their own writes never uploaded. Alpha.61 fixed this for new stores. From alpha.62 the device
 repairs an existing one when it can:
 
-- **No unsynced writes:** the store is rebuilt from scratch on the first connection and syncs
+- **No unsynced or refused writes:** the store is rebuilt from scratch on the first connection and syncs
   everything again from your server. Nothing is lost, and the app doesn't need to do anything.
 - **Writes the server never received:** the device keeps them and stays offline: its sync status
   shows the link `{ state: "offline", reason: "stopped" }`, and `lastError.message` names
   `StoreOpenedWithoutMigrations`. `await db.deleteClientStorage()` resets the store, and it syncs
-  again, but **those writes are lost**: everything the user created on that device while it
+  again, but **those writes are lost**, along with any the server refused that the app kept for a
+  retry: everything the user created on that device while it
   couldn't sync. On a device that was affected from its first install, that is everything they
   created there.
 

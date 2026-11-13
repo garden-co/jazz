@@ -953,6 +953,34 @@ fn ensure_sqlite_store(path: &std::path::Path) -> Result<(), RelayError> {
 /// retries) and every tick error is treated as terminal by the JavaScript
 /// runtime (`core_tick_failed`). Adding a chunk store here means first
 /// giving hosts a way to tell those failures apart.
+/// Beside a store: the schema version it was last rebuilt for (#5145).
+fn rebuilt_marker(sqlite_path: &std::path::Path) -> PathBuf {
+    let mut path = sqlite_path.as_os_str().to_owned();
+    path.push(".rebuilt-for");
+    PathBuf::from(path)
+}
+
+/// Delete a store's SQLite files: its `-wal` and `-shm` first, so a crash
+/// part-way never leaves a write-ahead log beside no main file, or one for a
+/// newer file. Missing files are fine.
+pub(crate) fn delete_store_files(sqlite_path: &std::path::Path) -> std::io::Result<()> {
+    for suffix in ["-wal", "-shm", ""] {
+        let mut path = sqlite_path.as_os_str().to_owned();
+        path.push(suffix);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// Forget that a store was rebuilt: a store deleted by the app starts over.
+pub(crate) fn forget_rebuilt_marker(sqlite_path: &std::path::Path) {
+    let _ = std::fs::remove_file(rebuilt_marker(sqlite_path));
+}
+
 fn relay_db_config(schema: JazzSchema, identity: DbIdentity, migrations: &Migrations) -> DbConfig {
     DbConfig::new(schema, identity)
         .with_migrations(migrations.schemas.clone(), migrations.lenses.clone())
@@ -1230,13 +1258,6 @@ impl RelayWorker {
         });
     }
 
-    /// Rebuild a store an older relay opened without the app's migrations
-    /// (#5145), when nothing would be lost: neither it nor any foreground
-    /// holds a write the server has not confirmed. The new store opens with
-    /// the migrations and syncs everything again from the server; every
-    /// foreground is served by it, and the socket worker reconnects. Once
-    /// per process. `false` leaves the refusal to be reported, so the app can
-    /// reset the store itself (`deleteClientStorage()`), dropping its writes.
     /// Writes the relay's store holds that its server has not confirmed.
     #[cfg(test)]
     pub(crate) fn persistent_pending_uploads(&self) -> usize {
@@ -1250,9 +1271,36 @@ impl RelayWorker {
         self.upstream.as_ref().map(|upstream| upstream.generation)
     }
 
+    /// Rebuild a store an older relay opened without the app's migrations
+    /// (#5145), when nothing would be lost: neither it nor any foreground
+    /// holds a write the server has not confirmed, nor a refused one kept
+    /// for retry. The new store opens with
+    /// the migrations and syncs everything again from the server; every
+    /// foreground is served by it, and the socket worker reconnects. Once
+    /// per schema version: a marker beside the store remembers the version
+    /// it was rebuilt for, so a bundle that disagrees with its server does
+    /// not rebuild and re-sync on every launch. `false` leaves the refusal to
+    /// be reported, so the app can reset the store itself
+    /// (`deleteClientStorage()`), dropping its writes.
     fn rebuild_stale_store(&mut self) -> bool {
+        let marker = rebuilt_marker(&self.sqlite_path);
+        let version: String = self
+            .schema
+            .version_id()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         if self.rebuilt
+            || std::fs::read_to_string(&marker).is_ok_and(|rebuilt| rebuilt == version)
             || self.persistent.pending_upload_count() > 0
+            // Refused commits kept for the app's listeners or a retry are
+            // its writes too: a store holding any is not rebuilt.
+            || self
+                .persistent
+                .db
+                .rejected_transactions()
+                .map_or(true, |rejected| !rejected.is_empty())
             || self
                 .clients
                 .values()
@@ -1263,6 +1311,8 @@ impl RelayWorker {
         self.rebuilt = true;
         match self.reopen_fresh_store() {
             Ok(()) => {
+                // Best effort: without it, the next launch may rebuild once more.
+                let _ = std::fs::write(&marker, &version);
                 tracing::warn!(
                     target: "jazz_native_relay",
                     "rebuilt a store opened without the app's migrations; it syncs again from the server"
@@ -1292,15 +1342,7 @@ impl RelayWorker {
             client.served.close();
         }
         block_on(self.persistent.close()).map_err(|error| error.to_string())?;
-        for suffix in ["", "-wal", "-shm"] {
-            let mut path = self.sqlite_path.clone().into_os_string();
-            path.push(suffix);
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.to_string()),
-            }
-        }
+        delete_store_files(&self.sqlite_path).map_err(|error| error.to_string())?;
         let db = block_on(Db::open_at(
             relay_db_config(self.schema.clone(), self.identity, &self.migrations),
             &self.sqlite_path,

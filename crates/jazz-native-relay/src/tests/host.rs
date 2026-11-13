@@ -1243,6 +1243,10 @@ fn a_store_opened_without_migrations_is_rebuilt_when_nothing_is_pending() {
                 connections, 2,
                 "refused once, then served by the rebuilt store"
             );
+            assert!(
+                directory.path().join("alice.sqlite.rebuilt-for").exists(),
+                "the store remembers the version it was rebuilt for"
+            );
             return;
         }
     }
@@ -1403,5 +1407,96 @@ fn delete_store_command_and_response_have_pinned_bytes() {
         })
         .unwrap(),
         vec![31, 0xac, 0x02]
+    );
+}
+
+/// #5145 review: a relay whose bundle still disagrees with its server is
+/// refused again after its rebuild. It rebuilds once for that schema
+/// version, and never again, also in a later process (a marker beside the
+/// store remembers it), so a device does not delete and re-sync its store
+/// on every launch. The refusal is reported instead.
+#[test]
+fn a_store_is_rebuilt_once_per_schema_version() {
+    let (server, head) = server_with_history(&renamed_label_bundle());
+    let directory = tempfile::tempdir().unwrap();
+    let author = AuthorSubject::for_test_bytes([0x4e; 16]);
+    let identity = |byte: u8| DbIdentity {
+        node: NodeUuid::from_bytes([byte; 16]),
+        author,
+    };
+    // Without the app's migrations, as a bundle that disagrees with the
+    // server would open it: every store it makes is refused.
+    let open = || {
+        NativeRelay::spawn(RelayOpenConfig {
+            supported_abi: NativeRelayAbiRange {
+                minimum: NATIVE_RELAY_ABI_V1,
+                maximum: NATIVE_RELAY_ABI_V1,
+            },
+            scope: RelayScope {
+                app_namespace: "app".to_owned(),
+                storage_namespace: "default".to_owned(),
+                auth_scope: Some("alice".to_owned()),
+            },
+            sqlite_path: directory.path().join("alice.sqlite"),
+            schema: head.clone(),
+            migrations: Migrations::default(),
+            identity: identity(0x01),
+        })
+        .unwrap()
+    };
+    // Carry the upstream until it stops changing; returns how many
+    // connections the relay made.
+    let carry = |relay: &NativeRelay| {
+        let mut generation = None;
+        let mut upstream = None;
+        let mut connections = 0;
+        for _ in 0..100 {
+            let wire = relay.wire().unwrap();
+            let current = relay
+                .run(|worker| Ok(worker.upstream_generation()))
+                .unwrap();
+            if generation != current {
+                generation = current;
+                connections += 1;
+                upstream = Some(
+                    server
+                        .accept_subscriber(author, Default::default())
+                        .unwrap(),
+                );
+            }
+            let link = upstream.as_ref().unwrap();
+            if let Ok(frames) = wire.take_outbound_encoded() {
+                link.receive(frames);
+            }
+            block_on(server.tick()).unwrap();
+            for frame in link.take_outbound() {
+                let _ = wire.push_inbound_encoded(&frame);
+            }
+            relay.pump().unwrap();
+        }
+        connections
+    };
+
+    let first = open();
+    let _alice = first
+        .attach_client(identity(0x02), BTreeMap::new())
+        .unwrap();
+    assert_eq!(carry(&first), 2, "refused, rebuilt once, refused again");
+    assert!(first.upstream_refusal().unwrap().is_some());
+    drop(first);
+
+    let later = open();
+    let _alice = later
+        .attach_client(identity(0x03), BTreeMap::new())
+        .unwrap();
+    assert_eq!(carry(&later), 1, "a later launch does not rebuild again");
+    assert_eq!(
+        later
+            .upstream_refusal()
+            .unwrap()
+            .map(|refusal| refusal.code)
+            .as_deref(),
+        Some("store_opened_without_migrations"),
+        "the refusal is reported for the app"
     );
 }

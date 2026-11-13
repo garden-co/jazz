@@ -2184,15 +2184,9 @@ impl NativeRelayHost {
         }
         // Closes the store synchronously, before its files go.
         self.registry.close(&scope).map_err(relay_status)?;
-        for suffix in ["", "-wal", "-shm"] {
-            let mut path = sqlite_path.clone().into_os_string();
-            path.push(suffix);
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => return Err(JazzNativeRelayStatus::LifecycleFailure),
-            }
-        }
+        relay::delete_store_files(&sqlite_path)
+            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        relay::forget_rebuilt_marker(&sqlite_path);
         Ok(pending as u64)
     }
 
