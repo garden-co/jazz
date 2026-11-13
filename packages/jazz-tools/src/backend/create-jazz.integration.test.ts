@@ -1277,6 +1277,26 @@ describe("createJazz", () => {
     await expect(jazz.accountFor(request())).resolves.toBeNull();
   }, 30_000);
 
+  // An Expo app is a CommonJS package: an ESM backend importing its
+  // permissions.ts by default gets the whole module.exports, `{ default }`.
+  it("names a permissions module imported as CommonJS, not an unknown table `default`", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-cjs-permissions-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const key = "jazz-tools.test.create-jazz.cjs-permissions";
+    (globalThis as Record<symbol, unknown>)[Symbol.for(key)] = permissions;
+    const file = join(dir, "permissions.js");
+    await writeFile(
+      file,
+      `"use strict";\nObject.defineProperty(exports, "__esModule", { value: true });\nexports.default = globalThis[Symbol.for(${JSON.stringify(key)})];\n`,
+    );
+    const wrapped = createRequire(file)(file) as typeof permissions;
+    const jazz = createJazz({ app, permissions: wrapped, store: memory() });
+    cleanups.push(() => jazz.close());
+    await expect(jazz.ready()).rejects.toThrow(
+      /^permissions\.ts arrived as \{ default: … \}.*\{"type": "module"\}/,
+    );
+  }, 30_000);
+
   it("refuses a sync session for a user without an account, until they sign in", async () => {
     // One origin whose backend is replaced by one on a new core (a reset dev
     // store): the client remembers alice, but the new core has no account
