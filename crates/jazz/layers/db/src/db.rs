@@ -43,7 +43,7 @@ pub use large_ops::{
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
-pub use sync::origin_node;
+pub use sync::{ORIGIN_ENTRY_RETENTION_MS, origin_node};
 
 #[path = "shard.rs"]
 pub mod shard;
@@ -3318,6 +3318,16 @@ impl Db {
                 {
                     inner.record_fate(node, tx, &Ok(()))?;
                     inner.record_settled(node, tx, Some(Pos::at(seq)))?;
+                    // Its entry ages out if all it wrote is latest-only,
+                    // as the commit's version declares (SPEC 8 §8.14).
+                    let prunable = {
+                        let changed = inner.changed.borrow();
+                        changed.len() > mark
+                            && changed[mark..]
+                                .iter()
+                                .all(|(stored, ..)| inner.prunes(stored))
+                    };
+                    inner.note_origin_entry(node, tx, prunable)?;
                 }
                 Ok((wrote, handle))
             });

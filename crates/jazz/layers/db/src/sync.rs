@@ -51,6 +51,7 @@ use rusqlite::OptionalExtension;
 use rusqlite::types::Value as SqlValue;
 use std::cell::Cell as StdCell;
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::future::poll_fn;
@@ -746,6 +747,28 @@ const ORIGIN_NODE_TAG: [u8; 4] = *b"jzTW";
 pub(crate) fn is_origin_node(node: [u8; 16]) -> bool {
     node[..4] == ORIGIN_NODE_TAG && node[6] >> 4 == 8 && node[8] >> 6 == 0b10
 }
+
+/// How long the authority keeps a thin writer's prunable dedupe entry, on
+/// its own clock (SPEC 8 §8.14). Far longer than a thin client resends a
+/// write for (`THIN_WRITE_RESEND_WINDOW_MS`, 10 minutes, in the TypeScript
+/// thin runtime): an entry is recorded no earlier than the write's first
+/// send, so every resend inside the client's window still finds it.
+pub const ORIGIN_ENTRY_RETENTION_MS: i64 = 60 * 60 * 1000;
+
+/// The most expired thin-writer entries one recorded entry drops: more than
+/// one, so a backlog drains while thin writes keep coming, and bounded, so
+/// no write pays for the whole backlog.
+const ORIGIN_PRUNE_BATCH: i64 = 64;
+
+/// The ages of the thin-writer dedupe entries the authority may drop
+/// (storage format 1, created by the first such entry, so a store that
+/// never takes one stays byte-identical): `at` is the authority's wall
+/// clock in Unix ms when it recorded the entry of `n`'s (a
+/// `_jazz_nodes.n`) commit `tx`. Keyed by age first, so pruning reads only
+/// the expired rows.
+pub(crate) const ORIGIN_ENTRIES_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_origin_entries \
+     (at INTEGER NOT NULL, n INTEGER NOT NULL, tx INTEGER NOT NULL, PRIMARY KEY (at, n, tx)) \
+     WITHOUT ROWID";
 
 pub(crate) fn writer_bytes(node: [u8; 16], tx: u64) -> Vec<u8> {
     let mut w = node.to_vec();
@@ -6538,19 +6561,22 @@ impl Inner {
             [],
         )
         .map_err(storage)?;
-        let code = self.node_code(node)?;
         // The commit's own version decides, as for its history.
-        // A thin client's commits reach the authority through any of its
-        // servers, so out of order (`INV-HIST-23` holds per server): each
-        // keeps its exact entry, which a resend is answered from.
         let latest_only = !ops.is_empty()
-            && !is_origin_node(node)
             && !self.shard.awaits(crate::db::shard::CommitRef { node, tx })
             && ops.iter().all(|op| {
                 self.schema
                     .stored_table(op.table())
                     .is_ok_and(|stored| self.prunes(stored))
             });
+        // A thin client's commits reach the authority through any of its
+        // servers, so out of order (`INV-HIST-23` holds per server): each
+        // keeps its exact entry, which a resend is answered from, until it
+        // ages out.
+        if is_origin_node(node) {
+            return self.note_origin_entry(node, tx, latest_only);
+        }
+        let code = self.node_code(node)?;
         let waiting: Option<i64> = self
             .conn
             .cached_row(
@@ -6596,6 +6622,96 @@ impl Inner {
             rusqlite::params![code, waiting],
         )
         .map_err(storage)?;
+        Ok(())
+    }
+
+    /// Note the dedupe entry the authority just recorded for thin writer
+    /// `node`'s commit `tx` (SPEC 8 §8.14), and drop the entries that aged
+    /// out. Only a `prunable` entry ages: a refusal, or an accepted commit
+    /// that wrote only tables its version declares latest-only. Any other
+    /// accepted commit's entry is also its history's record (history reads
+    /// name versions by it, and later writes build on it), kept as every
+    /// writer's is. An entry older than [`ORIGIN_ENTRY_RETENTION_MS`] on
+    /// this store's clock is dropped, and so is its node's `_jazz_nodes`
+    /// row once the node has no entry left. A resend after that is written
+    /// again: a client stops resending well before (the known limit is a
+    /// replica that holds the upload that long). Each call reads and drops
+    /// at most [`ORIGIN_PRUNE_BATCH`] expired entries, by age.
+    pub(crate) fn note_origin_entry(
+        &self,
+        node: [u8; 16],
+        tx: u64,
+        prunable: bool,
+    ) -> Result<(), Error> {
+        // A relay's entries are its own uploads' record, not dedupe.
+        if self.client.is_some() {
+            return Ok(());
+        }
+        let now = self.now_ms();
+        if prunable {
+            self.exec(ORIGIN_ENTRIES_DDL, []).map_err(storage)?;
+            self.exec(
+                "INSERT OR IGNORE INTO _jazz_origin_entries (at, n, tx) VALUES (?1, ?2, ?3)",
+                rusqlite::params![now, self.node_code(node)?, tx as i64],
+            )
+            .map_err(storage)?;
+        } else if !self.has_table("_jazz_origin_entries")? {
+            return Ok(());
+        }
+        let expired: Vec<(i64, i64, i64)> = {
+            let mut statement = self
+                .conn
+                .prepare_cached(
+                    "SELECT at, n, tx FROM _jazz_origin_entries WHERE at < ?1 ORDER BY at LIMIT ?2",
+                )
+                .map_err(storage)?;
+            statement
+                .query_map(
+                    rusqlite::params![
+                        now.saturating_sub(ORIGIN_ENTRY_RETENTION_MS),
+                        ORIGIN_PRUNE_BATCH
+                    ],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .and_then(|rows| rows.collect())
+                .map_err(storage)?
+        };
+        let mut nodes = BTreeSet::new();
+        for (at, code, tx) in expired {
+            self.exec(
+                "DELETE FROM _jazz_origin_entries WHERE at = ?1 AND n = ?2 AND tx = ?3",
+                rusqlite::params![at, code, tx],
+            )
+            .map_err(storage)?;
+            self.exec(
+                "DELETE FROM _jazz_transactions WHERE n = ?1 AND tx = ?2",
+                rusqlite::params![code, tx],
+            )
+            .map_err(storage)?;
+            nodes.insert(code);
+        }
+        let pruned_txs = !nodes.is_empty() && self.has_pruned_txs()?;
+        for code in nodes {
+            let left: bool = self
+                .conn
+                .cached_row(
+                    "SELECT EXISTS (SELECT 1 FROM _jazz_transactions WHERE n = ?1)",
+                    [code],
+                    |r| r.get(0),
+                )
+                .map_err(storage)?;
+            if left {
+                continue;
+            }
+            // Nothing else names a node by its code: the next node interned
+            // may take it.
+            self.exec("DELETE FROM _jazz_nodes WHERE n = ?1", [code])
+                .map_err(storage)?;
+            if pruned_txs {
+                self.exec("DELETE FROM _jazz_pruned_txs WHERE n = ?1", [code])
+                    .map_err(storage)?;
+            }
+        }
         Ok(())
     }
 
@@ -13320,6 +13436,11 @@ impl Db {
                                 let result = Err(wire_error(&error));
                                 inner.record_fate(node, tx, &result)?;
                                 inner.record_settled(node, tx, None)?;
+                                // A refusal is no history's record: a thin
+                                // writer's ages out (SPEC 8 §8.14).
+                                if is_origin_node(node) {
+                                    inner.note_origin_entry(node, tx, true)?;
+                                }
                                 (result, rows, Vec::new())
                             }
                         },

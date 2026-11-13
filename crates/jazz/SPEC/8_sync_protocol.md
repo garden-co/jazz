@@ -1089,8 +1089,24 @@ those bytes are refused with it at once until the fetch backoff ends.
   nothing, and the next commit does not inherit its id. A write whose key
   the store already knows for the same author is not made again: it answers
   `Written` with seq 0, or the first one's refusal as uploaded through a
-  replica. In .60 the authority keeps these dedupe entries and never prunes them;
-  a bounded resend window is planned for .61 (#4961). The authority does not record its own refusal: a resend of a
+  replica. A client resends a write for at most 10 minutes after its first
+  send (the TypeScript thin client's `THIN_WRITE_RESEND_WINDOW_MS`); after
+  that the write ends with its outcome unknown. The authority drops the
+  dedupe entry of such a commit one hour after it recorded it, on its own
+  clock (`ORIGIN_ENTRY_RETENTION_MS`), if the commit was refused or wrote
+  only latest-only tables (SPEC 4 §4.9), and the writer node's interned
+  row once the node has no entry left. Any other accepted commit's entry is
+  also its history's record (history reads name its versions by it, and
+  later writes build on it), so it is kept, as every writer's is. Entries
+  are dropped oldest first, a bounded batch per thin-writer entry the
+  authority records, so pruning costs what it drops; a store that takes no
+  more thin writes keeps what it holds. An entry is recorded no earlier
+  than the write's first send, so every resend inside the client's window
+  finds it. Known limit: a replica that holds an origin commit's upload for
+  more than an hour while the client resends the write through another
+  server could apply a latest-only write twice. Entries recorded before
+  the authority ran a build that records their ages are never dropped.
+  The authority does not record its own refusal: a resend of a
   write it refused runs again, against current state. On a replica, seq 0
   can answer a write still pending upstream. An insert with a key names its
   `rowId`; a staged write names no key. So a client resends a keyed write
