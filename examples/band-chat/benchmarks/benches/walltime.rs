@@ -4,6 +4,7 @@
 use jazz_example_band_chat_benchmark::announcements::AnnouncementsFixture;
 use jazz_example_band_chat_benchmark::live_rooms::LiveRoomsFixture;
 use jazz_example_band_chat_benchmark::membership_room::{OpenFixture, SendFixture};
+use jazz_example_band_chat_benchmark::presence::{NestedPageFixture, PresenceFixture};
 use jazz_example_band_chat_benchmark::{FastResumeFixture, Fixture};
 
 #[global_allocator]
@@ -87,4 +88,24 @@ fn band_chat_post_announcements(bencher: divan::Bencher<'_, '_>, messages: usize
     bencher
         .with_inputs(|| AnnouncementsFixture::new(messages))
         .bench_local_refs(|fixture| fixture.post_announcements(ANNOUNCEMENTS_POSTED));
+}
+
+/// A member on the open page stamps their presence; the page (100 messages,
+/// each with its sender and its system rows, each naming three people)
+/// re-reads every relation that shows the member's profile. The stamp's own
+/// commit is a small part: the measured time is mostly that re-read.
+#[divan::bench(sample_count = 100)]
+fn band_chat_presence_on_nested_page(bencher: divan::Bencher<'_, '_>) {
+    let mut fixture = PresenceFixture::new();
+    bencher.bench_local(|| divan::black_box(fixture.stamp()));
+}
+
+/// A member opens the same page: one full read of the 100 messages and their
+/// nested relations through the read policies, with no write. Each sample
+/// opens a freshly seeded store, so no earlier result is reused.
+#[divan::bench(sample_count = 20, sample_size = 1)]
+fn band_chat_open_nested_page(bencher: divan::Bencher<'_, '_>) {
+    bencher
+        .with_inputs(NestedPageFixture::new)
+        .bench_local_refs(|fixture| fixture.open());
 }
