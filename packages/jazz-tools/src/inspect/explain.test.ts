@@ -32,12 +32,12 @@ describe("explain's clauses", () => {
         ]),
       );
     });
-    const projects = policyClauses(permissions.projects!.select.using);
+    const projects = policyClauses(permissions.projects?.select?.using);
     expect(projects.map(renderPolicy)).toEqual([
       "owner = session.user",
       'session.claims.role = "manager"',
     ]);
-    const tasks = policyClauses(permissions.tasks!.select.using);
+    const tasks = policyClauses(permissions.tasks?.select?.using);
     expect(tasks.map(renderPolicy)).toEqual([
       "the row projectId points to allows read",
       'tags contains "public" and session.claims.team in ["a", "b"]',
@@ -48,7 +48,7 @@ describe("explain's clauses", () => {
     const permissions = definePermissions(app, ({ policy }) => {
       policy.projects.allowRead.where({ archived: false });
     });
-    expect(policyClauses(permissions.projects!.select.using).map(renderPolicy)).toEqual([
+    expect(policyClauses(permissions.projects?.select?.using).map(renderPolicy)).toEqual([
       "archived = false",
     ]);
     expect(policyClauses(undefined)).toEqual([]);
