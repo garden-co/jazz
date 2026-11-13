@@ -872,7 +872,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly schemaBytes: Uint8Array;
   private readonly configBytes: Uint8Array;
   private readonly peerIdentity: Uint8Array;
-  /** The principal the first credential naming one connects as; see `assertSameUpstreamPrincipal`. */
+  /** The principal of the first admitted credential naming one; see `assertCredentialKeepsPrincipal`. */
   private upstreamPrincipal: Uint8Array | null = null;
   private readonly selfSignedClientProof: NativeSelfSignedClientProof | undefined;
   private readonly scopeIsolatedRelay: boolean;
@@ -2682,7 +2682,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return;
     }
     const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
-    this.assertSameUpstreamPrincipal(normalizedAuthJson);
+    this.assertCredentialKeepsPrincipal(normalizedAuthJson);
     // Validate synchronously before retiring the current transport. Callers
     // historically observe an incompatible native binding at connect() time.
     this.nativeWireFeatures();
@@ -3039,6 +3039,7 @@ export class NativeRuntimeAdapter implements Runtime {
         const firstPump = this.pumpServerTransport();
         firstPump.catch((error) => this.handleServerTransportError(error, generation));
         this.pumpSubscriptions();
+        this.pinUpstreamPrincipal(normalizedAuthJson);
         this.stepLink({ type: "admitted", attempt: id });
         // Waiters resume once the new link's first pump pass has run, or has
         // yielded to a core tick that other work holds.
@@ -3129,7 +3130,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.nativeAuthRefusalRenewable = false;
     if (this.db?.rejectAuthUpdate) return this.db.rejectAuthUpdate();
     const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
-    this.assertSameUpstreamPrincipal(normalizedAuthJson);
+    this.assertCredentialKeepsPrincipal(normalizedAuthJson);
     if (!this.serverEndpointUrl) return;
     this.serverAuthJson = normalizedAuthJson;
     // A live link is replaced so the server sees the new credential; a link
@@ -3138,14 +3139,21 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   /**
-   * The upstream principal is fixed once a credential names one: a later
-   * credential, from a refresh or a reconnect, that would connect as another
-   * principal is refused (`identity_mismatch`). The store, and in a browser
-   * worker every tab it serves, syncs as that principal, so a credential for
-   * someone else would link its replica upstream as them (#4476). A renewed
-   * credential for the same principal passes.
+   * The upstream principal is fixed once the server admits a credential that
+   * names one. A later credential, from a refresh or a reconnect, that names
+   * another principal is refused (`identity_mismatch`): the store, and in a
+   * browser worker every tab it serves, syncs as that principal, so a
+   * credential for someone else would link its replica upstream as them
+   * (#4476). A renewed credential for the same principal passes, and so does
+   * one that names no principal (signing out to `{}`). A credential the
+   * server refuses pins nothing.
    */
-  private assertSameUpstreamPrincipal(normalizedAuthJson: string): void {
+  assertCredentialKeepsPrincipal(authJson: string): void {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.assertCredentialKeepsPrincipal(authJson);
+    if (!this.upstreamPrincipal) return;
+    const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
+    if (!webSocketAuthNamesPrincipal(normalizedAuthJson)) return;
     let identity: Uint8Array | null;
     try {
       identity = peerIdentityForWebSocketAuth(normalizedAuthJson, this.peerIdentity);
@@ -3153,14 +3161,17 @@ export class NativeRuntimeAdapter implements Runtime {
       // It refuses a credential for another user than the store's account.
       identity = null;
     }
-    if (!identity || (this.upstreamPrincipal && !sameBytes(identity, this.upstreamPrincipal))) {
+    if (!identity || !sameBytes(identity, this.upstreamPrincipal)) {
       throw identityMismatchError(
         "a credential refresh must keep the principal this store connects upstream as",
       );
     }
-    if (!this.upstreamPrincipal && webSocketAuthNamesPrincipal(normalizedAuthJson)) {
-      this.upstreamPrincipal = identity;
-    }
+  }
+
+  /** Pin the principal of a credential the server just admitted. */
+  private pinUpstreamPrincipal(normalizedAuthJson: string): void {
+    if (this.upstreamPrincipal || !webSocketAuthNamesPrincipal(normalizedAuthJson)) return;
+    this.upstreamPrincipal = peerIdentityForWebSocketAuth(normalizedAuthJson, this.peerIdentity);
   }
 
   onAuthFailure(callback: (reason: string) => void): void {

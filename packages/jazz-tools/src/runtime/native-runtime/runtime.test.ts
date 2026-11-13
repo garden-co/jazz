@@ -296,7 +296,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       Buffer.from(JSON.stringify({ iss: "urn:jazz:test", sub })).toString("base64url") +
       ".signature";
 
-    const connectedRuntime = async () => {
+    const connectedRuntime = async (author = TEST_RUNTIME_AUTHOR) => {
       const sockets: FakeWebSocket[] = [];
       globalThis.WebSocket = class extends FakeWebSocket {
         constructor(url: string) {
@@ -317,7 +317,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         } as never,
         testSchema,
         new Uint8Array(16),
-        TEST_RUNTIME_AUTHOR,
+        author,
         1,
         true,
       );
@@ -345,6 +345,63 @@ describe("NativeRuntimeAdapter server transport", () => {
 
       expect(sockets).toHaveLength(1);
       expect(sockets[0]!.closed).toBe(false);
+      await runtime.close();
+    });
+
+    it("allows signing out to a credential that names no principal", async () => {
+      // A store whose own author is a local host identity, not the user.
+      const { runtime } = await connectedRuntime(
+        new TextEncoder().encode('["https://jazz.test","local-cache"]'),
+      );
+
+      await runtime.updateAuth("{}");
+      expect(() => runtime.updateAuth(JSON.stringify({ jwt_token: jwtFor("another") }))).toThrow(
+        expect.objectContaining({ reason: "identity_mismatch" }),
+      );
+      await runtime.close();
+    });
+
+    it("pins nothing for a credential the server has not admitted", async () => {
+      const sockets: FakeWebSocket[] = [];
+      globalThis.WebSocket = class extends FakeWebSocket {
+        constructor(url: string) {
+          super(url);
+          sockets.push(this);
+        }
+
+        override send(data: Uint8Array | string): void {
+          // The first credential never completes its handshake.
+          if (sockets[0] === this) {
+            this.sent.push(data);
+            return;
+          }
+          super.send(data);
+        }
+      } as unknown as typeof WebSocket;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      runtime.connect(
+        "ws://127.0.0.1:4200/apps/app-a/ws",
+        JSON.stringify({ jwt_token: jwtFor("mistyped") }),
+      );
+      await waitForFakeWebSocketNegotiation();
+
+      await runtime.updateAuth(JSON.stringify({ jwt_token: jwtFor("runtime") }));
+      await runtime.waitForUpstreamServerConnection();
+
+      expect(sockets).toHaveLength(2);
       await runtime.close();
     });
 
