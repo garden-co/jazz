@@ -14,7 +14,7 @@ testing = []
 anyhow = "1"
 async-trait = "0.1"
 futures = "0.3"
-jazz = { path = "../jazz", default-features = false, features = ["runtime"] }
+jazz = { package = "jazz-core", path = "../jazz", default-features = false, features = ["runtime"] }
 jazz-server = { path = "../jazz-server", default-features = false, features = ["embedded-server"] }
 jazz-db = { path = "../jazz/layers/db", default-features = false }
 jazz-sql = { path = "../jazz-sql" }

@@ -1571,6 +1571,7 @@ function runningStore(store: JazzStore): JazzStore {
 function storeOpenedLine(store: Exclude<JazzStore, { kind: "vercel" }>): string {
   if (store.kind === "sqlite") return `jazz: store sqlite at ${store.path}`;
   if (store.kind === "memory") return "jazz: store memory (its data lasts as long as this process)";
+  if (store.kind === "rivet") return `jazz: store rivet ${store.options.name}`;
   return `jazz: store remote at ${store.url} (app ${store.appId})`;
 }
 

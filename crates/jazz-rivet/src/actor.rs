@@ -59,7 +59,6 @@ impl Actor for JazzActor {
         let auth = AuthConfig {
             admin_secret: Some(secret.clone()),
             backend_secret: Some(secret.clone()),
-            allow_local_first_auth: true,
             ..Default::default()
         };
         let runtime = tokio::runtime::Handle::current();

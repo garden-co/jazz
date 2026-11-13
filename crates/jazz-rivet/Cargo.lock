@@ -1437,8 +1437,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
-name = "jazz"
-version = "0.1.0"
+name = "jazz-compression"
+version = "2.0.0-alpha.66"
+
+[[package]]
+name = "jazz-core"
+version = "2.0.0-alpha.66"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1472,12 +1476,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "jazz-compression"
-version = "0.1.0"
-
-[[package]]
 name = "jazz-db"
-version = "0.1.0"
+version = "2.0.0-alpha.66"
 dependencies = [
  "bytes",
  "futures",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-model"
-version = "0.1.0"
+version = "2.0.0-alpha.66"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -1515,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-protocol"
-version = "0.1.0"
+version = "2.0.0-alpha.66"
 dependencies = [
  "hex",
  "jazz-compression",
@@ -1540,7 +1540,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "futures",
- "jazz",
+ "jazz-core",
  "jazz-db",
  "jazz-model",
  "jazz-protocol",
@@ -1561,7 +1561,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-server"
-version = "0.1.0"
+version = "2.0.0-alpha.66"
 dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
@@ -1571,7 +1571,9 @@ dependencies = [
  "hex",
  "hmac",
  "http",
- "jazz",
+ "hyper",
+ "hyper-util",
+ "jazz-core",
  "jazz-sql",
  "jsonwebtoken",
  "postcard",
@@ -1591,15 +1593,15 @@ dependencies = [
 
 [[package]]
 name = "jazz-sql"
-version = "0.1.0"
+version = "2.0.0-alpha.66"
 
 [[package]]
 name = "jazz-text"
-version = "0.1.0"
+version = "2.0.0-alpha.66"
 
 [[package]]
 name = "jazz-types"
-version = "0.1.0"
+version = "2.0.0-alpha.66"
 dependencies = [
  "base64 0.22.1",
  "bytes",
