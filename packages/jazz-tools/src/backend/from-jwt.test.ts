@@ -232,6 +232,19 @@ describe("fromJWT", () => {
     await expect(thrown).rejects.toSatisfy(isAuthenticationUnavailableError);
   });
 
+  it("throws a plain error, not an outage, when the JWKS URL answers with something that isn't a JWKS", async () => {
+    for (const body of ["<html>login</html>", JSON.stringify({ keys: [] })]) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(body)),
+      );
+      const authenticate = fromJWT({ jwksUrl: jwksUrl(), issuer: ISSUER, audience: AUDIENCE });
+      const thrown = authenticate(request(await sign({})));
+      await expect(thrown).rejects.toThrow(/JWKS response/);
+      await expect(thrown).rejects.not.toSatisfy(isAuthenticationUnavailableError);
+    }
+  });
+
   // A JWKS endpoint that hangs, rather than erroring, is the same outage as
   // one that is down: sign-in fails within the deadline (so the client
   // retries) instead of stalling, and the next sign-in fetches again.
@@ -289,8 +302,10 @@ describe("fromJWT", () => {
     // The refresh fails: the request throws, so the client retries.
     await expect(authenticate(request(unknown))).rejects.toThrow(/JWKS/);
     // Within the cooldown no refetch, but the retry still fails rather than
-    // being refused by keys that predate the outage.
-    await expect(authenticate(request(unknown))).rejects.toThrow(/JWKS/);
+    // being refused by keys that predate the outage, and still as an outage.
+    await expect(authenticate(request(unknown))).rejects.toSatisfy(
+      isAuthenticationUnavailableError,
+    );
     expect(fetch).toHaveBeenCalledTimes(2);
     // Known keys still work from the cache.
     expect((await authenticate(request(await sign({}))))?.userId).toBe("user_01");

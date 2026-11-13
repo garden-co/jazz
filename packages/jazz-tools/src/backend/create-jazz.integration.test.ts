@@ -1376,6 +1376,45 @@ describe("createJazz", () => {
     ).rejects.toMatchObject({ status: 503 });
   });
 
+  // A JWKS URL that answers, but not with a JWKS, is the app's setup and not
+  // an outage: retrying won't fix it, so it stays a 500 naming authenticate.
+  it("answers 500 naming authenticate when fromJWT's JWKS answers with something that isn't a JWKS (#5367)", async () => {
+    const jwks: Server = createServer((_req, res) => res.end("<html>not a JWKS</html>"));
+    await new Promise<void>((resolve) => jwks.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => jwks.close(resolve)));
+    const jwksUrl = `http://127.0.0.1:${(jwks.address() as AddressInfo).port}/jwks.json`;
+    const { privateKey } = await generateKeyPair("ES256");
+    const issuer = "https://idp.example";
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: fromJWT({ jwksUrl, issuer, audience: "my-app" }),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+    const token = await new SignJWT({})
+      .setProtectedHeader({ alg: "ES256", kid: "k1" })
+      .setIssuer(issuer)
+      .setAudience("my-app")
+      .setSubject("alice")
+      .setExpirationTime("5m")
+      .sign(privateKey);
+    const answer = await jazz.handle(
+      new Request(`http://app.test/jazz/apps/${jazz.appId}/accounts/backend-user`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+      }),
+    );
+    expect(answer.status).toBe(500);
+    expect(await answer.text()).toBe("authenticate_failed");
+    expect(errors).toHaveBeenCalledTimes(1);
+    const [message, error] = errors.mock.calls[0]!;
+    expect(message).toMatch(/^createJazz: your authenticate threw/);
+    expect((error as Error).message).toBe("Unable to parse JWKS response");
+  });
+
   it("tells the browser by a stable code that authenticate returned no expiresAt, and the client names the fix", async () => {
     let answer: unknown = { userId: "alice", internal: "secret-session-detail" };
     const jazz = await createJazz({
