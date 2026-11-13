@@ -143,6 +143,8 @@ mod remote_read_after_bulk_writes;
 mod reopened_admitted_versions;
 #[path = "../replica_lost_tail.rs"]
 mod replica_lost_tail;
+#[path = "../required_relation_policies.rs"]
+mod required_relation_policies;
 #[path = "../same_version_bundles.rs"]
 mod same_version_bundles;
 #[path = "../schema_activation.rs"]
