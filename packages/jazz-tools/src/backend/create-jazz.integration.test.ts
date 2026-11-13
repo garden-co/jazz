@@ -1002,6 +1002,63 @@ describe("createJazz", () => {
     });
   });
 
+  it("answers 500 naming authenticate when it throws, without an unhandled rejection (#5263)", async () => {
+    let fail: () => never | Promise<never> = () => {
+      throw new Error("synthetic auth failure");
+    };
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: () => fail(),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    cleanups.push(async () => void process.off("unhandledRejection", unhandled));
+    const origin = await serve(jazz, { sockets: false });
+    const url = `http://app.test/jazz/apps/${jazz.appId}/accounts/backend-user`;
+
+    // Before: `next()`'s POST rejected with the app's error, which on Vercel
+    // surfaced as an unhandledRejection and the function exited.
+    const { POST } = jazz.next();
+    for (const thrower of [
+      () => {
+        throw new Error("synthetic auth failure");
+      },
+      () => Promise.reject(new Error("synthetic auth failure")),
+    ]) {
+      fail = thrower;
+      errors.mockClear();
+      for (const answer of [
+        await POST(new Request(url, { method: "POST" })),
+        await jazz.handle(new Request(url, { method: "POST" })),
+        await fetch(`${origin}/jazz/apps/${jazz.appId}/accounts/backend-sign-in`, {
+          method: "POST",
+        }),
+      ]) {
+        expect(answer.status).toBe(500);
+        expect(answer.headers.get("cache-control")).toBe("no-store");
+        // Only the code: nothing of the app's error.
+        expect(await answer.text()).toBe("authenticate_failed");
+      }
+      // Logged once per request, naming authenticate, with the app's error.
+      expect(errors).toHaveBeenCalledTimes(3);
+      for (const [message, error] of errors.mock.calls) {
+        expect(message).toMatch(/^createJazz: your authenticate threw/);
+        expect((error as Error).message).toBe("synthetic auth failure");
+      }
+    }
+    // The client reports the stable code.
+    await expect(
+      requestBackendUser(`${origin}/jazz/apps/${jazz.appId}/accounts`),
+    ).rejects.toMatchObject({ code: "authenticate_failed", status: 500 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(unhandled).not.toHaveBeenCalled();
+  });
+
   it("tells the browser by a stable code that authenticate returned no expiresAt, and the client names the fix", async () => {
     let answer: unknown = { userId: "alice", internal: "secret-session-detail" };
     const jazz = await createJazz({
@@ -1320,6 +1377,26 @@ describe("createJazz", () => {
     await expect(jazz.accountFor(request())).resolves.toBeNull();
     answer = undefined;
     await expect(jazz.accountFor(request())).resolves.toBeNull();
+  }, 30_000);
+
+  // An Expo app is a CommonJS package: an ESM backend importing its
+  // permissions.ts by default gets the whole module.exports, `{ default }`.
+  it("names a permissions module imported as CommonJS, not an unknown table `default`", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-cjs-permissions-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const key = "jazz-tools.test.create-jazz.cjs-permissions";
+    (globalThis as Record<symbol, unknown>)[Symbol.for(key)] = permissions;
+    const file = join(dir, "permissions.js");
+    await writeFile(
+      file,
+      `"use strict";\nObject.defineProperty(exports, "__esModule", { value: true });\nexports.default = globalThis[Symbol.for(${JSON.stringify(key)})];\n`,
+    );
+    const wrapped = createRequire(file)(file) as typeof permissions;
+    const jazz = createJazz({ app, permissions: wrapped, store: memory() });
+    cleanups.push(() => jazz.close());
+    await expect(jazz.ready()).rejects.toThrow(
+      /^permissions\.ts arrived as \{ default: … \}.*\{"type": "module"\}/,
+    );
   }, 30_000);
 
   it("refuses a sync session for a user without an account, until they sign in", async () => {
@@ -2011,6 +2088,41 @@ describe("createJazz", () => {
       .insert(app.todos, { title: "still over the stream", owner: alice.session!.user! })
       .wait({ tier: "global" });
     expect((await jazz.db.all(app.todos.where({ id: later.id }))).length).toBe(1);
+  }, 60_000);
+
+  it("lets a client end its stream session once signed out, and calls one already ended done", async () => {
+    // #5187: a client ends its stream as it signs out, when the app's
+    // sign-in is already gone. That was a 403, and a DELETE that arrived
+    // after the session ended a 404 or 410: errors the browser logs.
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    const appId = jazz.appId;
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: false });
+    const previous = (globalThis as { location?: unknown }).location;
+    (globalThis as { location?: unknown }).location = {
+      host: new URL(origin).host,
+      href: `${origin}/`,
+    };
+    cleanups.push(async () => {
+      (globalThis as { location?: unknown }).location = previous;
+    });
+    const alice = await userSession(appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "over the stream", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    const sessionPath = requestPaths.find((path) => /\/stream\/[^/]+$/.test(path))!;
+    const key = streamKeys.get(sessionPath)!;
+    const end = (headers: Record<string, string>) =>
+      statusOf(`${origin}${sessionPath}`, "DELETE", headers);
+
+    // Still refused: no key, or the key with someone else's sign-in.
+    expect(await end({})).toBe(403);
+    expect(await end({ "x-test-user": "bob", "x-jazz-stream-key": key })).toBe(403);
+    // Its own client, signed out: ends it.
+    expect(await end({ "x-jazz-stream-key": key })).toBe(204);
+    // Ended already: done, for its client only.
+    expect(await end({ "x-jazz-stream-key": key })).toBe(204);
+    expect(await end({ "x-test-user": "alice" })).toBe(403);
   }, 60_000);
 
   for (const sockets of [false, true]) {

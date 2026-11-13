@@ -49,6 +49,8 @@ mod enum_tags;
 mod error_code_strings;
 #[path = "../existential_joins.rs"]
 mod existential_joins;
+#[path = "../explain_read_clauses.rs"]
+mod explain_read_clauses;
 #[path = "../fanout_differential.rs"]
 mod fanout_differential;
 #[path = "../flat_joins.rs"]

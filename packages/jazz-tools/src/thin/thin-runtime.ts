@@ -33,8 +33,11 @@ import { parseSnapshotRef, type SnapshotRef } from "../runtime/snapshot-ref.js";
 import {
   CONNECTED,
   CONNECTING,
+  linkFailureOf,
   offlineLink,
+  type LinkFailure,
   type LinkStatus,
+  type OfflineReason,
   type UploadStatus,
 } from "../runtime/sync-status.js";
 import { streamingChunks } from "../runtime/streaming-source.js";
@@ -270,6 +273,11 @@ export class ThinRuntime implements Runtime {
   private failingSince?: number;
   private outagePublished = false;
   private readonly outageReportMs: number;
+  /** Why the latest connection ended, in the server's words when it said. */
+  private lastLostMessage: string | undefined;
+  /** The way the link is failing now, to record each failure once. */
+  private failingAs: OfflineReason | null = null;
+  private lastFailure: LinkFailure | null = null;
   private nextRequestId = 1;
   private readonly oneShots = new Map<number, OneShot>();
   private nextHandle = 1;
@@ -490,6 +498,7 @@ export class ThinRuntime implements Runtime {
     if (this.carrier !== carrier) return;
     const lostError = new ThinConnectionLostError(`${error.code}: ${error.message}`);
     const wasBound = this.bound;
+    this.lastLostMessage = error.message;
     // A planned swap that ends any other way is reported as that ending.
     this.reauthenticating = false;
     if (isReauthenticateWireError(error) && wasBound) {
@@ -523,12 +532,15 @@ export class ThinRuntime implements Runtime {
       return;
     }
     this.dropConnection(lostError, this.wanted && !this.closed);
-    // An attempt that fails past the window reports the outage.
+    // An attempt that fails past the window reports the outage. A server that
+    // answered and refused this connection for now (`backpressure` before
+    // admission, such as the connection cap per user) is reported at once:
+    // there is nothing to wait out, and its message says why.
     if (
       !this.stopped &&
       !this.outagePublished &&
-      this.failingSince !== undefined &&
-      Date.now() - this.failingSince >= this.outageReportMs
+      ((!wasBound && error.code === "backpressure") ||
+        (this.failingSince !== undefined && Date.now() - this.failingSince >= this.outageReportMs))
     ) {
       this.outagePublished = true;
     }
@@ -600,6 +612,7 @@ export class ThinRuntime implements Runtime {
   private fatal(error: Error): void {
     this.wanted = false;
     this.failure = error;
+    this.lastLostMessage = error.message;
     this.stop();
     // A write the server may have taken ends with its fate unknown, not as
     // the server's rejection of it.
@@ -1386,7 +1399,24 @@ export class ThinRuntime implements Runtime {
   }
 
   private notifySyncStatus(): void {
+    this.noteLinkFailure();
     for (const listener of [...this.syncStatusListeners]) listener();
+  }
+
+  /** The latest time the link failed, and how; it stays after the link recovers. */
+  lastLinkFailure(): LinkFailure | null {
+    this.noteLinkFailure();
+    return this.lastFailure;
+  }
+
+  /** Record a failure the first time the link is seen failing that way. */
+  private noteLinkFailure(): void {
+    const link = this.upstreamLinkStatus();
+    const failing = link.state === "offline" ? link.reason : null;
+    if (failing === this.failingAs) return;
+    this.failingAs = failing;
+    const failure = linkFailureOf(link, this.lastLostMessage);
+    if (failure) this.lastFailure = failure;
   }
 
   /**

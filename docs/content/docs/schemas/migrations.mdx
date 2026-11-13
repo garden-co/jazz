@@ -46,9 +46,10 @@ In practice, this lets you:
    `{ migrations }` now, as in [Shipping migrations with your app](#shipping-migrations-with-your-app).
 
 2. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
-3. **Validate locally**&hairsp;—&hairsp;optionally run `npx jazz-tools validate` to surface
-   any policy diagnostics without publishing. Your main backend runs the same checks when it starts;
-   `validate` is most useful as a fast check before you deploy, or in CI.
+3. **Validate locally**&hairsp;—&hairsp;run `npx jazz-tools validate` after each schema change. It
+   regenerates `migrations/index.ts` and surfaces any policy diagnostics without publishing. Your
+   main backend runs the same checks when it starts, so `validate` is also a fast check before you
+   deploy, or in CI.
 4. **Create a migration stub for the updated schema**&hairsp;—&hairsp;run:
 
    ```bash
