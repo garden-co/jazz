@@ -16,6 +16,7 @@ declare global {
   var __authBetterAuthChatJazz: Promise<Jazz> | undefined;
 }
 
+// #region default-stack-create-jazz
 /** One Jazz per process, shared across Next's module graphs and reloads. */
 export function jazz(): Promise<Jazz> {
   const pending = (globalThis.__authBetterAuthChatJazz ??= createJazz({
@@ -44,3 +45,4 @@ export function jazz(): Promise<Jazz> {
   });
   return pending;
 }
+// #endregion default-stack-create-jazz

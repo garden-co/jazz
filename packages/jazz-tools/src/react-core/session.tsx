@@ -130,7 +130,7 @@ function JazzSessionView<Client extends CoreJazzClient>({
   );
   useLayoutEffect(() => {
     // Suspense hides layout effects while passive query subscriptions remain live.
-    consumer.lease ??= attachJazzSessionConsumer(session);
+    consumer.lease ??= attachJazzSessionConsumer(session, "React <JazzProvider>");
   }, [session, consumer]);
   useEffect(() => {
     ++consumer.epoch;

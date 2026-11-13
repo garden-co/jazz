@@ -223,6 +223,18 @@ export async function requestApproval(
   grant: GrantRequest,
   options: { store: TokenStore; timeoutMs?: number; fetch?: typeof fetch },
 ): Promise<PendingApproval> {
+  // Refused here, not after the person has opened the approval page. The
+  // app's own maximum (a day unless it set `maxTokenTtlSeconds`) is checked
+  // on that page, which knows it.
+  if (
+    grant.ttlSeconds !== undefined &&
+    (!Number.isSafeInteger(grant.ttlSeconds) || grant.ttlSeconds < MIN_TOKEN_TTL_SECONDS)
+  ) {
+    throw new InspectError(
+      "bad_request",
+      `a token must last at least a minute (asked for ${grant.ttlSeconds} seconds)`,
+    );
+  }
   const state = randomBytes(18).toString("base64url");
   let server: Server | undefined;
   let settle!: {
@@ -317,6 +329,9 @@ export async function requestApproval(
     },
   };
 }
+
+/** The shortest an agent token may live, as the backend mints them. */
+export const MIN_TOKEN_TTL_SECONDS = 60;
 
 /** Parse a duration like `30m`, `1h`, `1d` or a number of seconds. */
 export function parseDuration(text: string): number {

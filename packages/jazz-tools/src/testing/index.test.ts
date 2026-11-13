@@ -463,6 +463,36 @@ describe("createPolicyTestApp", () => {
     }
   }, 10_000);
 
+  // tobiaslins's reproduction from #4771: a local-first session on an app
+  // whose bundle ships two schema versions (a table added in between). It
+  // timed out waiting for query coverage until createPolicyTestApp
+  // published the app's history as createJazz does.
+  it("answers a local-first session on an app that ships two schema versions", async () => {
+    const before = { notes: s.table({ text: s.string() }, {}) };
+    const after = { ...before, tags: s.table({ label: s.string() }, {}) };
+    const migration = m.defineMigration({
+      from: before,
+      to: after,
+      createTables: { tags: true },
+    });
+    const app = s.defineApp(after, {
+      migrations: await appMigrations(before, { to: after, migration }),
+    });
+    const permissions = definePermissions(app, ({ policy }) => {
+      policy.notes.allowRead.always();
+      policy.tags.allowRead.always();
+    });
+    const policyTestApp = await createPolicyTestApp(app, permissions, expect);
+
+    try {
+      const alice = policyTestApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
+      await expect(alice.all(app.notes)).resolves.toEqual([]);
+      await expect(alice.all(app.tags)).resolves.toEqual([]);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+
   it("rejects a seed callback that returns the inserted row instead of the write", async () => {
     const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
 

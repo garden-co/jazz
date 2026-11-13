@@ -148,3 +148,6 @@ jobs:
             --commentWithSha \
             --packageManager=pnpm \
             "${PACKAGES[@]}"
+          # Every package must install from the short-SHA URL pkg.pr.new
+          # prints; the job summary lists those install commands.
+          node dev/scripts/check-pkg-pr-new-urls.mjs "${PREVIEW_COMMIT}" "${PACKAGES[@]}"

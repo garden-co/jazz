@@ -5,6 +5,8 @@ import {
 } from "./runtime-config.js";
 import { assertNativeArtifactCompatibility } from "./native-artifact-compatibility.js";
 import { installJsonSchemaValidator } from "./json-schema-validator.js";
+import { browserRuntimeModuleUrl, bundledWasmUrl } from "./browser-worker-assets.js";
+import { isMetroBundle, METRO_SETUP_ERROR } from "./metro-setup-error.js";
 
 /** WASM-only loader, deliberately outside the shared client implementation. */
 export type WasmModule = typeof import("jazz-wasm");
@@ -68,11 +70,15 @@ async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<Was
     }
   }
   if (!nodeInitDone && typeof wasmModule.default === "function") {
+    // A bundler that does not follow wasm-bindgen's own reference to the
+    // binary (Metro) names its URL for it instead.
     const wasmUrl =
       typeof location !== "undefined"
-        ? resolveRuntimeConfigWasmUrl(import.meta.url, location.href, runtime)
+        ? (resolveRuntimeConfigWasmUrl(browserRuntimeModuleUrl, location.href, runtime) ??
+          bundledWasmUrl())
         : null;
     if (wasmUrl) await initializeWasmFromUrl(wasmModule, wasmUrl);
+    else if (typeof location !== "undefined" && isMetroBundle()) throw new Error(METRO_SETUP_ERROR);
     else await wasmModule.default();
   }
 

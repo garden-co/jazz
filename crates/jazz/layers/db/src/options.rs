@@ -600,6 +600,14 @@ pub enum ErrorCode {
     /// local store is reset (`deleteClientStorage()` in jazz-tools) or the
     /// old server is back.
     AuthorityChanged,
+    /// This store was opened without the app's migrations (by a client that
+    /// dropped them, such as React Native's relay before alpha.61), so it
+    /// keeps a schema version's tables and columns under other names than
+    /// its authority, which never confirmed them. Nothing it holds can sync
+    /// with that authority: the store must be rebuilt (a React Native relay
+    /// does that itself when it holds no unsynced writes), or reset with
+    /// `deleteClientStorage()` in jazz-tools, which drops its unsynced writes.
+    StoreOpenedWithoutMigrations,
 }
 
 impl ErrorCode {
@@ -622,6 +630,7 @@ impl ErrorCode {
             ErrorCode::HistoricalReadRequiresServer => "historical_read_requires_server",
             ErrorCode::UnsupportedStorageCodecs => "unsupported_storage_codecs",
             ErrorCode::AuthorityChanged => "authority_changed",
+            ErrorCode::StoreOpenedWithoutMigrations => "store_opened_without_migrations",
         }
     }
 }

@@ -18,6 +18,8 @@
 // the point of the Inspector, and it is why the hook must be narrow.
 
 import { NoJazzAccountError } from "./no-account-error.js";
+import { accountAppId } from "../accounts/local-first.js";
+import { endpointScope } from "../runtime/client-scope.js";
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { ColumnType, TablePolicies, WasmSchema } from "../drivers/types.js";
 import type { Db, QueryBuilder, TableProxy } from "../runtime/db.js";
@@ -33,11 +35,14 @@ import {
   buildQueryJson,
   fromJsonForColumn,
   inspectorLink,
+  cleanTokenLabel,
+  fromJsonValue,
   isLoopbackHost,
   policyClauses,
   readsClaims,
   renderPolicy,
   rowLimit,
+  summarizeLargeValue,
   toJsonValue,
   type InspectAs,
   type InspectErrorCode,
@@ -87,6 +92,8 @@ export interface InspectEvent {
   write: boolean;
   /** The id of the agent token, when one was used. */
   tokenId?: string;
+  /** The agent token's label (what the agent asked access for), when one was used. */
+  label?: string;
   /** Set when the call was refused or failed. */
   error?: InspectErrorCode;
 }
@@ -148,6 +155,7 @@ interface Admitted {
   tables?: string[];
   expiresAt?: number;
   tokenId?: string;
+  label?: string;
 }
 
 interface TokenClaims {
@@ -170,7 +178,8 @@ const PROVENANCE = ["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"];
 
 function defaultAudit(event: InspectEvent): void {
   const parts = [
-    `jazz inspect: ${event.by} (${event.via})`,
+    // The label is the agent's own text: quoted, so it can't forge a line.
+    `jazz inspect: ${event.by} (${event.via}${event.label ? ` ${JSON.stringify(event.label)}` : ""})`,
     event.op,
     event.table,
     event.as && `as ${event.as}`,
@@ -339,7 +348,7 @@ export function createInspector(deps: InspectorDeps) {
   async function mintToken(
     admitted: Admitted,
     request: Extract<InspectRequest, { op: "mint_token" }>,
-  ): Promise<{ token: string; expiresAt: number; tokenId: string }> {
+  ): Promise<{ token: string; expiresAt: number; tokenId: string; label?: string }> {
     // A token is a person's delegation: another token can't make one.
     if (admitted.via === "token") {
       throw new InspectError(
@@ -381,7 +390,7 @@ export function createInspector(deps: InspectorDeps) {
       by: admitted.by,
       write: request.write === true,
       ...(tables ? { tables: [...new Set(tables)] } : {}),
-      ...(request.label ? { label: String(request.label).slice(0, 200) } : {}),
+      ...(cleanTokenLabel(request.label) ? { label: cleanTokenLabel(request.label) } : {}),
       iat,
       exp: iat + ttl,
       jti: randomUUID(),
@@ -392,6 +401,7 @@ export function createInspector(deps: InspectorDeps) {
       token: `${INSPECT_TOKEN_PREFIX}${payload}.${mac}`,
       expiresAt: claims.exp,
       tokenId: claims.jti,
+      ...(claims.label ? { label: claims.label } : {}),
     };
   }
 
@@ -426,15 +436,20 @@ export function createInspector(deps: InspectorDeps) {
       ...(claims.tables ? { tables: claims.tables } : {}),
       expiresAt: claims.exp,
       tokenId: claims.jti,
+      ...(typeof claims.label === "string" && claims.label ? { label: claims.label } : {}),
     };
   }
 
   // ---------------------------------------------------------------- reads and writes
 
+  /** Where browsers reach this Jazz: its public URL, else this request's origin and basePath. */
+  function endpointUrl(request: Request): string {
+    if (deps.publicUrls[0]) return deps.publicUrls[0];
+    return `${new URL(request.url).origin}${deps.basePath}`;
+  }
+
   function inspectorUrl(request: Request): string {
-    if (deps.publicUrls[0]) return `${deps.publicUrls[0]}${INSPECT_PATH}/`;
-    const url = new URL(request.url);
-    return `${url.origin}${deps.basePath}${INSPECT_PATH}/`;
+    return `${endpointUrl(request)}${INSPECT_PATH}/`;
   }
 
   function tableOf(name: string): {
@@ -530,6 +545,7 @@ export function createInspector(deps: InspectorDeps) {
     admitted: Admitted,
     query: InspectQuery,
     as: InspectAs | undefined,
+    options: { summarize?: boolean; part?: { column: string; from: number; to: number } } = {},
   ): Promise<{
     rows: Record<string, unknown>[];
     truncated: boolean;
@@ -557,9 +573,20 @@ export function createInspector(deps: InspectorDeps) {
     const limit = rowLimit(query.limit);
     const { columns } = tableOf(query.table);
     // One more than the limit, to tell whether more matched.
-    const json = buildQueryJson(query, limit + 1, (column, value) =>
+    let json = buildQueryJson(query, limit + 1, (column, value) =>
       fromJsonForColumn(columns.get(column), value),
     );
+    // Only `from`–`to` of one bytes or text value: the store reads just the
+    // chunks that part covers.
+    if (options.part) {
+      const { column, from, to } = options.part;
+      json = JSON.stringify({
+        ...JSON.parse(json),
+        select: [column],
+        partialSelect: { [column]: { from, to } },
+      });
+    }
+    const summarize = options.summarize ?? true;
     const { db, as: asUser, asClaims, warning } = await dbFor(as);
     const found = await db.all(queryBuilder(query.table, json), {
       tier: "remote",
@@ -570,8 +597,30 @@ export function createInspector(deps: InspectorDeps) {
     for (const row of found.slice(0, limit)) {
       const shown = toJsonValue(row) as Record<string, unknown>;
       if (hidden) for (const column of hidden) if (column in shown) shown[column] = REDACTED;
-      bytes += JSON.stringify(shown).length;
-      if (bytes > MAX_ANSWER_BYTES) {
+      // A large value is summarized, so its row is listed (`get` with
+      // `column` answers the value itself).
+      if (summarize) {
+        for (const [column, value] of Object.entries(shown)) {
+          shown[column] = summarizeLargeValue(value);
+        }
+      }
+      let size = JSON.stringify(shown).length;
+      // Always the first row: a row that exists is never answered as none.
+      // Should it alone be larger than an answer carries (many values just
+      // under the limit), summarize its largest values until it fits.
+      if (rows.length === 0 && size > MAX_ANSWER_BYTES) {
+        const bySize = Object.entries(shown)
+          .filter(([column]) => column !== "id")
+          .map(([column, value]) => [column, JSON.stringify(value)?.length ?? 0] as const)
+          .sort((a, b) => b[1] - a[1]);
+        for (const [column] of bySize) {
+          if (size <= MAX_ANSWER_BYTES) break;
+          shown[column] = summarizeLargeValue(shown[column], 0);
+          size = JSON.stringify(shown).length;
+        }
+      }
+      bytes += size;
+      if (bytes > MAX_ANSWER_BYTES && rows.length > 0) {
         truncated = true;
         break;
       }
@@ -604,7 +653,10 @@ export function createInspector(deps: InspectorDeps) {
     }
     const prepared = ops.map((op) => {
       if (!op || typeof op !== "object" || !["insert", "update", "delete"].includes(op.kind)) {
-        throw new InspectError("bad_request", "each op is an insert, update or delete");
+        throw new InspectError(
+          "bad_request",
+          `each op needs kind: "insert", "update" or "delete" (got ${String(JSON.stringify(op && typeof op === "object" ? ((op as { kind?: unknown }).kind ?? null) : op)).slice(0, 60)})`,
+        );
       }
       if (typeof op.table !== "string" || !op.table) {
         throw new InspectError("bad_request", `${op.kind} needs a table`);
@@ -671,6 +723,112 @@ export function createInspector(deps: InspectorDeps) {
       ...(asClaims ? { asClaims } : {}),
       ...(warning ? { warning } : {}),
     };
+  }
+
+  /** `get` with `column`: one value of one row, whole or `from`–`to` of it. */
+  async function getValue(
+    admitted: Admitted,
+    body: Extract<InspectRequest, { op: "get" }>,
+    url: string,
+  ) {
+    const column = body.column;
+    if (typeof column !== "string" || !column) {
+      throw new InspectError("bad_request", "column must name a column");
+    }
+    for (const bound of [body.from, body.to]) {
+      if (bound !== undefined && (!Number.isSafeInteger(bound) || bound < 0)) {
+        throw new InspectError("bad_request", "from and to must be whole numbers of at least 0");
+      }
+    }
+    const type = tableOf(body.table).columns.get(column);
+    if (!type) throw new InspectError("not_found", `${body.table} has no column ${column}`);
+    const ranged = type.type === "Bytea" || type.type === "Text";
+    const unit = type.type === "Bytea" ? "bytes" : "UTF-16 code units";
+    const partLimit = type.type === "Bytea" ? MAX_PART_BYTES : MAX_PART_TEXT;
+    const where = { table: body.table, where: { id: body.id }, select: [column], limit: 1 };
+    const read = (part?: { from: number; to: number }) =>
+      readRows(admitted, where, body.as, {
+        summarize: false,
+        ...(part ? { part: { column, ...part } } : {}),
+      }).then((answer) => {
+        const row = answer.rows[0];
+        if (!row)
+          throw new InspectError("not_found", `${body.table} has no row ${body.id} to read`);
+        return { answer, value: row[column] };
+      });
+    const answerWith = (
+      found: Awaited<ReturnType<typeof read>>,
+      extra: Record<string, unknown> = {},
+    ) => ({
+      answer: {
+        value: found.value,
+        ...extra,
+        ...(found.answer.warning ? { warning: found.answer.warning } : {}),
+        inspectorUrl: inspectorLink(url, { table: body.table, row: body.id, as: body.as }),
+      },
+      event: { table: body.table, rows: 1, as: found.answer.as, asClaims: found.answer.asClaims },
+    });
+
+    if (body.from !== undefined || body.to !== undefined) {
+      if (!ranged) {
+        throw new InspectError(
+          "bad_request",
+          `from and to are for a bytes or text column; ${column} is neither`,
+        );
+      }
+      const from = body.from ?? 0;
+      if (body.to === undefined) {
+        throw new InspectError(
+          "bad_request",
+          `give to as well: the part ends there (${column}'s size is in its row's $large summary)`,
+        );
+      }
+      if (body.to < from) throw new InspectError("bad_request", "to must not be before from");
+      if (body.to - from > partLimit) {
+        throw new InspectError(
+          "bad_request",
+          `a part is at most ${partLimit} ${unit}: ask for ${column} in smaller parts`,
+        );
+      }
+      try {
+        return answerWith(await read({ from, to: body.to }), { from, to: body.to });
+      } catch (error) {
+        if (!isOutOfBounds(error)) throw error;
+        throw new InspectError(
+          "bad_request",
+          `${from}–${body.to} is past the end of ${column} (its size is in its row's $large summary)`,
+        );
+      }
+    }
+
+    if (ranged) {
+      // Not the whole value to find out it's too large: a part one past what
+      // an answer carries either exists (too large) or is out of bounds.
+      try {
+        await read({ from: 0, to: partLimit + 1 });
+        throw new InspectError(
+          "bad_request",
+          `${column} is longer than one answer carries (${partLimit} ${unit}): ask for it in parts with from and to`,
+        );
+      } catch (error) {
+        if (!isOutOfBounds(error)) throw error;
+      }
+    }
+    const found = await read();
+    const encoded = JSON.stringify(found.value) ?? "";
+    if (encoded.length > MAX_ANSWER_BYTES) {
+      throw new InspectError(
+        "bad_request",
+        `${column} is larger than one answer carries; parts (from and to) are for bytes and text columns only`,
+      );
+    }
+    const size =
+      typeof found.value === "string"
+        ? found.value.length
+        : type.type === "Bytea" && found.value
+          ? (fromJsonValue(found.value) as Uint8Array).length
+          : undefined;
+    return answerWith(found, size !== undefined ? { size } : {});
   }
 
   /**
@@ -774,11 +932,14 @@ export function createInspector(deps: InspectorDeps) {
       case "whoami": {
         const whoami: InspectWhoami = {
           appId: deps.appId,
+          clientAppId: accountAppId(endpointScope(endpointUrl(request))),
           by: admitted.by,
           via: admitted.via,
           write: admitted.write,
           ...(admitted.tables ? { tables: admitted.tables } : {}),
           ...(admitted.expiresAt ? { expiresAt: admitted.expiresAt } : {}),
+          ...(admitted.label ? { label: admitted.label } : {}),
+          maxTokenTtlSeconds: settings().maxTtl,
           inspectorUrl: url,
           protocol: INSPECT_PROTOCOL_VERSION,
         };
@@ -808,6 +969,7 @@ export function createInspector(deps: InspectorDeps) {
       }
       case "get": {
         if (typeof body.id !== "string") throw new InspectError("bad_request", "get needs an id");
+        if (body.column !== undefined) return getValue(admitted, body, url);
         const read = await readRows(
           admitted,
           {
@@ -923,7 +1085,11 @@ export function createInspector(deps: InspectorDeps) {
         const minted = await mintToken(admitted, body);
         return {
           answer: { token: minted.token, expiresAt: minted.expiresAt },
-          event: { tokenId: minted.tokenId, write: body.write === true },
+          event: {
+            tokenId: minted.tokenId,
+            write: body.write === true,
+            ...(minted.label ? { label: minted.label } : {}),
+          },
         };
       }
       default:
@@ -992,6 +1158,7 @@ export function createInspector(deps: InspectorDeps) {
       op: body.op,
       write: false,
       ...(admitted.tokenId ? { tokenId: admitted.tokenId } : {}),
+      ...(admitted.label ? { label: admitted.label } : {}),
     };
     try {
       const { answer: result, event } = await answer(request, admitted, body);
@@ -1037,6 +1204,16 @@ export function createInspector(deps: InspectorDeps) {
 }
 
 export type Inspector = ReturnType<typeof createInspector>;
+
+/** The most of a bytes value `get` answers at once: its base64 stays within an answer. */
+const MAX_PART_BYTES = 512 * 1024;
+/** The most UTF-16 code units of a text value `get` answers at once. */
+const MAX_PART_TEXT = 256 * 1024;
+
+/** The store refused a range past the end of a value. */
+function isOutOfBounds(error: unknown): boolean {
+  return /out of bounds/.test(error instanceof Error ? error.message : String(error));
+}
 
 function asInspectError(error: unknown): InspectError {
   if (error instanceof InspectError) return error;
