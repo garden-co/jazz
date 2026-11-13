@@ -1,5 +1,6 @@
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { verifyChallenge } from "../local-first-auth/server.js";
+import { serverSigningKey } from "./signing-key.js";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Http2SecureServer, Http2Server } from "node:http2";
 import type { Duplex } from "node:stream";
@@ -709,6 +710,16 @@ const ACCESS_HEADER = "x-jazz-backend-access";
 // What the secret slots carry to a remote core: the access stated next to
 // the backend credential decides what a request gets, not these.
 const STAND_IN_SECRET = "stated-by-backend-credential";
+
+/**
+ * The app's secret, when this backend holds it: `remote()`'s `secret`, or
+ * an in-process core's own. A core reached with a backend credential holds
+ * only {@link STAND_IN_SECRET}, which is no secret.
+ */
+function appSecretOf(store: JazzStore, core: { adminSecret: string }): string | undefined {
+  if (store.kind === "remote" && store.secret) return store.secret;
+  return core.adminSecret === STAND_IN_SECRET ? undefined : core.adminSecret;
+}
 /** The core's refusal of every local-first identity: it admits none. */
 const LOCAL_FIRST_AUTH_DISABLED = "local_first_auth_disabled";
 /**
@@ -1740,13 +1751,16 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    * Link challenges: a guest links only on a proof made for one challenge,
    * never on its sync token, so a leaked token can't link it to someone
    * else. A challenge names the user it links to and expires quickly; it is
-   * signed with a key only this app's backend instances share (derived from
-   * the core's admin secret), and its nonce becomes the link's single-use
-   * intent id at the core, so a proof works once.
+   * signed with a key only this app's backend holds (derived from the app's
+   * secret, or, where the store has none, this instance's own: see
+   * `serverSigningKey`), and its nonce becomes the link's single-use intent
+   * id at the core, so a proof works once.
    */
-  const challengeKey = createHmac("sha256", core.adminSecret)
-    .update(`jazz-link-challenge-v1\0${accountAppId(appId)}`)
-    .digest();
+  const challengeKey = serverSigningKey(
+    "jazz-link-challenge-v1",
+    accountAppId(appId),
+    appSecretOf(store, core),
+  );
   const LINK_CHALLENGE_TTL_SECONDS = 120;
   const challengeMac = (payload: string) =>
     createHmac("sha256", challengeKey).update(payload).digest("base64url");
