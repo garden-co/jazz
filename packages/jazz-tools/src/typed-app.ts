@@ -2218,7 +2218,9 @@ export interface DefineAppOptions {
    * The app's schema versions and migrations, from the module `jazz-tools`
    * generates beside schema.ts (`import { migrations } from "./migrations"`),
    * even while the app has a single version. `"none"` is for an app defined
-   * in code that has no other versions, such as a test's.
+   * in code that has no other versions and runs on a `memory()` store, such
+   * as a test's: `createJazz` refuses it with `sqlite()`, `vercel()` or
+   * `remote()`, which would keep its data past its first schema change.
    */
   migrations: ClientMigrations | "none";
 }

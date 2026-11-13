@@ -38,6 +38,7 @@ import {
   encodeStreamRecord,
 } from "../runtime/native-runtime/http-stream-socket.js";
 import { resolveSchemaSource } from "../schema-source.js";
+import { shipsNoMigrations } from "../runtime/client-migrations.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import { deployApp } from "../dev/catalogue.js";
 import { DeploymentError } from "../dev/catalogue-api.js";
@@ -3457,6 +3458,56 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
  */
 export function createJazz(options: CreateJazzOptions): Jazz {
   jazzSettings(options);
+  refuseNoMigrationsOnPersistentStore(options);
+  return openFacade(options);
+}
+
+/**
+ * `createJazz` for a test harness that fronts a test core with `remote()`
+ * (`startTestJazz`): its apps may be defined in code with
+ * `{ migrations: "none" }`, as a test's are. Not exported to apps.
+ */
+export function createTestJazz(options: CreateJazzOptions): Jazz {
+  jazzSettings(options);
+  return openFacade(options);
+}
+
+/**
+ * The fix for an app on `{ migrations: "none" }` with a store that keeps its
+ * data: what `createJazz` says when it refuses one.
+ */
+export function noMigrationsOnPersistentStoreMessage(kind: string): string {
+  return (
+    `createJazz: defineApp(schema, { migrations: "none" }) ships no schema history, so this ${kind}() store ` +
+    "could not follow your first schema change. " +
+    'Add `import { migrations } from "./migrations"` to schema.ts, pass `{ migrations }` to defineApp, ' +
+    "then run `npx jazz-tools migrations create`: it records schema.ts as the app's first version in migrations/index.ts. " +
+    '"none" is only for memory() stores and tests. See https://jazz.tools/docs/schemas/migrations'
+  );
+}
+
+/**
+ * An app on `{ migrations: "none" }` ships no schema history: a store that
+ * keeps its data (`sqlite()`, `vercel()`, `remote()`) would refuse the app at
+ * its first schema change. Refused when `createJazz` is called, before
+ * anything opens. `vercel()` is refused even outside a deployment, where it
+ * runs its `local` store: it is the deployment's store that keeps the data.
+ */
+function refuseNoMigrationsOnPersistentStore(options: CreateJazzOptions): void {
+  if (options.store.kind === "memory") return;
+  let schema;
+  try {
+    schema = resolveSchemaSource(options.app);
+  } catch {
+    // Not an app: opening the store says so.
+    return;
+  }
+  if (shipsNoMigrations(schema)) {
+    throw new Error(noMigrationsOnPersistentStoreMessage(options.store.kind));
+  }
+}
+
+function openFacade(options: CreateJazzOptions): Jazz {
   // Checked at startup, so a missing `ws` is in the logs before the first socket.
   if (onVercelHost()) void vercelUpgradesSockets();
   const store = runningStore(options.store);

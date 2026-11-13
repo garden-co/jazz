@@ -2,6 +2,7 @@ import { createHmac, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { defineShippedApp } from "../testing/client-migrations.js";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { fetchFor } from "../runtime/in-process-transport.js";
@@ -19,7 +20,7 @@ import {
   type SandboxSdk,
 } from "./vercel-store.js";
 
-const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
+const app = await defineShippedApp({ notes: s.table({ text: s.string() }, {}) });
 const permissions = s.definePermissions(app, ({ policy }) => {
   policy.notes.allowRead.always();
   policy.notes.allowInsert.always();
