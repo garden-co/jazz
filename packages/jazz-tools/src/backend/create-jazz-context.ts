@@ -12,7 +12,7 @@ import {
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { CompiledPermissions } from "../permissions/index.js";
-import { JazzClient, type MutationErrorEvent, type Runtime } from "../runtime/client.js";
+import { JazzClient, type MutationErrorEvent, type Runtime, type TxId } from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { Db, type DbConfig } from "../runtime/db.js";
@@ -90,9 +90,39 @@ type FlushableRuntime = Runtime & { flush?: () => void };
 /** Pre-listener mutation errors a backend context retains for its first listener. */
 export const MAX_PENDING_MUTATION_ERROR_EVENTS = 256;
 
+/**
+ * Unsettled writes a backend context tracks for routing. Beyond the cap (say,
+ * while the sync server is down), new writes go untracked: a rejection of
+ * one is then treated as untraceable and reaches only backend-global `Db`s,
+ * never another user's.
+ */
+export const MAX_UNSETTLED_WRITE_ROUTES = 65_536;
+
+/**
+ * How long a rejected write's route is kept for its mutation-error event when
+ * a `wait()` may have claimed the rejection (and no event will come).
+ */
+const REJECTED_WRITE_ROUTE_GRACE_MS = 60_000;
+
+/**
+ * What a backend `Db` writes as: its explicit `Session` object (compared by
+ * reference) and attribution.
+ */
+interface BackendWriter {
+  session: Session | undefined;
+  attribution: string | undefined;
+}
+
 interface BackendMutationErrorSink {
   hasMutationErrorListeners(): boolean;
   deliverMutationError(event: MutationErrorEvent): void;
+  /** Whether writes made as `writer` are this facade's writes. */
+  writesAs(writer: BackendWriter): boolean;
+  /**
+   * A facade with no per-request identity (`db()`, `asBackend()`): it also
+   * receives rejections that cannot be traced to the facade that made them.
+   */
+  readonly backendGlobal: boolean;
 }
 
 class BackendRuntimeSource extends RuntimeSource<DbConfig> {
@@ -120,18 +150,27 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   private shutdownPromise?: Promise<void>;
   private gracefulWait?: object;
   /**
-   * Every backend `Db` facade shares this source's single runtime, so its
-   * mutation errors belong to the source rather than to whichever facade
-   * happened to be created last. The source holds facades only weakly: a
-   * per-request `Db` that is dropped takes its listeners (and whatever they
-   * capture) with it, instead of living as long as the context.
+   * Every backend `Db` facade shares this source's single runtime, so the
+   * source routes each rejection to the facades that write as the identity
+   * (session and attribution) that made the write, never to another
+   * user's. The source holds facades only weakly: a per-request `Db` that is
+   * dropped takes its listeners (and whatever they capture) with it, instead
+   * of living as long as the context.
    */
   private readonly mutationErrorSinks = new Set<WeakRef<BackendMutationErrorSink>>();
   /**
-   * Rejections that arrive while no facade has a listener (for example,
-   * persisted in-flight writes settled during startup replay). They drain to
-   * whichever facade registers a listener first. Bounded: beyond the cap, the
-   * events are still logged as unhandled but only counted, not retained.
+   * Who made each write that is still unsettled, recorded while any facade
+   * listens for rejections. An entry ends when the write is accepted, or
+   * with its rejection's event. Bounded by {@link MAX_UNSETTLED_WRITE_ROUTES}.
+   */
+  private readonly unsettledWriters = new Map<TxId, BackendWriter>();
+  /**
+   * Rejections that cannot be traced to the facade that made them, while no
+   * backend-global facade has a listener (for example, persisted in-flight
+   * writes settled during startup replay). They drain to the first
+   * backend-global facade (`db()`, `asBackend()`) that registers a listener,
+   * never to a per-request one. Bounded: beyond the cap, the events are still
+   * logged as unhandled but only counted, not retained.
    */
   private readonly pendingMutationErrorEvents: MutationErrorEvent[] = [];
   private droppedMutationErrorEvents = 0;
@@ -248,6 +287,9 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
       { onAuthFailure },
     );
     this.client.onMutationError((event) => this.handleMutationError(event));
+    this.client.observeCommittedWrites((txId, session, attribution) =>
+      this.recordWriter(txId, { session, attribution }),
+    );
     return this.client;
   }
 
@@ -258,7 +300,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   attachMutationErrorSink(sink: WeakRef<BackendMutationErrorSink>): void {
     this.mutationErrorSinks.add(sink);
     const target = sink.deref();
-    if (!target) return;
+    if (!target?.backendGlobal) return;
     const dropped = this.droppedMutationErrorEvents;
     this.droppedMutationErrorEvents = 0;
     const pending = this.pendingMutationErrorEvents.splice(0);
@@ -275,13 +317,64 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     this.mutationErrorSinks.delete(sink);
   }
 
-  private handleMutationError(event: MutationErrorEvent): void {
+  private listeningSinks(): BackendMutationErrorSink[] {
     const targets: BackendMutationErrorSink[] = [];
     for (const sink of this.mutationErrorSinks) {
       const target = sink.deref();
       if (target?.hasMutationErrorListeners()) targets.push(target);
       else this.mutationErrorSinks.delete(sink);
     }
+    return targets;
+  }
+
+  private anySinkListening(): boolean {
+    for (const sink of this.mutationErrorSinks) {
+      if (sink.deref()?.hasMutationErrorListeners()) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Remember who made `txId` until it settles, so its rejection reaches only
+   * that writer's facades. Skipped while nobody listens: such a rejection is
+   * unhandled wherever it would go.
+   */
+  private recordWriter(txId: TxId, writer: BackendWriter): void {
+    const runtime = this.runtime;
+    if (!runtime || this.unsettledWriters.size >= MAX_UNSETTLED_WRITE_ROUTES) return;
+    if (!this.anySinkListening()) return;
+    this.unsettledWriters.set(txId, writer);
+    const forget = () => {
+      if (this.unsettledWriters.get(txId) === writer) this.unsettledWriters.delete(txId);
+    };
+    // Observe only: the rejection stays with the app's own wait or its
+    // mutation-error event. Global is the authority's verdict; with no
+    // server, this runtime is the authority.
+    runtime
+      .waitForTransaction(txId, this.config.serverUrl ? "global" : "local", { observeOnly: true })
+      .then(forget, () => {
+        // Usually the event follows and ends the entry. A wait that claimed
+        // the rejection means no event comes, so do not keep it forever.
+        const timer = setTimeout(forget, REJECTED_WRITE_ROUTE_GRACE_MS);
+        (timer as { unref?: () => void }).unref?.();
+      });
+  }
+
+  private handleMutationError(event: MutationErrorEvent): void {
+    const txId = event.transaction.transactionId;
+    const writer = this.unsettledWriters.get(txId);
+    this.unsettledWriters.delete(txId);
+    const listening = this.listeningSinks();
+    if (writer) {
+      // The write's own facades, or nobody: never another user's.
+      const targets = listening.filter((target) => target.writesAs(writer));
+      if (targets.length === 0) console.error("Unhandled Jazz mutation error", event);
+      for (const target of targets) target.deliverMutationError(event);
+      return;
+    }
+    // Not traceable to a facade (made by an earlier process, or before any
+    // listener existed): only backend-global facades may see it.
+    const targets = listening.filter((target) => target.backendGlobal);
     if (targets.length === 0) {
       console.error("Unhandled Jazz mutation error", event);
       if (this.pendingMutationErrorEvents.length < MAX_PENDING_MUTATION_ERROR_EVENTS) {
@@ -342,6 +435,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
       }
       this.explicitOfflineListeners.clear();
       this.mutationErrorSinks.clear();
+      this.unsettledWriters.clear();
       this.pendingMutationErrorEvents.length = 0;
       this.droppedMutationErrorEvents = 0;
     });
@@ -490,6 +584,19 @@ class BackendDb extends Db implements BackendMutationErrorSink {
     return this.accessContext;
   }
 
+  /** @internal */
+  get backendGlobal(): boolean {
+    return this.accessContext === null;
+  }
+
+  /** @internal Writes pass exactly this context's session and attribution. */
+  writesAs(writer: BackendWriter): boolean {
+    return (
+      writer.session === this.accessContext?.writeSession &&
+      writer.attribution === this.accessContext?.attribution
+    );
+  }
+
   protected override getClient(_schema: WasmSchema): JazzClient {
     this.coreSource.assertOpen();
     this.assertOpen();
@@ -509,13 +616,19 @@ class BackendDb extends Db implements BackendMutationErrorSink {
    * Attach a fallback listener for write rejections that are not handled by an
    * active {@link WriteHandle.wait} call.
    *
-   * On a backend context this is **context-wide**: every `Db` from the same
-   * context (`db()`, `asBackend()`, `forSession()`, ...)
-   * shares one runtime, so a listener sees rejections of writes made through
-   * any of them, for any session. A per-request handler must match events
-   * against its own transaction ids. Rejections that arrived before any
-   * listener existed (such as in-flight writes settled during startup replay)
-   * drain to whichever `Db` registers a listener first.
+   * On a backend context, a listener sees rejections of writes made through
+   * this `Db`, or through another `Db` of the same context built from the
+   * same `Session` object (by reference) and attribution. `db()` and
+   * `asBackend()` both write as the backend itself, so they share theirs.
+   * Two `forSession()` `Db`s built from separate `Session` objects for the
+   * same user do not. It never sees another user's rejection.
+   *
+   * A `Db` with no per-request identity (`db()`, `asBackend()`) also receives
+   * rejections Jazz cannot trace to the `Db` that made the write: writes made
+   * while no listener was attached anywhere (or beyond
+   * {@link MAX_UNSETTLED_WRITE_ROUTES} unsettled writes), and in-flight writes
+   * from an earlier process settled during startup replay. Those that arrive before
+   * such a listener exists drain to the first one registered.
    *
    * The context holds this `Db` only weakly, so its listeners are released
    * when the `Db` is dropped, when it shuts down, or via the returned callback.
