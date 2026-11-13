@@ -178,7 +178,8 @@ export async function createJazzSessionOwner<
    * @internal With `clearOnSignOut`, how the host closes a signed-out
    * account's local-first client and wipes its storage, in place of
    * deleting it through the client: the browser closes this tab's client
-   * first and wipes only once no other tab has the account open.
+   * first and, as the last tab out, wipes (see `replicaLifecycle`). False
+   * when another tab still has the account open: that tab decides.
    */
   wipeSignedOut?(client: Client, account: AccountHandle): Promise<boolean | void>;
   /** Add host methods (e.g. `reauthenticate`) to the session before it is sealed. */
@@ -276,7 +277,7 @@ export async function createJazzSessionOwner<
         // A thin client keeps nothing in the browser, so there is nothing to wipe.
         const thin = isThinDb((client as WipeableClient).db as Db);
         if (signsOut && options.clearOnSignOut && !thin && options.wipeSignedOut && selected) {
-          // False: another tab still has the account open, and wipes it.
+          // False: another tab still has the account open, and decides.
           wiped = (await options.wipeSignedOut(client, selected)) !== false;
         } else if (signsOut && options.clearOnSignOut && !thin) {
           const db = (client as WipeableClient).db;

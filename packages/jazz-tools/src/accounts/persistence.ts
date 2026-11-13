@@ -142,6 +142,21 @@ export async function accountForgotten(
   return (await forgottenReaders.get(accounts)?.(account)) ?? false;
 }
 
+const selectionReaders = new WeakMap<AccountManager<JWTAuth>, () => Promise<string | undefined>>();
+
+/**
+ * @internal The device account the store `accounts` keeps selects now (the
+ * one this device's tabs open), as stored, not as this manager last saw it.
+ * `undefined` when it selects none.
+ */
+export async function storedSelectedAccount(
+  accounts: AccountManager<JWTAuth>,
+): Promise<string | undefined> {
+  const read = selectionReaders.get(accounts);
+  if (!read) throw new Error("Jazz can't read this account store's selection");
+  return read();
+}
+
 /** @internal Select and adopt one durable root for automatic first startup. */
 export async function ensureAutomaticLocalFirst(
   accounts: AccountManager<JWTAuth>,
@@ -318,6 +333,11 @@ export async function prepareAccountManager(options: {
   forgottenReaders.set(manager, async (account) =>
     (decode(await options.store.read()).forgottenAccounts ?? []).includes(account),
   );
+  selectionReaders.set(manager, async () => {
+    const latest = decode(await options.store.read());
+    dropForgotten(latest);
+    return latest.selected === null ? undefined : rootAccount(latest.roots[latest.selected]!);
+  });
   const superseded = async (): Promise<never> => {
     stored.selected = null;
     await save();

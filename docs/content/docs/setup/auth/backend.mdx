@@ -414,8 +414,14 @@ On a computer several people use, such as a family laptop or a library terminal:
 - **Tabs of one account share its local storage**, so it's wiped once the last tab open on that
   account signs out. A tab that signs out while another tab is still signed in (it signed out of
   Jazz only, offline say) leaves the data to that tab, unsynced writes included. A tab that closes
-  without signing out leaves it for a later page load to wipe, once your backend confirms the user
-  is signed out.
+  or crashes without signing out leaves the data behind. Another open page wipes it when it
+  becomes visible or its session changes, or the next page load does, once your backend confirms
+  twice that the user is signed out. Nothing polls in the background.
+- **Guests too.** A guest's local storage is wiped once the last tab on it signs out. If its tab
+  closes without signing out, the data stays while the guest is still this device's account, and
+  is wiped once it isn't: someone signed it out in another tab.
+- **A wipe a crash interrupts is finished** before that account's data opens again, so a
+  half-deleted store is never read.
 - **Sign the old user out before you sign the next one in.** The wait for pending writes covers only
   writes the server still accepts: once your session cookie names the new user, nothing can upload
   the old user's writes. So a user switch while offline drops the old user's unsynced writes from
