@@ -7,8 +7,8 @@ import { startLocalJazzServer } from "../dev/dev-server.js";
 import { fetchFor } from "../runtime/in-process-transport.js";
 import { createJazz, vercel, vercelBlob } from "./index.js";
 import {
-  defaultCoreName,
   newerVersion,
+  perBranch,
   openVercelCore,
   onVercelDeployment,
   onVercelHost,
@@ -26,6 +26,11 @@ const permissions = s.definePermissions(app, ({ policy }) => {
   policy.notes.allowUpdate.never();
   policy.notes.allowDelete.never();
 });
+
+// The cores earlier versions created by default, production's and one per
+// preview branch (see vercel-namespace.test.ts).
+const legacyNamespace = ({ environment, branch }: { environment: string; branch?: string }) =>
+  environment === "production" ? "production" : perBranch(branch);
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -222,13 +227,14 @@ describe("vercel() store", () => {
     const jazz = await createJazz({
       app,
       permissions,
-      store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
+      store: vercel({
+        namespace: legacyNamespace,
+        sdk: fake.sdk,
+        backendCredential: core.credential,
+      }),
     }).ready();
     cleanups.push(() => jazz.close());
-    const name = defaultCoreName("prj_test", {
-      VERCEL_ENV: "preview",
-      VERCEL_GIT_COMMIT_REF: "main",
-    });
+    const name = `jazz-prj-test-${perBranch("main")}`;
     expect(fake.calls.slice(0, 2)).toEqual([`drive ${name}-data`, `create ${name}`]);
     expect(fake.calls[2]).toMatch(/^start /);
     const scripts = [...fake.files.keys()].filter((path) => path.startsWith("/tmp/jazz-start-"));
@@ -249,7 +255,11 @@ describe("vercel() store", () => {
     const again = await createJazz({
       app,
       permissions,
-      store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
+      store: vercel({
+        namespace: legacyNamespace,
+        sdk: fake.sdk,
+        backendCredential: core.credential,
+      }),
     }).ready();
     cleanups.push(() => again.close());
     const seen = await again.db.all(app.notes.where({ id: row.id }));
@@ -269,7 +279,7 @@ describe("vercel() store", () => {
       createJazz({
         app,
         permissions,
-        store: vercel({ sdk: fresh.sdk, backendCredential: preview }),
+        store: vercel({ namespace: legacyNamespace, sdk: fresh.sdk, backendCredential: preview }),
       }).ready(),
     ).rejects.toThrow(/401/);
 
@@ -288,7 +298,11 @@ describe("vercel() store", () => {
     const jazz = await createJazz({
       app,
       permissions,
-      store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
+      store: vercel({
+        namespace: legacyNamespace,
+        sdk: fake.sdk,
+        backendCredential: core.credential,
+      }),
     }).ready();
     cleanups.push(() => jazz.close());
     const pinned = fake.files.get("/data/trust")?.toString();
@@ -303,7 +317,7 @@ describe("vercel() store", () => {
       createJazz({
         app,
         permissions,
-        store: vercel({ sdk: fake.sdk, backendCredential: preview }),
+        store: vercel({ namespace: legacyNamespace, sdk: fake.sdk, backendCredential: preview }),
       }).ready(),
     ).rejects.toThrow(/trusts .*environment:production, not this deployment/);
     expect(fake.files.get("/data/trust")?.toString()).toBe(pinned);
@@ -327,7 +341,7 @@ describe("vercel() store", () => {
       createJazz({
         app,
         permissions,
-        store: vercel({ sdk: fake.sdk, backendCredential: preview }),
+        store: vercel({ namespace: legacyNamespace, sdk: fake.sdk, backendCredential: preview }),
       }).ready(),
     ).rejects.toThrow(/delete \/data\/trust/);
     expect(Date.now() - started).toBeLessThan(5_000);
@@ -346,7 +360,11 @@ describe("vercel() store", () => {
       delete process.env.VERCEL_OIDC_TOKEN;
     });
     await expect(
-      createJazz({ app, permissions, store: vercel({ sdk: fake.sdk }) }).ready(),
+      createJazz({
+        app,
+        permissions,
+        store: vercel({ namespace: legacyNamespace, sdk: fake.sdk }),
+      }).ready(),
     ).rejects.toThrow(/preview deployment's OIDC token is for .*environment:production/);
     expect(fake.calls).toEqual([]);
   }, 60_000);
@@ -374,7 +392,7 @@ describe("vercel() store", () => {
     };
     const credential = oidcToken(await startIssuer());
     const opened = await openVercelCore({
-      options: { sdk: fake.sdk, backendCredential: () => credential, name: "jazz-test" },
+      options: { sdk: fake.sdk, backendCredential: () => credential, namespace: "test" },
       openRemote: ({ url: base }) =>
         ({
           serverUrl: base,
@@ -391,7 +409,7 @@ describe("vercel() store", () => {
           close: async () => {},
         }) as never,
       version: "1.2.3",
-      env: { VERCEL_ENV: "production" },
+      env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" },
     });
     cleanups.push(() => opened.close());
 
@@ -440,11 +458,11 @@ describe("vercel() store", () => {
     };
     const credential = oidcToken(await startIssuer());
     const opened = await openVercelCore({
-      options: { sdk: fake.sdk, backendCredential: () => credential, name: "jazz-test" },
+      options: { sdk: fake.sdk, backendCredential: () => credential, namespace: "test" },
       openRemote: ({ url: base }) =>
         ({ serverUrl: base, handle: async () => ({}), close: async () => {} }) as never,
       version: "1.2.3",
-      env: { VERCEL_ENV: "production" },
+      env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" },
     });
     cleanups.push(() => opened.close());
 
@@ -475,11 +493,11 @@ describe("vercel() store", () => {
     const core = await startTrustedCore(appId);
     const fake = fakeVercel({ ...core, appId });
     const opened = await openVercelCore({
-      options: { sdk: fake.sdk, backendCredential: core.credential, name: "jazz-test" },
+      options: { sdk: fake.sdk, backendCredential: core.credential, namespace: "test" },
       openRemote: ({ url }) =>
         ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
       version: "1.2.3",
-      env: { VERCEL_ENV: "production" },
+      env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" },
     });
     cleanups.push(() => opened.close());
 
@@ -494,7 +512,7 @@ describe("vercel() store", () => {
     await new Promise((resolve) => setTimeout(resolve, 10_500));
     const t0 = Date.now();
     await expect(opened.handle("GET", "/health", [], new Uint8Array())).rejects.toThrow(
-      /core jazz-test could not start: could not download the core for 1\.2\.3 .*HTTP 404/,
+      /core jazz-prj-test-test could not start: could not download the core for 1\.2\.3 .*HTTP 404/,
     );
     // Reported within one health round, not after the minute-long wake deadline,
     // and the Sandbox isn't kept awake.
@@ -525,7 +543,7 @@ describe("vercel() store", () => {
         options: {
           sdk: fake.sdk,
           backendCredential: core.credential,
-          name: "jazz-test",
+          namespace: "test",
           blobs: vercelBlob({ storeId: "store_Shared1" }),
         },
         openRemote: ({ url }) =>
@@ -537,7 +555,7 @@ describe("vercel() store", () => {
             },
           }) as never,
         version: "1.2.3",
-        env: { VERCEL_ENV: "production" },
+        env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" },
         fetch: claimedByPreview,
       }),
     ).rejects.toThrow(/Blob store Shared1 serves the preview environment, not production/);
@@ -564,11 +582,11 @@ describe("vercel() store", () => {
     // there while the core isn't listening yet.
     fake.state.slowStarts = 2;
     const opened = await openVercelCore({
-      options: { sdk: fake.sdk, backendCredential: core.credential, name: "jazz-test" },
+      options: { sdk: fake.sdk, backendCredential: core.credential, namespace: "test" },
       openRemote: ({ url }) =>
         ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
       version: "1.2.3",
-      env: { VERCEL_ENV: "production" },
+      env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" },
     });
     cleanups.push(() => opened.close());
     expect(fake.calls).not.toContain("stop");
@@ -584,11 +602,11 @@ describe("vercel() store", () => {
       times: 2,
     };
     const opened = await openVercelCore({
-      options: { sdk: fake.sdk, backendCredential: core.credential, name: "jazz-test" },
+      options: { sdk: fake.sdk, backendCredential: core.credential, namespace: "test" },
       openRemote: ({ url }) =>
         ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
       version: "1.2.3",
-      env: { VERCEL_ENV: "production" },
+      env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" },
     });
     cleanups.push(() => opened.close());
     expect(fake.state.status).toBe("running");
@@ -626,11 +644,11 @@ describe("vercel() store", () => {
       const opened = await Promise.allSettled(
         Array.from({ length: 5 }, () =>
           openVercelCore({
-            options: { sdk: fake.sdk, backendCredential: () => credential, name: "jazz-test" },
+            options: { sdk: fake.sdk, backendCredential: () => credential, namespace: "test" },
             openRemote: ({ url: base }) =>
               ({ serverUrl: base, handle: async () => ({}), close: async () => {} }) as never,
             version: "1.2.3",
-            env: { VERCEL_ENV: "production" },
+            env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" },
           }),
         ),
       );
@@ -638,7 +656,9 @@ describe("vercel() store", () => {
         if (result.status === "fulfilled") cleanups.push(() => result.value.close());
       }
       expect(opened.filter((result) => result.status === "rejected")).toEqual([]);
-      expect(fake.calls.filter((call) => call.startsWith("create"))).toEqual(["create jazz-test"]);
+      expect(fake.calls.filter((call) => call.startsWith("create"))).toEqual([
+        "create jazz-prj-test-test",
+      ]);
     },
     60_000,
   );
@@ -654,7 +674,11 @@ describe("vercel() store", () => {
     const jazz = await createJazz({
       app,
       permissions,
-      store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
+      store: vercel({
+        namespace: legacyNamespace,
+        sdk: fake.sdk,
+        backendCredential: core.credential,
+      }),
     }).ready();
     cleanups.push(() => jazz.close());
     expect(fake.calls).toContain("resume jazz-prj-test-production");
@@ -673,7 +697,7 @@ describe("vercel() store", () => {
     const jazz = await createJazz({
       app,
       permissions,
-      store: vercel({ sdk: fake.sdk, local: memory() }),
+      store: vercel({ namespace: legacyNamespace, sdk: fake.sdk, local: memory() }),
     }).ready();
     cleanups.push(() => jazz.close());
     await jazz.db.insert(app.notes, { text: "local" }).wait({ tier: "global" });
@@ -690,7 +714,11 @@ describe("vercel() store", () => {
     const upgraded = await createJazz({
       app,
       permissions,
-      store: vercel({ sdk: older.sdk, backendCredential: core.credential }),
+      store: vercel({
+        namespace: legacyNamespace,
+        sdk: older.sdk,
+        backendCredential: core.credential,
+      }),
     }).ready();
     cleanups.push(() => upgraded.close());
     expect(older.calls.filter((call) => call.startsWith("start"))).toHaveLength(1);
@@ -703,21 +731,16 @@ describe("vercel() store", () => {
     const old = await createJazz({
       app,
       permissions,
-      store: vercel({ sdk: newer.sdk, backendCredential: core.credential }),
+      store: vercel({
+        namespace: legacyNamespace,
+        sdk: newer.sdk,
+        backendCredential: core.credential,
+      }),
     }).ready();
     cleanups.push(() => old.close());
     expect(newer.calls.some((call) => call.startsWith("start"))).toBe(false);
     expect(newer.state.running).toBe("99.0.0");
   }, 60_000);
-
-  it("gives each preview branch its own core", () => {
-    const main = defaultCoreName("prj_1", { VERCEL_ENV: "production" });
-    const a = defaultCoreName("prj_1", { VERCEL_ENV: "preview", VERCEL_GIT_COMMIT_REF: "feat/A" });
-    const b = defaultCoreName("prj_1", { VERCEL_ENV: "preview", VERCEL_GIT_COMMIT_REF: "feat-a" });
-    expect(main).toBe("jazz-prj-1-production");
-    expect(a).toMatch(/^jazz-prj-1-preview-feat-a-[0-9a-f]{8}$/);
-    expect(new Set([main, a, b]).size).toBe(3);
-  });
 
   it("reports a preview without a Git branch when it opens, not when createJazz is called", async () => {
     const appId = randomUUID();
@@ -733,24 +756,15 @@ describe("vercel() store", () => {
     const jazz = createJazz({
       app,
       permissions,
-      store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
+      store: vercel({
+        namespace: legacyNamespace,
+        sdk: fake.sdk,
+        backendCredential: core.credential,
+      }),
     });
     cleanups.push(() => jazz.close());
     await expect(jazz.ready()).rejects.toThrow(/no Git branch/);
     expect(fake.calls).toEqual([]);
-  });
-
-  it("asks for a name when a preview deployment has no Git branch", () => {
-    // Deploys through the API, or from the CLI outside a Git checkout, run
-    // with an empty branch; they must not all share one core.
-    for (const ref of ["", undefined]) {
-      expect(() =>
-        defaultCoreName("prj_1", { VERCEL_ENV: "preview", VERCEL_GIT_COMMIT_REF: ref }),
-      ).toThrow(/no Git branch.*vercel\(\{ name \}\)/);
-    }
-    expect(defaultCoreName("prj_1", { VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "" })).toBe(
-      "jazz-prj-1-production",
-    );
   });
 
   it("uses the cloud core only in production and preview deployments", () => {

@@ -59,15 +59,23 @@ import {
 import { BACKEND_USER_ISSUER } from "./backend-issuer.js";
 import { earlyDb, type EarlyDb } from "./early-db.js";
 import {
-  defaultCoreName,
+  checkNamespaceOption,
+  coreName,
   onVercelDeployment,
   onVercelHost,
   openVercelCore,
   refuseVercelAppId,
+  refuseVercelName,
   type VercelStoreOptions,
 } from "./vercel-store.js";
+import { logStoreOpened } from "./store-log.js";
 
-export type { VercelStoreOptions } from "./vercel-store.js";
+export type {
+  VercelNamespace,
+  VercelNamespaceContext,
+  VercelStoreOptions,
+} from "./vercel-store.js";
+export { perBranch } from "./vercel-store.js";
 
 import { files, type BlobStore } from "./blobs.js";
 import {
@@ -229,8 +237,11 @@ export function remote(
  * `local`, by default `sqlite({ path: ".jazz/local" })`.
  *
  * Deployed, it runs a core in a persistent Vercel Sandbox in your own Vercel
- * project, with its data on a Drive: one for production and one per Git
- * branch for previews.
+ * project, with its data on a Drive. `namespace` (required) says which: the
+ * Sandbox is `jazz-<project>-<namespace>`, e.g. one core per environment
+ * with `namespace: ({ environment }) => environment`, or production's core
+ * and one per preview branch with
+ * `namespace: ({ environment, branch }) => environment === "production" ? "production" : perBranch(branch)`.
  * It is created on first use, wakes when a request needs it (about a second)
  * and stops after `idleMs` without requests or sockets. The function's Vercel
  * OIDC token is its only credential, so there are no secrets and no env vars:
@@ -251,11 +262,13 @@ export function remote(
  * Sandbox and a Drive of up to `maxDriveBytes` until you remove them.
  */
 export function vercel(
-  options: VercelStoreOptions & { local?: Extract<JazzStore, { kind: "sqlite" | "memory" }> } = {},
+  options: VercelStoreOptions & { local?: Extract<JazzStore, { kind: "sqlite" | "memory" }> },
 ): JazzStore {
   // Refused here, not on the first deployed request: in dev the local
-  // store runs and would never read it.
-  refuseVercelAppId(options);
+  // store runs and would never read them.
+  refuseVercelAppId(options ?? {});
+  refuseVercelName(options ?? {});
+  checkNamespaceOption(options ?? {});
   const { local, ...rest } = options;
   return { kind: "vercel", options: rest, local: local ?? sqlite({ path: ".jazz/local" }) };
 }
@@ -1438,6 +1451,13 @@ function runningStore(store: JazzStore): JazzStore {
   return store.kind === "vercel" && !onVercelDeployment() ? store.local : store;
 }
 
+/** The line a store logs when it opens (a `vercel()` core logs its own). */
+function storeOpenedLine(store: Exclude<JazzStore, { kind: "vercel" }>): string {
+  if (store.kind === "sqlite") return `jazz: store sqlite at ${store.path}`;
+  if (store.kind === "memory") return "jazz: store memory (its data lasts as long as this process)";
+  return `jazz: store remote at ${store.url} (app ${store.appId})`;
+}
+
 /** A Jazz with its store open: what a `createJazz` facade hands each call to. */
 interface OpenedJazz extends Omit<Jazz, "ready" | "db" | "attach"> {
   readonly db: Db;
@@ -1471,6 +1491,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
               openRemoteCore(appId, { url, backendCredential }, bundle),
           })
         : await openInProcessCore(store, bundle);
+  // A vercel() core says which it opened itself.
+  if (store.kind !== "vercel") logStoreOpened(storeOpenedLine(store));
   const appId = core.appId;
   const issuer = BACKEND_USER_ISSUER;
   // An in-memory store's agent tokens last as long as its data: this process.
@@ -3510,11 +3532,11 @@ function storeKey(store: JazzStore): string | undefined {
   if (store.kind === "sqlite") return `sqlite:${resolve(store.path)}`;
   if (store.kind === "vercel") {
     const project = store.options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID;
-    let name = store.options.name;
+    let name: string | undefined;
     try {
-      name ??= project ? defaultCoreName(project, process.env) : undefined;
+      name = project ? coreName(project, store.options.namespace, process.env).name : undefined;
     } catch {
-      // A preview without a branch: its open reports that, not createJazz.
+      // No namespace for this deployment: its open reports that, not createJazz.
     }
     // Without a name the core is unknown: its open reports that.
     return name ? `vercel:${name}` : undefined;
