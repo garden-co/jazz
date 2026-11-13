@@ -477,6 +477,22 @@ export type BrowserForegroundNodeLeasePortEvent = {
   error?: BrowserRelayError;
 };
 
+/**
+ * Delete a store no tab has open, without opening it (#5250): what a
+ * `clearOnSignOut` wipe uses once the account is signed out and can't be
+ * opened again. The worker answers `held`, deleting nothing, while a tab of
+ * this realm has the store attached, or another realm owns it.
+ */
+export interface BrowserDeleteStoreRequest {
+  type: "delete-store";
+  dbName: string;
+  runtimeSources?: RuntimeSourcesConfig;
+}
+
+export type BrowserDeleteStoreResponse =
+  | { type: "delete-store-result"; outcome: "deleted" | "held" }
+  | { type: "delete-store-error"; error: BrowserRelayError };
+
 export type BrowserSharedWorkerConnectResponse =
   | { type: "worker-alive" }
   | { type: "runtime-ready" }
@@ -561,6 +577,8 @@ export type BrowserFollowerPortRequest =
   | { type: "flush-pending-writes"; id: number }
   | { type: "flush-local-observed" }
   | { type: "prepare-storage-reset"; id: number }
+  /** The store's writes the server hasn't confirmed, every tab's: answers `{ pendingUploads }`. */
+  | { type: "store-pending-uploads"; id: number }
   | { type: "finish-storage-reset"; id: number }
   | { type: "abort-storage-reset"; id: number }
   | { type: "storage-reset-observed"; resetId: number }
@@ -597,7 +615,8 @@ export type BrowserWorkerLifecycleTrace = {
     | "query-attach"
     | "query-covered"
     | "owner-release-start"
-    | "owner-release-finished";
+    | "owner-release-finished"
+    | "delete-store";
   dbName: string;
   peerCount: number;
   pendingBootstraps: number;

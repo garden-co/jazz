@@ -543,6 +543,11 @@ export class BrowserConnectionManager extends ConnectionManager {
     return deletion;
   }
 
+  override async storePendingUploads(): Promise<number | undefined> {
+    if (!this.connection || this.storageReset) return undefined;
+    return (await this.connection.storePendingUploads?.().catch(() => undefined)) ?? undefined;
+  }
+
   override isUsable(): boolean {
     return !this.shutdownStarted && !this.storageReset && !this.storageResetError;
   }
