@@ -159,7 +159,6 @@ describe("startLocalJazzServer via JazzServer", () => {
             server = await startLocalJazzServer({
               port: await getAvailablePort(),
               inMemory: true,
-              allowLocalFirstAuth: true,
               schema: source,
               permissions,
             });

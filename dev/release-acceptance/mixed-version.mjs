@@ -135,10 +135,12 @@ class Server {
       this.dataDir,
       "--bound-port-file",
       portPath,
-      "--allow-local-first-auth",
     ];
     this.child = launch(this.dir, version.cli, args, log, {
       NODE_ENV: "production",
+      // Servers before 2.0.0-alpha.62 refuse local-first guests in
+      // production without it; later ones have no such switch and ignore it.
+      JAZZ_ALLOW_LOCAL_FIRST_AUTH: "true",
       JAZZ_ADMIN_SECRET: this.ctx.adminSecret,
       JAZZ_BACKEND_SECRET: this.ctx.backendSecret,
     });

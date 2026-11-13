@@ -37,7 +37,6 @@ it("reports the link and pending uploads through a disconnect", async () => {
     app: app,
     permissions: permissions,
     coreOptions: {
-      allowLocalFirstAuth: true,
       inMemory: true,
     },
   });
@@ -116,7 +115,7 @@ it("says since when a write waits, what the server rejected, and when the link f
   const server = await startTestJazz({
     app: app,
     permissions: permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   let db: Db | undefined;
   try {
@@ -193,7 +192,7 @@ it("rejects an invalid timeout before waiting", async () => {
 });
 
 it("ends a pending wait when the Db shuts down", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startLocalJazzServer({ inMemory: true });
   const db = await createDb(await localAccountConfig(server.appId, server.url));
   try {
     await db.disconnect();

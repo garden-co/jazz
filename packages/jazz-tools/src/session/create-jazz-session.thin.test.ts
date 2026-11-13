@@ -36,7 +36,7 @@ async function startServer(): Promise<TestJazz> {
   server = await startTestJazz({
     app: app,
     permissions: permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   return server;
 }

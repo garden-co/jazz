@@ -2130,7 +2130,6 @@ struct JazzServerStartOptions {
     backend_secret: Option<String>,
     admin_secret: Option<String>,
     upstream_url: Option<String>,
-    allow_local_first_auth: Option<bool>,
     telemetry_collector_url: Option<String>,
     schema: Option<Vec<u8>>,
     /// Live WebSocket connections one signed-in user may hold.
@@ -2229,7 +2228,7 @@ impl JazzServer {
     #[napi(factory, ts_return_type = "Promise<JazzServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; maxConnectionsPerUser?: number; trustedWorkload?: { issuer: string; audience: string; subject: string } }"
+            ts_arg_type = "{ appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; maxConnectionsPerUser?: number; trustedWorkload?: { issuer: string; audience: string; subject: string } }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -2274,7 +2273,6 @@ impl JazzServer {
         };
 
         let auth_config = AuthConfig {
-            allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
             backend_secret: backend_secret.clone(),
             admin_secret: admin_secret.clone(),
             trusted_workload,

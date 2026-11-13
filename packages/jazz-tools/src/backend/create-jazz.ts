@@ -709,12 +709,15 @@ const ACCESS_HEADER = "x-jazz-backend-access";
 // What the secret slots carry to a remote core: the access stated next to
 // the backend credential decides what a request gets, not these.
 const STAND_IN_SECRET = "stated-by-backend-credential";
-/** The core's refusal of every local-first identity: it admits none. */
+/**
+ * The refusal of every local-first identity by a core that admits none: one
+ * an older jazz-tools started with local-first auth off (cores have no such
+ * switch since 2.0.0-alpha.62), or a Jazz Cloud app's with it turned off.
+ */
 const LOCAL_FIRST_AUTH_DISABLED = "local_first_auth_disabled";
 /**
- * What a core that admits no local-first identity tells a guest's session
- * (`LOCAL_FIRST_AUTH_DISABLED_MESSAGE` in jazz-server's middleware/auth.rs;
- * vercel-guest.integration.test.ts pins it against a real core).
+ * What such a core tells a guest's session (jazz-server's
+ * `LOCAL_FIRST_AUTH_DISABLED_MESSAGE` before 2.0.0-alpha.62).
  */
 const CORE_REFUSES_GUESTS = "Local-first auth is not enabled";
 // What a browser's request to a public route carries on to a remote core:
@@ -1586,7 +1589,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     if (warnedGuestsOffOnCore) return;
     warnedGuestsOffOnCore = true;
     console.error(
-      "createJazz: the core refuses local-first guests (local_first_auth_disabled), so device accounts can't sync or link. Start the core with allowLocalFirstAuth: true. A vercel() core started by an older jazz-tools keeps refusing them until a deployment of a newer one restarts it.",
+      "createJazz: the core refuses local-first guests (local_first_auth_disabled), so device accounts can't sync or link. It runs an older jazz-tools with local-first auth off: upgrade it (a vercel() core is restarted on the newer version by the next deployment), or turn it on for a Jazz Cloud app with `jazz-tools apps auth set <appId> --allow-local-first-auth true`.",
     );
   }
 

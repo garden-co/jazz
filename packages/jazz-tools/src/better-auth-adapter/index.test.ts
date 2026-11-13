@@ -88,9 +88,7 @@ describe("jazzAdapter", () => {
   });
 
   it("rejects ordinary-session reads and writes to Better Auth tables", async () => {
-    const server = await startLocalJazzServer({
-      allowLocalFirstAuth: true,
-    });
+    const server = await startLocalJazzServer({});
     // Published as createJazz publishes it; the backend link is pinned to it.
     const { bundle } = await deployFixture({
       serverUrl: server.url,

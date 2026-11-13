@@ -54,11 +54,7 @@ describe("JazzBackend Effect layer", () => {
   it("serves request handlers as the requesting user and syncs to Effect clients", async () => {
     // The app's Jazz decides who a request is (its `authenticate`); Effect
     // clients sync as guests through it.
-    const server = await startTestJazz({
-      app,
-      permissions,
-      coreOptions: { allowLocalFirstAuth: true },
-    });
+    const server = await startTestJazz({ app, permissions });
     try {
       const backendLayer = JazzBackend.layerJazz(server.jazz);
       const clientLayer = Jazz.layer({
