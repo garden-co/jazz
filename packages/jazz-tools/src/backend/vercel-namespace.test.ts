@@ -144,11 +144,11 @@ describe("vercel() namespace", () => {
     // Any other name can't be reached, and the error says so.
     for (const name of ["myapp-core", "jazz-prj_AbC1-prod", "jazz-prj-abc1-Prod"]) {
       expect(() => vercel({ name, credentials } as never)).toThrow(
-        /is not of that form \(for this project it would start with jazz-prj-abc1-\), so no namespace reaches it/,
+        /is not of that form \(for this project it would start with jazz-prj-abc1-\), so no namespace reaches it any more\. Its data stays on that Sandbox and its Drive.*open an issue at https:\/\/github\.com\/garden-co\/jazz\/issues\/new/,
       );
     }
     expect(() => vercel({ name: "myapp-core" } as never)).toThrow(
-      /lowercased with each run of characters other than a-z and 0-9 as one `-` \(prj_AbC1 is prj-abc1\).*a name of any other form can't be reached/,
+      /lowercased with each run of characters other than a-z and 0-9 as one `-` \(prj_AbC1 is prj-abc1\).*a name of any other form can't be reached by a namespace any more\. Its data stays.*open an issue/,
     );
   });
 

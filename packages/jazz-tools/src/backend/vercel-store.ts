@@ -661,6 +661,10 @@ export function missingNamespaceError(): Error {
 }
 
 /** `name` became `namespace`; refused with the migration rather than ignored. */
+/** What happens to a core no namespace reaches, and where to ask for it back. */
+const UNREACHABLE =
+  "Its data stays on that Sandbox and its Drive, but this version opens another core: if you need it, open an issue at https://github.com/garden-co/jazz/issues/new and we'll add a way to reach it, or rename it for you.";
+
 export function refuseVercelName(options: {
   name?: unknown;
   credentials?: { projectId?: string };
@@ -679,14 +683,14 @@ export function refuseVercelName(options: {
   if (typeof name !== "string") {
     keep = `${rule} A Sandbox you named \`jazz-<project>-<rest>\` is \`namespace: "<rest>"\`.`;
   } else if (!project) {
-    keep = `${rule} If ${JSON.stringify(name)} is jazz-<project>-<rest> for this project, pass \`namespace: "<rest>"\`; a name of any other form can't be reached by a namespace.`;
+    keep = `${rule} If ${JSON.stringify(name)} is jazz-<project>-<rest> for this project, pass \`namespace: "<rest>"\`; a name of any other form can't be reached by a namespace any more. ${UNREACHABLE}`;
   } else {
     const prefix = `jazz-${safeProject(project)}-`;
     const rest = name.startsWith(prefix) ? name.slice(prefix.length) : undefined;
     keep =
       rest && safeNamespace(rest) === rest && /[a-z0-9]/.test(rest)
         ? `To keep the core ${name}, pass \`namespace: ${JSON.stringify(rest)}\`.`
-        : `${rule} The core ${name} is not of that form (for this project it would start with ${prefix}), so no namespace reaches it: its Sandbox and Drive keep their data, but this version opens another core.`;
+        : `${rule} The core ${name} is not of that form (for this project it would start with ${prefix}), so no namespace reaches it any more. ${UNREACHABLE}`;
   }
   throw new Error(`vercel(): \`name\` is now \`namespace\`. ${keep} ${defaults}`);
 }
