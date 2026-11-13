@@ -39,9 +39,9 @@ interface SyncState {
 interface SyncConfig {
   readonly mappedDocs: WeakMap<Node, MappedMarkdown>;
   options: MarkdownSyncOptions;
-  /** The column's value as this editor last wrote or applied it. A value
-   * read from the column that equals it is that write's echo. */
-  base: string | null;
+  /** Exact source for each sync state, including writes and equivalent
+   * spellings acknowledged without a document-changing transaction. */
+  readonly bases: WeakMap<SyncState, string>;
 }
 
 const key = new PluginKey<SyncState>("jazzMarkdownSync");
@@ -55,22 +55,33 @@ const configs = new WeakMap<Plugin, SyncConfig>();
  * text went.
  */
 export function markdownSync(options: MarkdownSyncOptions): Plugin<SyncState> {
-  const config: SyncConfig = { options, base: null, mappedDocs: new WeakMap() };
+  const bases = new WeakMap<SyncState, string>();
+  const config: SyncConfig = { options, bases, mappedDocs: new WeakMap() };
   const plugin: Plugin<SyncState> = new Plugin<SyncState>({
     key,
     state: {
       init: () => ({ remote: false }),
-      apply: (tr, value) => (tr.docChanged ? { remote: tr.getMeta(key)?.remote === true } : value),
+      apply(tr, previous) {
+        if (!tr.docChanged) return previous;
+        const remote = remoteSource(tr);
+        const next = { remote: remote !== undefined };
+        const base = remote ?? bases.get(previous);
+        if (base !== undefined) bases.set(next, base);
+        return next;
+      },
     },
     view: (initial) => {
-      config.base ??= markdownOf(initial.state).text;
+      const sync = key.getState(initial.state)!;
+      if (!bases.has(sync)) bases.set(sync, markdownOf(initial.state).text);
       return {
         update(view, previous) {
-          if (view.state.doc === previous.doc || key.getState(view.state)?.remote) return;
-          const markdown = ownChanges(config, markdownOf(view.state).text);
-          if (markdown === config.base) return;
-          const editedFrom = config.base ?? markdown;
-          config.base = markdown;
+          const sync = key.getState(view.state)!;
+          if (view.state.doc === previous.doc || sync.remote) return;
+          const base = bases.get(sync);
+          const markdown = ownChanges(options, base, markdownOf(view.state).text);
+          if (markdown === base) return;
+          const editedFrom = base ?? markdown;
+          bases.set(sync, markdown);
           options.onChange?.(markdown, { editedFrom });
         },
       };
@@ -89,10 +100,13 @@ export function markdownSync(options: MarkdownSyncOptions): Plugin<SyncState> {
  * place in that value cannot be found exactly, the canonical markdown is
  * written whole: splicing at a guess would delete the text in between.
  */
-function ownChanges(config: SyncConfig, markdown: string): string {
-  const base = config.base;
-  if (base === null || base === markdown) return markdown;
-  const canonical = toMarkdown(config.options.parse(base), config.options.spec).text;
+function ownChanges(
+  options: MarkdownSyncOptions,
+  base: string | undefined,
+  markdown: string,
+): string {
+  if (base === undefined || base === markdown) return markdown;
+  const canonical = toMarkdown(options.parse(base), options.spec).text;
   if (canonical === base || canonical === markdown) return canonical === base ? markdown : base;
   const { start, endBefore, endAfter } = changedMiddle(canonical, markdown);
   const from = mapOffsetExactly(canonical, base, start, "before");
@@ -104,7 +118,12 @@ function ownChanges(config: SyncConfig, markdown: string): string {
 /** Whether `tr` applied a value read from the text column, rather than a
  * local edit. */
 export function isRemoteChange(tr: Transaction): boolean {
-  return tr.getMeta(key)?.remote === true;
+  return remoteSource(tr) !== undefined;
+}
+
+function remoteSource(tr: Transaction): string | undefined {
+  const source: unknown = tr.getMeta(key);
+  return typeof source === "string" ? source : undefined;
 }
 
 /** The document's canonical markdown and its position map. */
@@ -148,11 +167,20 @@ function configOf(state: EditorState): SyncConfig {
 export function applyMarkdown(state: EditorState, markdown: string): Transaction | null {
   const config = configOf(state);
   const current = markdownOf(state);
-  if (markdown === config.base || markdown === current.text) {
-    config.base = markdown;
-    return null;
-  }
-  config.base = markdown;
+  const sync = key.getState(state)!;
+  if (markdown === config.bases.get(sync)) return null;
+  const tr = markdown === current.text ? null : remoteTransaction(state, current, markdown, config);
+  // When the editor already shows this value, there is no transaction to accept.
+  if (!tr) config.bases.set(sync, markdown);
+  return tr;
+}
+
+function remoteTransaction(
+  state: EditorState,
+  current: MappedMarkdown,
+  markdown: string,
+  config: SyncConfig,
+): Transaction | null {
   const doc = config.options.parse(markdown);
   const next = toMarkdown(doc, config.options.spec);
   config.mappedDocs.set(doc, next);
@@ -215,7 +243,7 @@ export function applyMarkdown(state: EditorState, markdown: string): Transaction
     const newHead = anchor === head ? newAnchor : follow(head, sideOf(head));
     tr.setSelection(TextSelection.between(tr.doc.resolve(newAnchor), tr.doc.resolve(newHead)));
   }
-  return tr.setMeta(key, { remote: true }).setMeta("addToHistory", false);
+  return tr.setMeta(key, markdown).setMeta("addToHistory", false);
 }
 
 /** The index of the top-level block holding `pos`. */

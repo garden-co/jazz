@@ -1,3 +1,4 @@
+import { createServer, type Socket } from "node:net";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -11,11 +12,15 @@ import { startLocalJazzServer, startTestJazz } from "../testing/index.js";
 const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
 
 /** Resolve with the first status `matches` accepts, now or after a change. */
-function statusWhere(db: Db, matches: (status: SyncStatus) => boolean): Promise<SyncStatus> {
+function statusWhere(
+  db: Db,
+  matches: (status: SyncStatus) => boolean,
+  timeoutMs = 15_000,
+): Promise<SyncStatus> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
       () => reject(new Error(`status never matched; last ${JSON.stringify(db.getSyncStatus())}`)),
-      15_000,
+      timeoutMs,
     );
     const check = (status: SyncStatus) => {
       if (!matches(status)) return;
@@ -160,6 +165,33 @@ it("says since when a write waits, what the server rejected, and when the link f
     await server.stop().catch(() => undefined);
   }
 }, 90_000);
+
+// #5225: a server that takes the connection and never answers (a dev proxy
+// holding the upgrade for a backend that is down) used to leave the link
+// "connecting" for as long as it hung: no attempt failed, so no outage was
+// published. Each attempt now gives up without a hello, so it reads offline.
+it("reads offline when the server accepts connections but never answers", async () => {
+  const sockets: Socket[] = [];
+  const hole = createServer((socket) => void sockets.push(socket));
+  await new Promise<void>((resolve) => hole.listen(0, "127.0.0.1", resolve));
+  const { port } = hole.address() as { port: number };
+  let db: Db | undefined;
+  try {
+    db = await createDb(
+      await localAccountConfig("00000000-0000-0000-0000-0000000005e5", `http://127.0.0.1:${port}`),
+    );
+    const unsubscribe = db.subscribe(app.notes, () => undefined);
+    const offline = await statusWhere(db, (status) => status.link.state === "offline", 45_000);
+    expect(offline.link).toEqual({ state: "offline", reason: "network", retrying: true });
+    expect(offline.lastError).toMatchObject({ kind: "network" });
+    expect(sockets.length).toBeGreaterThan(1);
+    unsubscribe();
+  } finally {
+    await db?.shutdown();
+    for (const socket of sockets) socket.destroy();
+    hole.close();
+  }
+}, 60_000);
 
 it("is local-only and synced without a server", async () => {
   const db = await createDb(await localAccountConfig("sync-status-local"));

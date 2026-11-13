@@ -10,6 +10,8 @@ import { join } from "node:path";
 import { JazzServer } from "jazz-napi";
 import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
+import { shippedMigrations } from "../runtime/client-migrations.js";
+import { deployApp } from "./catalogue.js";
 
 export { deploy, type DeployOptions } from "./catalogue.js";
 
@@ -68,6 +70,8 @@ async function createOwnedDataDir(): Promise<string> {
  * Start a local Jazz sync server.
  *
  * To initialize an app, pass its schema and permissions. Omit both to deploy later.
+ * An app that ships migrations (`defineApp(schema, { migrations })`) is
+ * published with all of them, as `createJazz` publishes it.
  *
  * When no port is provided, an available localhost port is chosen automatically.
  * When no data directory is provided, the server owns a temporary directory and
@@ -93,12 +97,30 @@ export async function startLocalJazzServer(
     );
   }
   const host = validateServerHost(options.host);
-  const schema =
+  const declared =
     options.schema === undefined
       ? undefined
-      : encodeSchema(
-          mergePermissionsIntoWasmSchema(resolveSchemaSource(options.schema), options.permissions),
-        );
+      : {
+          source: options.schema,
+          schema: resolveSchemaSource(options.schema),
+          permissions: options.permissions,
+        };
+  // An app that ships migrations is published as createJazz publishes it
+  // (deployApp): every schema version and lens it ships. Started with only
+  // its current schema, the server would take that as the app's first
+  // version, and refuse the app's own deployment and clients opening with
+  // its lenses.
+  const shipsMigrations =
+    declared !== undefined && (shippedMigrations(declared.schema)?.migrations.length ?? 0) > 0;
+  if (shipsMigrations && options.trustedWorkload !== undefined) {
+    throw new Error(
+      "startLocalJazzServer: an app that ships migrations is not supported with trustedWorkload yet; start without schema and deploy the app with its admin secret.",
+    );
+  }
+  const schema =
+    declared === undefined || shipsMigrations
+      ? undefined
+      : encodeSchema(mergePermissionsIntoWasmSchema(declared.schema, declared.permissions));
   const appId = options.appId ?? DEFAULT_APP_ID;
   // Ask the server to bind port 0 when callers do not require a particular
   // address. Unlike probing a candidate port first, this is atomic and remains
@@ -142,6 +164,24 @@ export async function startLocalJazzServer(
 
   if (options.enableLogs === true) {
     console.log(`[jazz-server] started on ${server.url}`);
+  }
+
+  if (shipsMigrations && declared) {
+    try {
+      await deployApp({
+        appId: server.appId,
+        serverUrl: server.url,
+        adminSecret: server.adminSecret,
+        app: declared.source,
+        permissions: declared.permissions,
+      });
+    } catch (error) {
+      await server.stop().catch(() => undefined);
+      if (ownsDataDir && dataDir) {
+        await rm(dataDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   let stopPromise: Promise<void> | null = null;

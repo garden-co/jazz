@@ -59,15 +59,23 @@ import {
 import { BACKEND_USER_ISSUER } from "./backend-issuer.js";
 import { earlyDb, type EarlyDb } from "./early-db.js";
 import {
-  defaultCoreName,
+  checkNamespaceOption,
+  coreName,
   onVercelDeployment,
   onVercelHost,
   openVercelCore,
   refuseVercelAppId,
+  refuseVercelName,
   type VercelStoreOptions,
 } from "./vercel-store.js";
+import { logStoreOpened } from "./store-log.js";
 
-export type { VercelStoreOptions } from "./vercel-store.js";
+export type {
+  VercelNamespace,
+  VercelNamespaceContext,
+  VercelStoreOptions,
+} from "./vercel-store.js";
+export { perBranch } from "./vercel-store.js";
 
 import { files, type BlobStore } from "./blobs.js";
 import {
@@ -96,7 +104,7 @@ import {
   withCheckedExpiry,
 } from "./session-expiry.js";
 import { NoJazzAccountError } from "./no-account-error.js";
-import { RequestAuthenticationError } from "./request-auth.js";
+import { isAuthenticationUnavailableError, RequestAuthenticationError } from "./request-auth.js";
 import { optionalPeerImportError } from "./optional-peer.js";
 import { closingBeforeDeadline } from "./socket-deadline.js";
 import { importWs, vercelUpgradesSockets } from "./ws-peer.js";
@@ -229,8 +237,11 @@ export function remote(
  * `local`, by default `sqlite({ path: ".jazz/local" })`.
  *
  * Deployed, it runs a core in a persistent Vercel Sandbox in your own Vercel
- * project, with its data on a Drive: one for production and one per Git
- * branch for previews.
+ * project, with its data on a Drive. `namespace` (required) says which: the
+ * Sandbox is `jazz-<project>-<namespace>`, e.g. one core per environment
+ * with `namespace: ({ environment }) => environment`, or production's core
+ * and one per preview branch with
+ * `namespace: ({ environment, branch }) => environment === "production" ? "production" : perBranch(branch)`.
  * It is created on first use, wakes when a request needs it (about a second)
  * and stops after `idleMs` without requests or sockets. The function's Vercel
  * OIDC token is its only credential, so there are no secrets and no env vars:
@@ -251,11 +262,13 @@ export function remote(
  * Sandbox and a Drive of up to `maxDriveBytes` until you remove them.
  */
 export function vercel(
-  options: VercelStoreOptions & { local?: Extract<JazzStore, { kind: "sqlite" | "memory" }> } = {},
+  options: VercelStoreOptions & { local?: Extract<JazzStore, { kind: "sqlite" | "memory" }> },
 ): JazzStore {
   // Refused here, not on the first deployed request: in dev the local
-  // store runs and would never read it.
-  refuseVercelAppId(options);
+  // store runs and would never read them.
+  refuseVercelAppId(options ?? {});
+  refuseVercelName(options ?? {});
+  checkNamespaceOption(options ?? {});
   const { local, ...rest } = options;
   return { kind: "vercel", options: rest, local: local ?? sqlite({ path: ".jazz/local" }) };
 }
@@ -700,8 +713,10 @@ export interface Jazz {
    * if `authenticate` no longer names that user (or reconnects if it still
    * does). Call it from your sign-out handler or your auth provider's
    * session-revoked webhook, so a sign-out reaches open sessions before
-   * their `expiresAt`. Sessions served by other instances end at their
-   * `expiresAt`. Returns how many sessions it ended.
+   * their `expiresAt`. A session still signing in when you call it (its
+   * `authenticate` may have read the cookie you just ended) is refused too
+   * if it signs in as `userId`. Sessions served by other instances end at
+   * their `expiresAt`. Returns how many open sessions it ended.
    */
   revokeUser(userId: string): Promise<number>;
   /**
@@ -1442,6 +1457,13 @@ function runningStore(store: JazzStore): JazzStore {
   return store.kind === "vercel" && !onVercelDeployment() ? store.local : store;
 }
 
+/** The line a store logs when it opens (a `vercel()` core logs its own). */
+function storeOpenedLine(store: Exclude<JazzStore, { kind: "vercel" }>): string {
+  if (store.kind === "sqlite") return `jazz: store sqlite at ${store.path}`;
+  if (store.kind === "memory") return "jazz: store memory (its data lasts as long as this process)";
+  return `jazz: store remote at ${store.url} (app ${store.appId})`;
+}
+
 /** A Jazz with its store open: what a `createJazz` facade hands each call to. */
 interface OpenedJazz extends Omit<Jazz, "ready" | "db" | "attach"> {
   readonly db: Db;
@@ -1475,6 +1497,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
               openRemoteCore(appId, { url, backendCredential }, bundle),
           })
         : await openInProcessCore(store, bundle);
+  // A vercel() core says which it opened itself.
+  if (store.kind !== "vercel") logStoreOpened(storeOpenedLine(store));
   const appId = core.appId;
   const issuer = BACKEND_USER_ISSUER;
   // An in-memory store's agent tokens last as long as its data: this process.
@@ -2103,6 +2127,13 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     close(): void;
     /** End the session as refused (`jazz.revokeUser`). */
     revoke(reason: string): void;
+    /**
+     * `jazz.revokeUser(userId)` ran while this session's sign-in was still
+     * being admitted: if it admits `userId`, refuse it as revoked instead.
+     * Its `authenticate` may have read the user's cookie before the app
+     * ended their auth session.
+     */
+    revokeWhileAdmitting(userId: string): void;
     /** The user the session was admitted as, once it is. */
     readonly userId: string | undefined;
     /** Whether a trusted backend client opened it. */
@@ -2129,6 +2160,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     let ended = false;
     let userId: string | undefined;
     let trusted = false;
+    // Users `revokeUser` named while this session's admission ran.
+    let admitting = true;
+    const revokedWhileAdmitting = new Set<string>();
     // A session that never sends its prelude ends too.
     let stopExpiry: (() => void) | undefined = startTimer(() => {
       onEvent(null, { kind: "close", code: 1008, reason: "no sign-in in time" });
@@ -2194,7 +2228,19 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       end();
     };
     const admit = async (prelude: Uint8Array): Promise<boolean> => {
-      const admitted = await admitPrelude(request, prelude);
+      const admitted = await admitPrelude(request, prelude).finally(() => (admitting = false));
+      if (
+        admitted &&
+        admitted !== UNVERIFIED_CREDENTIAL &&
+        admitted.userId !== undefined &&
+        revokedWhileAdmitting.has(admitted.userId) &&
+        !ended
+      ) {
+        // Admitted on an answer `authenticate` gave before the app revoked
+        // this user: refused as the sessions `revokeUser` ended are.
+        clientSession.revoke("revokeUser");
+        return false;
+      }
       if (!admitted || admitted === UNVERIFIED_CREDENTIAL || ended) {
         // An auth failure, not a dropped link: the client stops retrying and
         // reports `offline: auth`, and its session asks the backend whether
@@ -2338,7 +2384,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
                 // `authenticate` without `expiresAt` fails the same way every
                 // time: say why, once.
                 if (error instanceof AuthenticateExpiresAtError) warnMissingExpiry(error);
-                if (isThrownByAuthenticate(error)) console.error(AUTHENTICATE_THREW_MESSAGE, error);
+                if (isAuthenticationUnavailableError(error)) console.error(error);
+                else if (isThrownByAuthenticate(error)) {
+                  console.error(AUTHENTICATE_THREW_MESSAGE, error);
+                }
                 onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
               }
               end();
@@ -2362,6 +2411,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         onEvent(null, { kind: "message", data: authFailedBatch(`session revoked: ${reason}`) });
         onEvent(null, { kind: "close", code: 1008, reason: "session revoked" });
         end();
+      },
+      revokeWhileAdmitting(revoked) {
+        if (admitting && !ended) revokedWhileAdmitting.add(revoked);
       },
       get userId() {
         return userId;
@@ -3009,6 +3061,15 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
           headers: { "Cache-Control": "no-store" },
         });
       }
+      if (isAuthenticationUnavailableError(error)) {
+        // The identity provider is down, not the app's code: the client
+        // retries and stays signed in. The reason stays in the logs.
+        console.error(error);
+        return new Response(AUTHENTICATION_UNAVAILABLE, {
+          status: 503,
+          headers: { "Retry-After": "5", "Cache-Control": "no-store" },
+        });
+      }
       if (isThrownByAuthenticate(error)) {
         // The reason (it can name the app's internals) stays in the logs.
         console.error(AUTHENTICATE_THREW_MESSAGE, error);
@@ -3382,7 +3443,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         throw new Error("revokeUser: pass the user's id, as your authenticate names it");
       let ended = 0;
       for (const { session } of [...liveSessions]) {
-        if (session.trusted || session.userId !== userId) continue;
+        if (session.trusted) continue;
+        // A session still signing in may turn out to be theirs: its
+        // `authenticate` may have read their cookie before the app ended it.
+        if (session.userId === undefined) session.revokeWhileAdmitting(userId);
+        if (session.userId !== userId) continue;
         session.revoke("revokeUser");
         ended += 1;
       }
@@ -3514,11 +3579,11 @@ function storeKey(store: JazzStore): string | undefined {
   if (store.kind === "sqlite") return `sqlite:${resolve(store.path)}`;
   if (store.kind === "vercel") {
     const project = store.options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID;
-    let name = store.options.name;
+    let name: string | undefined;
     try {
-      name ??= project ? defaultCoreName(project, process.env) : undefined;
+      name = project ? coreName(project, store.options.namespace, process.env).name : undefined;
     } catch {
-      // A preview without a branch: its open reports that, not createJazz.
+      // No namespace for this deployment: its open reports that, not createJazz.
     }
     // Without a name the core is unknown: its open reports that.
     return name ? `vercel:${name}` : undefined;
@@ -4178,6 +4243,13 @@ const UNVERIFIED_CREDENTIAL = "unverified-credential";
  * error goes to the backend's log; the response carries only this code.
  */
 const AUTHENTICATE_FAILED = "authenticate_failed";
+
+/**
+ * What a Jazz route answers (503, with Retry-After) when the app's
+ * `authenticate` could not check a credential because its identity
+ * provider is unreachable (`fromJWT`'s JWKS).
+ */
+const AUTHENTICATION_UNAVAILABLE = "authentication_unavailable";
 
 /** What the backend logs, before the error, when the app's `authenticate` threw. */
 const AUTHENTICATE_THREW_MESSAGE =

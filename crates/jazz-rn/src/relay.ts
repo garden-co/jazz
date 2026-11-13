@@ -176,6 +176,8 @@ export type NativeForegroundCommand =
   | { type: "pendingUploadCount" }
   /** The upload status: pending, since when, refusals (append-only command). */
   | { type: "uploadStatus" }
+  /** Delete the scope's local store (ABI 6). */
+  | { type: "deleteStore" }
   | {
       type: "beginStreamingMutation";
       mutation: "insert" | "update" | "upsert";
@@ -270,7 +272,8 @@ export type NativeForegroundResponse =
   | { type: "slowQueryReport"; lines: string[] }
   | { type: "slowQueryThresholdSet" }
   | { type: "pendingUploadCount"; count: number }
-  | { type: "uploadStatus"; statusJson: string };
+  | { type: "uploadStatus"; statusJson: string }
+  | { type: "storeDeleted"; pendingUploads: number };
 
 export type NativeForegroundSubscriptionEvent =
   | {
@@ -423,6 +426,7 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
   if (command.type === "drainTickEvents") return Uint8Array.of(35);
   if (command.type === "pendingUploadCount") return Uint8Array.of(38);
   if (command.type === "uploadStatus") return Uint8Array.of(39);
+  if (command.type === "deleteStore") return Uint8Array.of(40);
   if (command.type === "takeSlowQueryReport") {
     return concatForegroundBytes(
       Uint8Array.of(36),
@@ -834,6 +838,12 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
     return {
       type: "uploadStatus",
       statusJson: decodeForegroundString(bytes.subarray(1), "upload status"),
+    };
+  }
+  if (tag === 31) {
+    return {
+      type: "storeDeleted",
+      pendingUploads: decodeForegroundU64(bytes.subarray(1), "deleted store's pending uploads"),
     };
   }
   if (
