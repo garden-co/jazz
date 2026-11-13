@@ -12352,12 +12352,17 @@ impl Db {
                 // upstream answers: its own store may be cold. A Remote
                 // read waits for that answer however long it takes, its
                 // link down or no server at all: only the authority
-                // confirms a remote result. A LocalFirst one whose upstream
-                // cannot answer yet (its link is down, or still to come)
-                // serves this store, settled at once, while the upstream
-                // subscription it keeps fills the store once the link is
-                // up; one with a first-load wait is served so once the wait
-                // runs out.
+                // confirms a remote result. A LocalFirst one with a
+                // first-load wait waits for it while the upstream may
+                // answer, and is served from this store once the wait runs
+                // out or the upstream can no longer answer. Any other
+                // LocalFirst read serves this store, settled at once, as a
+                // one-shot one does: a zero wait is `FirstLoad::Deliver`,
+                // never "until the upstream answers". The upstream
+                // subscription it keeps fills the store, and the read
+                // follows it as deltas. Settled here, it stays at this
+                // store's tier: the upstream's global answer is not
+                // forwarded to it.
                 let upstream = db
                     .inner()
                     .client
@@ -12371,7 +12376,7 @@ impl Db {
                 let strict = tier == ReadTier::Remote && wait.is_none();
                 let relayed = attached
                     .as_ref()
-                    .filter(|_| upstream == Some(true) || strict);
+                    .filter(|_| strict || (upstream == Some(true) && wait.is_some()));
                 if relayed.is_some()
                     && let Some(until) = wait.and_then(wait_until)
                 {
