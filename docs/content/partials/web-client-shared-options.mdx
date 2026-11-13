@@ -1,0 +1,16 @@
+Both clients take these options, in `createJazzClient(config)` or `<JazzProvider config={…}>`:
+
+| Option                      | Default        | What it does                                                                    |
+| :-------------------------- | :------------- | :------------------------------------------------------------------------------ |
+| `serverUrl`                 | `/jazz`        | Where your main backend mounts Jazz. Set it only if you mount it somewhere else |
+| `initial`                   | `"signed-out"` | `"device"` starts visitors as guests on a device account                        |
+| `linkDeviceAccountOnSignUp` | `true`         | Link the device account to a user who signs up; turn off on shared devices      |
+| `clearOnSignOut`            | `false`        | Wipe the account's local data on sign-out, for shared devices                   |
+
+`createJazzClient` needs a config (`{}` for the defaults) and refuses an option it doesn't take, naming
+the ones it does, rather than ignoring it.
+
+Both clients also set `window.__jazz`, the page's sync status and storage controls for tests and
+agents (`window.__jazz.status()`, `waitForSync()`, `clearStorage()`). The name is Jazz's: if your
+app or another library already set `window.__jazz`, Jazz leaves it alone, warns once on the
+console and goes without the handle. Rename your own global to get the handle back.

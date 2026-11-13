@@ -130,6 +130,7 @@ const mocks = vi.hoisted(() => {
           discard: vi.fn(),
           onAuthFailure: vi.fn(),
           onMutationError: vi.fn(),
+          onStorageFailure: vi.fn(),
           onServerTransportError: vi.fn(),
           onRemoteLinkStateChange: vi.fn(),
           remoteLinkState: vi.fn(() => "connected"),
@@ -150,6 +151,7 @@ const mocks = vi.hoisted(() => {
           connect: vi.fn(),
           disconnect: vi.fn(async () => undefined),
           updateAuth: vi.fn(async () => undefined),
+          assertCredentialKeepsPrincipal: vi.fn(),
           waitForUpstreamServerConnection: vi.fn(async () => undefined),
         };
         runtimes.push(runtime);
@@ -2867,6 +2869,41 @@ describe("broker worker context initialization", () => {
         explicitlyDisconnected: false,
       });
     }
+  });
+
+  it("refuses another principal's credential while explicitly disconnected, before storing it (#4476)", async () => {
+    const initOptions = { ...options("disconnected-principal"), serverUrl: "ws://server.test" };
+    const owner = await connect(initOptions, "owner-tab");
+    const editor = await connect(initOptions, "editor-tab");
+    await initializeFollower(owner.port, 1);
+    await initializeFollower(editor.port, 1);
+    const runtime = mocks.runtimes[0]!;
+    owner.port.emitMessage({ type: "disconnect", id: 2 });
+    await owner.port.waitForEvent((event) => event.type === "result" && event.id === 2);
+    runtime.connect.mockClear();
+
+    runtime.assertCredentialKeepsPrincipal.mockImplementationOnce(() => {
+      throw Object.assign(new Error("another principal"), { reason: "identity_mismatch" });
+    });
+    owner.port.emitMessage({
+      type: "update-auth",
+      authJson: '{"jwt_token":"another-user"}',
+      sessionClaims: { role: "other" },
+    });
+    expect(await owner.port.waitForEvent((event) => event.type === "error")).toMatchObject({
+      error: { message: "another principal" },
+    });
+
+    // A sibling's reconnect without a credential of its own still dials with
+    // the stored one: the refused credential was never stored.
+    editor.port.emitMessage({
+      type: "reconnect",
+      id: 2,
+      authJson: '{"jwt_token":null}',
+      sessionClaims: {},
+    });
+    await editor.port.waitForEvent((event) => event.type === "result" && event.id === 2);
+    expect(runtime.connect).toHaveBeenCalledExactlyOnceWith("ws://server.test", TAB_AUTH);
   });
 
   it("dials the server only once a retained account's tab supplies its first credential", async () => {

@@ -76,7 +76,23 @@ describe("fromJWT", () => {
     expect(await authenticate(request(token))).toEqual({
       userId: "user_01",
       claims: { role: "admin", permissions: ["posts:write"], org_id: "org_1" },
+      expiresAt: expect.any(Number),
     });
+  });
+
+  it("says the token holds until its exp plus the clock tolerance it accepts", async () => {
+    serveJwks();
+    const exp = Math.floor(Date.now() / 1000) + 300;
+    const token = await sign({}, { expires: exp });
+    const standard = fromJWT({ jwksUrl: jwksUrl(), issuer: ISSUER, audience: AUDIENCE });
+    expect((await standard(request(token)))?.expiresAt).toBe(exp + 60);
+    const strict = fromJWT({
+      jwksUrl: jwksUrl(),
+      issuer: ISSUER,
+      audience: AUDIENCE,
+      clockToleranceSeconds: 0,
+    });
+    expect((await strict(request(token)))?.expiresAt).toBe(exp);
   });
 
   it("verifies with a static public key and shapes claims on request", async () => {
@@ -90,6 +106,7 @@ describe("fromJWT", () => {
     expect(await authenticate(request(token))).toEqual({
       userId: "user_01",
       claims: { role: "member" },
+      expiresAt: expect.any(Number),
     });
   });
 
@@ -172,6 +189,36 @@ describe("fromJWT", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  // The issuer rotates to a new key moments after the JWKS was fetched
+  // (by a sign-in, the cache expiring, or any token with a key it lacks):
+  // its users stay signed in, retrying until the next fetch can show it.
+  it("refuses a key newer than a JWKS fetched moments ago, and accepts it after the cooldown", async () => {
+    let keys = [jwk];
+    const fetch = serveJwks(() => keys);
+    const start = Date.now();
+    const authenticate = fromJWT({ jwksUrl: jwksUrl(), issuer: ISSUER, audience: AUDIENCE });
+    expect((await authenticate(request(await sign({}))))?.userId).toBe("user_01");
+    keys = [jwk, rotatedJwk];
+    const rotatedToken = await sign({}, { key: rotatedKey, kid: "k2" });
+    vi.useFakeTimers({ toFake: ["Date"], now: start + 10_000 });
+    // Within the cooldown, a key the document lacks is refused, never a
+    // server error: it may as well be another issuer's.
+    expect(await authenticate(request(rotatedToken))).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    // A key the document has still refuses a bad signature at once.
+    const forged = await sign({}, { key: otherKey, kid: "k1" });
+    expect(await authenticate(request(forged))).toBeNull();
+    // After the cooldown the refetch shows the new key.
+    vi.setSystemTime(start + 31_000);
+    expect((await authenticate(request(rotatedToken)))?.userId).toBe("user_01");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    // A fetched document that lacks a key refuses it.
+    vi.setSystemTime(start + 62_000);
+    const unknown = await sign({}, { key: otherKey, kid: "k9" });
+    expect(await authenticate(request(unknown))).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
   it("throws when the JWKS cannot be fetched at all, so clients retry", async () => {
     vi.stubGlobal(
       "fetch",
@@ -180,6 +227,48 @@ describe("fromJWT", () => {
     const authenticate = fromJWT({ jwksUrl: jwksUrl(), issuer: ISSUER, audience: AUDIENCE });
     await expect(authenticate(request(await sign({})))).rejects.toThrow(/Unable to fetch JWKS/);
   });
+
+  // A JWKS endpoint that hangs, rather than erroring, is the same outage as
+  // one that is down: sign-in fails within the deadline (so the client
+  // retries) instead of stalling, and the next sign-in fetches again.
+  it.each(["headers", "body"])(
+    "fails a sign-in within 30 seconds when the JWKS hangs on its %s, so clients retry",
+    async (phase) => {
+      vi.useFakeTimers();
+      const token = await sign({});
+      const hang = () => new Promise<never>(() => {});
+      const fetch = vi
+        .fn<typeof globalThis.fetch>()
+        .mockImplementationOnce(async () =>
+          phase === "headers" ? hang() : ({ ok: true, json: hang } as unknown as Response),
+        )
+        .mockImplementation(async () => Response.json({ keys: [jwk] }));
+      vi.stubGlobal("fetch", fetch);
+      const authenticate = fromJWT({ jwksUrl: jwksUrl(), issuer: ISSUER, audience: AUDIENCE });
+      // Two concurrent sign-ins share the one stalled fetch.
+      const alice = authenticate(request(token));
+      const bob = authenticate(request(token));
+      const settled = Promise.allSettled([alice, bob]);
+      await vi.advanceTimersByTimeAsync(29_999);
+      let done = false;
+      void settled.then(() => (done = true));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      for (const result of await settled) {
+        expect(result).toMatchObject({
+          status: "rejected",
+          reason: expect.objectContaining({ message: expect.stringMatching(/timed out/) }),
+        });
+      }
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch.mock.calls[0]![1]!.signal!.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+      // The provider answers again: the retry fetches and signs in.
+      expect((await authenticate(request(token)))?.userId).toBe("user_01");
+      expect(fetch).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it("keeps an unknown key retrying through an outage instead of signing it out", async () => {
     let up = true;

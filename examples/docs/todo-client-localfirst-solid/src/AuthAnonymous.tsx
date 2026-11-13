@@ -1,11 +1,11 @@
 import { type ParentProps } from "solid-js";
-import type { DbConfig } from "jazz-tools";
 import { JazzProvider } from "jazz-tools/solid";
 
-// Prepare a handle outside this context with createAccountManager.
-export function AuthAnonymous(props: ParentProps<{ config: DbConfig }>) {
+// Everyone starts as a guest: a device account, created on this device.
+// Your backend accepts guests with acceptDeviceAccounts.
+export function AuthAnonymous(props: ParentProps) {
   return (
-    <JazzProvider config={props.config} fallback={<p>Loading...</p>}>
+    <JazzProvider config={{ serverUrl: "/jazz", initial: "device" }} loading={<p>Loading...</p>}>
       {props.children}
     </JazzProvider>
   );

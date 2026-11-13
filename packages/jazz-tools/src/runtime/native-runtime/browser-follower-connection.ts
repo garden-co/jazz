@@ -20,9 +20,15 @@ import {
 } from "./inspector-control-lifecycle.js";
 import { toError } from "../util.js";
 
+/** What a reply carries beyond its success (see the worker's `result`). */
+type RequestReply = { pendingUploads?: number };
+
+/** A storage deletion: how many of the store's writes it took that the server hadn't confirmed. */
+export type StorageDeletion = { pendingUploads?: number };
+
 type PendingRequest = {
   type: BrowserFollowerPortRpcRequest["type"] | "open-inspector-control";
-  resolve: () => void;
+  resolve: (reply?: RequestReply) => void;
   reject: (error: Error) => void;
 };
 
@@ -78,6 +84,8 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private readonly disposeLocalSettlementObserver: () => void;
   private localSettlementsPending = false;
   private resumeProbePending = false;
+  /** The worker admitted this follower; until then, init RPCs carry the probes. */
+  private established = false;
   private readonly connectionId = crypto.randomUUID();
   private nextProbeNonce = 1;
   private probeNonce: number | null = null;
@@ -110,7 +118,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     globalThis.document?.addEventListener("resume", this.onResume);
     this.disposeLocalSettlementObserver = runtime.onLocalSettlementChange((pending) => {
       this.localSettlementsPending = pending;
-      if (this.hasPendingWork()) this.armWatchdog();
+      if (this.wantsWatchdog()) this.armWatchdog();
       else this.clearWatchdog();
     });
     this.disposeQueryCoverageTrace = traceRelay
@@ -168,7 +176,13 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       for (const frames of this.pendingFrames.splice(0)) this.pump.receive(frames);
     })();
     this.readyPromise = Promise.all([initialized, connected]).then(() => undefined);
-    void this.readyPromise.catch((error: unknown) => this.fail(toError(error)));
+    void this.readyPromise.then(
+      () => {
+        this.established = true;
+        this.armWatchdog();
+      },
+      (error: unknown) => this.fail(toError(error)),
+    );
   }
 
   async ready(): Promise<void> {
@@ -192,10 +206,10 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     await this.request({ type: "disconnect" });
   }
 
-  async deleteStorage(): Promise<void> {
+  async deleteStorage(): Promise<StorageDeletion> {
     await this.ready();
     if (!this.dbName) throw new Error("Browser storage reset requires its IndexedDB name");
-    await this.request({ type: "prepare-storage-reset" });
+    const prepared = await this.request({ type: "prepare-storage-reset" });
     try {
       await IndexedDbPageStore.destroy(this.dbName);
     } catch (error) {
@@ -203,6 +217,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       throw error;
     }
     await this.request({ type: "finish-storage-reset" });
+    return { pendingUploads: prepared?.pendingUploads };
   }
 
   async openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort> {
@@ -214,7 +229,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     let rejectPending: (error: Error) => void = () => {};
     const promise = new Promise<void>((resolve, reject) => {
       rejectPending = reject;
-      this.pending.set(id, { type: "open-inspector-control", resolve, reject });
+      this.pending.set(id, { type: "open-inspector-control", resolve: () => resolve(), reject });
     });
     let controlClosed = false;
     const closeControl = () => {
@@ -305,12 +320,12 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.dispose(new Error("Browser follower connection is reconnecting"));
   }
 
-  private request(request: BrowserFollowerPortRpcRequest): Promise<void> {
+  private request(request: BrowserFollowerPortRpcRequest): Promise<RequestReply | undefined> {
     if (this.failed) return Promise.reject(this.failed);
     if (this.closed) return Promise.reject(new Error("Browser follower connection is closed"));
     const id = this.nextRequestId++;
     const message = { ...request, id };
-    const promise = new Promise<void>((resolve, reject) => {
+    const promise = new Promise<RequestReply | undefined>((resolve, reject) => {
       this.pending.set(id, { type: request.type, resolve, reject });
     });
     this.armWatchdog();
@@ -330,7 +345,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   }
 
   private armWatchdog(): void {
-    if (this.closed || this.failed || !this.hasPendingWork() || this.watchdogTimer !== null) return;
+    if (this.closed || this.failed || !this.wantsWatchdog() || this.watchdogTimer !== null) return;
     this.scheduleWatchdog(probeTiming.intervalMs, false);
   }
 
@@ -340,7 +355,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.watchdogTimer = setTimeout(() => {
       if (epoch !== this.watchdogEpoch || this.closed || this.failed) return;
       this.watchdogTimer = null;
-      if (!this.hasPendingWork()) {
+      if (!this.wantsWatchdog()) {
         this.clearWatchdog();
         return;
       }
@@ -360,7 +375,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
 
   private sendProbe(): void {
     this.clearWatchdog();
-    if (this.closed || this.failed || !this.hasPendingWork()) return;
+    if (this.closed || this.failed || !this.wantsWatchdog()) return;
     const nonce = this.nextProbeNonce++;
     this.probeNonce = nonce;
     // Arm first so a synchronous adapter reply cannot leave an expiry behind.
@@ -385,6 +400,20 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
 
   private hasPendingWork(): boolean {
     return this.pending.size > 0 || this.localSettlementsPending || this.resumeProbePending;
+  }
+
+  /**
+   * Probe the worker while work waits on it, and while the page is visible:
+   * a visible tab that sits idle when the worker dies (another tab crashed
+   * it) has no other cue to notice and reopen it, and the writes the dead
+   * worker still held upload only once some tab does. A hidden page rests
+   * and probes when it becomes visible again.
+   */
+  private wantsWatchdog(): boolean {
+    return (
+      this.hasPendingWork() ||
+      (this.established && globalThis.document?.visibilityState === "visible")
+    );
   }
 
   private readonly onVisibilityChange = (): void => {
@@ -429,6 +458,10 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       this.runtime.reportRemoteMutationError(message.event);
       return;
     }
+    if (message.type === "storage-failure") {
+      this.runtime.reportLocalStorageFailure(message.message);
+      return;
+    }
     if (message.type === "transport-error") {
       // Keep this distinct from a fate rejection. The runtime records the
       // error before any later port teardown so active Global waits and
@@ -445,7 +478,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         this.pending.delete(id);
         pending.resolve();
       }
-      if (!this.hasPendingWork()) this.clearWatchdog();
+      if (!this.wantsWatchdog()) this.clearWatchdog();
       this.port.postMessage({
         type: "storage-reset-observed",
         resetId: message.resetId,
@@ -470,7 +503,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
-    if (!this.hasPendingWork()) this.clearWatchdog();
+    if (!this.wantsWatchdog()) this.clearWatchdog();
     if (message.error) {
       pending.reject(deserializeBrowserRelayError(message.error));
     } else {
@@ -479,7 +512,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         this.peerAuthority = message.peerAuthority;
         this.workerRealmId = message.workerRealmId;
       }
-      pending.resolve();
+      pending.resolve({ pendingUploads: message.pendingUploads });
     }
   };
 

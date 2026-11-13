@@ -152,6 +152,35 @@ export async function jazzAppUser(
   return (await front.as(userId, claims)).serverUrl;
 }
 
+/** Sign the user at `userUrl` (from `jazzAppUser`) out of the app backend at `frontUrl`. */
+export async function jazzAppSignOut(frontUrl: string, userUrl: string): Promise<void> {
+  const front = (await startedFor(frontUrl))?.[1].front;
+  if (!front || front.url !== frontUrl)
+    throw new Error(`No Jazz app backend is running at ${frontUrl}`);
+  if (!front.signOut(userUrl)) throw new Error(`${userUrl} is not a user origin of ${frontUrl}`);
+}
+
+/** A new origin of the app backend at `frontUrl` where no one is signed in yet. */
+export async function jazzAppVisitor(frontUrl: string): Promise<string> {
+  const front = (await startedFor(frontUrl))?.[1].front;
+  if (!front || front.url !== frontUrl)
+    throw new Error(`No Jazz app backend is running at ${frontUrl}`);
+  return front.visitor();
+}
+
+/** Sign `userId` up on `originUrl` (from `jazzAppVisitor`), as the app's own sign-up does. */
+export async function jazzAppSignUp(
+  frontUrl: string,
+  originUrl: string,
+  userId: string,
+): Promise<void> {
+  const front = (await startedFor(frontUrl))?.[1].front;
+  if (!front || front.url !== frontUrl)
+    throw new Error(`No Jazz app backend is running at ${frontUrl}`);
+  if (!front.signUp(originUrl, userId))
+    throw new Error(`${originUrl} is not an origin of ${frontUrl}`);
+}
+
 /**
  * Send an HTTP request to a test app backend from Node. A page's origin is not
  * the backend's (its user origins are other ports), and a backend answers no

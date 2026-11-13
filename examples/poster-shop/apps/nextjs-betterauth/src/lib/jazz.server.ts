@@ -38,7 +38,13 @@ export function jazz(): Promise<Jazz> {
     authenticate: async (request) => {
       const { auth } = await import("./auth");
       const session = await auth.api.getSession({ headers: request.headers });
-      return session ? { userId: session.user.id, claims: { name: session.user.name } } : null;
+      return session
+        ? {
+            userId: session.user.id,
+            expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
+            claims: { name: session.user.name },
+          }
+        : null;
     },
   }).ready());
   // A failed start must not poison every later request.

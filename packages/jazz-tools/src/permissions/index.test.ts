@@ -1679,6 +1679,156 @@ describe("permissions DSL", () => {
     });
   });
 
+  function seedFilteredReachableForTest(filters?: Record<string, unknown>, fourArguments = false) {
+    let relation: PermissionRelation | undefined;
+    definePermissions(app, ({ policy, session }) => {
+      const seed = policy.projects.reachable_via(
+        "resource_access_edges",
+        "resource",
+        "team",
+        session.claims["sub"],
+        "team_team_edges",
+        "child_team",
+        "parent_team",
+      );
+      relation = fourArguments
+        ? seed.seeded_by("user_team_edges", "user_id", session.claims["sub"], "team")
+        : seed.seeded_by("user_team_edges", "user_id", session.claims["sub"], "team", filters);
+      return [];
+    });
+    if (!relation) throw new Error("Expected reachable relation.");
+    const ir = toAssertionRelExprForTest(relationToIr(relation));
+    if (ir.type !== "Filter" || ir.input.type !== "Join" || ir.input.left.type !== "Gather")
+      throw new Error("Expected filtered access join with recursive gather.");
+    return { ir, gather: ir.input.left };
+  }
+
+  function directSeedPredicatesForTest(filters: Record<string, unknown>) {
+    let relation: PermissionRelation | undefined;
+    definePermissions(app, ({ policy }) => {
+      relation = policy.user_team_edges.where(
+        filters as Parameters<typeof policy.user_team_edges.where>[0],
+      );
+      return [];
+    });
+    if (!relation) throw new Error("Expected seed filter relation.");
+    const ir = toAssertionRelExprForTest(relationToIr(relation));
+    if (ir.type !== "Filter") throw new Error("Expected direct seed filter.");
+    return ir.predicate.type === "And" ? ir.predicate.exprs : [ir.predicate];
+  }
+
+  it("reachable seed filters preserve four-argument, undefined and empty defaults", () => {
+    const legacy = seedFilteredReachableForTest(undefined, true).ir;
+    expect(seedFilteredReachableForTest().ir).toEqual(legacy);
+    expect(seedFilteredReachableForTest(undefined).ir).toEqual(legacy);
+    expect(seedFilteredReachableForTest({}).ir).toEqual(legacy);
+  });
+
+  it("reachable seed filters narrow only the seed and preserve recursion and outer correlation", () => {
+    const filters = { administrator: true, user_id: { isNull: false } };
+    const before = seedFilteredReachableForTest();
+    const after = seedFilteredReachableForTest(filters);
+    if (
+      before.gather.seed.type !== "Project" ||
+      before.gather.seed.input.type !== "Filter" ||
+      after.gather.seed.type !== "Project" ||
+      after.gather.seed.input.type !== "Filter"
+    )
+      throw new Error("Expected projected filtered seed.");
+    expect(after.gather.seed.input.predicate).toEqual({
+      type: "And",
+      exprs: [...directSeedPredicatesForTest(filters), before.gather.seed.input.predicate],
+    });
+    expect(after.gather.seed.input.input).toEqual(before.gather.seed.input.input);
+    expect(after.gather.seed.columns).toEqual(before.gather.seed.columns);
+    expect({
+      ...after.ir,
+      input: { ...after.ir.input, left: { ...after.gather, seed: before.gather.seed } },
+    }).toEqual(before.ir);
+  });
+
+  it.each([
+    { name: "literal null", filters: { user_id: null } },
+    { name: "IS NULL", filters: { user_id: { isNull: true } } },
+    { name: "IS NOT NULL", filters: { user_id: { isNull: false } } },
+    { name: "literal false", filters: { administrator: false } },
+  ])("reachable seed filters forward $name through existing predicate semantics", ({ filters }) => {
+    const baseline = seedFilteredReachableForTest();
+    const filtered = seedFilteredReachableForTest(filters);
+    if (
+      baseline.gather.seed.type !== "Project" ||
+      baseline.gather.seed.input.type !== "Filter" ||
+      filtered.gather.seed.type !== "Project" ||
+      filtered.gather.seed.input.type !== "Filter"
+    )
+      throw new Error("Expected filtered seed.");
+    expect(filtered.gather.seed.input.predicate).toEqual({
+      type: "And",
+      exprs: [...directSeedPredicatesForTest(filters), baseline.gather.seed.input.predicate],
+    });
+  });
+
+  it("reachable seed filters cannot replace the original authenticated session equality", () => {
+    const baseline = seedFilteredReachableForTest();
+    const filtered = seedFilteredReachableForTest({ user_id: "another-principal" });
+    if (
+      baseline.gather.seed.type !== "Project" ||
+      baseline.gather.seed.input.type !== "Filter" ||
+      filtered.gather.seed.type !== "Project" ||
+      filtered.gather.seed.input.type !== "Filter"
+    )
+      throw new Error("Expected filtered seed.");
+    const equality = baseline.gather.seed.input.predicate;
+    expect(equality).toMatchObject({
+      type: "Cmp",
+      left: { scope: "user_team_edges", column: "user_id" },
+      op: "Eq",
+      right: { type: "SessionRef", path: ["claims", "sub"] },
+    });
+    expect(filtered.gather.seed.input.predicate).toEqual({
+      type: "And",
+      exprs: [...directSeedPredicatesForTest({ user_id: "another-principal" }), equality],
+    });
+  });
+
+  it.each([
+    { filters: { user_id: { isNull: "not-boolean" } }, error: /isNull.*boolean/ },
+    { filters: { user_id: { in: "not-array" } }, error: /in.*array/ },
+    { filters: { user_id: { unknownOperator: true } }, error: /Unsupported where operator/ },
+  ])("reachable seed filters retain malformed-filter refusal: $error", ({ filters, error }) => {
+    expect(() => directSeedPredicatesForTest(filters)).toThrow(error);
+    expect(() => seedFilteredReachableForTest(filters)).toThrow(error);
+  });
+
+  it("reachable seed filters retain the branded-session requirement", () => {
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => {
+        policy.projects
+          .reachable_via(
+            "resource_access_edges",
+            "resource",
+            "team",
+            session.claims["sub"],
+            "team_team_edges",
+            "child_team",
+            "parent_team",
+          )
+          .seeded_by("user_team_edges", "user_id", "spoofed" as never, "team", {});
+        return [];
+      }),
+    ).toThrow(/seeded_by.*session reference/);
+  });
+
+  it("reachable seed filters do not mutate caller-owned frozen input", () => {
+    const filters = Object.freeze({
+      administrator: false,
+      user_id: Object.freeze({ in: Object.freeze(["alice", "bob"]) }),
+    });
+    const before = JSON.stringify(filters);
+    expect(() => seedFilteredReachableForTest(filters)).not.toThrow();
+    expect(JSON.stringify(filters)).toBe(before);
+  });
+
   it("projects team keys through reachable_via recursion frontiers", () => {
     let relation: PermissionRelation | undefined;
     definePermissions(app, ({ policy, session }) => {
@@ -1892,6 +2042,28 @@ describe("permissions DSL", () => {
       op: "Eq",
       right: { type: "Literal", value: "team-a" },
     });
+  });
+
+  it("resolves a gather(...) start column qualified by a relation's name as by its table", () => {
+    const seedOf = (start: Record<string, unknown>) => {
+      let relation: PermissionRelation | undefined;
+      definePermissions(app, ({ policy }) => {
+        relation = policy.teams.gather({
+          start,
+          step: ({ current }) =>
+            policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
+          maxDepth: 3,
+        });
+        return [];
+      });
+      return toAssertionRelExprForTest(relationToIr(relation!));
+    };
+    expect(seedOf({ "team_team_edgesViaChild_team.child_team": "team-a" })).toEqual(
+      seedOf({ "team_team_edges.child_team": "team-a" }),
+    );
+    expect(() => seedOf({ "nope.child_team": "team-a" })).toThrow(
+      /gather\(\.\.\.\) qualified start column "nope\.child_team": "nope" is neither a relation of "teams"/,
+    );
   });
 
   it("keeps chained relation joins anchored to the preceding joined table", () => {
@@ -2607,5 +2779,13 @@ describe("permissions DSL", () => {
         policy.todos.allowRead.where(raw(invalidManualExistsExpr)),
       ]),
     ).toThrow(/available fk columns: todoId/i);
+  });
+});
+
+describe("definePermissions without an app", () => {
+  it("points at a circular schema.ts and permissions.ts import", () => {
+    expect(() => definePermissions(undefined as never, () => {})).toThrow(
+      "If permissions.ts imports the app from schema.ts and schema.ts imports permissions.ts, the import is circular",
+    );
   });
 });

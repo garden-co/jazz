@@ -36,6 +36,8 @@ interface LocalJazzServerOptions {
   adminSecret?: string;
   allowLocalFirstAuth?: boolean;
   telemetryCollectorUrl?: string;
+  /** Live WebSocket connections one signed-in user may hold (default 128). */
+  maxConnectionsPerUser?: number;
   /** Trust only this OIDC workload instead of the shared secrets. */
   trustedWorkload?: { issuer: string; audience: string; subject: string };
   enableLogs?: boolean;
@@ -129,6 +131,7 @@ export async function startLocalJazzServer(
       adminSecret,
       allowLocalFirstAuth: options.allowLocalFirstAuth,
       telemetryCollectorUrl: options.telemetryCollectorUrl,
+      maxConnectionsPerUser: options.maxConnectionsPerUser,
       schema: schema ? [...schema] : undefined,
       trustedWorkload: options.trustedWorkload,
     });

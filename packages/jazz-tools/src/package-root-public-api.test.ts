@@ -363,13 +363,32 @@ function listSourceFiles(dir: string): string[] {
 }
 
 describe("package root public API", () => {
+  it("has one auth object, the session: no account manager, handles or Db opener", () => {
+    expect(packageRoot).toHaveProperty("createJazzClient");
+    expect(packageRoot).toHaveProperty("AccountAuthError");
+    for (const removed of [
+      "createAccountManager",
+      "createDb",
+      "exportLocalFirstSecret",
+      "BrowserAuthSecretStore",
+      "createJazzApp",
+    ]) {
+      // For one release a stub that throws, naming the replacement: no
+      // working alias (see removed-api.ts).
+      const stub = (packageRoot as Record<string, unknown>)[removed];
+      if (stub === undefined) continue;
+      expect(
+        () => (stub as () => unknown)(),
+        `package root removed auth export ${removed}`,
+      ).toThrow(expect.objectContaining({ code: "JAZZ_API_REMOVED" }));
+    }
+  });
+
   it("exposes intended runtime APIs without core internals", () => {
     for (const publicRuntimeExport of [
-      "BrowserAuthSecretStore",
       "Db",
       "PersistedWriteRejectedError",
       "Transaction",
-      "createDb",
       "fetchPublishedBundles",
       "fetchSchemaHashes",
       "fetchStoredWasmSchema",

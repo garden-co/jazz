@@ -87,13 +87,22 @@ describe("cli migrations", () => {
     expect(await fileExists(first.snapshotPath)).toBe(true);
     const index = () => readFile(join(migrationsDir, "index.ts"), "utf8");
     expect(await index()).toContain(first.hash);
+    // Unchanged schema: validate says what it found, and that permissions
+    // never need a migration (#4773).
+    const { logs: unchangedValidate } = await captureConsoleLogs(() =>
+      validate({ schemaDir: root }),
+    );
+    expect(unchangedValidate).toContain(
+      "schema.ts matches its latest snapshot, so no migration is needed. " +
+        "Changes to permissions.ts never need one: your backend publishes them when it starts.",
+    );
 
     await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithTodoNotes()));
     const { logs: changedValidate } = await captureConsoleLogs(() => validate({ schemaDir: root }));
     expect(changedValidate.join("\n")).toContain("changed since the latest snapshot");
-    expect(changedValidate).not.toContain(
-      "Permission-only changes do not create schema hashes or require migrations.",
-    );
+    // After a schema change, nothing about permissions reads as a diagnosis
+    // of it (#4773).
+    expect(changedValidate.join("\n")).not.toMatch(/Permission-only|Changes to permissions\.ts/);
 
     const second = await createCatalogueMigration({
       schemaDir: root,
@@ -107,6 +116,116 @@ describe("cli migrations", () => {
     expect(bundled).toContain(`"fromHash": "${first.hash}"`);
     expect(bundled).toContain(`"toHash": "${second.toHash}"`);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // An app still on `{ migrations: "none" }` got snapshots and a stub but no
+  // migrations/index.ts, and nothing said why (alpha.61 adopter round).
+  it("tells an app on migrations: none to import its migrations, then writes index.ts", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const index = join(root, "migrations", "index.ts");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+    const hint = 'Add `import { migrations } from "./migrations";` to schema.ts';
+
+    // Nothing to ship yet: no hint before the first snapshot, and looking
+    // for snapshots creates no migrations directory.
+    const { logs: fresh } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    expect(fresh.join("\n")).not.toContain(hint);
+    expect(await fileExists(migrationsDir)).toBe(false);
+
+    const { logs: created } = await captureConsoleLogs(() =>
+      createMigration({ schemaDir: root, migrationsDir }),
+    );
+    expect(created.join("\n")).toContain(hint);
+    expect(await fileExists(index)).toBe(false);
+
+    const { logs: validated } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    expect(validated.join("\n")).toContain(hint);
+    expect(await fileExists(index)).toBe(false);
+
+    // Following the hint: the import, then validate, writes the module.
+    await writeFile(
+      join(root, "schema.ts"),
+      `import { migrations } from "./migrations";\n` +
+        rootSchemaWithoutInlinePermissions().replace('{ migrations: "none" }', "{ migrations }"),
+    );
+    const { logs: shipped } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    expect(shipped.join("\n")).not.toContain(hint);
+    const module = await readFile(index, "utf8");
+    expect(module).toContain("`jazz-tools validate` and `jazz-tools migrations create` rewrite it");
+    expect(module).not.toContain("`deploy`");
+  });
+
+  it("counts the steps a stub leaves to fill in", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+    await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    await writeFile(
+      join(root, "schema.ts"),
+      rootSchemaWithTodoNotes().replace("notes: s.string().optional()", "points: s.int()"),
+    );
+    const { logs } = await captureConsoleLogs(() =>
+      createMigration({ schemaDir: root, migrationsDir, name: "add-points" }),
+    );
+    expect(logs).toContain("1. Fill in migrate: 1 step marked TODO.");
+  });
+
+  // A migration validate passed used to fail only at deploy (adopter b22):
+  // renaming an optional column to a required one.
+  it("refuses in validate a migration that a deploy would refuse, naming the column", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const shipping = (source: string) =>
+      `import { migrations } from "./migrations/index.ts";\n` +
+      source.replace('{ migrations: "none" }', "{ migrations }");
+    await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithTodoNotes()));
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+    await mkdir(join(root, "node_modules"), { recursive: true });
+    await symlink(
+      fileURLToPath(new URL("..", import.meta.url)),
+      join(root, "node_modules", "jazz-tools"),
+      "dir",
+    );
+    vi.stubGlobal("fetch", vi.fn());
+    const first = await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    assert(first.status === "initial-snapshot");
+
+    await writeFile(
+      join(root, "schema.ts"),
+      shipping(
+        rootSchemaWithTodoNotes().replace(
+          "notes: s.string().optional(),",
+          'body: s.string().default(""),',
+        ),
+      ),
+    );
+    const second = await createCatalogueMigration({
+      schemaDir: root,
+      migrationsDir,
+      name: "notes-to-body",
+    });
+    assert(second.status === "generated");
+    await validate({ schemaDir: root });
+
+    // The author keeps the values by renaming, but the column's optionality
+    // changes with it, which no migration step does.
+    const stub = await readFile(second.filePath, "utf8");
+    await writeFile(
+      second.filePath,
+      stub
+        .split("\n")
+        .filter((line) => !line.includes('"notes": m.drop'))
+        .map((line) =>
+          line.includes('"body": m.add') ? '      "body": m.renameFrom("notes"),' : line,
+        )
+        .join("\n"),
+    );
+    await expect(validate({ schemaDir: root })).rejects.toThrow(
+      /The migrations in migrations would not deploy: .*table "todos".*"body" comes out optional but is required/,
+    );
   });
 
   it.each([false, true])(
@@ -197,6 +316,8 @@ describe("cli migrations", () => {
         expect.stringMatching(/^20260825T060001-[0-9a-f]{12}\.json$/i),
       ]);
       expect(logs.some((line) => line.startsWith("Generated:"))).toBe(true);
+      // An optional column's stub is complete: nothing to fill in.
+      expect(logs).toContain("1. Review migrate: it is complete as generated, nothing to fill in.");
 
       const filesBeforeNoop = await readdir(snapshotsDir);
       const { result: noopResult, logs: noopLogs } = await captureConsoleLogs(() =>
@@ -393,7 +514,8 @@ describe("cli migrations", () => {
                 nullable: false,
                 merge_strategy: "Counter",
               },
-              { name: "addedValue", column_type: { type: "BigInt" }, nullable: true },
+              // Another type than removedValue, so it can't be its rename.
+              { name: "addedValue", column_type: { type: "Text" }, nullable: true },
               { name: "label", column_type: { type: "Text" }, nullable: false },
             ],
           },
@@ -421,7 +543,7 @@ describe("cli migrations", () => {
     }
 
     const generated = await readFile(filePath, "utf8");
-    expect(generated).toContain('"addedValue": m.add.bigint({ default: null }),');
+    expect(generated).toContain('"addedValue": m.add.string({ default: null }),');
     expect(generated).toContain('"removedValue": m.drop.bigint({ backwardsDefault: null }),');
     expect(generated).toContain('"value": s.bigint().merge("counter"),');
     await typecheckGeneratedMigration(filePath);
@@ -469,7 +591,7 @@ describe("cli migrations", () => {
         toHash: toHash.slice(0, 12),
       }),
     ).rejects.toThrow(
-      'Changing column "todos.done" from required to optional is not supported yet. Add a column under a new name and drop the old one instead.',
+      'Changing column "todos.done" from required to optional is not supported yet. A migration can add, drop or rename a column but not convert its values',
     );
     expect(
       (await readdir(migrationsDir).catch(() => [])).filter((name) => name.endsWith(".ts")),
@@ -522,7 +644,7 @@ describe("cli migrations", () => {
           toHash: toHash.slice(0, 12),
         }),
       ).rejects.toThrow(
-        `Changing ${change} column "todos.state" is not supported yet. Add a column under a new name and drop the old one instead.`,
+        `Changing ${change} column "todos.state" is not supported yet. A migration can add, drop or rename a column but not convert its values`,
       );
       expect(
         (await readdir(migrationsDir).catch(() => [])).filter((name) => name.endsWith(".ts")),
@@ -608,10 +730,9 @@ describe("cli migrations", () => {
         (name) => /^\d{8}T\d{6}-/.test(name) && name.endsWith(`-${fromShortHash}.json`),
       ),
     ).toBe(true);
-    expect(logs).toContain("Migration stubs are only for schema changes.");
-    expect(logs).toContain(
-      "Permission-only changes do not create schema hashes or require migrations.",
-    );
+    // A stub is for a schema change: its output says nothing about
+    // permissions (#4773).
+    expect(logs.join("\n")).not.toMatch(/Permission-only|Changes to permissions\.ts/);
   });
 
   it("renders createTables and dropTables when inferring table add/drop steps", async () => {

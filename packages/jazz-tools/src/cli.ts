@@ -11,10 +11,12 @@ import {
   compileSchema as compileCatalogueSchema,
   requireAppId,
   requireServerValue,
+  unshippedMigrationsWarning,
   validateProject,
 } from "./dev/catalogue-project.js";
 import { renderMigrationGraph } from "./dev/migration-graph.js";
 import { isCloudCommand, runCloudCommand } from "./cloud/commands.js";
+import { runInspectCommand } from "./inspect/cli.js";
 
 export interface BuildOptions {
   schemaDir: string;
@@ -51,8 +53,16 @@ const MIGRATE_ALPHA59_MOVED =
   "https://github.com/garden-co/jazz/releases and run `jazz-alpha59-alpha60-import import --dump <dump> " +
   "--data-dir <dir> --app-id <app id>`.";
 
-const PERMISSIONS_LIFECYCLE_NOTE =
-  "Permission-only changes do not create schema hashes or require migrations.";
+/**
+ * What `validate` says when schema.ts matches its latest snapshot. It states
+ * what this run found; it can't say whether permissions.ts changed (only the
+ * backend's store knows what it last published), so it says what a change
+ * there would need. Never printed after a schema change, where it read as a
+ * diagnosis of that change (#4773).
+ */
+const SCHEMA_UNCHANGED_NOTE =
+  "schema.ts matches its latest snapshot, so no migration is needed. " +
+  "Changes to permissions.ts never need one: your backend publishes them when it starts.";
 
 function parseArgs(args: string[]): { command: string; options: BuildOptions } {
   const command = args[0] || "";
@@ -84,12 +94,13 @@ export async function validate(options: BuildOptions): Promise<void> {
       break;
     case "unsnapshotted":
       console.log(
-        "This project has no schema snapshot yet: before you change schema.ts, run `jazz-tools migrations create` " +
-          "on the version your backend runs, so later migrations start from it.",
+        "This project has no schema snapshot yet. Run `jazz-tools migrations create` once now: it only records " +
+          "schema.ts as the app's first version, so your first schema change can be migrated instead of needing " +
+          "a fresh store. Do it before you change schema.ts.",
       );
       break;
     case "snapshotted":
-      console.log(PERMISSIONS_LIFECYCLE_NOTE);
+      console.log(SCHEMA_UNCHANGED_NOTE);
       break;
   }
   if (result.schema.status !== "changed") console.log(DEPLOY_NOTE);
@@ -313,6 +324,13 @@ function requireMigrationServerOptions(options: MigrationCommandOptions): {
 }
 
 export async function createMigration(options: CreateMigrationOptions): Promise<string | null> {
+  const written = await reportCreatedMigration(options);
+  const unshipped = await unshippedMigrationsWarning(options.schemaDir, options.migrationsDir);
+  if (unshipped) console.warn(`\x1b[33m${unshipped}\x1b[0m`);
+  return written;
+}
+
+async function reportCreatedMigration(options: CreateMigrationOptions): Promise<string | null> {
   const result = await createCatalogueMigration(options);
 
   switch (result.status) {
@@ -337,11 +355,12 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
     case "generated": {
       console.log("Generated: " + result.filePath);
       console.log("");
-      console.log("Migration stubs are only for schema changes.");
-      console.log(PERMISSIONS_LIFECYCLE_NOTE);
-      console.log("");
       console.log("Next steps:");
-      console.log("1. Fill in migrate.");
+      console.log(
+        result.unfilledSteps > 0
+          ? `1. Fill in migrate: ${result.unfilledSteps} step${result.unfilledSteps === 1 ? "" : "s"} marked TODO.`
+          : "1. Review migrate: it is complete as generated, nothing to fill in.",
+      );
       if (result.needsRename) {
         console.log("2. Rename the file by replacing 'unnamed'.");
       }
@@ -380,6 +399,9 @@ function printHelp(): void {
   console.log("  login | logout | whoami");
   console.log("                        Sign in to Jazz Cloud with your dashboard account");
   console.log("  teams, apps           Manage Jazz Cloud teams and apps (see `apps --help`)");
+  console.log(
+    "  inspect <command>     Read and change an app's data through its backend (see `inspect --help`)",
+  );
   console.log("\nValidation options:");
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log("  --strict-provenance   Reject conventional duplicates of Jazz provenance");
@@ -410,7 +432,9 @@ if (isMainModule()) {
   const command = args[0] ?? "";
   // Cloud commands (login, apps, ...) have their own help.
   const cloudCommand = isCloudCommand(command);
-  if (!cloudCommand && args.some((arg) => arg === "--help" || arg === "-h")) {
+  // Cloud commands and `inspect` have their own help.
+  const ownHelp = cloudCommand || command === "inspect";
+  if (!ownHelp && args.some((arg) => arg === "--help" || arg === "-h")) {
     printHelp();
     process.exit(0);
   }
@@ -422,7 +446,37 @@ if (isMainModule()) {
     loadDotEnv();
   }
 
-  if (cloudCommand) {
+  if (command === "inspect" && args[1] === "mcp") {
+    const rest = args.slice(2);
+    if (rest.some((arg) => arg === "--help" || arg === "-h")) {
+      console.log(
+        "Usage: jazz-tools inspect mcp [--app <url>]\n\nServe the app's Inspector API as an MCP server over stdio.\nAdd it to an agent with e.g. `claude mcp add jazz -- npx jazz-tools inspect mcp --app <url>`.",
+      );
+      process.exit(0);
+    }
+    const appIndex = rest.findIndex((arg) => arg === "--app" || arg.startsWith("--app="));
+    const app =
+      appIndex === -1
+        ? undefined
+        : rest[appIndex]!.startsWith("--app=")
+          ? rest[appIndex]!.slice("--app=".length)
+          : rest[appIndex + 1];
+    void import("./inspect/mcp.js").then(({ runMcpServer }) =>
+      runMcpServer(app ? { app } : {}).then(
+        () => process.exit(0),
+        (error: unknown) => {
+          console.error(error);
+          process.exit(1);
+        },
+      ),
+    );
+  } else if (command === "inspect") {
+    runInspectCommand(args.slice(1), {
+      stdout: (text) => process.stdout.write(text),
+      stderr: (text) => process.stderr.write(text),
+      env: process.env,
+    }).then((code) => process.exit(code));
+  } else if (cloudCommand) {
     runCloudCommand(args, {
       stdout: (text) => process.stdout.write(text),
       stderr: (text) => process.stderr.write(text),

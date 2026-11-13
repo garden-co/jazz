@@ -44,22 +44,30 @@ proxies `/auth`, `/api/auth` and `/jazz` to it, so the browser talks to one orig
 
 `/auth/sign-in` redirects to AuthKit, and `/auth/callback` exchanges the code with
 `authenticateWithCode({ session: { sealSession: true, cookiePassword } })` and sets the sealed
-session cookie. `createJazz`'s `authenticate` loads that cookie with `loadSealedSession` and returns
-the WorkOS user id and organization role:
+session cookie. The session's access token lasts minutes, and refreshing it spends a single-use
+refresh token, so the server reads and refreshes it in separate places:
 
-```ts
-authenticate: async (request) => {
-  const session = await readSession(readCookie(request.headers.get("cookie")));
-  return session ? { userId: session.user.id, claims: { role: session.role ?? "" } } : null;
-},
-```
+- `createJazz`'s `authenticate` only reads the cookie (`loadSealedSession(...).authenticate()`) and
+  returns the WorkOS user id, the organization role as the `role` claim, and the access token's
+  `exp` as `expiresAt`.
+- `createJazz`'s `refresh` refreshes a session whose token expires within two minutes and appends
+  the rotated cookie. Jazz calls it on the request a browser makes to ask who is signed in, before
+  an open sync session reaches its `expiresAt`, and renews that session in place.
+- The app's own routes (`/api`, `/auth`) refresh an expired session and write the new cookie, as
+  an AuthKit app's routes do. Jazz's routes are left to `refresh`.
+- Optional: with `WORKOS_WEBHOOK_SECRET` set and `/webhooks/workos` added in WorkOS, a
+  `session.revoked` event calls `jazz.revokeUser(userId)`, so a sign-out elsewhere ends this user's
+  open sync sessions at once instead of at their next renewal.
+
+See [WorkOS](https://jazz.tools/docs/setup/auth/workos) in the docs for the same setup.
 
 ### Client — `src/App.tsx`
 
 `useWorkOSSession` asks `/api/auth/session` who is signed in, for the UI. `JazzProvider` starts
 signed out and asks the backend itself, so the identity always comes from `authenticate`;
-the app calls `reauthenticate()` when the WorkOS user changes and after sign-out, which clears the
-cookie and redirects to the WorkOS logout URL.
+the app calls `refresh()` (from `useJazzSession()`) when the WorkOS user changes and after
+sign-out. Sign-out ends the session at WorkOS and clears the cookie without redirecting, so
+`refresh()` signs this tab and the browser's other tabs out.
 
 Ownership policies compare `$createdBy.account` with `session.user`. The WorkOS user id is
 available under `session.identity.subject`.

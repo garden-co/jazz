@@ -19,8 +19,7 @@ const loadLocalFirst = () => import("jazz-tools/local-first");
 export function JazzProvider({ children }: { children: React.ReactNode }) {
   return (
     <CoreJazzProvider
-      serverUrl="/jazz"
-      client={loadLocalFirst}
+      config={{ serverUrl: "/jazz", client: loadLocalFirst }}
       signedOut={<SignInForm />}
       loading={<StatusScreen label="Opening BandBook" />}
       error={(state) => (

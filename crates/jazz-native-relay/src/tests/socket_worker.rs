@@ -476,14 +476,29 @@ fn tick_events_command_and_response_have_pinned_bytes() {
             sequence: 2,
             reason: "tls".to_owned(),
             retrying: true,
+            code: None,
         }),
     };
     assert_eq!(
         postcard::to_allocvec(&response).unwrap(),
         vec![
-            26, 2, b'[', b']', 1, 0xac, 0x02, 2, b'n', b'o', 1, 2, 3, b't', b'l', b's', 1
+            26, 2, b'[', b']', 1, 0xac, 0x02, 2, b'n', b'o', 1, 2, 3, b't', b'l', b's', 1, 0
         ]
     );
+    // ABI 6: a refusal's failure ends with its error code.
+    let response = ForegroundDbCommandResponse::TickEvents {
+        events_json: "[]".to_owned(),
+        auth_rejection: None,
+        upstream_failure: Some(NativeUpstreamFailure {
+            sequence: 3,
+            reason: "no".to_owned(),
+            retrying: false,
+            code: Some("authority_changed".to_owned()),
+        }),
+    };
+    let mut expected = vec![26, 2, b'[', b']', 0, 1, 3, 2, b'n', b'o', 0, 1, 17];
+    expected.extend_from_slice(b"authority_changed");
+    assert_eq!(postcard::to_allocvec(&response).unwrap(), expected);
     let response = ForegroundDbCommandResponse::TickEvents {
         events_json: "[]".to_owned(),
         auth_rejection: None,
@@ -492,5 +507,213 @@ fn tick_events_command_and_response_have_pinned_bytes() {
     assert_eq!(
         postcard::to_allocvec(&response).unwrap(),
         vec![26, 2, b'[', b']', 0, 0]
+    );
+}
+
+/// A core with schema history (a root version, then a head) stores a column
+/// where the version that introduced it put it. A replica attached with the
+/// head alone would name it after the head instead, and read nothing from
+/// that core. So the attach carries the app's migrations beside its tables:
+///
+/// ```
+/// app ─{tables, migrations}─► relay store: same column     as core
+/// app ─{tables}────────────►  relay store: another column  than core
+/// ```
+#[test]
+fn an_attached_schema_stores_columns_where_its_shipped_migrations_put_them() {
+    use jazz::tools::deployment::published::with_client_migrations;
+    use jazz::tools::{Schema, SchemaHash};
+    let todos = |column: &str| -> Schema {
+        let allow = PolicyExpr::True;
+        SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column(column, ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(allow.clone())
+                            .with_insert(allow.clone())
+                            .with_update(Some(allow.clone()), allow.clone())
+                            .with_delete(allow),
+                    ),
+            )
+            .build()
+    };
+    let (root_schema, head) = (todos("title"), todos("name"));
+    let (root_hash, head_hash) = (
+        SchemaHash::compute(&root_schema).to_string(),
+        SchemaHash::compute(&head).to_string(),
+    );
+    let bundle = serde_json::json!({
+        "schemas": [
+            {"hash": root_hash, "schema": root_schema},
+            {"hash": head_hash, "schema": head},
+        ],
+        "migrations": [{
+            "fromHash": root_hash,
+            "toHash": head_hash,
+            "forward": [{
+                "table": "todos",
+                "operations": [{"type": "rename", "column": "title", "value": "name"}],
+            }],
+        }],
+    });
+    let head_schema = JazzSchema::new(&head).unwrap();
+    let stored_column = |path: &std::path::Path| -> String {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT group_concat(name) FROM pragma_table_info('todos') \
+                 WHERE name LIKE 'title%' OR name LIKE 'name%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let identity = DbIdentity {
+        node: jazz::ids::NodeUuid::from_bytes([0x5a; 16]),
+        author: jazz::ids::AuthorSubject::for_test_bytes([0x5a; 16]),
+    };
+    let core_dir = tempfile::tempdir().unwrap();
+    let core_path = core_dir.path().join("core.sqlite");
+    let core = jazz::db::block_on(jazz::db::Db::open_at(
+        with_client_migrations(
+            jazz::db::DbConfig::new(head_schema.clone(), identity),
+            Some(&serde_json::to_vec(&bundle).unwrap()),
+        )
+        .unwrap(),
+        &core_path,
+        jazz::db::FileOptions::default(),
+    ))
+    .unwrap();
+    let on_core = stored_column(&core_path);
+    drop(core);
+
+    let attach = |payload: serde_json::Value, app_id: &str, root: &std::path::Path| {
+        let (_release, never) = tokio::sync::oneshot::channel();
+        let mut host = NativeRelayHost {
+            socket_connector: Some(ScriptedConnector::new([Step::ConnectWhenReleased(never)])),
+            ..NativeRelayHost::default()
+        };
+        let pending = host
+            .begin_private_session(PrivateSessionSetupJson {
+                server_url: "https://edge.example".to_owned(),
+                app_id: app_id.to_owned(),
+                jwt: bearer(1),
+                storage_root: root.display().to_string(),
+            })
+            .unwrap();
+        let admitted = host
+            .attach_canonical_schema(pending, &payload.to_string())
+            .unwrap();
+        host.open_foreground(admitted, DIRECT_FOREGROUND_RUNTIME_TOKEN)
+            .unwrap();
+        stored_column(&host.admitted_scopes[&admitted].config.sqlite_path)
+    };
+    let tables = serde_json::to_value(head_schema.public_schema()).unwrap();
+    let mut shipped = tables.clone();
+    shipped["migrations"] = bundle;
+
+    let root = tempfile::tempdir().unwrap();
+    assert_eq!(attach(shipped, "with-history", root.path()), on_core);
+    assert_ne!(attach(tables, "head-only", root.path()), on_core);
+}
+
+/// A bundle the relay cannot lower refuses the attach: the store must not open
+/// with columns stored where the authority does not keep them.
+#[test]
+fn an_attached_schema_with_malformed_migrations_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let (_release, never) = tokio::sync::oneshot::channel();
+    let mut host = NativeRelayHost {
+        socket_connector: Some(ScriptedConnector::new([Step::ConnectWhenReleased(never)])),
+        ..NativeRelayHost::default()
+    };
+    let pending = host
+        .begin_private_session(PrivateSessionSetupJson {
+            server_url: "https://edge.example".to_owned(),
+            app_id: "malformed-migrations".to_owned(),
+            jwt: bearer(1),
+            storage_root: root.path().display().to_string(),
+        })
+        .unwrap();
+    let mut payload = serde_json::to_value(schema().public_schema()).unwrap();
+    payload["migrations"] = serde_json::json!({"schemas": "nope"});
+    assert!(matches!(
+        host.attach_canonical_schema(pending, &payload.to_string()),
+        Err(JazzNativeRelayStatus::LifecycleFailure)
+    ));
+}
+
+/// When the relay's database refuses its upstream (it cannot mirror the
+/// server's catalogue, say), the socket worker stops instead of keeping a
+/// connection nothing syncs over, and alice hears why as a non-retrying
+/// upstream failure. Before, the socket stayed open and nothing reported
+/// anything.
+///
+/// Lower-level than the other receipts: a scripted connector carries no
+/// server, so the test hands the relay owner a refusal, as its drive does
+/// with `Link::upstream_refusal()`; the host test
+/// `a_relay_attached_without_the_apps_migrations_stops_its_refused_upstream`
+/// covers the owner's half against a real refusing server.
+///
+/// ```text
+/// alice ─open─► relay ══socket══► edge      (connected)
+///                 │ relay refuses its upstream
+///                 ══socket══✗               (worker stops, no retry)
+/// alice ─tick─► relay                       (Ok, failure: refused, not retrying)
+/// ```
+#[test]
+fn a_refused_upstream_stops_the_worker_and_is_reported() {
+    let root = tempfile::tempdir().unwrap();
+    let (release, released) = tokio::sync::oneshot::channel();
+    release.send(()).unwrap();
+    let connector = ScriptedConnector::new([Step::ConnectWhenReleased(released)]);
+    let (mut host, _, alice) =
+        scripted_foreground(root.path(), "refused-catalogue", connector.clone());
+    let scope = host.foregrounds[&alice].scope.clone();
+    wait_for(&host, "the connection lands", |host| {
+        connected(host, &scope)
+    });
+
+    let relay = host
+        .relays
+        .values()
+        .find(|opened| opened.scope == scope)
+        .expect("alice's relay is open")
+        .relay
+        .clone();
+    relay
+        .run(|worker| {
+            worker.refuse_upstream(&jazz::db::Error::new(
+                jazz::db::ErrorCode::AuthorityChanged,
+                "the upstream serves another authority history",
+            ));
+            Ok(())
+        })
+        .unwrap();
+
+    wait_for(&host, "the worker stops", |host| {
+        host.private_scope_workers[&scope].terminally_stopped()
+    });
+    assert_eq!(
+        host.tick_foreground(alice),
+        Ok(()),
+        "a refused upstream must not fail local ticks"
+    );
+    let (auth_rejection, failure) = tick_events(&mut host, alice);
+    assert_eq!(auth_rejection, None, "not a credential problem");
+    let failure = failure.expect("the refusal is reported");
+    assert!(!failure.retrying, "a refusal is not retried: {failure:?}");
+    assert!(failure.reason.contains("refused"), "{failure:?}");
+    assert_eq!(
+        failure.code.as_deref(),
+        Some("authority_changed"),
+        "the refusal's code reaches alice, as napi and wasm report it"
+    );
+    assert_eq!(
+        connector.bearers().len(),
+        1,
+        "nothing reconnects on its own"
     );
 }

@@ -1,4 +1,5 @@
 import { clientScope } from "./client-scope.js";
+import { registerPageDb } from "./page-handle.js";
 import { isHistoryTable, resolveQueryTable } from "./history-relation.js";
 import type { ConnectionRequirement } from "./connection-manager/types.js";
 import type { DbAccessContext } from "./db-access-context.js";
@@ -48,6 +49,7 @@ import {
   type BranchView,
   type OpenTransactionId,
   type TxId,
+  type ExplainedRows,
   type PermissionAdvice,
   type StreamingMutationKind,
   type StreamingValueSource,
@@ -71,6 +73,7 @@ import {
   unwrapValue,
 } from "./row-transformer.js";
 import { getOwnerPreparation, runAfterPreparation, WritePreparation } from "./write-preparation.js";
+import { nativeCoreErrorCode, unreadableTargetError } from "./native-runtime/native-error-code.js";
 import { writeRow } from "./write-row.js";
 import {
   ComputedReadState,
@@ -132,8 +135,9 @@ import {
   type DbForConnection,
 } from "./connection-manager/index.js";
 import { toError } from "./util.js";
-import { upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
+import { isThinDb, upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
+import { RuntimeClosedError } from "./runtime-closed-error.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -429,6 +433,7 @@ const FORWARDED_TO_SUCCESSOR = [
   "serializableTransaction",
   "upgradeToLocalFirst",
   "deleteClientStorage",
+  "wipeClientStorage",
   "logout",
   "all",
   "allInternal",
@@ -1499,6 +1504,42 @@ function transformInputColumns(
 
 const noWriteDependencies: readonly string[] = [];
 
+/**
+ * How long an update of a row this replica hasn't loaded waits for the
+ * server to send it, before it is refused as a row the session can't find.
+ */
+const LOAD_ROW_WAIT_MS = 10_000;
+
+/**
+ * Read one row by id from the server through the caller's session, so this
+ * replica holds it before a write stages against it. The read waits for the
+ * server at most {@link LOAD_ROW_WAIT_MS}: offline, it finds no row and the
+ * update fails instead of hanging, with the writes queued behind it.
+ */
+function loadRow(
+  client: JazzClient,
+  table: TableProxy<any, any>,
+  id: string,
+  session: Session | undefined,
+  branch: NonNullable<ReturnType<typeof normalizeViewOptions>>["branch"],
+): Promise<unknown[]> {
+  const built = JSON.stringify({
+    table: table._table,
+    conditions: [{ column: "id", op: "eq", value: id }],
+    limit: 1,
+  });
+  const read = client.queryInternal(
+    translateQuery(built, table._schema),
+    branch ? { tier: "remote", branch } : { tier: "remote" },
+    session,
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<unknown[]>((resolve) => {
+    timer = setTimeout(() => resolve([]), LOAD_ROW_WAIT_MS);
+  });
+  return Promise.race([read, timeout]).finally(() => clearTimeout(timer));
+}
+
 function missingWriteDependencies(
   table: TableProxy<any, any>,
   data: Record<string, unknown>,
@@ -2517,6 +2558,11 @@ export class Db {
     const inspectorAttachmentRequested =
       config.runtimeSources?.browserWorkerPort !== undefined &&
       config.runtimeSources.inspectorHostPhysicalDbName !== undefined;
+    // The Inspector's own Db reads the page's data; it is not one of the page's Dbs.
+    if (!inspectorAttachmentRequested) {
+      const unregister = registerPageDb(this, config.appId ?? null);
+      this.shutdownAbort.signal.addEventListener("abort", unregister, { once: true });
+    }
     dbSubscriptionSources.set(this, {
       // Cache identity is reserved before the async worker receipt arrives so
       // an Inspector entry can never share a host application's query cache.
@@ -2840,9 +2886,12 @@ export class Db {
 
   private wrapWriteWait<THandle extends WriteHandle<unknown, unknown>>(handle: THandle): THandle {
     notifyLocalWrite(this);
-    return setWriteWaitReadiness(handle, (tier) =>
-      this.ensureReady(tier === "global" ? "upload" : "runtime"),
-    );
+    return setWriteWaitReadiness(handle, async (tier) => {
+      // A write made before this Db handed over to a successor waits on its
+      // own runtime's last uploads, which the drain keeps going.
+      if (this.drain) return;
+      await this.ensureReady(tier === "global" ? "upload" : "runtime");
+    });
   }
 
   protected getAccessContext(): DbAccessContext | null {
@@ -2995,12 +3044,6 @@ export class Db {
   }
 
   /**
-   * Whether this Db's writes have reached the server: the upstream
-   * connection, and how many committed transactions the server has not
-   * accepted or rejected yet. The same object is returned until the status
-   * changes, so it can back `useSyncExternalStore` directly.
-   */
-  /**
    * Stateless anchors and ranges into text values, such as cursors,
    * selections and comments on a text column: captured from one value and
    * found again in later ones by the text around them.
@@ -3009,6 +3052,13 @@ export class Db {
     return this.runtimeSource.textAnchors();
   }
 
+  /**
+   * Whether this Db's writes have reached the server: the upstream
+   * connection, and how many committed transactions the server has not
+   * accepted or rejected yet. The same object is returned until the status
+   * changes, so it can back `useSyncExternalStore` directly. In a browser,
+   * agents and tests read the same through `window.__jazz.status()`.
+   */
   getSyncStatus(): SyncStatus {
     const next = this.connection.syncStatus();
     if (this.syncStatusSnapshot && sameSyncStatus(next, this.syncStatusSnapshot)) {
@@ -3494,8 +3544,34 @@ export class Db {
               context?.attribution,
             );
       };
-      if (missing.length === 0)
-        return submit(table._columnTransforms ? transformInputColumns(table, data, { id }) : data);
+      if (missing.length === 0) {
+        const record = table._columnTransforms ? transformInputColumns(table, data, { id }) : data;
+        if (operation !== "Update") return submit(record);
+        try {
+          return submit(record);
+        } catch (error) {
+          // An update stages against the row's current cells. When this
+          // replica has not loaded the row yet (a fresh process, another
+          // instance), read it through the caller's session and stage again;
+          // later writes wait behind this one, so their order holds.
+          if (nativeCoreErrorCode(error) !== "not_observed") throw error;
+          // The read's row count is not the answer: this replica may filter
+          // out a row it now holds, lacking the rows that grant the session
+          // access, and only the authority decides whether the session may
+          // write it. Stage again whatever came back.
+          return loadRow(client, table, id, context?.readSession, normalized?.branch).then(() => {
+            try {
+              return submit(record);
+            } catch (retryError) {
+              // Still not held: the server sent no row, so it does not exist
+              // or the session may not read it, and the two are refused alike,
+              // with the denial's code, as the authority answers.
+              if (nativeCoreErrorCode(retryError) !== "not_observed") throw retryError;
+              throw unreadableTargetError("Update", table._table);
+            }
+          });
+        }
+      }
       const transaction = client.beginTransaction(
         "mergeable",
         context?.writeSession,
@@ -3626,6 +3702,17 @@ export class Db {
     const values = writeRecord("Insert", table, data);
     const context = this.getAccessContext();
     return client.requestInsertPermissionAdvice(table._table, values, context?.writeSession);
+  }
+
+  /**
+   * @internal The Inspector's `explain`: for each of `ids` of `table`, which
+   * clauses of its read policy (the arms of its top-level `Or`) hold for
+   * this Db's session. Backend only.
+   */
+  explainReadClauses<T, Init>(table: TableProxy<T, Init>, ids: string[]): ExplainedRows {
+    const session = this.getAccessContext()?.readSession;
+    if (!session) throw new Error("explain needs a Db acting as a user");
+    return this.getClient(table._schema).explainReadClauses(table._table, ids, session);
   }
 
   /** Request authoritative permission advice for reading a row. */
@@ -3768,10 +3855,39 @@ export class Db {
   }
 
   /**
+   * Whether this `Db` reads and writes through a local store: true for a
+   * local-first `Db`, and for a thin one once its session has upgraded it
+   * (the same `Db` carries on), false for a thin one before. To wait for the
+   * upgrade, `await db.upgradeToLocalFirst(loader)`.
+   */
+  isLocalFirst(): boolean {
+    return !isThinDb(this);
+  }
+
+  /**
    * Delete browser IndexedDB storage for this Db's active namespace.
    */
   async deleteClientStorage(): Promise<void> {
     await this.connection.deleteClientStorage();
+  }
+
+  /**
+   * @internal {@link deleteClientStorage}, saying how many of the store's
+   * writes (any tab's) the server hadn't confirmed: the delete took them.
+   * `undefined` when the runtime can't say.
+   */
+  async wipeClientStorage(): Promise<{ pendingUploads: number | undefined }> {
+    const deletion = await this.connection.deleteClientStorage();
+    return { pendingUploads: deletion ? deletion.pendingUploads : undefined };
+  }
+
+  /**
+   * @internal Whether this Db still reads and writes: it isn't shutting down
+   * or replaced, and its storage wasn't reset under it. A session whose
+   * sign-out or sign-in failed keeps a usable Db rather than ending in error.
+   */
+  isUsable(): boolean {
+    return !this.shutdownPromise && !this.replaced && this.connection.isUsable();
   }
 
   /**
@@ -3796,7 +3912,15 @@ export class Db {
    * @returns Array of typed objects matching the query
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    return this.allInternal(query, lowerPublicDbQueryOptions(options));
+    try {
+      return await this.allInternal(query, lowerPublicDbQueryOptions(options));
+    } catch (error) {
+      // Begun before this Db handed over to a successor, and ended by that
+      // (its own runtime closing): the successor answers it. Any other
+      // error is the read's own answer.
+      if (this.successor && isRuntimeClosed(error)) return this.current().all(query, options);
+      throw error;
+    }
   }
 
   private async allInternal<T>(
@@ -4297,9 +4421,15 @@ export class Db {
    */
   adoptSuccessor(next: Db): void {
     if (this.successor) throw new Error("This Db already has a successor");
+    const own = this.currentRuntime();
     this.successor = next;
+    // A read still waiting for this runtime's server (the server is down)
+    // asks `next` instead: only the drain below waits for that server.
+    own?.endUnsentReads?.();
     // Upload what this runtime still holds, then stop it. Until then its
-    // writes count in the sync status and in waitForSync.
+    // writes count in the sync status and in waitForSync. A stream still
+    // sending its value finishes first, unless the app shuts down.
+    const streams = this.letStreamsFinish();
     let draining = true;
     const drainListeners = new Set<() => void>();
     const drained = this.shutdown({ waitForSync: true }).finally(() => {
@@ -4309,6 +4439,7 @@ export class Db {
     void drained.catch(() => {});
     this.drain = {
       done: drained,
+      endStreamWait: () => streams.abort(),
       abort: () => {
         if (draining) this.abortGracefulShutdown();
       },
@@ -4321,6 +4452,15 @@ export class Db {
       const status: SyncStatus = {
         link: ahead.link,
         pendingUploads: ahead.pendingUploads + own.pendingUploads,
+        oldestPendingAt:
+          ahead.oldestPendingAt === null || own.oldestPendingAt === null
+            ? (ahead.oldestPendingAt ?? own.oldestPendingAt)
+            : Math.min(ahead.oldestPendingAt, own.oldestPendingAt),
+        rejected: ahead.rejected + own.rejected,
+        lastError:
+          own.lastError && (!ahead.lastError || own.lastError.at > ahead.lastError.at)
+            ? own.lastError
+            : ahead.lastError,
         synced: ahead.synced && own.pendingUploads === 0,
       };
       if (combined && sameSyncStatus(status, combined)) return combined;
@@ -4421,17 +4561,38 @@ export class Db {
   private offlineRequested: boolean | undefined;
 
   /** Set once this Db adopted a successor: its own runtime's last uploads. */
-  private drain: { done: Promise<void>; abort(): void } | null = null;
+  private drain: { done: Promise<void>; endStreamWait(): void; abort(): void } | null = null;
+
+  /** Set by {@link letStreamsFinish}. */
+  private streamsMayFinish: AbortController | null = null;
+
+  /**
+   * @internal This Db's graceful shutdown lets streaming writes in flight on
+   * its own runtime finish (and waits for their writes) before closing it,
+   * until the returned controller aborts. Only the drain after the
+   * local-first upgrade asks for this: the app didn't ask for that shutdown,
+   * so it must not cut off an upload the app is making. A shutdown the app
+   * asks for (a sign-out, an account switch, a close) aborts it, so it is
+   * never held by a slow or stalled stream; the stream then fails saying why.
+   */
+  letStreamsFinish(): AbortController {
+    this.streamsMayFinish?.abort();
+    this.streamsMayFinish = new AbortController();
+    return this.streamsMayFinish;
+  }
 
   /**
    * @internal Stop this Db's own runtime after the upgrade. With
    * `waitForSync`, its writes upload first, the way a local-first client's
    * do when it shuts down; without, they are dropped, as when a thin client
-   * closes.
+   * closes. Either way a streaming write still sending its value is cut off
+   * (it fails saying why) rather than holding the app's shutdown.
    */
   async stopOwnRuntime(options: ShutdownOptions = {}): Promise<void> {
     const drain = this.drain;
     if (!drain) return this.shutdown(options);
+    // The app is shutting down: streams in flight no longer hold the drain.
+    drain.endStreamWait();
     if (!options.waitForSync) drain.abort();
     await drain.done.catch(() => {});
     // An aborted or failed drain leaves the runtime open: stop it now.
@@ -4496,7 +4657,9 @@ export class Db {
       try {
         await Promise.race([
           this.runtimeSource.waitForPendingWrites?.(syncAbort.signal) ??
-            this.connection.waitForPendingWrites(),
+            this.connection.waitForPendingWrites({
+              inFlightStreams: this.streamsMayFinish?.signal,
+            }),
           cancelled,
         ]);
       } catch (error) {
@@ -4879,4 +5042,11 @@ export function holdCredentialRenewal(db: object): () => void {
     released = true;
     credentialRenewers.set(db, (credentialRenewers.get(db) ?? 1) - 1);
   };
+}
+
+/** `error` says the runtime closed, also when a connection wrapped it as its cause. */
+function isRuntimeClosed(error: unknown): boolean {
+  for (let current = error; current instanceof Error; current = current.cause)
+    if (current instanceof RuntimeClosedError) return true;
+  return false;
 }

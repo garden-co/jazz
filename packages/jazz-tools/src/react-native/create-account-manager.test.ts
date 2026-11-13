@@ -1,6 +1,8 @@
 import { NATIVE_RELAY_ABI_V1 } from "jazz-rn/native-relay-abi";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createAccountManager, createDb } from "./index.js";
+import { createAccountManager } from "./create-account-manager.js";
+import { createDb } from "./create-db.js";
+import { schema as s } from "./index.js";
 import { accountToken } from "../accounts/enrollment.js";
 import { accountRegistryUrl } from "../accounts/context.js";
 
@@ -133,6 +135,89 @@ describe("React Native account preparation", () => {
     await db.shutdown();
     expect(native.releaseAccountSession).toHaveBeenCalledExactlyOnceWith(capability);
     expect(manager.getLoggedIn()).toBe(account);
+  });
+
+  it("attaches the app's shipped migrations with its schema", async () => {
+    vi.stubGlobal("crypto", undefined);
+    const jwt = `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: "00000000-0000-4000-8000-000000000001" }))}.signature`;
+    const attached = new Error("schema attached");
+    const native = {
+      abiVersion: NATIVE_RELAY_ABI_V1,
+      accountSecret: vi.fn(() => new Uint8Array(32).fill(7)),
+      mintLocalFirstToken: vi.fn(() => jwt),
+      beginAccountSession: vi.fn((_request: string) => new Uint8Array(32).fill(9)),
+      attachAccountSchema: vi.fn((_pending: Uint8Array, _schema: string) => {
+        throw attached;
+      }),
+      releaseAccountSession: vi.fn(),
+      refreshAccountSession: vi.fn(),
+      openAttached: vi.fn(),
+    };
+    mocks.install.mockReturnValue(native);
+    const migrations = {
+      schemas: [{ hash: "root", schema: { tables: {} } }],
+      migrations: [{ fromHash: "root", toHash: "head", forward: [] }],
+    };
+    const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations });
+    const config = { appId: "native-history", serverUrl: "https://core.example", store: store() };
+    const manager = await createAccountManager(config);
+    const db = await createDb({ appId: config.appId, account: manager.createLocalFirst() });
+
+    await expect(db.all(app.notes)).rejects.toBe(attached);
+
+    const payload = JSON.parse(native.attachAccountSchema.mock.calls[0]![1]);
+    expect(Object.keys(payload.tables)).toEqual(["notes"]);
+    expect(payload.migrations).toEqual(migrations);
+    await db.shutdown();
+  });
+
+  // The bearer the worker was admitted with may have expired since.
+  it("hands the native worker the app's current bearer on reconnect", async () => {
+    const identity = { issuer: "https://issuer.example", subject: "alice" };
+    const account = "00000000-0000-4000-8000-00000000000b";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ account, identity }))),
+    );
+    const capability = new Uint8Array(32).fill(4);
+    const native = {
+      abiVersion: NATIVE_RELAY_ABI_V1,
+      accountSecret: vi.fn(() => new Uint8Array(32).fill(7)),
+      mintLocalFirstToken: vi.fn(() => "unused"),
+      beginAccountSession: vi.fn((_request: string) => capability),
+      attachAccountSchema: vi.fn(),
+      releaseAccountSession: vi.fn(),
+      refreshAccountSession: vi.fn(),
+      openAttached: vi.fn(),
+    };
+    mocks.install.mockReturnValue(native);
+    // The app's bearer turns over while the client lives, as an access token does.
+    let current = "bearer-at-admission";
+    const config = {
+      appId: "native-bearer-renewal",
+      serverUrl: "https://core.example",
+      store: store(),
+      bearer: vi.fn(async () => current),
+    };
+    const manager = await createAccountManager(config);
+    await manager.loginWithBackend();
+    const db = await createDb({
+      appId: config.appId,
+      serverUrl: config.serverUrl,
+      account: manager.getLoggedIn()!,
+    });
+    expect(JSON.parse(native.beginAccountSession.mock.calls[0]![0]).bearer).toBe(
+      "bearer-at-admission",
+    );
+
+    current = "bearer-renewed";
+    await db.reconnect();
+
+    expect(native.refreshAccountSession).toHaveBeenCalledExactlyOnceWith(
+      capability,
+      JSON.stringify({ bearer: "bearer-renewed", claims: {} }),
+    );
+    await db.shutdown();
   });
 
   it("remembers the backend-signed-in user without a credential, never as an assignment", async () => {

@@ -1,8 +1,13 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-alpha.59",
+  "version": "2.0.0-alpha.61",
   "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/garden-co/jazz",
+    "directory": "packages/jazz-tools"
+  },
   "bin": {
     "jazz-tools": "bin/jazz-tools.js"
   },
@@ -90,6 +95,10 @@
       "types": "./dist/prosemirror/index.d.ts",
       "default": "./dist/prosemirror/index.js"
     },
+    "./text-field": {
+      "types": "./dist/text-field/index.d.ts",
+      "default": "./dist/text-field/index.js"
+    },
     "./react-core": {
       "types": "./dist/react-core/index.d.ts",
       "default": "./dist/react-core/index.js"
@@ -109,6 +118,14 @@
     "./dev": {
       "types": "./dist/dev/index.d.ts",
       "default": "./dist/dev/index.js"
+    },
+    "./inspect": {
+      "types": "./dist/inspect/protocol.d.ts",
+      "default": "./dist/inspect/protocol.js"
+    },
+    "./inspector": {
+      "types": "./dist/inspector/index.d.ts",
+      "default": "./dist/inspector/index.js"
     },
     "./_dev/inspector-client": {
       "types": "./dist/_dev/inspector-client.d.ts",
@@ -133,6 +150,10 @@
       "react-native": "./dist/expo/polyfills.js",
       "default": "./dist/expo/polyfills.js"
     },
+    "./expo/metro": {
+      "types": "./dist/expo/metro.d.ts",
+      "default": "./dist/expo/metro.js"
+    },
     "./passphrase": {
       "types": "./dist/passphrase.d.ts",
       "default": "./dist/passphrase.js"
@@ -149,7 +170,7 @@
   },
   "publishConfig": {
     "access": "public",
-    "tag": "alpha"
+    "tag": "latest"
   },
   "scripts": {
     "build": "pnpm build:runtime && pnpm build:test && pnpm typecheck:react-native && pnpm build:svelte && pnpm build:solid",
@@ -171,7 +192,8 @@
     "build:test": "node dist/cli.js validate --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.tests.json --incremental --tsBuildInfoFile node_modules/.cache/tsc/tests.tsbuildinfo && pnpm typecheck:public-api",
     "typecheck:public-api": "tsc --project tsconfig.public-api.json",
     "typecheck:react-native": "tsc --project tsconfig.react-native-tests.json",
-    "test:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts && pnpm test:browser:transport",
+    "test:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts && pnpm test:browser:storage-quota && pnpm test:browser:transport",
+    "test:browser:storage-quota": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts tests/browser/db.storage-quota.test.ts && node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts tests/browser/db.storage-quota-retry.test.ts",
     "test:browser:focused": "node scripts/test-browser-focused.mjs",
     "typecheck:browser-helpers": "tsc --project tests/browser/tsconfig.browser-helpers.json",
     "test:browser:transport": "node --test scripts/evaluate-harness.test.mjs",

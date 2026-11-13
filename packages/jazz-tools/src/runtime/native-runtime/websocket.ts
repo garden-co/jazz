@@ -1,5 +1,5 @@
-import { inProcessWebSocketFor } from "../in-process-transport.js";
-import { sameOriginWebSocketConstructor } from "./http-stream-socket.js";
+import { fetchFor, inProcessWebSocketFor } from "../in-process-transport.js";
+import { httpStreamFallbackWebSocket } from "./http-stream-socket.js";
 import { Utf8Decoder } from "../utf8.js";
 import { httpUrlToWs } from "../url.js";
 import { mapAuthReason } from "../auth-state.js";
@@ -11,6 +11,15 @@ import {
 } from "../author-id.js";
 import { parseJwtPayload, policyClaimsFromJwtPayload } from "../client-session.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
+import {
+  SESSION_RENEWAL_HEADER,
+  SESSION_RENEWAL_PRELUDE_FIELD,
+  decodeRenewSoonFrame,
+  encodeRenewFrame,
+  isRenewSoonFrame,
+  renewalUrlFor,
+  sessionRefreshLockName,
+} from "./session-renewal-wire.js";
 
 export type WebSocketFrameHandler = (frame: Uint8Array) => void;
 export type WebSocketErrorHandler = (error: WireError) => void;
@@ -42,6 +51,41 @@ export class PreHelloWireError extends Error {
  */
 export function isReconnectLaterWireError(error: WireError): boolean {
   return error.retry === "later" && (error.code === "not_ready" || error.code === "backpressure");
+}
+
+/** How the app's backend starts the message of a planned re-authentication. */
+export const REAUTHENTICATE_WIRE_MESSAGE_PREFIX = "reauthenticate:";
+
+/**
+ * Whether the server ended an admitted session because the expiry its app's
+ * auth gave it is near, asking the client to connect again so the app's
+ * `authenticate` decides with the client's current credential. It is an
+ * `auth_failed` error with `after_resume` retry whose message starts with
+ * {@link REAUTHENTICATE_WIRE_MESSAGE_PREFIX}: the core sends the same code
+ * and retry for other refusals (a session that no longer matches), which
+ * stay refusals. A client that doesn't know it treats it as a refused
+ * credential and asks its backend again.
+ */
+export function isReauthenticateWireError(error: WireError): boolean {
+  return (
+    error.code === "auth_failed" &&
+    error.retry === "after_resume" &&
+    error.message.startsWith(REAUTHENTICATE_WIRE_MESSAGE_PREFIX)
+  );
+}
+
+/**
+ * Whether the carrier itself ended the link because the socket went away:
+ * closed, failed, or silent past {@link HEARTBEAT_SILENCE_MS}. These are
+ * network outages, which a client retries however long they last.
+ */
+export function isSocketDropWireError(error: WireError): boolean {
+  return (
+    error.retry === "later" &&
+    (error.code === "websocket_closed" ||
+      error.code === "websocket_error" ||
+      error.code === "websocket_silent")
+  );
 }
 
 export function isRetryablePreHelloWireError(error: unknown): error is PreHelloWireError {
@@ -94,6 +138,26 @@ export const MAX_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const FEATURE_PAYLOAD_ZSTD = 1 << 4;
 export const FEATURE_AUTHORIZATION_SCOPE_VIEWS = 1 << 7;
 export const FEATURE_AUXILIARY_CHUNKS = 1 << 8;
+/**
+ * `FEATURE_HEARTBEAT` in `crates/jazz/layers/protocol/src/wire.rs`: the server
+ * sends a `Heartbeat` frame on its keepalive cadence (20 s). The WebSocket API
+ * shows neither pings nor partial messages, so this is how a carrier tells a
+ * link that went silently dead (a half-open TCP connection, a stalled proxy)
+ * from a quiet one. Every carrier asks for it; it never reaches the runtime
+ * above.
+ */
+export const FEATURE_HEARTBEAT = 1 << 11;
+/**
+ * How long a heartbeat link may stay silent before the carrier gives it up.
+ * A message arrives whole, and a heartbeat queues behind the message being
+ * sent, so this also bounds the slowest link a full 2 MiB message survives:
+ * about 18 KB/s. A link slower than that is treated as gone.
+ */
+export const HEARTBEAT_SILENCE_MS = 120_000;
+/** A silence past the limit is confirmed after this long, so that messages
+ * a frozen page or a long task held back are delivered before it counts. */
+const HEARTBEAT_CONFIRM_MS = 1_000;
+const WIRE_FRAME_HEARTBEAT = 7;
 export const CLIENT_WIRE_FEATURES =
   FEATURE_PAYLOAD_ZSTD | FEATURE_AUTHORIZATION_SCOPE_VIEWS | FEATURE_AUXILIARY_CHUNKS;
 
@@ -175,14 +239,26 @@ export function encodeWireClientHello(features = CLIENT_WIRE_FEATURES): Uint8Arr
 }
 
 /**
+ * A server's frames are told apart by their first byte, as the Rust client
+ * does (`CorpusReader::Client` in `crates/jazz/layers/db/src/sync.rs`): 0 is
+ * a `Hello`, 1 an `Error`, anything else a sync message or a part of one
+ * split across frames. A part starts with a marker byte (0xFF, or 0xFE for
+ * the last) and then arbitrary message bytes, so it must not be read as a
+ * postcard tag: `0xFE 0x00` reads as a non-minimal varint.
+ */
+const WIRE_HELLO_TAG = 0;
+const WIRE_ERROR_TAG = 1;
+
+/**
  * Classify a `Hello`. Only the tag and version range are shared across wire
  * versions; the rest of the body is read exactly when the range is this
  * version's, and a foreign-version Hello is left to `decodeServerHello` to
  * report as a version mismatch (SPEC 8 §8.1.1).
  */
 export function isWireHello(frame: Uint8Array): boolean {
+  if (frame[0] !== WIRE_HELLO_TAG) return false;
   const reader = new PostcardReader(frame);
-  if (reader.u64() !== 0) return false;
+  reader.u64();
   const { min, max } = readWireHelloVersionRange(reader);
   if (min === WIRE_PROTOCOL_VERSION && max === WIRE_PROTOCOL_VERSION) {
     readWireHelloBodyAfterRangeExact(reader);
@@ -191,8 +267,9 @@ export function isWireHello(frame: Uint8Array): boolean {
 }
 
 export function isWireError(frame: Uint8Array): boolean {
+  if (frame[0] !== WIRE_ERROR_TAG) return false;
   const reader = new PostcardReader(frame);
-  if (reader.u64() !== 1) return false;
+  reader.u64();
   readWireErrorBodyExact(reader);
   return true;
 }
@@ -232,6 +309,11 @@ export class WebSocketCarrier {
   private negotiated = false;
   private closing = false;
   private terminated = false;
+  private lastInbound = performance.now();
+  private silenceTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Where to renew this session in place, when it rides on the app's cookie. */
+  private readonly renewalUrl: string | null;
+  private renewalTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: WebSocketCarrierOptions) {
     this.url = options.endpointUrl;
@@ -240,7 +322,8 @@ export class WebSocketCarrier {
     this.onFrame = options.onFrame;
     this.onError = options.onError;
     this.onTerminal = options.onTerminal;
-    this.localFeatures = options.features ?? CLIENT_WIRE_FEATURES;
+    this.localFeatures = (options.features ?? CLIENT_WIRE_FEATURES) | FEATURE_HEARTBEAT;
+    this.renewalUrl = isCookieSessionAuth(options.authJson) ? renewalUrlFor(this.url) : null;
     assertWireFeatures(this.localFeatures, "client wire features");
     this.socket = new WebSocketCtor(this.url);
     this.socket.binaryType = "arraybuffer";
@@ -256,6 +339,7 @@ export class WebSocketCarrier {
             options.authJson ?? "{}",
             options.peerIdentity,
             options.requestedLink,
+            this.renewalUrl !== null,
           ),
         );
         this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello(this.localFeatures)]));
@@ -270,6 +354,7 @@ export class WebSocketCarrier {
       },
     );
     this.socket.addEventListener("message", (event) => {
+      this.lastInbound = performance.now();
       void this.handleMessage(event.data).catch((error) => {
         this.reportTerminal(
           {
@@ -283,11 +368,13 @@ export class WebSocketCarrier {
         this.close();
       });
     });
-    this.socket.addEventListener("error", () => {
+    this.socket.addEventListener("error", (event) => {
       this.reportTerminal({
         code: "websocket_error",
         retry: "later",
-        message: "websocket transport error",
+        // A native socket's error event says nothing; the HTTP stream and a
+        // backend client's failed upgrade hand an Error that does.
+        message: event instanceof Error ? event.message : "websocket transport error",
       });
     });
     this.socket.addEventListener("close", (event) => {
@@ -338,6 +425,8 @@ export class WebSocketCarrier {
   close(): void {
     if (this.closing) return;
     this.closing = true;
+    clearTimeout(this.silenceTimer);
+    clearTimeout(this.renewalTimer);
     this.reportTerminal(
       {
         code: "websocket_closed",
@@ -364,9 +453,62 @@ export class WebSocketCarrier {
   ): void {
     if (this.terminated) return;
     this.terminated = true;
+    clearTimeout(this.silenceTimer);
+    clearTimeout(this.renewalTimer);
     this.rejectNegotiation(negotiationError);
     if (notifyError) this.onError?.(error);
     if (notifyTerminal) this.onTerminal?.(error);
+  }
+
+  /**
+   * Renew this session in place at the time the backend named: one ordinary
+   * request to the backend (where its auth may refresh the cookie), whose
+   * answer carries a ticket sent back over this socket. A renewal that
+   * fails does nothing: the backend then ends the session at its expiry
+   * and this client connects again, as without renewal.
+   */
+  private scheduleRenewal({ session, renewInMs }: { session: string; renewInMs: number }): void {
+    clearTimeout(this.renewalTimer);
+    const url = this.renewalUrl;
+    if (!url) return;
+    this.renewalTimer = setTimeout(
+      () => {
+        this.renewalTimer = undefined;
+        if (this.closing || this.terminated) return;
+        void requestSessionRenewal(url, session)
+          .then((ticket) => {
+            if (!ticket || this.closing || this.terminated) return;
+            return this.send(encodeRenewFrame(ticket));
+          })
+          .catch(() => {});
+      },
+      Math.min(renewInMs, 2 ** 31 - 1),
+    );
+  }
+
+  /** Give the link up once the server has sent nothing, not even a
+   * heartbeat, for {@link HEARTBEAT_SILENCE_MS}. Checked against the time
+   * of the last message, so a timer the browser throttled judges the
+   * silence it actually saw; a silence past the limit is confirmed a moment
+   * later, after any messages a frozen page held back were delivered. */
+  private watchSilence(confirming = false): void {
+    clearTimeout(this.silenceTimer);
+    if (this.closing || this.terminated) return;
+    const silentFor = performance.now() - this.lastInbound;
+    if (silentFor >= HEARTBEAT_SILENCE_MS && !confirming) {
+      this.silenceTimer = setTimeout(() => this.watchSilence(true), HEARTBEAT_CONFIRM_MS);
+      return;
+    }
+    if (silentFor >= HEARTBEAT_SILENCE_MS) {
+      this.reportTerminal({
+        code: "websocket_silent",
+        retry: "later",
+        message: `the server sent nothing for ${Math.round(silentFor / 1000)} s, not even a heartbeat`,
+      });
+      this.close();
+      return;
+    }
+    this.silenceTimer = setTimeout(() => this.watchSilence(), HEARTBEAT_SILENCE_MS - silentFor);
   }
 
   private async handleMessage(data: unknown): Promise<void> {
@@ -375,7 +517,21 @@ export class WebSocketCarrier {
       if (isWireHello(frame)) {
         if (this.negotiated) continue;
         this.negotiated = true;
-        this.resolveNegotiation(decodeServerHello(frame, this.localFeatures));
+        const negotiation = decodeServerHello(frame, this.localFeatures);
+        if ((negotiation.features & FEATURE_HEARTBEAT) !== 0) this.watchSilence();
+        this.resolveNegotiation({
+          ...negotiation,
+          features: negotiation.features & ~FEATURE_HEARTBEAT,
+        });
+        continue;
+      }
+      if (this.negotiated && frame.byteLength === 1 && frame[0] === WIRE_FRAME_HEARTBEAT) {
+        continue;
+      }
+      // The backend's word on when to renew this session in place: only ever
+      // sent to a carrier that asked for it, and never handed to the core.
+      if (this.negotiated && this.renewalUrl && isRenewSoonFrame(frame)) {
+        this.scheduleRenewal(decodeRenewSoonFrame(frame));
         continue;
       }
       if (!this.negotiated) {
@@ -490,6 +646,7 @@ export function encodeWebSocketPrelude(
   authJson: string,
   peerIdentity: Uint8Array,
   requestedLink?: "scope_isolated_client_relay",
+  renewal = false,
 ): string {
   const auth = JSON.parse(authJson) as Record<string, unknown>;
   const peerAuthor = new Utf8Decoder().decode(peerIdentity);
@@ -500,7 +657,85 @@ export function encodeWebSocketPrelude(
     auth: { ...auth, sub },
     sub,
     ...(requestedLink ? { requested_link: requestedLink } : {}),
+    // A core ignores unknown top-level fields; an app backend that renews
+    // sessions in place takes this out before the core sees the prelude.
+    ...(renewal ? { [SESSION_RENEWAL_PRELUDE_FIELD]: 1 } : {}),
   });
+}
+
+/**
+ * Whether `authJson` is a browser's sync session on the app's cookie: it
+ * states a backend session and no credential of its own, so the app's
+ * backend decides who it is from the request's cookies.
+ */
+function isCookieSessionAuth(authJson: string | undefined): boolean {
+  if (!authJson) return false;
+  try {
+    const auth = JSON.parse(authJson) as Record<string, unknown>;
+    return (
+      auth.backend_session != null &&
+      auth.jwt_token == null &&
+      auth.admin_secret == null &&
+      auth.backend_secret == null
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * How long a renewal may hold the other windows back, at most: a request
+ * that hangs longer (a frozen page) lets them ask. Its own request is never
+ * aborted, so a rotated cookie the backend already set still lands.
+ */
+const SESSION_RENEWAL_TURN_MS = 30_000;
+
+async function requestSessionRenewal(url: string, session: string): Promise<string | null> {
+  return oneWindowAtATime(sessionRefreshLockName(url), () => renewalRequest(url, session));
+}
+
+/**
+ * Run `request` while holding a Web Lock named `name`, so the windows (and
+ * workers) of one browser renew one after another: each request carries the
+ * cookie the one before it refreshed, and a single-use refresh token is
+ * spent once. Held for at most {@link SESSION_RENEWAL_TURN_MS}; without
+ * Web Locks, it just runs.
+ */
+async function oneWindowAtATime<T>(name: string, request: () => Promise<T>): Promise<T> {
+  const locks = (globalThis.navigator as { locks?: LockManager } | undefined)?.locks;
+  if (!locks) return request();
+  let started: Promise<T> | undefined;
+  const run = () => (started ??= request());
+  try {
+    await locks.request(name, () => {
+      let turn: ReturnType<typeof setTimeout> | undefined;
+      return Promise.race([
+        run().catch(() => undefined),
+        new Promise<void>((done) => {
+          turn = setTimeout(done, SESSION_RENEWAL_TURN_MS);
+        }),
+      ]).finally(() => clearTimeout(turn));
+    });
+  } catch {
+    // Locks unavailable here after all (an opaque origin): ask anyway.
+  }
+  return run();
+}
+
+async function renewalRequest(url: string, session: string): Promise<string | null> {
+  try {
+    const response = await fetchFor(url)(url, {
+      method: "POST",
+      credentials: "same-origin",
+      redirect: "error",
+      headers: { [SESSION_RENEWAL_HEADER]: session },
+    });
+    if (!response.ok) return null;
+    const answer = (await response.json()) as { renewal?: unknown };
+    return typeof answer.renewal === "string" ? answer.renewal : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Project only policy metadata after the server has admitted this credential.
@@ -612,6 +847,20 @@ function hasUsableBackendSession(auth: Record<string, unknown>): boolean {
   );
 }
 
+/**
+ * Whether a credential names the principal it connects as (a user, or the
+ * system for admin and backend secrets). Without one, the connection uses the
+ * store's own identity (see `peerIdentityForWebSocketAuth`).
+ */
+export function webSocketAuthNamesPrincipal(authJson: string): boolean {
+  const auth = JSON.parse(authJson) as Record<string, unknown>;
+  return (
+    typeof auth.admin_secret === "string" ||
+    typeof auth.backend_secret === "string" ||
+    canonicalAuthorForWebSocketAuth(auth) !== null
+  );
+}
+
 function canonicalAuthorForWebSocketAuth(auth: Record<string, unknown>): string | null {
   // Admin admission is intentionally sessionless and takes precedence over
   // every other field in the server route. Do not let an incidental (or
@@ -667,7 +916,7 @@ export async function bytesFromWebSocketMessage(data: unknown): Promise<Uint8Arr
  * can't upgrade WebSockets (see `http-stream-socket.ts`). */
 function defaultWebSocketConstructor(url: string): WebSocketConstructor {
   const native = browserWebSocketConstructor();
-  return isSameOriginEndpoint(url) ? sameOriginWebSocketConstructor(native) : native;
+  return isSameOriginEndpoint(url) ? httpStreamFallbackWebSocket(native) : native;
 }
 
 function isSameOriginEndpoint(url: string): boolean {

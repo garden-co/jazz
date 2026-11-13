@@ -1,9 +1,9 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import { useJazzAuth, type JazzAuthState } from '../../src/svelte/auth-state.js';
-  let { onAuth }: { onAuth?: (auth: JazzAuthState) => void } = $props();
-  const auth = useJazzAuth();
-  untrack(() => onAuth?.(auth));
+  import { getJazzSession, type JazzSessionState } from '../../src/svelte/session-state.js';
+  let { onAuth }: { onAuth?: (session: JazzSessionState) => void } = $props();
+  const session = getJazzSession();
+  untrack(() => onAuth?.(session));
 </script>
-<p>{$auth.status}</p>
-<button onclick={() => void auth.logout()}>Log out</button>
+<p>{$session.status}</p>
+<button onclick={() => void session.signOut().catch(() => {})}>Sign out</button>

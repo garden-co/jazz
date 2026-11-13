@@ -4,7 +4,7 @@
 // connects to a sync server itself.
 import type { Server } from "node:http";
 import type { Plugin, PreviewServer, ViteDevServer } from "vite";
-import { acceptLocalFirstAuth, createJazz, memory, sqlite } from "jazz-tools/backend";
+import { acceptDeviceAccounts, createJazz, memory, sqlite } from "jazz-tools/backend";
 import { app } from "./schema.js";
 import permissions from "./permissions.js";
 
@@ -17,7 +17,7 @@ export function jazzBackend(options: { dataDir?: string } = {}): Plugin {
       app,
       permissions,
       // No sign-in: every browser is a guest, so let guests sync.
-      authenticate: acceptLocalFirstAuth,
+      authenticate: acceptDeviceAccounts,
       store: options.dataDir ? sqlite({ path: options.dataDir }) : memory(),
     });
     server.middlewares.use((req, res, next) => jazz.nodeHandler(req, res, next));

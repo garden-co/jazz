@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { defineMigration, exportLocalFirstSecret, schema as s } from "../index.js";
+import { defineMigration, schema as s } from "../index.js";
 import { deploy, startLocalJazzServer, startTestJazz, type TestJazz } from "../testing/index.js";
 import { appMigrations } from "../testing/client-migrations.js";
 import { createJazzClient } from "./index.js";
@@ -68,11 +68,11 @@ describe("offline persistent schema bootstrap", () => {
           app: clientApp,
           permissions: clientApp === newApp ? newPermissions : oldPermissions,
           driver: { type: "persistent", dataPath: join(directory, name) },
-          initial: "local-first",
+          initial: "device",
         });
         sessions.add(session);
-        if (readerSecret) await session.restoreLocalFirst(readerSecret);
-        else readerSecret = exportLocalFirstSecret(session.getSnapshot().account!);
+        if (readerSecret) await session.restoreDeviceAccount(readerSecret);
+        else readerSecret = session.exportDeviceKey();
         const snapshot = session.getSnapshot();
         if (!snapshot.client) throw snapshot.error ?? new Error(snapshot.status);
         return { session, db: snapshot.client.db };

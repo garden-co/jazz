@@ -71,6 +71,9 @@ it("reports a server whose store was recreated as authority-changed", async () =
     expect(await statusWhere(alice, (status) => status.link.state === "offline")).toEqual({
       link: { state: "offline", reason: "authority-changed", retrying: false },
       pendingUploads: 1,
+      oldestPendingAt: expect.any(Number),
+      rejected: 0,
+      lastError: expect.objectContaining({ kind: "authority-changed" }),
       synced: false,
     });
 

@@ -701,6 +701,11 @@ class AddBuilder {
     return { _type: "add", sqlType: "BYTEA", default: opts.default };
   }
 
+  /** A plain `s.uuid()` column; for a reference to a table, use {@link AddBuilder.ref}. */
+  uuid<const TDefault extends string | null>(opts: { default: TDefault }): AddOp<"UUID", TDefault> {
+    return { _type: "add", sqlType: "UUID", default: opts.default };
+  }
+
   ref<const TTargetTable extends string, const TDefault extends string | null>(
     _targetTable: TTargetTable,
     opts: { default: TDefault },
@@ -801,6 +806,13 @@ class DropBuilder {
     backwardsDefault: TBackwardsDefault;
   }): DropOp<"BYTEA", TBackwardsDefault> {
     return { _type: "drop", sqlType: "BYTEA", backwardsDefault: opts.backwardsDefault };
+  }
+
+  /** A plain `s.uuid()` column; for a reference to a table, use {@link DropBuilder.ref}. */
+  uuid<const TBackwardsDefault extends string | null>(opts: {
+    backwardsDefault: TBackwardsDefault;
+  }): DropOp<"UUID", TBackwardsDefault> {
+    return { _type: "drop", sqlType: "UUID", backwardsDefault: opts.backwardsDefault };
   }
 
   ref<const TTargetTable extends string, const TBackwardsDefault extends string | null>(

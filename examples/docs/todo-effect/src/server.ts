@@ -8,7 +8,10 @@ import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
 // Your own auth decides who a request is (a session cookie, a header).
-declare function currentUser(request: Request): Promise<{ id: string } | null>;
+// `sessionExpiresAt`: when that session expires, in Unix seconds.
+declare function currentUser(
+  request: Request,
+): Promise<{ id: string; sessionExpiresAt: number } | null>;
 
 // The app's Jazz for the whole server, closed when the server stops.
 const JazzLive = JazzBackend.layer({
@@ -17,7 +20,7 @@ const JazzLive = JazzBackend.layer({
   store: sqlite({ path: "./data/jazz" }),
   async authenticate(request) {
     const user = await currentUser(request);
-    return user ? { userId: user.id } : null;
+    return user ? { userId: user.id, expiresAt: user.sessionExpiresAt } : null;
   },
 });
 
@@ -122,5 +125,10 @@ const { handler, dispose } = HttpRouter.toWebHandler(Routes);
 const server = serve({ fetch: (request) => handler(request, services), port: 3000 }, (info) => {
   console.log(`Server running on http://localhost:${info.port}`);
 });
-process.on("SIGTERM", () => server.close(() => void dispose().then(() => jazzRuntime.dispose())));
+// Close Jazz first: it ends the sync connections that server.close() waits for.
+process.on("SIGTERM", () => {
+  void dispose()
+    .then(() => jazzRuntime.dispose())
+    .then(() => server.close());
+});
 // #endregion quickstart-server-listen-effect

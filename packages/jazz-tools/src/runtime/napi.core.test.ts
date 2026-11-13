@@ -771,6 +771,54 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     ]);
   });
 
+  it("drains pooled NAPI subscriptions in one call, returning only those with events", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-subscription-pool:node"),
+      testAuthorBytes("jazz-napi-subscription-pool:author"),
+      1,
+      true,
+    );
+    runtimes.push(runtime);
+    const db = (runtime as unknown as { db: InstanceType<typeof NapiDb> }).db;
+    const pool = db.createSubscriptionPool();
+    const quiet = db.subscribe(queryFromTable("todos"));
+    const busy = db.subscribe(queryFromTable("todos"));
+    try {
+      const quietId = quiet.joinPool(pool);
+      const busyId = busy.joinPool(pool);
+      expect(busy.joinPool(pool)).toBe(busyId);
+      expect(pool.size).toBe(2);
+      // Both opened: each has its opening event.
+      const openings = pool.drain();
+      expect(openings.map((batch) => batch.id)).toEqual([quietId, busyId]);
+      for (const batch of openings) {
+        expect(batch.error ?? null).toBeNull();
+        expect(batch.events).toEqual([expect.objectContaining({ type: "delta", reset: true })]);
+      }
+      expect(pool.drain()).toEqual([]);
+      expect(quiet.close()).toBe(true);
+      expect(pool.size).toBe(1);
+      runtime.insert("todos", {
+        title: { type: "Text", value: "pooled" },
+        done: { type: "Boolean", value: false },
+      });
+      const changes = pool.drain();
+      expect(changes.map((batch) => batch.id)).toEqual([busyId]);
+      expect(changes[0]!.events).toEqual([
+        expect.objectContaining({ type: "delta", reset: false }),
+      ]);
+      // readAll still reads a pooled subscription on its own.
+      expect(busy.readAll()).toEqual([]);
+      expect(() => quiet.readAll()).toThrow(/subscription is closed/);
+    } finally {
+      quiet.close();
+      busy.close();
+    }
+  });
+
   it("opens, mutates one row, and queries it through the native runtime payload shape", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(
@@ -1227,6 +1275,23 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
             return (...args: unknown[]) => {
               const source = Reflect.apply(value, target, args) as object;
               return "setWake" in source ? observePending(source) : observeSource(source);
+            };
+          }
+          // Activated subscriptions are read through the runtime's pool.
+          if (property === "createSubscriptionPool" && typeof value === "function") {
+            return () => {
+              const pool = Reflect.apply(value, target, []) as {
+                drain(): Array<{ events: NapiSubscriptionEvent[] }>;
+              };
+              // The pool itself goes back to `joinPool`, so it stays the
+              // native object: only its `drain` is observed.
+              const drain = pool.drain.bind(pool);
+              pool.drain = () => {
+                const batches = drain();
+                for (const batch of batches) rawEvents.push(...batch.events);
+                return batches;
+              };
+              return pool;
             };
           }
           return typeof value === "function" ? value.bind(target) : value;

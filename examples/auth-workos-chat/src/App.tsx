@@ -1,5 +1,5 @@
 import * as React from "react";
-import { JazzProvider, useJazzAuth, useAuthState } from "jazz-tools/react";
+import { JazzProvider, useJazzSession, useAuthState } from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "../constants.js";
 import { type WorkOSUser, useWorkOSSession } from "./session.js";
 import { ChatPanel } from "./ChatPanel.js";
@@ -55,7 +55,7 @@ export function App() {
     // Jazz runs in the backend (server/server.ts) under /jazz; its
     // `authenticate` reads the AuthKit session cookie.
     <JazzProvider
-      serverUrl="/jazz"
+      config={{ serverUrl: "/jazz" }}
       signedOut={<button onClick={() => void signIn()}>Sign in with WorkOS</button>}
     >
       <SignedInChat user={user} onSignIn={signIn} onSignOut={signOut} />
@@ -64,7 +64,7 @@ export function App() {
 }
 
 function SignedInChat({ user, onSignIn, onSignOut }: ChatShellProps) {
-  const { reauthenticate } = useJazzAuth();
+  const { refresh } = useJazzSession();
   // AuthKit's cookie changes outside Jazz: when the WorkOS user changes, ask
   // the backend again so Jazz follows it.
   const email = user?.email ?? null;
@@ -72,16 +72,17 @@ function SignedInChat({ user, onSignIn, onSignOut }: ChatShellProps) {
   React.useEffect(() => {
     if (seen.current === email) return;
     seen.current = email;
-    void reauthenticate();
-  }, [email, reauthenticate]);
+    void refresh();
+  }, [email, refresh]);
   return (
     <ChatShell
       user={user}
       onSignIn={onSignIn}
       onSignOut={async () => {
-        // Clears the AuthKit cookie and heads to WorkOS's logout page.
+        // Ends the WorkOS session and clears its cookie without redirecting,
+        // then `refresh()` signs this tab and the browser's other tabs out.
         await onSignOut();
-        await reauthenticate();
+        await refresh();
       }}
     />
   );

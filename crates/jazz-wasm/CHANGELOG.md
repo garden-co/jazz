@@ -1,5 +1,74 @@
 # jazz-wasm
 
+## 2.0.0-alpha.61
+
+## 2.0.0-alpha.60
+
+### Major Changes
+
+- 79b143e: Rename exclusive transactions to serializable transactions. `db.exclusiveTransaction(...)` is now `db.serializableTransaction(...)`, `db.beginExclusiveTransaction()` is now `db.beginSerializableTransaction()`, the Effect `jazz.exclusiveTransaction` is now `jazz.serializableTransaction`, `ExclusiveWriteResult` and `ExclusiveWriteHandle` are now `SerializableWriteResult` and `SerializableWriteHandle`, and the transaction kind `"exclusive"` is now `"serializable"`. A conflict rejection now has the code `"serialization_conflict"` instead of `"exclusive_conflict"`. The error for reads that are not supported yet now says "is not supported in serializable transactions yet". In Rust, `Db::exclusive_tx` is now `Db::serializable_tx`, and `ExclusiveTx`, `ExclusiveTxOps` and `ExclusiveTxRef` are now `SerializableTx`, `SerializableTxOps` and `SerializableTxRef`. The core Rust names follow: `TxKind::Exclusive` is now `TxKind::Serializable`, `RejectionReason::ExclusiveConflict` is now `RejectionReason::SerializationConflict`, `node::Error::UnsupportedExclusiveRead` is now `node::Error::UnsupportedSerializableRead`, `open_exclusive*` and `commit_exclusive*` are now `open_serializable*` and `commit_serializable*`, `Snapshot::exclusive_base` is now `Snapshot::serializable_base`, and `ViewCompleteExclusiveCoverage` is now `ViewCompleteSerializableCoverage`. The raw `writeState` JSON from the napi, wasm and React Native bindings now spells the conflict fate `SerializationConflict` instead of `ExclusiveConflict`. Only the names changed: validation, conflicts, and stored and synced data are the same, and the old names have no alias.
+
+### Patch Changes
+
+- 0aec19c: Fix live combined aggregate subscriptions missing changes when the first aggregate value stays unchanged. Complete summaries now identify replacements without changing group occurrences or limiting large multi-output summaries.
+- ab06af5: Add `$deletedAt` and `$deletedBy` as optional projection, filter, and sort columns after `.includeDeleted()`. They return the winning deletion's authored timestamp as a `Date` and author as a `RowAuthor`, or `null` for live and restored rows. History versions share the logical row's current deletion timestamp and author.
+
+  Filters on `isNull`, `eq: null` and `ne: null` now become null checks for every column type before any type-specific handling. Author columns such as `$createdBy` previously threw on `eq: null`; they now match rows whose author is null.
+
+  `$deletedAt` and `$deletedBy` are rejected in flat joins: `.includeDeleted()` widens only the root query, so joined sources have no deletion metadata.
+
+  The query compiler now treats `$createdAt` and `$updatedAt` like other ordered scalar columns: a join on either can drive an indexed lookup, and an equality on either against a query parameter becomes a binding-route key instead of a residual predicate. Results are unchanged. Structured author columns stay predicates.
+
+- ff0d69b: Fix grouped aggregate results using opaque identities for default ordering and explicit-order ties. Reads and live subscriptions now use logical group keys before pagination, while preserving group occurrence identities and explicit sort directions.
+- d09159b: Query and subscribe to previous row versions through `app.$history.table` in TypeScript or `history.tableName` in Rust.
+
+  History queries support filtering, projection, ordering, pagination, and local-first and remote reads and subscriptions, fetching missing history from upstream when needed. Historical content is transformed through schema lenses to the requested schema.
+
+  Each version exposes `$acceptedAt` as a JavaScript `Date` and `$transactionId` as a `TxId`, alongside the usual opt-in attribution columns (`$createdAt`, `$createdBy`, `$updatedAt`, `$updatedBy`). Server authorization follows access to the current row.
+
+  **Upgrade note:** history is available for every table, with no opt-in. Anyone who can currently read a row in a branch can read all retained versions of that row in that branch, including versions written while they had no read access. Review your read policies before upgrading if earlier versions of a row may hold content its current readers should not see.
+
+  History tables are read-only and require a bounded `id` constraint. They cannot be filtered by `$transactionId` or used on either side of `.include()`, `.hopTo()`, or `.gather()`. Only accepted content versions appear: pending writes and deletion-only events do not add history rows. Deleted rows' content history can be queried with `.includeDeleted()`. History is currently indexed only by row ID.
+
+  **Breaking wire change:** `SupportingRow` now includes an `is_current` flag, allowing queries to combine a current table and its history without treating historical versions as current rows.
+
+  **Breaking wire and binding change:** `ResultKey` moves to version 2. A v2 key starts with byte `2`. After its union-arm records it carries one transaction flag byte per source occurrence: first the root, then each joined source in order. A flag of `1` is followed by that source version's `tx_time` (u64, big-endian) and `tx_node` (16 bytes); a flag of `0` marks a current source. Version 1 keys are rejected. `OutputOccurrenceId` now serializes as its `ResultKey` bytes instead of the old postcard `(root, joined)` pair, and the typed-row result member variant is removed. These keys are not persisted.
+
+- 70f3002: Support `.includeDeleted()` in subscriptions for regular and history tables, with both local-first and remote reads. Subscriptions retain deleted rows' content, receive restoration updates, and fetch deleted content from upstream when needed. Server read permissions still apply.
+
+  **Breaking wire change:** subscription registrations now carry `ReadViewSpec.include_deleted`. Include-deleted subscriptions have separate coverage keys; existing coverage keys and stored row/version formats are unchanged.
+
+  Include-deleted subscriptions of regular tables accept the current source and snapshots (which transaction reads use), and reject branch views with a "not supported yet" error. Plain one-shot include-deleted reads still accept only the current source. History queries are unaffected.
+
+  **Breaking Rust API change:** `ReadOpts.include_deleted` is removed. Rust callers now set the flag on the read view: `ReadOpts { read_view: ReadViewSpec { include_deleted: true, ..Default::default() }, ..Default::default() }`.
+
+- 3ca94c7: A column a migration adds with a default now gets that default on a local-first device that heard about the new version from the server while an older tab was still open. Before, the device's existing rows read `null` for that column even after reloading onto the new version, while a fresh device read the default. The sync server now sends each added column's default with the catalogue. A device that already added such a column as `null` keeps it that way until its local store is cleared.
+- e432352: Fix nullable group keys having different public representations in aggregate reads and subscriptions. One-shot reads now preserve NULL group keys and use the same logical result types as snapshots and live updates.
+
+  Fix live aggregates losing nullable groups when their source rows change. Updates now find the indexed group using the same nullable key encoding, preserving counts, sums and group identity.
+
+- c510fd6: Expose `db.captureSnapshot()` and typed, versioned snapshot references for frozen branch bases. Add persistence helpers, explicit unavailable-history checks, native foreground capture support, and a maintained example covering restoration and draft edits.
+
+  Existing compatible React Native builds continue to support existing operations. Only snapshot capture requires an updated native build; older builds report `UnsupportedSnapshotError` when capture is called.
+
+  Open frozen subscriptions retain their captured base values through later writes and transaction fate changes. Reopening still requires the captured history to remain available.
+
+  The TypeScript `snapshot` option now requires a `SnapshotRef` string. Replace hand-built snapshot field objects with `db.captureSnapshot()` or restore a saved string with `parseSnapshotRef()`; field objects passed to this option now throw `SnapshotRefFormatError`.
+
+- ecb2595: Shrink the browser WASM by about 13% gzip: release builds optimise the engine for size, drop the random mangling hash from kept function names and let wasm-opt fold pointer offsets. IndexedDB reads can be up to 7% slower; writes are unaffected.
+- 68dd540: Jazz stores and queries data in SQLite on every platform: a SQLite file on Node, React Native and the server, and a SQLite file on IndexedDB in the browser. Local stores written by alpha.59 and earlier (native, native relay, Core and browser) are refused with `UnsupportedStorageCodecs` (`unsupported_storage_codecs`) and left unchanged. See the upgrading-from-alpha-59 changeset for what to do with them.
+- 144326e: ### Upgrading from alpha.59
+
+  alpha.60 is a breaking release for every app. Upgrade in this order:
+  1. **Sync server first.** An alpha.60 sync server (core) speaks wire protocol v6 and admits only its app's backend, so alpha.59 clients can't reach it, and `createJazz` refuses to start against an older core. Plan one cutover per app, and ship the new backend and clients with it, because both change. Clients can't sync from the moment the alpha.59 server stops until the new backend and client bundle are live, so plan for that downtime, and let clients finish syncing first: writes still queued in alpha.59 browsers are not carried over. On Jazz Cloud you start the upgrade yourself, when your new backend and clients are ready to ship; we don't move your app for you. On your own server, stop it, move its data dir with the alpha59-alpha60 importer, and drop the JWT flags and their `JAZZ_*` variables (see core-admits-only-its-backend). Download the `jazz-alpha59-alpha60-export` and `jazz-alpha59-alpha60-import` binaries for your platform from this release's GitHub assets, export the old data dir with the exporter, then run `jazz-alpha59-alpha60-import import` and `jazz-alpha59-alpha60-import verify` before your backend first starts on the new dir (see alpha59-migration and the Backups & Upgrades docs page). The import checks the result against what alpha.59 reads, and links each user's old identity to `(jazz:backend, sub)`, so returning users keep their accounts when your `authenticate` answers with their old `sub`. Later releases keep the importer, so you can upgrade from alpha.59 whenever you're ready.
+  2. **Your backend.** Add `createJazz` with `remote({ url, appId, secret })` (or `sqlite({ path })` on the imported data dir) and an `authenticate` that reads your app's own session (an app that signed users in with a JWT can use `fromJWT()`, which answers with the token's `sub`), and mount it at `/jazz` (see client-signs-in-through-backend). If your app has local-first guests, return `acceptLocalFirstAuth(request)` from `authenticate` for them, or the backend refuses them (see local-first-guests-opt-in). Other machines that used `createJazzSession` call `createJazzClient` now. Your backend now publishes the schema, permissions and migrations when it starts. `jazz-tools deploy` and the dev plugins are gone, and so are the starters: `npm create jazz` now prints a brief for your coding agent instead of scaffolding an app.
+  3. **Your schema.** Import `schema as s` and `migration as m` instead of `col`, add `import { migrations } from "./migrations"` and pass them to `s.defineApp(schema, { migrations })`, then run `jazz-tools validate`, which writes `migrations/index.ts`. `defineApp` throws without migrations, so add the import before running the CLI.
+  4. **Your clients.** Drop `appId` from browser clients (pass `scope` with the old value to keep existing local-first identities). Point `serverUrl` at your backend (`"/jazz"` by default) and remove JWT auth. Browser and React Native apps, the Node and WASM bindings and the React Native native build all move together: the native relay ABI is now 4, so a JavaScript bundle and a native build from different releases refuse each other.
+
+  Local data on devices doesn't carry over. Opening a local store written by alpha.59 throws `UnsupportedStorageCodecsError` (match it with `isUnsupportedStorageCodecsError`) and leaves the store unchanged. Delete it, and the client resyncs from the server. Writes that were still waiting to upload when a device upgraded are lost, so let clients sync before you cut over.
+
+- faa7249: Read the foreground transaction-time high-water asynchronously in the browser runtime. The synchronous WASM call blocked on the node lock while the lock holder waited for the JS event loop, so closing a foreground runtime could spin at full CPU instead of completing.
+
 ## 2.0.0-alpha.59
 
 ### Patch Changes

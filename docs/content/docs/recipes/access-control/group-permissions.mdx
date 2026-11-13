@@ -1,6 +1,6 @@
 ---
 title: "Group permissions"
-description: Model a workspace with role-based access control using a members table and existence-based permissions.
+description: "Build a workspace with roles, using a members table and existence-based permissions."
 reviewedAt: "c92542388"
 ---
 
@@ -29,11 +29,14 @@ Three tables: the workspace itself, a members join table that records each user'
   ../examples/docs/todo-client-localfirst-react/src/group-permissions-snippets.tsx#group-permissions
 </include>
 
-- **Contributor** edit access uses `allOf` to require both `"$createdBy.account": session.user` (the row belongs to this author) and a matching contributor membership. Writers and admins bypass the creator check entirely.
+The helpers take a `RowRefValue`, the type of a row reference such as `workspace.id` inside a
+policy: `import { type RowRefValue } from "jazz-tools"`.
+
+- **Contributor** edit access uses `allOf` to require both `$createdBy: session.user` (the row belongs to this author) and a matching contributor membership. Writers and admins bypass the creator check entirely.
 - **Bootstrap insert**: the second branch of `allowInsert` lets the workspace creator add themselves as the first admin&hairsp;—&hairsp;otherwise `isAdmin` would block everyone, since there are no members yet.
 - **Leave on your own**: members can delete their own membership row regardless of role. Admins can remove anyone.
 
-See [Permissions](/docs/schemas/policies) for more on `exists.where`, `anyOf`, `allOf`, and `$createdBy`.
+See [Declarative Permissions](/docs/schemas/policies) for more on `exists.where`, `anyOf`, `allOf`, and `$createdBy`.
 
 ## Creating a workspace
 
@@ -66,6 +69,18 @@ See [Permissions](/docs/schemas/policies) for more on `exists.where`, `anyOf`, `
 <include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-react/src/group-permissions-snippets.tsx#group-remove-member
 </include>
+
+### What a removed member still sees
+
+- **Online** (thin client, or local-first while connected): the workspace's documents drop out of
+  their live queries right away.
+- **Offline local-first:** the rows already on their device stay readable, across reloads too,
+  until they reconnect. Within about a second of reconnecting they are removed from the device.
+  Writes they queued meanwhile are rejected and reverted.
+- `clearOnSignOut` doesn't help here: a removed member isn't signed out.
+
+Anything they read before removal they may have copied; removing access stops future reads, not
+past ones.
 
 ## Querying documents
 

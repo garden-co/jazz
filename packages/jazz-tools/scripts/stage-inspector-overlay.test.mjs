@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   copyFileSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -105,4 +106,75 @@ test("a previous interrupted promotion restores its backup on the next invocatio
     readFileSync(join(destination, "embedded.html"), "utf8"),
     "recoverable embedded content",
   );
+});
+
+// E2 (alpha.61 rc.1): on Vercel the backend answered "This jazz-tools build has
+// no Inspector UI", because it read the UI from disk next to its own module and
+// Next.js's output file tracing never copied those files. The UI must reach a
+// deployment by following the code's own imports alone.
+test("the staged Inspector UI is served from a bundle of the code alone, with no files beside it", async (t) => {
+  const { build } = await import("esbuild");
+  const { source, fixtureScript } = makeFixture(t);
+  const packageRoot = dirname(dirname(fixtureScript));
+  const backendDir = join(packageRoot, "dist/backend");
+  mkdirSync(join(source, "assets"), { recursive: true });
+  writeFileSync(join(source, "embedded.html"), "overlay page");
+  writeFileSync(
+    join(source, "backend.html"),
+    '<!doctype html><title>Jazz Inspector</title><script type="module" src="./assets/app-abc.js"></script>',
+  );
+  writeFileSync(join(source, "assets", "app-abc.js"), "console.log('inspector')");
+  writeFileSync(join(source, "favicon.ico"), Buffer.from([0, 1, 2, 255]));
+
+  // The backend's modules as tsc emits them into dist/backend.
+  const realBackend = join(dirname(scriptPath), "../src/backend");
+  for (const name of ["inspect-ui", "inspector-ui-files"]) {
+    await build({
+      entryPoints: [join(realBackend, `${name}.ts`)],
+      outfile: join(backendDir, `${name}.js`),
+      format: "esm",
+      platform: "node",
+      logLevel: "silent",
+    });
+  }
+  writeFileSync(join(backendDir, "inspector-ui-files.js.map"), "{}");
+
+  const result = runStage(fixtureScript);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(!existsSync(join(backendDir, "inspector-ui-files.js.map")), "stale map removed");
+
+  // Bundle as a deployment would, then remove the package: only what the
+  // bundle carries is left.
+  const deployed = mkdtempSync(join(tmpdir(), "inspector-ui-deployed-"));
+  t.after(() => rmSync(deployed, { recursive: true, force: true }));
+  await build({
+    entryPoints: [join(backendDir, "inspect-ui.js")],
+    outdir: deployed,
+    bundle: true,
+    splitting: true,
+    format: "esm",
+    platform: "node",
+    outExtension: { ".js": ".mjs" },
+    logLevel: "silent",
+  });
+  rmSync(packageRoot, { recursive: true, force: true });
+  // Each file is its own chunk, loaded when asked for: the code that serves
+  // the page doesn't carry the assets.
+  const assetBase64 = Buffer.from("console.log('inspector')").toString("base64");
+  assert.ok(!readFileSync(join(deployed, "inspect-ui.mjs"), "utf8").includes(assetBase64));
+
+  const { createInspectorUi } = await import(join(deployed, "inspect-ui.mjs"));
+  const serve = createInspectorUi();
+  const request = new Request("http://localhost:3000/jazz/inspect/");
+  const page = await serve(request, "/");
+  assert.ok(page, "the page is served");
+  assert.match(await page.text(), /Jazz Inspector/);
+  // Without the trailing slash (Next.js strips it), its assets still resolve below /inspect/.
+  assert.match(await (await serve(request, "")).text(), /src="inspect\/assets\/app-abc\.js"/);
+  assert.equal(await (await serve(request, "/embedded.html")).text(), "overlay page");
+  assert.equal(
+    await (await serve(request, "/assets/app-abc.js")).text(),
+    "console.log('inspector')",
+  );
+  assert.equal(await serve(request, "/assets/missing.js"), null);
 });

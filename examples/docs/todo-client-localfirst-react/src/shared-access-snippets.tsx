@@ -28,7 +28,7 @@ export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" })
 s.definePermissions(app, ({ policy, anyOf, session }) => {
   policy.todos.allowRead.where((todo) =>
     anyOf([
-      { "$createdBy.account": session.user },
+      { $createdBy: session.user },
       policy.todoShares.exists.where({
         todoId: todo.id,
         user_id: session.user,
@@ -40,7 +40,7 @@ s.definePermissions(app, ({ policy, anyOf, session }) => {
 
   policy.todos.allowUpdate.where((todo) =>
     anyOf([
-      { "$createdBy.account": session.user },
+      { $createdBy: session.user },
       policy.todoShares.exists.where({
         todoId: todo.id,
         user_id: session.user,
@@ -49,20 +49,30 @@ s.definePermissions(app, ({ policy, anyOf, session }) => {
     ]),
   );
 
-  policy.todos.allowDelete.where({ "$createdBy.account": session.user });
+  policy.todos.allowDelete.where({ $createdBy: session.user });
 
   // Only the todo creator can manage shares
   policy.todoShares.allowInsert.where((share) =>
     policy.todos.exists.where({
       id: share.todoId,
-      "$createdBy.account": session.user,
+      $createdBy: session.user,
     }),
   );
-  policy.todoShares.allowRead.where({ user_id: session.user });
+  // The recipient sees their share, and the todo's creator sees every share of it,
+  // so they can list who has access and revoke it.
+  policy.todoShares.allowRead.where((share) =>
+    anyOf([
+      { user_id: session.user },
+      policy.todos.exists.where({
+        id: share.todoId,
+        $createdBy: session.user,
+      }),
+    ]),
+  );
   policy.todoShares.allowDelete.where((share) =>
     policy.todos.exists.where({
       id: share.todoId,
-      "$createdBy.account": session.user,
+      $createdBy: session.user,
     }),
   );
 });
@@ -112,6 +122,24 @@ export function SharedWithMe() {
   );
 }
 // #endregion shared-query
+
+// #region shared-list
+export function SharedWith({ todoId }: { todoId: string }) {
+  const { data: shares = [], db } = useAll(app.todoShares.where({ todoId }));
+
+  return (
+    <ul>
+      {shares.map((share) => (
+        <li key={share.id}>
+          {share.user_id}
+          {share.can_edit ? " (can edit)" : " (read-only)"}
+          <button onClick={() => unshareTodo(db, share.id)}>Remove</button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+// #endregion shared-list
 
 // #region shared-revoke
 export function unshareTodo(db: ReturnType<typeof useDb>, shareId: string) {

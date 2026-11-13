@@ -1,6 +1,6 @@
 ---
 title: WorkOS
-description: "Use WorkOS AuthKit on your backend: keep its sealed session in a cookie, and let Jazz's authenticate read it."
+description: "Learn how to sign users in with WorkOS AuthKit and connect its session to Jazz."
 ---
 
 [WorkOS](https://workos.com/) AuthKit hosts the sign-in pages. Run its server-side flow in the
@@ -9,9 +9,12 @@ backend that hosts Jazz: the callback stores a sealed session cookie, and `authe
 ```ts title="server.ts"
 import { WorkOS } from "@workos-inc/node";
 import { createJazz, remote } from "jazz-tools/backend";
+import { decodeJwt } from "jose";
 
-const workos = new WorkOS(process.env.WORKOS_API_KEY, { clientId: WORKOS_CLIENT_ID });
-const cookiePassword = process.env.WORKOS_COOKIE_PASSWORD!;
+export const workos = new WorkOS(process.env.WORKOS_API_KEY, {
+  clientId: WORKOS_CLIENT_ID,
+});
+export const cookiePassword = process.env.WORKOS_COOKIE_PASSWORD!;
 
 // GET /auth/callback: exchange the code and set the `wos_session` cookie.
 const { sealedSession } = await workos.userManagement.authenticateWithCode({
@@ -20,11 +23,33 @@ const { sealedSession } = await workos.userManagement.authenticateWithCode({
   session: { sealSession: true, cookiePassword },
 });
 
-export const jazz = await createJazz({
-  appId: "my-app",
+export const jazz = createJazz({
   app,
   permissions,
-  store: remote({ url, secret: adminSecret }),
+  store: remote({ appId, url, secret }),
+  // Runs on the request a browser makes to ask who is signed in, one tab at a time, so the
+  // single-use refresh token is spent once and every tab gets the rotated cookie.
+  refresh: async (request, next) => {
+    const sessionData = readCookie(request, "wos_session");
+    if (!sessionData) return next(request);
+    const sealed = workos.userManagement.loadSealedSession({ sessionData, cookiePassword });
+    const current = await sealed.authenticate();
+    // WorkOS refreshes only an expired token, but an open session renews up to ~90 s before
+    // the expiry `authenticate` returned: refresh one that expires within two minutes too.
+    const expiresIn = current.authenticated
+      ? decodeJwt(current.accessToken).exp! - Date.now() / 1000
+      : 0;
+    if (expiresIn > 120) return next(request);
+    const refreshed = await sealed.refresh();
+    if (!refreshed.authenticated || !refreshed.sealedSession) return next(request);
+    const response = await next(withSession(request, refreshed.sealedSession));
+    response.headers.append(
+      "Set-Cookie",
+      `wos_session=${refreshed.sealedSession}; Path=/; HttpOnly; Secure; SameSite=Lax`,
+    );
+    return response;
+  },
+  // Read-only: it never refreshes, so it may run on every request.
   authenticate: async (request) => {
     const sessionData = readCookie(request, "wos_session");
     if (!sessionData) return null;
@@ -32,15 +57,40 @@ export const jazz = await createJazz({
       .loadSealedSession({ sessionData, cookiePassword })
       .authenticate();
     return session.authenticated
-      ? { userId: session.user.id, claims: { role: session.role ?? "" } }
+      ? {
+          userId: session.user.id,
+          claims: { role: session.role ?? "" },
+          expiresAt: decodeJwt(session.accessToken).exp!,
+        }
       : null;
   },
 });
+
+// The request with `wos_session` set to the new seal, other cookies kept.
+function withSession(request: Request, sealed: string): Request {
+  const others = (request.headers.get("cookie") ?? "")
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part && !part.startsWith("wos_session="));
+  const headers = new Headers(request.headers);
+  headers.set("cookie", [...others, `wos_session=${sealed}`].join("; "));
+  return new Request(request, { headers });
+}
 ```
 
-WorkOS access tokens inside the session are short-lived. Refresh an expired session once
-(`session.refresh()`) and write the new cookie on your next HTTP response; the example shows one
-way to share the refreshed session with sync sockets, which can't set cookies.
+`refresh` is the only place the session is refreshed: Jazz calls it on its own `backend-user`
+request, which your auth middleware doesn't see (see
+[Keep auth middleware off Jazz's routes](/docs/setup/auth/backend#keep-auth-middleware-off-jazzs-routes)).
+Before a sync session reaches the `expiresAt` that `authenticate` returned, the browser asks again,
+`refresh` rotates the cookie, and the open session is renewed in place, without reconnecting. If
+anything in that fails, the session reconnects at its expiry instead. Your own routes keep
+refreshing the session as they do today.
+
+A sign-out or a ban reaches open sessions within one access token's lifetime, a few minutes. To end
+them at once, handle WorkOS's `session.revoked` event in a webhook and call
+`jazz.revokeUser(userId)`. On `vercel()`, and on `remote()` with only a backend credential, a
+renewal that lands on an instance other than the one holding the socket falls back to a reconnect;
+there is nothing to configure.
 
 If your backend receives WorkOS access tokens instead (for example, from a native app sending
 `Authorization: Bearer`), use `fromJWT`. Their `role`, `permissions` and `org_id` claims reach your
@@ -54,6 +104,37 @@ authenticate: fromJWT({
   audience: false,
 }),
 ```
+
+## Signing out
+
+AuthKit's `signOut()` redirects, so the tab leaves before Jazz hears of it, and the browser's other
+tabs stay signed in until they're in front again. Sign out without redirecting instead: end the
+session and clear its cookie in a server action, then call `refresh()` on the client and navigate,
+as in [Signing out in every tab](/docs/setup/auth/backend#signing-out-in-every-tab):
+
+```ts title="actions.ts"
+"use server";
+import { cookies } from "next/headers";
+import { cookiePassword, workos } from "./server";
+
+export async function signOutAction() {
+  const store = await cookies();
+  const sessionData = store.get("wos_session")?.value;
+  if (sessionData) {
+    const sealed = workos.userManagement.loadSealedSession({ sessionData, cookiePassword });
+    const current = await sealed.authenticate();
+    // An expired access token still names the session after a refresh.
+    const session = current.authenticated ? current : await sealed.refresh();
+    // End the session at WorkOS too, so its refresh token stops working on every device.
+    if (session.authenticated)
+      await workos.userManagement.revokeSession({ sessionId: session.sessionId });
+  }
+  store.delete("wos_session");
+}
+```
+
+If the session has already ended at WorkOS, there is nothing to revoke, and deleting the cookie
+signs this browser out.
 
 ## Client
 

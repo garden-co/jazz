@@ -25,8 +25,12 @@ export {
   isUnsupportedStorageCodecsError,
 } from "./unsupported-storage-codecs-error.js";
 export { AuthorityChangedError, isAuthorityChangedError } from "./authority-changed-error.js";
+export { CoreTickFailedError, isCoreTickFailedError } from "./core-tick-failed-error.js";
+export {
+  StoreHeldByAnotherTabError,
+  isStoreHeldByAnotherTabError,
+} from "./store-held-by-another-tab-error.js";
 export { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
-export { createDb } from "./default-create-db.js";
 export {
   type SnapshotRef,
   parseSnapshotRef,
@@ -65,7 +69,14 @@ export {
 export type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 export type { ClientMigrations } from "./client-migrations.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
-export type { LinkStatus, OfflineReason, SyncStatus } from "./sync-status.js";
+export type {
+  LinkFailure,
+  LinkStatus,
+  OfflineReason,
+  SyncError,
+  SyncStatus,
+} from "./sync-status.js";
+export type { JazzPageHandle, PageDbInfo } from "./page-handle.js";
 export {
   fetchPublishedBundles,
   fetchSchemaHashes,
@@ -83,13 +94,11 @@ export {
 } from "./introspection-fetch.js";
 export {
   generateAuthSecret,
-  BrowserAuthSecretStore,
   authSecretStorageKey,
   formatAuthSecret,
   parseAuthSecret,
   AuthSecretFormatError,
 } from "./auth-secret-store.js";
-export type { AuthSecretStore, BrowserAuthSecretStoreOptions } from "./auth-secret-store.js";
 export type {
   ResolvedTextAnchor,
   ResolvedTextRange,

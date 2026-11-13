@@ -1,14 +1,10 @@
 ---
 title: Column Types
-description: Every column type available in the TypeScript DSL and its SQL equivalent.
+description: "Look up every column type in the schema DSL and what it maps to in SQL."
 reviewedAt: "b29b48d1a"
 ---
 
-import AvailableColumnTypes from "../../partials/available-column-types.mdx";
-
-Any column can be made nullable by chaining `.optional()`.
-
-<AvailableColumnTypes />
+<include>../../partials/available-column-types.mdx</include>
 
 ## Mergeable Text Columns
 
@@ -33,16 +29,19 @@ const schema = {
 ```
 
 The column still stores and syncs a plain string, so you read and write it like any other string,
-large values included. What changes is what happens when edits meet: the server merges them, so
-Alice adding a sentence at the top while Bob fixes a typo at the bottom keeps both changes.
+large values included. What changes is what happens when two people edit different parts of the
+text at once: Jazz merges the edits, so Alice adding a sentence at the top while Bob fixes a typo at
+the bottom keeps both changes.
 
-The three formats differ in what the merge keeps whole. An edit never splits one of these pieces:
+The three formats differ in the pieces the merge works on. When both people replace the same piece, one replacement wins it whole rather than mixing the two:
 
 | Strategy            | Kept whole                                                                                                                                                                                                               |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `merge("text")`     | Words, single spaces and punctuation marks. In scripts written without spaces (Chinese, Japanese, Thai and the like) and for emoji, each character. Accents, emoji modifiers and joined emoji stay with their character. |
 | `merge("markdown")` | Everything `text` keeps, plus runs of markup characters such as `**` or `##`, list markers like `1.`, and link targets like `](https://example.com)`.                                                                    |
 | `merge("html")`     | Everything `text` keeps, plus whole tags (`<p class="intro">`) and entities (`&amp;`).                                                                                                                                   |
+
+There is one finer case. When both people type into the same word at once, each only adding or deleting letters at one spot, that word merges by character and both keep what they typed. If one person changes "color" to "colour" while another changes it to "colors", the result is "colours". This applies to words written only in scripts whose letters stand alone (Latin, Greek, Cyrillic, Chinese, Japanese kana, Hangul and the like). A word in other scripts, or one holding an emoji or a curly apostrophe (`don’t`), is merged whole.
 
 The merge works on these pieces, not on a document tree: it keeps markup intact but does not check
 that the merged Markdown or HTML is well formed. See
@@ -92,16 +91,16 @@ const schema = {
 With this schema, `priority` is stored as an `INTEGER`, but TypeScript treats it as `Priority` when reading and writing rows:
 
 ```ts
-db.insert(app.tasks, {
+const { value: created } = db.insert(app.tasks, {
   title: "Write launch notes",
   priority: "high",
 });
 
-db.update(app.tasks, task.id, {
+db.update(app.tasks, created.id, {
   priority: "medium",
 });
 
-const task = await db.one(app.tasks.where({ id: task.id }));
+const task = await db.one(app.tasks.where({ id: created.id }));
 task?.priority; // "low" | "medium" | "high"
 ```
 
@@ -169,7 +168,7 @@ The callback above receives a read-only row with `id`, `title` and `score`. The 
 
 Computed fields receive app-facing values, after any stored column transforms. To build on an earlier computed field, pass the earlier table's `.columns` to another `s.table` declaration; callbacks infer those existing fields too. A stored column transform cannot depend on a virtual field.
 
-Computed callbacks run synchronously in the TypeScript client. Jazz tracks which fields each callback accesses through a read-only proxy, so there is no `dependsOn` list. When a complete value is missing, Jazz expands the selection and retries the scoped read and callback. Callbacks must be pure: do not mutate inputs, perform side effects or capture the proxy in a closure for later use. Returning the row directly or nested in result data completes a snapshot before delivering the result, loading all of that callback's input fields. Unknown fields and dependency cycles fail when evaluated.
+Computed callbacks run synchronously in the TypeScript client. Jazz records which fields each callback reads, through a read-only proxy. When a complete value is missing, Jazz expands the selection and retries the scoped read and callback. Callbacks must be pure: do not mutate inputs, perform side effects or capture the proxy in a closure for later use. Returning the row directly or nested in result data completes a snapshot before delivering the result, loading all of that callback's input fields. Unknown fields and dependency cycles fail when evaluated.
 
 Hidden dependencies stay out of the returned row. Ordinary reads, transaction reads, included rows and relationship hops use the same preparation. Subscriptions retain the dependencies they observe and expand their native selection when a callback takes a new branch. A dependency-only update recomputes the result without writing a computed value.
 

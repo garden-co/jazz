@@ -100,6 +100,16 @@ export const VARIANTS = Object.freeze([
     env: Object.freeze({}),
   }),
   Object.freeze({
+    name: "auth-betterauth-chat",
+    dir: "examples/auth-betterauth-chat",
+    // The agent quickstart's default stack, which its one-page guide is built from.
+    environment: "Next.js, Jazz in the app, Better Auth, thin client",
+    env: Object.freeze({
+      NEXT_PUBLIC_CHAT_ID: "chat-01",
+      NEXT_PUBLIC_ANNOUNCEMENTS_CHAT_ID: "announcements",
+    }),
+  }),
+  Object.freeze({
     name: "big-label",
     dir: "examples/big-label",
     environment: "Next.js, organizations and members, Better Auth",

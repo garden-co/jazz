@@ -326,20 +326,18 @@ impl Inner {
                 // A version this relay shipped the session: one of the
                 // commits it carries, by the writer's id, is its own here.
                 let on = match base.on {
-                    BuiltOn::Commit { node, tx } if node != sender.0 && node != me => match pending
-                        .commits
-                        .iter()
-                        .find(|p| p.id == super::tx_id(node, tx))
-                    {
-                        Some(p) => BuiltOn::Commit { node: me, tx: p.tx },
-                        None => match self.settled(node, tx)? {
-                            Some(Some(at)) if at.accepted() => BuiltOn::Seq(at.seq),
-                            // Another session's refusal: why it was refused
-                            // is not this session's to learn.
-                            Some(None) => return Err(predecessor_rejected()),
-                            _ => return Err(unknown_base("another node's commit")),
-                        },
-                    },
+                    BuiltOn::Commit { node, tx } if node != sender.0 && node != me => {
+                        match pending.iter().find(|p| p.id == super::tx_id(node, tx)) {
+                            Some(p) => BuiltOn::Commit { node: me, tx: p.tx },
+                            None => match self.settled(node, tx)? {
+                                Some(Some(at)) if at.accepted() => BuiltOn::Seq(at.seq),
+                                // Another session's refusal: why it was refused
+                                // is not this session's to learn.
+                                Some(None) => return Err(predecessor_rejected()),
+                                _ => return Err(unknown_base("another node's commit")),
+                            },
+                        }
+                    }
                     on => on,
                 };
                 let on = match on {
@@ -516,7 +514,6 @@ impl Inner {
             self.client.as_ref().and_then(|client| {
                 client
                     .pending
-                    .commits
                     .iter()
                     .find(|p| p.id == super::tx_id(node, tx))
                     .map(|p| p.tx)

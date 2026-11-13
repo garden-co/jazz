@@ -177,6 +177,10 @@ jobs:
           # Not `grep -q`: under pipefail its early exit makes tar fail with a write error.
           tar -tf "${out}/jazz-tools-${VERSION}.tgz" > "${RUNNER_TEMP}/jazz-tools-files.txt"
           grep -qx "package/dist/dev/inspector-overlay/embedded/embedded.html" "${RUNNER_TEMP}/jazz-tools-files.txt"
+          grep -qx "package/dist/dev/inspector-overlay/embedded/backend.html" "${RUNNER_TEMP}/jazz-tools-files.txt"
+          # createJazz serves the Inspector from this module, which ships wherever the code does.
+          tar -xOf "${out}/jazz-tools-${VERSION}.tgz" package/dist/backend/inspector-ui-files.js > "${RUNNER_TEMP}/inspector-ui-files.js"
+          grep -Fq '"backend.html":' "${RUNNER_TEMP}/inspector-ui-files.js"
           ls -la "${out}"
 
       - name: Link the tarballs to this release

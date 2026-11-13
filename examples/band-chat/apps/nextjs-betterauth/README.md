@@ -40,14 +40,35 @@ product slice, not another generic Todo tutorial.
   external issuer and subject remain account identity metadata, never
   membership values. Revocation rejects subsequent writes at the serving
   authority; it does not erase rows already retained locally.
-- **Unread state.** `rooms.lastActivityAt` is a denormalized carrier that any
-  member may bump (an `exists` check against the stored row keeps the name
-  creator-only). The value is not bounded by the policy: a member can write any
-  time, including a future one, which keeps the room at the top of everyone's
-  list. Opening the room still clears it, because a read marker never lags the
-  room's activity. Each reader keeps a private `readMarkers` row per room; a room
-  is unread when its activity is newer than the marker, and only unread rooms pay
-  for a bounded count query.
+- **Unread state.** The room list reads each room with its newest message
+  (`messagesViaRoom`, newest first, limit 1), which also orders the list.
+  Nobody writes to the room when they post, so no member can keep a room on
+  top or hide new messages from others. Each reader keeps one `readMarkers` row
+  per room holding the `$createdAt` of the newest message they have seen; it
+  only moves forward. A room is unread when its newest message was sent by
+  someone else after the marker, and only unread rooms pay for a count, capped
+  at 100. `$createdAt` is the sender's clock, so a message sent from a clock
+  far behind can land before the marker and not count as unread.
+- **Read receipts.** The marker is the only read state: one "read up to" row
+  per member and room, updated in place, never a history. The room's current
+  members can read it: under your own messages, one check mark means sent and
+  two mean another member's marker has reached it, and "Read by" lists the
+  members whose marker reaches a message, by name, without times. This is a
+  privacy change from a marker private to its reader: co-members see how far
+  you have read, and the marker's `$updatedAt` shows roughly when you last had
+  the room open. The app writes the marker only while the room is open and the
+  page visible, at most every 5 seconds (plus once when you switch rooms or
+  hide the page), so its cost does not grow with the room's traffic. Leaving a
+  room, or being removed by its creator, deletes your marker in the same
+  transaction: ex-members leave no read position behind and can read no one
+  else's. That a marker only moves forward is the app's rule, not a policy's:
+  a policy cannot yet compare a column with the written row's new value.
+- **History.** A room opens on its newest 50 messages, each with its reactions.
+  Older messages load 50 at a time before a cursor: the oldest shown
+  `$createdAt`, skipping only the messages already shown at that same time, so
+  the offset never grows with the history. Once older pages are loaded, the
+  live window keeps everything from its oldest message on, so new messages
+  cannot open a gap.
 - **Attachments** stream into the message row with `db.insertStreaming`. The
   room timeline selects message metadata only. An image or audio attachment
   reads its bytes once it scrolls near the viewport, and any other file only

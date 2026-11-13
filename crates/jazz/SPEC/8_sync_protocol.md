@@ -70,6 +70,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-52`: A replica MUST upload each commit's ops by stored names, as the schema view that wrote them stores them, keeping it pending while offline; a server MUST refuse a commit naming a stored table or column of a version it has not deployed, at once, with reason `schema_version_not_deployed`.
 - `INV-SYNC-53`: The authority MUST NOT name a writer's own row as written (instead of shipping it) unless the commit applied unmerged over the very version the writer built on and that version is still current (§8.3); every other row ships, and a writer whose image differs from the digest asks for the row whole.
 - `INV-SYNC-54`: An authority MUST mint its namespace when it is opened as the authority and keep it in its store. A replica that keeps another namespace than its upstream's MUST refuse that link with `AuthorityChanged`, upload nothing to it, fail its remote reads and its `Global` waits on writes still pending with that error, and keep its local rows and pending writes; only a new link tries again (§8.10).
+- `INV-SYNC-55`: A store whose file writes complete after its commits return MUST NOT tell a session a commit is in the store (`Stored`, or its own acceptance) until a persist covering that commit succeeded.
 - `INV-TX-2`, `INV-TX-11`, `INV-TX-23`: commit, seq and relay rules (ch. 3).
 - `INV-WIRE-1`, `INV-WIRE-2`: exact postcard frames and Hello version negotiation (§8.1.1).
 
@@ -153,7 +154,7 @@ Messages, with their postcard variant tags:
 | 14  | `SchemaAdmission`    | server → client | That version's admission changed (§8.9)                           |
 | 15  | `Stored`             | relay → session | A relay holds the session's commit and uploads it (§8.3)          |
 | 16  | `Join`               | client → server | Open: the session's version and the catalogue it keeps (§8.9)     |
-| 17  | `Catalogue`          | server → client | Admitted versions, stored names and lens cells (§8.10)            |
+| 17  | `Catalogue`          | server → client | Admitted versions, stored names, lens cells, defaults (§8.10)     |
 | 18  | `Welcome`            | server → client | The answer to `Join`: admission and catalogue (§8.9, §8.10)       |
 | 19  | `ConnectionSettled`  | server → client | The position the whole connection is settled through (§8.4)       |
 | 20  | `Holds`              | server → client | Rows a live read holds: all with its opening, then changes (§8.4) |
@@ -183,6 +184,19 @@ The sync frames are pinned by `crates/jazz/fixtures/sqlite_sync_wire_v1.json`,
 which every shipped artifact (native, NAPI, WASM) validates
 (`jazz::sync_wire_corpus`). The corpus may be re-pinned until alpha.60 ships;
 after that, a layout change needs a compatibility write-up.
+
+A server pings every link every 20 s and drops one that sent nothing for
+60 s. The WebSocket API shows neither pings nor partial messages, so a
+client that advertises `FEATURE_HEARTBEAT` also gets a `WireFrame::Heartbeat`
+(tag 7, no body, no answer) with each ping. Such a client gives a link up,
+and reconnects, once nothing at all, heartbeat included, arrived for 120 s:
+a half-open TCP link or a stalled proxy then ends instead of showing
+`connected` while nothing moves. A heartbeat queues behind the message being
+sent, so 120 s also bounds the slowest link a whole 2 MiB message survives
+(about 18 KB/s). The TypeScript carrier (browsers, Node, workers) asks for
+it on every link and drops the frame before the runtime sees it. The native
+Rust transport (NAPI `remote()`, React Native) does not ask yet and has no
+silence timeout of its own.
 
 In-process links (a worker and its tab, tests) carry `SyncMessage` values
 directly (`sync::duplex`); a byte link frames them with postcard
@@ -603,11 +617,44 @@ that masks that row (§8.4). An eviction of a version that still exists keeps
 the session watching the row's id, since the replica may hold the row on
 another branch, and later writes that leave that version unreadable send
 nothing more, whichever of the session's reads watches the id; a version
-that becomes readable ships again while a live read keeps it watched. A row
-the reader's own accepted commit wrote and cannot read (a write-only insert)
-is reconciled at settlement: the commit's fate reports acceptance without
-creating a persistent watch. Local copies are not a redaction boundary; eviction keeps the
-replica coherent, not secret.
+that becomes readable ships again while a live read keeps it watched. The
+rows a reader's own commit wrote reconcile at its settlement, without
+creating a persistent watch: each ships as it is now if the reader may read
+it, else it is evicted. That includes a row the reader's own write moved out
+of its read scope, live read or not. A write that took no access away is
+the exception: where the reader could read the row neither just before nor
+just after each of its commits of one server tick (it may not have existed),
+the row is still at the version those commits made, and none of the
+session's live reads reads its table, the global authority's fate confirms
+each of those versions as written (a write-only insert, and a delete or
+restore after it). The replica keeps them as a cold copy until a covering
+read reconciles it.[^write-only-own-rows] A version another writer superseded it with, a row a
+live read covers, or a commit a relay accepted for its session (other than
+the writer's own store, which serves its sessions what it holds) reconciles
+as any other written row. A refused commit takes no access away: its rows
+ship again only where the reader may read them, and a cold copy of a row the
+reader lost access to otherwise stays until a covering read. Local copies are not a redaction
+boundary; eviction keeps the replica coherent, not secret.
+
+[^write-only-own-rows]:
+    Why a write-only own row stays. An insert needs no read access, but an
+    update, upsert, delete or restore acts on the writer's own prior row,
+    and its replica stages it over the accepted version it holds, founder
+    metadata (the accepted creation stamp) included. A writer that inserts
+    into a table it may not read and then queues a delete or restore, or has
+    a later edit refused and falls back to its accepted row, needs that row
+    as its base. Before this rule, the row was evicted as soon as the insert
+    was accepted, so the writer had nothing to build on. The motivating case
+    is E2EE's key and recipient tables, where a client writes rows meant for
+    other readers and may still need to delete or restore them. Each
+    condition guards one case where keeping the row would be wrong.
+    Unreadable just before and just after each commit: a write that moved a
+    readable row out of the writer's scope (an out-of-scope update) did take
+    access away, and is evicted as usual. Still at the version the writer's
+    own commits made: a row another writer superseded is not the writer's to
+    keep, and reconciles to the authority's version. No live read of the
+    writer reads its table: a live result must match what the authority
+    would send it (`INV-SYNC-14`), so a covered row reconciles as any other.
 
 `CheckAllowed { id, action, acting }` asks whether the session would be
 allowed an action now, without writing; `CheckAllowedResult { id, result }`
@@ -744,7 +791,8 @@ keep and retry pending writes but cannot accept them or make them `Global`.
 
 A replica's `Join` lists in `known` the schema versions whose stored names it
 keeps, each with `names_digest` of those names. The server answers in its
-`Welcome` with the catalogue `{ namespace, versions, cells, confirmed }`,
+`Welcome` with the catalogue `{ namespace, versions, cells, defaults,
+confirmed }` (in that order: the wire is positional),
 carrying every admitted version the replica lacks or names otherwise, in
 admission order, ahead of any row; and again, as a `Catalogue` of the same
 fields, whenever its store admits a version or learns more of its authority's
@@ -754,6 +802,14 @@ catalogue.
   table, its name and stored name and, per column, its name and stored name.
 - A `CatalogueCell` is a stored column a lens fills: a copy of stored column
   `source`, or a dropped column's backwards default, from version `since` on.
+- A `CatalogueDefault` is the default a stored column of the versions sent
+  was added with (`ADD COLUMN ... DEFAULT`, read from the sender's DDL), which
+  rows written before it read. A lens's default for a column it adds is in no
+  schema, so a replica that mirrors the version adds a column it lacks with
+  this one and reads old rows as the authority does. It is a value, an enum
+  default by its variant's name (tags are each store's own, §10.8). A default
+  that is not of the column's type, or not one of its variants, is left out:
+  the column is added as it would be without it, and the catalogue applies.
 - `namespace` is the authority's, once the sender knows it. Table and column
   identities are UUIDs derived from it and the stored names, so the authority
   mints them and replicas only mirror them. An authority mints its namespace
@@ -794,6 +850,11 @@ pending writes belong to the history it followed, so:
 - its remote reads (those open and those opened later) fail with the error,
   and so do `Global` waits on its writes still pending; `Local` waits and
   local reads are served as before, and the pending writes are kept;
+- a relay fails the `Remote` reads it relays for its sessions (live and
+  one-shot, open and opened later) the same way, with the same code, once
+  each; its sessions' local-first reads read its store, their local view,
+  as when there is no server. A read opened on a new link before its
+  `Welcome` is not failed with the last link's refusal;
 - the link reports the refusal to its host (`Db::upstream_refusal`), which
   stops it instead of retrying: a retry would be refused the same way. Only
   a new link (an explicit reconnect) tries again, so the old authority back
@@ -823,7 +884,7 @@ The responder opens a resumed read one of three ways:
 
 - **Fresh**, when it cannot resume: the store is a relay (its store may be
   cold, and its seqs are not the ones its sessions resume from), the read is
-  windowed, a flat join, an aggregate, a relation or a history read, the
+  a flat join, an aggregate, a relation or a history read, the
   session has its own claims (policies read them, and they are not part of
   what the client resumes from), `since` is past what the store serves (a
   reset store), or `since` is at or before the current schema's activation.
@@ -835,7 +896,12 @@ The responder opens a resumed read one of three ways:
   without changing. The authority evaluates the result as of `since` and ships
   every row not in it, rows that changed after `since`, rows it held then that
   have since left (as they are now, or their eviction), and supporting rows
-  whose access changed.
+  whose access changed. A window (`limit`, or the prefix through an
+  `offset` a replica asks for) resumes the same way: its own table is one
+  of its membership inputs, so any write to it takes this path, and rows
+  pushed out of the window or let into it without changing are judged
+  against the window as of `since`; its opening's `members` drop the ones
+  that left.
 
 Each ends with a `Settled` (and its `members` where §8.4 calls for one), so a
 resumed read leaves the replica with the same rows as a fresh one
@@ -972,6 +1038,16 @@ retryable `Backpressure` error, releasing its room. These budgets bound
 what the server holds of incoming requests; answers waiting for a client
 that does not read are not bounded yet (#4865).
 
+A read or row write that needs large-value bytes held only in a network
+chunk store (`s3()`, Vercel Blob; after a restart, say) never fetches them
+on the store thread, which serves every session. The request is parked: the
+store's fetch lane reads the bytes beside the store thread, with its
+backoff, and the parked request runs again on the tick after they land.
+Until then it keeps its admitted room, so that session's later requests wait
+behind it, in order, while other sessions are served as usual. A fetch that
+fails answers the request with its `Storage` error, and later reads of
+those bytes are refused with it at once until the fetch backoff ends.
+
 - A thin session is served as its admitted identity and claims, exactly as a
   sync session with that admission is (§8.6): reads see what its policies let
   it see, and writes are admitted and authorized as `WriteIdentity::Session`.
@@ -998,6 +1074,33 @@ that does not read are not bounded yet (#4865).
   row and the server seq of the version they left; the write is globally
   durable when the answer arrives. A client-chosen row id is honored on
   insert.
+- A standalone `Insert`, `Update`, `Upsert`, `Delete` or `Restore` may name a
+  `writeKey` option, `{ node: <32 hex digits>, seq }`: the client's own id
+  for it, a node the client picks and that node's counter, in the order the
+  client makes its writes. The server makes the write as a commit whose
+  writer is derived from the session's author and the client's node
+  (`origin_node`, an RFC 9562 version-8 node with a fixed tag), at the client's counter
+  (`Db::write_as_origin`): every server derives the same writer, and no
+  other author can name it. No session commits as such a node. The
+  authority records the commit's fate under it; a replica uploads it under
+  it, which the authority dedups like any resent commit (§8.2), and never
+  infers from pruned entries (a client's commits reach it through any
+  server, so out of order). A write that fails, or makes no commit, records
+  nothing, and the next commit does not inherit its id. A write whose key
+  the store already knows for the same author is not made again: it answers
+  `Written` with seq 0, or the first one's refusal as uploaded through a
+  replica. In .60 the authority keeps these dedupe entries and never prunes them;
+  a bounded resend window is planned for .61 (#4961). The authority does not record its own refusal: a resend of a
+  write it refused runs again, against current state. On a replica, seq 0
+  can answer a write still pending upstream. An insert with a key names its
+  `rowId`; a staged write names no key. So a client resends a keyed write
+  its connection left unanswered, in order, on its next connection, through
+  whichever server of the authority it reaches, under the same credential.
+  The TypeScript thin client does, with one node per runtime; a write left
+  unanswered when the credential changes ends with its outcome unknown, as
+  the new one may name another user. `UpdateLargeValues` and streams take
+  no key: one their connection left unanswered ends with its outcome
+  unknown.
 - `Begin` opens a mergeable or serializable transaction under a
   client-chosen open-transaction id, owned by that session. A write naming it
   is staged and answered `Staged`; a refusal while staging is kept and

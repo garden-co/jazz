@@ -1,6 +1,6 @@
 ---
 title: WHERE Operators
-description: Full reference for filter operators available in Jazz query builders, with examples for each column kind.
+description: "Look up every filter operator for each column type, with examples."
 reviewedAt: "de3155d6"
 ---
 
@@ -14,7 +14,7 @@ import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
 
 ### Equality and inequality
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-eq-ne-ts
@@ -25,16 +25,11 @@ import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
       ../examples/docs/todo-effect/src/docs-snippets.ts#where-eq-ne-effect
     </include>
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-eq-ne-rust
-    </include>
-  </Tab>
 </Tabs>
 
 ### Numeric comparisons
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-numeric-ts
@@ -45,16 +40,11 @@ import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
       ../examples/docs/todo-effect/src/docs-snippets.ts#where-numeric-effect
     </include>
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-numeric-rust
-    </include>
-  </Tab>
 </Tabs>
 
 ### String contains
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-contains-ts
@@ -65,18 +55,13 @@ import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
       ../examples/docs/todo-effect/src/docs-snippets.ts#where-contains-effect
     </include>
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-contains-rust
-    </include>
-  </Tab>
 </Tabs>
 
 ### Null checks on optional columns
 
 In TypeScript, `isNull: true` matches missing values and `isNull: false` matches present values. Nullable columns with ordinary filter operators support it, including scalar and array columns, not just references; required columns and payload enums do not expose it.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-null-ts
@@ -87,18 +72,13 @@ In TypeScript, `isNull: true` matches missing values and `isNull: false` matches
       ../examples/docs/todo-effect/src/docs-snippets.ts#where-null-effect
     </include>
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-null-rust
-    </include>
-  </Tab>
 </Tabs>
 
 ### Multiple conditions (AND)
 
 All predicates passed to `where(...)` / chained `filter_*` calls are AND-combined:
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-and-ts
@@ -109,16 +89,11 @@ All predicates passed to `where(...)` / chained `filter_*` calls are AND-combine
       ../examples/docs/todo-effect/src/docs-snippets.ts#where-and-effect
     </include>
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-and-rust
-    </include>
-  </Tab>
 </Tabs>
 
 ### Combining with ordering and limits
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-order-limit-ts
@@ -129,18 +104,13 @@ All predicates passed to `where(...)` / chained `filter_*` calls are AND-combine
       ../examples/docs/todo-effect/src/docs-snippets.ts#where-order-limit-effect
     </include>
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-order-limit-rust
-    </include>
-  </Tab>
 </Tabs>
 
 ## Live subscriptions with WHERE
 
 `useAll` and query subscriptions accept the same query builders as `db.all`. The subscription stays active and updates whenever any row enters or exits the filter:
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-subscription-ts
@@ -149,11 +119,6 @@ All predicates passed to `where(...)` / chained `filter_*` calls are AND-combine
   <Tab value="Effect">
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#where-subscription-effect
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-subscription-rust
     </include>
   </Tab>
 </Tabs>

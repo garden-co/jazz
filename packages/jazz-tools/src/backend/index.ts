@@ -1,4 +1,10 @@
-export { createJazzClient, type JazzClientConfig, type JazzClient } from "./create-jazz-session.js";
+export {
+  createJazzClient,
+  type BackendClientCloseOptions,
+  type BackendClientSession,
+  type JazzClientConfig,
+  type JazzClient,
+} from "./create-jazz-session.js";
 export {
   type BackendQuerySchemaSource,
   type BackendSchemaInput,
@@ -36,7 +42,17 @@ export {
   type BackendCredential,
   type JazzUser,
   type LocalFirstGuest,
-  acceptLocalFirstAuth,
+  acceptDeviceAccounts,
+  perBranch,
+  type VercelNamespace,
+  type VercelNamespaceContext,
   type VercelStoreOptions,
   type WsLikeSocket,
+  type InspectEvent,
+  type InspectGrant,
+  type InspectHook,
+  type InspectorOptions,
 } from "./create-jazz.js";
+
+// Removed in alpha.61: stubs that throw, naming the replacement (one release).
+export { acceptLocalFirstAuth } from "../removed-api.js";

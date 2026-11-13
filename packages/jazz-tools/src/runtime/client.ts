@@ -25,7 +25,7 @@ import { getTrustedReservedSession, setTrustedReservedSession } from "./db-inter
 import { isRenewableAuthFailure, mapAuthReason } from "./auth-state.js";
 import { httpUrlToWs } from "./url.js";
 import type { RemoteLinkState } from "./remote-link-state.js";
-import type { LinkStatus } from "./sync-status.js";
+import type { LinkFailure, LinkStatus, UploadStatus } from "./sync-status.js";
 import { toError } from "./util.js";
 import { parseUuidBytes } from "./hex.js";
 
@@ -159,12 +159,20 @@ export type AuthUpdate =
  */
 export interface Runtime {
   /**
+   * @internal The Db handed over to a successor: end reads not sent yet with
+   * a `RuntimeClosedError` cause, so they ask the successor instead.
+   */
+  endUnsentReads?(): void;
+  /**
    * Wait until every write committed so far reaches `tier`. `throughOutage`
    * keeps the wait pending through outages until a terminal failure.
+   * `inFlightStreams` (the drain after the local-first upgrade) first lets
+   * streaming writes still sending their value finish, and waits for their
+   * writes too, until that signal aborts.
    */
   waitForPendingWrites?(
     tier?: string,
-    options?: { throughOutage?: boolean; signal?: AbortSignal },
+    options?: { throughOutage?: boolean; inFlightStreams?: AbortSignal; signal?: AbortSignal },
   ): Promise<void>;
   /** @internal Close mutation admission and report the foreground TxTime high-water. */
   quiesceForegroundTxTimeHighWater?(): Promise<bigint>;
@@ -188,9 +196,11 @@ export interface Runtime {
   setRemoteLinkHint?(state: RemoteLinkState): void;
   /** @internal The upstream link as the app sees it. */
   upstreamLinkStatus?(): LinkStatus;
-  /** @internal How many local commits still wait for the server's verdict. */
-  pendingUploadCount?(): number;
-  /** @internal Observe changes of the link status or the pending count. */
+  /** @internal This client's uploads: pending, since when, and refusals. */
+  uploadStatus?(): UploadStatus;
+  /** @internal The latest link failure this client saw, if any. */
+  lastLinkFailure?(): LinkFailure | null;
+  /** @internal Observe changes of the link status or the upload status. */
   onSyncStatusChange?(listener: () => void, signal: AbortSignal): void;
   /** @internal Construct a provisional row without staging or accepting a write. */
   previewInsert?(table: string, values: InsertValues, objectId?: string): Row;
@@ -255,6 +265,7 @@ export interface Runtime {
     objectId: string,
     session?: Session,
   ): Promise<PermissionAdvice>;
+  explainReadClauses?(table: string, rows: string[], session: Session): ExplainedRows;
   requestUpdatePermissionAdvice?(
     table: string,
     objectId: string,
@@ -293,7 +304,10 @@ export interface Runtime {
   close?(): void | Promise<void>;
   /** Abandon a runtime whose backing persistence epoch was invalidated. */
   discard?(): void;
-  clearClientStorage?(): Promise<void>;
+  /** Delete the local store, saying how many unconfirmed writes it dropped when it can. */
+  clearClientStorage?(): Promise<{ pendingUploads?: number } | void>;
+  /** Whether {@link clearClientStorage} works here (a React Native relay's store). */
+  canClearClientStorage?(): boolean;
   /** Connect to a Jazz server over WebSocket (Rust transport). */
   connect(url: string, auth_json: string): void;
   /**
@@ -326,6 +340,15 @@ export interface Runtime {
  * `unknown` means that a local replica or unavailable authority cannot decide.
  */
 export type PermissionAdvice = "allowed" | "denied" | "unknown";
+
+/**
+ * The engine's answer to the Inspector's `explain`: how many clauses the
+ * table's read policy has, and for each row found which of them hold.
+ */
+export interface ExplainedRows {
+  clauses: number;
+  rows: { id: string; holds: boolean[] }[];
+}
 
 declare const openTransactionIdBrand: unique symbol;
 declare const txIdBrand: unique symbol;
@@ -1093,12 +1116,26 @@ export function beginClientTransactionAfter(
   return client.openTransaction(kind, session, attribution, reservedId, prerequisite);
 }
 
+/** @internal Sees a committed write's id and the identity it was made with. */
+export type CommittedWriteObserver = (
+  txId: TxId,
+  session: Session | undefined,
+  attribution: string | undefined,
+) => void;
+
 /** High-level Jazz client. */
 export class JazzClient {
   private readonly transactionPreparations = new Map<
     OpenTransactionId,
-    { pending?: Promise<void>; committing: boolean; unopened?: boolean }
+    {
+      pending?: Promise<void>;
+      committing: boolean;
+      unopened?: boolean;
+      session?: Session;
+      attribution?: string;
+    }
   >();
+  private committedWriteObserver: CommittedWriteObserver | undefined;
   private runtime: Runtime;
   private scheduler: (task: () => void) => void;
   private context: AppContext;
@@ -1223,9 +1260,17 @@ export class JazzClient {
     const id = reservedId ?? createOpenTransactionId();
     if (prerequisite) {
       const context = this.writeContext(session, attribution);
-      const state: { pending?: Promise<void>; committing: boolean; unopened?: boolean } = {
+      const state: {
+        pending?: Promise<void>;
+        committing: boolean;
+        unopened?: boolean;
+        session?: Session;
+        attribution?: string;
+      } = {
         committing: false,
         unopened: true,
+        session,
+        attribution,
       };
       this.transactionPreparations.set(id, state);
       state.pending = Promise.resolve().then(async () => {
@@ -1246,7 +1291,7 @@ export class JazzClient {
       return id;
     }
     const opened = this.runtime.beginTransaction(kind, id, this.writeContext(session, attribution));
-    this.transactionPreparations.set(opened, { committing: false });
+    this.transactionPreparations.set(opened, { committing: false, session, attribution });
     return opened;
   }
 
@@ -1268,6 +1313,33 @@ export class JazzClient {
 
   onMutationError(listener: (event: MutationErrorEvent) => void): void {
     this.runtime.onMutationError(listener);
+  }
+
+  /**
+   * @internal Observe every write this client commits, with the explicit
+   * session and attribution it was made with. A backend context shares one
+   * client between many `Db`s and uses this to route each rejection back to
+   * the `Db` that made the write.
+   */
+  observeCommittedWrites(observer: CommittedWriteObserver): void {
+    this.committedWriteObserver = observer;
+  }
+
+  private reportCommittedWrite<T extends TxId | Promise<TxId>>(
+    txId: T,
+    writer?: { session?: Session; attribution?: string },
+  ): T {
+    const observer = this.committedWriteObserver;
+    if (!observer) return txId;
+    const session = writer?.session;
+    const attribution = writer?.attribution;
+    if (typeof txId === "string") observer(txId, session, attribution);
+    else
+      txId.then(
+        (committed) => observer(committed, session, attribution),
+        () => undefined,
+      );
+    return txId;
   }
 
   /**
@@ -1388,7 +1460,7 @@ export class JazzClient {
       : runtime.commitTransaction(id);
     if (typeof submitted === "string") {
       this.transactionPreparations.delete(id);
-      return new WriteHandle(submitted, this);
+      return new WriteHandle(this.reportCommittedWrite(submitted, state), this);
     }
     if (state) state.committing = true;
     const txId = Promise.resolve(submitted).then(
@@ -1401,7 +1473,7 @@ export class JazzClient {
         throw error;
       },
     );
-    return new WriteHandle(txId, this);
+    return new WriteHandle(this.reportCommittedWrite(txId, state), this);
   }
 
   rollbackTransaction(id: OpenTransactionId): Promise<boolean> {
@@ -1575,7 +1647,11 @@ export class JazzClient {
     attribution?: string,
   ): WriteResult<Row> {
     const row = this.insertInternal(table, values, options, session, attribution);
-    return new WriteResult(row, committedTxId(row), this);
+    return new WriteResult(
+      row,
+      this.reportCommittedWrite(committedTxId(row), { session, attribution }),
+      this,
+    );
   }
 
   /**
@@ -1675,7 +1751,9 @@ export class JazzClient {
     if (result.kind !== "committed") {
       throw new Error("Streaming mutations cannot be staged inside an open transaction");
     }
-    return new WriteHandle(result.txId, this, { id: result.id });
+    return new WriteHandle(this.reportCommittedWrite(result.txId, { session, attribution }), this, {
+      id: result.id,
+    });
   }
 
   /**
@@ -1776,7 +1854,11 @@ export class JazzClient {
     attribution?: string,
   ): WriteResult<Row> {
     const row = this.restoreInternal(table, objectId, values, options, session, attribution);
-    return new WriteResult(row, committedTxId(row), this);
+    return new WriteResult(
+      row,
+      this.reportCommittedWrite(committedTxId(row), { session, attribution }),
+      this,
+    );
   }
 
   /**
@@ -1813,7 +1895,10 @@ export class JazzClient {
     attribution?: string,
   ): WriteHandle {
     const result = this.upsertInternal(table, objectId, values, options, session, attribution);
-    return new WriteHandle(committedTxId(result), this);
+    return new WriteHandle(
+      this.reportCommittedWrite(committedTxId(result), { session, attribution }),
+      this,
+    );
   }
 
   /**
@@ -1899,7 +1984,10 @@ export class JazzClient {
       undefined,
       options?.branch,
     );
-    return new WriteHandle(committedTxId(result), this);
+    return new WriteHandle(
+      this.reportCommittedWrite(committedTxId(result), { session, attribution }),
+      this,
+    );
   }
 
   /** @internal Typed `Db.update` diff lowering; not exposed as an imperative API. */
@@ -1923,7 +2011,10 @@ export class JazzClient {
       undefined,
       options?.branch,
     );
-    return new WriteHandle(committedTxId(result), this);
+    return new WriteHandle(
+      this.reportCommittedWrite(committedTxId(result), { session, attribution }),
+      this,
+    );
   }
 
   /** @internal */
@@ -1991,7 +2082,10 @@ export class JazzClient {
       undefined,
       options?.branch,
     );
-    return new WriteHandle(committedTxId(result), this);
+    return new WriteHandle(
+      this.reportCommittedWrite(committedTxId(result), { session, attribution }),
+      this,
+    );
   }
 
   canInsertLocally(table: string, values: InsertValues, session?: Session): PermissionAdvice {
@@ -2056,6 +2150,14 @@ export class JazzClient {
         session ?? this.resolvedSession ?? undefined,
       ) ?? Promise.resolve("unknown")
     );
+  }
+
+  /** For the Inspector's `explain`; see {@link Runtime.explainReadClauses}. */
+  explainReadClauses(table: string, rows: string[], session: Session): ExplainedRows {
+    if (!this.runtime.explainReadClauses) {
+      throw new Error("explain is not supported yet by this runtime");
+    }
+    return this.runtime.explainReadClauses(table, rows, session);
   }
 
   requestReadPermissionAdvice(
@@ -2312,10 +2414,28 @@ export class JazzClient {
     txId: TxId | Promise<TxId>,
     timeoutMs?: number,
   ): Promise<void> {
-    txId = await txId;
     const hasAuthority =
       Boolean(this.context.serverUrl) || this.runtime.nativeUpstreamConfigured?.() === true;
-    await this.waitForTransaction(txId, hasAuthority ? "global" : "local", undefined, timeoutMs);
+    // Hand the unresolved ID to the runtime wait so `timeoutMs` also covers a
+    // commit that has not returned it yet. A commit that fails surfaces its own
+    // error unchanged, not one normalized as a runtime wait failure.
+    let commitFailure: { error: unknown } | undefined;
+    const committed = Promise.resolve(txId).catch((error: unknown) => {
+      commitFailure = { error };
+      throw error;
+    });
+    committed.catch(() => undefined);
+    try {
+      await this.waitForTransaction(
+        committed,
+        hasAuthority ? "global" : "local",
+        undefined,
+        timeoutMs,
+      );
+    } catch (error) {
+      if (commitFailure) throw commitFailure.error;
+      throw error;
+    }
   }
 
   private normalizeTransactionWaitError(error: unknown): Error {
@@ -2348,11 +2468,16 @@ export class JazzClient {
     this.runtime.discard?.();
   }
 
-  async clearClientStorage(): Promise<void> {
+  /** Whether this client's runtime can delete its local store. */
+  supportsClientStorageReset(): boolean {
+    return this.runtime.canClearClientStorage?.() === true;
+  }
+
+  async clearClientStorage(): Promise<{ pendingUploads?: number } | void> {
     if (!this.runtime.clearClientStorage) {
       throw new Error("Runtime does not support client storage reset.");
     }
 
-    await this.runtime.clearClientStorage();
+    return await this.runtime.clearClientStorage();
   }
 }

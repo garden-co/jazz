@@ -1,6 +1,6 @@
 ---
 title: Durability Tiers
-description: "API reference for read and write durability tiers: the options that control how far data must propagate before an operation confirms."
+description: "Look up the read and write durability tiers and how far each one waits for data to travel."
 reviewedAt: "b29b48d1a"
 ---
 
@@ -36,11 +36,28 @@ They are intentionally separate from write durability.
 New applications should use the two product read choices `"local-first"` and `"remote"`:
 
 - `"local-first"` uses cached local knowledge and shows pending local writes immediately, while still syncing.
-- `"remote"` uses the server's current query scope, without pending local writes. It waits while offline.
+- `"remote"` uses the server's current query scope, without pending local writes. A one-shot remote
+  read made during an outage rejects with a transport error once the client has noticed the server
+  is unreachable (a few seconds in), even while it keeps reconnecting.
+
+On the [thin client](/docs/setup/web-client/thin-client) every read is a server read, whatever its
+tier. While the backend is unreachable, one-shot reads and subscriptions wait and are answered after
+the reconnect. To keep reading while offline,
+[upgrade to the local-first client](/docs/setup/web-client/local-first-client).
 
 Without a `tier`, browser and React Native clients read `"local-first"`, and when they have a server
 the first result waits up to 5 seconds for it (see below). Other clients read `"remote"` when they
 have a server, and `"local-first"` when they don't.
+
+<Callout type="warn">
+  In your backend, return only `"remote"` reads (the default) to users. The core decides whether a
+  user's write is allowed, so a session's write sits pending until the core answers. A
+  `"local-first"` read in that session, or a read inside a transaction, already shows the pending
+  version, and judges the row by the user's read permissions as they apply to the edited version. A
+  user who changes a column their read permission checks, on a row they can't read, could see that
+  row's other columns through such a read until the core refuses the write. A `"remote"` read shows
+  only accepted rows, under their own permissions.
+</Callout>
 
 Remote reads and your own writes:
 
@@ -56,8 +73,7 @@ A local-first read accepts an optional `firstLoadRemoteWaitMs` that bounds how l
 its first result may wait for the server. With an explicit `tier: "local-first"` the default is `0`,
 plain `"local-first"`. A browser or React Native read that names no tier defaults to `5000` when a
 server is configured; pass `firstLoadRemoteWaitMs: 0` to show local data at once. TypeScript rejects
-the option with `"remote"` (JavaScript callers have it ignored). In Rust, use
-`client.query_local_first(query, timeout)` and `client.subscribe_local_first(query, timeout)`.
+the option with `"remote"` (JavaScript callers have it ignored).
 
 Only the initial load waits: a one-shot read, or a subscription's first callback. While the client
 looks online (its connection is live, or its connection attempt started less than five seconds
@@ -66,7 +82,7 @@ server-confirmed result, together with the client's own pending writes. If the s
 answered by then, the local result is shown. The read waits even when local data exists, but never
 longer than the timeout.
 
-It never waits on a server it cannot reach. The first result is local, and immediate, when no
+On the local-first client it never waits on a server it cannot reach. The first result is local, and immediate, when no
 server is configured, after `db.disconnect()`, while the connection is down or retrying, or when the
 connection attempt fails. If the connection drops during the wait, the local result is delivered at
 that moment. After the first result, a subscription behaves exactly like `"local-first"`: local
@@ -114,7 +130,7 @@ storage driver or a JavaScript-side SQLite path.
 
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript", "Effect", "Rust"]}
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript", "Effect"]}
   persist
   updateAnchor
 >
@@ -146,11 +162,6 @@ storage driver or a JavaScript-side SQLite path.
   <Tab value="Effect">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-durability-tier-effect
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs" meta='title="main.rs"'>
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-durability-tier-rust
     </include>
   </Tab>
 </Tabs>

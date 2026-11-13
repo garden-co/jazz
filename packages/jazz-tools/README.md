@@ -91,7 +91,7 @@ intercept separate legacy packages such as `jazz-vue`, `jazz-svelte` or
 ## Usage
 
 ```bash
-npx jazz-tools@alpha server
+npx jazz-tools server
 ```
 
 To use a specific prerelease:
