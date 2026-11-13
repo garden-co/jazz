@@ -3766,6 +3766,18 @@ impl Db {
 /// Why a replica refuses an upstream whose authority namespace is not the
 /// one it mirrors (INV-SYNC-54). Nothing on the wire tells a recreated server
 /// store from another app's, so the message names both, and the one way on.
+/// A store keeps `version` under other names than its authority, which never
+/// confirmed them: it was opened without the app's migrations.
+pub(crate) fn store_opened_without_migrations(version: &crate::ids::SchemaVersionId) -> Error {
+    Error::new(
+        ErrorCode::StoreOpenedWithoutMigrations,
+        format!(
+            "this store keeps schema version {} under other names than the server, which never confirmed them: it was opened without the app's migrations (React Native before alpha.61 dropped them). Syncing a store opened without the app's migrations is not supported yet: rebuild it, or reset it with deleteClientStorage(), which drops its unsynced writes",
+            uuid::Uuid::from_bytes(*version.as_bytes())
+        ),
+    )
+}
+
 pub(crate) fn authority_changed() -> Error {
     Error::new(
         ErrorCode::AuthorityChanged,
@@ -4009,6 +4021,12 @@ impl Inner {
         for (version, names, _) in &entries {
             match self.names.get(version) {
                 Some(local) if local == names => {}
+                // No authority ever confirmed this version's names here: the
+                // store minted them itself, opened without the lenses that
+                // lead to it (a client that dropped the app's migrations).
+                Some(_) if !self.names.confirmed(version) => {
+                    return Err(store_opened_without_migrations(version));
+                }
                 Some(_) => {
                     return Err(unsupported(format!(
                         "schema version {}, which this store stores otherwise than its upstream (it was opened without the app's lenses into it),",

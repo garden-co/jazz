@@ -273,6 +273,11 @@ type NativeDb = {
   /** How many local commits still wait for the server's verdict. */
   /** This store's uploads; see {@link UploadStatus}. */
   uploadStatus?(): UploadStatus;
+  /**
+   * A React Native foreground's scope store, deleted by its native relay
+   * (see `NativeForegroundDb.deleteNativeStore`), with the writes it dropped.
+   */
+  deleteNativeStore?(): { pendingUploads: number };
   nativeConnectionStatus?(): {
     configured: boolean;
     explicitlyOffline: boolean;
@@ -1599,6 +1604,26 @@ export class NativeRuntimeAdapter implements Runtime {
       return offlineLink("authority-changed", false);
     }
     return linkStatusFromUpstream(this.linkStatus);
+  }
+
+  /**
+   * Delete this runtime's local store, where its native host can (React
+   * Native's relay): `deleteClientStorage()`. The runtime is closed with it;
+   * the account stays, and the next client opens a fresh store.
+   */
+  canClearClientStorage(): boolean {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.canClearClientStorage();
+    return typeof this.db?.deleteNativeStore === "function";
+  }
+
+  async clearClientStorage(): Promise<{ pendingUploads: number }> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.clearClientStorage();
+    if (!this.db?.deleteNativeStore) {
+      throw new Error("Runtime does not support client storage reset.");
+    }
+    const deleted = this.db.deleteNativeStore();
+    this.closed = true;
+    return deleted;
   }
 
   /** This client's uploads: pending, since when, and the server's refusals. */
