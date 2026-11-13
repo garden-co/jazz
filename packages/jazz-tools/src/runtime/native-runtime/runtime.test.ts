@@ -33,6 +33,7 @@ import {
 import { encodeSchema } from "./schema-codec.js";
 import { createUpstreamLink } from "../testing/napi-runtime-test-utils.js";
 import { applySubscriptionDelta, SubscriptionManager } from "../subscription-manager.js";
+import { CoreTickFailedError } from "../core-tick-failed-error.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
 import { type TxId, type WriteReceipt } from "../client.js";
@@ -849,7 +850,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       schedule!("immediate");
       for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
       expect(authFailures).toHaveLength(1);
-      expect(thrown).toEqual([tickFailure]);
+      expect(thrown).toHaveLength(1);
+      expect(thrown[0]).toBeInstanceOf(CoreTickFailedError);
+      expect(thrown[0]).toMatchObject({ code: "core_tick_failed", cause: tickFailure });
     } finally {
       spy.mockRestore();
     }

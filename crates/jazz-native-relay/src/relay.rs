@@ -902,6 +902,17 @@ fn ensure_sqlite_store(path: &std::path::Path) -> Result<(), RelayError> {
     Ok(())
 }
 
+/// A relay store's config, for its persistent store and each session's.
+/// Like the client bindings' ([`binding_host::db_config`]), it has no chunk
+/// store, so a tick never runs chunk-store I/O (whose failures a later tick
+/// retries) and every tick error is treated as terminal by the JavaScript
+/// runtime (`core_tick_failed`). Adding a chunk store here means first
+/// giving hosts a way to tell those failures apart.
+fn relay_db_config(schema: JazzSchema, identity: DbIdentity, migrations: &Migrations) -> DbConfig {
+    DbConfig::new(schema, identity)
+        .with_migrations(migrations.schemas.clone(), migrations.lenses.clone())
+}
+
 impl RelayWorker {
     fn open(config: RelayOpenConfig) -> Result<Self, RelayError> {
         ensure_sqlite_store(&config.sqlite_path)?;
@@ -910,10 +921,7 @@ impl RelayWorker {
                 .map_err(|error| RelayError::Storage(error.to_string()))?;
         }
         let db = block_on(Db::open_at(
-            DbConfig::new(config.schema.clone(), config.identity).with_migrations(
-                config.migrations.schemas.clone(),
-                config.migrations.lenses.clone(),
-            ),
+            relay_db_config(config.schema.clone(), config.identity, &config.migrations),
             &config.sqlite_path,
             FileOptions::default(),
         ))
@@ -1018,12 +1026,11 @@ impl RelayWorker {
             .db
             .check_serves(identity.author)
             .map_err(|error| RelayError::Host(error.into()))?;
-        let db = block_on(Db::open(
-            DbConfig::new(self.schema.clone(), identity).with_migrations(
-                self.migrations.schemas.clone(),
-                self.migrations.lenses.clone(),
-            ),
-        ))
+        let db = block_on(Db::open(relay_db_config(
+            self.schema.clone(),
+            identity,
+            &self.migrations,
+        )))
         .map_err(|error| RelayError::Host(error.into()))?;
         // Continue after the node's previous holder: its transaction ids
         // were (seq, node), and the relay deduplicates by them.
@@ -2452,4 +2459,23 @@ pub enum RelayError {
     Drive(String),
     #[error("native relay socket: {0}")]
     Socket(String),
+}
+
+#[cfg(test)]
+mod relay_config_tests {
+    use super::*;
+
+    /// See [`relay_db_config`]: relay stores, like the bindings', have no
+    /// chunk store.
+    #[test]
+    fn relay_configs_have_no_chunk_store() {
+        let schema = JazzSchema::new(&jazz::tools::SchemaBuilder::new().build()).unwrap();
+        let identity = DbIdentity {
+            node: jazz::ids::NodeUuid::from_bytes([1; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let config = relay_db_config(schema, identity, &Migrations::default());
+        assert!(config.chunk_store.is_none());
+        assert!(!config.host_chunk_io);
+    }
 }
