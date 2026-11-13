@@ -67,23 +67,17 @@ anywhere else needs `https://`.
 | `insert <table> '<values>' [--id <id>]`            | Inserts a row                                                              |
 | `update <table> <id> '<values>'`                   | Changes a row's columns                                                    |
 | `delete <table> <id>`                              | Deletes a row                                                              |
-| `explain '<query json>' --as <user>`               | Which read policy allowed or denied each row for that user                 |
 | `sessions`                                         | Sync sessions connected to the backend instance that answers               |
 | `link ['<query json>'] [--table <t>] [--row <id>]` | An Inspector URL that opens on exactly this, with no credential in it      |
 
 Writes need a token that allows them, and change real data.
 
-Add `--as <user>` (your backend's user ID) to `query`, `get`, `insert`, `update`, `delete`,
-`explain` and `link` to run under that user's permissions, seeing and writing what they could.
+Add `--as <user>` (your backend's user ID) to `query`, `get`, `insert`, `update`, `delete` and
+`link` to run under that user's permissions, seeing and writing what they could.
 Without it, commands use the backend's authority and see every row. If your policies read
 `session.claims`, pass the user's claims too with `--claims '{"role":"manager"}'` (a JSON object;
 only with `--as`). Without them, policies see no claims, and answers carry a `warning` when that
 may matter.
-
-`explain` needs `--as`. Its answer lists the arms of the table's read policy (`clauses`, numbered
-from 0, each with its `text`, such as `owner = session.user`) and, for each row, whether it's
-`allowed` and `by` which clauses. A token limited to some tables gets neither the clauses' `text` nor `by`; for a table with redacted
-columns, `by` is left out. A table with branches, and a `history.<table>` query, can't be explained yet.
 
 ## The MCP server
 
@@ -94,18 +88,18 @@ for example to Claude Code:
 claude mcp add jazz -- npx jazz-tools inspect mcp --app https://my-app.com
 ```
 
-| Tool             | Arguments                                 | What it does                                                         |
-| :--------------- | :---------------------------------------- | :------------------------------------------------------------------- |
-| `whoami`         |                                           | Who the backend says the agent is, what it may do, the Inspector URL |
-| `request_access` | `write`, `ttlSeconds`, `tables`, `reason` | Asks a person to approve a token; returns the URL to give them       |
-| `schema`         |                                           | Tables, columns, history tables and permissions                      |
-| `query`          | `query`, `as`, `claims`                   | Runs a query                                                         |
-| `get`            | `table`, `id`, `as`, `claims`             | One row                                                              |
-| `history`        | `table`, `id`                             | Every version of a row                                               |
-| `write`          | `ops`, `as`, `claims`                     | Inserts, updates and deletes rows in one transaction                 |
-| `explain`        | `query`, `as`, `claims`                   | Which read policy allowed or denied each row                         |
-| `sessions`       |                                           | Connected sync sessions                                              |
-| `inspector_link` | `query`, `table`, `row`, `as`, `claims`   | An Inspector URL to show a person what the agent means               |
+| Tool             | Arguments                                 | What it does                                                                       |
+| :--------------- | :---------------------------------------- | :--------------------------------------------------------------------------------- |
+| `whoami`         |                                           | Who the backend says the agent is, what it may do, the Inspector URL               |
+| `request_access` | `write`, `ttlSeconds`, `tables`, `reason` | Asks a person to approve a token; returns the URL to give them                     |
+| `schema`         |                                           | Tables, columns, history tables and permissions                                    |
+| `query`          | `query`, `as`, `claims`                   | Runs a query                                                                       |
+| `get`            | `table`, `id`, `as`, `claims`             | One row                                                                            |
+| `history`        | `table`, `id`                             | Every version of a row                                                             |
+| `write`          | `ops`, `as`, `claims`                     | Inserts, updates and deletes rows in one transaction                               |
+| `explain`        | `query`, `as`, `claims`                   | Not supported yet (see [the Inspector](/docs/tooling/inspector#not-supported-yet)) |
+| `sessions`       |                                           | Connected sync sessions                                                            |
+| `inspector_link` | `query`, `table`, `row`, `as`, `claims`   | An Inspector URL to show a person what the agent means                             |
 
 An agent starts with `whoami`. If that fails with `unauthorized`, it calls `request_access` and gives
 the URL to a person. Once they approve in their browser, the token goes to the MCP server, which
