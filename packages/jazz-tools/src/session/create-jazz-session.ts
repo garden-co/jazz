@@ -406,7 +406,13 @@ export async function openBrowserSessionCore(
     initial: coreInitial(initial),
     // A memory-only client has no storage to wipe.
     clearOnSignOut: wipesOnSignOut,
-    ...(replicas ? { wipeSignedOut } : {}),
+    ...(replicas
+      ? {
+          wipeSignedOut,
+          // A thin tab holds no store: any hold is another tab's.
+          storeHeldElsewhere: (account: AccountHandle) => replicas.heldByATab(account.id),
+        }
+      : {}),
     openClient,
     decorate: followUser({
       registry,

@@ -1,4 +1,9 @@
-import { ensureAutomaticLocalFirst } from "../accounts/persistence.js";
+import {
+  ensureAutomaticLocalFirst,
+  keepDeviceKeyOnSignOut,
+  keptDeviceKey,
+} from "../accounts/persistence.js";
+import { NoKeptDeviceAccountError } from "./no-kept-device-account-error.js";
 import { admitBackendAccount, type AccountHandle, type AccountManager } from "../accounts/state.js";
 import type { JWTAuth, BackendAuth } from "../accounts/enrollment.js";
 import {
@@ -38,6 +43,7 @@ function stillUsable(client: unknown, cause: unknown): boolean {
 export type SessionCoreOperation =
   | "createLocalFirst"
   | "restoreLocalFirst"
+  | "reopenLocalFirst"
   | "loginWithBackend"
   | "linkWithBackend"
   | "logout"
@@ -54,6 +60,14 @@ export interface SessionCoreSnapshot<Client> {
 export interface SessionCoreActions {
   createLocalFirst(): Promise<void>;
   restoreLocalFirst(secret: string): Promise<void>;
+  /**
+   * Sign in again as the device account this device keeps that signed in
+   * most recently (a sign-out keeps its key; `clearOnSignOut` doesn't).
+   * Rejects with {@link NoKeptDeviceAccountError} when it keeps none.
+   */
+  reopenLocalFirst(): Promise<void>;
+  /** That kept device account's key, as this session last saw the device's store; `undefined` without one. */
+  keptLocalFirstKey(): string | undefined;
   /**
    * Sign in as whoever the app's own backend says is signed in. For apps that
    * mount Jazz with `createJazz`: the backend's `authenticate` decides, from
@@ -197,6 +211,13 @@ export async function createJazzSessionOwner<
    * when another tab still has the account open: that tab decides.
    */
   wipeSignedOut?(client: Client, account: AccountHandle): Promise<boolean | void>;
+  /**
+   * @internal With `clearOnSignOut`, whether another tab still has
+   * `account`'s local store open, asked when this tab had no local store to
+   * wipe (a thin client). Then, as when its wipe is held off, the
+   * device account's key is kept for the last tab out to decide.
+   */
+  storeHeldElsewhere?(account: AccountHandle): Promise<boolean>;
   /** Add host methods (e.g. `reauthenticate`) to the session before it is sealed. */
   decorate?(session: SessionCore<Client>): Extra;
 }): Promise<SessionCore<Client> & Extra> {
@@ -284,6 +305,10 @@ export async function createJazzSessionOwner<
     // signed-out state: on a shared device the app must know.
     let unfinishedWipe: Error | undefined;
     let wiped = false;
+    // Another tab still has the signed-out account's store open.
+    let heldElsewhere = false;
+    const previousSelected = signsOut ? selected : undefined;
+    let thinSignOut = false;
     await (detached ??
       detach({ status: "transitioning", account: selected, pending: operation }).done);
     if (token !== generation) throw superseded();
@@ -291,9 +316,17 @@ export async function createJazzSessionOwner<
       if (client) {
         // A thin client keeps nothing in the browser, so there is nothing to wipe.
         const thin = isThinDb((client as WipeableClient).db as Db);
+        thinSignOut = thin;
         if (signsOut && options.clearOnSignOut && !thin && options.wipeSignedOut && selected) {
           // False: another tab still has the account open, and decides.
-          wiped = (await options.wipeSignedOut(client, selected)) !== false;
+          try {
+            wiped = (await options.wipeSignedOut(client, selected)) !== false;
+          } catch (error) {
+            // Whether another tab still has the store is unknown: keep the key.
+            heldElsewhere = true;
+            throw error;
+          }
+          heldElsewhere = !wiped;
         } else if (signsOut && options.clearOnSignOut && !thin) {
           const db = (client as WipeableClient).db;
           // Upload what the server still accepts before wiping the rest.
@@ -354,6 +387,13 @@ export async function createJazzSessionOwner<
         );
       (client as WipeableClient).db?.markReplaced?.("signed-out");
       client = undefined;
+    }
+    if (token !== generation) throw superseded();
+    if (signsOut && options.clearOnSignOut && previousSelected) {
+      if (!heldElsewhere && thinSignOut && options.storeHeldElsewhere)
+        heldElsewhere = await options.storeHeldElsewhere(previousSelected).catch(() => true);
+      // The last tab out decides: this tab's sign-out keeps the key.
+      if (heldElsewhere) keepDeviceKeyOnSignOut(accounts);
     }
     if (token !== generation) throw superseded();
     try {
@@ -443,6 +483,13 @@ export async function createJazzSessionOwner<
       }
       return run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret));
     },
+    reopenLocalFirst: async () => {
+      // Looked up first: with none kept, the session goes on as it was.
+      const key = await keptDeviceKey(accounts).latest();
+      if (!key) throw new NoKeptDeviceAccountError("reopenDeviceAccount()");
+      return run("reopenLocalFirst", () => accounts.restoreLocalFirst(key));
+    },
+    keptLocalFirstKey: () => keptDeviceKey(accounts).known(),
     loginWithBackend: () => run("loginWithBackend", () => accounts.loginWithBackend()),
     linkWithBackend: () => run("linkWithBackend", () => accounts.linkWithBackend()),
     retry: () => run("retry", () => selected),

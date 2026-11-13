@@ -477,6 +477,10 @@ export function replicaLifecycle(options: {
         await release();
       }
     },
+    /** Whether a tab holds `account`'s store open (a look, taking no lock). */
+    heldByATab(account: string): Promise<boolean> {
+      return lockHeld(locks, registry, account);
+    },
     /**
      * This tab signed `account` out and closed its client (letting go of its
      * hold). As the last tab out it wipes now; while another tab holds the

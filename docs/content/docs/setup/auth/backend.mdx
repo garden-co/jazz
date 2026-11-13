@@ -500,9 +500,13 @@ same state and operations.
 
 ### Signing out and closing
 
-Signing out stays signed out until a user signs in again. It doesn't erase local data or revoke
-anything at your auth provider; you are still responsible for any clean-up your auth
-library requires. Device account keys stay on the device for recovery.
+Signing out stays signed out until a user signs in again, across reloads too: with
+`initial: "device"`, Jazz doesn't create a new device account over a sign-out. It doesn't erase
+local data or revoke anything at your auth provider; you are still responsible for any clean-up
+your auth library requires. A device account's key stays on the device, and
+`session.reopenDeviceAccount()` signs back in as it, with its data (see
+[Signing out of a device account](/docs/setup/auth/local-first#signing-out-of-a-device-account)).
+With `clearOnSignOut`, the key is forgotten and the data wiped.
 
 `session.signOut()` signs out of Jazz only. While your own auth still has the user signed in (its
 sign-out failed offline, say), Jazz signs them back in on its next answer from your backend: sign

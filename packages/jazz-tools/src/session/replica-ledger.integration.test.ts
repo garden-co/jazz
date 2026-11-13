@@ -134,7 +134,7 @@ async function setup(options: { guests?: boolean } = {}) {
         },
       }),
     });
-  return { jar, open, wiped, hold, storage, page };
+  return { jar, open, wiped, hold, storage, page, store };
 }
 
 /** Web Locks as a browser has them: every page of the test shares them. */
@@ -436,4 +436,34 @@ it("signs out when the sign-out's delete fails, says so, and finishes the wipe l
   const next = await open();
   cleanups.push(() => next.close());
   await expect.poll(() => wiped, { timeout: 15_000 }).toEqual(["alice"]);
+}, 60_000);
+
+// #5397 review: with clearOnSignOut, a guest's key is forgotten only by the
+// sign-out that wiped its store. A tab signing out while another still has
+// the guest open keeps the key, and the last tab out decides.
+it("keeps a guest's key while another tab has it open, and the last tab out forgets it and wipes", async () => {
+  stubWebLocks();
+  const { jar, open, wiped, store } = await setup({ guests: true });
+  jar.user = null;
+  const here = await open();
+  cleanups.push(() => here.close());
+  await here.createLocalFirst();
+  await expect.poll(() => isThinDb(here.getSnapshot().client!.db), { timeout: 15_000 }).toBe(false);
+  const guest = here.getSnapshot().account!.id;
+  const there = await open();
+  cleanups.push(() => there.close());
+  await expect.poll(() => there.getSnapshot().account?.id, { timeout: 15_000 }).toBe(guest);
+  await expect
+    .poll(() => isThinDb(there.getSnapshot().client!.db), { timeout: 15_000 })
+    .toBe(false);
+  const roots = async () => JSON.parse((await store.read()) ?? "{}").roots as string[];
+  const [root] = await roots();
+
+  await here.logout();
+  expect(wiped).toEqual([]);
+  expect(await roots()).toEqual([root]);
+  // The last tab out wipes, and only then is the key gone.
+  await there.logout();
+  expect(wiped).toHaveLength(1);
+  expect(await roots()).toEqual([]);
 }, 60_000);

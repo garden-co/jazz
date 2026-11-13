@@ -1046,6 +1046,12 @@ describe("a shared device (clearOnSignOut)", () => {
       client: async () => ({ createClient: createLocalFirstDb }),
     });
     cleanups.push(() => next.close());
+    // A sign-out lasts across reloads (E7), and nothing on the device holds
+    // Kim's root to reopen her with.
+    expect(next.getSnapshot().status).toBe("signed-out");
+    await expect(next.reopenLocalFirst()).rejects.toThrow(/keeps no device account/);
+    // The next person starts a guest of their own.
+    await next.createLocalFirst();
     expect(next.getSnapshot().client!.session!.user).not.toBe(account);
     expect(stored).not.toContain(root);
   }, 60_000);
