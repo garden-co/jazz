@@ -67,7 +67,7 @@ pub(crate) fn open_as(schema: JazzSchema, node: u8, author: AuthorSubject) -> St
 
 /// One subscription and the result its deltas maintain.
 pub(crate) struct Live {
-    name: String,
+    pub(crate) name: String,
     query: PreparedQuery,
     identity: Option<AuthorSubject>,
     stream: SubscriptionStream,
@@ -80,7 +80,7 @@ fn owned(row: &jazz::db::CurrentRow) -> Vec<(String, Option<Value>)> {
         .collect()
 }
 
-fn snapshot(rows: &[jazz::db::CurrentRow]) -> Snapshot {
+pub(crate) fn snapshot(rows: &[jazz::db::CurrentRow]) -> Snapshot {
     rows.iter().map(|r| (r.row_uuid(), owned(r))).collect()
 }
 

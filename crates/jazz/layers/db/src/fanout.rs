@@ -1068,6 +1068,17 @@ impl Inner {
     /// Wake the groups a commit's changed rows hit, re-run and diff them.
     pub(super) fn dispatch(&mut self, mut changes: Vec<(String, RowUuid, Vec<u8>)>) {
         changes.sort();
+        // Rows written more than once since the last dispatch (a
+        // transaction's repeated writes, a replica applying several
+        // pushes of one row in one tick): their history's previous version
+        // need not be the one the results last saw, so the images of a
+        // correlation or evidence match are not read for them, and every
+        // group watching their table that way wakes.
+        let repeated: BTreeSet<(String, RowUuid, Vec<u8>)> = changes
+            .windows(2)
+            .filter(|pair| pair[0] == pair[1])
+            .map(|pair| pair[0].clone())
+            .collect();
         changes.dedup();
         // Per woken group: the root rows that woke it, or `None` once any
         // other table's row did (then it re-runs).
@@ -1185,6 +1196,7 @@ impl Inner {
             } else {
                 self.stored_images(table, *row, key, &columns)
             };
+            let images = images.filter(|_| !repeated.contains(&(table.clone(), *row, key.clone())));
             related(table, *row, images.as_deref());
         }
         for image in &gone {
@@ -1240,6 +1252,7 @@ impl Inner {
                 .collect();
             columns.insert("_state".to_owned());
             let images = self.stored_images(table, *row, key, &columns);
+            let images = images.filter(|_| !repeated.contains(&(table.clone(), *row, key.clone())));
             evident(table, images.as_deref(), false);
         }
         for image in &gone {
