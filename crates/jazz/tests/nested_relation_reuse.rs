@@ -1121,3 +1121,473 @@ mod batched {
         assert_eq!(read.roots.len(), 20);
     }
 }
+
+mod branch_views {
+    //! Nested reads through a branch view composed over a base, live or
+    //! frozen: each branched table's source is its effective rows (head
+    //! rows, tombstones masking, then base rows the head does not
+    //! override), a `UNION ALL`. Rows the head overrides, deletes, adds or
+    //! moves to another parent, a read policy on the children, ordering
+    //! with ties and per-parent pages must read the same per parent and
+    //! batched.
+
+    use super::{MODES, agree, cells, id, set_mode};
+    use jazz::block_on;
+    use jazz::db::{
+        Db, DbConfig, DbIdentity, DeleteOptions, ExactWriteTarget, InsertOptions, ReadOpts,
+        SubscriptionEvent, UpdateOptions, WriteTarget,
+    };
+    use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+    use jazz::protocol::{BranchSelector, BranchViewBase};
+    use jazz::query::{ArraySubquery, OrderDirection, Query};
+    use jazz::records::Value;
+    use jazz::tools::{
+        CmpOp, ColumnType, PolicyExpr, PolicyValue, SchemaBuilder, TableSchemaBuilder,
+    };
+
+    use crate::common::{compile_schema, read_and_allow_all_writes};
+
+    const PEOPLE: usize = 4;
+    const POSTS: usize = 6;
+    const COMMENTS: usize = 18;
+
+    fn branch(byte: u8) -> BranchSelector {
+        BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+    }
+
+    fn base() -> BranchSelector {
+        branch(0xb1)
+    }
+
+    fn head() -> BranchSelector {
+        branch(0xb2)
+    }
+
+    fn reader() -> AuthorSubject {
+        AuthorSubject::for_test_bytes([0x77; 16])
+    }
+
+    fn person(n: usize) -> Value {
+        Value::Uuid(id(1, n % PEOPLE).0)
+    }
+
+    fn post(n: usize) -> Value {
+        Value::Uuid(id(5, n % POSTS).0)
+    }
+
+    /// Posts and comments are branched; people are not. Comments are
+    /// readable only where `visible`.
+    fn store() -> Db {
+        let visible = PolicyExpr::Cmp {
+            column: "visible".to_owned(),
+            op: CmpOp::Eq,
+            value: PolicyValue::Literal(jazz::tools::Value::Boolean(true)),
+        };
+        let schema = compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("people")
+                        .column("name", ColumnType::Text)
+                        .column("rank", ColumnType::Integer)
+                        .policies(read_and_allow_all_writes(PolicyExpr::True)),
+                )
+                .table(
+                    TableSchemaBuilder::new("posts")
+                        .column("branch_id", ColumnType::Uuid)
+                        .nullable_fk_column("author", "people")
+                        .column(
+                            "mentions",
+                            ColumnType::Array {
+                                element: Box::new(ColumnType::Uuid),
+                            },
+                        )
+                        .column("rank", ColumnType::Integer)
+                        .branch_by("branch_id")
+                        .policies(read_and_allow_all_writes(PolicyExpr::True)),
+                )
+                .table(
+                    TableSchemaBuilder::new("comments")
+                        .column("branch_id", ColumnType::Uuid)
+                        .fk_column("post", "posts")
+                        .nullable_fk_column("author", "people")
+                        .column("rank", ColumnType::Integer)
+                        .column("visible", ColumnType::Boolean)
+                        .branch_by("branch_id")
+                        .policies(read_and_allow_all_writes(visible)),
+                )
+                .build(),
+        );
+        let db = block_on(Db::open(DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x55; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        let insert = |table: &str, row: RowUuid, values, target| {
+            block_on(db.insert(
+                table,
+                values,
+                InsertOptions {
+                    row_id: Some(row),
+                    target,
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        };
+        for p in 0..PEOPLE {
+            insert(
+                "people",
+                id(1, p),
+                cells(vec![
+                    ("name", Value::String(format!("person {p}"))),
+                    ("rank", Value::I32((p % 2) as i32)),
+                ]),
+                ExactWriteTarget::default(),
+            );
+        }
+        for p in 0..POSTS {
+            let mentions = (0..p % 3).map(|k| person(p + 2 * k)).collect();
+            insert(
+                "posts",
+                id(5, p),
+                cells(vec![
+                    ("author", person(p)),
+                    ("mentions", Value::Array(mentions)),
+                    ("rank", Value::I32((p % 3) as i32)),
+                ]),
+                ExactWriteTarget::Branch(base()),
+            );
+        }
+        for c in 0..COMMENTS {
+            insert(
+                "comments",
+                id(6, c),
+                cells(vec![
+                    ("post", post(c)),
+                    ("author", person(c / 2)),
+                    // Ranks tie often: ties break by id.
+                    ("rank", Value::I32((c % 2) as i32)),
+                    ("visible", Value::Bool(c % 5 != 4)),
+                ]),
+                ExactWriteTarget::Branch(base()),
+            );
+        }
+        block_on(db.tick()).unwrap();
+        db
+    }
+
+    fn in_head() -> WriteTarget {
+        WriteTarget::BranchView {
+            head: head(),
+            base: Some(BranchViewBase::Current(base())),
+        }
+    }
+
+    /// The head's own changes over the base: a post's author and
+    /// mentions, a comment moved to another post, a comment re-ranked,
+    /// one hidden, one deleted (its tombstone masks the base row), and
+    /// one comment only the head has.
+    fn edit_head(db: &Db) {
+        let update = |table: &str, row: RowUuid, values| {
+            block_on(db.update(
+                table,
+                row,
+                values,
+                UpdateOptions {
+                    target: in_head(),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        };
+        update(
+            "posts",
+            id(5, 0),
+            cells(vec![
+                ("author", person(3)),
+                (
+                    "mentions",
+                    Value::Array(vec![person(2), person(2), person(1)]),
+                ),
+            ]),
+        );
+        update("comments", id(6, 1), cells(vec![("post", post(0))]));
+        update("comments", id(6, 2), cells(vec![("rank", Value::I32(7))]));
+        update(
+            "comments",
+            id(6, 3),
+            cells(vec![("visible", Value::Bool(false))]),
+        );
+        block_on(db.delete(
+            "comments",
+            id(6, 6),
+            DeleteOptions {
+                target: in_head(),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        block_on(db.insert(
+            "comments",
+            cells(vec![
+                ("post", post(0)),
+                ("author", person(1)),
+                ("rank", Value::I32(0)),
+                ("visible", Value::Bool(true)),
+            ]),
+            InsertOptions {
+                row_id: Some(id(6, 99)),
+                target: ExactWriteTarget::Branch(head()),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        block_on(db.tick()).unwrap();
+    }
+
+    /// Posts with their author, mentions and a page of their comments
+    /// (each with its author and its post's author); people with their
+    /// posts and those posts' comments.
+    fn queries() -> Vec<(&'static str, Query)> {
+        let person = |name: &str| ArraySubquery::new(name, "people", "id", name);
+        let comments = |offset, limit: Option<usize>| {
+            let mut comments = ArraySubquery::new("comments", "comments", "post", "id")
+                .order_by("rank", OrderDirection::Desc)
+                .offset(offset)
+                .nested(person("author"))
+                .nested(ArraySubquery::new("post", "posts", "id", "post").nested(person("author")));
+            if let Some(limit) = limit {
+                comments = comments.limit(limit);
+            }
+            comments
+        };
+        vec![
+            (
+                "posts, unpaged comments",
+                Query::from("posts")
+                    .order_by("rank", OrderDirection::Asc)
+                    .array_subquery(person("author"))
+                    .array_subquery(ArraySubquery::new("mentions", "people", "id", "mentions"))
+                    .array_subquery(comments(0, None)),
+            ),
+            (
+                "posts, paged comments",
+                Query::from("posts").array_subquery(comments(1, Some(2))),
+            ),
+            (
+                "people, their posts and comments",
+                Query::from("people").array_subquery(
+                    ArraySubquery::new("posts", "posts", "author", "id")
+                        .order_by("rank", OrderDirection::Desc)
+                        .nested(comments(0, Some(3))),
+                ),
+            ),
+        ]
+    }
+
+    /// The head over a live base, the head over the base frozen before
+    /// later base writes, the base alone and the head alone.
+    fn views(db: &Db) -> Vec<(&'static str, ReadOpts)> {
+        let frozen = block_on(db.capture_snapshot()).unwrap();
+        // Base writes after the snapshot: the live base sees them, the
+        // frozen one does not.
+        for (c, rank) in [(0, 5), (7, 9)] {
+            block_on(db.update(
+                "comments",
+                id(6, c),
+                cells(vec![("rank", Value::I32(rank))]),
+                UpdateOptions {
+                    target: WriteTarget::BranchView {
+                        head: base(),
+                        base: None,
+                    },
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        }
+        block_on(db.tick()).unwrap();
+        vec![
+            (
+                "head over live base",
+                ReadOpts::default().branch_view(head(), Some(BranchViewBase::Current(base()))),
+            ),
+            (
+                "head over frozen base",
+                ReadOpts::default()
+                    .branch_view(head(), Some(BranchViewBase::snapshot(base(), frozen))),
+            ),
+            ("base", ReadOpts::default().branch_view(base(), None)),
+            ("head alone", ReadOpts::default().branch_view(head(), None)),
+        ]
+    }
+
+    #[test]
+    fn one_shot_reads_agree_through_branch_views() {
+        let db = store();
+        edit_head(&db);
+        let views = views(&db);
+        for (view, opts) in &views {
+            for (what, query) in queries() {
+                let prepared = db.prepare_query(&query).unwrap();
+                let tree = agree(&format!("{view}, {what}"), || {
+                    block_on(db.all_result_tree(&prepared, opts.clone())).unwrap()
+                });
+                if *view != "head alone" {
+                    assert!(!tree.roots.is_empty(), "{view}, {what}: rows");
+                }
+            }
+        }
+    }
+
+    /// The head's edits show through the nested reads: post 0's comments
+    /// over the live base are the moved, added and inherited ones, ordered
+    /// by rank (descending, ties by id descending), without the deleted or
+    /// hidden ones.
+    #[test]
+    fn the_head_overrides_masks_and_moves_nested_rows() {
+        let db = store();
+        edit_head(&db);
+        let opts = ReadOpts::default().branch_view(head(), Some(BranchViewBase::Current(base())));
+        let query = Query::from("posts")
+            .array_subquery(
+                ArraySubquery::new("comments", "comments", "post", "id")
+                    .order_by("rank", OrderDirection::Desc),
+            )
+            .array_subquery(ArraySubquery::new("mentions", "people", "id", "mentions"));
+        let prepared = db.prepare_query(&query).unwrap();
+        let tree = agree("post 0", || {
+            block_on(db.all_result_tree(&prepared, opts.clone())).unwrap()
+        });
+        let post0 = tree
+            .roots
+            .iter()
+            .find(|node| node.row.row_uuid() == id(5, 0))
+            .expect("post 0");
+        let ids = |name: &str| -> Vec<RowUuid> {
+            let jazz::result_tree::ResultRelation::Array(nodes) = &post0.relations[name] else {
+                panic!("an array relation");
+            };
+            nodes.iter().map(|node| node.row.row_uuid()).collect()
+        };
+        // Post 0's base comments are 0, 6 and 12; the head moves 1 here,
+        // deletes 6 and adds 99. Ranks: 1 → 1, 0 → 0, 12 → 0, 99 → 0.
+        assert_eq!(ids("comments"), [id(6, 1), id(6, 99), id(6, 12), id(6, 0)]);
+        assert_eq!(ids("mentions"), [id(1, 2), id(1, 2), id(1, 1)]);
+    }
+
+    /// Live results through a head over its base, as a reader the
+    /// comments' policy applies to, on identical stores, one per path,
+    /// through edits in the head and in the base.
+    #[test]
+    fn live_results_agree_through_branch_views() {
+        for (what, query) in queries() {
+            let stores = MODES.map(|mode| (mode, store()));
+            let opts =
+                ReadOpts::default().branch_view(head(), Some(BranchViewBase::Current(base())));
+            let mut opened: Vec<_> = stores
+                .iter()
+                .map(|(mode, db)| {
+                    set_mode(*mode);
+                    let prepared = db.prepare_query(&query).unwrap();
+                    let mut subscription =
+                        block_on(db.subscribe_for_identity(&prepared, opts.clone(), reader()))
+                            .unwrap();
+                    block_on(db.tick()).unwrap();
+                    (drain(&mut subscription), subscription)
+                })
+                .collect();
+            for (mode, other) in MODES.iter().zip(&opened).skip(1) {
+                assert_eq!(opened[0].0, other.0, "{what}: opening, {mode:?}");
+            }
+            if what == "posts, unpaged comments" {
+                // The comments' policy hides some from the reader: an
+                // unrestricted read of the same view shows more.
+                let (_, db) = &stores[0];
+                let prepared = db.prepare_query(&query).unwrap();
+                let mut all = block_on(db.subscribe(&prepared, opts.clone())).unwrap();
+                block_on(db.tick()).unwrap();
+                assert_ne!(
+                    drain(&mut all).0,
+                    opened[0].0.0,
+                    "{what}: the policy hides some"
+                );
+            }
+            for step in 0..3 {
+                let mut deltas = Vec::new();
+                for ((mode, db), (_, subscription)) in stores.iter().zip(&mut opened) {
+                    set_mode(*mode);
+                    match step {
+                        0 => edit_head(db),
+                        1 => {
+                            block_on(db.update(
+                                "comments",
+                                id(6, 12),
+                                cells(vec![("rank", Value::I32(3))]),
+                                UpdateOptions {
+                                    target: WriteTarget::BranchView {
+                                        head: base(),
+                                        base: None,
+                                    },
+                                    ..Default::default()
+                                },
+                            ))
+                            .unwrap();
+                            block_on(db.tick()).unwrap();
+                        }
+                        _ => {
+                            block_on(db.update(
+                                "people",
+                                id(1, 1),
+                                cells(vec![("rank", Value::I32(5))]),
+                                UpdateOptions::default(),
+                            ))
+                            .unwrap();
+                            block_on(db.tick()).unwrap();
+                        }
+                    }
+                    deltas.push(drain(subscription));
+                }
+                for (mode, delta) in MODES.iter().zip(&deltas).skip(1) {
+                    assert_eq!(&deltas[0], delta, "{what}: step {step}, {mode:?}");
+                }
+            }
+        }
+        set_mode((true, true));
+    }
+
+    type Shown = Vec<(RowUuid, String)>;
+
+    fn drain(subscription: &mut jazz::db::SubscriptionStream) -> (Shown, Shown, Vec<RowUuid>) {
+        let shown = |rows: Vec<jazz::db::SubscriptionOutputRow>| -> Shown {
+            let mut rows: Shown = rows
+                .into_iter()
+                .map(|row| {
+                    let cells: Vec<_> = row.row.cells().collect();
+                    (row.row.row_uuid(), format!("{cells:?}"))
+                })
+                .collect();
+            rows.sort();
+            rows
+        };
+        let (mut added, mut updated, mut removed) = (Vec::new(), Vec::new(), Vec::new());
+        while let Some(event) = subscription.try_next_event() {
+            if let SubscriptionEvent::Delta {
+                added: a,
+                updated: u,
+                removed: r,
+                ..
+            } = event
+            {
+                added.extend(a);
+                updated.extend(u);
+                removed.extend(r.into_iter().map(|row| row.row_uuid));
+            }
+        }
+        removed.sort();
+        (shown(added), shown(updated), removed)
+    }
+}
