@@ -127,7 +127,12 @@ function browser() {
     if (locks.sharedHolders(lockName(account)) > 0)
       violations.push(`I1: deleted ${account} while a tab held it`);
     const store = stores.get(account);
-    if (account === guest.id && device.kept.has(guest.id) && !signingOut.has(account) && !store?.partial)
+    if (
+      account === guest.id &&
+      device.kept.has(guest.id) &&
+      !signingOut.has(account) &&
+      !store?.partial
+    )
       violations.push("I8: wiped a guest whose key the device keeps");
     if (heldNextDelete) {
       // A closing worker realm, or a tab of another build: nothing deleted.

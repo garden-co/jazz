@@ -121,9 +121,7 @@ export function replicaLedger(registry: string) {
         // Unreadable storage records nothing.
       }
       for (const owner of legacyOwners()) if (isIdentified(owner)) accounts.add(owner.account);
-      return [...accounts]
-        .map(get)
-        .filter((entry): entry is ReplicaEntry => entry !== undefined);
+      return [...accounts].map(get).filter((entry): entry is ReplicaEntry => entry !== undefined);
     },
     get,
     /** `entry`'s account is about to keep a store here. A wipe already marked stays marked. */
@@ -148,9 +146,7 @@ export function replicaLedger(registry: string) {
       try {
         storage()?.removeItem(prefix + account);
         const owners = legacyOwners();
-        const kept = owners.filter(
-          (owner) => !(isIdentified(owner) && owner.account === account),
-        );
+        const kept = owners.filter((owner) => !(isIdentified(owner) && owner.account === account));
         if (kept.length === owners.length) return;
         if (kept.length === 0) storage()?.removeItem(legacy);
         else storage()?.setItem(legacy, JSON.stringify(kept));
