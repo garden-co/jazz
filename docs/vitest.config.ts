@@ -13,6 +13,7 @@ export default defineConfig({
       "lib/sidebar-rules.test.ts",
       "lib/bundle-sizes/**/*.test.ts",
       "lib/llm-text.test.ts",
+      "lib/quickstart-links.test.ts",
     ],
     exclude: ["**/node_modules/**", "**/.next/**"],
   },
