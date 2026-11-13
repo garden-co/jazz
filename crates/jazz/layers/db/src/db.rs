@@ -8556,6 +8556,9 @@ enum BatchKind {
 struct ReadRecord {
     prepared: PreparedQuery,
     include_deleted: bool,
+    /// The session the read ran as (`None`: unrestricted), which its rows
+    /// are listed and revalidated under.
+    reader: Option<AuthorSubject>,
     rows: Vec<(RowUuid, sync::Rank)>,
 }
 
@@ -9245,7 +9248,7 @@ impl Db {
                         include_deleted: read.include_deleted,
                         ..ReadSpec::default()
                     };
-                    let now = inner.read_versions(&read.prepared, batch.reader(), &spec)?;
+                    let now = inner.read_versions(&read.prepared, read.reader, &spec)?;
                     let changed = now.len() != read.rows.len()
                         || now.iter().zip(&read.rows).any(|(now, then)| {
                             now.0 != then.0
@@ -9319,7 +9322,7 @@ impl Db {
                     include_deleted: read.include_deleted,
                     ..ReadSpec::default()
                 };
-                if inner.read_versions(&read.prepared, batch.reader(), &spec)? != read.rows {
+                if inner.read_versions(&read.prepared, read.reader, &spec)? != read.rows {
                     return Err(conflict(
                         "a row read by the transaction changed since its snapshot",
                     ));
@@ -9710,6 +9713,7 @@ impl Db {
         id: OpenTransactionId,
         prepared: &PreparedQuery,
         include_deleted: bool,
+        reader: Option<AuthorSubject>,
     ) -> Result<(), Error> {
         // A mergeable read records nothing: peek without the store gate,
         // so the batch's cached overlay stays for its next stage or read.
@@ -9723,22 +9727,19 @@ impl Db {
             return Ok(());
         }
         let mut inner = self.inner();
-        let Some(
-            batch @ Batch {
-                kind: BatchKind::Serializable { snapshot, own, .. },
-                ..
-            },
-        ) = inner.batches.get(&id)
+        let Some(Batch {
+            kind: BatchKind::Serializable { snapshot, own, .. },
+            ..
+        }) = inner.batches.get(&id)
         else {
             return Ok(());
         };
-        let identity = batch.reader();
         let read = ReadSpec {
             include_deleted,
             cut: Some(inner.serializable_cut(*snapshot, own)?),
             ..ReadSpec::default()
         };
-        let rows = inner.read_versions(prepared, identity, &read)?;
+        let rows = inner.read_versions(prepared, reader, &read)?;
         if let Some(Batch {
             kind: BatchKind::Serializable { reads, pinned, .. },
             ..
@@ -9750,6 +9751,7 @@ impl Db {
             reads.push(ReadRecord {
                 prepared: prepared.clone(),
                 include_deleted,
+                reader,
                 rows,
             });
         }
@@ -10047,7 +10049,7 @@ impl TxRef<'_> {
                 })
             })
             .await?;
-        self.db.record_read(self.id, prepared, include_deleted)?;
+        self.db.record_read(self.id, prepared, include_deleted, identity)?;
         Ok(rows)
     }
 

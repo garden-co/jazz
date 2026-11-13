@@ -571,3 +571,52 @@ fn read_only_commits_preserve_session_identity_and_connection_trust() {
         assert_eq!(session, &claims("alice"));
     }
 }
+
+/// A SYSTEM backend's unbound serializable transaction reads as Alice over
+/// a query that also matches Bob's rows, writes as Alice, and uploads over
+/// a trusted link. Nothing it read changes, so the authority must accept it.
+/// `as_alice`: the reads name Alice; otherwise they read as the backend.
+#[test]
+fn unbound_session_writes_over_a_trusted_link_commit_without_a_spurious_conflict() {
+    for as_alice in [true, false] {
+        let server = open(1, AuthorSubject::SYSTEM);
+        server.set_authority();
+        seed(&server);
+        let replica = open(2, AuthorSubject::SYSTEM);
+        connect(&replica, &server, AuthorSubject::SYSTEM);
+        let tx = OpenTransactionId::new();
+        block_on(replica.begin_serializable(tx)).unwrap();
+        let query = replica.prepare_query(&Query::from("notes")).unwrap();
+        let rows = drive(
+            &replica,
+            &server,
+            replica.tx_ref(tx).all_prepared_at(
+                &query,
+                false,
+                as_alice.then(|| author("alice")),
+                ReadTier::Remote,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            bodies(rows),
+            if as_alice { vec!["alice"] } else { vec!["alice", "bob"] }
+        );
+        block_on(replica.tx_ref(tx).insert(
+            "notes",
+            cells("alice", "written"),
+            InsertOptions {
+                identity: WriteIdentity::Session(author("alice")),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        let receipt = commit(&replica, tx, true).unwrap();
+        drive(
+            &replica,
+            &server,
+            replica.wait_for_transaction(receipt.0, DurabilityTier::Global),
+        )
+        .unwrap_or_else(|e| panic!("as_alice={as_alice}: {e:?}"));
+    }
+}
