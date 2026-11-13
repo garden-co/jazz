@@ -304,7 +304,13 @@ export async function createJazzSessionOwner<
         thinSignOut = thin;
         if (signsOut && options.clearOnSignOut && !thin && options.wipeSignedOut && selected) {
           // False: another tab still has the account open, and decides.
-          wiped = (await options.wipeSignedOut(client, selected)) !== false;
+          try {
+            wiped = (await options.wipeSignedOut(client, selected)) !== false;
+          } catch (error) {
+            // Whether another tab still has the store is unknown: keep the key.
+            heldElsewhere = true;
+            throw error;
+          }
           heldElsewhere = !wiped;
         } else if (signsOut && options.clearOnSignOut && !thin) {
           const db = (client as WipeableClient).db;

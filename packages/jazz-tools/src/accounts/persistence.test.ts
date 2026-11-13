@@ -875,3 +875,25 @@ it("keeps the key of a clearOnSignOut sign-out whose wipe another tab held off, 
   await accounts.settleSelection();
   expect(store.value()).not.toContain(guestRoot(1));
 });
+
+it("keeps the key of a clearOnSignOut sign-out whose wipe failed: whether another tab holds the store is unknown", async () => {
+  const store = storeWith(null);
+  const accounts = await deviceAccounts(store, guestRoot(1), false);
+  accounts.createLocalFirst();
+  await accounts.settleSelection();
+  // The client is closed by then: the failure is the wipe's, after teardown.
+  const client = { db: { isUsable: () => false, markReplaced: vi.fn() }, shutdown: vi.fn() };
+  const session = await createJazzSessionOwner({
+    accounts,
+    clearOnSignOut: true,
+    openClient: async () => client,
+    wipeSignedOut: async () => {
+      throw new Error("the client's shutdown failed");
+    },
+  });
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  await session.logout();
+  error.mockRestore();
+  expect(session.getSnapshot().status).toBe("signed-out");
+  expect(JSON.parse(store.value()!).roots).toEqual([guestRoot(1)]);
+});
