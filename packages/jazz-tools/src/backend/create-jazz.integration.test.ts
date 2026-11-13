@@ -43,6 +43,7 @@ import {
 } from "./index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 import { requestBackendSignIn, requestBackendUser } from "../accounts/registry-client.js";
+import { signedInIdentity } from "../session/follow-user.js";
 import {
   encodeWebSocketFrameBatch,
   encodeWireClientHello,
@@ -957,6 +958,50 @@ describe("createJazz", () => {
     await expect(jazz.forReqUser(request())).rejects.toThrow(/has no Jazz account yet/);
   });
 
+  it("answers a signed-out backend-user probe with 200 and no user, and every client reads it as signed out (#5171)", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: false });
+    const registry = `${origin}/jazz/apps/${jazz.appId}/accounts`;
+
+    // Before: 401 signed_out, a red line in devtools on every signed-out
+    // page load. Now: an answer saying no one is signed in.
+    const probe = await fetch(`${registry}/backend-user`, { method: "POST" });
+    expect(probe.status).toBe(200);
+    expect(probe.headers.get("cache-control")).toBe("no-store");
+    const body = (await probe.json()) as { identity?: unknown };
+    expect(body).toEqual({ user: null });
+
+    // An alpha.60/61 client (`if (!answer.identity) return null`) reads it
+    // as signed out, as it read the 401.
+    expect(body.identity).toBeFalsy();
+    // So does this one.
+    await expect(signedInIdentity(registry)).resolves.toBeNull();
+
+    // The routes that do something keep refusing a signed-out request.
+    for (const route of ["backend-sign-in", "backend-link", "backend-link/challenge"]) {
+      const refused = await fetch(`${registry}/${route}`, { method: "POST" });
+      expect({ route, status: refused.status }).toEqual({ route, status: 401 });
+      expect(await refused.text()).toBe("signed_out");
+    }
+
+    // A backend still on alpha.61 or earlier answers 401: still signed out.
+    const oldBackend = (async () =>
+      new Response("signed_out", { status: 401 })) as unknown as typeof fetch;
+    await expect(signedInIdentity(registry, oldBackend)).resolves.toBeNull();
+    // And a signed-in answer still names the user.
+    const signedIn = (async (input: RequestInfo | URL, init?: RequestInit) =>
+      fetch(input, {
+        ...init,
+        headers: { "x-test-user": "alice" },
+      })) as typeof fetch;
+    await expect(signedInIdentity(registry, signedIn)).resolves.toMatchObject({
+      issuer: "jazz:backend",
+      subject: "alice",
+      hasAccount: false,
+    });
+  });
+
   it("tells the browser by a stable code that authenticate returned no expiresAt, and the client names the fix", async () => {
     let answer: unknown = { userId: "alice", internal: "secret-session-detail" };
     const jazz = await createJazz({
@@ -1216,7 +1261,7 @@ describe("createJazz", () => {
     const backendUser = await fetch(`${origin}/jazz/apps/${jazz.appId}/accounts/backend-user`, {
       method: "POST",
     });
-    expect(backendUser.status).toBe(401);
+    expect(await backendUser.json()).toEqual({ user: null });
     await expect(jazz.accountFor(new Request("http://app/x"))).resolves.toBeNull();
 
     // And its sync session is let in.
@@ -1592,7 +1637,7 @@ describe("createJazz", () => {
         },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
-    expect((await post("backend-user")).status).toBe(401);
+    expect(await (await post("backend-user")).json()).toEqual({ user: null });
     // Asked as often as a page focuses, it never assigns an account.
     for (let i = 0; i < 2; i++) {
       const answer = (await (await post("backend-user", "alice")).json()) as {

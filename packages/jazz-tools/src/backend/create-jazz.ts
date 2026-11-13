@@ -1700,12 +1700,17 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    * `authenticate` names, and whether the core already holds an account for
    * them. A browser's session asks this to follow the backend; only a sign-in
    * (`backend-sign-in`) or a link (`backend-link`) assigns an account, so a
-   * local-first guest whose user has none yet can still link to them.
+   * local-first guest whose user has none yet can still link to them. No one
+   * signed in answers 200 `{ user: null }`, not 401.
    */
   async function backendUser(request: Request): Promise<Response> {
     if (request.method !== "POST") return new Response(null, { status: 405 });
     const user = await authenticate(request);
-    if (!user) return new Response("signed_out", { status: 401 });
+    // No one signed in is an answer, not a refused request: 200, so a
+    // signed-out page load logs no red 4xx in devtools. The body has no
+    // `identity`, which every client (alpha.60 on) reads as signed out.
+    // Clients still read a 401 as signed out too, for older backends.
+    if (!user) return Response.json({ user: null }, { headers: { "Cache-Control": "no-store" } });
     let account: string | null;
     try {
       account = await existingAccountOf(user.userId);
