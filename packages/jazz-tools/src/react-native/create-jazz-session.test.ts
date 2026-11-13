@@ -3,6 +3,7 @@ import { AccountManager } from "../accounts/state.js";
 import { makeFakeAccount } from "../react-core/test-utils.js";
 import { openNativeSessionCore as createNativeSession } from "./create-jazz-session.js";
 import { openNativeSessionCore as createExpoSession } from "../expo/create-jazz-session.js";
+import { ownJazzSession } from "../session/jazz-session.js";
 
 const mocks = vi.hoisted(() => ({
   nativeAccounts: vi.fn(),
@@ -17,24 +18,41 @@ vi.mock("./create-jazz-client.js", () => ({ openJazzClient: mocks.client }));
 // unless a test names a user.
 let backendUser: { issuer: string; subject: string } | null = null;
 let backendUserAnswer: Promise<void> | undefined;
+// A failing backend: `backend-user` answers this code with a 500.
+let backendFailure: string | undefined;
+// How the backend says no one is signed in: 200 with no user (alpha.62 on),
+// or 401 (alpha.61 and earlier).
+let signedOutAs: 200 | 401 = 200;
 beforeEach(() => {
   vi.resetAllMocks();
   backendUser = null;
   backendUserAnswer = undefined;
+  backendFailure = undefined;
+  signedOutAs = 200;
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (url: string) => {
-      if (!String(url).endsWith("/backend-user")) return new Response("not_found", { status: 404 });
+    vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (!url.endsWith("/backend-user")) return new Response("not_found", { status: 404 });
       await backendUserAnswer;
-      if (!backendUser) return new Response("signed_out", { status: 401 });
+      if (backendFailure) return new Response(backendFailure, { status: 500 });
+      if (!backendUser)
+        return signedOutAs === 401
+          ? new Response("signed_out", { status: 401 })
+          : Response.json({ user: null });
       return Response.json({ identity: backendUser, account: "account-of-alice" });
     }),
   );
 });
 afterEach(() => vi.unstubAllGlobals());
-for (const [host, create, prepare] of [
-  ["React Native", createNativeSession, mocks.nativeAccounts],
-  ["Expo", createExpoSession, mocks.expoAccounts],
+// Each host's own options: React Native takes an account `store`, Expo keeps
+// accounts in its secure store and takes a `profile` instead. (Typed as React
+// Native's: a call through either factory type-checks against both configs.)
+const nativeStore = { store: { read: async () => null, update: async () => {} } };
+const expoProfile = { profile: "personal" } as unknown as typeof nativeStore;
+for (const [host, create, prepare, own] of [
+  ["React Native", createNativeSession, mocks.nativeAccounts, nativeStore],
+  ["Expo", createExpoSession, mocks.expoAccounts, expoProfile],
 ] as const) {
   describe(`${host} session factory`, () => {
     it("prepares once, restores selection, and reuses host configuration after logout", async () => {
@@ -56,9 +74,8 @@ for (const [host, create, prepare] of [
         scope: "app-1",
         serverUrl: "https://jazz.example.com",
         initial: "device" as const,
-        profile: "personal",
         env: "test",
-        store: { read: async () => null, update: async () => {} },
+        ...own,
       };
       const session = await create(config);
       expect(prepare).toHaveBeenCalledExactlyOnceWith(config);
@@ -85,7 +102,7 @@ for (const [host, create, prepare] of [
       const session = await create({
         scope: "app-1",
         serverUrl: "https://jazz.example.com",
-        store: { read: async () => null, update: async () => {} },
+        ...own,
       });
       expect(session.getSnapshot().status).toBe("signed-out");
       expect(mocks.client).not.toHaveBeenCalled();
@@ -108,7 +125,7 @@ for (const [host, create, prepare] of [
       const session = await create({
         scope: "app-1",
         serverUrl: "https://jazz.example.com",
-        store: { read: async () => null, update: async () => {} },
+        ...own,
       });
       expect(session.getSnapshot().status).toBe("ready");
       expect(session.getSnapshot().account).toBe(alice);
@@ -116,8 +133,44 @@ for (const [host, create, prepare] of [
       await session.close();
     });
 
+    it("asks the backend who is signed in with the app's bearer", async () => {
+      // A backend that authenticates by bearer, not cookie, answers only a
+      // request that carries it.
+      const alice = makeFakeAccount();
+      const accounts = new AccountManager({
+        createLocalFirst: () => makeFakeAccount(),
+        restoreLocalFirst: () => makeFakeAccount(),
+        loginWithBackend: async () => alice,
+        logout: vi.fn(),
+      });
+      prepare.mockResolvedValue(accounts);
+      mocks.client.mockResolvedValue({ shutdown: async () => {} });
+      backendUser = { issuer: "jazz:backend", subject: "alice" };
+      const session = await create({
+        scope: "app-1",
+        serverUrl: "https://jazz.example.com",
+        ...own,
+        bearer: async () => "bearer-of-alice",
+      });
+      const asked = vi
+        .mocked(fetch)
+        .mock.calls.map(([input]) => input)
+        .filter((input) =>
+          String(input instanceof Request ? input.url : input).endsWith("/backend-user"),
+        );
+      expect(asked).not.toHaveLength(0);
+      for (const request of asked) {
+        expect(request instanceof Request ? request.headers.get("authorization") : null).toBe(
+          "Bearer bearer-of-alice",
+        );
+      }
+      expect(session.getSnapshot().status).toBe("ready");
+      await session.close();
+    });
+
     it("opens signed out once the backend says no one is signed in, or can't be asked", async () => {
-      for (const answer of ["signed-out", "offline"] as const) {
+      for (const answer of ["signed-out", "signed-out-401", "offline"] as const) {
+        signedOutAs = answer === "signed-out-401" ? 401 : 200;
         const accounts = new AccountManager({
           createLocalFirst: () => makeFakeAccount(),
           restoreLocalFirst: () => makeFakeAccount(),
@@ -130,7 +183,7 @@ for (const [host, create, prepare] of [
         const session = await create({
           scope: "app-1",
           serverUrl: "https://jazz.example.com",
-          store: { read: async () => null, update: async () => {} },
+          ...own,
         });
         expect(fetch).toHaveBeenCalled();
         expect(session.getSnapshot().status).toBe("signed-out");
@@ -157,7 +210,7 @@ for (const [host, create, prepare] of [
         scope: "app-1",
         serverUrl: "https://jazz.example.com",
         initial: "device",
-        store: { read: async () => null, update: async () => {} },
+        ...own,
       });
       expect(session.getSnapshot().status).toBe("ready");
       expect(session.getSnapshot().account).toBe(retained);
@@ -176,9 +229,8 @@ for (const [host, create, prepare] of [
       });
       prepare.mockResolvedValue(accounts);
       mocks.client.mockResolvedValue({ shutdown: vi.fn(async () => {}) });
-      const store = { read: async () => null, update: async () => {} };
       // No `initial` needed: a device-only session always opens this device's account.
-      const session = await create({ serverUrl: null, store });
+      const session = await create({ serverUrl: null, ...own });
       expect(session.getSnapshot().status).toBe("ready");
       expect(session.getSnapshot().account).toBe(guest);
       // The client gets no server at all.
@@ -191,18 +243,75 @@ for (const [host, create, prepare] of [
     });
 
     it("refuses a signed-out device-only start before preparing accounts", async () => {
-      const store = { read: async () => null, update: async () => {} };
-      await expect(create({ serverUrl: null, store, initial: "signed-out" })).rejects.toThrow(
+      await expect(create({ serverUrl: null, ...own, initial: "signed-out" })).rejects.toThrow(
         /no backend to sign in through/,
       );
       expect(prepare).not.toHaveBeenCalled();
     });
 
     it("refuses an appId: the app id is the backend's", async () => {
-      const store = { read: async () => null, update: async () => {} };
       await expect(
-        create({ appId: "app-1", serverUrl: "https://jazz.example.com", store } as never),
+        create({ appId: "app-1", serverUrl: "https://jazz.example.com", ...own } as never),
       ).rejects.toThrow(/takes no appId/);
+      expect(prepare).not.toHaveBeenCalled();
+    });
+
+    it("shows a failed refresh on the snapshot, keeping the signed-in user's client", async () => {
+      // Adopter round 2: authenticate returned no expiresAt for a signed-in
+      // user; refresh() rejected and the session showed nothing.
+      const alice = { ...makeFakeAccount(), identity: { issuer: "provider", subject: "alice" } };
+      const accounts = new AccountManager(
+        {
+          createLocalFirst: () => makeFakeAccount(),
+          restoreLocalFirst: () => makeFakeAccount(),
+          loginWithBackend: async () => alice as never,
+          logout: vi.fn(),
+        },
+        alice as never,
+      );
+      prepare.mockResolvedValue(accounts);
+      const client = { shutdown: async () => {} };
+      mocks.client.mockResolvedValue(client);
+      backendUser = alice.identity;
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const session = ownJazzSession(
+        { scope: "app-1", serverUrl: "https://jazz.example.com", ...own },
+        create as never,
+      );
+      await vi.waitFor(() => expect(session.getSnapshot().status).toBe("ready"));
+      backendFailure = "authenticate_expires_at_missing";
+      const failed = await session.refresh().then(
+        () => undefined,
+        (error: Error) => error,
+      );
+      expect(failed?.message).toBe("Jazz could not ask your backend who is signed in");
+      expect((failed?.cause as Error | undefined)?.message).toMatch(
+        /^authenticate_expires_at_missing: /,
+      );
+      expect(session.getSnapshot()).toMatchObject({
+        status: "ready",
+        client,
+        user: { identity: { subject: "alice" } },
+        error: failed,
+        recovery: "action",
+      });
+      // Retrying asks the backend again; once it answers, the error clears.
+      backendFailure = undefined;
+      await session.retry();
+      expect(session.getSnapshot().error).toBeUndefined();
+      await session.close();
+      errors.mockRestore();
+    });
+
+    it("refuses a missing config and unknown options before preparing accounts", async () => {
+      await expect((create as (config?: unknown) => Promise<unknown>)()).rejects.toThrow(
+        /createJazzClient needs a config object.*got nothing\. Options: .*nativeRelay.*serverUrl/,
+      );
+      await expect(
+        create({ serverUrl: "https://jazz.example.com", ...own, guest: true } as never),
+      ).rejects.toThrow(
+        /has no option "guest": guests are device accounts: use `initial: "device"`/,
+      );
       expect(prepare).not.toHaveBeenCalled();
     });
   });

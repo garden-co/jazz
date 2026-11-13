@@ -37,3 +37,15 @@ export {
   type UseJazzSessionResult,
   type JazzSessionViewProps,
 } from "../react-core/session.js";
+
+// Removed in alpha.61: stubs that throw, naming the replacement (one release).
+export {
+  AccountManager,
+  JazzSessionProvider,
+  createAccountManager,
+  exportLocalFirstSecret,
+  useAccountState,
+  useJazzAuth,
+  useJazzSessionOwner,
+  useLocalFirstAuth,
+} from "../removed-api.js";

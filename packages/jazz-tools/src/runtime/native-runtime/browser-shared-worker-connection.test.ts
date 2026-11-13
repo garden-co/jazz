@@ -6,6 +6,7 @@ import {
   SharedBrowserWorkerConnection,
 } from "./browser-shared-worker-connection.js";
 import { BrowserWorkerUnresponsiveError } from "./browser-worker-protocol.js";
+import { BrowserWorkerScriptLoadError } from "./broker-worker-load-failure.js";
 
 type LeaseMessage =
   | { type: "probe-foreground-node-lease-worker"; attemptId: string }
@@ -1111,6 +1112,223 @@ describe("browser SharedWorker realm identity", () => {
 
     expect(current).not.toBe(next);
     expect(current).toContain('"protocolVersion":"jazz-shared-runtime-v2"');
+  });
+});
+
+/**
+ * A SharedWorker whose script never loads, as every engine reports it: the
+ * port accepts messages that nothing will ever answer, and the worker object
+ * fires `error` (when `failAfterMs` is not null).
+ */
+function stubUnloadableSharedWorker(failAfterMs: number | null | Array<number | null> = 0) {
+  const ports: ScriptedRuntimePort[] = [];
+  const urls: string[] = [];
+  vi.stubGlobal(
+    "SharedWorker",
+    class extends EventTarget {
+      readonly port = new ScriptedRuntimePort(() => undefined);
+
+      constructor(url: URL | string) {
+        super();
+        const delay = Array.isArray(failAfterMs) ? failAfterMs[ports.length] : failAfterMs;
+        ports.push(this.port);
+        urls.push(String(url));
+        if (delay !== null && delay !== undefined) {
+          setTimeout(() => this.dispatchEvent(new Event("error")), delay);
+        }
+      }
+    },
+  );
+  return { ports, urls };
+}
+
+describe("broker worker that never starts", () => {
+  it("rejects the foreground lease as soon as the worker script fails to load", async () => {
+    vi.useFakeTimers();
+    const { ports } = stubUnloadableSharedWorker(5);
+
+    const acquire = SharedBrowserForegroundNodeLease.acquire({
+      dbName: "unloadable-worker-root",
+      storageOwner: "owner",
+    });
+    const rejected = expect(acquire).rejects.toBeInstanceOf(BrowserWorkerScriptLoadError);
+    // Well before the ten-second admission timeout.
+    await vi.advanceTimersByTimeAsync(10);
+    await rejected;
+    await expect(acquire).rejects.toThrow(
+      "Jazz's browser worker script did not load. Your bundler or server did not serve jazz-tools' dist/worker/jazz-broker-worker.js as JavaScript",
+    );
+    expect(ports).toHaveLength(1);
+    expect(ports[0]!.closed).toBe(true);
+  });
+
+  it("names the configured worker URL and the HTML page the server answered with", async () => {
+    vi.useFakeTimers();
+    stubUnloadableSharedWorker(0);
+    const fetched: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      fetched.push(url);
+      return new Response("<!doctype html><html></html>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    });
+
+    const acquire = SharedBrowserForegroundNodeLease.acquire({
+      dbName: "html-worker-root",
+      storageOwner: "owner",
+      runtimeSources: {
+        brokerWorkerUrl: "https://app.example/assets/jazz-broker-worker.js",
+        wasmVersion: "build-1",
+      },
+    });
+    const rejected = expect(acquire).rejects.toThrow(
+      "Jazz's browser worker script https://app.example/assets/jazz-broker-worker.js?jazz-runtime-version=build-1 did not load: the server answered with an HTML page (HTTP 200) instead of JavaScript.",
+    );
+    await vi.advanceTimersByTimeAsync(1);
+    await rejected;
+    expect(fetched).toEqual([
+      "https://app.example/assets/jazz-broker-worker.js?jazz-runtime-version=build-1",
+    ]);
+  });
+
+  it("releases a timed-out admission's retained cleanup once the worker reports it never started", async () => {
+    vi.useFakeTimers();
+    // The load failure arrives only after the admission timeout.
+    const { ports } = stubUnloadableSharedWorker([10_500, 5]);
+    const options = { dbName: "late-load-failure-root", storageOwner: "owner" };
+
+    const first = SharedBrowserForegroundNodeLease.acquire(options);
+    const firstRejected = expect(first).rejects.toThrow("did not issue a foreground node lease");
+    await vi.advanceTimersByTimeAsync(10_000);
+    await firstRejected;
+    await expect(SharedBrowserForegroundNodeLease.acquire(options)).rejects.toThrow(
+      "cancellation cleanup is still pending",
+    );
+    expect(ports[0]!.closed).toBe(false);
+
+    // No realm ever ran, so no late lease can exist: nothing is left to retain.
+    await vi.advanceTimersByTimeAsync(500);
+    expect(ports[0]!.closed).toBe(true);
+    const second = SharedBrowserForegroundNodeLease.acquire(options);
+    const secondRejected = expect(second).rejects.toBeInstanceOf(BrowserWorkerScriptLoadError);
+    await vi.advanceTimersByTimeAsync(10);
+    await secondRejected;
+  });
+
+  it("rejects runtime readiness at once instead of after the five-minute startup grace", async () => {
+    vi.useFakeTimers();
+    const { ports } = stubUnloadableSharedWorker(5);
+    const onFailure = vi.fn();
+    const connection = new SharedBrowserWorkerConnection(
+      {
+        connectUpstreamPeer: () => ({ recvWireFrames: () => [] }),
+        onPeerTransportWork: () => () => undefined,
+        onLocalSettlementChange: () => () => undefined,
+        progressPeerTransport: async () => undefined,
+        retirePeerTransport: async () => undefined,
+        reportRemoteServerTransportError: vi.fn(),
+        reportRemoteMutationError: vi.fn(),
+        flushLocalSettlements: async () => undefined,
+      } as never,
+      {
+        schema: {},
+        dbName: "unloadable-runtime-root",
+        author: new Uint8Array(16),
+        initialSyncFlushEvery: 1,
+        appId: "app",
+        storageOwner: "owner",
+        authSessionKey: "scope",
+        authJson: "{}",
+        sessionClaims: {},
+      },
+      "runtime-fingerprint",
+      {
+        onAuthFailure: vi.fn(),
+        onAuthRestored: vi.fn(),
+        onExplicitOfflineChange: vi.fn(),
+        onFailure,
+        onStorageReset: vi.fn(),
+        onStorageInvalidated: vi.fn(),
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(10);
+    await expect(connection.ready()).rejects.toBeInstanceOf(BrowserWorkerScriptLoadError);
+    expect(onFailure).toHaveBeenCalledWith(expect.any(BrowserWorkerScriptLoadError));
+    expect(ports[0]!.closed).toBe(true);
+    await connection.shutdown();
+  });
+
+  it("releases a shut-down bootstrap's retained port once its worker reports it never started", async () => {
+    vi.useFakeTimers();
+    const { ports } = stubUnloadableSharedWorker(50);
+    const connection = new SharedBrowserWorkerConnection(
+      {
+        connectUpstreamPeer: () => ({ recvWireFrames: () => [] }),
+        onPeerTransportWork: () => () => undefined,
+        onLocalSettlementChange: () => () => undefined,
+        progressPeerTransport: async () => undefined,
+        retirePeerTransport: async () => undefined,
+        reportRemoteServerTransportError: vi.fn(),
+        reportRemoteMutationError: vi.fn(),
+        flushLocalSettlements: async () => undefined,
+      } as never,
+      {
+        schema: {},
+        dbName: "shutdown-unloadable-root",
+        author: new Uint8Array(16),
+        initialSyncFlushEvery: 1,
+        appId: "app",
+        storageOwner: "owner",
+        authSessionKey: "scope",
+        authJson: "{}",
+        sessionClaims: {},
+      },
+      "runtime-fingerprint",
+      {
+        onAuthFailure: vi.fn(),
+        onAuthRestored: vi.fn(),
+        onExplicitOfflineChange: vi.fn(),
+        onFailure: vi.fn(),
+        onStorageReset: vi.fn(),
+        onStorageInvalidated: vi.fn(),
+      },
+    );
+    // Shutdown before the failure: the bootstrap keeps its port for an
+    // acknowledgement a worker that never ran cannot send.
+    await connection.shutdown();
+    expect(ports[0]!.closed).toBe(false);
+    await vi.advanceTimersByTimeAsync(60);
+    expect(ports[0]!.closed).toBe(true);
+  });
+
+  it("keeps waiting for a worker that starts, ignoring nothing but load failures", async () => {
+    vi.useFakeTimers();
+    const port = new DelayedLeasePort(1_100);
+    let listened = false;
+    vi.stubGlobal(
+      "SharedWorker",
+      class extends EventTarget {
+        readonly port = port;
+
+        override addEventListener(...args: Parameters<EventTarget["addEventListener"]>): void {
+          if (args[0] === "error") listened = true;
+          super.addEventListener(...args);
+        }
+      },
+    );
+
+    const acquire = SharedBrowserForegroundNodeLease.acquire({
+      dbName: "healthy-watched-root",
+      storageOwner: "owner",
+    });
+    await vi.advanceTimersByTimeAsync(1_100);
+    const lease = await acquire;
+    expect(listened).toBe(true);
+    const retired = lease.retire();
+    await vi.runAllTimersAsync();
+    await retired;
   });
 });
 

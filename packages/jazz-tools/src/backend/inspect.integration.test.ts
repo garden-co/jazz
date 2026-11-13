@@ -429,12 +429,15 @@ describe("Inspector reads", () => {
       status: 400,
       message: expect.stringMatching(/query.includes is not supported/),
     });
+    // explain needs a user, and a table rather than its history.
     expect(
-      await refused(api(jazz, { op: "explain", query: { table: "todos" }, as: "alice" }, STAFF)),
-    ).toMatchObject({
-      status: 501,
-      error: "not_supported",
-    });
+      await refused(api(jazz, { op: "explain", query: { table: "todos" } }, STAFF)),
+    ).toMatchObject({ status: 400, message: expect.stringMatching(/needs as/) });
+    expect(
+      await refused(
+        api(jazz, { op: "explain", query: { table: "history.todos" }, as: "alice" }, STAFF),
+      ),
+    ).toMatchObject({ status: 400 });
     expect(await refused(api(jazz, { op: "frobnicate" }, STAFF))).toMatchObject({ status: 400 });
   });
 
@@ -480,11 +483,12 @@ describe("Inspector reads", () => {
 });
 
 describe("Inspector UI", () => {
-  it("lives at <basePath>/inspect/, and a redirect keeps the deep link's fragment", async () => {
+  it("answers at <basePath>/inspect without redirecting, so a host that strips the slash can't loop", async () => {
+    // Next.js 308s `/jazz/inspect/` to `/jazz/inspect`; a redirect back looped forever.
     const { jazz } = await start();
     const bare = await jazz.handle(new Request("http://localhost:3000/jazz/inspect"));
-    expect(bare.status).toBe(308);
-    expect(bare.headers.get("location")).toBe("/jazz/inspect/");
+    expect(bare.status).not.toBe(308);
+    expect(bare.headers.get("location")).toBeNull();
     const posted = await jazz.handle(
       new Request("http://localhost:3000/jazz/inspect/", { method: "POST" }),
     );
@@ -1197,7 +1201,12 @@ describe("jazz-tools inspect and mcp", () => {
         arguments: { query: { table: "todos" }, as: "alice" },
       },
     });
-    expect((await answer(4)).result).toMatchObject({ isError: true });
+    const explained = JSON.parse((await answer(4)).result.content[0].text);
+    expect(explained.clauses).toEqual([{ index: 0, text: "owner = session.user" }]);
+    expect(explained.rows.map((row: any) => [row.row.title, row.allowed, row.by]).sort()).toEqual([
+      ["alice's", true, [0]],
+      ["bob's", false, []],
+    ]);
     send({
       jsonrpc: "2.0",
       id: 5,
@@ -1209,5 +1218,116 @@ describe("jazz-tools inspect and mcp", () => {
     );
     input.end();
     await served;
+  });
+});
+
+describe("Viewing as a user whose permissions read claims", () => {
+  // Managers (a claim) see every expense; others see their own.
+  const claimsApp = s.defineApp(
+    { expenses: s.table({ title: s.string(), owner: s.uuid() }, {}) },
+    { migrations: "none" },
+  );
+  const claimsPermissions = s.definePermissions(claimsApp, ({ policy, anyOf, session }) => {
+    policy.expenses.allowRead.where(
+      anyOf([{ owner: session.user }, session.where({ "claims.role": "manager" })]),
+    );
+    policy.expenses.allowInsert.where(
+      anyOf([{ owner: session.user }, session.where({ "claims.role": "manager" })]),
+    );
+  });
+
+  async function startWithClaims() {
+    const jazz = await createJazz({
+      app: claimsApp,
+      permissions: claimsPermissions,
+      store: memory(),
+      authenticate,
+      inspect: staffOnly,
+    });
+    cleanups.push(() => jazz.close());
+    const worker = await accountOf(jazz, "worker");
+    await accountOf(jazz, "manager");
+    await jazz.db
+      .insert(claimsApp.expenses, { title: "the worker's", owner: worker })
+      .wait({ tier: "global" });
+    return { jazz, worker };
+  }
+
+  it("uses the claims given with `as`, and warns when none were given", async () => {
+    const { jazz } = await startWithClaims();
+    const query = { table: "expenses" };
+
+    // Without claims: a session with none, and the answer says so.
+    const bare = await ok(api(jazz, { op: "query", query, as: "manager" }, STAFF));
+    expect(bare.rows).toEqual([]);
+    expect(bare.warning).toMatch(/read session claims.*none were given for manager/);
+
+    // With them: what the manager's own session sees, and no warning.
+    const as = { userId: "manager", claims: { role: "manager" } };
+    const withClaims = await ok(api(jazz, { op: "query", query, as }, STAFF));
+    expect(withClaims.rows.map((row: any) => row.title)).toEqual(["the worker's"]);
+    expect(withClaims.warning).toBeUndefined();
+    // Its deep link carries the claims along.
+    expect(parseInspectorLink(new URL(withClaims.inspectorUrl).hash).as).toEqual(as);
+
+    // A refused write says why it may have been refused.
+    const write = await refused(
+      api(
+        jazz,
+        {
+          op: "write",
+          ops: [
+            {
+              kind: "insert",
+              table: "expenses",
+              values: { title: "x", owner: crypto.randomUUID() },
+            },
+          ],
+          as: "manager",
+        },
+        STAFF_WRITER,
+      ),
+    );
+    expect(write.message).toMatch(/none were given for manager/);
+
+    expect(
+      await refused(
+        api(jazz, { op: "query", query, as: { userId: "manager", claims: ["manager"] } }, STAFF),
+      ),
+    ).toMatchObject({ status: 400, error: "bad_request" });
+  });
+
+  it("explains which clause let each row through, with and without the claims", async () => {
+    const { jazz } = await startWithClaims();
+    const query = { table: "expenses" };
+    const asWorker = await ok(api(jazz, { op: "explain", query, as: "worker" }, STAFF));
+    expect(asWorker.clauses).toEqual([
+      { index: 0, text: "owner = session.user" },
+      { index: 1, text: 'session.claims.role = "manager"' },
+    ]);
+    expect(asWorker.rows.map((row: any) => [row.allowed, row.by])).toEqual([[true, [0]]]);
+
+    // Without claims the manager clause can't hold, and the answer says why.
+    const bare = await ok(api(jazz, { op: "explain", query, as: "manager" }, STAFF));
+    expect(bare.rows.map((row: any) => [row.allowed, row.by])).toEqual([[false, []]]);
+    expect(bare.warning).toMatch(/none were given for manager/);
+    const asManager = await ok(
+      api(
+        jazz,
+        { op: "explain", query, as: { userId: "manager", claims: { role: "manager" } } },
+        STAFF,
+      ),
+    );
+    expect(asManager.rows.map((row: any) => [row.allowed, row.by])).toEqual([[true, [1]]]);
+    expect(asManager.warning).toBeUndefined();
+  });
+
+  it("doesn't warn when the app's permissions read no claims", async () => {
+    const { jazz } = await start();
+    await seed(jazz);
+    const asAlice = await ok(
+      api(jazz, { op: "query", query: { table: "todos" }, as: "alice" }, STAFF),
+    );
+    expect(asAlice.warning).toBeUndefined();
   });
 });

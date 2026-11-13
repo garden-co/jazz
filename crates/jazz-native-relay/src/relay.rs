@@ -186,6 +186,10 @@ pub struct NativeRelayWire {
     outbound_ready: Arc<tokio::sync::Notify>,
     /// Set when the owner retired this connection: no more frames cross it.
     retired: Arc<AtomicBool>,
+    /// Why the relay's database dropped this connection on its own (see
+    /// [`Link::upstream_refusal`]): whoever carries it stops instead of
+    /// keeping a socket nothing syncs over, and reports why.
+    refusal: Arc<Mutex<Option<String>>>,
 }
 
 impl NativeRelayWire {
@@ -256,6 +260,24 @@ impl NativeRelayWire {
     fn retire(&self) {
         self.retired.store(true, Ordering::Release);
         self.outbound_ready.notify_one();
+    }
+
+    /// Retire the connection because the relay's database refused its
+    /// upstream, recording why first so the carrier reads it.
+    pub(crate) fn refuse(&self, reason: String) {
+        *self
+            .refusal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason);
+        self.retire();
+    }
+
+    /// Why the relay refused this connection, once it has.
+    pub fn refusal(&self) -> Option<String> {
+        self.refusal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -880,6 +902,17 @@ fn ensure_sqlite_store(path: &std::path::Path) -> Result<(), RelayError> {
     Ok(())
 }
 
+/// A relay store's config, for its persistent store and each session's.
+/// Like the client bindings' ([`binding_host::db_config`]), it has no chunk
+/// store, so a tick never runs chunk-store I/O (whose failures a later tick
+/// retries) and every tick error is treated as terminal by the JavaScript
+/// runtime (`core_tick_failed`). Adding a chunk store here means first
+/// giving hosts a way to tell those failures apart.
+fn relay_db_config(schema: JazzSchema, identity: DbIdentity, migrations: &Migrations) -> DbConfig {
+    DbConfig::new(schema, identity)
+        .with_migrations(migrations.schemas.clone(), migrations.lenses.clone())
+}
+
 impl RelayWorker {
     fn open(config: RelayOpenConfig) -> Result<Self, RelayError> {
         ensure_sqlite_store(&config.sqlite_path)?;
@@ -888,10 +921,7 @@ impl RelayWorker {
                 .map_err(|error| RelayError::Storage(error.to_string()))?;
         }
         let db = block_on(Db::open_at(
-            DbConfig::new(config.schema.clone(), config.identity).with_migrations(
-                config.migrations.schemas.clone(),
-                config.migrations.lenses.clone(),
-            ),
+            relay_db_config(config.schema.clone(), config.identity, &config.migrations),
             &config.sqlite_path,
             FileOptions::default(),
         ))
@@ -996,12 +1026,11 @@ impl RelayWorker {
             .db
             .check_serves(identity.author)
             .map_err(|error| RelayError::Host(error.into()))?;
-        let db = block_on(Db::open(
-            DbConfig::new(self.schema.clone(), identity).with_migrations(
-                self.migrations.schemas.clone(),
-                self.migrations.lenses.clone(),
-            ),
-        ))
+        let db = block_on(Db::open(relay_db_config(
+            self.schema.clone(),
+            identity,
+            &self.migrations,
+        )))
         .map_err(|error| RelayError::Host(error.into()))?;
         // Continue after the node's previous holder: its transaction ids
         // were (seq, node), and the relay deduplicates by them.
@@ -1175,6 +1204,16 @@ impl RelayWorker {
             if !progressed {
                 break;
             }
+        }
+        // A refused upstream syncs nothing: stop its connection and say why,
+        // rather than keeping the socket open.
+        if let Some(upstream) = &self.upstream
+            && upstream.wire.refusal().is_none()
+            && let Some(error) = upstream.link.upstream_refusal()
+        {
+            let reason = format!("native relay upstream refused: {error}");
+            tracing::warn!(target: "jazz_native_relay", "{reason}");
+            upstream.wire.refuse(reason);
         }
         for client in self.clients.values_mut() {
             if let Err(error) = client.collect_events() {
@@ -2291,10 +2330,21 @@ async fn bridge_connection(
             }
         })
     };
-    let lost = || LinkEnd::Lost(LinkFailure::Network("native relay wire closed".to_owned()));
+    // A wire the owner retired because it refused the upstream stops the
+    // link with that refusal, however the bridge found it closed: the
+    // refusal can land between the check below and a queue operation.
+    let lost = || match wire.refusal() {
+        Some(reason) => LinkEnd::Stop(reason),
+        None => LinkEnd::Lost(LinkFailure::Network("native relay wire closed".to_owned())),
+    };
     loop {
         if cancelled.load(Ordering::Acquire) {
             return LinkEnd::Cancelled;
+        }
+        // The relay refused this upstream: retrying the same link cannot
+        // succeed, so the link stops with the refusal until a reconnect.
+        if let Some(reason) = wire.refusal() {
+            return LinkEnd::Stop(reason);
         }
         // The relay's frames out.
         let outbound = match wire.take_outbound_encoded() {
@@ -2409,4 +2459,23 @@ pub enum RelayError {
     Drive(String),
     #[error("native relay socket: {0}")]
     Socket(String),
+}
+
+#[cfg(test)]
+mod relay_config_tests {
+    use super::*;
+
+    /// See [`relay_db_config`]: relay stores, like the bindings', have no
+    /// chunk store.
+    #[test]
+    fn relay_configs_have_no_chunk_store() {
+        let schema = JazzSchema::new(&jazz::tools::SchemaBuilder::new().build()).unwrap();
+        let identity = DbIdentity {
+            node: jazz::ids::NodeUuid::from_bytes([1; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let config = relay_db_config(schema, identity, &Migrations::default());
+        assert!(config.chunk_store.is_none());
+        assert!(!config.host_chunk_io);
+    }
 }

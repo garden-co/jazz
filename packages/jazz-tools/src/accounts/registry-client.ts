@@ -31,6 +31,32 @@ export const LINK_GUEST_KEY_MISSING_MESSAGE =
   "local_first_account_required: this device account's key isn't held by this client any more (it signed out, or comes from another Jazz client), so it can't prove itself to link. Link from the client where it is signed in, or call refresh() instead.";
 
 /**
+ * A backend secret of only whitespace (`"  "`, a stray newline): usually an
+ * environment variable that is set but blank. Refused before any transport
+ * opens, so the mistake isn't reported later as a refused connection. (An
+ * empty secret already counts as none.)
+ */
+export const WHITESPACE_BACKEND_SECRET =
+  "invalid_backend_secret: backendSecret is only whitespace. Pass your app's backend secret (check that the environment variable it comes from holds a value).";
+
+/** Whether `secret` is a non-empty string of only whitespace. */
+export function isWhitespaceOnlySecret(secret: unknown): boolean {
+  return typeof secret === "string" && secret !== "" && secret.trim() === "";
+}
+
+/**
+ * What `createJazz` answers a sign-in or `backend-user` request with when the
+ * app's `authenticate` named a user without a valid `expiresAt` (none, not a
+ * finite number, or in milliseconds). The backend
+ * logs the detail; the response carries only this code.
+ */
+export const AUTHENTICATE_EXPIRES_AT_MISSING = "authenticate_expires_at_missing";
+
+/** What a client says on {@link AUTHENTICATE_EXPIRES_AT_MISSING}: the fix is in the backend. */
+export const AUTHENTICATE_EXPIRES_AT_MISSING_MESSAGE =
+  "authenticate_expires_at_missing: your backend's authenticate (createJazz) named a user without a valid expiresAt (none, not a number, or in milliseconds), so Jazz can't tell how long that sign-in holds and can't sign them in. Return expiresAt with the user: when the answer stops holding, as Unix time in seconds (your session's expiry, or its token's exp). Your backend's log says what it returned. See https://jazz.tools/docs/setup/auth/backend#when-a-session-expires";
+
+/**
  * The app's backend vouches to the core's registry for an identity it
  * verified itself, with its backend secret: resolve its account
  * (`resolve`), create it on first sign-in (`login-or-register`), or found a
@@ -138,6 +164,17 @@ async function backendRequest(
     });
     if (!response.ok) {
       const code = await response.text();
+      if (code === AUTHENTICATE_EXPIRES_AT_MISSING) {
+        const error = new AccountAuthError(
+          code,
+          response.status,
+          AUTHENTICATE_EXPIRES_AT_MISSING_MESSAGE,
+        );
+        // The session asks who is signed in in the background too, where a
+        // failed answer is only retried: say it on the console as well, once.
+        warnExpiresAtMissing(error);
+        throw error;
+      }
       throw new AccountAuthError(
         /^[a-z_]{1,80}$/.test(code) ? code : "account_request_failed",
         response.status,
@@ -145,6 +182,13 @@ async function backendRequest(
     }
     return response.json();
   }, new AccountAuthError("account_request_timeout"));
+}
+
+let warnedExpiresAtMissing = false;
+function warnExpiresAtMissing(error: AccountAuthError): void {
+  if (warnedExpiresAtMissing) return;
+  warnedExpiresAtMissing = true;
+  console.error(`Jazz: ${error.message}`);
 }
 
 export function readAccountAssignment(value: unknown, expected: AccountIdentity): string {

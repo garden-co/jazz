@@ -141,6 +141,32 @@ describe("Svelte Jazz session", () => {
     await session.close();
   });
 
+  it("renders nothing once the session is closed, or the closed snippet", async () => {
+    for (const closed of [
+      undefined,
+      createRawSnippet(() => ({ render: () => "<p>Session closed</p>" })),
+    ]) {
+      const { session } = await setup([]);
+      const target = document.createElement("div");
+      const component = mount(JazzProvider, {
+        target,
+        props: {
+          session,
+          children: createRawSnippet(() => ({ render: () => "<p>Ready</p>" })),
+          ...(closed ? { closed } : {}),
+        },
+      });
+      await settle();
+      expect(target.textContent).toBe("Ready");
+      await session.close();
+      await settle();
+      expect(session.getSnapshot().status).toBe("closed");
+      // Before: the loading view, forever.
+      expect(target.textContent).toBe(closed ? "Session closed" : "");
+      await unmount(component);
+    }
+  });
+
   it("store subscriptions expose snapshots and bound commands", async () => {
     const { session } = await setup([]);
     const state = sessionState(session);

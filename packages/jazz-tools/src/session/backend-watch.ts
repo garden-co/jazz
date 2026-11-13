@@ -106,11 +106,15 @@ export interface BackendWatch {
  * again, once, which gives them a new account; reconnecting would only be
  * refused again.
  *
- * A sync server refusing the sign-in (`authRefused`) asks the backend too, but
- * only to reconnect, with backoff, while it still names the same user. It
- * never signs anyone out: a background tab's cookie may just be stale, so a
- * sign-out waits for a check after focus returns (or for the app to call
- * `reauthenticate`). A probe that reports there is no backend (404) is asked
+ * A sync server refusing the sign-in (`authRefused`, say after
+ * `jazz.revokeUser`) asks the backend too. While it still names the same
+ * user, the client reconnects, with backoff. When it says no one is signed
+ * in and the page is visible (its cookies are fresh), that answer counts as
+ * the first of the two a sign-out needs: a second one `confirmMs` later
+ * signs the user out (after `onSignedOut`), so a revoked user's open tab
+ * doesn't stay signed in and unsynced for long. A background tab's cookie
+ * may just be stale, so there a sign-out waits for a check after focus
+ * returns (or for the app to call `reauthenticate`). A probe that reports there is no backend (404) is asked
  * again with backoff, since a deploy or a proxy may answer 404 for a moment;
  * only 404s that keep coming for a while (`notFoundRetryMs`, three answers)
  * stop the watch. A stopped watch rejects every later `reauthenticate`.
@@ -125,12 +129,6 @@ export function watchBackendUser<Client>(
     reconnect?: () => void;
     /** The first wait before reconnecting after a refusal; it doubles up to a minute. */
     reconnectBackoffMs?: number;
-    /**
-     * After a refusal the backend agrees with (no one signed in) while the
-     * page is visible, wait this long and check again as on focus, so a
-     * revoked user in a tab that stays focused is signed out. Default 30s.
-     */
-    refusedConfirmMs?: number;
     /**
      * Link a local-first guest to a signed-in user who has no account yet
      * (default true). Off, the watch leaves that guest as it is: the app
@@ -211,16 +209,12 @@ export function watchBackendUser<Client>(
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   // The sync link was refused and hasn't connected since.
   let refusedPending = false;
-  let refusedConfirm: ReturnType<typeof setTimeout> | undefined;
-  const refusedConfirmMs = options.refusedConfirmMs ?? 30_000;
   const resetRefusal = () => {
     refusedPending = false;
     backoffMs = firstBackoffMs;
     reconnectAt = 0;
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = undefined;
-    if (refusedConfirm) clearTimeout(refusedConfirm);
-    refusedConfirm = undefined;
   };
   let stopped = false;
   const linkGuest = options.linkGuest ?? true;
@@ -450,21 +444,25 @@ export function watchBackendUser<Client>(
       if (quiet(asked)) return busy();
       forgottenGuest = true;
     }
-    if (refused) {
-      // Never sign out on a refusal alone (the cookie may be stale), but a
-      // visible page's cookies are fresh: check again shortly as on focus.
-      if (!refusedConfirm && (events.isVisible?.() ?? false))
-        refusedConfirm = setTimeout(() => {
-          refusedConfirm = undefined;
-          check();
-        }, refusedConfirmMs);
-      return;
-    }
+    // A background tab's cookie may be stale: a refusal there waits for a
+    // check after focus. A visible page's cookies are fresh, so its answer
+    // counts as the first, and a second one shortly after confirms it.
+    // Visibility counts when the refusal is checked: a tab that goes to the
+    // background during the confirmation wait is still signed out once the
+    // second answer agrees (and `onSignedOut` lets it).
+    if (refused && !(events.isVisible?.() ?? false)) return;
     if (!asked) {
       await new Promise((resolve) => setTimeout(resolve, confirmMs));
       if (quiet()) return;
       signedIn = await ask();
-      if (signedIn !== null || quiet()) return;
+      if (quiet()) return;
+      if (signedIn !== null) {
+        // Someone is signed in after all (the app refreshed its session):
+        // a refused link follows that answer as a plain check would, so it
+        // reconnects (or switches users) instead of staying refused.
+        if (refused) check();
+        return;
+      }
     }
     // The app moved on meanwhile (signed out itself, continued as a guest,
     // signed someone in): that account is not the one this answer was about.
@@ -644,21 +642,37 @@ function linkRefused(cause: unknown): boolean {
 
 /** Focus, visibility and BroadcastChannel events for a browser page. */
 export function browserBackendWatchEvents(channelName: string): BackendWatchEvents {
+  // The channel is open only while something listens: a session whose
+  // startup failed before its watch started (or after it stopped) holds
+  // none, so a provider retrying a failed createJazzClient leaks nothing.
   const crossTab =
     typeof BroadcastChannel === "function"
       ? (() => {
-          const channel = new BroadcastChannel(channelName);
+          let channel: BroadcastChannel | undefined;
           const listeners = new Set<() => void>();
-          channel.onmessage = () => {
-            for (const listener of listeners) listener();
-          };
           return {
-            post: () => channel.postMessage("account-changed"),
+            post() {
+              if (channel) return channel.postMessage("account-changed");
+              // Nothing in this tab listens: tell the others through a
+              // channel of its own (a message posted before close is sent).
+              const once = new BroadcastChannel(channelName);
+              once.postMessage("account-changed");
+              once.close();
+            },
             listen(check: () => void) {
+              if (!channel) {
+                const opened = new BroadcastChannel(channelName);
+                opened.onmessage = () => {
+                  for (const listener of listeners) listener();
+                };
+                channel = opened;
+              }
               listeners.add(check);
               return () => {
                 listeners.delete(check);
-                if (!listeners.size) channel.close();
+                if (listeners.size || !channel) return;
+                channel.close();
+                channel = undefined;
               };
             },
           };

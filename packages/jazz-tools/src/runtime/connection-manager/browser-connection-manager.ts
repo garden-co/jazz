@@ -515,7 +515,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       });
   }
 
-  async deleteClientStorage(): Promise<void> {
+  async deleteClientStorage(): Promise<{ pendingUploads?: number } | void> {
     // A reset already in progress (e.g. another tab deleted the shared
     // storage) has detached this Db's client and connection; it is the
     // delete, so wait for it rather than reopening mid-reset.
@@ -524,11 +524,23 @@ export class BrowserConnectionManager extends ConnectionManager {
     // without one there would be nothing to delete through: open it, as the
     // direct manager opens its client, so the delete reaches the storage.
     if (!this.connection && !this.getCurrentClient()) this.getClient({});
-    await this.connectionReady;
+    // Another tab may hold this account's store under another sign-in (a
+    // guest signed up here and now signs out, while another tab is still the
+    // guest). Wait for it to let go, as reads and writes do: it follows the
+    // sign-up and sign-out, or closes. Past the patience this fails with a
+    // `StoreHeldByAnotherTabError`, and the delete can be tried again: a
+    // delete asked for past the patience tries to join at once, rather than
+    // at the next background attempt, and fails at once if still held.
+    const held = this.connection;
+    if (held && this.heldTooLong && this.admissionRefused(held))
+      await this.retryConfigurationAdmission(held);
+    await this.ensureReady("runtime");
+    if (this.storageReset) return this.storageReset;
     if (!this.connection)
       throw new Error("deleteClientStorage(): the browser worker is not connected");
-    await this.connection?.deleteStorage();
+    const deletion = await this.connection.deleteStorage();
     await this.storageReset;
+    return deletion;
   }
 
   override isUsable(): boolean {

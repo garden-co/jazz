@@ -55,7 +55,7 @@ export class AttachedBrowserWorkerConnection implements BrowserWorkerConnection 
     return this.connection.reconnect(authJson, sessionClaims);
   }
 
-  deleteStorage(): Promise<void> {
+  deleteStorage(): Promise<{ pendingUploads?: number } | void> {
     return this.connection.deleteStorage();
   }
 

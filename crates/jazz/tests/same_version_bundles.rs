@@ -243,9 +243,6 @@ fn an_index_only_deploy_builds_its_index_and_pins_both_bundles() {
     );
 }
 
-/// Both bundles of one version resolve on the live store and after
-/// reopening under either of its schemas: a bundle's schema is read from
-/// the catalogue by its hash, and only its version must be admitted.
 /// Deploying the index-only schema again admits nothing (admitting resets
 /// every session): its row is stored and its version admitted, though `n`
 /// stays with the hash first admitted as that version. Both bundles still
@@ -273,6 +270,9 @@ fn a_repeated_index_only_deploy_admits_nothing() {
     pin(&server, bundle_b).unwrap();
 }
 
+/// Both bundles of one version resolve on the live store and after
+/// reopening under either of its schemas: a bundle's schema is read from
+/// the catalogue by its hash, and only its version must be admitted.
 #[test]
 fn bundles_of_one_version_pin_live_and_after_reopen_under_either_schema() {
     let (plain, indexed) = (users(false, None), users(true, None));

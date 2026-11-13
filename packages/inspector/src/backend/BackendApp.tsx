@@ -8,6 +8,7 @@ import type { TablePolicies, WasmSchema } from "jazz-tools";
 import {
   decodeGrant,
   parseInspectorLink,
+  readsClaims,
   type InspectWhoami,
   type InspectorLinkTarget,
 } from "jazz-tools/inspect";
@@ -21,7 +22,12 @@ import { InspectorRoutes } from "../routes.js";
 import { apiUrlFor, createInspectorCall, InspectorApiError, type InspectorCall } from "./api.js";
 import { createApiDataSource } from "./api-data.js";
 import { ApprovalPage } from "./ApprovalPage.js";
-import { BackendProvider, type BackendContextValue } from "./backend-context.js";
+import {
+  BackendProvider,
+  asForApi,
+  type BackendContextValue,
+  type ViewAs,
+} from "./backend-context.js";
 
 interface SchemaAnswer {
   tables: Record<string, WasmSchema[string] & { redacted?: string[] }>;
@@ -65,8 +71,8 @@ export function BackendApp({
   const [grantText, setGrantText] = useState(link.grant ?? null);
   const grant = useMemo(() => (grantText ? decodeGrant(grantText) : null), [grantText]);
   const [boot, setBoot] = useState<Boot>({ kind: "loading" });
-  const [viewAs, setViewAsState] = useState<string | null>(
-    typeof link.as === "string" ? link.as : (link.as?.userId ?? null),
+  const [viewAs, setViewAsState] = useState<ViewAs | null>(
+    typeof link.as === "string" ? { userId: link.as } : (link.as ?? null),
   );
   const viewAsRef = useRef(viewAs);
   viewAsRef.current = viewAs;
@@ -114,7 +120,7 @@ export function BackendApp({
         ? createApiDataSource({
             call,
             schema: boot.schema,
-            as: () => viewAsRef.current ?? undefined,
+            as: () => asForApi(viewAsRef.current),
           })
         : null,
     [boot, call],
@@ -183,12 +189,13 @@ export function BackendApp({
     whoami: boot.whoami,
     data: data!,
     viewAs,
-    setViewAs: (userId) => {
-      if (userId === viewAsRef.current) return;
-      viewAsRef.current = userId;
-      setViewAsState(userId);
+    setViewAs: (next) => {
+      if (JSON.stringify(next) === JSON.stringify(viewAsRef.current)) return;
+      viewAsRef.current = next;
+      setViewAsState(next);
       data!.refresh();
     },
+    permissionsReadClaims: readsClaims(boot.permissions),
     link: link.query || link.table ? link : null,
   };
   return (

@@ -11,6 +11,7 @@ import {
   compileSchema as compileCatalogueSchema,
   requireAppId,
   requireServerValue,
+  unshippedMigrationsWarning,
   validateProject,
 } from "./dev/catalogue-project.js";
 import { renderMigrationGraph } from "./dev/migration-graph.js";
@@ -85,8 +86,9 @@ export async function validate(options: BuildOptions): Promise<void> {
       break;
     case "unsnapshotted":
       console.log(
-        "This project has no schema snapshot yet: before you change schema.ts, run `jazz-tools migrations create` " +
-          "on the version your backend runs, so later migrations start from it.",
+        "This project has no schema snapshot yet. Run `jazz-tools migrations create` once now: it only records " +
+          "schema.ts as the app's first version, so your first schema change can be migrated instead of needing " +
+          "a fresh store. Do it before you change schema.ts.",
       );
       break;
     case "snapshotted":
@@ -314,6 +316,13 @@ function requireMigrationServerOptions(options: MigrationCommandOptions): {
 }
 
 export async function createMigration(options: CreateMigrationOptions): Promise<string | null> {
+  const written = await reportCreatedMigration(options);
+  const unshipped = await unshippedMigrationsWarning(options.schemaDir, options.migrationsDir);
+  if (unshipped) console.warn(`\x1b[33m${unshipped}\x1b[0m`);
+  return written;
+}
+
+async function reportCreatedMigration(options: CreateMigrationOptions): Promise<string | null> {
   const result = await createCatalogueMigration(options);
 
   switch (result.status) {
@@ -342,7 +351,11 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
       console.log(PERMISSIONS_LIFECYCLE_NOTE);
       console.log("");
       console.log("Next steps:");
-      console.log("1. Fill in migrate.");
+      console.log(
+        result.unfilledSteps > 0
+          ? `1. Fill in migrate: ${result.unfilledSteps} step${result.unfilledSteps === 1 ? "" : "s"} marked TODO.`
+          : "1. Review migrate: it is complete as generated, nothing to fill in.",
+      );
       if (result.needsRename) {
         console.log("2. Rename the file by replacing 'unnamed'.");
       }

@@ -42,6 +42,9 @@ import {
   type WsLikeSocket,
 } from "./index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
+import { mapAuthReason } from "../runtime/auth-state.js";
+import { requestBackendSignIn, requestBackendUser } from "../accounts/registry-client.js";
+import { signedInIdentity } from "../session/follow-user.js";
 import {
   encodeWebSocketFrameBatch,
   encodeWireClientHello,
@@ -956,6 +959,157 @@ describe("createJazz", () => {
     await expect(jazz.forReqUser(request())).rejects.toThrow(/has no Jazz account yet/);
   });
 
+  it("answers a signed-out backend-user probe with 200 and no user, and every client reads it as signed out (#5171)", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: false });
+    const registry = `${origin}/jazz/apps/${jazz.appId}/accounts`;
+
+    // Before: 401 signed_out, a red line in devtools on every signed-out
+    // page load. Now: an answer saying no one is signed in.
+    const probe = await fetch(`${registry}/backend-user`, { method: "POST" });
+    expect(probe.status).toBe(200);
+    expect(probe.headers.get("cache-control")).toBe("no-store");
+    const body = (await probe.json()) as { identity?: unknown };
+    expect(body).toEqual({ user: null });
+
+    // An alpha.60/61 client (`if (!answer.identity) return null`) reads it
+    // as signed out, as it read the 401.
+    expect(body.identity).toBeFalsy();
+    // So does this one.
+    await expect(signedInIdentity(registry)).resolves.toBeNull();
+
+    // The routes that do something keep refusing a signed-out request.
+    for (const route of ["backend-sign-in", "backend-link", "backend-link/challenge"]) {
+      const refused = await fetch(`${registry}/${route}`, { method: "POST" });
+      expect({ route, status: refused.status }).toEqual({ route, status: 401 });
+      expect(await refused.text()).toBe("signed_out");
+    }
+
+    // A backend still on alpha.61 or earlier answers 401: still signed out.
+    const oldBackend = (async () =>
+      new Response("signed_out", { status: 401 })) as unknown as typeof fetch;
+    await expect(signedInIdentity(registry, oldBackend)).resolves.toBeNull();
+    // And a signed-in answer still names the user.
+    const signedIn = (async (input: RequestInfo | URL, init?: RequestInit) =>
+      fetch(input, {
+        ...init,
+        headers: { "x-test-user": "alice" },
+      })) as typeof fetch;
+    await expect(signedInIdentity(registry, signedIn)).resolves.toMatchObject({
+      issuer: "jazz:backend",
+      subject: "alice",
+      hasAccount: false,
+    });
+  });
+
+  it("answers 500 naming authenticate when it throws, without an unhandled rejection (#5263)", async () => {
+    let fail: () => never | Promise<never> = () => {
+      throw new Error("synthetic auth failure");
+    };
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: () => fail(),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    cleanups.push(async () => void process.off("unhandledRejection", unhandled));
+    const origin = await serve(jazz, { sockets: false });
+    const url = `http://app.test/jazz/apps/${jazz.appId}/accounts/backend-user`;
+
+    // Before: `next()`'s POST rejected with the app's error, which on Vercel
+    // surfaced as an unhandledRejection and the function exited.
+    const { POST } = jazz.next();
+    for (const thrower of [
+      () => {
+        throw new Error("synthetic auth failure");
+      },
+      () => Promise.reject(new Error("synthetic auth failure")),
+    ]) {
+      fail = thrower;
+      errors.mockClear();
+      for (const answer of [
+        await POST(new Request(url, { method: "POST" })),
+        await jazz.handle(new Request(url, { method: "POST" })),
+        await fetch(`${origin}/jazz/apps/${jazz.appId}/accounts/backend-sign-in`, {
+          method: "POST",
+        }),
+      ]) {
+        expect(answer.status).toBe(500);
+        expect(answer.headers.get("cache-control")).toBe("no-store");
+        // Only the code: nothing of the app's error.
+        expect(await answer.text()).toBe("authenticate_failed");
+      }
+      // Logged once per request, naming authenticate, with the app's error.
+      expect(errors).toHaveBeenCalledTimes(3);
+      for (const [message, error] of errors.mock.calls) {
+        expect(message).toMatch(/^createJazz: your authenticate threw/);
+        expect((error as Error).message).toBe("synthetic auth failure");
+      }
+    }
+    // The client reports the stable code.
+    await expect(
+      requestBackendUser(`${origin}/jazz/apps/${jazz.appId}/accounts`),
+    ).rejects.toMatchObject({ code: "authenticate_failed", status: 500 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(unhandled).not.toHaveBeenCalled();
+  });
+
+  it("tells the browser by a stable code that authenticate returned no expiresAt, and the client names the fix", async () => {
+    let answer: unknown = { userId: "alice", internal: "secret-session-detail" };
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: () => answer as never,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: false });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+    const registry = `${origin}/jazz/apps/${jazz.appId}/accounts`;
+
+    // Before: a bare 500 the browser reported as "Jazz could not ask your
+    // backend who is signed in", the reason only in the server's log.
+    const response = await fetch(`${registry}/backend-user`, { method: "POST" });
+    expect(response.status).toBe(500);
+    // Only the code: nothing of what the app's authenticate returned.
+    expect(await response.text()).toBe("authenticate_expires_at_missing");
+    // The server logs the detail, once.
+    expect(errors).toHaveBeenCalledWith(
+      expect.stringMatching(/authenticate must return expiresAt with the user.*It returned none/),
+    );
+
+    // The client's error (the session's `refresh()` and sign-in reject with
+    // it, or with it as their cause) names the fix.
+    for (const ask of [() => requestBackendUser(registry), () => requestBackendSignIn(registry)]) {
+      const error = await ask().then(
+        () => undefined,
+        (error: unknown) => error as { code?: string; status?: number; message?: string },
+      );
+      expect(error).toMatchObject({ code: "authenticate_expires_at_missing", status: 500 });
+      expect(error?.message).toMatch(
+        /^authenticate_expires_at_missing: your backend's authenticate \(createJazz\) named a user without a valid expiresAt \(none, not a number, or in milliseconds\).*Return expiresAt with the user/,
+      );
+    }
+    // An expiresAt in milliseconds (or not a number) is the same mistake, by the same code.
+    for (const expiresAt of [Date.now() + 60_000, "tomorrow"]) {
+      answer = { userId: "alice", expiresAt };
+      const wrong = await fetch(`${registry}/backend-user`, { method: "POST" });
+      expect(wrong.status).toBe(500);
+      expect(await wrong.text()).toBe("authenticate_expires_at_missing");
+    }
+    // And it says so on the console, once, for the session's background checks.
+    expect(
+      errors.mock.calls.filter(([line]) => String(line).startsWith("Jazz: authenticate_expires")),
+    ).toHaveLength(1);
+  });
+
   it("refuses a sync session whose authenticate answer has already expired", async () => {
     let expired = false;
     const jazz = await createJazz({
@@ -1165,7 +1319,7 @@ describe("createJazz", () => {
     const backendUser = await fetch(`${origin}/jazz/apps/${jazz.appId}/accounts/backend-user`, {
       method: "POST",
     });
-    expect(backendUser.status).toBe(401);
+    expect(await backendUser.json()).toEqual({ user: null });
     await expect(jazz.accountFor(new Request("http://app/x"))).resolves.toBeNull();
 
     // And its sync session is let in.
@@ -1200,15 +1354,19 @@ describe("createJazz", () => {
     for (const [wrong, shown] of [
       [{}, /returned an object with keys \[\]$/],
       [{ id: "alice" }, /returned an object with keys \[id\]$/],
-      [{ userId: 42 }, /keys \[userId\], userId: 42$/],
-      [{ userId: "" }, /keys \[userId\], userId: ""$/],
-      ["alice", /returned alice$/],
+      [{ userId: 42 }, /keys \[userId\], userId: a number$/],
+      [{ userId: "" }, /keys \[userId\], userId: an empty string$/],
+      [{ userId: { token: "secret-token" } }, /keys \[userId\], userId: an object$/],
+      ["secret-token", /returned a string$/],
     ] as const) {
       answer = wrong;
       await expect(jazz.accountFor(request())).rejects.toThrow(
         /^createJazz: authenticate must return \{ userId: string, expiresAt: number \}, acceptDeviceAccounts\(request\) or null/,
       );
       await expect(jazz.accountFor(request())).rejects.toThrow(shown);
+      // It names the answer's shape, never its values: a wrong answer may be a token.
+      const error = await jazz.accountFor(request()).catch((caught: Error) => caught);
+      expect(String(error)).not.toMatch(/secret-token/);
       const response = await fetch(`${origin}/jazz/apps/${jazz.appId}/accounts/backend-user`, {
         method: "POST",
       });
@@ -1220,6 +1378,26 @@ describe("createJazz", () => {
     await expect(jazz.accountFor(request())).resolves.toBeNull();
     answer = undefined;
     await expect(jazz.accountFor(request())).resolves.toBeNull();
+  }, 30_000);
+
+  // An Expo app is a CommonJS package: an ESM backend importing its
+  // permissions.ts by default gets the whole module.exports, `{ default }`.
+  it("names a permissions module imported as CommonJS, not an unknown table `default`", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-cjs-permissions-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const key = "jazz-tools.test.create-jazz.cjs-permissions";
+    (globalThis as Record<symbol, unknown>)[Symbol.for(key)] = permissions;
+    const file = join(dir, "permissions.js");
+    await writeFile(
+      file,
+      `"use strict";\nObject.defineProperty(exports, "__esModule", { value: true });\nexports.default = globalThis[Symbol.for(${JSON.stringify(key)})];\n`,
+    );
+    const wrapped = createRequire(file)(file) as typeof permissions;
+    const jazz = createJazz({ app, permissions: wrapped, store: memory() });
+    cleanups.push(() => jazz.close());
+    await expect(jazz.ready()).rejects.toThrow(
+      /^permissions\.ts arrived as \{ default: … \}.*\{"type": "module"\}/,
+    );
   }, 30_000);
 
   it("refuses a sync session for a user without an account, until they sign in", async () => {
@@ -1537,7 +1715,7 @@ describe("createJazz", () => {
         },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
-    expect((await post("backend-user")).status).toBe(401);
+    expect(await (await post("backend-user")).json()).toEqual({ user: null });
     // Asked as often as a page focuses, it never assigns an account.
     for (let i = 0; i < 2; i++) {
       const answer = (await (await post("backend-user", "alice")).json()) as {
@@ -1860,6 +2038,55 @@ describe("createJazz", () => {
     expect(messages[0]).toContain("session refused: identity_not_authorized");
   }, 60_000);
 
+  it("refuses a token it can't verify as invalid, and no credential as missing (#4952)", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const refusal = async (prelude: unknown) => {
+      const socket = new NodeWebSocket(
+        `${origin.replace("http", "ws")}/jazz/apps/${jazz.appId}/ws`,
+      );
+      socket.binaryType = "arraybuffer";
+      socket.addEventListener("open", () => socket.send(JSON.stringify(prelude)));
+      const messages: string[] = [];
+      socket.addEventListener("message", (event) =>
+        messages.push(new TextDecoder().decode(new Uint8Array(event.data as ArrayBuffer))),
+      );
+      const closed = await new Promise<{ code: number; reason: string }>((resolve) =>
+        socket.addEventListener("close", (event) =>
+          resolve({ code: event.code, reason: event.reason }),
+        ),
+      );
+      expect(closed.code).toBe(1008);
+      expect(messages).toHaveLength(1);
+      return messages[0]!;
+    };
+    // A structurally valid JWT from an issuer this backend doesn't verify
+    // (forged signature): a credential was presented and failed.
+    const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+    const forged = [
+      encode({ alg: "HS256", typ: "JWT" }),
+      encode({ iss: "https://issuer.example", sub: "alice", exp: inAnHour() }),
+      Buffer.from("not-a-signature").toString("base64url"),
+    ].join(".");
+    // Before: "session missing: not signed in", reported as `missing`.
+    const invalid = await refusal({ peer_identity: "forged", auth: { jwt_token: forged } });
+    expect(invalid).toContain("session invalid");
+    expect(mapAuthReason(invalid)).toBe("invalid");
+    // Not even a JWT.
+    expect(
+      mapAuthReason(await refusal({ peer_identity: "junk", auth: { jwt_token: "junk" } })),
+    ).toBe("invalid");
+
+    // No credential at all (a stated session, no cookie) stays `missing`.
+    const missing = await refusal({
+      peer_identity: "nobody",
+      backend_session: { issuer: "jazz:backend", user_id: "alice" },
+    });
+    expect(missing).toContain("session missing");
+    expect(mapAuthReason(missing)).toBe("missing");
+  }, 60_000);
+
   it("syncs over the HTTP stream when the host can't upgrade sockets", async () => {
     const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
     const appId = jazz.appId;
@@ -1911,6 +2138,41 @@ describe("createJazz", () => {
       .insert(app.todos, { title: "still over the stream", owner: alice.session!.user! })
       .wait({ tier: "global" });
     expect((await jazz.db.all(app.todos.where({ id: later.id }))).length).toBe(1);
+  }, 60_000);
+
+  it("lets a client end its stream session once signed out, and calls one already ended done", async () => {
+    // #5187: a client ends its stream as it signs out, when the app's
+    // sign-in is already gone. That was a 403, and a DELETE that arrived
+    // after the session ended a 404 or 410: errors the browser logs.
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    const appId = jazz.appId;
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: false });
+    const previous = (globalThis as { location?: unknown }).location;
+    (globalThis as { location?: unknown }).location = {
+      host: new URL(origin).host,
+      href: `${origin}/`,
+    };
+    cleanups.push(async () => {
+      (globalThis as { location?: unknown }).location = previous;
+    });
+    const alice = await userSession(appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "over the stream", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    const sessionPath = requestPaths.find((path) => /\/stream\/[^/]+$/.test(path))!;
+    const key = streamKeys.get(sessionPath)!;
+    const end = (headers: Record<string, string>) =>
+      statusOf(`${origin}${sessionPath}`, "DELETE", headers);
+
+    // Still refused: no key, or the key with someone else's sign-in.
+    expect(await end({})).toBe(403);
+    expect(await end({ "x-test-user": "bob", "x-jazz-stream-key": key })).toBe(403);
+    // Its own client, signed out: ends it.
+    expect(await end({ "x-jazz-stream-key": key })).toBe(204);
+    // Ended already: done, for its client only.
+    expect(await end({ "x-jazz-stream-key": key })).toBe(204);
+    expect(await end({ "x-test-user": "alice" })).toBe(403);
   }, 60_000);
 
   for (const sockets of [false, true]) {

@@ -1585,6 +1585,72 @@ impl SyncMessage {
     }
 }
 
+/// Whether sync messages are logged (`debug` on target `jazz::sync`).
+fn log_enabled() -> bool {
+    tracing::enabled!(target: "jazz::sync", tracing::Level::DEBUG)
+}
+
+/// Log one sync message crossing a link at `debug` (target `jazz::sync`):
+/// the hop, its kind, the read or transaction it is about, what it carries
+/// and its encoded size (before the link frames or compresses it). Free when debug logging is off.
+fn log_message(hop: &'static str, message: &SyncMessage) {
+    if !log_enabled() {
+        return;
+    }
+    // The message's own encoding, before the link frames or compresses it.
+    // At debug this serializes each message a second time, for its size
+    // alone: worth it for a diagnostic, never paid with debug off.
+    let bytes = postcard::serialize_with_flavor(message, postcard::ser_flavors::Size::default())
+        .unwrap_or(0);
+    let detail = match message {
+        SyncMessage::Read {
+            id,
+            query,
+            tier,
+            wait,
+            since,
+            span,
+            ..
+        } => format!(
+            "id={id} table={} tier={tier:?} wait={wait:?} resume={} span={}",
+            query.table,
+            since.is_some(),
+            match span {
+                ReadSpan::Live => "live",
+                ReadSpan::Once { .. } => "once",
+            }
+        ),
+        SyncMessage::Unsubscribe { id } => format!("id={id}"),
+        SyncMessage::Settled {
+            id,
+            through,
+            members,
+            global,
+        } => format!(
+            "id={id} through={through} global={global} listed={}",
+            members.as_ref().map_or(0, Vec::len)
+        ),
+        SyncMessage::Rows { images, .. } => {
+            let mut tables = BTreeMap::<&str, usize>::new();
+            for image in images {
+                *tables.entry(image.table.as_str()).or_default() += 1;
+            }
+            format!("rows={} by_table={tables:?}", images.len())
+        }
+        SyncMessage::Holds { id, added, removed } => {
+            format!("id={id} added={} removed={}", added.len(), removed.len())
+        }
+        SyncMessage::AccessLost { table, .. } => format!("table={table}"),
+        SyncMessage::ResendWhole { rows } => format!("rows={}", rows.len()),
+        SyncMessage::Refused { id, code, .. } => format!("id={id} code={code:?}"),
+        SyncMessage::Fate { id, global, .. } => format!("tx={id:?} global={global}"),
+        SyncMessage::Commit { id, ops, .. } => format!("tx={id:?} ops={}", ops.len()),
+        SyncMessage::ConnectionSettled { through } => format!("through={through}"),
+        _ => String::new(),
+    };
+    tracing::debug!(target: "jazz::sync", hop, kind = message.kind(), bytes, "{detail}");
+}
+
 // ---- client state ---------------------------------------------------------
 
 pub(crate) enum Kind {
@@ -1940,6 +2006,14 @@ struct LiveRead {
     /// leaves it out, and a read the server never answers again (its
     /// upstream gone for good) keeps its holds until it closes.
     holds: HashMap<String, HashSet<[u8; 16]>>,
+    /// Rows its holds dropped since its resume point last moved: that
+    /// point may still count them as held (a support row released with
+    /// no change to the result settles nothing), so losing one forgets it.
+    released: HashMap<String, HashSet<[u8; 16]>>,
+    /// Whether its resume point was settled in this process. One loaded
+    /// from the store (a reload, or the read reopened) may count rows its
+    /// holds here never named, so it is never kept until it settles again.
+    settled_here: bool,
     /// Whether this connection told the read what it holds yet.
     told: bool,
 }
@@ -2046,6 +2120,9 @@ pub(crate) struct Client {
     node: [u8; 16],
     connection: u64,
     fates: HashMap<u64, Result<(), Error>>,
+    /// Fates the upstream gave this replica's commits, counted: each is
+    /// progress a read queued behind them makes (see [`Db::settled_upstream`]).
+    settled_upstream: u64,
     /// Accepted fates from a replica with no server: they order the
     /// commit, but it never becomes `Global`.
     local_fates: HashSet<u64>,
@@ -2142,6 +2219,11 @@ pub(crate) struct Client {
     /// No resume point was stored since they were last all forgotten, so
     /// forgetting them again (another eviction this tick) costs nothing.
     forgotten: bool,
+    /// A superset of the keys of the stored resume points, as the last
+    /// forgetting left them, while none was stored since (`None`: not
+    /// known). A forgetting that keeps exactly these leaves the store as it
+    /// is; a point whose read closed since is not kept, so it is pruned.
+    stored_points: Option<HashSet<[u8; 32]>>,
 }
 
 /// A session's commit a relay uploads as its own, for its upload: the
@@ -5806,25 +5888,97 @@ impl Inner {
         since
     }
 
-    /// Forget every remote query's resume point: this store may no longer
-    /// hold a result as it settled (a row it held was evicted, or is owed
-    /// whole), so each opens fresh until it settles again. An eviction is
-    /// rare enough that a fresh opening costs less than knowing which
-    /// results held the row.
-    fn forget_watermarks(&mut self) -> Result<(), Error> {
-        if self.client.as_ref().is_some_and(|client| client.forgotten) {
+    /// Forget the resume points that may count a row of `table` among
+    /// `rows` as held, though this store no longer holds it as it settled
+    /// (it was evicted, or is owed whole): each such read opens fresh until
+    /// it settles again.
+    ///
+    /// Only a live read this connection told what it holds, whose point
+    /// settled in this process, can be cleared: it keeps its resume point
+    /// when neither its holds nor the rows they
+    /// released since that point moved list any of the rows. Every other
+    /// one is forgotten, since nothing here says which rows it held: a
+    /// closed read's stored point, a one-shot read's, and a live read not
+    /// yet told on this connection. Reads sharing a watermark key (the same
+    /// query, binding and view: two live reads, or a live and a one-shot
+    /// one) share its stored point, kept only when every one of them keeps
+    /// it.
+    ///
+    /// `table` is a stored name, as holds, `AccessLost` and evictions name
+    /// tables: a table no holds name is one no told read holds a row of.
+    fn forget_watermarks_holding(&mut self, table: &str, rows: &[[u8; 16]]) -> Result<(), Error> {
+        let Some(client) = self.client.as_mut() else {
+            return Ok(());
+        };
+        if client.forgotten {
             return Ok(());
         }
-        if self.has_table("_jazz_watermarks")? {
-            self.exec("DELETE FROM _jazz_watermarks", [])
-                .map_err(storage)?;
+        // A stored point is kept only when every read using its key keeps
+        // it: reads sharing a key read the same result, and any one of them
+        // counting a lost row speaks for the stored row.
+        let mut keeps: HashMap<[u8; 32], bool> = HashMap::new();
+        for read in client.reads.values() {
+            let Some(key) = read.watermark else {
+                continue;
+            };
+            let keep = read.through.is_some()
+                && read.live().is_some_and(|live| {
+                    let counts = |held: &HashMap<String, HashSet<[u8; 16]>>| {
+                        held.get(table)
+                            .is_some_and(|held| rows.iter().any(|row| held.contains(row)))
+                    };
+                    live.settled_here
+                        && live.told
+                        && !counts(&live.holds)
+                        && !counts(&live.released)
+                });
+            *keeps.entry(key).or_insert(true) &= keep;
         }
-        if let Some(client) = self.client.as_mut() {
-            for read in client.reads.values_mut() {
+        let kept: HashSet<[u8; 32]> = keeps
+            .into_iter()
+            .filter_map(|(key, keep)| keep.then_some(key))
+            .collect();
+        for read in client.reads.values_mut() {
+            if !read.watermark.is_some_and(|key| kept.contains(&key)) {
                 read.through = None;
                 read.context = None;
             }
-            client.forgotten = true;
+        }
+        client.forgotten = kept.is_empty();
+        if !kept.is_empty() && client.stored_points.as_ref() == Some(&kept) {
+            return Ok(());
+        }
+        client.stored_points = Some(kept.clone());
+        if self.has_table("_jazz_watermarks")? {
+            if kept.is_empty() {
+                self.exec("DELETE FROM _jazz_watermarks", [])
+                    .map_err(storage)?;
+            } else {
+                let mut stored = Vec::new();
+                {
+                    let mut statement = self
+                        .conn
+                        .prepare("SELECT key FROM _jazz_watermarks")
+                        .map_err(storage)?;
+                    let keys = statement
+                        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+                        .map_err(storage)?;
+                    for key in keys {
+                        stored.push(key.map_err(storage)?);
+                    }
+                }
+                for key in stored {
+                    let keep =
+                        <[u8; 32]>::try_from(key.as_slice()).is_ok_and(|key| kept.contains(&key));
+                    if !keep {
+                        self.exec(
+                            "DELETE FROM _jazz_watermarks WHERE key = ?1",
+                            rusqlite::params![key],
+                        )
+                        .map_err(storage)?;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -6531,7 +6685,7 @@ impl Inner {
 
     /// Whether a relay owes session `index` a position its upstream
     /// moved: the connection's (`at`), once the session was told one, or
-    /// a settled result's upstream read's.
+    /// a settled result's upstream read's, or that read's global answer.
     fn owes_positions(&self, index: usize, at: u64) -> bool {
         let session = &self.sessions[index];
         let Some(client) = &self.client else {
@@ -6540,9 +6694,10 @@ impl Inner {
         session.connection_settled.is_some_and(|sent| sent != at)
             || self.relays_upstream()
                 && session.settles.values().any(|settle| {
-                    settle
-                        .sent
-                        .is_some_and(|sent| sent < client.settled_through(&settle.key))
+                    settle.sent.is_some_and(|sent| {
+                        sent < client.settled_through(&settle.key)
+                            || !settle.global && client.settled_globally(&settle.key)
+                    })
                 })
     }
 
@@ -6743,12 +6898,14 @@ impl Inner {
     /// `None` opens it fresh, shipping the whole result.
     ///
     /// Only an authority resumes: a relay's store may be cold, and its seqs
-    /// are not the ones its sessions resume from. A windowed, flat-join,
-    /// aggregate, relation or history read opens fresh, as does a one-shot
-    /// read with its own claims (they are not part of the session's read
-    /// context the client resumes from), a `since` past what this store
-    /// serves (a reset store), or one at or before the current schema's
-    /// activation (its policies may read differently).
+    /// are not the ones its sessions resume from. A window resumes as any
+    /// other read: a write to its own table makes the result as of `since`
+    /// decide which unchanged rows entered or left it, and its opening lists
+    /// its rows. A flat-join, aggregate, relation or history read opens
+    /// fresh, as does a one-shot read with its own claims (they are not part
+    /// of the session's read context the client resumes from), a `since`
+    /// past what this store serves (a reset store), or one at or before the
+    /// current schema's activation (its policies may read differently).
     fn resume_from(
         &self,
         prepared: &PreparedQuery,
@@ -6763,7 +6920,6 @@ impl Inner {
             || request_claims
             || read.cut.is_some()
             || since > self.served_through()
-            || crate::db::is_windowed(query)
             || query.flat_join.is_some()
             || query.aggregate.is_some()
             || query.relation.is_some()
@@ -7158,6 +7314,16 @@ impl Client {
         self.pending.iter().find(|p| p.id == *id).map(|p| p.tx)
     }
 
+    /// Whether the upstream live read under `key` was answered by the
+    /// global authority.
+    fn settled_globally(&self, key: &str) -> bool {
+        self.live_reads
+            .get(key)
+            .and_then(|id| self.reads.get(id))
+            .and_then(ActiveRead::live)
+            .is_some_and(|live| live.global.get())
+    }
+
     /// How far the live read `key` is settled: its own settle, or the
     /// connection's position when that is further.
     fn settled_through(&self, key: &str) -> u64 {
@@ -7202,6 +7368,7 @@ impl Client {
             pending: PendingQueue::default(),
             unsent: Vec::new(),
             fates: HashMap::new(),
+            settled_upstream: 0,
             local_fates: HashSet::new(),
             refused: Vec::new(),
             stored: HashSet::new(),
@@ -7231,6 +7398,7 @@ impl Client {
             deferred: VecDeque::new(),
             releasing: None,
             forgotten: false,
+            stored_points: None,
         }
     }
 }
@@ -7299,9 +7467,12 @@ impl Db {
         // A new server session knows nothing: attach every remote query
         // again and resend unsettled commits (the server dedupes by node
         // and transaction).
-        // What the old session refused, the new one answers afresh.
-        for remote in client.reads.values().filter_map(ActiveRead::live) {
+        // What the old session refused, the new one answers afresh, and
+        // what it said each read holds stands only until the new one says
+        // (a transport swapped without a detach included).
+        for remote in client.reads.values_mut().filter_map(ActiveRead::live_mut) {
             remote.refused.borrow_mut().take();
+            remote.told = false;
         }
         let resubscribe: Vec<SyncMessage> = client
             .reads
@@ -7565,7 +7736,8 @@ impl Db {
             drop(inner);
             let mut inner = self.inner.borrow_mut();
             if !evict.is_empty() {
-                inner.forget_watermarks()?;
+                let rows: Vec<[u8; 16]> = evict.iter().map(|(row, _)| *row.0.as_bytes()).collect();
+                inner.forget_watermarks_holding(&table, &rows)?;
             }
             for (row, key) in evict {
                 inner.evict(&table, row, &key)?;
@@ -8068,6 +8240,8 @@ impl Inner {
                 global: global.clone(),
                 visible: None,
                 holds: HashMap::new(),
+                released: HashMap::new(),
+                settled_here: false,
                 told: false,
             }),
         );
@@ -8263,6 +8437,8 @@ impl Db {
                          deploy it to the server",
                     )));
                 }
+                // The check may look at this store (its progress).
+                drop(inner);
                 if expired() {
                     return Poll::Ready(Err(Error::new(
                         ErrorCode::NotObserved,
@@ -8699,6 +8875,7 @@ impl Db {
             let mut failed = false;
             if let Some(transport) = client.transport.as_mut() {
                 while let Some(message) = transport.try_recv() {
+                    log_message("upstream→client", &message);
                     inbound.push(message);
                 }
                 failed = transport.take_failure().is_some();
@@ -8857,7 +9034,7 @@ impl Db {
                         // the row: a resume from them would count it as
                         // held, though this store no longer has it.
                         if held {
-                            inner.forget_watermarks()?;
+                            inner.forget_watermarks_holding(&table, &[id])?;
                         }
                         let client = inner.client.as_mut().expect("client");
                         client.whole.remove(&(table, id, key));
@@ -8945,9 +9122,15 @@ impl Db {
                                     // Resumable only in the context it was
                                     // read in, known once the `Welcome` said.
                                     if resumable && let Some(context) = client.context {
+                                        // The new point counts what the
+                                        // read holds now, not what it
+                                        // released before.
+                                        live.released.clear();
+                                        live.settled_here = true;
                                         read.through = Some(through);
                                         read.context = context;
                                         client.forgotten = false;
+                                        client.stored_points = None;
                                         live_watermark = read.watermark;
                                     }
                                     (members.clone(), false)
@@ -9171,6 +9354,10 @@ impl Db {
                             client.local_fates.insert(tx);
                         }
                         client.fates.insert(tx, result);
+                        // A relayed commit is a session's, not this store's.
+                        if !relayed {
+                            client.settled_upstream += 1;
+                        }
                         let node = client.node;
                         if let Some(hashes) = client.pushed.remove(&tx) {
                             crate::large::mark_pushed(&inner.conn, &hashes)?;
@@ -9237,7 +9424,9 @@ impl Db {
                                 })
                         {
                             if !std::mem::replace(&mut live.told, true) {
-                                live.holds.clear();
+                                for (table, rows) in live.holds.drain() {
+                                    live.released.entry(table).or_default().extend(rows);
+                                }
                             }
                             for (table, row) in removed {
                                 if let Some(rows) = live.holds.get_mut(&table) {
@@ -9246,6 +9435,7 @@ impl Db {
                                         live.holds.remove(&table);
                                     }
                                 }
+                                live.released.entry(table).or_default().insert(row);
                             }
                             for (table, row) in added {
                                 live.holds.entry(table).or_default().insert(row);
@@ -9285,7 +9475,9 @@ impl Db {
                 let mut inner = self.inner.borrow_mut();
                 if inner.client.as_ref().expect("client").whole.is_empty() {
                     inner.store_watermark(&watermark, through)?;
-                    inner.client.as_mut().expect("client").forgotten = false;
+                    let client = inner.client.as_mut().expect("client");
+                    client.forgotten = false;
+                    client.stored_points = None;
                 }
             }
         }
@@ -9426,7 +9618,7 @@ impl Db {
         let mut out = out.into_iter();
         while let Some(message) = out.next() {
             match transport.send(message.clone()) {
-                Ok(()) => {}
+                Ok(()) => log_message("client→upstream", &message),
                 Err(TransportError::Backpressure) => {
                     let mut held: Vec<SyncMessage> = std::iter::once(message).chain(out).collect();
                     held.append(&mut client.outbox);
@@ -10216,11 +10408,11 @@ impl Inner {
 
     /// Ask the upstream for a row whole: a `ResendWhole` of it, which it
     /// answers with the row whole or its eviction (SPEC 19.8). Until it arrives
-    /// this store holds a stale version, so every watermark is forgotten
-    /// and none is stored (see `Client::whole`). `seq`: a version of the row
+    /// this store holds a stale version, so the watermarks that may count
+    /// it as held are forgotten and none is stored (see `Client::whole`). `seq`: a version of the row
     /// an own commit produced, which this store must hold too (0 for none).
     fn ask_whole(&mut self, (table, id, key): WholeRow, seq: u64) -> Result<(), Error> {
-        self.forget_watermarks()?;
+        self.forget_watermarks_holding(&table, &[id])?;
         let client = self.client.as_mut().expect("client");
         let owed = client
             .whole
@@ -10547,6 +10739,47 @@ impl Db {
         self.inner.borrow().replayed_commits
     }
 
+    /// Echoes the serving passes examined to match the images they ship
+    /// against the writers' own commits (for tests and metrics): one per
+    /// image a session's commits could have produced, however many commits
+    /// one tick applied for it.
+    #[doc(hidden)]
+    pub fn echo_probes(&self) -> u64 {
+        self.inner.borrow().echo_probes
+    }
+
+    /// Fates the upstream has given this replica's own commits (not ones
+    /// it relays for its sessions) since it opened, and how many of its
+    /// own commits are still pending: a read is queued behind those, and
+    /// the server answers it after their fates (see
+    /// `binding_host::CoverageBudget`).
+    #[doc(hidden)]
+    pub fn own_upload_progress(&self) -> (u64, u64) {
+        self.inner
+            .borrow()
+            .client
+            .as_ref()
+            .map_or((0, 0), |client| {
+                let pending = client
+                    .pending
+                    .iter()
+                    .filter(|p| !client.relayed_fates.contains_key(&p.tx))
+                    .count();
+                (client.settled_upstream, pending as u64)
+            })
+    }
+
+    /// The settled count of [`Self::own_upload_progress`] alone, without
+    /// counting what is pending.
+    #[doc(hidden)]
+    pub fn settled_upstream(&self) -> u64 {
+        self.inner
+            .borrow()
+            .client
+            .as_ref()
+            .map_or(0, |client| client.settled_upstream)
+    }
+
     /// Sessions currently served (for tests and metrics).
     pub fn open_subscribers(&self) -> usize {
         self.inner
@@ -10613,7 +10846,10 @@ impl Db {
                 return Err(Error::new(ErrorCode::Protocol, error));
             }
             let mut inbound = std::mem::take(&mut session.backlog);
-            inbound.extend(std::iter::from_fn(|| session.transport.try_recv()));
+            inbound.extend(
+                std::iter::from_fn(|| session.transport.try_recv())
+                    .inspect(|message| log_message("session→store", message)),
+            );
             let failed = session.transport.take_failure().is_some();
             (inbound.into(), failed)
         };
@@ -11426,16 +11662,20 @@ impl Db {
                     let relaying = inner.relays_upstream();
                     let through = match inner.sessions[index].settles.get(&id) {
                         Some(settle) if relaying => {
-                            let at = inner
-                                .client
-                                .as_ref()
+                            let client = inner.client.as_ref();
+                            let at = client
                                 .map_or(through, |client| client.settled_through(&settle.key));
+                            // Served from this store, the result settles
+                            // at this store's tier; its upstream read's
+                            // global answer settles it globally too.
+                            let upstream =
+                                client.is_some_and(|client| client.settled_globally(&settle.key));
                             let settle = inner.sessions[index]
                                 .settles
                                 .get_mut(&id)
                                 .expect("just read");
                             settle.sent = Some(at);
-                            settle.global = global;
+                            settle.global |= global || upstream;
                             at
                         }
                         // Served here with no server: once relaying
@@ -11447,11 +11687,15 @@ impl Db {
                                 .get_mut(&id)
                                 .expect("just read");
                             settle.sent.get_or_insert(0);
-                            settle.global = global;
+                            settle.global |= global;
                             through
                         }
                         None => through,
                     };
+                    let global = inner.sessions[index]
+                        .settles
+                        .get(&id)
+                        .map_or(global, |settle| settle.global);
                     settled.push(SyncMessage::Settled {
                         id,
                         through,
@@ -11549,15 +11793,18 @@ impl Db {
                     }
                 }
                 'rows: for ((table, row, key), ats) in written {
+                    // A live read of the table reconciles the row: checked
+                    // first, so a burst into a read table costs no extra
+                    // store lookup per row (R62).
+                    if covered.contains(&table) {
+                        continue;
+                    }
                     let Some(current) = inner.current_image(&table, row, &key)? else {
                         continue;
                     };
                     let own = current.at.accepted()
                         && own_versions.contains(&(table.clone(), row, key.clone(), current.at));
-                    if !own
-                        || covered.contains(&table)
-                        || readable(&inner, &policies, &table, row, &key, policy)?
-                    {
+                    if !own || readable(&inner, &policies, &table, row, &key, policy)? {
                         continue;
                     }
                     for at in ats {
@@ -11637,7 +11884,9 @@ impl Db {
             // each version this tick's own commits made of it, the current
             // one included, each confirmed by its commit's `Fate` as
             // written: a later restore can need the founder's accepted
-            // creation stamp.
+            // creation stamp. Echoes of superseded rows drop in one pass
+            // after the loop (R62).
+            let mut superseded_rows = HashSet::new();
             for (table, row, key, at) in committed {
                 let current = inner.current_image(&table, row, &key)?;
                 let superseded = current.as_ref().is_some_and(|current| {
@@ -11654,7 +11903,7 @@ impl Db {
                     }
                 } else {
                     if superseded {
-                        echoes.retain(|e| !(e.table == table && e.row == row && e.key == key));
+                        superseded_rows.insert((table.clone(), row, key.clone()));
                     }
                     if !(superseded && readable(&inner, &policies, &table, row, &key, policy)?) {
                         continue;
@@ -11669,6 +11918,11 @@ impl Db {
                     "id = ?1 AND _branch = ?2 AND _clock = ?3 AND _writer = ?4",
                     &[&id, &key, &at.0.t(), &w],
                 )?);
+            }
+            if !superseded_rows.is_empty() {
+                echoes.retain(|e| {
+                    !superseded_rows.contains(&(e.table.clone(), e.row, e.key.clone()))
+                });
             }
             // An eviction is the row's state as of now, after every event
             // drained above: a version of it a result shipped earlier in the
@@ -11697,16 +11951,21 @@ impl Db {
             // A relayed result whose upstream read settled further, with no
             // change to its rows here, is told so: its rows may have arrived
             // through another read, held back until this one settled them.
+            // One this store served is told once its upstream read's answer
+            // is the global authority's, and is never downgraded.
             let relaying = inner.relays_upstream();
             let state = &mut *inner;
             if let Some(client) = state.client.as_ref().filter(|_| relaying) {
                 for (&id, settle) in state.sessions[index].settles.iter_mut() {
                     let at = client.settled_through(&settle.key);
-                    if settle.sent.is_some_and(|sent| sent < at) {
-                        settle.sent = Some(at);
+                    let global = !settle.global && client.settled_globally(&settle.key);
+                    if let Some(sent) = settle.sent.filter(|&sent| sent < at || global) {
+                        let through = at.max(sent);
+                        settle.global |= global;
+                        settle.sent = Some(through);
                         settled.push(SyncMessage::Settled {
                             id,
-                            through: at,
+                            through,
                             members: None,
                             global: settle.global,
                         });
@@ -11760,18 +12019,44 @@ impl Db {
                 })
                 .collect();
             echoes.retain(|echo| fated.contains(&echo.id));
+            let mut echo_probes = 0;
             if !echoes.is_empty() {
+                // By version, each in the order it was echoed: a tick that
+                // applied N commits of one writer matches its N images in
+                // one pass, not N scans of N echoes.
+                let mut by_version: HashMap<(&str, [u8; 16], &[u8], Pos), Vec<usize>> =
+                    HashMap::with_capacity(echoes.len());
+                for (i, echo) in echoes.iter().enumerate() {
+                    by_version
+                        .entry((
+                            echo.table.as_str(),
+                            *echo.row.0.as_bytes(),
+                            echo.key.as_slice(),
+                            echo.at,
+                        ))
+                        .or_default()
+                        .push(i);
+                }
+                let mut taken = vec![false; echoes.len()];
                 images.retain(|image| {
-                    let Some(at) = echoes.iter().position(|e| {
-                        e.table == image.table
-                            && *e.row.0.as_bytes() == image.id
-                            && e.key == image.key
-                            && e.at == image.at
-                            && image.at.accepted()
-                    }) else {
+                    if !image.at.accepted() {
+                        return true;
+                    }
+                    echo_probes += 1;
+                    let version = (
+                        image.table.as_str(),
+                        image.id,
+                        image.key.as_slice(),
+                        image.at,
+                    );
+                    let Some(&at) = by_version
+                        .get(&version)
+                        .and_then(|candidates| candidates.iter().find(|&&i| !taken[i]))
+                    else {
                         return true;
                     };
-                    let echo = echoes.swap_remove(at);
+                    taken[at] = true;
+                    let echo = &echoes[at];
                     as_written
                         .entry(echo.id)
                         .or_default()
@@ -11820,6 +12105,7 @@ impl Db {
                 session.connection_settled = Some(through);
                 out.push(SyncMessage::ConnectionSettled { through });
             }
+            inner.echo_probes += echo_probes;
             // A relay's versions of the session's own commits it still
             // uploads are the session's pending writes, which it holds as
             // it wrote them: shipped at the relay's seqs, they would stand
@@ -11979,7 +12265,24 @@ impl Db {
                 // host tells it why (see `take_closed_subscribers`): a
                 // backed-up one may reconnect, one sent a message that
                 // cannot be encoded would fail the same way again.
-                if let Err(error) = session.transport.send(message) {
+                // Logged once sent: a message the session never got is not.
+                let logged = log_enabled().then(|| message.clone());
+                let sent = session.transport.send(message);
+                if let Some(message) = &logged
+                    && sent.is_ok()
+                {
+                    log_message("store→session", message);
+                }
+                if let Err(error) = sent {
+                    if let Some(message) = &logged {
+                        tracing::debug!(
+                            target: "jazz::sync",
+                            hop = "store→session",
+                            kind = message.kind(),
+                            %error,
+                            "send failed: the session closes",
+                        );
+                    }
                     let code = match error {
                         TransportError::Backpressure => ErrorCode::Backpressure,
                         TransportError::Failed(_) => ErrorCode::Protocol,
@@ -12191,12 +12494,17 @@ impl Db {
                 // upstream answers: its own store may be cold. A Remote
                 // read waits for that answer however long it takes, its
                 // link down or no server at all: only the authority
-                // confirms a remote result. A LocalFirst one whose upstream
-                // cannot answer yet (its link is down, or still to come)
-                // serves this store, settled at once, while the upstream
-                // subscription it keeps fills the store once the link is
-                // up; one with a first-load wait is served so once the wait
-                // runs out.
+                // confirms a remote result. A LocalFirst one with a
+                // first-load wait waits for it while the upstream may
+                // answer, and is served from this store once the wait runs
+                // out or the upstream can no longer answer. Any other
+                // LocalFirst read serves this store, settled at once, as a
+                // one-shot one does: a zero wait is `FirstLoad::Deliver`,
+                // never "until the upstream answers". The upstream
+                // subscription it keeps fills the store, and the read
+                // follows it as deltas. Settled here, it stays at this
+                // store's tier: the upstream's global answer is not
+                // forwarded to it.
                 let upstream = db
                     .inner()
                     .client
@@ -12210,7 +12518,7 @@ impl Db {
                 let strict = tier == ReadTier::Remote && wait.is_none();
                 let relayed = attached
                     .as_ref()
-                    .filter(|_| upstream == Some(true) || strict);
+                    .filter(|_| strict || (upstream == Some(true) && wait.is_some()));
                 if relayed.is_some()
                     && let Some(until) = wait.and_then(wait_until)
                 {
@@ -13872,9 +14180,15 @@ fn readable_version(
     )
 }
 
-/// Whether `identity` may read the version of `row` at `seq` and, still,
-/// the row as it stands: losing read access takes effect at once for the
-/// content of every earlier version too (SPEC 19.9, INV-RLS-13).
+/// Whether `identity` may read the version of `row` at `at`: the row as it
+/// stands, when the version is the row's current one; otherwise also the
+/// version as of its own position, as history (SPEC 19.9, INV-RLS-13).
+/// Losing read access to the row takes effect at once for every version.
+///
+/// So a reader granted access after the row's last write (a share row made
+/// later) reads the current version's content, though nothing granted it
+/// as of that version's position. A relay judges "current" by its own
+/// store, which may lag; its upstream judges again.
 fn still_readable_version(
     inner: &Inner,
     policies: &Schema,
@@ -13884,10 +14198,16 @@ fn still_readable_version(
     at: Pos,
     identity: Option<AuthorSubject>,
 ) -> Result<bool, Error> {
-    Ok(
-        readable_version(inner, policies, table, row, key, at, identity)?
-            && readable(inner, policies, table, row, key, identity)?,
-    )
+    if !readable(inner, policies, table, row, key, identity)? {
+        return Ok(false);
+    }
+    if inner
+        .current_image(table, row, key)?
+        .is_some_and(|current| current.at == at)
+    {
+        return Ok(true);
+    }
+    readable_version(inner, policies, table, row, key, at, identity)
 }
 
 /// Whether `identity` may read a row of stored table `table`, by

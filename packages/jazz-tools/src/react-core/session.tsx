@@ -28,8 +28,8 @@ const SessionContext = createContext<UseJazzSessionResult<any> | null>(null);
 /**
  * Who is signed in and what the session is doing, with its operations
  * (`createDeviceAccount`, `refresh`, `signOut`, ...). Available everywhere
- * under `<JazzProvider>`, including its `signedOut`, `loading` and `error`
- * views. Operations reject on failure; the failure also shows in `error`.
+ * under `<JazzProvider>`, including its `signedOut`, `loading`, `error` and
+ * `closed` views. Operations reject on failure; the failure also shows in `error`.
  */
 export function useJazzSession<Client = CoreJazzClient>(): UseJazzSessionResult<Client> {
   const value = useContext(SessionContext);
@@ -46,6 +46,13 @@ export type JazzSessionViewProps<Client = CoreJazzClient> = {
   loading?: ReactNode | ((state: UseJazzSessionResult<Client>) => ReactNode);
   /** Shown when there is no usable client (`status: "error"`). */
   error?: ReactNode | ((state: UseJazzSessionResult<Client>) => ReactNode);
+  /**
+   * Shown once the session is closed (`status: "closed"`, after
+   * `session.close()`): it has no client and never starts again. Nothing by
+   * default. To start over, give the provider a new session (or a new React
+   * key for `config`).
+   */
+  closed?: ReactNode | ((state: UseJazzSessionResult<Client>) => ReactNode);
 };
 
 /** The two ways to give `<JazzProvider>` its session. */
@@ -107,6 +114,7 @@ function JazzSessionView<Client extends CoreJazzClient>({
   signedOut = null,
   loading = null,
   error = null,
+  closed = null,
 }: JazzSessionViewProps<Client> & { session: JazzSession<Client> }) {
   const snapshot = useSyncExternalStore(
     session.subscribe,
@@ -156,6 +164,8 @@ function JazzSessionView<Client extends CoreJazzClient>({
         signedOut
       ) : state.status === "error" ? (
         render(error)
+      ) : state.status === "closed" ? (
+        render(closed)
       ) : (
         render(loading)
       )}

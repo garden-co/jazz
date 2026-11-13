@@ -534,6 +534,14 @@ struct Inner {
     /// Errors the next ticks fail with, for tests of a tick driver.
     #[cfg(any(test, feature = "testing"))]
     failing_ticks: VecDeque<ErrorCode>,
+    /// Staged writes replayed into a transaction overlay so far: what tests
+    /// of staging cost count.
+    #[cfg(any(test, feature = "testing"))]
+    overlay_replays: usize,
+    /// Times a write check copied the evidence set it shares with its
+    /// batch: what tests of staging cost count.
+    #[cfg(any(test, feature = "testing"))]
+    evidence_copies: std::cell::Cell<usize>,
     /// Large-value chunks: the cache the collation and decoders read.
     chunks: Arc<crate::large::Chunks>,
     /// Nodes a large-value edit consolidated, stored when the edited cell
@@ -696,6 +704,9 @@ struct Inner {
     pub(crate) as_written_mismatches: u64,
     /// Pending commits a rebase replayed (see `Db::rebase`).
     pub(crate) replayed_commits: u64,
+    /// Echoes a serving pass examined to match its images (see
+    /// `Db::echo_probes`).
+    pub(crate) echo_probes: u64,
     /// The global authority: what it settles is durable at `Global`.
     authority: bool,
     /// Every session but SYSTEM's must be pinned to a published bundle
@@ -832,9 +843,12 @@ pub(crate) enum Who {
 
 /// How long a LocalFirst read's first load waits for a relay's upstream
 /// (`firstLoadRemoteWaitMs`), as a non-durable foreground tells its relay.
+/// A zero wait is `FirstLoad::Deliver`: no wait at all.
 pub(crate) fn first_load_wait(tier: ReadTier, first_load: &FirstLoad) -> Option<u64> {
     match (tier, first_load) {
-        (ReadTier::LocalFirst, FirstLoad::WaitForRemote { timeout_ms }) => Some(*timeout_ms),
+        (ReadTier::LocalFirst, FirstLoad::WaitForRemote { timeout_ms }) if *timeout_ms > 0 => {
+            Some(*timeout_ms)
+        }
         _ => None,
     }
 }
@@ -1415,6 +1429,9 @@ impl Db {
         conn: Connection,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
+        // Before the first statement is prepared: the flag is read at
+        // prepare time.
+        crate::host::stable_plans(&conn)?;
         // A schema this store has not admitted is reached along the lenses
         // the app ships: from a version it admitted, else from the first
         // version, each admitted as the authority admits it.
@@ -1621,6 +1638,10 @@ impl Db {
                 kept_variants: BTreeMap::new(),
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),
+                #[cfg(any(test, feature = "testing"))]
+                overlay_replays: 0,
+                #[cfg(any(test, feature = "testing"))]
+                evidence_copies: std::cell::Cell::new(0),
                 chunks,
                 pending_nodes: Vec::new(),
                 merging: false,
@@ -1688,6 +1709,7 @@ impl Db {
                 reopenable: path.is_some(),
                 as_written_mismatches: 0,
                 replayed_commits: 0,
+                echo_probes: 0,
                 authority: false,
                 pins_required: false,
                 upstream_rejections: None,
@@ -1945,10 +1967,23 @@ impl Db {
         Query::from(table)
     }
 
-    pub fn set_identity_claims(&self, identity: AuthorSubject, claims: BTreeMap<String, Value>) {
+    /// Bind `claims` to `identity`; returns whether they changed.
+    pub fn set_identity_claims(
+        &self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> bool {
+        // A peek: a host repeats an identity's claims before each of its
+        // writes, and the store gate would undo an open transaction's
+        // cached overlay, so its next stage would replay every write it
+        // staged so far.
+        if self.inner.staging().claims.get(&identity) == Some(&claims) {
+            return false;
+        }
         let mut inner = self.inner();
         inner.claims.insert(identity, claims);
         inner.refresh_identity(identity);
+        true
     }
 
     pub async fn tick(&self) -> Result<(), Error> {
@@ -2543,6 +2578,87 @@ impl Db {
         Ok((compiled.sql.clone(), plan.join(" | ")))
     }
 
+    /// Diagnostics for the Inspector's `explain`: for each of `rows` of
+    /// `table` (current, not deleted), which of its read policy's clauses
+    /// hold for `author` with `claims` (as bound to an identity: see
+    /// [`crate::binding_args::policy_claims`]). The clauses are the arms of the
+    /// policy's top-level `Or` (one clause when it is not an `Or`); none when
+    /// the table has no read policy, which denies every row. The policy is
+    /// the one reads are judged by (an older schema's rows by the current
+    /// schema's policies). Answers the number of clauses and, for each row
+    /// found (current, not deleted), whether each holds. Branched tables are
+    /// not supported yet.
+    #[doc(hidden)]
+    pub fn explain_read_clauses(
+        &self,
+        table: &str,
+        rows: &[RowUuid],
+        author: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> Result<(usize, Vec<(RowUuid, Vec<bool>)>), Error> {
+        let inner = self.inner();
+        let table = inner.schema.table(table)?;
+        if !table.branch_by.is_empty() {
+            return Err(unsupported("explain for a table with branches"));
+        }
+        // As `Ctx::under_policy_schema` judges reads: by the schema whose
+        // policies govern this table's rows.
+        let governing = match inner.schema.policies_from.as_deref() {
+            None => Some(table),
+            Some(current) => current.by_stored(&table.stored),
+        };
+        let clauses: Vec<PolicyExpr> = match governing.and_then(|t| t.policy(Operation::Select)) {
+            None => Vec::new(),
+            Some(PolicyExpr::Or(exprs)) => exprs.clone(),
+            Some(policy) => vec![policy.clone()],
+        };
+        if rows.is_empty() {
+            return Ok((clauses.len(), Vec::new()));
+        }
+        let session = Session::for_author(author, claims);
+        let binding = BTreeMap::new();
+        let none = Session::default();
+        let mut ctx = Ctx::new(&inner.schema, None, &none, &binding);
+        let mut columns = Vec::with_capacity(clauses.len());
+        for clause in &clauses {
+            let condition = ctx.policy_clause(Some(clause), table, "a", &session)?;
+            columns.push(format!(", COALESCE({condition}, 0)"));
+        }
+        let source = ctx.source(table)?;
+        let mut params = ctx.params;
+        let mut ids = Vec::with_capacity(rows.len());
+        for row in rows {
+            params.push(Sql::Blob(row.0.as_bytes().to_vec()));
+            ids.push(format!("?{}", params.len()));
+        }
+        let sql = format!(
+            "SELECT a.id{} FROM {source} AS a WHERE a.id IN ({}) AND (a._state & {STATE_DELETED}) = 0",
+            columns.concat(),
+            ids.join(", "),
+        );
+        let mut statement = inner.conn.prepare(&sql).map_err(storage)?;
+        let count = clauses.len();
+        let found = statement
+            .query_map(params_from_iter(params.iter()), |r| {
+                let id: Vec<u8> = r.get(0)?;
+                let mut holds = Vec::with_capacity(count);
+                for index in 0..count {
+                    holds.push(r.get::<_, i64>(index + 1)? != 0);
+                }
+                Ok((id, holds))
+            })
+            .map_err(storage)?;
+        let mut answer = Vec::new();
+        for row in found {
+            let (id, holds) = row.map_err(storage)?;
+            let id: [u8; 16] = id
+                .try_into()
+                .map_err(|_| crate::values::query_error("a row id is not 16 bytes"))?;
+            answer.push((RowUuid::from_bytes(id), holds));
+        }
+        Ok((count, answer))
+    }
+
     /// Text merges that ran past [`jazz_text::MERGE_WORK_BUDGET`] since the
     /// last call, so the incoming write stood as sent and the held value's
     /// concurrent edits left the current text (history keeps them), and
@@ -2743,8 +2859,9 @@ impl Db {
 
     /// On a client a subscription also attaches remotely (unless
     /// LocalOnly); its opening is withheld while it waits for the server
-    /// (the Remote tier, or `FirstLoad::WaitForRemote` while the link could
-    /// answer), and its deltas report whether the server answered.
+    /// (the Remote tier, or `FirstLoad::WaitForRemote` with a non-zero wait
+    /// while the link could answer), and its deltas report whether the
+    /// server answered.
     fn open_subscription(
         &self,
         prepared: &PreparedQuery,
@@ -5383,7 +5500,7 @@ impl Inner {
     /// unit could have taken away is checked again against the unit's
     /// whole post-state (see [`Inner::post_state_pass`]).
     pub(crate) fn finish_checks(&self, seq: u64) -> Result<(), Error> {
-        self.finish_checks_after(seq, BTreeMap::new())
+        self.finish_checks_after(seq, Arc::default())
     }
 
     /// [`Inner::finish_checks`] for a unit that continues writes already
@@ -5392,25 +5509,40 @@ impl Inner {
     pub(crate) fn finish_checks_after(
         &self,
         seq: u64,
-        grounded: BTreeMap<String, BTreeSet<[u8; 16]>>,
+        grounded: Arc<GroundedRows>,
     ) -> Result<(), Error> {
         let pending = self.deferred.borrow_mut().take().unwrap_or_default();
+        let trusted = std::mem::take(&mut *self.trusted_rows.borrow_mut());
+        // Nothing to ground: writes no policy checks (a backend's own, a
+        // replica's) leave only trusted rows, and merging those into the
+        // set a staged write shares with its batch would copy that set on
+        // every stage.
+        if pending.is_empty() {
+            return Ok(());
+        }
         let mut grounded = grounded;
-        for (table, rows) in std::mem::take(&mut *self.trusted_rows.borrow_mut()) {
-            grounded.entry(table).or_default().extend(rows);
+        #[cfg(any(test, feature = "testing"))]
+        if !trusted.is_empty() && Arc::strong_count(&grounded) > 1 {
+            self.evidence_copies.set(self.evidence_copies.get() + 1);
+        }
+        for (table, rows) in trusted {
+            Arc::make_mut(&mut grounded)
+                .entry(table)
+                .or_default()
+                .extend(rows);
         }
         self.ground_after(pending, seq, grounded)
     }
 
     fn ground(&self, pending: Vec<DeferredCheck>, seq: u64) -> Result<(), Error> {
-        self.ground_after(pending, seq, BTreeMap::new())
+        self.ground_after(pending, seq, Arc::default())
     }
 
     fn ground_after(
         &self,
         mut pending: Vec<DeferredCheck>,
         seq: u64,
-        mut grounded: BTreeMap<String, BTreeSet<[u8; 16]>>,
+        mut grounded: Arc<GroundedRows>,
     ) -> Result<(), Error> {
         // Each check runs under the schema its write was staged with.
         let mut live = Vec::with_capacity(pending.len());
@@ -5438,7 +5570,7 @@ impl Inner {
                 seq: self.own_pos(seq.saturating_sub(1)),
                 own: self.own_rank(seq),
                 extra: Vec::new(),
-                overlay: Some(CutOverlay::Grounded(Arc::new(grounded.clone()))),
+                overlay: Some(CutOverlay::Grounded(grounded.clone())),
             };
             let mut passed = Vec::new();
             let mut failed = Vec::new();
@@ -5455,16 +5587,23 @@ impl Inner {
             if !failed.is_empty() && passed.is_empty() {
                 return Err(write_check_denied(&failed[0]));
             }
+            drop(cut);
+            // Only a further round reads what this one grounded.
+            if failed.is_empty() {
+                rounds.extend(
+                    passed
+                        .into_iter()
+                        .map(|(check, tables)| (check, round, tables)),
+                );
+                break;
+            }
             for (check, tables) in passed {
                 let stored = check.schema.table(&check.table)?.stored.clone();
-                grounded
+                Arc::make_mut(&mut grounded)
                     .entry(stored)
                     .or_default()
                     .insert(*check.row.0.as_bytes());
                 rounds.push((check, round, tables));
-            }
-            if failed.is_empty() {
-                break;
             }
             pending = failed;
             round += 1;
@@ -8306,6 +8445,9 @@ struct Overlay {
     mark: usize,
 }
 
+/// Rows a unit's checks may take as evidence, by stored table.
+pub(crate) type GroundedRows = BTreeMap<String, BTreeSet<[u8; 16]>>;
+
 /// The store behind its one gate: every borrow first undoes a transaction
 /// handle's overlay, so nothing but that handle's next stage or read sees
 /// it.
@@ -8341,8 +8483,10 @@ struct Batch {
     kind: BatchKind,
     ops: Vec<(Rc<Schema>, StagedOp)>,
     /// The rows `ops` write, by stored table: a later staged write's
-    /// evidence (see [`Db::in_overlay`]).
-    rows: BTreeMap<String, BTreeSet<[u8; 16]>>,
+    /// evidence (see [`Db::in_overlay`]). Shared with that write's check
+    /// rather than copied, so a stage costs the same however many writes
+    /// came before it.
+    rows: Arc<GroundedRows>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
@@ -8868,7 +9012,7 @@ impl Db {
             Batch {
                 kind,
                 ops: Vec::new(),
-                rows: BTreeMap::new(),
+                rows: Arc::default(),
                 edits: LargeEdits::default(),
                 uploads: Vec::new(),
             },
@@ -8876,9 +9020,31 @@ impl Db {
         Ok(())
     }
 
-    /// A fresh row id from this database's id source.
+    /// A fresh row id from this database's id source. Drawing one leaves
+    /// an open transaction's overlay applied: a host draws one per staged
+    /// insert, and undoing the overlay would make each stage replay the
+    /// batch.
     pub fn next_row_id(&self) -> RowUuid {
-        self.inner().ids.next_row_id()
+        self.inner.staging().ids.next_row_id()
+    }
+
+    /// How many staged writes have been replayed into transaction overlays:
+    /// staging a batch write by write replays each write at most once
+    /// unless something else used the store in between.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn overlay_replays_for_test(&self) -> usize {
+        // A peek: the store gate would undo the cached overlay.
+        self.inner.staging().overlay_replays
+    }
+
+    /// How many times a staged write's check copied the evidence set it
+    /// shares with its batch (see [`Batch::rows`]).
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn evidence_copies_for_test(&self) -> usize {
+        // A peek: the store gate would undo the cached overlay.
+        self.inner.staging().evidence_copies.get()
     }
 
     /// The open transaction `id`, mergeable or serializable.
@@ -9156,13 +9322,17 @@ impl Db {
                 let mut rows = batch.rows.clone();
                 if let Some(row) = op.row() {
                     let stored = &inner.schema.table(op.table())?.stored;
-                    if let Some(set) = rows.get_mut(stored) {
+                    if rows
+                        .get(stored)
+                        .is_some_and(|set| set.contains(row.0.as_bytes()))
+                        && let Some(set) = Arc::make_mut(&mut rows).get_mut(stored)
+                    {
                         set.remove(row.0.as_bytes());
                     }
                 }
                 rows
             }
-            None => BTreeMap::new(),
+            None => Arc::default(),
         };
         let live = inner
             .overlay
@@ -9185,6 +9355,10 @@ impl Db {
         if let Some(ops) = ops {
             inner.settle_overlay();
             begin_savepoint(&inner.conn, "overlay")?;
+            #[cfg(any(test, feature = "testing"))]
+            {
+                inner.overlay_replays += ops.len();
+            }
             let mark = inner.changed.borrow().len();
             if let Err(error) = inner.apply_all_checking(&ops, ops.len(), own) {
                 inner.clear_derived();
@@ -9302,6 +9476,10 @@ impl Db {
         };
         let own = inner.seq + 1;
         begin_savepoint(&inner.conn, "overlay")?;
+        #[cfg(any(test, feature = "testing"))]
+        {
+            inner.overlay_replays += ops.len();
+        }
         let mark = inner.changed.borrow().len();
         let result = inner
             .apply_with_edits(&ops, &edits, ops.len(), own)
@@ -9331,8 +9509,7 @@ impl Db {
         };
         let batch = inner.batches.get_mut(&id).expect("validated");
         if let Some((table, row)) = stored {
-            batch
-                .rows
+            Arc::make_mut(&mut batch.rows)
                 .entry(table)
                 .or_default()
                 .insert(*row.0.as_bytes());

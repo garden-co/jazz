@@ -25,6 +25,11 @@ const AS = {
   description:
     "Run under this user's permissions (the app's user id), to see what they see. Omit to use the backend's authority (every row).",
 };
+const CLAIMS = {
+  type: "object",
+  description:
+    'With as: the user\'s session claims, as their sign-in would carry them, e.g. {"role":"manager"}. Policies that read claims see none unless you pass them; answers carry a warning when that may matter.',
+};
 const QUERY = {
   type: "object",
   description:
@@ -91,7 +96,7 @@ export const MCP_TOOLS: Tool[] = [
       "Run a query against the app's live data. Answers carry an inspectorUrl: link it to show the person exactly these rows.",
     inputSchema: {
       type: "object",
-      properties: { query: QUERY, as: AS },
+      properties: { query: QUERY, as: AS, claims: CLAIMS },
       required: ["query"],
     },
   },
@@ -100,7 +105,7 @@ export const MCP_TOOLS: Tool[] = [
     description: "One row by id, with who created and last changed it.",
     inputSchema: {
       type: "object",
-      properties: { table: { type: "string" }, id: { type: "string" }, as: AS },
+      properties: { table: { type: "string" }, id: { type: "string" }, as: AS, claims: CLAIMS },
       required: ["table", "id"],
     },
   },
@@ -127,6 +132,7 @@ export const MCP_TOOLS: Tool[] = [
           items: { type: "object" },
         },
         as: AS,
+        claims: CLAIMS,
       },
       required: ["ops"],
     },
@@ -139,10 +145,10 @@ export const MCP_TOOLS: Tool[] = [
   {
     name: "explain",
     description:
-      "Which policy allowed or denied each row of a query for a user (not supported yet).",
+      "Why a user can or can't read each row of a query: every row the query matches (with the backend's authority), whether the user may read it, and which clauses of the table's read policy allowed it. Clauses are the arms of the policy's top-level or, numbered from 0 and rendered as text. Pass the user's claims if the policy reads them.",
     inputSchema: {
       type: "object",
-      properties: { query: QUERY, as: AS },
+      properties: { query: QUERY, as: AS, claims: CLAIMS },
       required: ["query", "as"],
     },
   },
@@ -157,6 +163,7 @@ export const MCP_TOOLS: Tool[] = [
         table: { type: "string" },
         row: { type: "string" },
         as: AS,
+        claims: CLAIMS,
       },
     },
   },
@@ -182,10 +189,23 @@ export async function runMcpServer(options: {
     callInspector(endpoint, request, {
       token: (await store.get(endpoint))?.token,
       fetch: options.fetch,
+      withoutToken: "call request_access to ask a person for one",
     });
 
   async function callTool(name: string, args: Json): Promise<unknown> {
-    const as = typeof args.as === "string" ? { as: args.as } : {};
+    if (args.claims !== undefined && typeof args.as !== "string") {
+      throw new InspectError("bad_request", "claims goes with as (the user they belong to)");
+    }
+    // Claims go to the backend as given: it refuses ones that aren't an object.
+    const as =
+      typeof args.as === "string"
+        ? {
+            as:
+              args.claims === undefined
+                ? args.as
+                : { userId: args.as, claims: args.claims as Record<string, unknown> },
+          }
+        : {};
     switch (name) {
       case "whoami":
         return call({ op: "whoami" });
@@ -232,7 +252,7 @@ export async function runMcpServer(options: {
         return call({
           op: "explain",
           query: args.query as never,
-          as: String(args.as),
+          as: as.as ?? String(args.as),
         });
       case "inspector_link":
         return call({

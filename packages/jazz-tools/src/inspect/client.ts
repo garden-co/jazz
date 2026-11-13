@@ -132,7 +132,15 @@ export type TokenStore = ReturnType<typeof tokenStore>;
 export async function callInspector<T = unknown>(
   endpoint: string,
   request: InspectRequest,
-  options: { token?: string | null; fetch?: typeof fetch } = {},
+  options: {
+    token?: string | null;
+    fetch?: typeof fetch;
+    /**
+     * What to do about a refusal when no token was sent: the app's hook
+     * refusing an anonymous call means the caller has no token yet.
+     */
+    withoutToken?: string;
+  } = {},
 ): Promise<T> {
   const doFetch = options.fetch ?? fetch;
   // A token reads every row it's scoped to: it never crosses a network in the clear.
@@ -175,7 +183,14 @@ export async function callInspector<T = unknown>(
   }
   if (!response.ok) {
     const error = body as Partial<InspectErrorAnswer>;
-    throw new InspectError(error.error ?? "failed", error.message ?? `HTTP ${response.status}`);
+    const message = error.message ?? `HTTP ${response.status}`;
+    if (!options.token && error.error === "unauthorized" && options.withoutToken) {
+      throw new InspectError(
+        "unauthorized",
+        `no Inspector token for ${endpoint}: ${options.withoutToken} (the backend said: ${message})`,
+      );
+    }
+    throw new InspectError(error.error ?? "failed", message);
   }
   return body as T;
 }
@@ -198,6 +213,10 @@ export interface PendingApproval {
  * Ask a person to approve an agent token for `endpoint`: listen on a
  * loopback port, and answer with the Inspector URL to open. The token is
  * stored once the browser hands it over.
+ *
+ * The loopback server keeps the process running until the browser hands the
+ * token over, the request times out, or `cancel()` is called: a CLI awaiting
+ * `token` must still be there when the browser comes back.
  */
 export async function requestApproval(
   endpoint: string,
@@ -276,7 +295,6 @@ export async function requestApproval(
     server!.once("error", reject);
     server!.listen(0, "127.0.0.1", resolve);
   });
-  server.unref();
   const port = (server.address() as { port: number }).port;
   timer = setTimeout(
     () => {
@@ -285,7 +303,6 @@ export async function requestApproval(
     },
     options.timeoutMs ?? 10 * 60_000,
   );
-  (timer as unknown as { unref?: () => void }).unref?.();
   const fragment = encodeGrant({
     ...grant,
     callback: `http://127.0.0.1:${port}/callback`,

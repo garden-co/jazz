@@ -11,10 +11,12 @@ call commits as its own transaction, which the server checks against your
 [declarative permissions](/docs/schemas/policies) and accepts or rejects as a whole. To make several
 reads and writes commit together, group them in a [transaction](#transactions).
 
-Every write returns a `MutationResult`:
+`insert` and `restore` return a `WriteResult`; `update`, `upsert` and `delete` return a
+`WriteHandle`. Both have:
 
-- `value`&hairsp;—&hairsp;The written result. `insert` and `restore` return the row; `upsert`,
-  `update`, and `delete` return `undefined`.
+- `value`&hairsp;—&hairsp;The written result: the row for `insert` and `restore`, so a new row's id
+  is `db.insert(…).value.id`; `undefined` for the others. Inside a
+  [transaction](#transactions), `tx.insert(…)` returns the staged row itself.
 - `txId`&hairsp;—&hairsp;A promise for the committed transaction ID, the durable identity of this
   write.
 - `wait(...)`&hairsp;—&hairsp;A method that waits until the write is confirmed at a
@@ -30,7 +32,7 @@ first, so it shows at once, before the server has seen it.
 
 ## Getting a `Db` handle
 
-Every framework provides a hook to access the database handle, and query hooks return it too. In plain TypeScript, use the `Db` returned by `createClient` directly.
+Every framework provides a hook to access the database handle, and query hooks return it too. In plain TypeScript, use `session.db` from `createJazzClient`.
 
 <Tabs
   groupId="jazz-framework"
@@ -229,12 +231,15 @@ into a long value stays cheap however long it grows.
 Store a file in a `bytes` column next to its metadata:
 
 ```ts title="schema.ts"
-files: s.table({
-  name: s.string(),
-  type: s.string(),
-  size: s.int(),
-  content: s.bytes(),
-}),
+files: s.table(
+  {
+    name: s.string(),
+    type: s.string(),
+    size: s.int(),
+    content: s.bytes(),
+  },
+  {},
+),
 ```
 
 Upload from the browser with `insertStreaming`, which streams the bytes into the row instead of

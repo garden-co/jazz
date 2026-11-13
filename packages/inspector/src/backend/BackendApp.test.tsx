@@ -181,6 +181,44 @@ describe("the Inspector a backend serves", () => {
     expect(await screen.findByText("bob's bread")).toBeTruthy();
   });
 
+  it("views as a user with the claims given for them, and flags when none are", async () => {
+    // Only managers (a claim) see todos. (This schema's owner is a plain
+    // string, so the policy reads the claim alone.)
+    const jazz = await createJazz({
+      app,
+      permissions: s.definePermissions(app, ({ policy, session }) => {
+        policy.todos.allowRead.where(session.where({ "claims.role": "manager" }));
+      }),
+      store: memory(),
+      authenticate: () => null,
+      inspect: staff,
+      inspector: { audit: () => {} },
+    });
+    cleanups.push(() => jazz.close());
+    await jazz.createAccountFor("manager");
+    await jazz.db
+      .insert(app.todos, { title: "bob's bread", done: true, owner: "bob" })
+      .wait({ tier: "global" });
+    const { call, calls } = callAs(jazz, { "x-staff": "ops@example.com" });
+    render(<BackendApp pageUrl={`${PAGE}#table=todos&as=manager`} call={call} />);
+
+    // No claims: a session with none, and the Inspector says so.
+    expect(await screen.findByText("no claims")).toBeTruthy();
+    expect(screen.queryByText("bob's bread")).toBeNull();
+
+    const claims = screen.getByLabelText("with claims") as HTMLInputElement;
+    fireEvent.change(claims, { target: { value: '{"role":"manager"}' } });
+    fireEvent.blur(claims);
+    expect(await screen.findByText("bob's bread")).toBeTruthy();
+    expect(screen.queryByText("no claims")).toBeNull();
+    expect(calls).toContainEqual(
+      expect.objectContaining({
+        op: "query",
+        as: { userId: "manager", claims: { role: "manager" } },
+      }),
+    );
+  });
+
   it("opens on exactly the rows a deep link's query names", async () => {
     const jazz = await backend();
     const { call } = callAs(jazz, { "x-staff": "ops@example.com" });
@@ -194,6 +232,26 @@ describe("the Inspector a backend serves", () => {
     expect(screen.queryByText("alice's milk")).toBeNull();
     expect(screen.getByText("1 row")).toBeTruthy();
     expect(screen.getByRole("link", { name: "Open todos in the data explorer" })).toBeTruthy();
+  });
+
+  it("explains which clause lets the user viewed as read each row of a linked query", async () => {
+    const jazz = await backend();
+    await jazz.createAccountFor("alice");
+    const { call, calls } = callAs(jazz, { "x-staff": "ops@example.com" });
+    const link = inspectorLink(PAGE, { query: { table: "todos" }, as: "alice" });
+    render(<BackendApp pageUrl={link} call={call} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Explain why" }));
+    const explain = await screen.findByRole("region", { name: "Explain" });
+    expect(await within(explain).findByText('owner = "alice"')).toBeTruthy();
+    const rows = within(explain).getAllByRole("row").slice(1);
+    expect(rows.map((row) => within(row).getAllByRole("cell")[1]!.textContent).sort()).toEqual([
+      "no",
+      "yes",
+    ]);
+    expect(within(explain).getByText('0: owner = "alice"')).toBeTruthy();
+    expect(within(explain).getByText("no clause holds")).toBeTruthy();
+    expect(calls).toContainEqual(expect.objectContaining({ op: "explain", as: "alice" }));
   });
 
   it("says who decides when the hook refuses", async () => {
