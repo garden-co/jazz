@@ -142,6 +142,25 @@ export async function accountForgotten(
   return (await forgottenReaders.get(accounts)?.(account)) ?? false;
 }
 
+const keptAccountReaders = new WeakMap<
+  AccountManager<JWTAuth>,
+  (account: string) => Promise<boolean>
+>();
+
+/**
+ * @internal Whether the store `accounts` keeps still holds the key of the
+ * device account `account` (as stored now, not as this manager last saw it):
+ * while it does, that account can be opened again, so its local data is kept.
+ */
+export async function storedKeepsDeviceAccount(
+  accounts: AccountManager<JWTAuth>,
+  account: string,
+): Promise<boolean> {
+  const read = keptAccountReaders.get(accounts);
+  if (!read) throw new Error("Jazz can't read this device's account store");
+  return read(account);
+}
+
 /** @internal Select and adopt one durable root for automatic first startup. */
 export async function ensureAutomaticLocalFirst(
   accounts: AccountManager<JWTAuth>,
@@ -318,6 +337,11 @@ export async function prepareAccountManager(options: {
   forgottenReaders.set(manager, async (account) =>
     (decode(await options.store.read()).forgottenAccounts ?? []).includes(account),
   );
+  keptAccountReaders.set(manager, async (account) => {
+    const latest = decode(await options.store.read());
+    dropForgotten(latest);
+    return latest.roots.some((root) => rootAccount(root) === account);
+  });
   const superseded = async (): Promise<never> => {
     stored.selected = null;
     await save();
