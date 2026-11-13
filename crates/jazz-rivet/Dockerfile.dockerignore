@@ -1,0 +1,10 @@
+**
+!Cargo.toml
+!Cargo.lock
+!crates
+!crates/**
+**/target
+**/node_modules
+crates/jazz-rivet/vendor
+crates/jazz-rivet/artifacts
+**/.env*

@@ -3242,6 +3242,43 @@ describe("createJazz", () => {
     expect(((await listed.json()) as { bundles: unknown[] }).bundles).toEqual([]);
   });
 
+  it("uses the Rivet socket URL for the backend's own database session", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const provider = await import("./rivet-store.js");
+    const socketUrl = `${core.url.replace(/^http/, "ws")}/actor-socket/apps/${appId}/ws`;
+    const provision = vi.spyOn(provider, "openRivetStore").mockResolvedValue({
+      appId,
+      url: core.url,
+      socketUrl,
+      headers: async () => ({ "x-rivet-token": "fixture" }),
+      backendCredential: () => core.adminSecret,
+      secrets: { adminSecret: core.adminSecret, backendSecret: core.backendSecret },
+    });
+    cleanups.push(async () => provision.mockRestore());
+    const sockets: string[] = [];
+    const RealWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = class extends RealWebSocket {
+      constructor(url: string | URL, options?: { headers?: Record<string, string> }) {
+        sockets.push(String(url));
+        super(String(url).replace("/actor-socket/", "/"), options as never);
+      }
+    } as typeof WebSocket;
+    cleanups.push(async () => {
+      globalThis.WebSocket = RealWebSocket;
+    });
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: provider.rivet({ name: "socket-route", pool: "jazz" }),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    expect(await jazz.db.all(app.todos)).toEqual([]);
+    expect(sockets.length).toBeGreaterThan(0);
+    expect(sockets.every((url) => url === socketUrl)).toBe(true);
+  });
+
   it("presents the backend credential on every request and socket to a remote core", async () => {
     const appId = randomUUID();
     const core = await startLocalJazzServer({ appId, inMemory: true });

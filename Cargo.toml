@@ -41,6 +41,8 @@ members = [
   "examples/wequencer/benchmarks",
 ]
 exclude = [
+  # Rivet owns SQLite and requires its own dependency graph and newer toolchain.
+  "crates/jazz-rivet",
   "examples/todo-server-rs",
   "examples/docs/todo-server-rs",
   "vendor/ruzstd",

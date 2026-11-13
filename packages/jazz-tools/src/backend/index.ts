@@ -29,6 +29,8 @@ export {
   files,
   memory,
   remote,
+  rivet,
+  type RivetStoreOptions,
   s3,
   sqlite,
   vercel,
