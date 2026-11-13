@@ -62,7 +62,7 @@ it("upgrades to the local-first client under a mounted tree, keeping its state a
   server = await startTestJazz({
     app,
     permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   const opened = await createJazzClient({
     scope: server.appId,

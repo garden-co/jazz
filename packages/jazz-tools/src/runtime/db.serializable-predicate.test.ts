@@ -35,7 +35,7 @@ it("inserts an ordinary parent and child atomically after adding a table", async
   const server = await startTestJazz({
     app: oldApp,
     permissions: oldPermissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
@@ -74,7 +74,7 @@ it.each(["local", "global"] as const)(
     const server = await startTestJazz({
       app: app,
       permissions: permissions,
-      coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+      coreOptions: { inMemory: true },
     });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     try {
@@ -121,7 +121,7 @@ it("does not reject a filtered transaction read when an unrelated row is inserte
   const server = await startTestJazz({
     app: app,
     permissions: permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
@@ -157,7 +157,7 @@ it.each(["offline", "synced"] as const)(
         ? await startTestJazz({
             app,
             permissions,
-            coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+            coreOptions: { inMemory: true },
           })
         : undefined;
     const uncaught: unknown[] = [];

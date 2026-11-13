@@ -31,7 +31,7 @@ it.each([
     const server = await startTestJazz({
       app,
       permissions,
-      coreOptions: { appId: randomUUID(), inMemory: true, allowLocalFirstAuth: true },
+      coreOptions: { appId: randomUUID(), inMemory: true },
     });
     onTestFinished(() => server.stop());
     const alice = await createDb(await localAccountConfig(server.appId, server.url));

@@ -29,7 +29,6 @@ pub struct JazzServerBuilder {
     backend_secret: Option<String>,
     auth_clock: Option<crate::middleware::auth::AuthClock>,
     trusted_workload: Option<crate::middleware::workload::TrustedWorkload>,
-    local_first_auth_disabled: bool,
 }
 
 impl std::fmt::Debug for JazzServerBuilder {
@@ -80,12 +79,6 @@ impl JazzServerBuilder {
 
     pub fn with_backend_secret(mut self, secret: impl Into<String>) -> Self {
         self.backend_secret = Some(secret.into());
-        self
-    }
-
-    /// Admit no local-first accounts (`--allow-local-first-auth false`).
-    pub fn without_local_first_auth(mut self) -> Self {
-        self.local_first_auth_disabled = true;
         self
     }
 
@@ -151,7 +144,6 @@ impl JazzServer {
             backend_secret,
             auth_clock,
             trusted_workload,
-            local_first_auth_disabled,
         } = builder;
 
         let app_id = app_id.unwrap_or_else(AppId::random);
@@ -166,7 +158,6 @@ impl JazzServer {
         let auth_clock = auth_clock.unwrap_or_default();
 
         let auth_config = AuthConfig {
-            allow_local_first_auth: !local_first_auth_disabled,
             backend_secret: trusted_workload.is_none().then(|| backend_secret.clone()),
             admin_secret: trusted_workload.is_none().then(|| admin_secret.clone()),
             trusted_workload,

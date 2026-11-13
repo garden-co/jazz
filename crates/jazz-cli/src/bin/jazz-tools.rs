@@ -35,26 +35,6 @@ use jazz_server::profiling::DiagnosticsConfig;
 const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 const MAX_SHUTDOWN_TIMEOUT_SECS: u64 = 60 * 60;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NodeEnvMode {
-    Production,
-    DevelopmentLike,
-}
-
-fn resolve_node_env_mode() -> NodeEnvMode {
-    match std::env::var("NODE_ENV") {
-        Ok(value) if value.eq_ignore_ascii_case("production") => NodeEnvMode::Production,
-        _ => NodeEnvMode::DevelopmentLike,
-    }
-}
-
-fn resolve_dev_default_flag(mode: NodeEnvMode, enabled_in_production: bool) -> bool {
-    match mode {
-        NodeEnvMode::Production => enabled_in_production,
-        NodeEnvMode::DevelopmentLike => true,
-    }
-}
-
 fn parse_app_id(value: &str) -> Result<String, String> {
     jazz::tools::AppId::from_string(value).map_err(|_| {
         "Application ID must be a UUID, not an app name. Generate one with `jazz-tools create app` and reuse it for the server and client.".to_owned()
@@ -178,12 +158,6 @@ enum Commands {
         /// is refused there (a `vercel()` core passes it).
         #[arg(long)]
         blobs_environment: Option<String>,
-
-        /// Enable local-first auth (Authorization: Bearer <self-signed Jazz JWT>).
-        ///
-        /// Required in NODE_ENV=production.
-        #[arg(long, env = "JAZZ_ALLOW_LOCAL_FIRST_AUTH")]
-        allow_local_first_auth: bool,
 
         /// Trust only this OIDC workload instead of shared secrets: every
         /// request and session must carry its token in
@@ -358,7 +332,6 @@ async fn run() {
             vercel_blob_prefix,
             vercel_blob_token_from_workload,
             blobs_environment,
-            allow_local_first_auth,
             backend_secret,
             admin_secret,
             trusted_workload_issuer,
@@ -374,21 +347,7 @@ async fn run() {
             diagnostics_listen,
             diagnostics_token,
         } => {
-            let node_env_mode = resolve_node_env_mode();
-            let explicitly_allowed = allow_local_first_auth;
-            let allow_local_first_auth =
-                resolve_dev_default_flag(node_env_mode, allow_local_first_auth);
-            if allow_local_first_auth && !explicitly_allowed {
-                tracing::warn!(
-                    "Local-first auth is enabled automatically because NODE_ENV is not \
-                     set to \"production\". Any self-signed Jazz token will be accepted \
-                     with no additional configuration. Set NODE_ENV=production or pass \
-                     --allow-local-first-auth / JAZZ_ALLOW_LOCAL_FIRST_AUTH=true to \
-                     acknowledge this explicitly."
-                );
-            }
             let auth_config = AuthConfig {
-                allow_local_first_auth,
                 backend_secret,
                 admin_secret,
                 trusted_workload: trusted_workload_issuer.map(|issuer| {
@@ -493,7 +452,31 @@ fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
             .iter()
             .copied()
             .filter(|name| std::env::var_os(name).is_some()),
+    )?;
+    validate_local_first_auth_environment(
+        std::env::var("JAZZ_ALLOW_LOCAL_FIRST_AUTH").ok().as_deref(),
     )
+}
+
+/// A core no longer has its own switch for local-first (device) accounts:
+/// the app's backend decides which ones sync, and the core admits only the
+/// sockets its backend opens. Turning it on (as older servers needed) is
+/// harmless; turning it off can't be honoured, so it is refused.
+fn validate_local_first_auth_environment(value: Option<&str>) -> Result<(), String> {
+    match value {
+        None => Ok(()),
+        // The values clap read as "on" for the old flag.
+        Some(value)
+            if ["y", "yes", "t", "true", "on", "1"]
+                .iter()
+                .any(|on| value.trim().eq_ignore_ascii_case(on)) =>
+        {
+            Ok(())
+        }
+        Some(value) => Err(format!(
+            "JAZZ_ALLOW_LOCAL_FIRST_AUTH={value} is not supported: a core has no local-first switch of its own. The app's backend decides which device accounts sync (return acceptDeviceAccounts(request) from createJazz's authenticate only for those you admit)."
+        )),
+    }
 }
 
 fn validate_removed_user_auth_environment<'a>(
@@ -666,26 +649,6 @@ mod tests {
                     None => std::env::remove_var(self.key),
                 }
             }
-        }
-    }
-
-    #[test]
-    fn server_command_parses_allow_local_first_auth_flag() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
-        let cli = Cli::try_parse_from([
-            "jazz-tools",
-            "server",
-            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
-            "--allow-local-first-auth",
-        ])
-        .expect("server command should parse");
-
-        match cli.command {
-            Commands::Server {
-                allow_local_first_auth,
-                ..
-            } => assert!(allow_local_first_auth),
-            _ => panic!("expected server command"),
         }
     }
 
@@ -896,16 +859,29 @@ mod tests {
     }
 
     #[test]
-    fn dev_defaults_enable_local_first_auth() {
-        assert!(resolve_dev_default_flag(
-            NodeEnvMode::DevelopmentLike,
-            false
-        ));
-    }
-
-    #[test]
-    fn production_requires_explicit_local_first_opt_in() {
-        assert!(!resolve_dev_default_flag(NodeEnvMode::Production, false));
-        assert!(resolve_dev_default_flag(NodeEnvMode::Production, true));
+    fn local_first_auth_off_is_refused() {
+        // Old servers needed it on; it changes nothing now.
+        for on in ["true", "1", "TRUE", "yes"] {
+            assert!(validate_local_first_auth_environment(Some(on)).is_ok());
+        }
+        assert!(validate_local_first_auth_environment(None).is_ok());
+        for off in ["false", "0", "no", ""] {
+            let error = validate_local_first_auth_environment(Some(off)).unwrap_err();
+            assert!(
+                error.starts_with("JAZZ_ALLOW_LOCAL_FIRST_AUTH=")
+                    && error.contains("acceptDeviceAccounts"),
+                "{error}"
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "jazz-tools",
+                "server",
+                "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
+                "--allow-local-first-auth",
+            ])
+            .is_err(),
+            "the flag is gone"
+        );
     }
 }

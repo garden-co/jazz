@@ -191,7 +191,6 @@ async function start(port) {
         port,
         dataDir: join(c.state, "server"),
         blobs: { kind: "sqlite" },
-        allowLocalFirstAuth: true,
       }),
     ],
     "server.log",
