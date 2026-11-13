@@ -1,8 +1,13 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-alpha.60",
+  "version": "2.0.0-alpha.61",
   "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/garden-co/jazz",
+    "directory": "packages/jazz-tools"
+  },
   "bin": {
     "jazz-tools": "bin/jazz-tools.js"
   },

@@ -23,16 +23,20 @@ export const jazz = createJazz({
   app,
   permissions,
   store: sqlite({ path: process.env.JAZZ_DATA_DIR ?? "./data/jazz" }),
-  authenticate: async (request) => /* your session */ null,
+  // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
+  authenticate: async (request) => null,
 });
 ```
 
 <include>../../../partials/main-backend-config.mdx</include>
 
 The examples on this page are ES modules and use top-level `await`, so the backend package needs
-`"type": "module"` (or `.mts` files). In a CommonJS package, such as an Expo app's, a default import
-like `permissions` arrives as `{ default }`, and `createJazz` fails with "permissions.ts defines
-permissions for unknown table(s): default". Run the backend from its own ESM package instead.
+`"type": "module"` (or `.mts` files). `schema.ts` and `permissions.ts` must be ES modules too. In a
+CommonJS package, such as an Expo app's, importing them gives `{ default }`, and `createJazz` fails
+with "permissions.ts defines permissions for unknown table(s): default". A backend in its own ESM
+package isn't enough while those two files stay in the CommonJS package: put them in a folder (for
+example `jazz/`) with a `package.json` of `{ "type": "module" }`, and import them from there in both
+the app and the backend.
 
 ### Large values
 
@@ -51,7 +55,7 @@ sqlite({ path: "./data/jazz", blobs: "sqlite" }); // inside the SQLite database 
 
 `"sqlite"` works, but the database file grows with every large value.
 
-`s3()` works with AWS S3, Cloudflare R2 and MinIO. All its options are optional:
+`s3()` works with any S3-compatible service, such as AWS S3 or Cloudflare R2. All its options are optional:
 
 | Option     | Default            | What it does                                 |
 | :--------- | :----------------- | :------------------------------------------- |
@@ -117,14 +121,9 @@ one proxy that passes WebSocket upgrades through).
 
 ## Deploy it
 
-That's the whole deployment:
-
-- **No separate process and no port.** Sync is served by your own HTTP server under `/jazz`.
-- **No deploy step.** On start, Jazz applies the schema, migrations and permissions your code
-  declares. If they can't be applied (a schema with no migration path), the process refuses to start
-  instead of serving with the wrong rules.
-- **No secrets to manage.** Browsers hold no Jazz credential: your `authenticate` function
-  decides who each request is (see [How Auth Works in Jazz](/docs/setup/auth/backend)).
+Deploy your backend as usual. Jazz serves sync requests through your HTTP server at `/jazz`. On
+startup, Jazz applies the schema, migrations and permissions defined in your code. If it can't apply
+them, for example because a migration is missing, it won't start.
 
 Keep the data directory on a durable disk (a Docker volume, an attached block device), and run one
 process per directory: a second process on the same directory is refused (`<path>/jazz.lock`). `sqlite()` refuses to start on serverless hosts with no
@@ -186,7 +185,8 @@ export const jazz = createJazz({
     url: process.env.JAZZ_SERVER_URL!,
     secret: process.env.JAZZ_ADMIN_SECRET!, // the app's admin secret
   }),
-  authenticate: async (request) => /* your session */ null,
+  // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
+  authenticate: async (request) => null,
 });
 ```
 
@@ -215,9 +215,4 @@ Alpha.59 ran Jazz as its own process (`jazz-tools server`), and clients connecte
   to `blobs/`, or wherever `blobs` points, without logging anything. Run the import's `verify`
   before that first start.
 
-## Coming next
-
-- systemd recipe
-- TLS and data dir on durable disks (reverse proxies work today with `publicUrl`; see
-  [Proxies, paths and origins](#proxies-paths-and-origins))
-- Backups and upgrades (see [Operating Jazz](/docs/operating/backups-and-upgrades))
+{/* TODO, coming next: systemd recipe; TLS and data dir on durable disks (reverse proxies already work with publicUrl); backups and upgrades (see Operating Jazz) */}

@@ -134,3 +134,108 @@ describe("declared relationships in permissions", () => {
     ).toThrow(/reverse relationships do not support maxDepth/);
   });
 });
+
+describe("relation-qualified where(...) keys", () => {
+  const twoWays = s.defineApp(
+    {
+      users: s.table({ uid: s.string() }, {}),
+      docs: s.table(
+        { a: s.uuid(), b: s.uuid() },
+        { ua: s.rel("users", "a"), ub: s.rel("users", "b") },
+      ),
+    },
+    { migrations: "none" },
+  );
+  const oneWay = s.defineApp(
+    {
+      users: s.table({ uid: s.string() }, {}),
+      docs: s.table({ a: s.uuid(), b: s.uuid() }, { ua: s.rel("users", "a") }),
+    },
+    { migrations: "none" },
+  );
+  const readWhere = (app: typeof twoWays | typeof oneWay, key: string) =>
+    s.definePermissions(app, ({ policy, session }) => {
+      policy.docs.allowRead.where({ [key]: session.user });
+    }).docs?.select?.using;
+
+  it("resolve a column through the named relation, as the table name does when only one relation leads there", () => {
+    expect(readWhere(twoWays, "ua.uid")).toEqual(readWhere(oneWay, "users.uid"));
+    expect(readWhere(oneWay, "ua.uid")).toEqual(readWhere(oneWay, "users.uid"));
+    expect(readWhere(twoWays, "ub.uid")).not.toEqual(readWhere(twoWays, "ua.uid"));
+  });
+
+  it("name the relations to qualify with when the table is ambiguous", () => {
+    expect(() => readWhere(twoWays, "users.uid")).toThrow(
+      /table "users" is ambiguous from "docs": relations "ua" \(to "users"\), "ub" \(to "users"\) all lead there\. Qualify the column with a relation's name instead \("ua\.uid" or "ub\.uid"\)/,
+    );
+  });
+
+  it("list the table's relations when the qualifier is neither a relation nor a reachable table", () => {
+    expect(() => readWhere(twoWays, "doctor.uid")).toThrow(
+      /"doctor" is neither a relation of "docs" nor a table that one of its relations leads to\. Its relations are "ua" \(to "users"\), "ub" \(to "users"\)\./,
+    );
+  });
+
+  it("resolve a relation named after its table as the table, as before relation names qualified keys", () => {
+    // Users name a reverse relation after its table, with a sibling to the
+    // same table: the table-qualified key keeps resolving by its column.
+    const selfNamed = s.defineApp(
+      {
+        users: s.table(
+          { uid: s.string() },
+          { todos: s.reverse("todos", "owner"), assigned: s.reverse("todos", "assignee") },
+        ),
+        todos: s.table(
+          { ownerId: s.uuid(), assigneeId: s.uuid(), title: s.string() },
+          { owner: s.rel("users", "ownerId"), assignee: s.rel("users", "assigneeId") },
+        ),
+      },
+      { migrations: "none" },
+    );
+    const usersWhere = (key: string) =>
+      s.definePermissions(selfNamed, ({ policy }) => {
+        policy.users.allowRead.where({ [key]: "x" });
+      }).users?.select?.using;
+    expect(usersWhere("todos.assigneeId")).toEqual(usersWhere("assigned.assigneeId"));
+    expect(usersWhere("todos.ownerId")).not.toEqual(usersWhere("todos.assigneeId"));
+
+    // With no sibling, a self-named relation compiles exactly as a
+    // differently named one does under its table's name.
+    const single = (name: string) =>
+      s.defineApp(
+        {
+          users: s.table({ uid: s.string() }, {}),
+          docs: s.table({ a: s.uuid() }, { [name]: s.rel("users", "a") }),
+        },
+        { migrations: "none" },
+      );
+    const docsWhere = (app: ReturnType<typeof single>, key: string) =>
+      s.definePermissions(app, ({ policy }) => {
+        policy.docs.allowRead.where({ [key]: "x" });
+      }).docs?.select?.using;
+    expect(docsWhere(single("users"), "users.uid")).toEqual(
+      docsWhere(single("author"), "users.uid"),
+    );
+  });
+
+  it("refuse a qualifier that names a relation to one table and a table other relations lead to", () => {
+    const clash = s.defineApp(
+      {
+        users: s.table({ uid: s.string() }, {}),
+        orgs: s.table({ name: s.string() }, {}),
+        docs: s.table(
+          { a: s.uuid(), o: s.uuid() },
+          { orgs: s.rel("users", "a"), org: s.rel("orgs", "o") },
+        ),
+      },
+      { migrations: "none" },
+    );
+    expect(() =>
+      s.definePermissions(clash, ({ policy }) => {
+        policy.docs.allowRead.where({ "orgs.name": "x" });
+      }),
+    ).toThrow(
+      /"orgs" names both the relation "orgs" \(to "users"\) and the table "orgs", which relation "org" leads to\. Rename the relation/,
+    );
+  });
+});

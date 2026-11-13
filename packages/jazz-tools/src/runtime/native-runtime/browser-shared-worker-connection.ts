@@ -28,6 +28,7 @@ import { MessagePortBrowserFollowerConnection } from "./browser-follower-connect
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { waitForInspectorOpening } from "./inspector-control-lifecycle.js";
 import { toError } from "../util.js";
+import { describeBrokerWorkerLoadFailure } from "./broker-worker-load-failure.js";
 
 /**
  * The only place the broker SharedWorker is constructed.
@@ -44,13 +45,53 @@ function createBrokerSharedWorker(
   runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
   name: string,
 ): SharedWorker {
-  if (runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion) {
+  if (usesJazzResolvedWorkerUrl(runtimeSources)) {
     return new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), { type: "module", name });
   }
   return new SharedWorker(new URL("../../worker/jazz-broker-worker.js", import.meta.url), {
     type: "module",
     name,
   });
+}
+
+function usesJazzResolvedWorkerUrl(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+): boolean {
+  return Boolean(
+    runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion,
+  );
+}
+
+/**
+ * Fail as soon as the browser reports that the broker worker script never
+ * started, naming the likely cause, instead of waiting out an admission
+ * timeout that can only say the worker was silent. Calls `onFailure` at most
+ * once; the returned function stops listening.
+ */
+function watchBrokerWorkerStart(
+  worker: Pick<SharedWorker, "port"> &
+    Partial<Pick<SharedWorker, "addEventListener" | "removeEventListener">>,
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+  onFailure: (error: Error) => void,
+): () => void {
+  if (typeof worker.addEventListener !== "function") return () => undefined;
+  let watching = true;
+  const onError = () => {
+    if (!watching) return;
+    stop();
+    void describeBrokerWorkerLoadFailure({
+      workerUrl: usesJazzResolvedWorkerUrl(runtimeSources)
+        ? resolveBrowserWorkerUrl(runtimeSources)
+        : undefined,
+      moduleUrl: import.meta.url,
+    }).then(onFailure);
+  };
+  const stop = () => {
+    watching = false;
+    worker.removeEventListener?.("error", onError);
+  };
+  worker.addEventListener("error", onError);
+  return stop;
 }
 
 export type BrowserForegroundNodeLeaseOptions = Pick<
@@ -181,6 +222,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
           crypto.randomUUID(),
           remainingAdmissionMs,
           workerWasmPrefetch(runtimeSources),
+          runtimeSources,
         );
         if (outcome.type === "ready") return outcome.lease;
         if (outcome.type === "worker-closing") {
@@ -226,12 +268,14 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
   }
 
   private static acquireFromWorkerGeneration(
-    worker: Pick<SharedWorker, "port">,
+    worker: Pick<SharedWorker, "port"> &
+      Partial<Pick<SharedWorker, "addEventListener" | "removeEventListener">>,
     options: BrowserForegroundNodeLeaseOptions,
     cleanupKey: string,
     attemptId: string,
     timeoutMs: number,
     wasmPrefetch?: BrowserForegroundNodeLeaseProbeRequest["wasmPrefetch"],
+    runtimeSources?: BrowserWorkerInitOptions["runtimeSources"],
   ): Promise<ForegroundNodeLeaseAttemptOutcome> {
     const port = worker.port;
     return new Promise<ForegroundNodeLeaseAttemptOutcome>((resolve, reject) => {
@@ -266,6 +310,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
       const cleanup = () => {
         if (admissionTimeout) clearTimeout(admissionTimeout);
         admissionTimeout = null;
+        stopWatchingStart();
         // A successful concurrent admission never owned this retained cleanup.
         // Only its timeout owner may clear the shared key; otherwise it could
         // let a third caller accumulate another orphan-risking port.
@@ -345,6 +390,14 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
         port.close();
         rejectPublic(new Error("Shared browser foreground lease port message error"));
       };
+      // A worker whose script never loaded can hold no lease and will never
+      // acknowledge a cancellation, so there is nothing to retain: settle at
+      // once (or, after a timeout, release the retained cleanup).
+      const stopWatchingStart = watchBrokerWorkerStart(worker, runtimeSources, (error) => {
+        cleanup();
+        port.close();
+        rejectPublic(error);
+      });
       port.addEventListener("message", onMessage);
       port.addEventListener("messageerror", onMessageError);
       port.start();
@@ -776,9 +829,18 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
       };
       const cleanup = () => {
         stopClock();
+        stopWatchingStart();
         port.removeEventListener("message", onMessage);
         port.removeEventListener("messageerror", onMessageError);
       };
+      // A realm that never ran admits nobody and acknowledges nothing: fail
+      // admission, or release a cancelled bootstrap's retained port.
+      const stopWatchingStart = watchBrokerWorkerStart(worker, options.runtimeSources, (error) => {
+        cleanup();
+        port.close();
+        if (this.worker === worker) this.worker = null;
+        settle({ connected: false, error });
+      });
       port.addEventListener("message", onMessage);
       port.addEventListener("messageerror", onMessageError);
       if (typeof document !== "undefined")
@@ -869,9 +931,9 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     await this.connection?.flushLocal();
   }
 
-  async deleteStorage(): Promise<void> {
+  async deleteStorage(): Promise<{ pendingUploads?: number } | void> {
     await this.ready();
-    await this.connection?.deleteStorage();
+    return this.connection?.deleteStorage();
   }
 
   async openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort> {

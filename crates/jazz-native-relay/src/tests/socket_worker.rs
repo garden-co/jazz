@@ -629,3 +629,66 @@ fn an_attached_schema_with_malformed_migrations_is_refused() {
         Err(JazzNativeRelayStatus::LifecycleFailure)
     ));
 }
+
+/// When the relay's database refuses its upstream (it cannot mirror the
+/// server's catalogue, say), the socket worker stops instead of keeping a
+/// connection nothing syncs over, and alice hears why as a non-retrying
+/// upstream failure. Before, the socket stayed open and nothing reported
+/// anything.
+///
+/// Lower-level than the other receipts: a scripted connector carries no
+/// server, so the test records the refusal on the connection's wire, as the
+/// relay owner's drive does on `Link::upstream_refusal()`; the host test
+/// `a_relay_attached_without_the_apps_migrations_stops_its_refused_upstream`
+/// covers the owner's half against a real refusing server.
+///
+/// ```text
+/// alice ─open─► relay ══socket══► edge      (connected)
+///                 │ relay refuses its upstream
+///                 ══socket══✗               (worker stops, no retry)
+/// alice ─tick─► relay                       (Ok, failure: refused, not retrying)
+/// ```
+#[test]
+fn a_refused_upstream_stops_the_worker_and_is_reported() {
+    let root = tempfile::tempdir().unwrap();
+    let (release, released) = tokio::sync::oneshot::channel();
+    release.send(()).unwrap();
+    let connector = ScriptedConnector::new([Step::ConnectWhenReleased(released)]);
+    let (mut host, _, alice) =
+        scripted_foreground(root.path(), "refused-catalogue", connector.clone());
+    let scope = host.foregrounds[&alice].scope.clone();
+    wait_for(&host, "the connection lands", |host| {
+        connected(host, &scope)
+    });
+
+    let relay = host
+        .relays
+        .values()
+        .find(|opened| opened.scope == scope)
+        .expect("alice's relay is open")
+        .relay
+        .clone();
+    relay
+        .wire()
+        .unwrap()
+        .refuse("native relay upstream refused: not supported yet".to_owned());
+
+    wait_for(&host, "the worker stops", |host| {
+        host.private_scope_workers[&scope].terminally_stopped()
+    });
+    assert_eq!(
+        host.tick_foreground(alice),
+        Ok(()),
+        "a refused upstream must not fail local ticks"
+    );
+    let (auth_rejection, failure) = tick_events(&mut host, alice);
+    assert_eq!(auth_rejection, None, "not a credential problem");
+    let failure = failure.expect("the refusal is reported");
+    assert!(!failure.retrying, "a refusal is not retried: {failure:?}");
+    assert!(failure.reason.contains("refused"), "{failure:?}");
+    assert_eq!(
+        connector.bearers().len(),
+        1,
+        "nothing reconnects on its own"
+    );
+}

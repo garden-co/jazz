@@ -13,6 +13,7 @@ import { renderToString } from "@vue/server-renderer";
 import { describe, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
+import { ownJazzSession, startJazzSession, type JazzSession } from "../session/jazz-session.js";
 import { JazzProvider, useJazzSession, type UseJazzSession } from "./session.js";
 import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 import type { JazzClient } from "./create-jazz-client.js";
@@ -59,6 +60,35 @@ describe("Vue JazzProvider", () => {
     const app = createSSRApp({ render: () => h(JazzProvider, { config: { scope: "test" } }) });
     expect(await renderToString(app)).toContain("Loading Jazz");
     expect(mocks.factory).not.toHaveBeenCalled();
+  });
+  it("renders nothing once its session is closed, or the closed slot", async () => {
+    for (const closed of [undefined, () => h("p", "Session closed")]) {
+      const { session: owner } = await fixture();
+      const session = ownJazzSession({}, async () => owner, { start: false });
+      await startJazzSession(session as JazzSession<unknown>);
+      const target = document.createElement("div");
+      const app = createApp({
+        render: () =>
+          h(
+            JazzProvider,
+            { session: session as never },
+            {
+              default: () => h("p", "data"),
+              loading: () => h("p", "Loading"),
+              ...(closed ? { closed } : {}),
+            },
+          ),
+      });
+      app.mount(target);
+      await flush();
+      expect(target.textContent).toBe("data");
+      await session.close();
+      await flush();
+      expect(session.getSnapshot().status).toBe("closed");
+      // Before: the loading slot, forever.
+      expect(target.textContent).toBe(closed ? "Session closed" : "");
+      app.unmount();
+    }
   });
   it("passes its config to the session as is", async () => {
     const { session } = await fixture();
