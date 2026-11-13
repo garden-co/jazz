@@ -1,5 +1,9 @@
 import { clientScope } from "./client-scope.js";
-import { browserRuntimeModuleUrl, bundledBrowserWorkerUrl } from "./browser-worker-assets.js";
+import {
+  browserRuntimeModuleUrl,
+  bundledBrowserWorkerUrl,
+  bundledWasmUrl,
+} from "./browser-worker-assets.js";
 import type { RuntimeSourcesConfig } from "./context.js";
 import type { DbConfig } from "./db.js";
 import { resolveClientInternalSessionSync } from "./client-session.js";
@@ -49,10 +53,12 @@ export function resolveBrowserWorkerUrl(runtimeSources?: RuntimeSourcesConfig): 
 export function resolveBrowserWorkerRuntimeSources(
   runtimeSources?: RuntimeSourcesConfig,
 ): RuntimeSourcesConfig | undefined {
-  if (!runtimeSources) return runtimeSources;
+  if (!runtimeSources) return withBundledWasmUrl(runtimeSources);
 
   if (
-    (runtimeSources.baseUrl || runtimeSources.wasmUrl || runtimeSources.brokerWorkerUrl) &&
+    (runtimeSources.baseUrl ||
+      (runtimeSources.wasmUrl && !isBundledWasmUrl(runtimeSources.wasmUrl)) ||
+      runtimeSources.brokerWorkerUrl) &&
     !runtimeSources.wasmVersion
   ) {
     throw new Error(
@@ -70,8 +76,25 @@ export function resolveBrowserWorkerRuntimeSources(
     typeof location !== "undefined" ? location.href : undefined,
     runtimeSources,
   );
-  if (!wasmUrl) return runtimeSources;
+  if (!wasmUrl) return withBundledWasmUrl(runtimeSources);
   return { ...runtimeSources, wasmUrl };
+}
+
+/**
+ * Hand the worker the bundler's URL for the binary when the bundler has one
+ * (Metro). The worker is a separate chunk that cannot name the asset itself.
+ * The bundler owns this URL and changes it with the bytes, so it carries no
+ * `wasmVersion`.
+ */
+function withBundledWasmUrl(
+  runtimeSources: RuntimeSourcesConfig | undefined,
+): RuntimeSourcesConfig | undefined {
+  const wasmUrl = bundledWasmUrl();
+  return wasmUrl ? { ...runtimeSources, wasmUrl } : runtimeSources;
+}
+
+function isBundledWasmUrl(wasmUrl: string): boolean {
+  return wasmUrl === bundledWasmUrl();
 }
 
 /**
