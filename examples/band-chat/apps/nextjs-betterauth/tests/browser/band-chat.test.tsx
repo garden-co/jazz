@@ -3,7 +3,7 @@ import { page, userEvent } from "vitest/browser";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { JazzClientConfig } from "jazz-tools";
-import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
+import { deployApp } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
 import {
   getJazzServerInfo,
   jazzAppFetch,
@@ -146,11 +146,11 @@ it("negotiates persistent browser workers and renders the owner, join-request, m
   const core = await getJazzServerInfo(
     `019d4a17-4591-7c0a-a320-${crypto.randomUUID().slice(0, 12)}`,
   );
-  await deploy({
+  await deployApp({
     appId: core.appId,
     serverUrl: core.serverUrl,
     adminSecret: core.adminSecret,
-    schema: app,
+    app: app,
     permissions,
   });
   const server = await startJazzApp(core, { schema: app, permissions });

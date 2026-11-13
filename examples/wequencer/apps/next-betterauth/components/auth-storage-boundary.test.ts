@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createJazz, createJazzClient, remote, type Jazz } from "jazz-tools/backend";
 import {
-  deploy,
   startLocalJazzServer,
   startTestJazz,
   type LocalJazzServerHandle,
@@ -25,14 +24,9 @@ describe("Better Auth storage boundary", () => {
   });
 
   it("allows backend persistence across reopen while denying client reads and writes", async () => {
-    server = await startLocalJazzServer();
-    await deploy({
-      appId: server.appId,
-      serverUrl: server.url,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
+    // Published as the app's createJazz publishes it, with the migrations
+    // it ships.
+    server = await startLocalJazzServer({ schema: app, permissions });
 
     // The app's backend, as its server runs it.
     const openSession = () =>
