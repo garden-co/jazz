@@ -49,6 +49,28 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
       const getPrefixedModelName = (model: string) => `${prefix}${getModelName(model)}`;
       const wasmSchema = resolveSchemaSource(config.schema);
 
+      // Better Auth 1.7.3 stopped writing `account.issuer`. An app that upgraded Better Auth
+      // without migrating its Jazz schema would otherwise only find out when sign-ups fail.
+      const accountTable = getPrefixedModelName("account");
+      const issuerColumn = wasmSchema[accountTable]?.columns.find(
+        (column) => column.name === "issuer",
+      );
+      const betterAuthWritesIssuer = Object.entries(schema.account?.fields ?? {}).some(
+        ([name, field]) => name === "issuer" || field.fieldName === "issuer",
+      );
+      if (
+        issuerColumn &&
+        !issuerColumn.nullable &&
+        issuerColumn.default === undefined &&
+        !betterAuthWritesIssuer
+      ) {
+        throw new Error(
+          `Your Jazz schema still requires "${accountTable}.issuer", which Better Auth 1.7.3 and later no longer write, so sign-ups and account links would fail. ` +
+            "Regenerate your auth tables and add a migration that drops the column: " +
+            "https://jazz.tools/docs/setup/auth/better-auth#compatibility",
+        );
+      }
+
       const applySelect = (row: JazzRowRecord | null, select?: string[]): JazzRowRecord | null => {
         if (row === null || select === undefined) {
           return row;
@@ -77,6 +99,15 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
               storedFieldNames: [getFieldName({ model: defaultModelName, field: fieldName })],
             });
           }
+        }
+
+        // Better Auth omits this index metadata; keep account identity atomic.
+        if (defaultModelName === "account") {
+          result.push({
+            storedFieldNames: ["providerId", "accountId"].map((field) =>
+              getFieldName({ model: defaultModelName, field }),
+            ),
+          });
         }
 
         for (const index of readTableIndexes(defaultModelName, modelSchema.indexes)) {
@@ -379,8 +410,37 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         }
       };
 
+      // Account identity is now unique on (providerId, accountId), where it used to be
+      // (issuer, accountId). Rows that were valid before can collide; writes to them would
+      // fail, so name them once rather than leave developers to decode the constraint error.
+      let duplicateAccountCheck: Promise<void> | undefined;
+      const warnAboutDuplicateAccountsOnce = (model: string) => {
+        if (getDefaultModelName(model) !== "account" || duplicateAccountCheck) return;
+        duplicateAccountCheck = (async () => {
+          const [providerField, accountField] = ["providerId", "accountId"].map((field) =>
+            getFieldName({ model: "account", field }),
+          );
+          const rowIdsByPair = new Map<string, string[]>();
+          for (const row of await findAllRows("account")) {
+            const key = JSON.stringify([row[providerField!], row[accountField!]]);
+            rowIdsByPair.set(key, [...(rowIdsByPair.get(key) ?? []), row.id]);
+          }
+          const duplicates = [...rowIdsByPair].filter(([, ids]) => ids.length > 1);
+          if (duplicates.length === 0) return;
+          console.warn(
+            `[jazz better-auth] ${duplicates.length} (providerId, accountId) pair(s) in "${accountTable}" belong to more than one row. ` +
+              "Better Auth writes to these accounts will fail until you keep one row per pair and delete the others " +
+              "(https://jazz.tools/docs/setup/auth/better-auth#compatibility):\n" +
+              duplicates.map(([pair, ids]) => `  ${pair}: rows ${ids.join(", ")}`).join("\n"),
+          );
+        })().catch((error) => {
+          console.warn("[jazz better-auth] Could not check for duplicate accounts:", error);
+        });
+      };
+
       return {
         async create({ model, data }): Promise<any> {
+          warnAboutDuplicateAccountsOnce(model);
           const db = await config.db();
           const table = getPrefixedModelName(model);
           const { id, ...fields } = data as Record<string, unknown> & { id?: string };
@@ -455,11 +515,13 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         },
 
         async update({ model, where, update }): Promise<any> {
+          warnAboutDuplicateAccountsOnce(model);
           const [id] = await updateMatchingRows(model, where, update as Record<string, unknown>, 1);
           return id ? findByJazzRowId(model, id) : null;
         },
 
         async updateMany({ model, where, update }) {
+          warnAboutDuplicateAccountsOnce(model);
           return (await updateMatchingRows(model, where, update as Record<string, unknown>)).length;
         },
 

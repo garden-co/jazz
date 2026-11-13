@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth";
+import { bearer, jwt } from "better-auth/plugins";
+import { createLocalJWKSet, jwtVerify } from "jose";
 import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
 import {
   startLocalJazzServer,
@@ -196,7 +198,6 @@ describe("jazzAdapter", () => {
       const account = await adapter.create<any>({
         model: "account",
         data: {
-          issuer: "external-policy-issuer",
           accountId: "external-policy-account",
           providerId: "test",
           userId: user.id,
@@ -839,7 +840,6 @@ describe("jazzAdapter", () => {
       const account = await adapter.create<any>({
         model: "account",
         data: {
-          issuer: "github",
           accountId: "github-account",
           providerId: "github",
           userId: user.id,
@@ -929,10 +929,9 @@ describe("jazzAdapter", () => {
           image: null,
         },
       });
-      const account = (issuer: string, accountId: string, userId: string) => ({
-        issuer,
+      const account = (providerId: string, accountId: string, userId: string) => ({
         accountId,
-        providerId: "test",
+        providerId,
         userId,
         accessToken: null,
         refreshToken: null,
@@ -947,7 +946,7 @@ describe("jazzAdapter", () => {
 
       const primary = await adapter.create<any>({
         model: "account",
-        data: account("issuer-a", "same-account", firstUser.id),
+        data: account("provider-a", "same-account", firstUser.id),
       });
       await expect(
         adapter.update({
@@ -959,19 +958,19 @@ describe("jazzAdapter", () => {
       await expect(
         adapter.create({
           model: "account",
-          data: account("issuer-a", "same-account", secondUser.id),
+          data: account("provider-a", "same-account", secondUser.id),
         }),
-      ).rejects.toThrow(/issuer, accountId/);
+      ).rejects.toThrow(/providerId, accountId/);
       await expect(
         adapter.create({
           model: "account",
-          data: account("issuer-b", "same-account", secondUser.id),
+          data: account("provider-b", "same-account", secondUser.id),
         }),
-      ).resolves.toMatchObject({ issuer: "issuer-b", accountId: "same-account" });
+      ).resolves.toMatchObject({ providerId: "provider-b", accountId: "same-account" });
 
       const movable = await adapter.create<any>({
         model: "account",
-        data: account("issuer-a", "other-account", secondUser.id),
+        data: account("provider-a", "other-account", secondUser.id),
       });
       await expect(
         adapter.update({
@@ -979,7 +978,7 @@ describe("jazzAdapter", () => {
           where: [{ field: "id", operator: "eq", value: movable.id, connector: "AND" }],
           update: { accountId: primary.accountId },
         }),
-      ).rejects.toThrow(/issuer, accountId/);
+      ).rejects.toThrow(/providerId, accountId/);
       await expect(
         adapter.incrementOne({
           model: "account",
@@ -987,17 +986,17 @@ describe("jazzAdapter", () => {
           increment: {},
           set: { accountId: primary.accountId },
         }),
-      ).rejects.toThrow(/issuer, accountId/);
+      ).rejects.toThrow(/providerId, accountId/);
 
-      await adapter.create({ model: "account", data: account("issuer-c", "one", firstUser.id) });
-      await adapter.create({ model: "account", data: account("issuer-c", "two", secondUser.id) });
+      await adapter.create({ model: "account", data: account("provider-c", "one", firstUser.id) });
+      await adapter.create({ model: "account", data: account("provider-c", "two", secondUser.id) });
       await expect(
         adapter.updateMany({
           model: "account",
-          where: [{ field: "issuer", operator: "eq", value: "issuer-c", connector: "AND" }],
+          where: [{ field: "providerId", operator: "eq", value: "provider-c", connector: "AND" }],
           update: { accountId: "shared" },
         }),
-      ).rejects.toThrow(/issuer, accountId/);
+      ).rejects.toThrow(/providerId, accountId/);
     });
 
     it("allows inserts when unique column value is null or undefined", async () => {
@@ -1221,7 +1220,6 @@ describe("jazzAdapter", () => {
       const account = await adapter.create({
         model: "account",
         data: {
-          issuer: "credential",
           userId: user.id,
           providerId: "credential",
           accountId: user.id,
@@ -1446,7 +1444,6 @@ describe("jazzAdapter", () => {
       const account = await adapter.create({
         model: "account",
         data: {
-          issuer: "github",
           userId: user.id,
           providerId: "github",
           accountId: "account000",
@@ -1604,6 +1601,61 @@ describe("jazzAdapter", () => {
         updatedAt: expect.any(Date),
       });
     });
+
+    test(
+      "issues verified JWTs and rejects signed-out and expired sessions",
+      { timeout: 10_000 },
+      async () => {
+        const sessionAuth = betterAuth({
+          ...auth.options,
+          secret: "better-auth-upgrade-test-secret-32-characters",
+          session: { expiresIn: 60 },
+          plugins: [bearer(), jwt({ jwks: { keyPairConfig: { alg: "ES256" } } })],
+        });
+        const body = {
+          name: "Session user",
+          email: "session@example.com",
+          password: "Password123!",
+        };
+        const signUp = await sessionAuth.api.signUpEmail({ body, returnHeaders: true });
+        const headers = new Headers({
+          origin: "http://localhost:3000",
+          cookie: signUp.headers
+            .getSetCookie()
+            .map((cookie) => cookie.split(";")[0])
+            .join("; "),
+        });
+        expect(await sessionAuth.api.getSession({ headers })).toMatchObject({
+          user: { id: signUp.response.user.id },
+        });
+        const { token } = await sessionAuth.api.getToken({ headers });
+        const jwks = await sessionAuth.api.getJwks();
+        const { payload } = await jwtVerify(token, createLocalJWKSet(jwks), {
+          issuer: "http://localhost:3000",
+        });
+        expect(payload.sub).toBe(signUp.response.user.id);
+
+        await sessionAuth.api.signOut({ headers });
+        await expect(sessionAuth.api.getSession({ headers })).resolves.toBeNull();
+        await expect(sessionAuth.api.getToken({ headers })).rejects.toThrow();
+
+        const expiringAuth = betterAuth({ ...sessionAuth.options, session: { expiresIn: 1 } });
+        const signIn = await expiringAuth.api.signInEmail({ body, returnHeaders: true });
+        headers.set(
+          "cookie",
+          signIn.headers
+            .getSetCookie()
+            .map((cookie) => cookie.split(";")[0])
+            .join("; "),
+        );
+        expect(await sessionAuth.api.getSession({ headers })).toMatchObject({
+          user: { id: signUp.response.user.id },
+        });
+        await new Promise((resolve) => setTimeout(resolve, 1_100));
+        await expect(sessionAuth.api.getSession({ headers })).resolves.toBeNull();
+        await expect(sessionAuth.api.getToken({ headers })).rejects.toThrow();
+      },
+    );
   });
 
   describe("better-auth usage with local Jazz server + memory driver", () => {
@@ -1808,7 +1860,6 @@ describe("jazzAdapter", () => {
             { timeout: 15_000 },
           );
           const account = {
-            issuer: "issuer-race",
             accountId: "same-account",
             providerId: "test",
             userId: user.id,

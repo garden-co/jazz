@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createJazzClient, type Db, type JazzClientConfig } from "jazz-tools";
-import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
+import { deployApp } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
 import {
   TestCleanup,
   uniqueDbName,
@@ -83,11 +83,11 @@ describe("BandChat cross-topology recovery", () => {
             name: "issuer-scoped room admission",
             run: async () => {
               const core = await getJazzServerInfo(uniqueDbName("band-chat-topology"));
-              await deploy({
+              await deployApp({
                 appId: core.appId,
                 serverUrl: core.serverUrl,
                 adminSecret: core.adminSecret,
-                schema: app,
+                app: app,
                 permissions,
               });
               const server = await startJazzApp(core, { schema: app, permissions });
@@ -243,11 +243,11 @@ describe("BandChat cross-topology recovery", () => {
 
   it("never publishes an empty owner room snapshot while another browser member bootstraps", async () => {
     const core = await getJazzServerInfo(uniqueDbName("band-chat-room-subscription"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: app,
+      app: app,
       permissions,
     });
     const server = await startJazzApp(core, { schema: app, permissions });
@@ -357,11 +357,11 @@ describe("BandChat cross-topology recovery", () => {
             name: "member admission",
             run: async () => {
               const core = await getJazzServerInfo(uniqueDbName("band-chat-window"));
-              await deploy({
+              await deployApp({
                 appId: core.appId,
                 serverUrl: core.serverUrl,
                 adminSecret: core.adminSecret,
-                schema: app,
+                app: app,
                 permissions,
               });
               const server = await startJazzApp(core, { schema: app, permissions });
