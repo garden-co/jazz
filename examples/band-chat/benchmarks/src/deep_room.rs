@@ -735,9 +735,7 @@ impl DeepRoom {
     fn read_rows(&self, query: &PreparedQuery, author: AuthorSubject) -> Vec<CurrentRow> {
         let roots = block_on(self.db.all_for_identity(query, local_opts(), author))
             .expect("BandChat one-shot read");
-        self.db
-            .nest_relations(query, roots)
-            .expect("nest BandChat relations")
+        block_on(self.db.nest_relations(query, roots)).expect("nest BandChat relations")
     }
 
     /// A member opens the deep room: the newest page with senders and

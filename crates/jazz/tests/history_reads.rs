@@ -503,7 +503,7 @@ fn uploaded_versions_keep_the_writers_transaction_id() {
     let client = open(notes_schema(), client_node, alice);
     let (client_side, server_side): (Box<dyn Transport>, Box<dyn Transport>) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice)).unwrap();
     let pump = || {
         for _ in 0..4 {
             block_on(client.tick()).unwrap();
@@ -682,8 +682,8 @@ impl Synced {
             let client = open(schema.clone(), node, author);
             let (client_side, server_side) = duplex();
             std::mem::forget(block_on(client.connect_upstream(client_side)));
-            server.accept_subscriber(server_side, author).unwrap();
-            client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+            jazz::db::block_on(server.accept_subscriber(server_side, author)).unwrap();
+            jazz::db::block_on(client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
             client
         };
         let alice = connect(ALICE_NODE, 0xa1);

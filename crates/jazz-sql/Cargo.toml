@@ -1,0 +1,13 @@
+[package]
+name = "jazz-sql"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+default = []
+# Include Jazz's built-in SQLite backend; disable for host-provided storage.
+sqlite = ["dep:rusqlite"]
+
+[dependencies]
+rusqlite = { version = "0.40", optional = true, features = ["limits"] }

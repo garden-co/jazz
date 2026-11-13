@@ -353,10 +353,12 @@ impl Session {
 
     /// SQLite's plan for the page as this session's identity reads it.
     pub fn plan(&self) -> String {
-        self.db
-            .explain_query_plan(&self.prepared, Some(self.identity))
-            .expect("explain document page")
-            .1
+        jazz::db::block_on(
+            self.db
+                .explain_query_plan(&self.prepared, Some(self.identity)),
+        )
+        .expect("explain document page")
+        .1
     }
 }
 

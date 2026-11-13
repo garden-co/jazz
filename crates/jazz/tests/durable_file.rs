@@ -273,7 +273,7 @@ fn a_replicas_pending_uploads_survive_a_restart_and_are_resent() {
     let server = block_on(Db::open_history_complete(config(0xee))).unwrap();
     let txs: Vec<u64> = {
         let client = open_file(&path, 3);
-        client.set_remote_link_hint(jazz::db::RemoteLinkHint::Failed);
+        jazz::db::block_on(client.set_remote_link_hint(jazz::db::RemoteLinkHint::Failed));
         (0..3)
             .map(|n| {
                 block_on(client.insert(
@@ -294,10 +294,8 @@ fn a_replicas_pending_uploads_survive_a_restart_and_are_resent() {
     assert_eq!(count(&client), 3, "optimistic rows are still there");
     let (client_side, server_side) = duplex();
     block_on(client.connect_upstream(client_side));
-    client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
-    server
-        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
+    jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     drive(
         &[&client, &server, &client],
         client.wait_for_pending_writes(DurabilityTier::Global),
@@ -340,10 +338,8 @@ fn a_reopened_replica_whose_uploads_settled_continues_after_its_own_seqs() {
     let connect = |client: &Db| {
         let (client_side, server_side) = duplex();
         block_on(client.connect_upstream(client_side));
-        client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
-        server
-            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-            .unwrap();
+        jazz::db::block_on(client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
+        jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     };
     let insert = |db: &Db, n: u64| {
         let options = InsertOptions {
@@ -386,9 +382,7 @@ fn a_fresh_database_under_a_reused_node_continues_after_the_seeded_floor() {
     let connect = |client: &Db| {
         let (client_side, server_side) = duplex();
         block_on(client.connect_upstream(client_side));
-        server
-            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-            .unwrap();
+        jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     };
     let insert = |db: &Db, n: u64| {
         let options = InsertOptions {
@@ -432,9 +426,7 @@ fn a_server_restart_between_apply_and_ack_does_not_apply_twice() {
         let server = open_file(&server_path, 0xef);
         let (client_side, server_side) = duplex();
         block_on(client.connect_upstream(client_side));
-        server
-            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-            .unwrap();
+        jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
         let tx = block_on(client.insert(
             "items",
             item(1),
@@ -453,9 +445,7 @@ fn a_server_restart_between_apply_and_ack_does_not_apply_twice() {
     let server = open_file(&server_path, 0xef);
     let (client_side, server_side) = duplex();
     block_on(client.connect_upstream(client_side));
-    server
-        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     drive(
         &[&client, &server, &client],
         client.wait_for_transaction(tx, DurabilityTier::Global),
@@ -563,9 +553,7 @@ fn closing_a_store_that_read_large_values_back_checkpoints_its_wal() {
         let client = open_file(&path, 4);
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
-        server
-            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-            .unwrap();
+        jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
         let query = client.prepare_query(&Query::from("items")).unwrap();
         let _stream = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
         for _ in 0..5 {
@@ -590,9 +578,7 @@ fn a_replica_reads_its_own_synced_large_value_offline_after_a_restart() {
         let client = open_file(&path, 5);
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
-        server
-            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-            .unwrap();
+        jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
         let query = client.prepare_query(&Query::from("items")).unwrap();
         let _stream = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
         let handle = block_on(client.insert(
@@ -654,15 +640,11 @@ fn a_durable_relay_reads_a_large_value_its_client_wrote_offline_after_a_restart(
         let relay = open_file(&path, 6);
         let (relay_side, server_side) = duplex();
         let _upstream = block_on(relay.connect_upstream(relay_side));
-        server
-            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-            .unwrap();
+        jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
         let client = block_on(Db::open(config(7))).unwrap();
         let (client_side, relay_down) = duplex();
         let _relay_link = block_on(client.connect_upstream(client_side));
-        relay
-            .accept_subscriber(relay_down, AuthorSubject::SYSTEM)
-            .unwrap();
+        jazz::db::block_on(relay.accept_subscriber(relay_down, AuthorSubject::SYSTEM)).unwrap();
         let query = client.prepare_query(&Query::from("items")).unwrap();
         let _stream = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
         let handle = block_on(client.insert(
@@ -705,14 +687,12 @@ fn a_durable_relay_reads_a_large_value_its_client_wrote_offline_after_a_restart(
     // offline (and disconnected from the server, as the app asked). Its one-shot read gets the row from the relay and waits for
     // the value's chunks instead of failing on them.
     let tab = block_on(Db::open(config(8))).unwrap();
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     let (tab_side, relay_down) = duplex();
     let _tab_link = block_on(tab.connect_upstream(tab_side));
-    relay
-        .accept_subscriber(relay_down, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(relay.accept_subscriber(relay_down, AuthorSubject::SYSTEM)).unwrap();
     // The app disconnected from the server; the worker still answers.
-    tab.set_remote_link_hint(jazz::db::RemoteLinkHint::Failed);
+    jazz::db::block_on(tab.set_remote_link_hint(jazz::db::RemoteLinkHint::Failed));
     let read = postcard::to_allocvec(&Query::from("items")).unwrap();
     let result = drive(
         &[&tab, &relay, &tab],
@@ -760,9 +740,7 @@ fn a_deep_crawl_then_shrink_releases_subscription_state() {
     let client = open_file(&client_path, 6);
     let (client_side, server_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server
-        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     let pump = || {
         for _ in 0..4 {
             block_on(client.tick()).unwrap();

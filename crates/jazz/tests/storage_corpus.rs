@@ -9,7 +9,7 @@
 //!   with every row, history version, branch, large value, renamed column
 //!   and pending upload intact, accept current writes, and reopen again.
 //! - A damaged copy is refused with a storage error, never read as data; a
-//!   file in another storage format, or one Jazz did not write, is refused
+//!   file in another Jazz storage format or with unstamped Jazz metadata is refused
 //!   with `UnsupportedStorageCodecs` and left byte-for-byte as it was.
 //! - `fixtures/pre-sqlite/` holds Groove stores (RocksDB directories from the
 //!   published alpha.54 and alpha.56 packages and the last Groove format, and
@@ -239,7 +239,7 @@ fn open_server(path: &Path) -> Result<Db, jazz::db::Error> {
         path,
         FileOptions::default(),
     ))?;
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     Ok(db)
 }
 
@@ -393,7 +393,7 @@ fn produce_sqlite_storage_corpus_v1() {
             FileOptions::default(),
         ))
         .unwrap();
-        server.set_authority();
+        jazz::db::block_on(server.set_authority());
         let client = open_client(&client_path);
 
         // Two authors (interned), history (updates), a soft delete, a large
@@ -488,7 +488,7 @@ fn produce_sqlite_storage_corpus_v1() {
         // its writes never reach the server before it quits.
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, user(3)).unwrap();
+        jazz::db::block_on(server.accept_subscriber(server_side, user(3))).unwrap();
         let streams: Vec<_> = ["projects", "documents"]
             .into_iter()
             .map(|table| {
@@ -828,7 +828,7 @@ fn assert_server_corpus(server: &Db, with_client_writes: bool) {
     // until its writer's next write to the row (the offline title edit) is
     // built on an accepted version.
     assert_eq!(
-        server.as_sent_versions_for_test().unwrap(),
+        jazz::db::block_on(server.as_sent_versions_for_test()).unwrap(),
         u64::from(!with_client_writes)
     );
     let bodies: Vec<_> = rows(
@@ -904,7 +904,7 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
         // Its pending uploads are resent and land on the server.
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, user(3)).unwrap();
+        jazz::db::block_on(server.accept_subscriber(server_side, user(3))).unwrap();
         drive(
             &[&client, &server, &client],
             client.wait_for_pending_writes(DurabilityTier::Global),

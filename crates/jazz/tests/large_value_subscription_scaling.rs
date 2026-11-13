@@ -274,7 +274,8 @@ fn listing_subscription_never_rebuilds_excluded_large_columns() {
     let with_contents = db
         .prepare_query(&Query::from(FILES).select(["name", "contents"]))
         .expect("prepare contents read");
-    let (rows, rebuilds) = counting(|| db.read(&with_contents).expect("contents read"));
+    let (rows, rebuilds) =
+        counting(|| jazz::db::block_on(db.read(&with_contents)).expect("contents read"));
     assert_eq!(rows.len(), 2, "b2.bin and c.bin remain");
     assert!(
         rebuilds >= 1,
@@ -349,7 +350,7 @@ fn listing_and_content_subscriptions_keep_their_own_representation() {
     let whole = db
         .prepare_query(&Query::from(FILES))
         .expect("prepare whole rows");
-    let rows = db.read(&whole).expect("whole rows");
+    let rows = jazz::db::block_on(db.read(&whole)).expect("whole rows");
     let changed = rows
         .iter()
         .find(|published| published.row_uuid() == row(0x93))

@@ -245,7 +245,7 @@ fn a_resumed_subscription_ships_only_what_changed_and_converges() {
     let client = open(1, alice());
     let (client_side, server_side, shipped) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let prepared = client.prepare_query(&Query::from("messages")).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &client);
@@ -282,7 +282,7 @@ fn a_resumed_subscription_ships_only_what_changed_and_converges() {
 
     let (client_side, server_side, shipped) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     pump(&server, &client);
     // The edits and the insert, the deleted version (its table was
     // written, so the result as of the resume point says it left), and
@@ -311,7 +311,7 @@ fn a_resumed_subscription_ships_only_what_changed_and_converges() {
     );
     let (client_side, server_side, shipped) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     pump(&server, &client);
     assert_eq!(ids(&client, None).len(), 2000);
     assert_eq!(ids(&client, None), ids(&server, Some(alice())));
@@ -358,7 +358,7 @@ fn caught_up_resume_cost() {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let mut upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let prepared = client.prepare_query(&Query::from("messages")).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &client);
@@ -368,7 +368,7 @@ fn caught_up_resume_cost() {
         let (client_side, server_side, shipped) = pipe();
         let started = std::time::Instant::now();
         upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, alice()).unwrap();
+        jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
         pump(&server, &client);
         times.push(started.elapsed());
         assert_eq!(*shipped.borrow(), 0);
@@ -410,7 +410,7 @@ fn a_deletion_reaches_a_cold_cached_row_once_a_subscription_covers_it_again() {
     };
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let prepared = client.prepare_query(&Query::from("rooms")).unwrap();
     let stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &client);
@@ -421,7 +421,7 @@ fn a_deletion_reaches_a_cold_cached_row_once_a_subscription_covers_it_again() {
     assert!(client.detach_connection(&upstream));
     let (client_side, server_side, _) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     pump(&server, &client);
 
     block_on(server.delete("rooms", room, Default::default())).unwrap();
@@ -479,7 +479,7 @@ fn an_ended_subscription_leaves_its_rows_cold() {
     let client = open(1, alice());
     let (client_side, server_side, shipped) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let prepared = client.prepare_query(&Query::from("messages")).unwrap();
     let stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &client);
@@ -509,7 +509,7 @@ fn a_resumed_subscription_evicts_rows_whose_access_was_lost_while_away() {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let prepared = client.prepare_query(&Query::from("messages")).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &client);
@@ -519,7 +519,7 @@ fn a_resumed_subscription_evicts_rows_whose_access_was_lost_while_away() {
     block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
     let (client_side, server_side, shipped) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     pump(&server, &client);
     assert_eq!(ids(&client, None), ids(&server, Some(alice())));
     assert!(
@@ -537,7 +537,7 @@ fn a_caught_up_subscription_resumes_without_shipping_rows() {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let prepared = client.prepare_query(&Query::from("messages")).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &client);
@@ -552,7 +552,7 @@ fn a_caught_up_subscription_resumes_without_shipping_rows() {
     .unwrap();
     let (client_side, server_side, shipped) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     pump(&server, &client);
     assert_eq!(*shipped.borrow(), 0);
     assert_eq!(ids(&client, None), ids(&server, Some(alice())));
@@ -568,7 +568,7 @@ fn a_row_evicted_and_readable_again_returns_when_an_older_subscription_resumes()
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let q1 = client
         .prepare_query(
             &Query::from("messages").filter(eq(col("body"), lit(Value::String("m0".into())))),
@@ -621,7 +621,7 @@ fn a_row_a_listing_dropped_returns_when_an_older_subscription_resumes() {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let q1 = client
         .prepare_query(
             &Query::from("messages").filter(eq(col("body"), lit(Value::String("m0".into())))),
@@ -638,7 +638,7 @@ fn a_row_a_listing_dropped_returns_when_an_older_subscription_resumes() {
     block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
     let (client_side, server_side, _) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     pump(&server, &client);
 
     let q2 = client.prepare_query(&Query::from("messages")).unwrap();
@@ -683,7 +683,7 @@ fn a_row_readable_through_a_commit_in_the_resumes_tick_ships() {
     let connect = |db: &Db, who: AuthorSubject| {
         let (client_side, server_side, _) = pipe();
         let upstream = block_on(db.connect_upstream(client_side));
-        server.accept_subscriber(server_side, who).unwrap();
+        jazz::db::block_on(server.accept_subscriber(server_side, who)).unwrap();
         upstream
     };
     let tick_all = || {
@@ -742,7 +742,7 @@ fn one_shot_reads_resume_and_catch_changes_after_reconnect() {
     let client = open(1, alice());
     let (up, down, shipped) = pipe();
     let connection = block_on(client.connect_upstream(up));
-    server.accept_subscriber(down, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(down, alice())).unwrap();
     assert_eq!(read_once(&server, &client).len(), 3);
     let before = *shipped.borrow();
     assert_eq!(read_once(&server, &client).len(), 3);
@@ -762,7 +762,7 @@ fn one_shot_reads_resume_and_catch_changes_after_reconnect() {
     block_on(server.delete("messages", id(3, 2), Default::default())).unwrap();
     let (up, down, shipped) = pipe();
     let _connection = block_on(client.connect_upstream(up));
-    server.accept_subscriber(down, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(down, alice())).unwrap();
     assert_eq!(read_once(&server, &client).len(), 2);
     assert!(*shipped.borrow() > 0, "changed result is delivered");
     let before = *shipped.borrow();
@@ -818,13 +818,13 @@ fn one_shot_resume_rechecks_permissions() {
     let client = open(1, alice());
     let (up, down, _) = pipe();
     let connection = block_on(client.connect_upstream(up));
-    server.accept_subscriber(down, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(down, alice())).unwrap();
     assert_eq!(read_once(&server, &client).len(), 3);
     assert!(client.detach_connection(&connection));
     block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
     let (up, down, _) = pipe();
     let _connection = block_on(client.connect_upstream(up));
-    server.accept_subscriber(down, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(down, alice())).unwrap();
     assert!(read_once(&server, &client).is_empty());
     assert!(
         ids(&client, None).is_empty(),
@@ -859,7 +859,7 @@ fn one_shot_checkpoint_survives_reopen() {
         let client = open();
         let (up, down, _) = pipe();
         let connection = block_on(client.connect_upstream(up));
-        server.accept_subscriber(down, alice()).unwrap();
+        jazz::db::block_on(server.accept_subscriber(down, alice())).unwrap();
         assert_eq!(read_once(&server, &client).len(), 3);
         assert!(client.detach_connection(&connection));
     }
@@ -867,7 +867,7 @@ fn one_shot_checkpoint_survives_reopen() {
         let client = open();
         let (up, down, shipped) = pipe();
         let _connection = block_on(client.connect_upstream(up));
-        server.accept_subscriber(down, alice()).unwrap();
+        jazz::db::block_on(server.accept_subscriber(down, alice())).unwrap();
         assert_eq!(read_once(&server, &client).len(), 3);
         assert_eq!(
             *shipped.borrow(),
@@ -886,7 +886,7 @@ fn one_shot_resume_includes_unchanged_new_members() {
     let client = open(1, alice());
     let (up, down, _) = pipe();
     let connection = block_on(client.connect_upstream(up));
-    server.accept_subscriber(down, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(down, alice())).unwrap();
     assert_eq!(read_once(&server, &client), [id(3, 0)]);
     assert!(client.detach_connection(&connection));
     server
@@ -902,7 +902,7 @@ fn one_shot_resume_includes_unchanged_new_members() {
         .unwrap();
     let (up, down, shipped) = pipe();
     let _connection = block_on(client.connect_upstream(up));
-    server.accept_subscriber(down, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(down, alice())).unwrap();
     assert_eq!(read_once(&server, &client), [id(3, 0), id(3, 1)]);
     assert!(*shipped.borrow() > 0);
 }
@@ -916,10 +916,10 @@ fn one_shot_relay_reuses_its_own_checkpoint() {
     let client = open(1, alice());
     let (up, down, shipped) = pipe();
     let _upstream = block_on(relay.connect_upstream(up));
-    server.accept_subscriber(down, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(down, alice())).unwrap();
     let (up, down, _) = pipe();
     let _downstream = block_on(client.connect_upstream(up));
-    relay.accept_subscriber(down, alice()).unwrap();
+    jazz::db::block_on(relay.accept_subscriber(down, alice())).unwrap();
     assert_eq!(read_once_via(&[&relay, &server], &client).len(), 3);
     let before = *shipped.borrow();
     assert_eq!(read_once_via(&[&relay, &server], &client).len(), 3);
@@ -933,7 +933,7 @@ fn one_shot_relay_reuses_its_own_checkpoint() {
     let cold = open(3, alice());
     let (up, down, _) = pipe();
     let _downstream = block_on(cold.connect_upstream(up));
-    relay.accept_subscriber(down, alice()).unwrap();
+    jazz::db::block_on(relay.accept_subscriber(down, alice())).unwrap();
     assert_eq!(read_once_via(&[&relay, &server], &cold).len(), 3);
     assert_eq!(*shipped.borrow(), before);
 }
@@ -946,7 +946,7 @@ fn one_shot_rows_and_support_go_cold_until_read_again() {
     let client = open(1, alice());
     let (up, down, shipped) = pipe();
     let _connection = block_on(client.connect_upstream(up));
-    server.accept_subscriber(down, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(down, alice())).unwrap();
     assert_eq!(read_once(&server, &client), [id(3, 0)]);
     let before = *shipped.borrow();
     block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
@@ -975,7 +975,7 @@ fn settled_writes_go_cold_but_live_reads_stay_current() {
     let client = open(1, alice());
     let (up, down, _) = pipe();
     let _connection = block_on(client.connect_upstream(up));
-    server.accept_subscriber(down, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(down, alice())).unwrap();
     assert_eq!(read_once(&server, &client), [id(3, 0)]);
     block_on(client.update(
         "messages",
@@ -1036,7 +1036,7 @@ fn cancelled_one_shot_reads_release_request_state() {
     for stage in 0..3 {
         let (up, down, _) = pipe();
         let connection = block_on(client.connect_upstream(up));
-        server.accept_subscriber(down, alice()).unwrap();
+        jazz::db::block_on(server.accept_subscriber(down, alice())).unwrap();
         let mut read = Box::pin(client.all_serialized_query(
             &query,
             ReadOpts::for_read_tier(ReadTier::Remote),
@@ -1074,12 +1074,12 @@ fn relay_background_checkpoints_end_with_their_connection() {
     use std::task::{Context, Poll, Waker};
     let relay = open(2, alice());
     let tab = open(1, alice());
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     let (up, _down, _) = pipe();
     let mut upstream = block_on(relay.connect_upstream(up));
     let (up, down, _) = pipe();
     let _tab_link = block_on(tab.connect_upstream(up));
-    relay.accept_subscriber(down, alice()).unwrap();
+    jazz::db::block_on(relay.accept_subscriber(down, alice())).unwrap();
     let query = postcard::to_allocvec(&Query::from("messages")).unwrap();
     for round in 0..4 {
         let mut read = Box::pin(tab.all_serialized_query(
@@ -1126,7 +1126,7 @@ fn pending_relay_read_rebuilds_its_checkpoint_after_reconnect() {
     let upstream = block_on(relay.connect_upstream(up));
     let (up, down, _) = pipe();
     let _tab_link = block_on(tab.connect_upstream(up));
-    relay.accept_subscriber(down, alice()).unwrap();
+    jazz::db::block_on(relay.accept_subscriber(down, alice())).unwrap();
     let query = postcard::to_allocvec(&Query::from("messages")).unwrap();
     let mut read = Box::pin(tab.all_serialized_query(
         &query,
@@ -1146,7 +1146,7 @@ fn pending_relay_read_rebuilds_its_checkpoint_after_reconnect() {
     assert_eq!(relay.pending_once_state_for_test(), (0, 1, 0));
     let (up, down, _) = pipe();
     let _upstream = block_on(relay.connect_upstream(up));
-    server.accept_subscriber(down, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(down, alice())).unwrap();
     assert_eq!(relay.pending_once_state_for_test(), (1, 1, 1));
     for _ in 0..30 {
         pump(&server, &relay);
@@ -1177,10 +1177,10 @@ fn a_one_shot_remote_read_after_a_delete_sees_another_replicas_restore() {
     let b = open(2, alice());
     let (up, down, _) = pipe();
     let _a_link = block_on(a.connect_upstream(up));
-    server.accept_subscriber(down, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(down, alice())).unwrap();
     let (up, down, _) = pipe();
     let _b_link = block_on(b.connect_upstream(up));
-    server.accept_subscriber(down, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(down, alice())).unwrap();
 
     // b watches the table, so it holds the deleted version to restore.
     let prepared = b.prepare_query(&Query::from("messages")).unwrap();
@@ -1223,7 +1223,7 @@ fn a_row_one_subscription_lost_stays_for_the_other(lost_first: bool) {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     // Rooms alice is a member of, and every room.
     let member_of = client
         .prepare_query(&Query::from("rooms").join_via("memberships", "room", []))
@@ -1258,7 +1258,7 @@ fn a_row_one_subscription_lost_stays_for_the_other(lost_first: bool) {
     block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
     let (client_side, server_side, _) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     pump(&server, &client);
     assert_eq!(
         rooms(&client),
@@ -1313,7 +1313,7 @@ fn an_included_row_one_subscription_lost_stays_for_the_other(lost_first: bool) {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     // Rooms alice is a member of, and every note with its room.
     let member_of = client
         .prepare_query(&Query::from("rooms").join_via("memberships", "room", []))
@@ -1336,7 +1336,7 @@ fn an_included_row_one_subscription_lost_stays_for_the_other(lost_first: bool) {
     block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
     let (client_side, server_side, _) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     pump(&server, &client);
     assert_eq!(
         local_rooms(&client),
@@ -1365,7 +1365,7 @@ fn a_row_that_left_the_other_subscription_live_is_evicted_by_a_listing() {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     // Rooms alice is a member of (reopens first), and room 0 by name.
     let member_of = client
         .prepare_query(&Query::from("rooms").join_via("memberships", "room", []))
@@ -1394,7 +1394,7 @@ fn a_row_that_left_the_other_subscription_live_is_evicted_by_a_listing() {
     block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
     let (client_side, server_side, _) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     pump(&server, &client);
     assert!(
         local_rooms(&client).is_empty(),
@@ -1440,7 +1440,7 @@ fn a_pending_write_does_not_move_what_another_read_holds(member_of_first: bool) 
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let member_of = client
         .prepare_query(&Query::from("rooms").join_via("memberships", "room", []))
         .unwrap();
@@ -1469,7 +1469,7 @@ fn a_pending_write_does_not_move_what_another_read_holds(member_of_first: bool) 
     block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
     let (client_side, server_side, _) = pipe();
     let _upstream = block_on(client.connect_upstream(Box::new(HoldCommits(client_side))));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     pump(&server, &client);
     assert_eq!(
         client.pending_upload_count(),
@@ -1540,7 +1540,7 @@ fn a_pending_write_does_not_move_support_below_the_first_hop(joined_first: bool)
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     // Reactions to the note whose body is n0, and room 0 with its notes'
     // reactions.
     let joined = client
@@ -1591,7 +1591,7 @@ fn a_pending_write_does_not_move_support_below_the_first_hop(joined_first: bool)
     .unwrap();
     let (client_side, server_side, _) = pipe();
     let _upstream = block_on(client.connect_upstream(Box::new(HoldCommits(client_side))));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     pump(&server, &client);
     assert_eq!(
         client.pending_upload_count(),
@@ -1665,7 +1665,7 @@ fn a_pending_write_does_not_drop_a_sticker_the_settled_note_names(liked_first: b
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     // Liked stickers, and room 0 with its notes' stickers.
     let liked = client
         .prepare_query(&Query::from("stickers").join_via("likes", "sticker", []))
@@ -1704,7 +1704,7 @@ fn a_pending_write_does_not_drop_a_sticker_the_settled_note_names(liked_first: b
     block_on(server.delete("likes", id(7, 0), Default::default())).unwrap();
     let (client_side, server_side, _) = pipe();
     let _upstream = block_on(client.connect_upstream(Box::new(HoldCommits(client_side))));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     pump(&server, &client);
     assert_eq!(
         client.pending_upload_count(),
@@ -1776,7 +1776,7 @@ fn a_row_a_union_holds_stays_when_another_read_loses_it(lost_first: bool) {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     // Rooms alice is a member of, and room 0 or room 1 by name.
     let member_of = client
         .prepare_query(&Query::from("rooms").join_via("memberships", "room", []))
@@ -1812,7 +1812,7 @@ fn a_row_a_union_holds_stays_when_another_read_loses_it(lost_first: bool) {
     block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
     let (client_side, server_side, _) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     pump(&server, &client);
     assert_eq!(
         local_rooms(&client),
@@ -1844,7 +1844,7 @@ fn rooms_and_messages(
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let rooms = client.prepare_query(&Query::from("rooms")).unwrap();
     let rooms = block_on(client.subscribe(&rooms, ReadOpts::default())).unwrap();
     let messages = client.prepare_query(&Query::from("messages")).unwrap();
@@ -1859,7 +1859,7 @@ fn reconnect_shipped(server: &Db, client: &Db, upstream: &jazz::db::Upstream) ->
     assert!(client.detach_connection(upstream));
     let (client_side, server_side, shipped) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    block_on(server.accept_subscriber(server_side, alice())).unwrap();
     pump(server, client);
     let shipped = *shipped.borrow();
     shipped
@@ -1898,7 +1898,7 @@ fn a_listing_eviction_keeps_open_subscriptions_resume_points() {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    block_on(server.accept_subscriber(server_side, alice())).unwrap();
     // A closed read leaves m0 cold in the replica.
     let m0 = client
         .prepare_query(
@@ -1916,7 +1916,7 @@ fn a_listing_eviction_keeps_open_subscriptions_resume_points() {
     block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    block_on(server.accept_subscriber(server_side, alice())).unwrap();
     pump(&server, &client);
 
     let rooms = client.prepare_query(&Query::from("rooms")).unwrap();
@@ -1977,16 +1977,15 @@ fn a_row_released_without_a_settle_still_forgets_the_reads_point() {
         inbound: down.clone(),
         log: None,
     })));
-    server
-        .accept_subscriber(
-            Box::new(LoggedPipe {
-                out: down.clone(),
-                inbound: up,
-                log: Some(log.clone()),
-            }),
-            alice(),
-        )
-        .unwrap();
+    block_on(server.accept_subscriber(
+        Box::new(LoggedPipe {
+            out: down.clone(),
+            inbound: up,
+            log: Some(log.clone()),
+        }),
+        alice(),
+    ))
+    .unwrap();
     let messages = client.prepare_query(&Query::from("messages")).unwrap();
     let _messages = block_on(client.subscribe(&messages, ReadOpts::default())).unwrap();
     pump(&server, &client);
@@ -2076,7 +2075,7 @@ fn reconnect(server: &Db, client: &Db) -> (jazz::db::Upstream, Rc<RefCell<usize>
 fn reconnect_watched(server: &Db, client: &Db) -> (jazz::db::Upstream, Rc<RefCell<usize>>, bool) {
     let (client_side, server_side, shipped, resumes) = watched_pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    block_on(server.accept_subscriber(server_side, alice())).unwrap();
     pump(server, client);
     let resumed = {
         let resumes = resumes.borrow();
@@ -2093,7 +2092,7 @@ fn a_caught_up_window_resumes_without_shipping_rows(offset: usize, limit: usize)
     let client = open(1, alice());
     let (client_side, server_side, shipped) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let query = window(offset, limit);
     let prepared = client.prepare_query(&query).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
@@ -2160,7 +2159,7 @@ fn a_resumed_window_ships_only_rows_that_entered_it() {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let query = window(1, 4);
     let prepared = client.prepare_query(&query).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
@@ -2244,7 +2243,7 @@ fn resumed_windows_match_fresh_ones_through_random_churn() {
         let client = open(1, alice());
         let (client_side, server_side, _) = pipe();
         let mut upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, alice()).unwrap();
+        block_on(server.accept_subscriber(server_side, alice())).unwrap();
         let _streams: Vec<_> = queries
             .iter()
             .map(|query| {
@@ -2337,7 +2336,7 @@ fn resumed_windows_match_fresh_ones_through_random_churn() {
             let fresh = open(10 + round as u8, alice());
             let (fresh_side, server_side, fresh_shipped) = pipe();
             let _fresh_upstream = block_on(fresh.connect_upstream(fresh_side));
-            server.accept_subscriber(server_side, alice()).unwrap();
+            block_on(server.accept_subscriber(server_side, alice())).unwrap();
             let _fresh_streams: Vec<_> = queries
                 .iter()
                 .map(|query| {
@@ -2412,7 +2411,7 @@ fn a_latest_window_resumes_after_live_churn() {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let query = Query::from("messages")
         .order_by("body", OrderDirection::Desc)
         .limit(4);
@@ -2462,7 +2461,7 @@ fn a_resumed_window_breaks_ties_at_its_edge_by_row_id() {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    block_on(server.accept_subscriber(server_side, alice())).unwrap();
     // m0, m2, then the first two tied rows: the edge cuts the tie.
     let query = window(1, 3);
     let prepared = client.prepare_query(&query).unwrap();
@@ -2505,7 +2504,7 @@ fn a_one_shot_window_read_resumes_after_reconnect() {
     let client = open(1, alice());
     let (up, down, shipped) = pipe();
     let connection = block_on(client.connect_upstream(up));
-    server.accept_subscriber(down, alice()).unwrap();
+    block_on(server.accept_subscriber(down, alice())).unwrap();
     let query = window(2, 3);
     let expected = window_ids(&server, &query, Some(alice()));
     assert_eq!(read_query_once(&[&server], &client, &query), expected);
@@ -2521,7 +2520,7 @@ fn a_one_shot_window_read_resumes_after_reconnect() {
     seed_message(&server, 5000, "a");
     let (up, down, shipped) = pipe();
     let _connection = block_on(client.connect_upstream(up));
-    server.accept_subscriber(down, alice()).unwrap();
+    block_on(server.accept_subscriber(down, alice())).unwrap();
     let expected = window_ids(&server, &query, Some(alice()));
     assert_eq!(read_query_once(&[&server], &client, &query), expected);
     assert_eq!(
@@ -2540,7 +2539,7 @@ fn a_resumed_window_keeps_a_pending_write_made_while_away() {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let query = window(1, 4);
     let prepared = client.prepare_query(&query).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
@@ -2587,7 +2586,7 @@ fn window_resume_cost() {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let query = window(0, 20);
     let prepared = client.prepare_query(&query).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
@@ -2608,7 +2607,7 @@ fn window_resume_cost() {
     let started = Instant::now();
     let (fresh_side, server_side, fresh_shipped) = pipe();
     let _fresh_upstream = block_on(fresh.connect_upstream(fresh_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let prepared = fresh.prepare_query(&query).unwrap();
     let _fresh_stream = block_on(fresh.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &fresh);
@@ -2628,7 +2627,7 @@ fn access_lost_through_one_window_keeps_another_windows_resume_point() {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let rooms = Query::from("rooms")
         .order_by("name", OrderDirection::Asc)
         .offset(1)
@@ -2682,16 +2681,15 @@ fn a_closed_reads_point_is_forgotten_when_a_row_it_counts_is_lost() {
         inbound: down.clone(),
         log: None,
     })));
-    server
-        .accept_subscriber(
-            Box::new(LoggedPipe {
-                out: down.clone(),
-                inbound: up,
-                log: Some(log.clone()),
-            }),
-            alice(),
-        )
-        .unwrap();
+    block_on(server.accept_subscriber(
+        Box::new(LoggedPipe {
+            out: down.clone(),
+            inbound: up,
+            log: Some(log.clone()),
+        }),
+        alice(),
+    ))
+    .unwrap();
     let subscribe = |table: &str| {
         let prepared = client.prepare_query(&Query::from(table)).unwrap();
         block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap()

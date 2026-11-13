@@ -157,9 +157,9 @@ fn a_replica_of_an_upstream_takes_no_shard_role() {
     };
     assert!(!writer.shard().is_shard());
     for error in [
-        writer.shard().observe(5).unwrap_err(),
-        writer.shard().hold(part, &[]).unwrap_err(),
-        writer.shard().fix(part, 5).unwrap_err(),
+        jazz::db::block_on(writer.shard().observe(5)).unwrap_err(),
+        jazz::db::block_on(writer.shard().hold(part, &[])).unwrap_err(),
+        jazz::db::block_on(writer.shard().fix(part, 5)).unwrap_err(),
     ] {
         assert!(error.to_string().contains("not supported"), "{error}");
     }
@@ -190,7 +190,7 @@ fn a_shard_draws_positions_from_its_clock() {
 fn observing_a_position_closes_the_shard_there() {
     let (db, _now) = shard(1);
     let at = hlc(NOW + 100);
-    assert_eq!(db.shard().observe(at).unwrap(), at);
+    assert_eq!(jazz::db::block_on(db.shard().observe(at)).unwrap(), at);
     assert_eq!(db.shard().served_through(), at, "settled through it");
     insert(&db, "after");
     assert_eq!(newest(&db), at + 1, "nothing lands at or below it");
@@ -204,7 +204,7 @@ fn a_far_ahead_position_is_observed_up_to_the_offset_bound() {
     let (db, now) = shard(1);
     let bound = hlc(NOW + HLC_MAX_OFFSET_MS);
     let far = hlc(NOW + HLC_MAX_OFFSET_MS + 1_000);
-    assert_eq!(db.shard().observe(far).unwrap(), bound);
+    assert_eq!(jazz::db::block_on(db.shard().observe(far)).unwrap(), bound);
     assert_eq!(db.shard().served_through(), bound);
     insert(&db, "after");
     assert_eq!(
@@ -213,7 +213,7 @@ fn a_far_ahead_position_is_observed_up_to_the_offset_bound() {
         "nothing lands at or below the bound"
     );
     now.set(NOW + 1_000);
-    assert_eq!(db.shard().observe(far).unwrap(), far);
+    assert_eq!(jazz::db::block_on(db.shard().observe(far)).unwrap(), far);
     assert_eq!(db.shard().served_through(), far);
 }
 
@@ -225,8 +225,12 @@ fn a_hold_keeps_what_is_served_as_settled_below_it() {
         node: [9; 16],
         tx: 1,
     };
-    let held = db.shard().hold(part, &[]).unwrap();
-    assert_eq!(db.shard().hold(part, &[]).unwrap(), held, "held once");
+    let held = jazz::db::block_on(db.shard().hold(part, &[])).unwrap();
+    assert_eq!(
+        jazz::db::block_on(db.shard().hold(part, &[])).unwrap(),
+        held,
+        "held once"
+    );
     assert_eq!(db.shard().lowest_hold(), Some(held));
     insert(&db, "meanwhile");
     assert_eq!(
@@ -234,7 +238,7 @@ fn a_hold_keeps_what_is_served_as_settled_below_it() {
         held - 1,
         "a commit accepted past the hold is not yet settled"
     );
-    let error = db.shard().fix(part, held - 1).unwrap_err();
+    let error = jazz::db::block_on(db.shard().fix(part, held - 1)).unwrap_err();
     assert!(
         error.to_string().contains("below the part's hold"),
         "{error}"
@@ -243,8 +247,11 @@ fn a_hold_keeps_what_is_served_as_settled_below_it() {
         node: [9; 16],
         tx: 2,
     };
-    assert!(db.shard().fix(other, held).is_err(), "fixed only once held");
-    db.shard().release(part).unwrap();
+    assert!(
+        jazz::db::block_on(db.shard().fix(other, held)).is_err(),
+        "fixed only once held"
+    );
+    jazz::db::block_on(db.shard().release(part)).unwrap();
     assert_eq!(db.shard().lowest_hold(), None);
     assert_eq!(db.shard().served_through(), held + 1);
 }
@@ -291,14 +298,14 @@ fn connect(writer: &Db, db: &Db) -> (Upstream, Log, Log) {
         recv: down.clone(),
         log: sent_up.clone(),
     })));
-    db.accept_subscriber(
+    jazz::db::block_on(db.accept_subscriber(
         Box::new(Pipe {
             send: down.clone(),
             recv: up.clone(),
             log: sent_down.clone(),
         }),
         AuthorSubject::SYSTEM,
-    )
+    ))
     .unwrap();
     for _ in 0..4 {
         block_on(writer.tick()).unwrap();
@@ -357,13 +364,13 @@ fn a_fixed_part_lands_at_its_fixed_position() {
     let (db, _now) = shard(1);
     let (writer, _upstream, sent_up, sent_down) = writer_of(&db);
     let part = upload(&writer, &sent_up, None);
-    let held = db.shard().hold(part, &[]).unwrap();
+    let held = jazz::db::block_on(db.shard().hold(part, &[])).unwrap();
     insert(&db, "the shard's own");
     let own = held + 1;
     assert_eq!(db.shard().served_through(), held - 1);
     // Every other shard's hold for the commit was lower: it lands at this
     // one's.
-    db.shard().fix(part, held).unwrap();
+    jazz::db::block_on(db.shard().fix(part, held)).unwrap();
     pump(&db, &writer);
     assert_eq!(db.shard().lowest_hold(), None, "it landed");
     assert_eq!(db.shard().served_through(), own, "and everything settled");
@@ -382,7 +389,7 @@ fn a_part_whose_row_the_shard_wrote_past_its_hold_is_refused() {
     let (writer, _upstream, sent_up, sent_down) = writer_of(&db);
     let row = RowUuid::from_bytes([7; 16]);
     let part = upload(&writer, &sent_up, Some(row));
-    let held = db.shard().hold(part, &[doc_row(row)]).unwrap();
+    let held = jazz::db::block_on(db.shard().hold(part, &[doc_row(row)])).unwrap();
     block_on(db.insert(
         "docs",
         BTreeMap::from([("title".to_owned(), Value::String("mine".to_owned()))]),
@@ -392,13 +399,13 @@ fn a_part_whose_row_the_shard_wrote_past_its_hold_is_refused() {
         },
     ))
     .unwrap();
-    db.shard().fix(part, held).unwrap();
+    jazz::db::block_on(db.shard().fix(part, held)).unwrap();
     pump(&db, &writer);
     let Outcome::Refused { error, .. } = fate(&sent_down) else {
         panic!("accepted below a newer version of its row");
     };
     assert!(format!("{error:?}").contains("INV-SHARD-19"), "{error:?}");
-    db.shard().release(part).unwrap();
+    jazz::db::block_on(db.shard().release(part)).unwrap();
     assert_eq!(db.shard().lowest_hold(), None);
 }
 
@@ -413,17 +420,15 @@ fn a_hold_makes_other_writers_of_its_rows_wait() {
         node: [9; 16],
         tx: 1,
     };
-    let held = db.shard().hold(part, &[doc_row(row)]).unwrap();
-    let error = db
-        .shard()
-        .hold(
-            CommitRef {
-                node: [9; 16],
-                tx: 2,
-            },
-            &[doc_row(row)],
-        )
-        .unwrap_err();
+    let held = jazz::db::block_on(db.shard().hold(part, &[doc_row(row)])).unwrap();
+    let error = jazz::db::block_on(db.shard().hold(
+        CommitRef {
+            node: [9; 16],
+            tx: 2,
+        },
+        &[doc_row(row)],
+    ))
+    .unwrap_err();
     assert!(error.to_string().contains("held by another"), "{error}");
     let (writer, _upstream, sent_up, sent_down) = writer_of(&db);
     upload(&writer, &sent_up, Some(row));
@@ -437,7 +442,7 @@ fn a_hold_makes_other_writers_of_its_rows_wait() {
         "the commit, and the one after it, wait"
     );
     assert!(titles(&db).is_empty());
-    db.shard().release(part).unwrap();
+    jazz::db::block_on(db.shard().release(part)).unwrap();
     pump(&db, &writer);
     assert_eq!(titles(&db), vec!["theirs", "theirs"]);
     let Outcome::Accepted { at, .. } = fate(&sent_down) else {
@@ -460,8 +465,8 @@ fn holds_and_fixes_survive_a_reopen() {
     let (upstream, sent_up, _) = connect(&writer, &db);
     // The writer's commit is in flight when the shard goes down.
     let part = upload(&writer, &sent_up, Some(row));
-    let held = db.shard().hold(part, &[doc_row(row)]).unwrap();
-    db.shard().fix(part, held).unwrap();
+    let held = jazz::db::block_on(db.shard().hold(part, &[doc_row(row)])).unwrap();
+    jazz::db::block_on(db.shard().fix(part, held)).unwrap();
     drop(upstream);
     drop(db);
 
@@ -500,7 +505,7 @@ fn a_reopened_shard_waits_out_its_offset_bound() {
         None,
         "a shard that observed nothing past what it numbered waits nothing out"
     );
-    let closed = db.shard().observe(hlc(NOW + 400)).unwrap();
+    let closed = jazz::db::block_on(db.shard().observe(hlc(NOW + 400))).unwrap();
     assert_eq!(db.shard().served_through(), closed);
     drop(db);
     let db = shard_at(&path, &now);

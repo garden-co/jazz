@@ -70,7 +70,7 @@ fn authority() -> Db {
 fn connect(client: &Db, server: &Db) {
     let (client_side, server_side) = duplex_transport::duplex();
     block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
 }
 
 fn pump(client: &Db, server: &Db) {
@@ -138,7 +138,10 @@ fn the_originating_store_keeps_a_refused_payload_until_it_is_reported() {
         0,
         "the refused version left history"
     );
-    let [rejected] = client.rejected_transactions().unwrap().try_into().unwrap();
+    let [rejected] = block_on(client.rejected_transactions())
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert_eq!(rejected.seq, seq);
     assert!(
         rejected.error.is_authorization_denied(),
@@ -165,13 +168,13 @@ fn the_originating_store_keeps_a_refused_payload_until_it_is_reported() {
         cells.get(&common::stored(&client, "notes", "title")),
         Some(&Value::String("in bob's name".into()))
     );
-    assert!(server.rejected_transactions().unwrap().is_empty());
+    assert!(block_on(server.rejected_transactions()).unwrap().is_empty());
 
     // The host reports it, then lets the payload go.
     let reported = client.take_upstream_rejections();
     assert_eq!(reported.iter().map(|r| r.seq).collect::<Vec<_>>(), [seq]);
-    client.discard_rejected_transaction(seq).unwrap();
-    assert!(client.rejected_transactions().unwrap().is_empty());
+    block_on(client.discard_rejected_transaction(seq)).unwrap();
+    assert!(block_on(client.rejected_transactions()).unwrap().is_empty());
 }
 
 /// A refusal the host had not reported when the store closed is kept and
@@ -196,19 +199,19 @@ fn an_unreported_refusal_survives_a_reopen() {
         connect(&client, &server);
         let seq = refused_note(&client, RowUuid::from_bytes([0x12; 16]));
         pump(&client, &server);
-        assert_eq!(client.rejected_transactions().unwrap().len(), 1);
+        assert_eq!(block_on(client.rejected_transactions()).unwrap().len(), 1);
         seq
     };
 
     let untracked = open();
-    untracked.requeue_rejected_transactions().unwrap();
+    block_on(untracked.requeue_rejected_transactions()).unwrap();
     assert!(untracked.take_upstream_rejections().is_empty());
     drop(untracked);
 
     let reopened = open();
     reopened.track_upstream_rejections();
-    reopened.requeue_rejected_transactions().unwrap();
-    reopened.requeue_rejected_transactions().unwrap();
+    block_on(reopened.requeue_rejected_transactions()).unwrap();
+    block_on(reopened.requeue_rejected_transactions()).unwrap();
     assert_eq!(
         reopened
             .take_upstream_rejections()
@@ -218,12 +221,15 @@ fn an_unreported_refusal_survives_a_reopen() {
         [seq],
         "reported again after the reopen"
     );
-    assert_eq!(reopened.rejected_transactions().unwrap()[0].seq, seq);
-    reopened.discard_rejected_transaction(seq).unwrap();
+    assert_eq!(
+        block_on(reopened.rejected_transactions()).unwrap()[0].seq,
+        seq
+    );
+    block_on(reopened.discard_rejected_transaction(seq)).unwrap();
     drop(reopened);
     let again = open();
     again.track_upstream_rejections();
-    again.requeue_rejected_transactions().unwrap();
+    block_on(again.requeue_rejected_transactions()).unwrap();
     assert!(again.take_upstream_rejections().is_empty());
 }
 
@@ -236,7 +242,7 @@ fn without_a_reporting_host_nothing_is_kept() {
     refused_note(&client, RowUuid::from_bytes([0x13; 16]));
     pump(&client, &server);
     assert_eq!(count(&client, Query::from("notes")), 0);
-    assert!(client.rejected_transactions().unwrap().is_empty());
+    assert!(block_on(client.rejected_transactions()).unwrap().is_empty());
 }
 
 /// The retry store comes with the first refusal it keeps: a store written
@@ -277,7 +283,11 @@ fn reopening_a_store_without_a_refusal_writes_nothing() {
         let reopened = open();
         reopened.track_upstream_rejections();
         assert_eq!(count(&reopened, Query::from("notes")), 1);
-        assert!(reopened.rejected_transactions().unwrap().is_empty());
+        assert!(
+            block_on(reopened.rejected_transactions())
+                .unwrap()
+                .is_empty()
+        );
     }
     assert!(
         std::fs::read(&path).unwrap() == before,
@@ -342,4 +352,45 @@ fn upload_status_counts_what_awaits_a_verdict_and_what_was_refused() {
     let accepted = client.upload_status();
     assert_eq!((accepted.pending, accepted.rejected), (0, 1));
     assert_eq!(accepted.last_rejection, Some(last));
+}
+
+/// Alice's refused write remains fully retryable when acknowledgement storage
+/// fails; a later acknowledgement removes it. SQL fault injection is needed
+/// because public APIs cannot fail a particular payload deletion.
+/// alice -> refused write -> failed acknowledgement -> intact payload -> retry
+#[test]
+fn failed_acknowledgement_keeps_the_complete_payload() {
+    use jazz::host::HostTables;
+
+    let server = authority();
+    let client = block_on(Db::open(DbConfig::new(schema(), identity(0xa1, alice())))).unwrap();
+    client.track_upstream_rejections();
+    connect(&client, &server);
+    let seq = refused_note(&client, RowUuid::from_bytes([0x51; 16]));
+    pump(&client, &server);
+    let before = block_on(client.rejected_transactions()).unwrap();
+    assert_eq!(before.len(), 1);
+    let expected = postcard::to_allocvec(&before[0].ops).unwrap();
+
+    block_on(client.host_sql(&mut |conn| {
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER refuse_payload_delete BEFORE DELETE ON _jazz_rejected_cells              BEGIN SELECT RAISE(ABORT, 'injected acknowledgement failure'); END;",
+        ).unwrap();
+        Ok(())
+    })).unwrap();
+    let error = block_on(client.discard_rejected_transaction(seq)).unwrap_err();
+    assert_eq!(error.code, jazz::db::ErrorCode::Storage);
+    let retained = block_on(client.rejected_transactions()).unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].seq, seq);
+    assert_eq!(postcard::to_allocvec(&retained[0].ops).unwrap(), expected);
+
+    block_on(client.host_sql(&mut |conn| {
+        conn.execute_batch("DROP TRIGGER refuse_payload_delete")
+            .unwrap();
+        Ok(())
+    }))
+    .unwrap();
+    block_on(client.discard_rejected_transaction(seq)).unwrap();
+    assert!(block_on(client.rejected_transactions()).unwrap().is_empty());
 }

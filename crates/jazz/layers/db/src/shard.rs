@@ -31,6 +31,7 @@ use std::collections::{BTreeMap, HashMap};
 use super::{Db, Inner};
 use crate::options::{Error, ErrorCode};
 use crate::values::storage;
+use jazz_sql::{Row as _, Sql as _};
 
 /// Commit positions are hybrid-clock timestamps: the wall clock in ms since
 /// [`HLC_EPOCH_MS`] above [`HLC_COUNTER_BITS`] bits of counter, so every
@@ -231,7 +232,11 @@ impl Inner {
     /// holds one of the rows they write, or the shard is waiting out its offset bound
     /// after a reopen and `by` is neither a part fixed at a position nor a
     /// resend of a commit that landed.
-    pub(crate) fn commit_waits(&self, by: CommitRef, ops: &[super::WireOp]) -> Result<bool, Error> {
+    pub(crate) async fn commit_waits(
+        &self,
+        by: CommitRef,
+        ops: &[super::WireOp],
+    ) -> Result<bool, Error> {
         // Most stores hold nothing: they skip naming the rows.
         if !self.shard.rows.is_empty() && self.shard.blocks(by, &HeldRow::of(ops)) {
             return Ok(true);
@@ -239,7 +244,7 @@ impl Inner {
         if self.waits_out().is_none() || self.shard.fixed(by).is_some() {
             return Ok(false);
         }
-        Ok(self.applied_fate(by.node, by.tx)?.is_none())
+        Ok(self.applied_fate(by.node, by.tx).await?.is_none())
     }
 
     /// A shard reopens: the holds it kept stand again, and it waits out its
@@ -249,75 +254,75 @@ impl Inner {
     /// at. Numbering from its clock afterwards (rather than from the bound
     /// at once) keeps its positions no further ahead of its peers' clocks
     /// than its own clock is. A hold whose part already landed is dropped.
-    pub(crate) fn load_shard(&mut self) -> Result<(), Error> {
+    pub(crate) async fn load_shard(&mut self) -> Result<(), Error> {
         let clock = &self.shard.clock;
         // A reopened shard that observed positions past what it numbered
         // may have served them, up to its clock plus the offset bound,
         // before it stopped; it waits that bound out. (What it numbered or
         // held, it reloads.)
-        if self.meta(SHARD_OBSERVED)?.is_some() {
+        if self.meta(SHARD_OBSERVED).await?.is_some() {
             self.shard.observed = true;
             self.shard.resumes_after = Some(clock().saturating_add(HLC_MAX_OFFSET_MS));
         }
         let kept: bool = self
             .conn
-            .query_row(
+            .sql()
+            .query_one(
                 "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '_jazz_shard_holds'",
-                [],
+                &[],
                 |r| r.get(0),
-            )
-            .map_err(storage)?;
+            ).await.map_err(storage)?;
         if !kept {
             return Ok(());
         }
         let holds: Vec<(u64, CommitRef, Option<u64>)> = {
-            let mut statement = self
-                .conn
-                .prepare("SELECT at, node, tx, fixed FROM _jazz_shard_holds")
-                .map_err(storage)?;
-            statement
-                .query_map([], |r| {
-                    let node: Vec<u8> = r.get(1)?;
-                    Ok((
-                        r.get::<_, i64>(0)? as u64,
-                        CommitRef {
-                            node: node.try_into().unwrap_or([0; 16]),
-                            tx: r.get::<_, i64>(2)? as u64,
-                        },
-                        r.get::<_, Option<i64>>(3)?.map(|at| at as u64),
-                    ))
-                })
-                .map_err(storage)?
-                .collect::<Result<_, _>>()
+            self.conn
+                .sql()
+                .query_rows(
+                    "SELECT at, node, tx, fixed FROM _jazz_shard_holds",
+                    &[],
+                    |r| {
+                        let node: Vec<u8> = r.get(1)?;
+                        Ok((
+                            r.get::<i64>(0)? as u64,
+                            CommitRef {
+                                node: node.try_into().unwrap_or([0; 16]),
+                                tx: r.get::<i64>(2)? as u64,
+                            },
+                            r.get::<Option<i64>>(3)?.map(|at| at as u64),
+                        ))
+                    },
+                )
+                .await
                 .map_err(storage)?
         };
         let rows: Vec<(HeldRow, CommitRef)> = {
-            let mut statement = self
-                .conn
-                .prepare("SELECT node, tx, tbl, id FROM _jazz_shard_held_rows")
-                .map_err(storage)?;
-            statement
-                .query_map([], |r| {
-                    let node: Vec<u8> = r.get(0)?;
-                    let id: Vec<u8> = r.get(3)?;
-                    Ok((
-                        HeldRow {
-                            table: r.get(2)?,
-                            row: id.try_into().unwrap_or([0; 16]),
-                        },
-                        CommitRef {
-                            node: node.try_into().unwrap_or([0; 16]),
-                            tx: r.get::<_, i64>(1)? as u64,
-                        },
-                    ))
-                })
-                .map_err(storage)?
-                .collect::<Result<_, _>>()
+            self.conn
+                .sql()
+                .query_rows(
+                    "SELECT node, tx, tbl, id FROM _jazz_shard_held_rows",
+                    &[],
+                    |r| {
+                        let node: Vec<u8> = r.get(0)?;
+                        let id: Vec<u8> = r.get(3)?;
+                        Ok((
+                            HeldRow {
+                                table: r.get(2)?,
+                                row: id.try_into().unwrap_or([0; 16]),
+                            },
+                            CommitRef {
+                                node: node.try_into().unwrap_or([0; 16]),
+                                tx: r.get::<i64>(1)? as u64,
+                            },
+                        ))
+                    },
+                )
+                .await
                 .map_err(storage)?
         };
         for (at, commit, fixed) in holds {
-            if self.landed_commit(commit)? {
-                self.forget_hold(commit)?;
+            if self.landed_commit(commit).await? {
+                self.forget_hold(commit).await?;
                 continue;
             }
             self.shard.holds.insert(at, commit);
@@ -337,23 +342,24 @@ impl Inner {
 
     /// Whether this store already applied the part `commit` (its fate is
     /// recorded).
-    fn landed_commit(&self, commit: CommitRef) -> Result<bool, Error> {
+    async fn landed_commit(&self, commit: CommitRef) -> Result<bool, Error> {
         let landed: Option<i64> = self
             .conn
-            .query_row(
+            .sql()
+            .query_optional(
                 "SELECT 1 FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
                  WHERE n.node = ?1 AND t.tx = ?2 AND t.t IS NOT NULL",
-                rusqlite::params![commit.node.to_vec(), commit.tx as i64],
+                jazz_sql::params![commit.node.to_vec(), commit.tx as i64],
                 |r| r.get(0),
             )
-            .optional()
+            .await
             .map_err(storage)?;
         Ok(landed.is_some())
     }
 
     /// Drop the durable record of `commit`'s hold. Run inside the savepoint
     /// that lands its part, so the two go together.
-    pub(crate) fn forget_hold(&self, commit: CommitRef) -> Result<(), Error> {
+    pub(crate) async fn forget_hold(&self, commit: CommitRef) -> Result<(), Error> {
         // Every durable hold is loaded on reopen, so a store holding
         // nothing in memory has none on disk either.
         if self.shard.holds.is_empty() && self.shard.fixed.is_empty() {
@@ -361,31 +367,35 @@ impl Inner {
         }
         let kept: bool = self
             .conn
-            .query_row(
+            .sql()
+            .query_one(
                 "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '_jazz_shard_holds'",
-                [],
+                jazz_sql::params![],
                 |r| r.get(0),
             )
+            .await
             .map_err(storage)?;
         if !kept {
             return Ok(());
         }
-        let params = rusqlite::params![commit.node.to_vec(), commit.tx as i64];
+        let tx = commit.tx as i64;
+        let node = &commit.node[..];
+        let params = jazz_sql::params![node, tx];
         self.exec(
             "DELETE FROM _jazz_shard_holds WHERE node = ?1 AND tx = ?2",
             params,
         )
+        .await
         .map_err(storage)?;
         self.exec(
             "DELETE FROM _jazz_shard_held_rows WHERE node = ?1 AND tx = ?2",
             params,
         )
+        .await
         .map_err(storage)?;
         Ok(())
     }
 }
-
-use rusqlite::OptionalExtension;
 
 /// The shard role of a store (see the module docs), from [`Db::shard`].
 pub struct ShardRole<'a> {
@@ -404,7 +414,7 @@ impl ShardRole<'_> {
     /// Whether the store takes the shard role: it is the last word on what
     /// it commits (an authority, not a replica of an upstream).
     pub fn is_shard(&self) -> bool {
-        self.db.inner.borrow().client.is_none()
+        self.db.inner.metadata().client.is_none()
     }
 
     /// The store must be a shard (see [`Self::is_shard`]).
@@ -425,30 +435,30 @@ impl ShardRole<'_> {
     /// store's clock than [`HLC_MAX_OFFSET_MS`] is observed only as far as
     /// that: returns the position observed, which the caller observes again
     /// once the clock has caught up.
-    pub fn observe(&self, position: u64) -> Result<u64, Error> {
-        let mut inner = self.db.inner.borrow_mut();
+    pub async fn observe(&self, position: u64) -> Result<u64, Error> {
+        let mut inner = self.db.inner.sql_borrow_mut().await;
         self.require(&inner)?;
         let observed = position.min(hlc((inner.shard.clock)().saturating_add(HLC_MAX_OFFSET_MS)));
-        observe(&mut inner, observed)?;
+        observe(&mut inner, observed).await?;
         Ok(observed)
     }
 
     /// The position the store serves its sessions as settled: its newest,
     /// or just below its lowest hold while one stands.
     pub fn served_through(&self) -> u64 {
-        self.db.inner.borrow().served_through()
+        self.db.inner.metadata().served_through()
     }
 
     /// While a reopened shard waits out its offset bound, the clock reading
     /// (ms) it waits to pass: until then its sessions' commits wait (but a
     /// fixed part's), and a caller holds nothing yet.
     pub fn waits_out(&self) -> Option<u64> {
-        self.db.inner.borrow().waits_out()
+        self.db.inner.metadata().waits_out()
     }
 
     /// The lowest position held for a part still to land, if any.
     pub fn lowest_hold(&self) -> Option<u64> {
-        self.db.inner.borrow().shard.lowest_hold()
+        self.db.inner.metadata().shard.lowest_hold()
     }
 
     /// Hold a position for the cross-shard part `commit`, which writes
@@ -459,8 +469,8 @@ impl ShardRole<'_> {
     /// standing hold. A row another part holds refuses the hold: two
     /// cross-shard commits holding each other's rows on two shards would
     /// otherwise wait on each other.
-    pub fn hold(&self, commit: CommitRef, rows: &[HeldRow]) -> Result<u64, Error> {
-        let mut inner = self.db.inner.borrow_mut();
+    pub async fn hold(&self, commit: CommitRef, rows: &[HeldRow]) -> Result<u64, Error> {
+        let mut inner = self.db.inner.sql_borrow_mut().await;
         self.require(&inner)?;
         if let Some(at) = inner.shard.held(commit) {
             return Ok(at);
@@ -473,20 +483,27 @@ impl ShardRole<'_> {
             ));
         }
         let at = inner.next_seq();
-        inner.conn.execute_batch(HOLDS_DDL).map_err(storage)?;
+        inner
+            .conn
+            .sql()
+            .execute_script(HOLDS_DDL)
+            .await
+            .map_err(storage)?;
         let node = commit.node.to_vec();
         inner
             .exec(
                 "INSERT INTO _jazz_shard_holds (at, node, tx) VALUES (?1, ?2, ?3)",
-                rusqlite::params![at as i64, node, commit.tx as i64],
+                jazz_sql::params![at as i64, node, commit.tx as i64],
             )
+            .await
             .map_err(storage)?;
         for row in rows {
             inner
                 .exec(
                     "INSERT INTO _jazz_shard_held_rows (node, tx, tbl, id) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![node, commit.tx as i64, row.table, row.row.to_vec()],
+                    jazz_sql::params![node, commit.tx as i64, row.table, row.row.to_vec()],
                 )
+                .await
                 .map_err(storage)?;
         }
         inner.seq = at;
@@ -501,8 +518,8 @@ impl ShardRole<'_> {
     /// every part of its cross-shard commit shares, at or above the part's
     /// hold here. Commits the store accepted since the hold may sit above
     /// it; none sits in what it served as settled. The part must be held.
-    pub fn fix(&self, commit: CommitRef, position: u64) -> Result<(), Error> {
-        let mut inner = self.db.inner.borrow_mut();
+    pub async fn fix(&self, commit: CommitRef, position: u64) -> Result<(), Error> {
+        let mut inner = self.db.inner.sql_borrow_mut().await;
         self.require(&inner)?;
         let Some(held) = inner.shard.held(commit) else {
             return Err(Error::new(
@@ -516,12 +533,13 @@ impl ShardRole<'_> {
                 format!("position {position} is below the part's hold at {held}"),
             ));
         }
-        observe(&mut inner, position)?;
+        observe(&mut inner, position).await?;
         inner
             .exec(
                 "UPDATE _jazz_shard_holds SET fixed = ?3 WHERE node = ?1 AND tx = ?2",
-                rusqlite::params![commit.node.to_vec(), commit.tx as i64, position as i64],
+                jazz_sql::params![commit.node.to_vec(), commit.tx as i64, position as i64],
             )
+            .await
             .map_err(storage)?;
         inner.shard.fixed.insert(commit, position);
         Ok(())
@@ -529,13 +547,13 @@ impl ShardRole<'_> {
 
     /// Drop the part `commit`'s hold without it landing: its cross-shard
     /// commit was refused. Releasing a part not held does nothing.
-    pub fn release(&self, commit: CommitRef) -> Result<(), Error> {
-        let mut inner = self.db.inner.borrow_mut();
+    pub async fn release(&self, commit: CommitRef) -> Result<(), Error> {
+        let mut inner = self.db.inner.sql_borrow_mut().await;
         self.require(&inner)?;
         if inner.shard.held(commit).is_none() {
             return Ok(());
         }
-        inner.forget_hold(commit)?;
+        inner.forget_hold(commit).await?;
         inner.shard.landed(commit);
         Ok(())
     }
@@ -544,7 +562,7 @@ impl ShardRole<'_> {
 /// Note a position a peer named: nothing the store commits later lands at
 /// or below it. One further ahead of the clock than [`HLC_MAX_OFFSET_MS`]
 /// is refused, unless the store already numbered or held past it.
-fn observe(inner: &mut Inner, position: u64) -> Result<(), Error> {
+async fn observe(inner: &mut Inner, position: u64) -> Result<(), Error> {
     if position > inner.seq
         && position > hlc((inner.shard.clock)().saturating_add(HLC_MAX_OFFSET_MS))
     {
@@ -556,7 +574,7 @@ fn observe(inner: &mut Inner, position: u64) -> Result<(), Error> {
         ));
     }
     if position > inner.seq && !inner.shard.observed {
-        inner.persist_meta(SHARD_OBSERVED, 1)?;
+        inner.persist_meta(SHARD_OBSERVED, 1).await?;
         inner.shard.observed = true;
     }
     inner.seq = inner.seq.max(position);

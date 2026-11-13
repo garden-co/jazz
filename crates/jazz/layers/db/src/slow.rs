@@ -174,6 +174,12 @@ impl SlowLog {
         self.threshold.is_some_and(|threshold| elapsed >= threshold)
     }
 
+    pub(crate) fn needs_plan(&self, sql: &str, schema_version: Option<i64>) -> bool {
+        schema_version.is_none()
+            || schema_version != self.plans_version
+            || !self.plans.contains_key(sql)
+    }
+
     /// Record a slow run of `sql`. `schema_version` is SQLite's schema
     /// version now (`None` if unknown: the plan is read afresh).
     pub fn record(

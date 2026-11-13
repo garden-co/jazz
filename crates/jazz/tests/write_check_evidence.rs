@@ -149,7 +149,7 @@ fn drive<T>(dbs: &[&Db], future: impl Future<Output = T>) -> T {
 fn connect(client: &Db, server: &Db, author: AuthorSubject) {
     let (client_side, server_side) = duplex();
     block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, author).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, author)).unwrap();
 }
 
 fn count(db: &Db, table: &str) -> usize {
@@ -793,17 +793,17 @@ fn write_checks_search_the_policy_table_through_the_cut() {
 
     // The first round overlays nothing; later rounds overlay grounded rows.
     for grounded in [vec![], vec![owner]] {
-        let plan = server
-            .explain_write_check_plan("members", joining, alice, &grounded)
-            .unwrap();
+        let plan = jazz::db::block_on(
+            server.explain_write_check_plan("members", joining, alice, &grounded),
+        )
+        .unwrap();
         assert!(
             !plan.contains("SCAN") && !plan.contains("CO-ROUTINE"),
             "grounded {grounded:?}: {plan}"
         );
     }
     // The post-state pass overlays the unit's rows without an id list.
-    let plan = server
-        .explain_post_state_check_plan("members", joining, alice)
+    let plan = jazz::db::block_on(server.explain_post_state_check_plan("members", joining, alice))
         .unwrap();
     assert!(
         !plan.contains("SCAN") && !plan.contains("CO-ROUTINE"),

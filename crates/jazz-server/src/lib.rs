@@ -568,8 +568,7 @@ mod tests {
             ..Default::default()
         }
         .resolve()
-        .err()
-        .expect("an unknown kind is refused");
+        .expect_err("an unknown kind is refused");
         assert_eq!(
             error,
             "blobs must be files, s3, vercel-blob or sqlite, not \"ftp\""

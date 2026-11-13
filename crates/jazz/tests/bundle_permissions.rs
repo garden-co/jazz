@@ -43,7 +43,7 @@ fn config(node: u8, author: AuthorSubject, read: PolicyExpr) -> DbConfig {
 
 /// An authority whose own schema reads everything, with one seeded row.
 fn server_with_row(db: Db) -> (Db, RowUuid) {
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     let row = RowUuid::from_bytes([7; 16]);
     db.seed_settled_mergeable_for_bootstrap(
         "users",
@@ -90,8 +90,7 @@ fn pinned(server: &Db, node: u8, author: AuthorSubject, bundle: BundleId) -> (Db
     let db = client(node, author);
     let (client_side, server_side) = duplex();
     let upstream = block_on(db.connect_upstream(client_side));
-    server
-        .accept_pinned_subscriber(server_side, author, None, Some(bundle))
+    jazz::db::block_on(server.accept_pinned_subscriber(server_side, author, None, Some(bundle)))
         .unwrap();
     let prepared = db.prepare_query(&Query::from("users")).unwrap();
     let stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
@@ -135,7 +134,13 @@ fn rolling_back_publishes_the_same_bundle_again() {
     let _second = block_on(server.publish_bundle(&users(PolicyExpr::False))).unwrap();
     let again = block_on(server.publish_bundle(&users(PolicyExpr::True))).unwrap();
     assert_eq!(again, first, "a bundle is addressed by its content");
-    assert_eq!(server.catalogue().unwrap().bundles.len(), 2);
+    assert_eq!(
+        jazz::db::block_on(server.catalogue())
+            .unwrap()
+            .bundles
+            .len(),
+        2
+    );
 
     let alice = AuthorSubject::for_test_bytes([0x55; 16]);
     let (db, _keep) = pinned(&server, 1, alice, again);
@@ -146,23 +151,22 @@ fn rolling_back_publishes_the_same_bundle_again() {
 #[test]
 fn a_bundle_this_store_never_published_is_refused() {
     let server = block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap();
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     let (_client_side, server_side) = duplex();
-    let error = server
-        .accept_pinned_subscriber(
-            server_side,
-            AuthorSubject::for_test_bytes([0x55; 16]),
-            None,
-            Some(BundleId([9; 32])),
-        )
-        .unwrap_err();
+    let error = jazz::db::block_on(server.accept_pinned_subscriber(
+        server_side,
+        AuthorSubject::for_test_bytes([0x55; 16]),
+        None,
+        Some(BundleId([9; 32])),
+    ))
+    .unwrap_err();
     assert!(error.to_string().contains("not published"), "{error}");
 }
 
 #[test]
 fn a_bundle_whose_write_schema_was_never_admitted_is_refused() {
     let server = block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap();
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     // Its schema has a column the store never admitted.
     let unadmitted = SchemaBuilder::new()
         .table(
@@ -174,14 +178,13 @@ fn a_bundle_whose_write_schema_was_never_admitted_is_refused() {
         .build();
     let bundle = block_on(server.publish_bundle(&unadmitted)).unwrap();
     let (_client_side, server_side) = duplex();
-    let error = server
-        .accept_pinned_subscriber(
-            server_side,
-            AuthorSubject::for_test_bytes([0x55; 16]),
-            None,
-            Some(bundle),
-        )
-        .unwrap_err();
+    let error = jazz::db::block_on(server.accept_pinned_subscriber(
+        server_side,
+        AuthorSubject::for_test_bytes([0x55; 16]),
+        None,
+        Some(bundle),
+    ))
+    .unwrap_err();
     assert!(
         error
             .to_string()
@@ -199,14 +202,11 @@ fn a_store_that_serves_bundles_refuses_unpinned_policy_sessions() {
     // Before any bundle, an unpinned session still opens under the
     // current permissions.
     let (_client_side, server_side) = duplex();
-    server
-        .accept_pinned_subscriber(server_side, alice, None, None)
-        .unwrap();
+    jazz::db::block_on(server.accept_pinned_subscriber(server_side, alice, None, None)).unwrap();
 
     block_on(server.publish_bundle(&users(PolicyExpr::True))).unwrap();
     let (_client_side, server_side) = duplex();
-    let error = server
-        .accept_pinned_subscriber(server_side, alice, None, None)
+    let error = jazz::db::block_on(server.accept_pinned_subscriber(server_side, alice, None, None))
         .unwrap_err();
     assert!(
         error.to_string().contains("served through createJazz"),
@@ -215,9 +215,13 @@ fn a_store_that_serves_bundles_refuses_unpinned_policy_sessions() {
 
     // The trusted backend's own sessions need no pin.
     let (_client_side, server_side) = duplex();
-    server
-        .accept_pinned_subscriber(server_side, AuthorSubject::SYSTEM, None, None)
-        .unwrap();
+    jazz::db::block_on(server.accept_pinned_subscriber(
+        server_side,
+        AuthorSubject::SYSTEM,
+        None,
+        None,
+    ))
+    .unwrap();
 }
 
 #[test]
@@ -239,7 +243,7 @@ fn bundles_govern_sessions_after_a_restart() {
     // Reopened with a schema that reads everything: the pinned session
     // still reads by its bundle.
     let server = open(PolicyExpr::True);
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     let alice = AuthorSubject::for_test_bytes([0x55; 16]);
     let (db, _keep) = pinned(&server, 1, alice, closed);
     pump(&server, &[&db]);
@@ -249,7 +253,7 @@ fn bundles_govern_sessions_after_a_restart() {
 #[test]
 fn a_pinned_session_writes_by_its_bundle() {
     let server = block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap();
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     let mut no_inserts = users(PolicyExpr::True);
     for table in no_inserts.values_mut() {
         table.policies.insert.with_check = Some(PolicyExpr::False);
@@ -265,7 +269,10 @@ fn a_pinned_session_writes_by_its_bundle() {
     pump(&server, &[&db]);
     let _ = written;
     assert_eq!(
-        server.catalogue().unwrap().bundles.len(),
+        jazz::db::block_on(server.catalogue())
+            .unwrap()
+            .bundles
+            .len(),
         1,
         "nothing else was published"
     );
@@ -380,7 +387,7 @@ fn counting_pipe() -> (
 /// reads every user and one that reads none.
 fn server_with_users(rows: u8) -> (Db, BundleId, BundleId) {
     let server = block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap();
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     for n in 0..rows {
         server
             .seed_settled_mergeable_for_bootstrap(
@@ -421,8 +428,7 @@ fn reconnect_with(
     assert!(db.detach_connection(upstream));
     let (client_side, server_side, shipped) = counting_pipe();
     let upstream = block_on(db.connect_upstream(client_side));
-    server
-        .accept_pinned_subscriber(server_side, author, claims, Some(bundle))
+    jazz::db::block_on(server.accept_pinned_subscriber(server_side, author, claims, Some(bundle)))
         .unwrap();
     pump(server, &[db]);
     (shipped.get(), upstream)
@@ -437,8 +443,7 @@ fn a_pinned_session_resumes_under_the_same_bundle() {
     let db = client(1, alice);
     let (client_side, server_side, shipped) = counting_pipe();
     let upstream = block_on(db.connect_upstream(client_side));
-    server
-        .accept_pinned_subscriber(server_side, alice, None, Some(open))
+    jazz::db::block_on(server.accept_pinned_subscriber(server_side, alice, None, Some(open)))
         .unwrap();
     let prepared = db.prepare_query(&Query::from("users")).unwrap();
     let _stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
@@ -464,8 +469,7 @@ fn a_pinned_session_under_another_bundle_opens_fresh() {
     let db = client(1, alice);
     let (client_side, server_side, _) = counting_pipe();
     let upstream = block_on(db.connect_upstream(client_side));
-    server
-        .accept_pinned_subscriber(server_side, alice, None, Some(closed))
+    jazz::db::block_on(server.accept_pinned_subscriber(server_side, alice, None, Some(closed)))
         .unwrap();
     let prepared = db.prepare_query(&Query::from("users")).unwrap();
     let _stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
@@ -491,7 +495,7 @@ fn a_pinned_session_under_another_bundle_opens_fresh() {
 #[test]
 fn a_session_with_claims_resumes_only_with_the_same_claims() {
     let server = block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap();
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     let teams = ["red", "red", "red", "blue", "blue"];
     for (n, team) in teams.iter().enumerate() {
         server
@@ -529,9 +533,13 @@ fn a_session_with_claims_resumes_only_with_the_same_claims() {
     let db = client(1, alice);
     let (client_side, server_side, shipped) = counting_pipe();
     let upstream = block_on(db.connect_upstream(client_side));
-    server
-        .accept_pinned_subscriber(server_side, alice, claims("red"), Some(own_team))
-        .unwrap();
+    jazz::db::block_on(server.accept_pinned_subscriber(
+        server_side,
+        alice,
+        claims("red"),
+        Some(own_team),
+    ))
+    .unwrap();
     let prepared = db.prepare_query(&Query::from("users")).unwrap();
     let _stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &[&db]);
@@ -637,8 +645,7 @@ fn an_offline_write_a_tightened_bundle_refuses_is_reported_as_denied() {
     // Back online, on the deployment that serves the stricter bundle.
     let (client_side, server_side) = duplex();
     let _upstream = block_on(db.connect_upstream(client_side));
-    server
-        .accept_pinned_subscriber(server_side, alice, None, Some(strict))
+    jazz::db::block_on(server.accept_pinned_subscriber(server_side, alice, None, Some(strict)))
         .unwrap();
     pump(&server, &[&db]);
 
@@ -677,14 +684,14 @@ fn an_offline_write_relayed_for_a_tab_is_reported_to_the_tab() {
     edge.track_upstream_rejections();
     let (edge_up, server_side) = duplex();
     let _edge_upstream = block_on(edge.connect_upstream(edge_up));
-    let session = server
-        .accept_pinned_subscriber(server_side, alice, None, Some(open))
-        .unwrap();
+    let session =
+        jazz::db::block_on(server.accept_pinned_subscriber(server_side, alice, None, Some(open)))
+            .unwrap();
     let tab = client(1, alice);
     tab.track_upstream_rejections();
     let (tab_side, edge_side) = duplex();
     let _tab_upstream = block_on(tab.connect_upstream(tab_side));
-    edge.accept_subscriber(edge_side, alice).unwrap();
+    jazz::db::block_on(edge.accept_subscriber(edge_side, alice)).unwrap();
     let prepared = tab.prepare_query(&Query::from("users")).unwrap();
     let _stream = block_on(tab.subscribe(&prepared, ReadOpts::default())).unwrap();
     let pump_all = |server: &Db| {
@@ -724,8 +731,7 @@ fn an_offline_write_relayed_for_a_tab_is_reported_to_the_tab() {
     pump_all(&server);
     let (client_side, server_side) = duplex();
     let _upstream = block_on(edge.connect_upstream(client_side));
-    server
-        .accept_pinned_subscriber(server_side, alice, None, Some(strict))
+    jazz::db::block_on(server.accept_pinned_subscriber(server_side, alice, None, Some(strict)))
         .unwrap();
     pump_all(&server);
 

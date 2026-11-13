@@ -57,7 +57,7 @@ const command = (label, executable, args, options = {}) =>
 const differentialCommand = command("bounded maintained-vs-one-shot differential oracle", "bash", [
   "-lc",
   String.raw`set -euo pipefail
-test_binary="$(cargo test -p jazz --test maintained_differential --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
+test_binary="$(cargo test -p jazz --test maintained_differential --no-default-features --features testing,sqlite,transport-compression-zstd --no-run --message-format=json | node -e '
   const readline = require("node:readline");
   let executable;
   const lines = readline.createInterface({ input: process.stdin });

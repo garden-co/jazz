@@ -155,7 +155,7 @@ impl Net {
         let i = self.clients.len();
         let node = 0x50 + i as u8;
         let db = open(node, author(node));
-        db.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(db.set_remote_link_hint(RemoteLinkHint::Live));
         self.clients.push(Client {
             node,
             db,
@@ -177,23 +177,27 @@ impl Net {
         let (client_side, server_side) = duplex();
         let client = &mut self.clients[i];
         client.up = Some(block_on(client.db.connect_upstream(client_side)));
-        self.core
-            .accept_subscriber(server_side, author(client.node))
-            .unwrap();
+        jazz::db::block_on(
+            self.core
+                .accept_subscriber(server_side, author(client.node)),
+        )
+        .unwrap();
     }
 
     fn offline(&mut self, i: usize) {
         let client = &mut self.clients[i];
         let up = client.up.take().expect("online");
         assert!(client.db.detach_connection(&up));
-        client.db.set_remote_link_hint(RemoteLinkHint::Failed);
+        jazz::db::block_on(client.db.set_remote_link_hint(RemoteLinkHint::Failed));
     }
 
     fn online(&mut self, i: usize) {
         self.connect(i);
-        self.clients[i]
-            .db
-            .set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(
+            self.clients[i]
+                .db
+                .set_remote_link_hint(RemoteLinkHint::Live),
+        );
         self.pump();
     }
 
@@ -289,8 +293,7 @@ impl Net {
 
     /// The seq of `row`'s current version at the authority.
     fn seq_of(&self, row: RowUuid) -> u64 {
-        self.core
-            .write_conflicts("docs", row, None)
+        jazz::db::block_on(self.core.write_conflicts("docs", row, None))
             .unwrap()
             .last()
             .expect("an accepted version")
@@ -436,7 +439,10 @@ fn an_offline_chain_merges_each_write_over_what_its_writer_saw() {
     // held value's insert goes first.
     net.assert_everywhere(row, "body", "Hi! Hello! big world");
     // Both merges kept what alice's chain sent, as versions of their own.
-    assert_eq!(net.core.as_sent_versions_for_test().unwrap(), 2);
+    assert_eq!(
+        jazz::db::block_on(net.core.as_sent_versions_for_test()).unwrap(),
+        2
+    );
     // No read lists them: history holds the accepted versions only.
     let accepted = [
         "Hello",
@@ -455,9 +461,7 @@ fn an_offline_chain_merges_each_write_over_what_its_writer_saw() {
         );
     }
     // Conflict analysis lists the accepted writes only.
-    let seqs: Vec<u64> = net
-        .core
-        .write_conflicts("docs", row, None)
+    let seqs: Vec<u64> = jazz::db::block_on(net.core.write_conflicts("docs", row, None))
         .unwrap()
         .iter()
         .map(|write| write.seq)
@@ -480,7 +484,10 @@ fn an_offline_chain_merges_each_write_over_what_its_writer_saw() {
     let next = net.edit(0, row, &[("body", "Hi! Hello! big world.")]);
     net.settle(0, next);
     net.assert_everywhere(row, "body", "Hi! Hello! big world.");
-    assert_eq!(net.core.as_sent_versions_for_test().unwrap(), 0);
+    assert_eq!(
+        jazz::db::block_on(net.core.as_sent_versions_for_test()).unwrap(),
+        0
+    );
 }
 
 /// A read through a cut never takes an as-sent version for a version of
@@ -499,7 +506,10 @@ fn a_read_at_a_snapshot_never_sees_a_value_as_sent() {
     net.settle(0, alice);
     net.online(1);
     net.settle(1, bob);
-    assert_eq!(net.core.as_sent_versions_for_test().unwrap(), 1);
+    assert_eq!(
+        jazz::db::block_on(net.core.as_sent_versions_for_test()).unwrap(),
+        1
+    );
     let at = |snapshot: &jazz::protocol::SnapshotRef| -> Vec<String> {
         let opts = ReadOpts {
             read_view: jazz::protocol::ReadViewSpec {
@@ -539,7 +549,7 @@ fn a_chain_merges_over_its_value_as_sent_after_the_authority_restarts() {
     // writes again before she hears back: her second is built on her first
     // as she sent it.
     net.connect(0);
-    net.db(0).set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(net.db(0).set_remote_link_hint(RemoteLinkHint::Live));
     block_on(net.db(0).tick()).unwrap();
     block_on(net.core.tick()).unwrap();
     assert_eq!(Net::read(&net.core, row, "body"), "Hello! world");
@@ -602,7 +612,7 @@ fn only_a_write_that_missed_an_edit_to_the_column_merges() {
     net.settle(0, first);
     let first_seq = net.seq_of(row);
     assert_eq!(
-        net.core.merge_base("docs", row, first_seq, "body").unwrap(),
+        jazz::db::block_on(net.core.merge_base("docs", row, first_seq, "body")).unwrap(),
         None
     );
     // A missed write that set only the title: still nothing to merge.
@@ -614,9 +624,7 @@ fn only_a_write_that_missed_an_edit_to_the_column_merges() {
     net.settle(0, second);
     let second_seq = net.seq_of(row);
     assert_eq!(
-        net.core
-            .merge_base("docs", row, second_seq, "body")
-            .unwrap(),
+        jazz::db::block_on(net.core.merge_base("docs", row, second_seq, "body")).unwrap(),
         None
     );
     // A missed write to the body: merged over the version it was built on.
@@ -628,7 +636,7 @@ fn only_a_write_that_missed_an_edit_to_the_column_merges() {
     net.settle(0, third);
     let third_seq = net.seq_of(row);
     assert_eq!(
-        net.core.merge_base("docs", row, third_seq, "body").unwrap(),
+        jazz::db::block_on(net.core.merge_base("docs", row, third_seq, "body")).unwrap(),
         Some(Value::String("alpha beta gamma delta epsilon".to_owned()))
     );
     net.assert_everywhere(row, "body", "ALPHA beta gamma delta epsilon zeta");
@@ -687,21 +695,27 @@ fn large_values_merge_edits_at_both_ends() {
     net.settle(1, bob);
     net.assert_everywhere(row, "body", &format!("Preface. {base} The end."));
     // The merged value is stored as a local write's would be: chunked.
-    let stored = net.core.stored_bytes_for_test("docs", row, "body").unwrap();
+    let stored = jazz::db::block_on(net.core.stored_bytes_for_test("docs", row, "body")).unwrap();
     assert!(stored < 64 * 1024, "{stored} bytes stored inline");
     // Bob's write as sent is kept, chunked too. Each whole write was stored
     // as the splice that makes it, and the merge as a splice of the held
     // value, so the seed, alice's version, the merge and bob's value as
     // sent all share the seed's tree.
-    assert_eq!(net.core.as_sent_versions_for_test().unwrap(), 1);
-    let (_, roots) = net.core.large_value_nodes_for_test().unwrap();
+    assert_eq!(
+        jazz::db::block_on(net.core.as_sent_versions_for_test()).unwrap(),
+        1
+    );
+    let (_, roots) = jazz::db::block_on(net.core.large_value_nodes_for_test()).unwrap();
     assert_eq!(roots, 1);
     // Bob's next write is built on the merge, settled: his value as sent
     // goes, and with it its tree's reference.
     let next = net.edit(1, row, &[("body", "short")]);
     net.settle(1, next);
-    assert_eq!(net.core.as_sent_versions_for_test().unwrap(), 0);
-    let (_, roots) = net.core.large_value_nodes_for_test().unwrap();
+    assert_eq!(
+        jazz::db::block_on(net.core.as_sent_versions_for_test()).unwrap(),
+        0
+    );
+    let (_, roots) = jazz::db::block_on(net.core.large_value_nodes_for_test()).unwrap();
     assert_eq!(roots, 1);
 }
 

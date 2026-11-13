@@ -111,9 +111,7 @@ fn logged_subscription(level: Level) -> Vec<BTreeMap<String, String>> {
         .unwrap();
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
-        server
-            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-            .unwrap();
+        block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
         let prepared = client.prepare_query(&Query::from("items")).unwrap();
         let mut stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
         for _ in 0..5 {

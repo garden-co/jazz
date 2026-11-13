@@ -410,11 +410,10 @@ impl Sim {
         let server = conn.server.clone();
         let identity = conn.identity;
         let upstream = block_on(self.db(client).connect_upstream(client_side));
-        self.db(client).set_remote_link_hint(RemoteLinkHint::Live);
-        let subscriber = self
-            .db(&server)
-            .accept_subscriber(server_side, identity)
-            .expect("the sim's server serves the link");
+        jazz::db::block_on(self.db(client).set_remote_link_hint(RemoteLinkHint::Live));
+        let subscriber =
+            jazz::db::block_on(self.db(&server).accept_subscriber(server_side, identity))
+                .expect("the sim's server serves the link");
         let conn = self.connections.get_mut(client).expect("connection");
         conn.upstream = Some(upstream);
         conn.subscriber = Some(subscriber);
@@ -428,7 +427,7 @@ impl Sim {
         let server = conn.server.clone();
         if let Some(upstream) = upstream {
             self.db(client).detach_connection(&upstream);
-            self.db(client).set_remote_link_hint(RemoteLinkHint::Failed);
+            jazz::db::block_on(self.db(client).set_remote_link_hint(RemoteLinkHint::Failed));
         }
         if let Some(subscriber) = subscriber {
             self.db(&server).disconnect_subscriber(subscriber);

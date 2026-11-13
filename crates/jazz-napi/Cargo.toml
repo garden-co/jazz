@@ -17,7 +17,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 jazz-native-relay = { path = "../jazz-native-relay", optional = true }
-jazz = { path = "../jazz", default-features = false, features = ["runtime"] }
+jazz = { path = "../jazz", default-features = false, features = ["sqlite", "runtime"] }
 jazz-server = { path = "../jazz-server", features = ["embedded-server"] }
 jazz-otel.workspace = true
 jazz-text = { path = "../jazz-text", features = ["serde"] }

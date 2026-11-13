@@ -151,11 +151,11 @@ fn fates(down: &Q) -> Vec<(u64, bool)> {
 fn a_message_the_server_does_not_serve_ends_only_that_session() {
     let server = server();
     let (_bad_client, bad_server, bad_up, _) = pipe();
-    let bad = server.accept_subscriber(bad_server, user(9)).unwrap();
+    let bad = jazz::db::block_on(server.accept_subscriber(bad_server, user(9))).unwrap();
     let alice = client(1, user(1));
     let (a_client, a_server, _, _) = pipe();
     let _a = block_on(alice.connect_upstream(a_client));
-    server.accept_subscriber(a_server, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(a_server, user(1))).unwrap();
 
     post(&alice, "hello");
     bad_up.borrow_mut().push_back(SyncMessage::Rows {
@@ -206,15 +206,14 @@ fn a_session_the_server_cannot_send_to_ends_with_why() {
         let alice = client(1, user(1));
         let (a_client, _, up, _) = pipe();
         let _a = block_on(alice.connect_upstream(a_client));
-        let session = server
-            .accept_subscriber(
-                Box::new(Refusing {
-                    error: error.clone(),
-                    inbound: up,
-                }),
-                user(1),
-            )
-            .unwrap();
+        let session = jazz::db::block_on(server.accept_subscriber(
+            Box::new(Refusing {
+                error: error.clone(),
+                inbound: up,
+            }),
+            user(1),
+        ))
+        .unwrap();
         let prepared = alice.prepare_query(&Query::from("messages")).unwrap();
         let _live = block_on(alice.subscribe(&prepared, ReadOpts::default())).unwrap();
         for _ in 0..4 {
@@ -241,7 +240,7 @@ fn closed_sessions_are_kept_only_for_a_host_that_tracks_them() {
     let server = block_on(Db::open_history_complete(config(0, AuthorSubject::SYSTEM))).unwrap();
     for _ in 0..3 {
         let (_client, server_side, up, _) = pipe();
-        server.accept_subscriber(server_side, user(9)).unwrap();
+        jazz::db::block_on(server.accept_subscriber(server_side, user(9))).unwrap();
         up.borrow_mut().push_back(SyncMessage::Rows {
             images: Vec::new(),
             tx_ids: Vec::new(),
@@ -260,10 +259,10 @@ fn closed_sessions_are_kept_only_for_a_host_that_tracks_them() {
 fn a_stale_subscriber_handle_does_not_close_the_session_reusing_its_slot() {
     let server = server();
     let (_old_client, old_server, _, _) = pipe();
-    let old = server.accept_subscriber(old_server, user(1)).unwrap();
+    let old = jazz::db::block_on(server.accept_subscriber(old_server, user(1))).unwrap();
     server.disconnect_subscriber(old);
     let (_new_client, new_server, _, _) = pipe();
-    let new = server.accept_subscriber(new_server, user(2)).unwrap();
+    let new = jazz::db::block_on(server.accept_subscriber(new_server, user(2))).unwrap();
     assert_ne!(old, new);
     server.disconnect_subscriber(old);
     assert_eq!(server.open_subscribers(), 1);
@@ -275,9 +274,9 @@ fn a_commit_as_another_identitys_node_is_refused_and_claims_nothing() {
     let alice = client(1, user(1));
     let (a_client, a_server, a_up, a_down) = pipe();
     let _a = block_on(alice.connect_upstream(a_client));
-    server.accept_subscriber(a_server, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(a_server, user(1))).unwrap();
     let (_m_client, m_server, m_up, m_down) = pipe();
-    server.accept_subscriber(m_server, user(9)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(m_server, user(9))).unwrap();
 
     post(&alice, "first");
     block_on(alice.tick()).unwrap();
@@ -340,7 +339,7 @@ fn owned_node(server: &Db, owner: AuthorSubject) -> (Db, TxId, WireKind) {
     let store = client(1, owner);
     let (c, s, up, _down) = pipe();
     let upstream = block_on(store.connect_upstream(c));
-    server.accept_subscriber(s, owner).unwrap();
+    jazz::db::block_on(server.accept_subscriber(s, owner)).unwrap();
     post(&store, "first");
     block_on(store.tick()).unwrap();
     let Some(SyncMessage::Commit { id, kind, .. }) = up
@@ -370,7 +369,7 @@ fn commit_as(
     kind: &WireKind,
 ) -> bool {
     let (_c, s, up, down) = pipe();
-    server.accept_subscriber(s, identity).unwrap();
+    jazz::db::block_on(server.accept_subscriber(s, identity)).unwrap();
     up.borrow_mut().push_back(SyncMessage::Commit {
         clock: 0,
         id: TxId::new(TxTime(tx), node),
@@ -443,7 +442,7 @@ fn racing_principals_of_the_account_each_take_over_the_guest_node() {
     let tx = id.time.0;
     let send = |identity: AuthorSubject, tx: u64| {
         let (c, s, up, down) = pipe();
-        server.accept_subscriber(s, identity).unwrap();
+        jazz::db::block_on(server.accept_subscriber(s, identity)).unwrap();
         up.borrow_mut().push_back(SyncMessage::Commit {
             clock: 0,
             id: TxId::new(TxTime(tx), id.node),
@@ -474,7 +473,7 @@ fn a_handed_over_node_stays_handed_over_after_a_restart() {
             jazz::db::FileOptions::default(),
         ))
         .unwrap();
-        server.set_authority();
+        jazz::db::block_on(server.set_authority());
         server.track_closed_subscribers();
         server
     };
@@ -547,7 +546,7 @@ fn a_base_on_another_identitys_commit_is_refused_whether_or_not_it_exists() {
         .into()
     };
     let (_a_client, a_server, a_up, a_down) = pipe();
-    server.accept_subscriber(a_server, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(a_server, user(1))).unwrap();
     a_up.borrow_mut().push_back(write(
         1,
         1,
@@ -564,7 +563,7 @@ fn a_base_on_another_identitys_commit_is_refused_whether_or_not_it_exists() {
     assert_eq!(fates(&a_down), vec![(1, true)]);
 
     let (_m_client, m_server, m_up, m_down) = pipe();
-    server.accept_subscriber(m_server, user(9)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(m_server, user(9))).unwrap();
     for (tx, named) in [(1, 1), (2, 99)] {
         m_up.borrow_mut().push_back(write(
             9,
@@ -641,7 +640,7 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
         )
         .unwrap();
     let (_m_client, m_server, m_up, m_down) = pipe();
-    server.accept_subscriber(m_server, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(m_server, user(1))).unwrap();
     m_up.borrow_mut().push_back(SyncMessage::Commit {
         clock: 0,
         id: TxId::new(TxTime(1), NodeUuid::from_bytes([1; 16])),
@@ -679,7 +678,7 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
 fn the_authority_refuses_cells_that_are_not_of_their_columns_type() {
     let server = server();
     let (_m_client, m_server, m_up, m_down) = pipe();
-    server.accept_subscriber(m_server, user(2)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(m_server, user(2))).unwrap();
     for (i, value) in [Value::I64(5), Value::Nullable(None), Value::Bool(true)]
         .into_iter()
         .enumerate()
@@ -725,12 +724,12 @@ fn a_reopened_authority_continues_after_the_seq_of_a_rowless_commit() {
             FileOptions::default(),
         ))
         .unwrap();
-        db.set_authority();
+        jazz::db::block_on(db.set_authority());
         db
     };
     let server = open();
     let (_r, r_server, r_up, r_down) = pipe();
-    server.accept_subscriber(r_server, user(2)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(r_server, user(2))).unwrap();
     r_up.borrow_mut().push_back(SyncMessage::Commit {
         clock: 0,
         id: TxId::new(TxTime(1), NodeUuid::from_bytes([2; 16])),
@@ -771,7 +770,7 @@ fn a_reopened_replica_continues_after_a_pending_commit_that_left_no_rows() {
     let alice = open_alice();
     let (a_client, a_server, _, _) = pipe();
     let up = block_on(alice.connect_upstream(a_client));
-    let session = server.accept_subscriber(a_server, user(1)).unwrap();
+    let session = jazz::db::block_on(server.accept_subscriber(a_server, user(1))).unwrap();
     // A delete of a row this replica does not hold writes no local row.
     block_on(alice.delete("messages", row, DeleteOptions::default())).unwrap();
     let before = alice.seq_high_water();
@@ -787,7 +786,7 @@ fn a_reopened_replica_continues_after_a_pending_commit_that_left_no_rows() {
     post(&alice, "after reopen");
     let (a_client, a_server, _, _) = pipe();
     let _up = block_on(alice.connect_upstream(a_client));
-    server.accept_subscriber(a_server, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(a_server, user(1))).unwrap();
     for _ in 0..6 {
         block_on(alice.tick()).unwrap();
         block_on(server.tick()).unwrap();
@@ -810,7 +809,7 @@ fn the_authority_refuses_misplaced_bases() {
         )
         .unwrap();
     let (_m_client, m_server, m_up, m_down) = pipe();
-    server.accept_subscriber(m_server, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(m_server, user(1))).unwrap();
     let base = || WireBase {
         key: Vec::new(),
         on: BuiltOn::Seq(1),
@@ -908,7 +907,7 @@ fn creators(db: &Db) -> Vec<(String, String)> {
 fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
     let server = server();
     let (_m_client, m_server, m_up, m_down) = pipe();
-    server.accept_subscriber(m_server, user(2)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(m_server, user(2))).unwrap();
     let insert = |tx: u64, row: u8, body: &str, acting: Acting| SyncMessage::Commit {
         clock: 0,
         id: TxId::new(TxTime(tx), NodeUuid::from_bytes([2; 16])),
@@ -988,9 +987,13 @@ fn an_unpinned_trusted_link_may_not_act_for_a_user_once_bundles_are_served() {
     };
 
     let (_unpinned_client, unpinned_server, unpinned_up, unpinned_down) = pipe();
-    server
-        .accept_pinned_subscriber(unpinned_server, AuthorSubject::SYSTEM, None, None)
-        .unwrap();
+    jazz::db::block_on(server.accept_pinned_subscriber(
+        unpinned_server,
+        AuthorSubject::SYSTEM,
+        None,
+        None,
+    ))
+    .unwrap();
     unpinned_up
         .borrow_mut()
         .extend([commit(1, 1, as_alice()), commit(2, 2, Acting::Own)]);
@@ -1006,8 +1009,13 @@ fn an_unpinned_trusted_link_may_not_act_for_a_user_once_bundles_are_served() {
     let core = self::server();
     core.require_session_pins();
     let (_core_client, core_server, core_up, core_down) = pipe();
-    core.accept_pinned_subscriber(core_server, AuthorSubject::SYSTEM, None, None)
-        .unwrap();
+    jazz::db::block_on(core.accept_pinned_subscriber(
+        core_server,
+        AuthorSubject::SYSTEM,
+        None,
+        None,
+    ))
+    .unwrap();
     core_up
         .borrow_mut()
         .extend([commit(4, 4, as_alice()), commit(5, 5, Acting::Own)]);
@@ -1019,9 +1027,13 @@ fn an_unpinned_trusted_link_may_not_act_for_a_user_once_bundles_are_served() {
     );
 
     let (_pinned_client, pinned_server, pinned_up, pinned_down) = pipe();
-    server
-        .accept_pinned_subscriber(pinned_server, AuthorSubject::SYSTEM, None, Some(bundle))
-        .unwrap();
+    jazz::db::block_on(server.accept_pinned_subscriber(
+        pinned_server,
+        AuthorSubject::SYSTEM,
+        None,
+        Some(bundle),
+    ))
+    .unwrap();
     pinned_up.borrow_mut().push_back(commit(3, 3, as_alice()));
     block_on(server.tick()).unwrap();
     assert_eq!(

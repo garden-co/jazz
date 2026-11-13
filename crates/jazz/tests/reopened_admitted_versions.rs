@@ -92,7 +92,7 @@ fn config(schema: JazzSchema, node: u8) -> DbConfig {
 /// The authority's file, opened under `schema` as a server core opens it.
 fn authority_at(schema: JazzSchema, path: &Path) -> Db {
     let db = block_on(Db::open_at(config(schema, 0), path, FileOptions::default())).unwrap();
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     db
 }
 
@@ -131,15 +131,14 @@ fn link(client: &Db, server: &Db) -> jazz::db::Upstream {
         out: up.clone(),
         inbound: down.clone(),
     })));
-    server
-        .accept_subscriber(
-            Box::new(Pipe {
-                out: down,
-                inbound: up,
-            }),
-            AuthorSubject::SYSTEM,
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Pipe {
+            out: down,
+            inbound: up,
+        }),
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
     link
 }
 
@@ -344,7 +343,7 @@ fn a_replica_file_reopened_with_the_apps_migrations_keeps_writing_the_added_tabl
             FileOptions::default(),
         ))
         .unwrap();
-        db.set_authority();
+        jazz::db::block_on(db.set_authority());
         insert_child(&db, n, "local");
         assert_eq!(rows(&db, "children", CHILD).len(), n as usize);
     }

@@ -240,3 +240,6 @@ mod write_receipt_owner;
 
 #[path = "../transaction_read_prefix.rs"]
 mod transaction_read_prefix;
+
+#[path = "../shared_sqlite.rs"]
+mod shared_sqlite;

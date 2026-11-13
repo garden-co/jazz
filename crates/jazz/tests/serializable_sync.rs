@@ -116,7 +116,7 @@ impl Net {
         let author = AuthorSubject::for_test_bytes([0x50 + i as u8; 16]);
         let upstream = block_on(self.clients[i].0.connect_upstream(client_side));
         self.clients[i].1 = Some(upstream);
-        self.core.accept_subscriber(server_side, author).unwrap();
+        jazz::db::block_on(self.core.accept_subscriber(server_side, author)).unwrap();
     }
 
     /// Connect client `i` as `author` (a client added after `new`).
@@ -124,21 +124,23 @@ impl Net {
         let (client_side, server_side) = duplex();
         let upstream = block_on(self.clients[i].0.connect_upstream(client_side));
         self.clients[i].1 = Some(upstream);
-        self.core.accept_subscriber(server_side, author).unwrap();
-        self.clients[i].0.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(self.core.accept_subscriber(server_side, author)).unwrap();
+        jazz::db::block_on(self.clients[i].0.set_remote_link_hint(RemoteLinkHint::Live));
     }
 
     fn go_offline(&mut self, i: usize) {
         let upstream = self.clients[i].1.take().expect("online");
         assert!(self.clients[i].0.detach_connection(&upstream));
-        self.clients[i]
-            .0
-            .set_remote_link_hint(RemoteLinkHint::Failed);
+        jazz::db::block_on(
+            self.clients[i]
+                .0
+                .set_remote_link_hint(RemoteLinkHint::Failed),
+        );
     }
 
     fn go_online(&mut self, i: usize) {
         self.connect(i);
-        self.clients[i].0.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(self.clients[i].0.set_remote_link_hint(RemoteLinkHint::Live));
     }
 
     fn pump(&self) {
@@ -819,10 +821,12 @@ fn an_offline_remote_read_in_a_transaction_waits_for_the_authority() {
     // rules out).
     let (client_side, server_side) = duplex();
     let _upstream = block_on(db.connect_upstream(client_side));
-    net.core
-        .accept_subscriber(server_side, AuthorSubject::for_test_bytes([0x50; 16]))
-        .unwrap();
-    db.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(
+        net.core
+            .accept_subscriber(server_side, AuthorSubject::for_test_bytes([0x50; 16])),
+    )
+    .unwrap();
+    jazz::db::block_on(db.set_remote_link_hint(RemoteLinkHint::Live));
     assert!(net.drive(read).unwrap().is_empty());
     db.abandon_transaction_handle(open).unwrap();
 }

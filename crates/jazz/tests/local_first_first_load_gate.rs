@@ -104,9 +104,9 @@ fn fresh_client(node: u8) -> Db {
 fn connect(client: &Db, server: &Db) {
     let (client_transport, server_transport) = duplex();
     let _upstream = block_on(client.connect_upstream(client_transport));
-    let _subscriber = server
-        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
-        .unwrap();
+    let _subscriber =
+        jazz::db::block_on(server.accept_subscriber(server_transport, AuthorSubject::SYSTEM))
+            .unwrap();
 }
 
 fn turn(client: &Db, server: Option<&Db>) {
@@ -268,12 +268,12 @@ fn seed(server: &Db, index: usize, label: &str) {
 fn attempting_then_live_opening_waits_for_the_servers_rows() {
     let server = seeded_server();
     let alice = fresh_client(0x61);
-    alice.set_remote_link_hint(RemoteLinkHint::Attempting);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Attempting));
     let mut stream = subscribe(&alice, &items(), gated());
     assert_withheld(&mut stream, &alice, None, 5);
 
     connect(&alice, &server);
-    alice.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Live));
     let (reset, mut rows, settled) = opening(first_event(&mut stream, &alice, Some(&server)));
     rows.sort();
     assert!(reset, "the opening is a reset");
@@ -282,9 +282,9 @@ fn attempting_then_live_opening_waits_for_the_servers_rows() {
 
     // One-shot: a second fresh client reads the server's rows.
     let bob = fresh_client(0x62);
-    bob.set_remote_link_hint(RemoteLinkHint::Attempting);
+    jazz::db::block_on(bob.set_remote_link_hint(RemoteLinkHint::Attempting));
     connect(&bob, &server);
-    bob.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(bob.set_remote_link_hint(RemoteLinkHint::Live));
     let mut rows = one_shot(&bob, Some(&server), &items(), gated(), MAX_TURNS);
     rows.sort();
     assert_eq!(rows, all_rows());
@@ -302,7 +302,7 @@ fn attempting_then_live_opening_waits_for_the_servers_rows() {
 #[test]
 fn an_attempt_that_outlives_its_window_releases_the_held_opening() {
     let alice = fresh_client(0x63);
-    alice.set_remote_link_hint(RemoteLinkHint::Attempting);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Attempting));
     let mut held = subscribe(&alice, &items(), gated());
     assert_withheld(&mut held, &alice, None, 3);
 
@@ -330,10 +330,10 @@ fn an_attempt_that_outlives_its_window_releases_the_held_opening() {
 #[test]
 fn leaving_a_live_link_for_a_new_attempt_releases_a_held_opening() {
     let bob = fresh_client(0x6a);
-    bob.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(bob.set_remote_link_hint(RemoteLinkHint::Live));
     let mut stream = subscribe(&bob, &items(), gated());
     assert_withheld(&mut stream, &bob, None, 5);
-    bob.set_remote_link_hint(RemoteLinkHint::Attempting);
+    jazz::db::block_on(bob.set_remote_link_hint(RemoteLinkHint::Attempting));
     let (reset, rows, settled) = opening(
         stream
             .try_next_event()
@@ -358,9 +358,9 @@ fn losing_the_own_upstream_releases_a_held_opening() {
     let alice = fresh_client(0x67);
     let (client_transport, server_transport) = duplex();
     let upstream = block_on(alice.connect_upstream(client_transport));
-    let _subscriber = server
-        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
-        .unwrap();
+    let _subscriber =
+        jazz::db::block_on(server.accept_subscriber(server_transport, AuthorSubject::SYSTEM))
+            .unwrap();
     let mut stream = subscribe(&alice, &items(), gated());
     assert_withheld(&mut stream, &alice, None, 5);
 
@@ -373,10 +373,10 @@ fn losing_the_own_upstream_releases_a_held_opening() {
     let bob = fresh_client(0x69);
     let (client_transport, server_transport) = duplex();
     let upstream = block_on(bob.connect_upstream(client_transport));
-    let _subscriber = server
-        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
-        .unwrap();
-    bob.set_remote_link_hint(RemoteLinkHint::Live);
+    let _subscriber =
+        jazz::db::block_on(server.accept_subscriber(server_transport, AuthorSubject::SYSTEM))
+            .unwrap();
+    jazz::db::block_on(bob.set_remote_link_hint(RemoteLinkHint::Live));
     let mut stream = subscribe(&bob, &items(), gated());
     assert_withheld(&mut stream, &bob, None, 5);
     assert!(bob.detach_connection(&upstream));
@@ -448,9 +448,9 @@ fn an_offset_window_falls_back_to_the_warm_cache_when_the_remote_cannot_answer()
     let alice = fresh_client(0x69);
     let (client_transport, server_transport) = duplex();
     let upstream = block_on(alice.connect_upstream(client_transport));
-    let _subscriber = server
-        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
-        .unwrap();
+    let _subscriber =
+        jazz::db::block_on(server.accept_subscriber(server_transport, AuthorSubject::SYSTEM))
+            .unwrap();
     let remote = ReadOpts {
         tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
@@ -473,7 +473,7 @@ fn an_offset_window_falls_back_to_the_warm_cache_when_the_remote_cannot_answer()
     let (_, plain_page) = page(first_event(&mut plain, &alice, None));
     assert_eq!(plain_page, expected, "the plain local-first page is cached");
 
-    alice.set_remote_link_hint(RemoteLinkHint::Attempting);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Attempting));
     let mut held = subscribe(&alice, &window(), gated());
     assert_withheld(&mut held, &alice, None, 3);
     std::thread::sleep(REMOTE_LINK_ATTEMPT_WINDOW + Duration::from_millis(100));
@@ -481,10 +481,10 @@ fn an_offset_window_falls_back_to_the_warm_cache_when_the_remote_cannot_answer()
     assert!(reset, "the fallback opens with a reset");
     assert_eq!(rows, expected, "the cached page, not an empty one");
 
-    alice.set_remote_link_hint(RemoteLinkHint::Attempting);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Attempting));
     let mut released = subscribe(&alice, &window(), gated());
     assert_withheld(&mut released, &alice, None, 3);
-    alice.set_remote_link_hint(RemoteLinkHint::Failed);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Failed));
     let (reset, rows) = page(first_event(&mut released, &alice, None));
     assert!(reset);
     assert_eq!(rows, expected, "a failed link releases to the cached page");
@@ -505,14 +505,14 @@ fn an_offset_window_falls_back_to_the_warm_cache_when_the_remote_cannot_answer()
 fn a_fallen_back_window_switches_to_the_servers_page_once_it_answers() {
     let server = seeded_server();
     let alice = fresh_client(0x6a);
-    alice.set_remote_link_hint(RemoteLinkHint::Attempting);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Attempting));
     let mut stream = subscribe(&alice, &window(), gated());
     std::thread::sleep(REMOTE_LINK_ATTEMPT_WINDOW + Duration::from_millis(100));
     let (reset, rows, settled) = opening(first_event(&mut stream, &alice, None));
     assert!(reset && rows.is_empty() && !settled, "the empty local page");
 
     connect(&alice, &server);
-    alice.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Live));
     // The page as a consumer applying each delta sees it; it may only ever
     // hold the server's page rows.
     let expected = vec![row(4), row(5)];
@@ -571,10 +571,11 @@ fn worker_connected_to(node: u8, server: &Db) -> Db {
 fn foreground_over(node: u8, worker_node: u8, worker: Db) -> Foreground {
     let author = AuthorSubject::for_test_bytes([worker_node; 16]);
     let tab = block_on(Db::open(config(node, author))).expect("open tab");
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     let (tab_transport, worker_transport) = duplex();
     let _upstream = block_on(tab.connect_upstream(tab_transport));
-    let _foreground = worker.accept_subscriber(worker_transport, author).unwrap();
+    let _foreground =
+        jazz::db::block_on(worker.accept_subscriber(worker_transport, author)).unwrap();
     Foreground { tab, worker }
 }
 
@@ -642,7 +643,7 @@ impl Foreground {
 fn a_foreground_opening_waits_for_the_servers_rows_through_its_owner() {
     let server = seeded_server();
     let foreground = foreground_over(0x71, 0x70, worker_connected_to(0x70, &server));
-    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(foreground.tab.set_remote_link_hint(RemoteLinkHint::Live));
 
     let mut stream = subscribe(&foreground.tab, &items(), gated());
     for _ in 0..6 {
@@ -662,7 +663,7 @@ fn a_foreground_opening_waits_for_the_servers_rows_through_its_owner() {
     // One-shot: a second foreground reads the server's rows through its
     // owner rather than the owner's empty local answer.
     let other = foreground_over(0x72, 0x73, worker_connected_to(0x73, &server));
-    other.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(other.tab.set_remote_link_hint(RemoteLinkHint::Live));
     let mut rows = other.one_shot(Some(&server), &items());
     rows.sort();
     assert_eq!(rows, all_rows());
@@ -683,7 +684,7 @@ fn an_empty_authority_answer_releases_a_foreground_opening() {
     )))
     .expect("open empty server");
     let foreground = foreground_over(0x75, 0x74, worker_connected_to(0x74, &server));
-    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(foreground.tab.set_remote_link_hint(RemoteLinkHint::Live));
 
     let mut stream = subscribe(&foreground.tab, &items(), gated());
     for _ in 0..6 {
@@ -706,7 +707,7 @@ fn an_empty_authority_answer_releases_a_foreground_opening() {
 #[test]
 fn a_foreground_whose_owner_link_failed_opens_at_once() {
     let foreground = foreground_over(0x77, 0x76, fresh_client(0x76));
-    foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed);
+    jazz::db::block_on(foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed));
 
     let mut stream = subscribe(&foreground.tab, &items(), gated());
     let (reset, rows, _) = opening(foreground.first_event(&mut stream, None));
@@ -749,7 +750,7 @@ fn a_warm_owner_cache_waits_for_the_authority_answer() {
     let server = seeded_server();
     let answered = foreground_over(0x79, 0x78, warm_worker(0x78, &server));
     seed(&server, 10, "k");
-    answered.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(answered.tab.set_remote_link_hint(RemoteLinkHint::Live));
     let mut stream = subscribe(&answered.tab, &items(), gated());
     for _ in 0..6 {
         answered.turn(None);
@@ -773,7 +774,7 @@ fn a_warm_owner_cache_waits_for_the_authority_answer() {
     // foreground's timeout releases the owner's cached rows.
     let quiet_server = seeded_server();
     let silent = foreground_over(0x7e, 0x7d, warm_worker(0x7d, &quiet_server));
-    silent.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(silent.tab.set_remote_link_hint(RemoteLinkHint::Live));
     let mut stream = subscribe(&silent.tab, &items(), wait_for_remote(SHORT));
     for _ in 0..3 {
         silent.turn(None);
@@ -801,17 +802,19 @@ fn a_warm_owner_cache_waits_for_the_authority_answer() {
 fn a_held_foreground_opening_is_released_when_its_owner_link_fails() {
     let server = seeded_server();
     let foreground = foreground_over(0x7b, 0x7a, warm_worker(0x7a, &server));
-    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(foreground.tab.set_remote_link_hint(RemoteLinkHint::Live));
     let mut stream = subscribe(&foreground.tab, &items(), gated());
     for _ in 0..6 {
         foreground.turn(None);
         assert!(stream.try_next_event().is_none());
     }
 
-    foreground
-        .worker
-        .set_remote_link_hint(RemoteLinkHint::Failed);
-    foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed);
+    jazz::db::block_on(
+        foreground
+            .worker
+            .set_remote_link_hint(RemoteLinkHint::Failed),
+    );
+    jazz::db::block_on(foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed));
     let (reset, mut rows, _) = opening(foreground.first_event(&mut stream, None));
     rows.sort();
     assert!(reset);
@@ -890,7 +893,7 @@ fn first_load_deadlines_release_each_held_read_at_its_own_time() {
 fn first_load_attempt_expiry_releases_after_an_earlier_deadline() {
     let alice = fresh_client(0x82);
     let started = Instant::now();
-    alice.set_remote_link_hint(RemoteLinkHint::Attempting);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Attempting));
     let mut held = subscribe(&alice, &items(), gated());
     let mut early = subscribe(&alice, &items(), wait_for_remote(SHORT));
     assert_withheld(&mut held, &alice, None, 3);
@@ -935,13 +938,13 @@ fn first_load_attempt_expiry_releases_after_an_earlier_deadline() {
 fn a_host_shutdown_link_sequence_releases_held_reads_and_closes_cleanly() {
     let server = seeded_server();
     let alice = fresh_client(0x7c);
-    alice.set_remote_link_hint(RemoteLinkHint::Attempting);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Attempting));
     let (client_transport, server_transport) = duplex();
     let upstream = block_on(alice.connect_upstream(client_transport));
-    let _subscriber = server
-        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
-        .unwrap();
-    alice.set_remote_link_hint(RemoteLinkHint::Live);
+    let _subscriber =
+        jazz::db::block_on(server.accept_subscriber(server_transport, AuthorSubject::SYSTEM))
+            .unwrap();
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Live));
 
     let mut answered = subscribe(&alice, &items(), gated());
     let (_, mut rows, _) = opening(first_event(&mut answered, &alice, Some(&server)));
@@ -958,7 +961,7 @@ fn a_host_shutdown_link_sequence_releases_held_reads_and_closes_cleanly() {
     assert_withheld(&mut held, &alice, None, 3);
     assert!(one_shot.as_mut().poll(&mut context).is_pending());
 
-    alice.set_remote_link_hint(RemoteLinkHint::Attempting);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Attempting));
     let (reset, _, settled) = opening(
         held.try_next_event()
             .expect("losing the live link releases the held window"),
@@ -977,7 +980,7 @@ fn a_host_shutdown_link_sequence_releases_held_reads_and_closes_cleanly() {
         "the local-first window over the synced cache"
     );
 
-    alice.set_remote_link_hint(RemoteLinkHint::Failed);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Failed));
     block_on(alice.tick()).expect("tick after the link failed");
     assert!(alice.detach_connection(&upstream));
     block_on(alice.tick()).expect("tick after detaching");
@@ -985,7 +988,7 @@ fn a_host_shutdown_link_sequence_releases_held_reads_and_closes_cleanly() {
     // A host timer fires after close, and the host reports the link once
     // more while shutting down: neither may disturb the closed Db.
     let _ = block_on(alice.tick());
-    alice.set_remote_link_hint(RemoteLinkHint::Failed);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Failed));
     let _ = block_on(alice.tick());
     drop(held);
     drop(answered);
@@ -1042,7 +1045,7 @@ fn remote_answer_coverage_preserves_local_first_pending_writes() {
 fn a_foreground_over_an_owner_without_a_server_reads_the_owners_store() {
     // A binding's store is a replica from the start, server or not.
     let worker = fresh_client(0x80);
-    worker.become_replica();
+    jazz::db::block_on(worker.become_replica());
     let foreground = foreground_over(0x81, 0x80, worker);
     block_on(foreground.tab.insert(
         "items",
@@ -1059,13 +1062,11 @@ fn a_foreground_over_an_owner_without_a_server_reads_the_owners_store() {
 
     let owner = AuthorSubject::for_test_bytes([0x80; 16]);
     let other = block_on(Db::open(config(0x82, owner))).expect("open second tab");
-    other.set_non_durable_client();
+    jazz::db::block_on(other.set_non_durable_client());
     let (tab_transport, worker_transport) = duplex();
     let _upstream = block_on(other.connect_upstream(tab_transport));
-    let _foreground = foreground
-        .worker
-        .accept_subscriber(worker_transport, owner)
-        .unwrap();
+    let _foreground =
+        jazz::db::block_on(foreground.worker.accept_subscriber(worker_transport, owner)).unwrap();
     let mut stream = subscribe(&other, &items(), ReadOpts::default());
     let rows = (0..MAX_TURNS)
         .find_map(|_| {
@@ -1094,8 +1095,8 @@ fn a_foreground_over_an_owner_without_a_server_reads_the_owners_store() {
 fn a_foreground_one_shot_falls_back_to_its_owner_when_a_live_server_is_silent() {
     let server = seeded_server();
     let foreground = foreground_over(0x75, 0x74, worker_connected_to(0x74, &server));
-    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
-    foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(foreground.tab.set_remote_link_hint(RemoteLinkHint::Live));
+    jazz::db::block_on(foreground.worker.set_remote_link_hint(RemoteLinkHint::Live));
 
     // An open subscription to the same query, released by its own wait.
     let mut stream = subscribe(&foreground.tab, &items(), wait_for_remote(SHORT));
@@ -1149,8 +1150,8 @@ fn a_foreground_one_shot_falls_back_to_its_owner_when_a_live_server_is_silent() 
 fn assert_no_wait_read_opens_from_the_owner(node: u8, owner_hint: RemoteLinkHint) {
     let server = seeded_server();
     let foreground = foreground_over(node, node + 1, warm_worker(node + 1, &server));
-    foreground.worker.set_remote_link_hint(owner_hint);
-    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    block_on(foreground.worker.set_remote_link_hint(owner_hint));
+    block_on(foreground.tab.set_remote_link_hint(RemoteLinkHint::Live));
     let deliver = || ReadOpts::for_read_tier(jazz::db::ReadTier::LocalFirst);
 
     let mut stream = subscribe(&foreground.tab, &items(), deliver());
@@ -1208,8 +1209,8 @@ fn a_no_wait_foreground_read_opens_while_the_owner_link_is_live() {
 fn a_zero_first_load_wait_opens_from_the_owner_like_no_wait() {
     let server = seeded_server();
     let foreground = foreground_over(0xc5, 0xc6, warm_worker(0xc6, &server));
-    foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
-    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    block_on(foreground.worker.set_remote_link_hint(RemoteLinkHint::Live));
+    block_on(foreground.tab.set_remote_link_hint(RemoteLinkHint::Live));
     let mut stream = subscribe(&foreground.tab, &items(), wait_for_remote(Duration::ZERO));
     let (reset, mut rows, _) = opening(foreground.first_event(&mut stream, None));
     rows.sort();
@@ -1259,8 +1260,8 @@ fn assert_no_wait_opening_follows(
 ) {
     let server = seeded_server();
     let foreground = foreground_over(node, node + 1, warm_worker(node + 1, &server));
-    foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
-    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    block_on(foreground.worker.set_remote_link_hint(RemoteLinkHint::Live));
+    block_on(foreground.tab.set_remote_link_hint(RemoteLinkHint::Live));
     let deliver = ReadOpts::for_read_tier(jazz::db::ReadTier::LocalFirst);
     let mut stream = subscribe(&foreground.tab, &query, deliver);
     let (reset, first, _) = opening(foreground.first_event(&mut stream, None));
@@ -1313,8 +1314,8 @@ fn a_remote_foreground_read_still_waits_for_the_server_through_a_live_owner() {
     let foreground = foreground_over(0x89, 0x8a, warm_worker(0x8a, &server));
     // Written after the owner cached a..j: only the authority's answer has k.
     seed(&server, LABELS.len(), "k");
-    foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
-    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    block_on(foreground.worker.set_remote_link_hint(RemoteLinkHint::Live));
+    block_on(foreground.tab.set_remote_link_hint(RemoteLinkHint::Live));
     let remote = ReadOpts::for_read_tier(jazz::db::ReadTier::Remote);
     let mut stream = subscribe(&foreground.tab, &items(), remote);
     for _ in 0..6 {
@@ -1366,7 +1367,7 @@ fn no_wait_subscriptions_follow_the_server_through_random_link_changes() {
         let node = 0x90 + 2 * seed_value as u8;
         let server = seeded_server();
         let foreground = foreground_over(node, node + 1, warm_worker(node + 1, &server));
-        foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+        block_on(foreground.tab.set_remote_link_hint(RemoteLinkHint::Live));
         let mut model: BTreeMap<usize, String> = LABELS
             .iter()
             .enumerate()
@@ -1392,12 +1393,12 @@ fn no_wait_subscriptions_follow_the_server_through_random_link_changes() {
         let mut ever: BTreeSet<RowUuid> = all_of(&model);
         let mut next_index = LABELS.len();
         let mut hint_index = 0usize;
-        foreground.worker.set_remote_link_hint(hints[hint_index]);
+        block_on(foreground.worker.set_remote_link_hint(hints[hint_index]));
         for step in 0..60 {
             match next(5) {
                 0 => {
                     hint_index = next(3) as usize;
-                    foreground.worker.set_remote_link_hint(hints[hint_index]);
+                    block_on(foreground.worker.set_remote_link_hint(hints[hint_index]));
                 }
                 1 => {
                     let index = next_index;
@@ -1474,7 +1475,7 @@ fn no_wait_subscriptions_follow_the_server_through_random_link_changes() {
             !streams.is_empty(),
             "seed {seed_value}: no subscription was opened"
         );
-        foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
+        block_on(foreground.worker.set_remote_link_hint(RemoteLinkHint::Live));
         let on_model = |streams: &mut Vec<Stream>| {
             foreground.turn(Some(&server));
             streams.iter_mut().all(|(stream, rows, windowed)| {
@@ -1546,8 +1547,8 @@ fn assert_settles_globally(foreground: &Foreground, server: &Db, stream: &mut Su
 fn assert_store_served_read_settles_globally(node: u8, opts: ReadOpts, wait: Option<Duration>) {
     let server = seeded_server();
     let foreground = foreground_over(node, node + 1, warm_worker(node + 1, &server));
-    foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
-    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    block_on(foreground.worker.set_remote_link_hint(RemoteLinkHint::Live));
+    block_on(foreground.tab.set_remote_link_hint(RemoteLinkHint::Live));
     let mut stream = subscribe(&foreground.tab, &items(), opts);
     if let Some(wait) = wait {
         foreground.turn(None);

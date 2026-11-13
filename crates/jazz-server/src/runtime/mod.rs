@@ -16,6 +16,8 @@ pub mod alpha59_alpha60;
 pub mod auth_admission;
 mod thin;
 
+pub(crate) use jazz::db::block_on;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -29,12 +31,14 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use crate::kv::HostKv;
 use crate::kv::HostSql;
+use crate::kv::NativeReader as HostReader;
 use jazz::catalogue::{CatalogueChange, CatalogueRows};
+#[cfg(feature = "sqlite")]
+use jazz::db::FileOptions;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, LensEffects, SubscriberId, SyncMessage, Transport,
-    TransportError, block_on,
+    Db, DbConfig, DbIdentity, LensEffects, SubscriberId, SyncMessage, Transport, TransportError,
 };
-use jazz::host::{HostReader, HostTable, HostTables, StoreFile};
+use jazz::host::{HostTable, HostTables, StoreFile};
 use jazz::ids::{AuthorSubject, MigrationLensId, NodeUuid, SchemaVersionId};
 use jazz::protocol::MigrationLens;
 use jazz::records::Value;
@@ -46,9 +50,34 @@ use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
 /// Encoded frames exchanged with a host transport.
 pub type AbiBytes = Vec<u8>;
 
+/// Factory for a worker-backed SQLite store. Called on the dedicated store thread,
+/// including recovery after a runtime failure. A host may refuse reopening.
+type OpenWorkerStore = Arc<dyn Fn() -> Result<StoreFile, String> + Send + Sync>;
+#[derive(Clone)]
+pub struct WorkerStore(OpenWorkerStore);
+
+impl WorkerStore {
+    pub fn new(open: impl Fn() -> Result<StoreFile, String> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(open))
+    }
+}
+impl std::fmt::Debug for WorkerStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WorkerStore")
+    }
+}
+impl PartialEq for WorkerStore {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for WorkerStore {}
+
 /// Where the runtime keeps its store.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StorageConfig {
+    /// Host-configured SQLite with all reads on its owner thread.
+    Worker(WorkerStore),
     /// A store that lives as long as the runtime (tests, dry runs, probes).
     InMemory,
     /// One SQLite file (WAL), holding the server's host tables too.
@@ -117,6 +146,7 @@ impl StorageConfig {
         match self {
             Self::SQLite { path, .. } => Self::SQLite { path, blobs },
             Self::InMemory => Self::InMemory,
+            Self::Worker(store) => Self::Worker(store),
         }
     }
 }
@@ -232,7 +262,8 @@ const TICK_SLICE: Duration = Duration::from_millis(4);
 
 type Job = Box<dyn FnOnce(&mut Owner) + Send>;
 /// Work on the store's host tables, before or after the runtime opened.
-pub(crate) type HostJob = Box<dyn FnOnce(&dyn HostTables) + Send>;
+pub(crate) type HostJob =
+    Box<dyn for<'a> FnOnce(HostAccess<'a>) -> futures::future::LocalBoxFuture<'a, ()> + Send>;
 
 /// After a panic the runtime restarts on the store at most this often; a
 /// second panic sooner leaves it stopped and the store reports the fault.
@@ -262,7 +293,8 @@ struct Runtime {
 /// Open the runtime on the store.
 struct Start {
     runtime: Runtime,
-    reply: std_mpsc::Sender<Result<(), String>>,
+    initial: Option<Box<CatalogueChange>>,
+    reply: std_mpsc::Sender<Result<(), CatalogueApplyError>>,
 }
 
 /// Sendable handle for the thread that owns one app's store file: its host
@@ -278,10 +310,11 @@ struct StoreThread {
     host: std_mpsc::Sender<HostJob>,
     /// Committed host tables, read without waiting for the store's thread.
     /// An in-memory store lives as long as this connection to it.
-    reader: Arc<HostReader>,
+    reader: Option<Arc<HostReader>>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
     tick_queued: Arc<AtomicBool>,
     fault: Arc<Mutex<Option<String>>>,
+    shutdown_error: Arc<Mutex<Option<String>>>,
     /// The app the store serves (see [`AppStore::set_app`]).
     app: Arc<Mutex<Option<String>>>,
     /// Tests: runtime ticks so far.
@@ -292,16 +325,21 @@ struct StoreThread {
 /// The file a store lives in.
 #[derive(Clone)]
 enum Source {
+    Worker(WorkerStore),
     /// The database file, and where its large-value bytes live.
-    File(PathBuf, Blobs),
+    File(
+        #[cfg_attr(not(feature = "sqlite"), allow(dead_code))] PathBuf,
+        Blobs,
+    ),
     /// An in-memory store shared by name within this process.
-    Memory(String),
+    Memory(#[cfg_attr(not(feature = "sqlite"), allow(dead_code))] String),
 }
 
 impl Source {
     fn new(storage: &StorageConfig) -> Self {
         static NEXT_MEMORY_STORE: AtomicU64 = AtomicU64::new(0);
         match storage {
+            StorageConfig::Worker(store) => Self::Worker(store.clone()),
             StorageConfig::InMemory => Self::Memory(format!(
                 "jazz-server-{}-{}",
                 std::process::id(),
@@ -313,14 +351,14 @@ impl Source {
 
     fn open(&self) -> Result<StoreFile, String> {
         match self {
-            Self::Memory(name) => StoreFile::shared_memory(name),
+            Self::Worker(store) => (store.0)(),
+            #[cfg(feature = "sqlite")]
+            Self::Memory(name) => StoreFile::shared_memory(name).map_err(|e| e.to_string()),
+            #[cfg(feature = "sqlite")]
             Self::File(path, _) => {
                 if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|error| format!("create {}: {error}", parent.display()))?;
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
                 }
-                // Every commit (rows, catalogue, account registry) is durable
-                // when it returns.
                 StoreFile::open(
                     path,
                     FileOptions {
@@ -328,9 +366,11 @@ impl Source {
                         ..FileOptions::default()
                     },
                 )
+                .map_err(|e| e.to_string())
             }
+            #[cfg(not(feature = "sqlite"))]
+            _ => Err("Built-in SQLite storage is disabled; configure a worker store".into()),
         }
-        .map_err(|error| format!("open server store: {error}"))
     }
 
     /// The chunk store the runtime's large-value bytes go to, if not the
@@ -353,12 +393,20 @@ impl Source {
         }
     }
 
-    fn reader(&self) -> Result<HostReader, String> {
+    fn reader(&self) -> Result<Option<HostReader>, String> {
         match self {
-            Self::Memory(name) => HostReader::shared_memory(name),
-            Self::File(path, _) => HostReader::open(path, None),
+            Self::Worker(_) => Ok(None),
+            #[cfg(feature = "sqlite")]
+            Self::Memory(name) => HostReader::shared_memory(name)
+                .map(Some)
+                .map_err(|e| e.to_string()),
+            #[cfg(feature = "sqlite")]
+            Self::File(path, _) => HostReader::open(path, None)
+                .map(Some)
+                .map_err(|e| e.to_string()),
+            #[cfg(not(feature = "sqlite"))]
+            _ => Err("Native readers are disabled".into()),
         }
-        .map_err(|error| format!("open server store reader: {error}"))
     }
 }
 
@@ -575,9 +623,9 @@ impl ChunkIoRunner {
         } = self.plan();
         if batch {
             let taken = if fetches {
-                owner.db.take_chunk_io()
+                block_on(owner.db.take_chunk_io())
             } else {
-                owner.db.take_chunk_io_holding_fetches()
+                block_on(owner.db.take_chunk_io_holding_fetches())
             };
             match taken {
                 // Nothing to do: dropping an empty batch ends it.
@@ -595,7 +643,7 @@ impl ChunkIoRunner {
         if !fetch_lane {
             return;
         }
-        match owner.db.take_chunk_fetches() {
+        match block_on(owner.db.take_chunk_fetches()) {
             Ok(Some(io)) => {
                 self.fetching.set(true);
                 if !self.fetches.send(io) {
@@ -652,6 +700,8 @@ impl AppStore {
         let (opened_tx, opened_rx) = std_mpsc::channel();
         let tick_queued = Arc::new(AtomicBool::new(false));
         let fault = Arc::new(Mutex::new(None));
+        let shutdown_error = Arc::new(Mutex::new(None));
+        let thread_shutdown_error = shutdown_error.clone();
         let app = Arc::new(Mutex::new(None));
         let (thread_source, thread_ticks, thread_fault, thread_app) = (
             source.clone(),
@@ -684,6 +734,7 @@ impl AppStore {
                     backlog: VecDeque::new(),
                     tick_queued: thread_ticks,
                     fault: thread_fault,
+                    shutdown_error: thread_shutdown_error,
                     app: thread_app,
                     state: State::Idle(Ok(file)),
                     started: None,
@@ -700,7 +751,7 @@ impl AppStore {
             .and_then(|opened| opened)
             .and_then(|()| source.reader());
         let reader = match opened {
-            Ok(reader) => Arc::new(reader),
+            Ok(reader) => reader.map(Arc::new),
             Err(error) => {
                 drop(work);
                 let _ = join.join();
@@ -715,6 +766,7 @@ impl AppStore {
                 join: Mutex::new(Some(join)),
                 tick_queued,
                 fault,
+                shutdown_error,
                 app,
                 #[cfg(test)]
                 ticks,
@@ -740,34 +792,22 @@ impl AppStore {
     pub(crate) fn kv(&self, table: HostTable) -> Result<HostKv, String> {
         Ok(HostKv::new(
             table,
-            Arc::clone(&self.inner.reader),
-            HostSender {
-                host: self.inner.host.clone(),
-                wake: self.sender()?,
-            },
+            self.inner.reader.clone(),
+            self.host_sender()?,
         ))
     }
 
     /// The store's catalogue tables.
     pub(crate) fn catalogue(&self) -> Result<crate::server::CatalogueStorage, String> {
         Ok(crate::server::CatalogueStorage::new(
-            Arc::clone(&self.inner.reader),
-            HostSender {
-                host: self.inner.host.clone(),
-                wake: self.sender()?,
-            },
+            self.inner.reader.clone(),
+            self.host_sender()?,
         ))
     }
 
     /// SQL access to the host tables a server shapes itself.
     pub(crate) fn sql(&self) -> Result<HostSql, String> {
-        Ok(HostSql::new(
-            Arc::clone(&self.inner.reader),
-            HostSender {
-                host: self.inner.host.clone(),
-                wake: self.sender()?,
-            },
-        ))
+        Ok(HostSql::new(self.inner.reader.clone(), self.host_sender()?))
     }
 
     /// Why the runtime stopped serving, if it failed (panicked) and could
@@ -775,6 +815,13 @@ impl AppStore {
     /// reports itself unhealthy so it is restarted.
     pub fn fault(&self) -> Option<String> {
         self.inner.fault.lock().ok().and_then(|fault| fault.clone())
+    }
+
+    fn host_sender(&self) -> Result<HostSender, String> {
+        self.sender()?;
+        Ok(HostSender {
+            store: self.clone(),
+        })
     }
 
     fn sender(&self) -> Result<std_mpsc::Sender<Work>, String> {
@@ -787,7 +834,13 @@ impl AppStore {
     }
 
     fn send(&self, work: Work) -> Result<(), String> {
-        self.sender()?
+        // Admission and enqueue are atomic with close taking this sender.
+        self.inner
+            .work
+            .lock()
+            .map_err(|_| "server store lock poisoned".to_owned())?
+            .as_ref()
+            .ok_or_else(|| "server store is closed".to_owned())?
             .send(work)
             .map_err(|_| "server store thread is not running".to_owned())
     }
@@ -801,7 +854,17 @@ impl AppStore {
         role: NodeRole,
         any_stored_catalogue: bool,
     ) -> Result<ServerRuntimeHandle, String> {
-        self.start(schema, role, any_stored_catalogue, false)
+        self.start(schema, role, any_stored_catalogue, false, None)
+            .map_err(String::from)
+    }
+
+    /// Initialize and commit the first deployment before making the runtime available.
+    pub(crate) fn start_deployment(
+        &self,
+        schema: JazzSchema,
+        change: CatalogueChange,
+    ) -> Result<ServerRuntimeHandle, CatalogueApplyError> {
+        self.start(schema, NodeRole::Core, false, false, Some(change))
     }
 
     fn start(
@@ -810,9 +873,12 @@ impl AppStore {
         role: NodeRole,
         any_stored_catalogue: bool,
         owns_store: bool,
-    ) -> Result<ServerRuntimeHandle, String> {
+        initial: Option<CatalogueChange>,
+    ) -> Result<ServerRuntimeHandle, CatalogueApplyError> {
         if role == NodeRole::Relay {
-            return Err("relay nodes are not supported yet on SQLite".to_owned());
+            return Err(CatalogueApplyError::Failed(
+                "relay nodes are not supported yet on SQLite".to_owned(),
+            ));
         }
         let (reply, started) = std_mpsc::channel();
         self.send(Work::Start(Start {
@@ -820,6 +886,7 @@ impl AppStore {
                 schema,
                 any_stored_catalogue,
             },
+            initial: initial.map(Box::new),
             reply,
         }))?;
         started
@@ -855,7 +922,10 @@ impl AppStore {
         // Before the store's connection, so that one closes last and
         // checkpoints the WAL into the file. (An in-memory store is gone
         // once both are.)
-        self.inner.reader.close();
+        #[cfg(feature = "sqlite")]
+        if let Some(reader) = &self.inner.reader {
+            reader.close();
+        }
         let work = self
             .inner
             .work
@@ -865,85 +935,176 @@ impl AppStore {
         if let Some(work) = work {
             let _ = work.send(Work::Close);
         }
-        let join = self
+        // Concurrent close callers must all wait for the same thread to exit.
+        let mut join = self
             .inner
             .join
             .lock()
-            .map_err(|_| "server store join lock poisoned".to_owned())?
-            .take();
-        if let Some(join) = join {
-            join.join()
+            .map_err(|_| "server store join lock poisoned".to_owned())?;
+        if let Some(thread) = join.take() {
+            thread
+                .join()
                 .map_err(|_| "server store thread panicked".to_owned())?;
         }
-        Ok(())
+        match self
+            .inner
+            .shutdown_error
+            .lock()
+            .map_err(|_| "server shutdown lock poisoned")?
+            .as_ref()
+        {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
     }
 }
 
 /// Sends host-table work to a store's thread; it keeps the thread running.
 pub(crate) struct HostSender {
-    host: std_mpsc::Sender<HostJob>,
-    wake: std_mpsc::Sender<Work>,
+    store: AppStore,
 }
 
 impl HostSender {
     pub(crate) fn send(&self, job: HostJob) -> Result<(), String> {
-        let closed = "server store is closed";
-        self.host.send(job).map_err(|_| closed.to_owned())?;
-        self.wake.send(Work::Host).map_err(|_| closed.to_owned())
+        // Both queue sends precede the close barrier, or neither is admitted.
+        let admission = self
+            .store
+            .inner
+            .work
+            .lock()
+            .map_err(|_| "server store lock poisoned".to_owned())?;
+        let wake = admission
+            .as_ref()
+            .ok_or_else(|| "server store is closed".to_owned())?;
+        self.store
+            .inner
+            .host
+            .send(job)
+            .map_err(|_| "server store is closed".to_owned())?;
+        wake.send(Work::Host)
+            .map_err(|_| "server store is closed".to_owned())
     }
 }
 
-/// Host tables of a store that could not be opened: each use reports why.
-struct Unavailable(String);
+/// A host job borrows the store for its entire future. Explicit variants keep
+/// async host dispatch static; only the queued job itself needs a boxed future.
+pub(crate) enum HostAccess<'a> {
+    File(&'a StoreFile),
+    Db(&'a Db),
+    Unavailable(&'a str),
+}
 
-impl HostTables for Unavailable {
-    fn catalogue(&self) -> Result<CatalogueRows, jazz::db::Error> {
-        Err(self.error())
-    }
-
-    fn catalogue_put(&self, _: &jazz::catalogue::CataloguePut) -> Result<(), jazz::db::Error> {
-        Err(self.error())
-    }
-
-    fn host_get(&self, _: HostTable, _: &[u8]) -> Result<Option<Vec<u8>>, jazz::db::Error> {
-        Err(self.error())
-    }
-    fn host_prefix(
+impl HostTables for HostAccess<'_> {
+    async fn with_sql<T>(
         &self,
-        _: HostTable,
-        _: &[u8],
-    ) -> Result<Vec<jazz::host::HostPair>, jazz::db::Error> {
-        Err(self.error())
+        write: bool,
+        f: impl FnOnce(jazz::host::ConnectionSql<'_>) -> Result<T, jazz::db::Error>,
+    ) -> Result<T, jazz::db::Error> {
+        match self {
+            Self::File(file) => file.with_sql(write, f).await,
+            Self::Db(db) => db.with_sql(write, f).await,
+            Self::Unavailable(error) => Err(jazz::db::Error::new(
+                jazz::db::ErrorCode::Storage,
+                error.to_string(),
+            )),
+        }
     }
-    fn host_put_many(
+
+    async fn catalogue(&self) -> Result<CatalogueRows, jazz::db::Error> {
+        match self {
+            Self::File(file) => HostTables::catalogue(*file).await,
+            Self::Db(db) => HostTables::catalogue(*db).await,
+            Self::Unavailable(error) => {
+                Err(jazz::db::Error::new(jazz::db::ErrorCode::Storage, *error))
+            }
+        }
+    }
+    async fn catalogue_put(
         &self,
-        _: HostTable,
-        _: &[jazz::host::HostPair],
+        put: &jazz::catalogue::CataloguePut,
     ) -> Result<(), jazz::db::Error> {
-        Err(self.error())
+        match self {
+            Self::File(file) => HostTables::catalogue_put(*file, put).await,
+            Self::Db(db) => HostTables::catalogue_put(*db, put).await,
+            Self::Unavailable(error) => {
+                Err(jazz::db::Error::new(jazz::db::ErrorCode::Storage, *error))
+            }
+        }
     }
-    fn host_put_if_absent(
+    async fn host_get(
         &self,
-        _: HostTable,
-        _: &[u8],
-        _: &[u8],
+        table: HostTable,
+        key: &[u8],
     ) -> Result<Option<Vec<u8>>, jazz::db::Error> {
-        Err(self.error())
+        match self {
+            Self::File(file) => HostTables::host_get(*file, table, key).await,
+            Self::Db(db) => HostTables::host_get(*db, table, key).await,
+            Self::Unavailable(error) => {
+                Err(jazz::db::Error::new(jazz::db::ErrorCode::Storage, *error))
+            }
+        }
     }
-    fn host_delete(&self, _: HostTable, _: &[u8]) -> Result<(), jazz::db::Error> {
-        Err(self.error())
-    }
-    fn host_sql(
+    async fn host_prefix(
         &self,
-        _: &mut dyn FnMut(&rusqlite::Connection) -> Result<(), jazz::db::Error>,
-    ) -> Result<(), jazz::db::Error> {
-        Err(self.error())
+        table: HostTable,
+        prefix: &[u8],
+    ) -> Result<Vec<jazz::host::HostPair>, jazz::db::Error> {
+        match self {
+            Self::File(file) => HostTables::host_prefix(*file, table, prefix).await,
+            Self::Db(db) => HostTables::host_prefix(*db, table, prefix).await,
+            Self::Unavailable(error) => {
+                Err(jazz::db::Error::new(jazz::db::ErrorCode::Storage, *error))
+            }
+        }
     }
-}
-
-impl Unavailable {
-    fn error(&self) -> jazz::db::Error {
-        jazz::db::Error::new(jazz::db::ErrorCode::Storage, self.0.clone())
+    async fn host_put_many(
+        &self,
+        table: HostTable,
+        pairs: &[jazz::host::HostPair],
+    ) -> Result<(), jazz::db::Error> {
+        match self {
+            Self::File(file) => HostTables::host_put_many(*file, table, pairs).await,
+            Self::Db(db) => HostTables::host_put_many(*db, table, pairs).await,
+            Self::Unavailable(error) => {
+                Err(jazz::db::Error::new(jazz::db::ErrorCode::Storage, *error))
+            }
+        }
+    }
+    async fn host_put_if_absent(
+        &self,
+        table: HostTable,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<Option<Vec<u8>>, jazz::db::Error> {
+        match self {
+            Self::File(file) => HostTables::host_put_if_absent(*file, table, key, value).await,
+            Self::Db(db) => HostTables::host_put_if_absent(*db, table, key, value).await,
+            Self::Unavailable(error) => {
+                Err(jazz::db::Error::new(jazz::db::ErrorCode::Storage, *error))
+            }
+        }
+    }
+    async fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), jazz::db::Error> {
+        match self {
+            Self::File(file) => HostTables::host_delete(*file, table, key).await,
+            Self::Db(db) => HostTables::host_delete(*db, table, key).await,
+            Self::Unavailable(error) => {
+                Err(jazz::db::Error::new(jazz::db::ErrorCode::Storage, *error))
+            }
+        }
+    }
+    #[cfg(feature = "sqlite")]
+    async fn host_sql(
+        &self,
+        f: &mut dyn FnMut(&rusqlite::Connection) -> Result<(), jazz::db::Error>,
+    ) -> Result<(), jazz::db::Error> {
+        match self {
+            Self::File(file) => HostTables::host_sql(*file, f).await,
+            Self::Db(db) => HostTables::host_sql(*db, f).await,
+            Self::Unavailable(error) => {
+                Err(jazz::db::Error::new(jazz::db::ErrorCode::Storage, *error))
+            }
+        }
     }
 }
 
@@ -959,6 +1120,7 @@ struct StoreLoop {
     backlog: VecDeque<HostJob>,
     tick_queued: Arc<AtomicBool>,
     fault: Arc<Mutex<Option<String>>>,
+    shutdown_error: Arc<Mutex<Option<String>>>,
     app: Arc<Mutex<Option<String>>>,
     state: State,
     /// What the running runtime was opened with, to restart it.
@@ -1010,6 +1172,7 @@ impl StoreLoop {
                 tick |= !matches!(item, Work::Host);
                 if !self.handle(item) {
                     self.stop();
+                    self.close_idle_worker();
                     return;
                 }
                 if Instant::now() >= deadline {
@@ -1026,6 +1189,15 @@ impl StoreLoop {
             }
         }
         self.stop();
+        self.close_idle_worker();
+    }
+
+    fn close_idle_worker(&self) {
+        if let State::Idle(Ok(file)) = &self.state
+            && let Err(error) = block_on(file.close_worker())
+        {
+            *self.shutdown_error.lock().unwrap() = Some(error.to_string());
+        }
     }
 
     fn owner(&self) -> Option<&Owner> {
@@ -1050,11 +1222,15 @@ impl StoreLoop {
             self.state = State::Idle(self.source.open());
         }
         let ran = match &self.state {
-            State::Idle(Ok(file)) => catch_unwind(AssertUnwindSafe(|| job(file))),
-            State::Idle(Err(error)) => {
-                catch_unwind(AssertUnwindSafe(|| job(&Unavailable(error.clone()))))
+            State::Idle(Ok(file)) => {
+                catch_unwind(AssertUnwindSafe(|| block_on(job(HostAccess::File(file)))))
             }
-            State::Running(owner) => catch_unwind(AssertUnwindSafe(|| job(&owner.db))),
+            State::Idle(Err(error)) => catch_unwind(AssertUnwindSafe(|| {
+                block_on(job(HostAccess::Unavailable(error)))
+            })),
+            State::Running(owner) => catch_unwind(AssertUnwindSafe(|| {
+                block_on(job(HostAccess::Db(&owner.db)))
+            })),
         };
         if let Err(panic) = ran {
             let panic = panic_message(&*panic);
@@ -1079,8 +1255,12 @@ impl StoreLoop {
             Work::Owner(job) => self.on_owner(job),
             Work::Start(start) => {
                 let started = match &self.state {
-                    State::Running(_) => Err("the server runtime is already running".to_owned()),
-                    State::Idle(_) => self.open_runtime(start.runtime),
+                    State::Running(_) => Err(CatalogueApplyError::Failed(
+                        "the server runtime is already running".to_owned(),
+                    )),
+                    State::Idle(_) => {
+                        self.open_runtime(start.runtime, start.initial.map(|change| *change))
+                    }
                 };
                 let _ = start.reply.send(started);
             }
@@ -1088,38 +1268,53 @@ impl StoreLoop {
                 self.stop();
                 let _ = reply.send(());
             }
-            Work::Close => return false,
+            Work::Close => {
+                // Admission is closed. The normal per-tick host deadline must
+                // not discard accepted writes during shutdown.
+                self.backlog.extend(self.host.try_iter());
+                while let Some(job) = self.backlog.pop_front() {
+                    self.host_job(job);
+                }
+                return false;
+            }
         }
         true
     }
 
-    /// Open the runtime on the file. If it fails, the file is opened afresh
-    /// for the host tables: the failed open consumed the connection, and the
-    /// store (even an in-memory one) outlives it.
-    fn open_runtime(&mut self, runtime: Runtime) -> Result<(), String> {
+    /// Open the runtime on the file. Rejected initialization retains the rolled-
+    /// back file; storage failures reopen it according to the provider policy.
+    fn open_runtime(
+        &mut self,
+        runtime: Runtime,
+        initial: Option<CatalogueChange>,
+    ) -> Result<(), CatalogueApplyError> {
         let file = match std::mem::replace(&mut self.state, State::Idle(Err(String::new()))) {
             State::Idle(file) => file,
             State::Running(owner) => {
                 self.state = State::Running(owner);
-                return Err("the server runtime is already running".to_owned());
+                return Err(CatalogueApplyError::Failed(
+                    "the server runtime is already running".to_owned(),
+                ));
             }
         };
-        let opened = file.and_then(|file| {
+        let mut recover = None;
+        let opened = file.map_err(CatalogueApplyError::Failed).and_then(|file| {
             catch_unwind(AssertUnwindSafe(|| {
                 Owner::open(
-                    runtime.schema.clone(),
+                    runtime.clone(),
                     file,
                     self.source.chunk_store()?,
                     self.wake.clone(),
-                    runtime.any_stored_catalogue,
+                    initial,
+                    &mut recover,
                     self.app.lock().ok().and_then(|app| app.clone()),
                 )
             }))
             .unwrap_or_else(|panic| {
-                Err(format!(
+                Err(CatalogueApplyError::Failed(format!(
                     "opening the runtime panicked: {}",
                     panic_message(&*panic)
-                ))
+                )))
             })
         });
         match opened {
@@ -1133,7 +1328,10 @@ impl StoreLoop {
                 Ok(())
             }
             Err(error) => {
-                self.state = State::Idle(self.source.open());
+                self.state = State::Idle(match recover {
+                    Some(file) => Ok(file),
+                    None => self.source.open(),
+                });
                 Err(error)
             }
         }
@@ -1169,7 +1367,7 @@ impl StoreLoop {
                     .is_none_or(|restarted| restarted.elapsed() >= RESTART_INTERVAL) =>
             {
                 self.restarted = Some(Instant::now());
-                self.open_runtime(runtime)
+                self.open_runtime(runtime, None).map_err(String::from)
             }
             _ => Err("it failed again within a minute of restarting".to_owned()),
         };
@@ -1188,6 +1386,9 @@ impl StoreLoop {
     /// Stop the runtime, if one is running: close its sessions and reopen
     /// the file for the host tables.
     fn stop(&mut self) {
+        if !matches!(self.state, State::Running(_)) {
+            return;
+        }
         let State::Running(owner) =
             std::mem::replace(&mut self.state, State::Idle(Err(String::new())))
         else {
@@ -1196,7 +1397,13 @@ impl StoreLoop {
         self.started = None;
         // A runtime that panicked may panic again on its way down; the file
         // is reopened either way.
-        let _ = catch_unwind(AssertUnwindSafe(move || owner.close()));
+        match catch_unwind(AssertUnwindSafe(move || owner.close())) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => *self.shutdown_error.lock().unwrap() = Some(error),
+            Err(panic) => {
+                *self.shutdown_error.lock().unwrap() = Some(panic_message(panic.as_ref()))
+            }
+        }
         self.state = State::Idle(self.source.open());
     }
 }
@@ -1339,7 +1546,9 @@ impl ServerRuntimeHandle {
         if role == NodeRole::Relay {
             return Err("relay nodes are not supported yet on SQLite".to_owned());
         }
-        AppStore::open(&storage)?.start(schema, role, any_stored_catalogue, true)
+        AppStore::open(&storage)?
+            .start(schema, role, any_stored_catalogue, true, None)
+            .map_err(String::from)
     }
 
     /// Start a runtime whose schema comes from the administrative catalogue.
@@ -1752,7 +1961,7 @@ impl ServerRuntimeHandle {
 
     /// The store's catalogue: every schema, lens and permissions revision.
     pub async fn catalogue(&self) -> Result<CatalogueRows, String> {
-        self.run(|owner| owner.db.catalogue().map_err(|error| error.to_string()))
+        self.run(|owner| block_on(owner.db.catalogue()).map_err(|error| error.to_string()))
             .await
     }
 
@@ -1927,6 +2136,21 @@ pub enum CatalogueApplyError {
     Rejected(String),
     /// Storage or the runtime failed.
     Failed(String),
+}
+
+impl CatalogueApplyError {
+    fn from_db(error: jazz::db::Error) -> Self {
+        if error.code == jazz::db::ErrorCode::Storage {
+            Self::Failed(error.to_string())
+        } else {
+            Self::Rejected(error.to_string())
+        }
+    }
+}
+impl From<String> for CatalogueApplyError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
 }
 
 impl std::fmt::Display for CatalogueApplyError {
@@ -2386,16 +2610,20 @@ impl Owner {
     /// current instead when the store has no revision yet, or (unless
     /// `any_stored_catalogue`) none whose catalogue admits `schema`.
     fn open(
-        schema: JazzSchema,
+        runtime: Runtime,
         file: StoreFile,
         chunk_store: Option<ChunkStoreChoice>,
         wake: std_mpsc::Sender<Work>,
-        any_stored_catalogue: bool,
+        initial: Option<CatalogueChange>,
+        recover: &mut Option<StoreFile>,
         app: Option<String>,
-    ) -> Result<Self, String> {
-        let rows = file
-            .catalogue()
-            .map_err(|error| format!("read catalogue: {error}"))?;
+    ) -> Result<Self, CatalogueApplyError> {
+        let Runtime {
+            schema,
+            any_stored_catalogue,
+        } = runtime;
+        let rows =
+            block_on(file.catalogue()).map_err(|error| format!("read catalogue: {error}"))?;
         let stored = any_stored_catalogue
             || rows
                 .schemas
@@ -2430,13 +2658,27 @@ impl Owner {
             Some(choice) if choice.network => Some(ChunkIoRunner::start(choice.store, wake)?),
             _ => None,
         };
-        let db = block_on(Db::open_file(config, file))
-            .map_err(|error| format!("open server store: {error}"))?;
-        db.set_authority();
+        let db = block_on(async {
+            match initial {
+                Some(change) => match Db::open_file_with_catalogue(config, file, change).await {
+                    Ok(db) => Ok(db),
+                    Err((error, file)) => {
+                        if error.code != jazz::db::ErrorCode::Storage {
+                            *recover = Some(file);
+                        }
+                        Err(error)
+                    }
+                },
+                None => Db::open_file(config, file).await,
+            }
+        })
+        .map_err(CatalogueApplyError::from_db)?;
+        block_on(db.set_authority());
         db.require_session_pins();
         db.track_closed_subscribers();
         db.set_slow_query_threshold(slow_query_threshold());
-        let catalogue = Catalogue::load(&db.catalogue().map_err(|error| error.to_string())?)?;
+        let catalogue =
+            Catalogue::load(&block_on(db.catalogue()).map_err(|error| error.to_string())?)?;
         Ok(Self {
             db,
             sessions: HashMap::new(),
@@ -2451,7 +2693,8 @@ impl Owner {
     }
 
     fn reload_catalogue(&mut self) -> Result<(), String> {
-        self.catalogue = Catalogue::load(&self.db.catalogue().map_err(|error| error.to_string())?)?;
+        self.catalogue =
+            Catalogue::load(&block_on(self.db.catalogue()).map_err(|error| error.to_string())?)?;
         Ok(())
     }
 
@@ -2514,11 +2757,13 @@ impl Owner {
     }
 
     /// Close every session (their streams end) and the store's runtime.
-    fn close(mut self) {
+    fn close(mut self) -> Result<(), String> {
         for (_, session) in self.sessions.drain() {
             self.db.disconnect_subscriber(session.subscriber);
         }
         self.thin.clear();
+        // The owner thread drains the worker even when the request waiter is gone.
+        block_on(self.db.close_worker()).map_err(|error| error.to_string())
     }
 
     fn open_session(
@@ -2531,19 +2776,19 @@ impl Owner {
         egress: Arc<AtomicUsize>,
     ) -> Result<(), jazz::db::Error> {
         let claims = (identity != AuthorSubject::SYSTEM).then(|| {
-            self.db.set_identity_claims(identity, claims.clone());
+            block_on(self.db.set_identity_claims(identity, claims.clone()));
             claims
         });
         let queues = Rc::new(SessionQueues::new(
             Rc::clone(&self.slice),
             Arc::clone(&egress),
         ));
-        let subscriber = self.db.accept_pinned_subscriber(
+        let subscriber = block_on(self.db.accept_pinned_subscriber(
             Box::new(SessionTransport(Rc::clone(&queues))),
             identity,
             claims,
             bundle,
-        )?;
+        ))?;
         self.sessions.insert(
             session,
             OwnerSession {
@@ -2650,7 +2895,7 @@ impl Owner {
     /// refuses the reads waiting on them, and holds fetches back (batches
     /// go on without them) for the backoff.
     fn finish_chunk_fetches(&mut self, done: jazz::chunk_store::ChunkIoDone) {
-        let finished = self.db.finish_chunk_fetches(done);
+        let finished = block_on(self.db.finish_chunk_fetches(done));
         let log = match &self.chunk_io {
             Some(runner) => runner.fetched(finished.is_err()),
             None => finished.is_err(),
@@ -2666,7 +2911,7 @@ impl Owner {
         // Fetches that failed in a batch hold fetches back as the fetch
         // lane's do, so the next batch does not ask again at once.
         let fetches_failed = done.fetches_failed();
-        let finished = self.db.finish_chunk_io(done);
+        let finished = block_on(self.db.finish_chunk_io(done));
         let log = match &self.chunk_io {
             Some(runner) => runner.returned_with(finished.is_err(), fetches_failed),
             None => finished.is_err(),
@@ -2783,10 +3028,7 @@ mod tests {
     const PROBE: HostTable = HostTable::new("probe");
 
     fn host_sender(store: &AppStore) -> HostSender {
-        HostSender {
-            host: store.inner.host.clone(),
-            wake: store.sender().unwrap(),
-        }
+        store.host_sender().unwrap()
     }
 
     /// Hold the store thread in a runtime job until the returned sender
@@ -2802,6 +3044,114 @@ mod tests {
             .unwrap();
         running.recv().unwrap();
         release
+    }
+
+    /// Alice stops waiting for an admitted application write. Bob closes the
+    /// store while host writes are queued; all accepted writes survive reopen,
+    /// new work is refused, and concurrent close callers wait for the drain.
+    /// This owner-queue fixture is needed to control admission and the host
+    /// deadline while exercising the normal Db write and persistence paths.
+    /// hold owner -> enqueue -> abandon reply -> close -> release -> reopen
+    #[test]
+    fn abandoned_writes_finish_before_concurrent_store_closes_return() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = StorageConfig::data_dir(dir.path());
+        let store = AppStore::open(&storage).unwrap();
+        let runtime = store
+            .start_runtime(schema(), NodeRole::Core, false)
+            .unwrap();
+        let release = hold(&runtime);
+        let mut write = Box::pin(runtime.with_db_for_test(|db| {
+            block_on(db.insert(
+                "todos",
+                BTreeMap::from([("title".to_owned(), Value::String("alice".to_owned()))]),
+                jazz::db::InsertOptions::default(),
+            ))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        }));
+        assert!(
+            write
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        drop(write);
+
+        const WRITES: u32 = 24;
+        let host = host_sender(&store);
+        for key in 0..WRITES {
+            host.send(Box::new(move |tables| {
+                Box::pin(async move {
+                    // Cross normal host-work deadlines during the shutdown drain.
+                    std::thread::sleep(Duration::from_millis(1));
+                    tables
+                        .host_put_many(PROBE, &[(key.to_be_bytes().to_vec(), b"bob".to_vec())])
+                        .await
+                        .unwrap();
+                })
+            }))
+            .unwrap();
+        }
+        let (finished, closed) = std_mpsc::channel();
+        let mut closers = Vec::new();
+        for _ in 0..2 {
+            let store = store.clone();
+            let finished = finished.clone();
+            closers.push(std::thread::spawn(move || {
+                finished.send(store.close()).unwrap();
+            }));
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while store.sender().is_ok() {
+            assert!(Instant::now() < deadline, "shutdown must stop admission");
+            std::thread::yield_now();
+        }
+        assert!(host.send(Box::new(|_| Box::pin(async {}))).is_err());
+        assert!(runtime.send(Box::new(|_| {})).is_err());
+        assert!(
+            closed.recv_timeout(Duration::from_millis(50)).is_err(),
+            "every close caller must wait while admitted work is held"
+        );
+        drop(release);
+        for _ in 0..2 {
+            closed
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+        }
+        for closer in closers {
+            closer.join().unwrap();
+        }
+
+        let reopened = AppStore::open(&storage).unwrap();
+        assert_eq!(
+            reopened.kv(PROBE).unwrap().prefix(b"").unwrap().len(),
+            WRITES as usize
+        );
+        let runtime = reopened
+            .start_runtime(schema(), NodeRole::Core, false)
+            .unwrap();
+        let count = block_on(runtime.with_db_for_test(|db| {
+            let query = db
+                .prepare_query(&jazz::query::Query::from("todos"))
+                .map_err(|e| e.to_string())?;
+            block_on(db.all(
+                &query,
+                jazz::db::ReadOpts {
+                    tier: jazz::db::ReadTier::LocalOnly,
+                    ..Default::default()
+                },
+            ))
+            .map(|rows| rows.len())
+            .map_err(|e| e.to_string())
+        }))
+        .unwrap();
+        assert_eq!(count, 1, "Alice's abandoned reply did not cancel her write");
+        reopened.close().unwrap();
     }
 
     /// A host write arriving during a long runtime job (or tick) runs as
@@ -2827,11 +3177,14 @@ mod tests {
         }
         let order_host = Arc::clone(&order);
         host_sender(&store)
-            .send(Box::new(move |tables: &dyn HostTables| {
-                tables
-                    .host_put_many(PROBE, &[(b"k".to_vec(), b"v".to_vec())])
-                    .unwrap();
-                order_host.lock().unwrap().push("host");
+            .send(Box::new(move |tables| {
+                Box::pin(async move {
+                    tables
+                        .host_put_many(PROBE, &[(b"k".to_vec(), b"v".to_vec())])
+                        .await
+                        .unwrap();
+                    order_host.lock().unwrap().push("host");
+                })
             }))
             .unwrap();
         // A blocking writer (a registration) waits for the long job, then
@@ -2894,9 +3247,11 @@ mod tests {
         for _ in 0..JOBS {
             let ticks = Arc::clone(&store.inner.ticks);
             let seen = seen.clone();
-            host.send(Box::new(move |_: &dyn HostTables| {
-                std::thread::sleep(Duration::from_millis(1));
-                let _ = seen.send(ticks.load(Ordering::Relaxed));
+            host.send(Box::new(move |_| {
+                Box::pin(async move {
+                    std::thread::sleep(Duration::from_millis(1));
+                    let _ = seen.send(ticks.load(Ordering::Relaxed));
+                })
             }))
             .unwrap();
         }
@@ -3000,10 +3355,8 @@ mod tests {
         assert_eq!(store.fault(), None, "restarted");
         let on_runtime = block_on(runtime.with_db_for_test(|db| {
             Ok((
-                db.host_get(PROBE, b"a")
-                    .map_err(|error| error.to_string())?,
-                db.host_get(PROBE, b"half")
-                    .map_err(|error| error.to_string())?,
+                block_on(db.host_get(PROBE, b"a")).map_err(|error| error.to_string())?,
+                block_on(db.host_get(PROBE, b"half")).map_err(|error| error.to_string())?,
             ))
         }))
         .unwrap();
@@ -3819,9 +4172,7 @@ mod tests {
         // Marked offloaded once a batch's hand-back ran, not when its puts
         // reached the bucket.
         while block_on(runtime.run(|owner| {
-            owner
-                .db
-                .offloaded_large_value_nodes_for_test()
+            block_on(owner.db.offloaded_large_value_nodes_for_test())
                 .map_err(|error| error.to_string())
         }))
         .unwrap()

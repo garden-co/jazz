@@ -190,16 +190,15 @@ fn connect_wires(server: &Db, client: &Db, identity: AuthorSubject) -> (Log, Wir
         inbound: down.clone(),
         log: log.clone(),
     })));
-    server
-        .accept_subscriber(
-            Box::new(Pipe {
-                out: down.clone(),
-                inbound: up.clone(),
-                log: log.clone(),
-            }),
-            identity,
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Pipe {
+            out: down.clone(),
+            inbound: up.clone(),
+            log: log.clone(),
+        }),
+        identity,
+    ))
+    .unwrap();
     (log, up, down)
 }
 
@@ -339,7 +338,7 @@ fn a_range_read_on_a_replica_fetches_only_what_it_covers() {
     // without any of the blob's chunks.
     let _stream = subscribe(&alice, Query::from("docs").select(["body"]));
     pump(&server, &[&alice]);
-    let (before, _) = alice.large_value_nodes_for_test().unwrap();
+    let (before, _) = jazz::db::block_on(alice.large_value_nodes_for_test()).unwrap();
     assert_eq!(before, 0, "nothing prefetched for an unindexed column");
     let range = 600_000..600_100;
     let first = block_on(alice.read_value_range("docs", row(1), "blob", range.clone()));
@@ -354,8 +353,8 @@ fn a_range_read_on_a_replica_fetches_only_what_it_covers() {
         got = block_on(alice.read_value_range("docs", row(1), "blob", range.clone()));
     }
     assert_eq!(got.unwrap(), blob[600_000..600_100]);
-    let (after, _) = alice.large_value_nodes_for_test().unwrap();
-    let (total, _) = server.large_value_nodes_for_test().unwrap();
+    let (after, _) = jazz::db::block_on(alice.large_value_nodes_for_test()).unwrap();
+    let (total, _) = jazz::db::block_on(server.large_value_nodes_for_test()).unwrap();
     assert!(after < total, "only the covering path: {after} of {total}");
 }
 
@@ -392,8 +391,8 @@ fn a_range_read_pulls_its_whole_path_in_one_round_trip() {
         .filter(|kind| **kind == "requests")
         .count();
     assert_eq!(pulls, 1, "{:?}", log.borrow());
-    let (after, _) = alice.large_value_nodes_for_test().unwrap();
-    let (total, _) = server.large_value_nodes_for_test().unwrap();
+    let (after, _) = jazz::db::block_on(alice.large_value_nodes_for_test()).unwrap();
+    let (total, _) = jazz::db::block_on(server.large_value_nodes_for_test()).unwrap();
     assert!(after < total, "only the covering path: {after} of {total}");
 }
 
@@ -434,8 +433,8 @@ fn a_utf16_range_read_pulls_its_whole_path_in_one_round_trip() {
     let expected: String = body.chars().skip(700_000).take(50).collect();
     assert_eq!(got.unwrap(), expected);
     assert_eq!(requests(&log), 1, "{:?}", log.borrow());
-    let (after, _) = alice.large_value_nodes_for_test().unwrap();
-    let (total, _) = server.large_value_nodes_for_test().unwrap();
+    let (after, _) = jazz::db::block_on(alice.large_value_nodes_for_test()).unwrap();
+    let (total, _) = jazz::db::block_on(server.large_value_nodes_for_test()).unwrap();
     assert!(after < total, "only the covering paths: {after} of {total}");
 }
 
@@ -687,16 +686,15 @@ fn connect_spied(server: &Db, client: &Db, identity: AuthorSubject) -> (Sizes, S
         inbound: down.clone(),
         sizes: sent.clone(),
     })));
-    server
-        .accept_subscriber(
-            Box::new(Spy {
-                out: down,
-                inbound: up,
-                sizes: received.clone(),
-            }),
-            identity,
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Spy {
+            out: down,
+            inbound: up,
+            sizes: received.clone(),
+        }),
+        identity,
+    ))
+    .unwrap();
     (sent, received)
 }
 
@@ -852,18 +850,17 @@ fn a_delta_over_a_version_the_replica_lacks_heals_by_asking_for_the_row() {
         inbound: down.clone(),
         log: Log::default(),
     })));
-    server
-        .accept_subscriber(
-            Box::new(Spoil {
-                out: down,
-                inbound: up,
-                spoiled: spoiled.clone(),
-                holds: holds.clone(),
-                lose_holds: false,
-            }),
-            user(2),
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Spoil {
+            out: down,
+            inbound: up,
+            spoiled: spoiled.clone(),
+            holds: holds.clone(),
+            lose_holds: false,
+        }),
+        user(2),
+    ))
+    .unwrap();
     let _bob_stream = subscribe(&bob, Query::from("docs"));
     let mut expected = text(6, LARGE);
     insert(
@@ -912,18 +909,17 @@ fn a_row_asked_for_whole_heals_after_its_hold_is_lost() {
         inbound: down.clone(),
         log: Log::default(),
     })));
-    server
-        .accept_subscriber(
-            Box::new(Spoil {
-                out: down,
-                inbound: up,
-                spoiled: spoiled.clone(),
-                holds: holds.clone(),
-                lose_holds: true,
-            }),
-            user(2),
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Spoil {
+            out: down,
+            inbound: up,
+            spoiled: spoiled.clone(),
+            holds: holds.clone(),
+            lose_holds: true,
+        }),
+        user(2),
+    ))
+    .unwrap();
     let bob_stream = subscribe(&bob, Query::from("docs"));
     let mut expected = text(6, LARGE);
     insert(
@@ -1320,7 +1316,7 @@ fn an_access_proof_the_writer_cannot_read_proves_nothing() {
             ("public", Value::Bool(false)),
         ],
     );
-    let secret = server.write_conflicts("shared", row(1), None).unwrap()[0].seq;
+    let secret = jazz::db::block_on(server.write_conflicts("shared", row(1), None)).unwrap()[0].seq;
     block_on(
         server.update(
             "shared",
@@ -1602,7 +1598,7 @@ fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
         2,
         vec![("body", Value::String("hello".into()))],
     );
-    let seed = server.write_conflicts("merged", row(2), None).unwrap()[0].seq;
+    let seed = jazz::db::block_on(server.write_conflicts("merged", row(2), None)).unwrap()[0].seq;
     block_on(server.update(
         "merged",
         row(2),
@@ -1662,7 +1658,10 @@ fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
         local_cell(&server, "merged", 2, "body").unwrap(),
         Some(Value::String("hello there".into()))
     );
-    assert_eq!(server.as_sent_versions_for_test().unwrap(), 0);
+    assert_eq!(
+        jazz::db::block_on(server.as_sent_versions_for_test()).unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -1766,7 +1765,7 @@ fn a_small_streamed_upload_reaches_the_server() {
 fn a_small_value_streamed_before_connecting_reaches_the_server() {
     let server = open(0, AuthorSubject::SYSTEM);
     let alice = open(1, user(1));
-    alice.become_replica();
+    jazz::db::block_on(alice.become_replica());
     block_on(alice.insert_streaming_value_with_id(
         "docs",
         row(1),
@@ -2016,7 +2015,7 @@ fn reads_reaching_a_held_table_through_policies_or_includes_wait() {
 fn a_snapshot_read_naming_a_held_commit_waits_for_it() {
     let (server, alice, (_log, up, down)) = held_upload();
     // Captured offline, the reference names the unsettled upload.
-    alice.set_remote_link_hint(RemoteLinkHint::Failed);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Failed));
     let snapshot = block_on(alice.capture_snapshot()).unwrap();
     assert!(
         !snapshot.dots.is_empty(),
@@ -2116,8 +2115,18 @@ fn a_range_read_through_a_relay_fetches_only_its_path_at_every_hop() {
     );
     let _stream = subscribe(&tab, Query::from("docs").select(["body"]));
     pump_chain(&core, &relay, &tab);
-    assert_eq!(relay.large_value_nodes_for_test().unwrap().0, 0);
-    assert_eq!(tab.large_value_nodes_for_test().unwrap().0, 0);
+    assert_eq!(
+        jazz::db::block_on(relay.large_value_nodes_for_test())
+            .unwrap()
+            .0,
+        0
+    );
+    assert_eq!(
+        jazz::db::block_on(tab.large_value_nodes_for_test())
+            .unwrap()
+            .0,
+        0
+    );
     upstream.borrow_mut().clear();
     downstream.borrow_mut().clear();
     let range = 3_000_000..3_000_100;
@@ -2130,9 +2139,9 @@ fn a_range_read_through_a_relay_fetches_only_its_path_at_every_hop() {
     // and answers the tab from its store once the path arrives.
     assert_eq!(requests(&downstream), 1, "{:?}", downstream.borrow());
     assert_eq!(requests(&upstream), 1, "{:?}", upstream.borrow());
-    let (total, _) = core.large_value_nodes_for_test().unwrap();
-    let (at_relay, _) = relay.large_value_nodes_for_test().unwrap();
-    let (at_tab, _) = tab.large_value_nodes_for_test().unwrap();
+    let (total, _) = jazz::db::block_on(core.large_value_nodes_for_test()).unwrap();
+    let (at_relay, _) = jazz::db::block_on(relay.large_value_nodes_for_test()).unwrap();
+    let (at_tab, _) = jazz::db::block_on(tab.large_value_nodes_for_test()).unwrap();
     assert!(
         at_relay < total,
         "the relay holds the path: {at_relay} of {total}"
@@ -2262,7 +2271,12 @@ fn a_relay_forwards_no_pull_its_tab_may_not_make() {
     }
     assert!(missing.contains(&draft));
     assert_eq!(requests(&upstream), 0, "nothing goes upstream");
-    assert_eq!(relay.large_value_nodes_for_test().unwrap().0, 0);
+    assert_eq!(
+        jazz::db::block_on(relay.large_value_nodes_for_test())
+            .unwrap()
+            .0,
+        0
+    );
 }
 
 #[test]
@@ -2389,9 +2403,9 @@ fn a_partial_select_through_a_relay_fetches_only_its_range_and_follows_edits() {
         partial_rows(&tab, &query, "blob"),
         vec![Some(Value::Bytes(blob[range.clone()].to_vec()))]
     );
-    let (total, _) = core.large_value_nodes_for_test().unwrap();
-    let (at_relay, _) = relay.large_value_nodes_for_test().unwrap();
-    let (at_tab, _) = tab.large_value_nodes_for_test().unwrap();
+    let (total, _) = jazz::db::block_on(core.large_value_nodes_for_test()).unwrap();
+    let (at_relay, _) = jazz::db::block_on(relay.large_value_nodes_for_test()).unwrap();
+    let (at_tab, _) = jazz::db::block_on(tab.large_value_nodes_for_test()).unwrap();
     assert!(
         at_relay < total,
         "the relay holds the path: {at_relay} of {total}"
@@ -2430,7 +2444,12 @@ fn a_partial_select_through_a_relay_fetches_only_its_range_and_follows_edits() {
     );
     assert_eq!(requests(&downstream), 0, "{:?}", downstream.borrow());
     assert_eq!(requests(&upstream), 0, "{:?}", upstream.borrow());
-    assert_eq!(tab.large_value_nodes_for_test().unwrap().0, at_tab);
+    assert_eq!(
+        jazz::db::block_on(tab.large_value_nodes_for_test())
+            .unwrap()
+            .0,
+        at_tab
+    );
 }
 
 #[test]
@@ -2500,9 +2519,9 @@ fn a_partial_select_in_an_include_fetches_only_its_range_through_a_relay() {
         included(&tab),
         vec![Some(Value::Bytes(blob[range.clone()].to_vec()))]
     );
-    let (total, _) = core.large_value_nodes_for_test().unwrap();
-    let (at_relay, _) = relay.large_value_nodes_for_test().unwrap();
-    let (at_tab, _) = tab.large_value_nodes_for_test().unwrap();
+    let (total, _) = jazz::db::block_on(core.large_value_nodes_for_test()).unwrap();
+    let (at_relay, _) = jazz::db::block_on(relay.large_value_nodes_for_test()).unwrap();
+    let (at_tab, _) = jazz::db::block_on(tab.large_value_nodes_for_test()).unwrap();
     assert!(
         at_relay < total,
         "the relay holds the path: {at_relay} of {total}"
@@ -2534,7 +2553,12 @@ fn a_partial_select_in_an_include_fetches_only_its_range_through_a_relay() {
     );
     assert_eq!(requests(&downstream), 0, "{:?}", downstream.borrow());
     assert_eq!(requests(&upstream), 0, "{:?}", upstream.borrow());
-    assert_eq!(tab.large_value_nodes_for_test().unwrap().0, at_tab);
+    assert_eq!(
+        jazz::db::block_on(tab.large_value_nodes_for_test())
+            .unwrap()
+            .0,
+        at_tab
+    );
 }
 
 #[test]
@@ -2557,7 +2581,7 @@ fn partial_selects_read_only_their_part_of_text_and_json() {
             ("blob", Value::Bytes(Vec::new())),
         ],
     );
-    let (total, _) = server.large_value_nodes_for_test().unwrap();
+    let (total, _) = jazz::db::block_on(server.large_value_nodes_for_test()).unwrap();
     let utf16 = Query::from("docs").select(["body"]).select_part(
         "body",
         Part::TextUtf16 {
@@ -2573,7 +2597,7 @@ fn partial_selects_read_only_their_part_of_text_and_json() {
         partial_rows(&alice, &utf16, "body"),
         vec![Some(Value::String(expected))]
     );
-    let (after_utf16, _) = alice.large_value_nodes_for_test().unwrap();
+    let (after_utf16, _) = jazz::db::block_on(alice.large_value_nodes_for_test()).unwrap();
     assert!(after_utf16 < total, "{after_utf16} of {total}");
     // UTF-8 bytes on code point boundaries; one splitting one is refused.
     let start = body.char_indices().nth(300_000).unwrap().0 as u64;
@@ -2595,7 +2619,7 @@ fn partial_selects_read_only_their_part_of_text_and_json() {
         panic!("{got:?}");
     };
     assert_eq!(got, body[start as usize..end as usize]);
-    let (after_utf8, _) = alice.large_value_nodes_for_test().unwrap();
+    let (after_utf8, _) = jazz::db::block_on(alice.large_value_nodes_for_test()).unwrap();
     assert!(after_utf8 < total, "{after_utf8} of {total}");
     let expected: String = body.chars().skip(700_000).take(50).collect();
     assert_eq!(
@@ -2680,8 +2704,8 @@ fn a_json_pointer_select_reads_its_subtree() {
             serde_json::json!(text(3, 40)).to_string()
         ))]
     );
-    let (after, _) = alice.large_value_nodes_for_test().unwrap();
-    let (total, _) = server.large_value_nodes_for_test().unwrap();
+    let (after, _) = jazz::db::block_on(alice.large_value_nodes_for_test()).unwrap();
+    let (total, _) = jazz::db::block_on(server.large_value_nodes_for_test()).unwrap();
     assert!(
         after < total,
         "a leading array index reads a prefix: {after} of {total}"

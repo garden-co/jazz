@@ -321,7 +321,10 @@ fn closing_blocks_large_value_mutations_but_allows_stream_cleanup() {
     assert_eq!(values(&alice), [Value::String("original".to_owned())]);
     // Staged chunks have no row representation, so the existing inventory
     // diagnostic is needed to prove abort/drop cleanup did not leak them.
-    assert_eq!(alice.large_value_nodes_for_test().unwrap(), (0, 0));
+    assert_eq!(
+        jazz::db::block_on(alice.large_value_nodes_for_test()).unwrap(),
+        (0, 0)
+    );
 }
 
 /// Alice fences new writes after committing locally. Bob's authority still
@@ -339,7 +342,7 @@ fn admitted_uploads_and_remote_reads_drain_after_the_fence() {
     let bob = open(2);
     let (client, server) = duplex();
     let _upstream = block_on(alice.connect_upstream(client));
-    bob.accept_subscriber(server, author).unwrap();
+    jazz::db::block_on(bob.accept_subscriber(server, author)).unwrap();
     let write = block_on(alice.insert("docs", body("committed"), Default::default())).unwrap();
     let mut wait =
         pin!(alice.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Global));

@@ -73,16 +73,13 @@ fn a_relay_serves_upstream_rows_in_the_tick_that_applies_them() {
     let core = open(0xc0);
     let relay = open(0x10);
     let tab = open(0x11);
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     let (client_side, server_side) = duplex();
     block_on(relay.connect_upstream(client_side));
-    core.accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(core.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     let (client_side, server_side) = duplex();
     block_on(tab.connect_upstream(client_side));
-    relay
-        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(relay.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     insert(&core, "first");
 
     let query = tab.prepare_query(&Query::from("todos")).unwrap();

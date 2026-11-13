@@ -155,6 +155,7 @@ impl ServerState {
         self.runtime()
     }
 
+    #[cfg(any(test, feature = "embedded-server"))]
     pub(crate) fn start_core_server_shell(
         &self,
         schema: jazz::schema::JazzSchema,

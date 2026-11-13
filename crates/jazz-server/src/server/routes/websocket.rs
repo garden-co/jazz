@@ -3093,9 +3093,11 @@ mod tests {
         let parts = jazz::protocol_limits::MAX_UNTRUSTED_MESSAGE_BYTES / (part.len() - 1) + 1;
         assert_eq!(parts, 5);
         for _ in 0..parts {
-            ws.send(WsMessage::Binary(ws_frame_batch(&[part.clone()]).into()))
-                .await
-                .expect("send a leading part");
+            ws.send(WsMessage::Binary(
+                ws_frame_batch(std::slice::from_ref(&part)).into(),
+            ))
+            .await
+            .expect("send a leading part");
         }
         let error = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -3125,7 +3127,9 @@ mod tests {
         let mut trusted = open_negotiated_ws(addr, &state, AuthorSubject::SYSTEM).await;
         for _ in 0..parts {
             trusted
-                .send(WsMessage::Binary(ws_frame_batch(&[part.clone()]).into()))
+                .send(WsMessage::Binary(
+                    ws_frame_batch(std::slice::from_ref(&part)).into(),
+                ))
                 .await
                 .expect("send a leading part");
         }
@@ -3283,7 +3287,7 @@ mod tests {
         let hash = jazz::tools::public_schema::SchemaHash::compute(&structural).to_string();
         let permissions = source
             .iter()
-            .map(|(name, table)| (name.clone(), table.policies.clone()))
+            .map(|(name, table)| (*name, table.policies.clone()))
             .collect();
         let response = deploy(
             state.clone(),

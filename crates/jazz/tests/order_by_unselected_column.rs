@@ -139,7 +139,7 @@ fn local_preview_read_orders_by_an_unselected_column() {
         .prepare_query(&by_rank(OrderDirection::Desc))
         .expect("prepare query");
     assert_eq!(
-        titles(db.read(&prepared).expect("read")),
+        titles(jazz::db::block_on(db.read(&prepared)).expect("read")),
         ["d", "c", "b", "a"]
     );
 }

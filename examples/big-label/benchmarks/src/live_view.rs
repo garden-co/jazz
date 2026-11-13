@@ -83,10 +83,11 @@ impl LiveViewFixture {
         .expect("run live-view query");
         let observed = rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>();
         assert_eq!(observed, self.expected, "live-view result changed");
-        let (sql, plan) = self
-            .db
-            .explain_query_plan(&self.prepared, Some(AuthorSubject::SYSTEM))
-            .expect("explain live-view query");
+        let (sql, plan) = jazz::db::block_on(
+            self.db
+                .explain_query_plan(&self.prepared, Some(AuthorSubject::SYSTEM)),
+        )
+        .expect("explain live-view query");
         assert!(
             plan.contains("USING INDEX") && !plan.contains(&format!("SCAN {TABLE}")),
             "live-view hydration must seek the label index: {plan}\n{sql}"

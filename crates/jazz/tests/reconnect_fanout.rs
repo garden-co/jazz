@@ -129,7 +129,7 @@ fn cells(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
 fn connect(server: &Db, client: &Db, who: AuthorSubject) -> jazz::db::Upstream {
     let (client_side, server_side) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, who).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, who)).unwrap();
     upstream
 }
 

@@ -420,14 +420,14 @@ fn a_table_rename_holds_across_reopen_and_for_a_fresh_receiver() {
     }
 
     let server = open_at(after.clone(), &path);
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     let fresh = block_on(Db::open(
         bare_config(after, 2, user(2)).with_migrations(vec![before], vec![rename]),
     ))
     .unwrap();
     let (client_side, server_side) = pipe();
     let _link = block_on(fresh.connect_upstream(client_side));
-    server.accept_subscriber(server_side, user(2)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, user(2))).unwrap();
     let query = fresh.prepare_query(&Query::from("documents")).unwrap();
     let mut stream = block_on(fresh.subscribe(&query, ReadOpts::default())).unwrap();
     pump(&server, &[&fresh]);
@@ -615,8 +615,8 @@ fn a_client_on_the_old_schema_syncs_with_a_server_on_the_new_one() {
     let (new_client, new_server) = pipe();
     let _old_link = block_on(old.connect_upstream(old_client));
     let _new_link = block_on(new.connect_upstream(new_client));
-    server.accept_subscriber(old_server, user(1)).unwrap();
-    server.accept_subscriber(new_server, user(2)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(old_server, user(1))).unwrap();
+    jazz::db::block_on(server.accept_subscriber(new_server, user(2))).unwrap();
     let old_query = old.prepare_query(&Query::from("todos")).unwrap();
     let new_query = new.prepare_query(&Query::from("tasks")).unwrap();
     let _old_stream = block_on(old.subscribe(&old_query, ReadOpts::default())).unwrap();
@@ -694,7 +694,7 @@ fn an_old_client_is_served_under_the_current_policies_by_the_stored_column() {
     let client = block_on(Db::open(config(old_schema, 1, user(1)))).unwrap();
     let (client_side, server_side) = pipe();
     let _link = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, user(1))).unwrap();
     let query = client.prepare_query(&Query::from("notes")).unwrap();
     let _stream = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
@@ -876,8 +876,8 @@ fn a_row_a_client_on_the_old_schema_inserts_gets_the_copy() {
     let (new_client, new_server) = pipe();
     let _old_link = block_on(old.connect_upstream(old_client));
     let _new_link = block_on(new.connect_upstream(new_client));
-    server.accept_subscriber(old_server, user(1)).unwrap();
-    server.accept_subscriber(new_server, user(2)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(old_server, user(1))).unwrap();
+    jazz::db::block_on(server.accept_subscriber(new_server, user(2))).unwrap();
     let new_query = new.prepare_query(&Query::from("todos")).unwrap();
     let _new_stream = block_on(new.subscribe(&new_query, ReadOpts::default())).unwrap();
 
@@ -1033,7 +1033,7 @@ fn a_client_store_upgraded_across_a_rename_reads_its_cached_rows_by_the_new_name
         .unwrap();
         let (c, s) = pipe();
         let _link = block_on(client.connect_upstream(c));
-        server.accept_subscriber(s, user(1)).unwrap();
+        jazz::db::block_on(server.accept_subscriber(s, user(1))).unwrap();
         let q = client.prepare_query(&Query::from("todos")).unwrap();
         let _stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
         pump(&server, &[&client]);
@@ -1053,7 +1053,7 @@ fn a_client_store_upgraded_across_a_rename_reads_its_cached_rows_by_the_new_name
     );
     let (c, s) = pipe();
     let _link = block_on(client.connect_upstream(c));
-    server.accept_subscriber(s, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(s, user(1))).unwrap();
     let q = client.prepare_query(&Query::from("todos")).unwrap();
     let _stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
@@ -1088,7 +1088,7 @@ fn a_pending_write_staged_before_a_client_upgrade_uploads_and_reads_by_the_new_n
     .unwrap();
     let (c, s) = pipe();
     let _link = block_on(client.connect_upstream(c));
-    server.accept_subscriber(s, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(s, user(1))).unwrap();
     pump(&server, &[&client]);
     let rejections = client.take_upstream_rejections();
     assert!(rejections.is_empty(), "{rejections:?}");
@@ -1120,17 +1120,17 @@ fn a_tab_behind_a_worker_reads_a_renamed_column_after_the_worker_mirrors() {
     seed(&server, "todos", 1, &[("name", text("from server"))]);
     let worker = block_on(Db::open(config(v2(), 0xa0, user(0xa0)))).unwrap();
     let tab = block_on(Db::open(config(v2(), 0xa1, user(0xa0)))).unwrap();
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
     let (tc, ts) = pipe();
     let _tab_link = block_on(tab.connect_upstream(tc));
-    worker.accept_subscriber(ts, user(0xa0)).unwrap();
+    jazz::db::block_on(worker.accept_subscriber(ts, user(0xa0))).unwrap();
     pump(&worker, &[&tab]);
 
     let (wc, ws) = pipe();
     let _worker_link = block_on(worker.connect_upstream(wc));
-    server.accept_subscriber(ws, user(0xa0)).unwrap();
-    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(server.accept_subscriber(ws, user(0xa0))).unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
     let q = tab.prepare_query(&Query::from("todos")).unwrap();
     let _stream = block_on(tab.subscribe(&q, ReadOpts::default())).unwrap();
     for _ in 0..6 {
@@ -1161,7 +1161,7 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
         // Offline under v1, then v3 without the lenses between: `tasks` is
         // stored here as a new table, beside v1's `todos`.
         let client = open_at(v1(), &path);
-        client.become_replica();
+        jazz::db::block_on(client.become_replica());
         insert(&client, "todos", 2, "title", "v1 row");
     }
     let client = block_on(Db::open_at(
@@ -1173,7 +1173,7 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
     insert(&client, "tasks", 3, "name", "local task");
     let (c, s) = pipe();
     let _link = block_on(client.connect_upstream(c));
-    server.accept_subscriber(s, AuthorSubject::SYSTEM).unwrap();
+    jazz::db::block_on(server.accept_subscriber(s, AuthorSubject::SYSTEM)).unwrap();
     let q = client.prepare_query(&Query::from("tasks")).unwrap();
     let mut stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
@@ -1271,15 +1271,14 @@ fn a_replicated_insert_names_every_column_of_its_version_by_stored_name() {
         "by stored names, the default included"
     );
 
-    server
-        .accept_subscriber(
-            Box::new(Pipe {
-                out: down,
-                inbound: up,
-            }),
-            user(1),
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Pipe {
+            out: down,
+            inbound: up,
+        }),
+        user(1),
+    ))
+    .unwrap();
     pump(&server, &[&old]);
     assert_eq!(read(&server, "todos", "name"), texts(&["x"]));
 }
@@ -1293,7 +1292,7 @@ fn an_old_clients_insert_fills_a_copy_at_the_server() {
     let old = block_on(Db::open(config(v1(), 1, user(1)))).unwrap();
     let (c, s) = pipe();
     let _link = block_on(old.connect_upstream(c));
-    server.accept_subscriber(s, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(s, user(1))).unwrap();
     insert(&old, "todos", 1, "title", "from old");
     pump(&server, &[&old]);
     assert_eq!(read(&server, "todos", "search_title"), texts(&["from old"]));
@@ -1316,8 +1315,8 @@ fn a_dropped_column_takes_its_backwards_default_only_where_an_insert_leaves_it_o
     let (new_client, new_server) = pipe();
     let _old_link = block_on(old.connect_upstream(old_client));
     let _new_link = block_on(new.connect_upstream(new_client));
-    server.accept_subscriber(old_server, user(1)).unwrap();
-    server.accept_subscriber(new_server, user(2)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(old_server, user(1))).unwrap();
+    jazz::db::block_on(server.accept_subscriber(new_server, user(2))).unwrap();
     insert(&new, "todos", 1, "title", "new");
     block_on(old.insert(
         "todos",
@@ -1361,15 +1360,14 @@ fn a_write_naming_columns_the_server_does_not_store_is_refused() {
     let q = lensless.prepare_query(&Query::from("todos")).unwrap();
     let mut stream = block_on(lensless.subscribe(&q, ReadOpts::default())).unwrap();
     block_on(lensless.tick()).unwrap();
-    server
-        .accept_subscriber(
-            Box::new(Pipe {
-                out: down.clone(),
-                inbound: up,
-            }),
-            user(2),
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Pipe {
+            out: down.clone(),
+            inbound: up,
+        }),
+        user(2),
+    ))
+    .unwrap();
     block_on(server.tick()).unwrap();
     let reason = down.borrow().iter().find_map(|message| match message {
         SyncMessage::Fate {
@@ -1420,7 +1418,7 @@ fn an_old_clients_insert_takes_a_lens_added_columns_default() {
     let old = block_on(Db::open(config(v1(), 1, user(1)))).unwrap();
     let (c, s) = pipe();
     let _link = block_on(old.connect_upstream(c));
-    server.accept_subscriber(s, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(s, user(1))).unwrap();
     insert(&old, "todos", 1, "title", "from old");
     pump(&server, &[&old]);
     assert_eq!(read(&server, "todos", "owner"), texts(&["nobody"]));
@@ -1474,7 +1472,7 @@ fn an_old_clients_insert_fills_a_copy_a_later_version_dropped() {
     let old = block_on(Db::open(config(v1(), 1, user(1)))).unwrap();
     let (c, s) = pipe();
     let _link = block_on(old.connect_upstream(c));
-    server.accept_subscriber(s, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(s, user(1))).unwrap();
     insert(&old, "todos", 1, "title", "from old");
     pump(&server, &[&old]);
     let v2 = block_on(server.register_schema_view(with_copy())).unwrap();
@@ -1509,7 +1507,7 @@ fn an_old_clients_insert_takes_an_added_columns_default_a_later_version_dropped(
     let old = block_on(Db::open(config(v1(), 1, user(1)))).unwrap();
     let (c, s) = pipe();
     let _link = block_on(old.connect_upstream(c));
-    server.accept_subscriber(s, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(s, user(1))).unwrap();
     insert(&old, "todos", 1, "title", "from old");
     pump(&server, &[&old]);
     let v2 = block_on(server.register_schema_view(with_note())).unwrap();
@@ -1543,8 +1541,8 @@ fn an_upsert_creating_its_row_takes_its_writers_defaults() {
     let (new_client, new_server) = pipe();
     let _old_link = block_on(old.connect_upstream(old_client));
     let _new_link = block_on(new.connect_upstream(new_client));
-    server.accept_subscriber(old_server, user(1)).unwrap();
-    server.accept_subscriber(new_server, user(2)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(old_server, user(1))).unwrap();
+    jazz::db::block_on(server.accept_subscriber(new_server, user(2))).unwrap();
     upsert(&old, 1, "old");
     upsert(&new, 2, "new");
     assert_eq!(read(&old, "todos", "rank"), vec![Value::I64(0)]);

@@ -67,7 +67,7 @@ fn setup(users: u32) -> (Db, Vec<jazz::db::SubscriptionStream>) {
     let prepared = db.prepare_query(&Query::from("documents")).unwrap();
     let mut streams = Vec::new();
     for n in 0..users {
-        db.set_identity_claims(user(n), claims(&format!("r{}", n % 10)));
+        jazz::db::block_on(db.set_identity_claims(user(n), claims(&format!("r{}", n % 10))));
         streams.push(
             block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), user(n))).unwrap(),
         );
@@ -97,7 +97,7 @@ fn deltas(stream: &mut jazz::db::SubscriptionStream) -> (usize, usize) {
 #[test]
 fn only_the_changed_sessions_results_move() {
     let (db, mut streams) = setup(20);
-    db.set_identity_claims(user(3), claims("r7"));
+    jazz::db::block_on(db.set_identity_claims(user(3), claims("r7")));
     assert_eq!(
         deltas(&mut streams[3]),
         (50, 50),
@@ -118,7 +118,9 @@ fn claims_change_cost_with_many_sessions() {
     let mut times = Vec::new();
     for round in 0..20u32 {
         let started = std::time::Instant::now();
-        db.set_identity_claims(user(round), claims(&format!("r{}", (round + 1) % 10)));
+        jazz::db::block_on(
+            db.set_identity_claims(user(round), claims(&format!("r{}", (round + 1) % 10))),
+        );
         times.push(started.elapsed());
         assert_eq!(deltas(&mut streams[round as usize]), (50, 50));
     }

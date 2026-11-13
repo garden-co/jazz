@@ -11,7 +11,9 @@ use crate::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 use crate::result_tree::{ResultNode, ResultRelation};
 use crate::schema::JazzSchema;
 use crate::tools::{PolicyExpr, TablePolicies};
-use rusqlite::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
+use jazz_sql::Cell as SqlCell;
+#[cfg(feature = "sqlite")]
+use rusqlite::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput};
 
 pub(crate) fn unsupported(what: impl std::fmt::Display) -> Error {
     Error::new(ErrorCode::Query, format!("{what} is not supported yet"))
@@ -21,123 +23,53 @@ pub(crate) fn query_error(what: impl std::fmt::Display) -> Error {
     Error::new(ErrorCode::Query, what.to_string())
 }
 
-/// One-row queries through the connection's statement cache. jazz-db asks
-/// the same few shapes per row (a row's state, an interned author), so
-/// re-parsing each one costs more than running it.
-pub(crate) trait CachedRow {
-    fn cached_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
-    where
-        P: rusqlite::Params,
-        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>;
+pub(crate) fn storage(error: impl Into<Error>) -> Error {
+    error.into()
 }
 
-impl CachedRow for rusqlite::Connection {
-    fn cached_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
-    where
-        P: rusqlite::Params,
-        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
-    {
-        self.prepare_cached(sql)?.query_row(params, f)
+impl From<jazz_sql::CellError> for Error {
+    fn from(error: jazz_sql::CellError) -> Self {
+        Error::new(ErrorCode::Storage, error.to_string())
+    }
+}
+#[cfg(feature = "sqlite")]
+impl From<rusqlite::Error> for Error {
+    fn from(error: rusqlite::Error) -> Self {
+        if error.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted) {
+            return crate::large::missing();
+        }
+        Error::new(ErrorCode::Storage, error.to_string())
     }
 }
 
-pub(crate) fn storage(error: rusqlite::Error) -> Error {
-    // Only the large-value collation and functions interrupt a statement,
-    // when a chunk it needs is not local (see `crate::large`).
-    if error.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted) {
-        return crate::large::missing();
+/// Transaction-local state owned by one Jazz database. No SQLite handles or
+/// thread-local lookup are needed to restore tags or invalidate learned caches.
+#[derive(Default)]
+pub(crate) struct TransactionJournal {
+    frames: RefCell<Vec<Vec<(ColumnTags, EnumTags)>>>,
+    rollbacks: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl TransactionJournal {
+    fn begin(&self) {
+        self.frames.borrow_mut().push(Vec::new());
     }
-    Error::new(ErrorCode::Storage, error.to_string())
-}
 
-/// Open `SAVEPOINT name`; [`end_savepoint`] closes it.
-pub(crate) fn begin_savepoint(conn: &rusqlite::Connection, name: &str) -> Result<(), Error> {
-    conn.execute_batch(&format!("SAVEPOINT {name}"))
-        .map_err(storage)?;
-    TAG_UNDO.with(|undo| {
-        undo.borrow_mut()
-            .entry(undo_key(conn))
-            .or_default()
-            .push(Vec::new())
-    });
-    Ok(())
-}
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn rollback_counter(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        self.rollbacks.clone()
+    }
 
-thread_local! {
-    /// By connection: each open savepoint's undo log, innermost last: the
-    /// enum columns whose tags changed inside it, as they were before.
-    static TAG_UNDO: RefCell<std::collections::HashMap<usize, Vec<Vec<(ColumnTags, EnumTags)>>>> =
-        RefCell::default();
-}
-
-/// A connection's key in [`TAG_UNDO`]: its SQLite handle, which moving the
-/// `Connection` keeps.
-fn undo_key(conn: &rusqlite::Connection) -> usize {
-    // SAFETY: the handle is only compared, never dereferenced.
-    unsafe { conn.handle() as usize }
-}
-
-/// Drop `conn`'s undo logs as it closes: a savepoint left open dies with
-/// it, and a later connection may get its handle's address.
-pub(crate) fn forget_tag_undo(conn: &rusqlite::Connection) {
-    TAG_UNDO.with(|undo| undo.borrow_mut().remove(&undo_key(conn)));
-    ROLLBACKS.with(|rollbacks| rollbacks.borrow_mut().remove(&undo_key(conn)));
-}
-
-thread_local! {
-    /// By connection: how many times it rolled back a savepoint or a whole
-    /// transaction. What a cache learned inside an open transaction holds
-    /// while this count stays as it was.
-    static ROLLBACKS: RefCell<std::collections::HashMap<usize, u64>> = RefCell::default();
-}
-
-/// How many rollbacks `conn` has seen (see [`ROLLBACKS`]).
-pub(crate) fn rollbacks(conn: &rusqlite::Connection) -> u64 {
-    ROLLBACKS.with(|rollbacks| {
-        rollbacks
-            .borrow()
-            .get(&undo_key(conn))
-            .copied()
-            .unwrap_or(0)
-    })
-}
-
-/// Count a rollback on the connection whose [`rollback_key`] is `key`.
-pub(crate) fn note_rollback(key: usize) {
-    ROLLBACKS.with(|rollbacks| *rollbacks.borrow_mut().entry(key).or_default() += 1);
-}
-
-/// `conn`'s key for [`note_rollback`], for a hook that cannot borrow it.
-pub(crate) fn rollback_key(conn: &rusqlite::Connection) -> usize {
-    undo_key(conn)
-}
-
-/// Stored enum column `tags` is about to change on `conn`: the innermost
-/// open savepoint logs how it was, once, to put back if it rolls back.
-pub(crate) fn tags_changing(conn: &rusqlite::Connection, tags: &ColumnTags) {
-    TAG_UNDO.with(|undo| {
-        if let Some(frame) = undo
-            .borrow_mut()
-            .get_mut(&undo_key(conn))
-            .and_then(|frames| frames.last_mut())
+    fn changed(&self, tags: &ColumnTags) {
+        if let Some(frame) = self.frames.borrow_mut().last_mut()
             && !frame.iter().any(|(logged, _)| Rc::ptr_eq(logged, tags))
         {
             frame.push((tags.clone(), tags.borrow().clone()));
         }
-    });
-}
+    }
 
-/// Close `conn`'s innermost savepoint's undo log: kept, its entries join
-/// the enclosing savepoint's (the outermost's are committed); rolled back,
-/// its columns' tags are put back. `all` closes every open log (SQLite
-/// rolled the whole transaction back).
-fn close_tag_undo(conn: &rusqlite::Connection, kept: bool, all: bool) {
-    TAG_UNDO.with(|undo| {
-        let mut undo = undo.borrow_mut();
-        let key = undo_key(conn);
-        let Some(frames) = undo.get_mut(&key) else {
-            return;
-        };
+    fn close(&self, kept: bool, all: bool) {
+        let mut frames = self.frames.borrow_mut();
         let count = if all { frames.len() } else { 1 };
         for _ in 0..count {
             let Some(frame) = frames.pop() else {
@@ -159,17 +91,110 @@ fn close_tag_undo(conn: &rusqlite::Connection, kept: bool, all: bool) {
                 }
             }
         }
-        if frames.is_empty() {
-            undo.remove(&key);
-        }
-    });
+    }
+
+    pub(crate) fn note_rollback(&self) {
+        self.rollbacks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn rollbacks(&self) -> u64 {
+        self.rollbacks.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Transaction control and metadata ownership, independent of a native handle.
+/// Worker implementations must own admitted SQL through completion and order
+/// abandoned-savepoint cleanup before any later operation (or stop the owner).
+pub(crate) trait TransactionConnection {
+    fn transaction_open(&self) -> bool;
+    fn transaction_sql(&self, sql: &str) -> impl std::future::Future<Output = Result<(), Error>>;
+    async fn begin_savepoint(&self, name: &str) -> Result<(), Error> {
+        self.transaction_sql(&format!("SAVEPOINT {name}")).await
+    }
+    async fn end_savepoint(&self, name: &str, keep: bool) -> Result<(), Error> {
+        let sql = if keep {
+            format!("RELEASE {name}")
+        } else {
+            format!("ROLLBACK TO {name}; RELEASE {name}")
+        };
+        self.transaction_sql(&sql).await
+    }
+    fn journal(&self) -> Option<&TransactionJournal> {
+        None
+    }
+    fn abandon_savepoint(&self, name: &str);
+}
+
+/// Compatibility access for synchronous native hosts and native Drop cleanup.
+/// The awaitable transaction algorithm below does not require this trait.
+#[cfg(feature = "sqlite")]
+pub(crate) trait NativeTransactionConnection: TransactionConnection {
+    fn sqlite(&self) -> &rusqlite::Connection;
+}
+
+#[cfg(feature = "sqlite")]
+impl TransactionConnection for rusqlite::Connection {
+    fn transaction_open(&self) -> bool {
+        use jazz_sql::Connection as _;
+        jazz_sql::native::Native(self).transaction_open()
+    }
+    fn transaction_sql(&self, sql: &str) -> impl std::future::Future<Output = Result<(), Error>> {
+        std::future::ready(self.execute_batch(sql).map_err(storage))
+    }
+    fn abandon_savepoint(&self, name: &str) {
+        let _ = end_savepoint_inline(self, name, false);
+    }
+}
+#[cfg(feature = "sqlite")]
+impl NativeTransactionConnection for rusqlite::Connection {
+    fn sqlite(&self) -> &rusqlite::Connection {
+        self
+    }
+}
+
+/// Open a native savepoint and its owned metadata undo frame.
+#[cfg(feature = "sqlite")]
+pub(crate) fn begin_savepoint_inline<C: NativeTransactionConnection + ?Sized>(
+    conn: &C,
+    name: &str,
+) -> Result<(), Error> {
+    conn.sqlite()
+        .execute_batch(&format!("SAVEPOINT {name}"))
+        .map_err(storage)?;
+    if let Some(journal) = conn.journal() {
+        journal.begin();
+    }
+    Ok(())
+}
+
+/// Await transaction SQL before publishing the corresponding undo frame.
+pub(crate) async fn begin_savepoint<C: TransactionConnection + ?Sized>(
+    conn: &C,
+    name: &str,
+) -> Result<(), Error> {
+    conn.begin_savepoint(name).await?;
+    if let Some(journal) = conn.journal() {
+        journal.begin();
+    }
+    Ok(())
+}
+
+pub(crate) fn rollbacks(conn: &crate::host::DbConnection) -> u64 {
+    conn.journal_state().rollbacks()
+}
+
+/// Log an enum's prior state in the innermost owned savepoint.
+pub(crate) fn tags_changing(conn: &crate::host::DbConnection, tags: &ColumnTags) {
+    conn.journal_state().changed(tags);
 }
 
 /// Release `SAVEPOINT name` (`keep`), or roll back everything since it. SQLite
 /// rolls a whole transaction back by itself after some errors (a full disk,
 /// an I/O error); then the savepoint is gone and there is nothing to undo.
-pub(crate) fn end_savepoint(
-    conn: &rusqlite::Connection,
+#[cfg(feature = "sqlite")]
+pub(crate) fn end_savepoint_inline<C: NativeTransactionConnection + ?Sized>(
+    conn: &C,
     name: &str,
     keep: bool,
 ) -> Result<(), Error> {
@@ -178,11 +203,34 @@ pub(crate) fn end_savepoint(
     } else {
         format!("ROLLBACK TO {name}; RELEASE {name}")
     };
-    match conn.execute_batch(&sql) {
+    finish_savepoint(
+        conn,
+        keep,
+        conn.sqlite().execute_batch(&sql).map_err(storage),
+    )
+}
+
+pub(crate) async fn end_savepoint<C: TransactionConnection + ?Sized>(
+    conn: &C,
+    name: &str,
+    keep: bool,
+) -> Result<(), Error> {
+    let result = conn.end_savepoint(name, keep).await;
+    finish_savepoint(conn, keep, result)
+}
+
+pub(crate) fn finish_savepoint<C: TransactionConnection + ?Sized>(
+    conn: &C,
+    keep: bool,
+    result: Result<(), Error>,
+) -> Result<(), Error> {
+    match result {
         Ok(()) => {
-            close_tag_undo(conn, keep, false);
-            if !keep {
-                note_rollback(undo_key(conn));
+            if let Some(journal) = conn.journal() {
+                journal.close(keep, false);
+            }
+            if !keep && let Some(journal) = conn.journal() {
+                journal.note_rollback();
             }
             Ok(())
         }
@@ -190,32 +238,67 @@ pub(crate) fn end_savepoint(
             // In autocommit mode SQLite already rolled everything back;
             // otherwise the savepoint is still open (a busy RELEASE, say),
             // and so is its log.
-            if conn.is_autocommit() {
-                close_tag_undo(conn, false, true);
+            if !conn.transaction_open()
+                && let Some(journal) = conn.journal()
+            {
+                journal.close(false, true);
             }
             // The `ROLLBACK TO` may have run before its `RELEASE` failed:
             // counting one too many only drops a cache entry.
-            if !keep {
-                note_rollback(undo_key(conn));
+            if !keep && let Some(journal) = conn.journal() {
+                journal.note_rollback();
             }
-            if !keep && conn.is_autocommit() {
+            if !keep && !conn.transaction_open() {
                 Ok(())
             } else {
-                Err(storage(error))
+                Err(error)
             }
         }
     }
 }
 
 /// Run `f` inside `SAVEPOINT name`: kept if it succeeds, undone if not.
-pub(crate) fn in_savepoint<T>(
-    conn: &rusqlite::Connection,
+#[cfg(feature = "sqlite")]
+pub(crate) fn in_savepoint<C: NativeTransactionConnection + ?Sized, T>(
+    conn: &C,
     name: &str,
     f: impl FnOnce() -> Result<T, Error>,
 ) -> Result<T, Error> {
-    begin_savepoint(conn, name)?;
+    begin_savepoint_inline(conn, name)?;
     let result = f();
-    end_savepoint(conn, name, result.is_ok())?;
+    end_savepoint_inline(conn, name, result.is_ok())?;
+    result
+}
+
+/// Savepoint ownership across an awaitable operation. On cancellation the
+/// connection owner must roll back before allowing later work. Native owners
+/// do that inline; worker owners retain their lease while cleanup completes.
+pub(crate) async fn in_savepoint_async<C: TransactionConnection + ?Sized, T>(
+    conn: &C,
+    name: &str,
+    f: impl AsyncFnOnce() -> Result<T, Error>,
+) -> Result<T, Error> {
+    struct Guard<'a, C: TransactionConnection + ?Sized> {
+        conn: &'a C,
+        name: &'a str,
+        armed: bool,
+    }
+    impl<C: TransactionConnection + ?Sized> Drop for Guard<'_, C> {
+        fn drop(&mut self) {
+            if self.armed {
+                self.conn.abandon_savepoint(self.name);
+            }
+        }
+    }
+    begin_savepoint(conn, name).await?;
+    let mut guard = Guard {
+        conn,
+        name,
+        armed: true,
+    };
+    let result = f().await;
+    end_savepoint(conn, name, result.is_ok()).await?;
+    guard.armed = false;
     result
 }
 
@@ -231,38 +314,90 @@ pub enum Sql {
 }
 
 impl Sql {
-    pub(crate) fn as_ref(&self) -> ValueRef<'_> {
+    pub(crate) fn as_param(&self) -> jazz_sql::Param<'_> {
+        match self.as_ref() {
+            SqlCell::Null => jazz_sql::Param::Null,
+            SqlCell::Integer(value) => jazz_sql::Param::Integer(value),
+            SqlCell::Real(value) => jazz_sql::Param::Real(value),
+            SqlCell::Text(value) => jazz_sql::Param::TextBytes(value),
+            SqlCell::Blob(value) => jazz_sql::Param::Blob(value),
+        }
+    }
+
+    pub(crate) fn as_ref(&self) -> SqlCell<'_> {
         match self {
-            Sql::Null => ValueRef::Null,
-            Sql::Integer(v) => ValueRef::Integer(*v),
-            Sql::Real(v) => ValueRef::Real(*v),
-            Sql::Text(v) => ValueRef::Text(v),
-            Sql::Blob(v) => ValueRef::Blob(v),
+            Sql::Null => SqlCell::Null,
+            Sql::Integer(v) => SqlCell::Integer(*v),
+            Sql::Real(v) => SqlCell::Real(*v),
+            Sql::Text(v) => SqlCell::Text(v),
+            Sql::Blob(v) => SqlCell::Blob(v),
         }
     }
 }
 
-impl From<ValueRef<'_>> for Sql {
-    fn from(value: ValueRef<'_>) -> Self {
+impl From<SqlCell<'_>> for Sql {
+    fn from(value: SqlCell<'_>) -> Self {
         match value {
-            ValueRef::Null => Sql::Null,
-            ValueRef::Integer(v) => Sql::Integer(v),
-            ValueRef::Real(v) => Sql::Real(v),
-            ValueRef::Text(v) => Sql::Text(v.to_vec()),
-            ValueRef::Blob(v) => Sql::Blob(v.to_vec()),
+            SqlCell::Null => Sql::Null,
+            SqlCell::Integer(v) => Sql::Integer(v),
+            SqlCell::Real(v) => Sql::Real(v),
+            SqlCell::Text(v) => Sql::Text(v.to_vec()),
+            SqlCell::Blob(v) => Sql::Blob(v.to_vec()),
         }
     }
 }
 
+impl jazz_sql::ToParam for Sql {
+    fn as_param(&self) -> jazz_sql::Param<'_> {
+        self.as_param()
+    }
+}
+
+impl jazz_sql::FromCell for Sql {
+    fn from_cell(cell: jazz_sql::Cell<'_>) -> Result<Self, jazz_sql::CellError> {
+        use jazz_sql::Cell;
+        Ok(match cell {
+            Cell::Null => Self::Null,
+            Cell::Integer(value) => Self::Integer(value),
+            Cell::Real(value) => Self::Real(value),
+            Cell::Text(value) => Self::Text(value.to_vec()),
+            Cell::Blob(value) => Self::Blob(value.to_vec()),
+        })
+    }
+}
+
+// Compatibility with native hosts stays at this adapter boundary. Jazz's
+// decoders and parameter construction use provider-independent cells above.
+#[cfg(feature = "sqlite")]
 impl ToSql for Sql {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        Ok(ToSqlOutput::Borrowed(self.as_ref()))
+        use rusqlite::types::ValueRef;
+        Ok(ToSqlOutput::Borrowed(match self.as_ref() {
+            SqlCell::Null => ValueRef::Null,
+            SqlCell::Integer(v) => ValueRef::Integer(v),
+            SqlCell::Real(v) => ValueRef::Real(v),
+            SqlCell::Text(v) => ValueRef::Text(v),
+            SqlCell::Blob(v) => ValueRef::Blob(v),
+        }))
     }
 }
-
+#[cfg(feature = "sqlite")]
+impl From<rusqlite::types::ValueRef<'_>> for Sql {
+    fn from(value: rusqlite::types::ValueRef<'_>) -> Self {
+        use rusqlite::types::ValueRef;
+        match value {
+            ValueRef::Null => Self::Null,
+            ValueRef::Integer(v) => Self::Integer(v),
+            ValueRef::Real(v) => Self::Real(v),
+            ValueRef::Text(v) => Self::Text(v.to_vec()),
+            ValueRef::Blob(v) => Self::Blob(v.to_vec()),
+        }
+    }
+}
+#[cfg(feature = "sqlite")]
 impl FromSql for Sql {
-    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        Ok(Sql::from(value))
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> FromSqlResult<Self> {
+        Ok(Self::from(value))
     }
 }
 
@@ -376,60 +511,98 @@ pub(crate) fn array_needle(sql: Sql) -> Sql {
     }
 }
 
-/// Decode column `column`'s cell (see [`cell_from_sql`]).
-pub(crate) fn column_from_sql(
+/// Decode a stored column using the operation's SQL provider.
+pub(crate) async fn column_from_sql<S: jazz_sql::Sql>(
+    conn: &mut S,
     column: &Column,
-    cell: ValueRef<'_>,
+    cell: SqlCell<'_>,
     chunks: &crate::large::Chunks,
-) -> Result<Option<Value>, Error> {
-    cell_from_sql(&column.ty, column.tags.as_ref(), cell, chunks)
+) -> Result<Option<Value>, Error>
+where
+    S::Error: std::fmt::Display,
+{
+    cell_from_sql(conn, &column.ty, column.tags.as_ref(), cell, chunks).await
 }
 
-/// Decode a cell of type `ty`: an enum column's (with `tags`) as its
-/// variant names, any other as [`from_sql`] does.
-pub(crate) fn cell_from_sql(
+/// Whether decoding this cell requires epoch/chunk reads. Enum tags use
+/// integer storage too, but must always go through their column's tag mapping.
+pub(crate) fn needs_storage(ty: &ValueType, tags: Option<&ColumnTags>, cell: SqlCell<'_>) -> bool {
+    let mut base = ty;
+    while let ValueType::Nullable(inner) = base {
+        base = inner;
+    }
+    tags.is_none()
+        && matches!(cell, SqlCell::Integer(_))
+        && matches!(base, ValueType::String | ValueType::Bytes)
+}
+
+/// Decode a cell, awaiting storage only for a chunked string or bytes value.
+pub(crate) async fn cell_from_sql<S: jazz_sql::Sql>(
+    conn: &mut S,
     ty: &ValueType,
     tags: Option<&ColumnTags>,
-    cell: ValueRef<'_>,
+    cell: SqlCell<'_>,
     chunks: &crate::large::Chunks,
+) -> Result<Option<Value>, Error>
+where
+    S::Error: std::fmt::Display,
+{
+    if !needs_storage(ty, tags, cell) {
+        return inline_cell_from_sql(ty, tags, cell);
+    }
+    let bytes = crate::large::materialize(conn, chunks, cell).await?;
+    let mut base = ty;
+    while let ValueType::Nullable(inner) = base {
+        base = inner;
+    }
+    let inline = match base {
+        ValueType::String => SqlCell::Text(&bytes),
+        _ => SqlCell::Blob(&bytes),
+    };
+    inline_cell_from_sql(ty, tags, inline)
+}
+
+/// Decode cells that do not require storage. SQL callbacks use this path;
+/// chunked cells must be deferred until the cursor is closed.
+pub(crate) fn inline_cell_from_sql(
+    ty: &ValueType,
+    tags: Option<&ColumnTags>,
+    cell: SqlCell<'_>,
 ) -> Result<Option<Value>, Error> {
+    if needs_storage(ty, tags, cell) {
+        return Err(Error::new(
+            ErrorCode::Storage,
+            "chunked cell requires storage decoding",
+        ));
+    }
     match tags {
         Some(tags) => enum_value(&tags.borrow(), ty, cell),
-        None => from_sql(ty, cell, chunks),
+        None => inline_from_sql(ty, cell),
     }
 }
 
-/// Decode a SQLite cell by the column's declared type, reading a chunked
-/// large value's chunks. `None` is a NULL in a non-nullable column, which
-/// only an unwritten cell can hold.
-pub(crate) fn from_sql(
-    ty: &ValueType,
-    cell: ValueRef<'_>,
-    chunks: &crate::large::Chunks,
-) -> Result<Option<Value>, Error> {
+fn inline_from_sql(ty: &ValueType, cell: SqlCell<'_>) -> Result<Option<Value>, Error> {
     if let ValueType::Nullable(inner) = ty {
         return Ok(Some(match cell {
-            ValueRef::Null => Value::Nullable(None),
-            cell => Value::Nullable(from_sql(inner, cell, chunks)?.map(Box::new)),
+            SqlCell::Null => Value::Nullable(None),
+            cell => Value::Nullable(inline_from_sql(inner, cell)?.map(Box::new)),
         }));
     }
     match (ty, cell) {
-        (ValueType::String, ValueRef::Text(_) | ValueRef::Integer(_)) => {
-            return Ok(String::from_utf8(chunks.materialize(cell)?)
-                .ok()
-                .map(Value::String));
+        (ValueType::String, SqlCell::Text(bytes)) => {
+            return Ok(String::from_utf8(bytes.to_vec()).ok().map(Value::String));
         }
-        (ValueType::Bytes, ValueRef::Blob(_) | ValueRef::Integer(_)) => {
-            return Ok(Some(Value::Bytes(chunks.materialize(cell)?)));
+        (ValueType::Bytes, SqlCell::Blob(bytes)) => {
+            return Ok(Some(Value::Bytes(bytes.to_vec())));
         }
         // An author record, read as a JSON array of its fields (see
         // `compile::column_sql`).
-        (ValueType::Record(descriptor), ValueRef::Text(cell)) => {
+        (ValueType::Record(descriptor), SqlCell::Text(cell)) => {
             let json = serde_json::from_slice(cell)
                 .map_err(|e| Error::new(ErrorCode::Storage, format!("record cell: {e}")))?;
             return Ok(json_record(descriptor, &json));
         }
-        (ValueType::Array(_), ValueRef::Text(cell)) => {
+        (ValueType::Array(_), SqlCell::Text(cell)) => {
             let json = serde_json::from_slice(cell)
                 .map_err(|e| Error::new(ErrorCode::Storage, format!("array cell: {e}")))?;
             return Ok(json_element(ty, &json));
@@ -477,7 +650,7 @@ fn json_record(
     )))
 }
 
-fn decode_fixed(ty: &ValueType, cell: ValueRef<'_>) -> Option<Value> {
+fn decode_fixed(ty: &ValueType, cell: SqlCell<'_>) -> Option<Value> {
     let int = || cell.as_i64().ok();
     Some(match ty {
         ValueType::U8 => Value::U8(int()? as u8),
@@ -488,8 +661,8 @@ fn decode_fixed(ty: &ValueType, cell: ValueRef<'_>) -> Option<Value> {
         ValueType::I32 => Value::I32(int()? as i32),
         ValueType::I64 => Value::I64(int()?),
         ValueType::F64 => Value::F64(match cell {
-            ValueRef::Real(v) => v,
-            ValueRef::Integer(v) => v as f64,
+            SqlCell::Real(v) => v,
+            SqlCell::Integer(v) => v as f64,
             _ => return None,
         }),
         ValueType::Bool => Value::Bool(int()? != 0),
@@ -865,7 +1038,7 @@ fn enum_json(tags: &EnumTags, item: &Value) -> Result<serde_json::Value, Error> 
 }
 
 /// An enum column's cell back as its variant name (also inside an array).
-fn enum_value(tags: &EnumTags, ty: &ValueType, cell: ValueRef<'_>) -> Result<Option<Value>, Error> {
+fn enum_value(tags: &EnumTags, ty: &ValueType, cell: SqlCell<'_>) -> Result<Option<Value>, Error> {
     let unknown = |tag: i64| {
         Error::new(
             ErrorCode::Storage,
@@ -873,18 +1046,18 @@ fn enum_value(tags: &EnumTags, ty: &ValueType, cell: ValueRef<'_>) -> Result<Opt
         )
     };
     Ok(Some(match (ty, cell) {
-        (ValueType::Nullable(_), ValueRef::Null) => Value::Nullable(None),
+        (ValueType::Nullable(_), SqlCell::Null) => Value::Nullable(None),
         (ValueType::Nullable(inner), cell) => {
             return Ok(enum_value(tags, inner, cell)?.map(|v| Value::Nullable(Some(Box::new(v)))));
         }
-        (ValueType::String, ValueRef::Integer(tag)) => {
+        (ValueType::String, SqlCell::Integer(tag)) => {
             Value::String(tags.name(tag).ok_or_else(|| unknown(tag))?.to_owned())
         }
-        (ValueType::String, ValueRef::Text(name)) => match std::str::from_utf8(name) {
+        (ValueType::String, SqlCell::Text(name)) => match std::str::from_utf8(name) {
             Ok(name) => Value::String(name.to_owned()),
             Err(_) => return Ok(None),
         },
-        (ValueType::Array(element), ValueRef::Text(cell)) => {
+        (ValueType::Array(element), SqlCell::Text(cell)) => {
             let json: serde_json::Value = serde_json::from_slice(cell)
                 .map_err(|e| Error::new(ErrorCode::Storage, format!("array cell: {e}")))?;
             let serde_json::Value::Array(items) = json else {
@@ -2249,5 +2422,139 @@ impl JsonCheck {
         let compiled = crate::tools::CompiledSchema::new(schema)
             .map_err(|error| crate::tools::json_schema_failure(error, path))?;
         Ok(Some(self.compiled.get_or_init(|| compiled)))
+    }
+}
+
+/// Borrow a provider cell for the existing durable Jazz value decoder.
+pub(crate) fn sql_cell_ref(row: &impl jazz_sql::Row, index: usize) -> Result<SqlCell<'_>, Error> {
+    row.cell(index)
+        .ok_or_else(|| Error::new(ErrorCode::Storage, "column index out of bounds"))
+}
+
+pub(crate) fn provider_error(error: impl std::fmt::Display) -> Error {
+    Error::new(ErrorCode::Storage, error.to_string())
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod async_savepoint_tests {
+    use super::*;
+    use std::future::Future;
+
+    /// Alice is cancelled after a write but before commit; Bob sees no row and
+    /// can start another transaction. This low-level fixture forces Pending
+    /// inside the native guard because native SQL itself never suspends.
+    /// alice -> insert -> Pending -> drop -> rollback -> bob reads empty
+    #[test]
+    fn cancellation_rolls_back_native_savepoint() {
+        let conn =
+            crate::host::DbConnection::new(rusqlite::Connection::open_in_memory().unwrap().into());
+        conn.execute_batch("CREATE TABLE notes (value TEXT)")
+            .unwrap();
+        let before = rollbacks(&conn);
+        let mut operation = Box::pin(in_savepoint_async(&conn, "probe", async || {
+            conn.execute("INSERT INTO notes VALUES ('alice')", [])
+                .map_err(storage)?;
+            std::future::pending::<()>().await;
+            Ok(())
+        }));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(operation.as_mut().poll(&mut cx).is_pending());
+        drop(operation);
+        assert!(conn.is_autocommit());
+        assert_eq!(rollbacks(&conn), before + 1);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        conn.execute("INSERT INTO notes VALUES ('bob')", [])
+            .unwrap();
+    }
+
+    /// Alice's deferred constraint fails at commit; Bob must not inherit her
+    /// uncommitted changes. The low-level guard is tested directly because the
+    /// normal Jazz schema does not use deferred SQLite foreign keys.
+    #[test]
+    fn refused_commit_rolls_back_native_savepoint() {
+        let conn =
+            crate::host::DbConnection::new(rusqlite::Connection::open_in_memory().unwrap().into());
+        conn.execute_batch("PRAGMA foreign_keys = ON;
+            CREATE TABLE parents (id INTEGER PRIMARY KEY);
+            CREATE TABLE children (parent INTEGER REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED)").unwrap();
+        let result = jazz_sql::inline(in_savepoint_async(&conn, "probe", async || {
+            conn.execute("INSERT INTO children VALUES (1)", [])
+                .map_err(storage)?;
+            Ok(())
+        }));
+        assert!(result.is_err());
+        assert!(conn.is_autocommit());
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM children", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod async_cell_tests {
+    use super::*;
+    use jazz_sql::Sql as _;
+    use jazz_types::large_values as lv;
+
+    /// Alice's stored text and bytes are read by Bob with a cold cache and a
+    /// suspending provider. Nullable values retain their shape. This lower-level
+    /// fixture targets the decoder shared by point reads, merges and defaults;
+    /// the public Db constructor still owns native SQLite.
+    #[test]
+    fn stored_cells_decode_through_the_operation_provider() {
+        futures::executor::block_on(async {
+            let conn = rusqlite::Connection::open_in_memory().unwrap();
+            let mut sql = crate::sql_test::Suspends(jazz_sql::native::Native(&conn));
+            sql.execute_script(crate::large::DDL).await.unwrap();
+            let staging = crate::large::Chunks::new(false, None, false);
+            for (kind, ty, bytes, expected) in [
+                (
+                    lv::LargeValueKind::String,
+                    ValueType::String,
+                    "hello 🦀".repeat(20_000).into_bytes(),
+                    Value::String("hello 🦀".repeat(20_000)),
+                ),
+                (
+                    lv::LargeValueKind::Bytes,
+                    ValueType::Bytes,
+                    vec![0xff; 200_000],
+                    Value::Bytes(vec![0xff; 200_000]),
+                ),
+            ] {
+                let built = lv::prepare(kind, &bytes).unwrap();
+                crate::large::store(&mut sql, &staging, &built, false)
+                    .await
+                    .unwrap();
+                let cell = crate::large::intern(&mut sql, &staging, &built.value_ref)
+                    .await
+                    .unwrap();
+                let cold = crate::large::Chunks::new(true, None, false);
+                assert_eq!(
+                    cell_from_sql(&mut sql, &ty, None, SqlCell::Integer(cell), &cold)
+                        .await
+                        .unwrap(),
+                    Some(expected.clone())
+                );
+                let nullable = ValueType::Nullable(Box::new(ty));
+                assert_eq!(
+                    cell_from_sql(&mut sql, &nullable, None, SqlCell::Integer(cell), &cold)
+                        .await
+                        .unwrap(),
+                    Some(Value::Nullable(Some(Box::new(expected))))
+                );
+                assert_eq!(
+                    cell_from_sql(&mut sql, &nullable, None, SqlCell::Null, &cold)
+                        .await
+                        .unwrap(),
+                    Some(Value::Nullable(None))
+                );
+            }
+        });
     }
 }

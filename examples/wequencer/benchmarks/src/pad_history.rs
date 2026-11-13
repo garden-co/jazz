@@ -89,7 +89,7 @@ impl PadHistoryFixture {
 
     /// The timed operation: one current-row read over the prepared fixture.
     pub fn current_rows(&mut self) -> Vec<CurrentRow> {
-        self.db.read(&self.pads).expect("read current pad")
+        jazz::db::block_on(self.db.read(&self.pads)).expect("read current pad")
     }
 }
 

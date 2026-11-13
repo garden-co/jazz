@@ -190,8 +190,7 @@ impl Fixture {
     }
 
     pub fn materialized_transcript(&self) -> Vec<String> {
-        self.db
-            .read(&self.transcript)
+        jazz::db::block_on(self.db.read(&self.transcript))
             .expect("read transcript")
             .into_iter()
             .map(|row| match row.cell("body") {
@@ -206,8 +205,7 @@ impl Fixture {
         let query = reopened
             .prepare_query(&transcript_query())
             .expect("prepare restarted transcript");
-        reopened
-            .read(&query)
+        jazz::db::block_on(reopened.read(&query))
             .expect("read restarted transcript")
             .into_iter()
             .map(|row| match row.cell("body") {

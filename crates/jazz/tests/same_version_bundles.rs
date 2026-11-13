@@ -86,21 +86,20 @@ fn core_at(schema: &PublicSchema, path: &Path) -> Db {
         FileOptions::default(),
     ))
     .unwrap();
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     db
 }
 
 fn pin(server: &Db, bundle: BundleId) -> Result<(), String> {
     let (_client, server_side) = duplex_transport::duplex();
-    server
-        .accept_pinned_subscriber(
-            server_side,
-            AuthorSubject::for_test_bytes([0x55; 16]),
-            None,
-            Some(bundle),
-        )
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    jazz::db::block_on(server.accept_pinned_subscriber(
+        server_side,
+        AuthorSubject::for_test_bytes([0x55; 16]),
+        None,
+        Some(bundle),
+    ))
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 /// Deploy `source` through the server's own pipeline
@@ -108,7 +107,7 @@ fn pin(server: &Db, bundle: BundleId) -> Result<(), String> {
 /// `Db::apply_catalogue`, as `jazz-server/src/server/deployment.rs` runs
 /// it): its bundle, and how many schemas the change admitted.
 fn deploy(server: &Db, source: &PublicSchema) -> (BundleId, usize) {
-    let rows = server.catalogue().unwrap();
+    let rows = jazz::db::block_on(server.catalogue()).unwrap();
     let stored = DeploymentCatalogue {
         schemas: rows.schemas.iter().map(|s| s.schema.clone()).collect(),
         migrations: Vec::new(),
@@ -335,8 +334,7 @@ fn a_default_only_deploy_writes_by_each_bundles_own_default() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("core.sqlite");
     let write = |server: &Db, bundle: BundleId, n: u8| {
-        let view = server
-            .pinned_view(version, Some(&bundle))
+        let view = jazz::db::block_on(server.pinned_view(version, Some(&bundle)))
             .unwrap()
             .expect("the bundle resolves");
         insert_name(&view, n, &format!("u{n}"));

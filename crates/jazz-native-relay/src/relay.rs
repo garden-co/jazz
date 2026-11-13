@@ -480,7 +480,7 @@ impl NativeRelay {
     /// Report the path to the authoritative server to the relay database.
     pub(crate) fn set_remote_link_hint(&self, hint: RemoteLinkHint) -> Result<(), RelayError> {
         self.run(move |worker| {
-            worker.persistent.db.set_remote_link_hint(hint);
+            jazz::db::block_on(worker.persistent.db.set_remote_link_hint(hint));
             worker.persistent.hooks.progress.wake_all();
             worker.persistent_dirty.set(true);
             Ok(())
@@ -926,7 +926,7 @@ impl RelayWorker {
             FileOptions::default(),
         ))
         .map_err(|error| RelayError::Host(error.into()))?;
-        let persistent = Binding::new(db, config.identity, false);
+        let persistent = jazz::db::block_on(Binding::new(db, config.identity, false));
         let persistent_dirty = hook(&persistent);
         Ok(Self {
             schema: config.schema,
@@ -1037,9 +1037,9 @@ impl RelayWorker {
         if high_water > 0 {
             db.seed_seq_floor(high_water);
         }
-        db.set_identity_claims(identity.author, claims.clone());
-        let binding = Binding::new(db, identity, false);
-        binding.set_non_durable_client();
+        jazz::db::block_on(db.set_identity_claims(identity.author, claims.clone()));
+        let binding = jazz::db::block_on(Binding::new(db, identity, false));
+        jazz::db::block_on(binding.set_non_durable_client());
         let dirty = hook(&binding);
         let mutation_errors = Rc::new(RefCell::new(Vec::new()));
         let reports = Rc::clone(&mutation_errors);
@@ -1051,12 +1051,12 @@ impl RelayWorker {
                 });
                 true
             }));
-        self.persistent
-            .db
-            .set_identity_claims(identity.author, claims.clone());
-        let served = self
-            .persistent
-            .accept_subscriber(identity.author, claims)
+        jazz::db::block_on(
+            self.persistent
+                .db
+                .set_identity_claims(identity.author, claims.clone()),
+        );
+        let served = jazz::db::block_on(self.persistent.accept_subscriber(identity.author, claims))
             .map_err(RelayError::Host)?;
         let link = binding.connect_upstream();
         self.next_client += 1;
@@ -1098,16 +1098,20 @@ impl RelayWorker {
     }
 
     fn refresh_claims(&mut self, author: AuthorSubject, claims: BTreeMap<String, Value>) {
-        self.persistent
-            .db
-            .set_identity_claims(author, claims.clone());
+        jazz::db::block_on(
+            self.persistent
+                .db
+                .set_identity_claims(author, claims.clone()),
+        );
         self.persistent.hooks.progress.wake_all();
         self.persistent_dirty.set(true);
         for client in self.clients.values() {
-            client
-                .binding
-                .db
-                .set_identity_claims(author, claims.clone());
+            jazz::db::block_on(
+                client
+                    .binding
+                    .db
+                    .set_identity_claims(author, claims.clone()),
+            );
             client.binding.hooks.progress.wake_all();
             client.dirty.set(true);
         }

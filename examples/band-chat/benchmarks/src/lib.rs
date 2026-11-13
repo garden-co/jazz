@@ -164,15 +164,13 @@ impl Fixture {
     }
 
     fn read_count(&self, query: &PreparedQuery) -> usize {
-        self.db
-            .read(query)
+        jazz::db::block_on(self.db.read(query))
             .expect("BandChat benchmark read succeeds")
             .len()
     }
 
     fn ordered_values(&self, query: &PreparedQuery, column: &str) -> Vec<u64> {
-        self.db
-            .read(query)
+        jazz::db::block_on(self.db.read(query))
             .expect("BandChat benchmark read succeeds")
             .into_iter()
             .map(|row| match row.cell(column) {

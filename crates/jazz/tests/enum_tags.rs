@@ -98,7 +98,7 @@ fn open_at(schema: JazzSchema, node: u8, path: &Path) -> Db {
 
 fn authority_at(schema: JazzSchema, path: &Path) -> Db {
     let db = open_at(schema, 0, path);
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     db
 }
 
@@ -131,15 +131,14 @@ fn link_as(client: &Db, server: &Db, author: AuthorSubject) -> jazz::db::Upstrea
         out: up.clone(),
         inbound: down.clone(),
     })));
-    server
-        .accept_subscriber(
-            Box::new(Pipe {
-                out: down,
-                inbound: up,
-            }),
-            author,
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Pipe {
+            out: down,
+            inbound: up,
+        }),
+        author,
+    ))
+    .unwrap();
     link
 }
 
@@ -935,7 +934,7 @@ fn a_client_tags_its_variants_before_it_ever_syncs() {
     let dir = tempfile::tempdir().unwrap();
     let client_path = dir.path().join("client.sqlite");
     let client = open_at(v1(), 1, &client_path);
-    client.become_replica();
+    jazz::db::block_on(client.become_replica());
     insert(&client, 1, "done");
     insert(&client, 2, "todo");
     insert(&client, 3, "doing");
@@ -1460,7 +1459,7 @@ fn a_peer_on_another_variant_order_is_refused_until_deployed() {
         1,
         &dir.path().join("client.sqlite"),
     );
-    client.become_replica();
+    jazz::db::block_on(client.become_replica());
     let _link = link(&client, &server);
     let q = client.prepare_query(&Query::from("tasks")).unwrap();
     let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();

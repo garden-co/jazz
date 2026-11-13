@@ -2,6 +2,7 @@
 //! evaluates their queries under the session's identity and claims, sends
 //! finished results, and runs their writes as that session.
 
+use super::block_on;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,7 +15,7 @@ use jazz::binding_host::{
 use jazz::db::{
     Db, Error, ErrorCode, LargeValueUpdate, OriginWrite, SerializedReadResult,
     StreamingMutationKind, StreamingValueUpload, SubscriptionEvent, SubscriptionStream,
-    UpdateOptions, WriteHandle, WriteIdentity, block_on,
+    UpdateOptions, WriteHandle, WriteIdentity,
 };
 use jazz::ids::{AuthorSubject, RowUuid, SchemaVersionId};
 use jazz::model::transaction::OpenTransactionId;
@@ -372,9 +373,9 @@ impl Owner {
     ) -> Result<(), jazz::db::Error> {
         // Admitted on the same terms as a sync session: a pinned bundle must
         // resolve here, and a createJazz app serves only pinned sessions.
-        self.db.check_session_pin(identity, bundle.as_ref())?;
+        crate::runtime::block_on(self.db.check_session_pin(identity, bundle.as_ref()))?;
         let claims = (identity != AuthorSubject::SYSTEM).then(|| {
-            self.db.set_identity_claims(identity, claims.clone());
+            crate::runtime::block_on(self.db.set_identity_claims(identity, claims.clone()));
             claims
         });
         self.thin.insert(
@@ -541,18 +542,20 @@ impl Owner {
                 Ok(schema) => schema.version_id(),
                 Err(error) => return Some(host_error(error)),
             };
-            return Some(match self.db.pinned_view(version, thin.bundle.as_ref()) {
-                Err(error) => error_body(&error),
-                Ok(Some(_)) => {
-                    thin.version = Some(version);
-                    ThinBody::Ok
-                }
-                Ok(None) => ThinBody::Error {
-                    code: "SchemaNotDeployed".to_owned(),
-                    message: "the client's schema version is not deployed to this server"
-                        .to_owned(),
+            return Some(
+                match block_on(self.db.pinned_view(version, thin.bundle.as_ref())) {
+                    Err(error) => error_body(&error),
+                    Ok(Some(_)) => {
+                        thin.version = Some(version);
+                        ThinBody::Ok
+                    }
+                    Ok(None) => ThinBody::Error {
+                        code: "SchemaNotDeployed".to_owned(),
+                        message: "the client's schema version is not deployed to this server"
+                            .to_owned(),
+                    },
                 },
-            });
+            );
         }
         if let &ThinOp::Unsubscribe { subscription } = op {
             let removed = thin.subscriptions.remove(&subscription).is_some();
@@ -570,7 +573,7 @@ impl Owner {
         };
         // Resolved per request: an activation changes the policies that
         // govern the declared version (a pinned bundle's never change).
-        let db = match self.db.pinned_view(version, thin.bundle.as_ref()) {
+        let db = match block_on(self.db.pinned_view(version, thin.bundle.as_ref())) {
             Ok(db) => db,
             Err(error) => return Some(error_body(&error)),
         };

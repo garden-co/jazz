@@ -19,7 +19,7 @@ use tower::ServiceExt;
 fn schema(columns: &[&str]) -> Schema {
     let mut table = TableSchema::builder("notes").column("title", ColumnType::Text);
     for column in columns {
-        table = table.column(*column, ColumnType::Text);
+        table = table.column(column, ColumnType::Text);
     }
     SchemaBuilder::new().table(table).build()
 }
@@ -934,10 +934,10 @@ async fn an_index_only_deployment_pins_both_bundles_across_a_restart() {
                         .iter()
                         .map(|bundle| {
                             let bundle = jazz::catalogue::BundleId::from_hex(bundle).unwrap();
-                            db.check_session_pin(
+                            jazz::db::block_on(db.check_session_pin(
                                 jazz::ids::AuthorSubject::for_test_bytes([0xa1; 16]),
                                 Some(&bundle),
-                            )
+                            ))
                             .map_err(|error| error.to_string())
                         })
                         .collect::<Vec<_>>())
