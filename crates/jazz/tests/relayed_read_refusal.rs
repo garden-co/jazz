@@ -506,7 +506,19 @@ fn a_relay_relinked_to_its_authority_answers_the_tabs_reads_again() {
         "not refused with the last link's refusal"
     );
     device.pump(&server1);
-    assert_eq!(rejections(&seen(&mut refused)), [], "refused once");
+    // The refused read is answered again: it settles with every row of
+    // server₁, and is not refused again.
+    let events = seen(&mut refused);
+    assert_eq!(rejections(&events), [], "refused once");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Seen::Delta { settled: true, .. })),
+        "answered again: {events:?}"
+    );
+    let mut answered = device.subscribe(remote());
+    device.pump(&server1);
+    assert_eq!(rows(&seen(&mut answered)), 5, "server₁'s rows");
     let events = seen(&mut local);
     assert_eq!(
         (rejections(&events), rows(&events)),
