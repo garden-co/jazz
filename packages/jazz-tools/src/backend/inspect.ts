@@ -33,11 +33,13 @@ import {
   buildQueryJson,
   fromJsonForColumn,
   inspectorLink,
+  fromJsonValue,
   isLoopbackHost,
   policyClauses,
   readsClaims,
   renderPolicy,
   rowLimit,
+  summarizeLargeValue,
   toJsonValue,
   type InspectAs,
   type InspectErrorCode,
@@ -530,6 +532,7 @@ export function createInspector(deps: InspectorDeps) {
     admitted: Admitted,
     query: InspectQuery,
     as: InspectAs | undefined,
+    summarize = true,
   ): Promise<{
     rows: Record<string, unknown>[];
     truncated: boolean;
@@ -570,8 +573,16 @@ export function createInspector(deps: InspectorDeps) {
     for (const row of found.slice(0, limit)) {
       const shown = toJsonValue(row) as Record<string, unknown>;
       if (hidden) for (const column of hidden) if (column in shown) shown[column] = REDACTED;
+      // A large value is summarized, so its row is listed (`get` with
+      // `column` answers the value itself).
+      if (summarize) {
+        for (const [column, value] of Object.entries(shown)) {
+          shown[column] = summarizeLargeValue(value);
+        }
+      }
       bytes += JSON.stringify(shown).length;
-      if (bytes > MAX_ANSWER_BYTES) {
+      // Always the first row: a row that exists is never answered as none.
+      if (bytes > MAX_ANSWER_BYTES && rows.length > 0) {
         truncated = true;
         break;
       }
@@ -670,6 +681,68 @@ export function createInspector(deps: InspectorDeps) {
       ...(asUser ? { as: asUser } : {}),
       ...(asClaims ? { asClaims } : {}),
       ...(warning ? { warning } : {}),
+    };
+  }
+
+  /** `get` with `column`: one value of one row, whole or `from`–`to` of it. */
+  async function getValue(
+    admitted: Admitted,
+    body: Extract<InspectRequest, { op: "get" }>,
+    url: string,
+  ) {
+    const column = body.column;
+    if (typeof column !== "string" || !column) {
+      throw new InspectError("bad_request", "column must name a column");
+    }
+    for (const bound of [body.from, body.to]) {
+      if (bound !== undefined && (!Number.isSafeInteger(bound) || bound < 0)) {
+        throw new InspectError("bad_request", "from and to must be whole numbers of at least 0");
+      }
+    }
+    const read = await readRows(
+      admitted,
+      { table: body.table, where: { id: body.id }, select: [column], limit: 1 },
+      body.as,
+      false,
+    );
+    const row = read.rows[0];
+    if (!row) throw new InspectError("not_found", `${body.table} has no row ${body.id} to read`);
+    const whole = row[column];
+    let value: unknown = whole;
+    let size: number | undefined;
+    const from = body.from ?? 0;
+    if (typeof whole === "string") {
+      size = whole.length;
+      value = whole.slice(from, body.to ?? whole.length);
+    } else if (
+      whole &&
+      typeof whole === "object" &&
+      typeof (whole as { $bytes?: unknown }).$bytes === "string"
+    ) {
+      const bytes = fromJsonValue(whole) as Uint8Array;
+      size = bytes.length;
+      value = toJsonValue(bytes.subarray(from, body.to ?? bytes.length));
+    } else if (body.from !== undefined || body.to !== undefined) {
+      throw new InspectError(
+        "bad_request",
+        `from and to are for a bytes or text column; ${column} is neither`,
+      );
+    }
+    const encoded = JSON.stringify(value) ?? "";
+    if (encoded.length > MAX_ANSWER_BYTES) {
+      throw new InspectError(
+        "bad_request",
+        `${column} is ${size ?? encoded.length} long, more than one answer carries: ask for it in parts with from and to`,
+      );
+    }
+    return {
+      answer: {
+        value,
+        ...(size !== undefined ? { size, from, to: Math.min(body.to ?? size, size) } : {}),
+        ...(read.warning ? { warning: read.warning } : {}),
+        inspectorUrl: inspectorLink(url, { table: body.table, row: body.id, as: body.as }),
+      },
+      event: { table: body.table, rows: 1, as: read.as, asClaims: read.asClaims },
     };
   }
 
@@ -808,6 +881,7 @@ export function createInspector(deps: InspectorDeps) {
       }
       case "get": {
         if (typeof body.id !== "string") throw new InspectError("bad_request", "get needs an id");
+        if (body.column !== undefined) return getValue(admitted, body, url);
         const read = await readRows(
           admitted,
           {
