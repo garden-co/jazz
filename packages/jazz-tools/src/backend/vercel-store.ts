@@ -179,6 +179,22 @@ class CoreStartError extends Error {}
 
 const isWakeConflict = (error: unknown) => /\b409\b|already attached|conflict/i.test(String(error));
 
+/**
+ * Whether `Sandbox.create` failed because a Sandbox of that name exists:
+ * another instance won the race to create it. `@vercel/sandbox` throws an
+ * `APIError` whose `response` is the API's answer and whose message carries
+ * the API's own ("Status code 4xx is not ok: A sandbox with the name '…'
+ * already exists for this project"); the status may be 409 or a 4xx the
+ * API uses for invalid requests, so the API's message decides.
+ */
+const isNameTaken = (error: unknown) => {
+  const e = error as { response?: { status?: unknown }; json?: { error?: { message?: unknown } } };
+  const status = typeof e?.response?.status === "number" ? e.response.status : undefined;
+  if (status !== undefined && (status < 400 || status >= 500)) return false;
+  const said = [String(error), String(e?.json?.error?.message ?? "")].join(" ");
+  return /already exists/i.test(said);
+};
+
 async function healthy(base: string, timeoutMs: number, diag: Record<string, number>) {
   const deadline = performance.now() + timeoutMs;
   let pause = 50;
@@ -790,7 +806,12 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     return sbx;
   };
 
-  const provision = async () => {
+  /**
+   * Create the Sandbox and start its core, or `null` when another instance
+   * created it first (concurrent first requests on a cold deploy): the
+   * caller then waits for that one, like any other wake.
+   */
+  const provision = async (): Promise<SandboxHandle | null> => {
     await sdk.Drive.getOrCreate({
       name: `${name}-data`,
       region: options.region ?? "iad1",
@@ -808,8 +829,11 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       keepLastSnapshots: { count: 1 },
       mounts: { "/data": { drive: `${name}-data`, mode: "read-write" } },
       ...creds,
+    }).catch((error: unknown) => {
+      if (isNameTaken(error)) return null;
+      throw error;
     });
-    await startServer(sbx);
+    if (sbx) await startServer(sbx);
     return sbx;
   };
 
@@ -851,6 +875,17 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
                 onResume: startServer,
               })
             : await provision();
+          if (!sbx) {
+            // Another instance is creating it: wait for that Sandbox,
+            // resuming it if it isn't running yet.
+            if (performance.now() > deadline) {
+              throw new Error(
+                `vercel(): core ${name} was being created by another instance and did not come up in ${since(t0)} ms`,
+              );
+            }
+            await sleep(250);
+            sbx = await getRunning();
+          }
         } catch (error) {
           if (!isWakeConflict(error) || performance.now() > deadline) throw error;
           await sleep(500);
