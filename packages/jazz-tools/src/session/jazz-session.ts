@@ -1,5 +1,6 @@
 import {
   attachSessionCoreConsumer,
+  onJazzSessionClientUpgraded,
   type SessionCore,
   type SessionCoreConsumer,
   type SessionCoreSnapshot,
@@ -350,7 +351,12 @@ export function ownJazzSession<Config, Client>(
         }
         core = created;
         for (const consumer of consumers) consumer.lease = attachSessionCoreConsumer(created);
-        unsubscribeCore = created.subscribe(() => publish(closed));
+        const stopCore = created.subscribe(() => publish(closed));
+        const stopUpgrades = onJazzSessionClientUpgraded(created, () => publish(closed));
+        unsubscribeCore = () => {
+          stopCore();
+          stopUpgrades();
+        };
         publish();
       })
       .catch((cause) => {

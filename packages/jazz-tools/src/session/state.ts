@@ -85,6 +85,21 @@ type ClientReplacer = (
 ) => Promise<void>;
 const replacers = new WeakMap<object, ClientReplacer>();
 const switchers = new WeakMap<object, (from: AccountHandle) => Promise<boolean>>();
+const upgradeListeners = new WeakMap<object, Set<() => void>>();
+
+/**
+ * @internal Call `listener` when the session's client is upgraded in place
+ * (see `replaceJazzSessionClient`'s `adopt`), which publishes no snapshot.
+ */
+export function onJazzSessionClientUpgraded<Client>(
+  session: SessionCore<Client>,
+  listener: () => void,
+): () => void {
+  let listeners = upgradeListeners.get(session);
+  if (!listeners) upgradeListeners.set(session, (listeners = new Set()));
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
 
 /**
  * @internal Sign the current account out and the user the backend names now
@@ -468,9 +483,10 @@ export async function createJazzSessionOwner<
     }
     if (adopt) {
       adopt(current, next);
-      // Same client, upgraded in place: observers learn of it (the session
-      // snapshot's `localFirst`) without a client change.
-      publish({ ...snapshot });
+      // Same client, upgraded in place: the core publishes nothing (there is
+      // nothing for a provider to redo), but the public session re-reads
+      // its snapshot's `localFirst`.
+      for (const listener of [...(upgradeListeners.get(session) ?? [])]) listener();
       return;
     }
     client = next;
