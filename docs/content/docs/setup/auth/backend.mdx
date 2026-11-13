@@ -432,8 +432,8 @@ On a computer several people use, such as a family laptop or a library terminal:
   becomes visible or its session changes, or the next page load does, once your backend confirms
   twice that the user is signed out. Nothing polls in the background.
 - **Guests too.** A guest's local storage is wiped once the last tab on it signs out. If its tab
-  closes without signing out, the data stays while the guest is still this device's account, and
-  is wiped once it isn't: someone signed it out in another tab.
+  closes without signing out, the data stays as long as the device keeps the guest's key (it can be
+  opened again), and is wiped once the key is gone (the guest was linked to a user who signed up).
 - **A wipe a crash interrupts is finished** before that account's data opens again, so a
   half-deleted store is never read.
 - **Sign the old user out before you sign the next one in.** The wait for pending writes covers only

@@ -106,8 +106,12 @@ function browser() {
   const trace: string[] = [];
   const warnings: number[] = [];
   const backend = { user: alice.identity as Account["identity"] | null, answers: 0 };
-  const device = { selected: guest.id as string | undefined };
+  /** The account store: which device accounts' keys it keeps. */
+  const device = { kept: new Set<string>() };
+  /** Accounts a tab is signing out right now: their last tab out wipes, key or not. */
+  const signingOut = new Set<string>();
   let generation = 0;
+  let heldNextDelete = false;
   let crashNextDelete = false;
 
   type Tab = {
@@ -123,6 +127,18 @@ function browser() {
     if (locks.sharedHolders(lockName(account)) > 0)
       violations.push(`I1: deleted ${account} while a tab held it`);
     const store = stores.get(account);
+    if (
+      account === guest.id &&
+      device.kept.has(guest.id) &&
+      !signingOut.has(account) &&
+      !store?.partial
+    )
+      violations.push("I8: wiped a guest whose key the device keeps");
+    if (heldNextDelete) {
+      // A closing worker realm, or a tab of another build: nothing deleted.
+      heldNextDelete = false;
+      return "held" as const;
+    }
     if (crashNextDelete) {
       crashNextDelete = false;
       if (store) store.partial = true;
@@ -147,7 +163,7 @@ function browser() {
         backend.answers += 1;
         return backend.user;
       },
-      selectedDeviceAccount: async () => device.selected,
+      deviceKeyKept: async (account) => device.kept.has(account),
     });
     tabs.push(self);
     return self;
@@ -168,7 +184,7 @@ function browser() {
       if (store?.partial) violations.push(`I5: ${t.name} opened ${account.id} half-deleted`);
       if (!store) stores.set(account.id, { pending: 0, generation: ++generation });
       t.open = { account, release };
-      if (account.kind === "device") device.selected = account.id;
+      if (account.kind === "device") device.kept.add(account.id);
     } finally {
       t.opening = undefined;
     }
@@ -184,10 +200,13 @@ function browser() {
     const othersHold = tabs.some((o) => o !== t && !o.gone && o.open?.account.id === account.id);
     trace.push(`${t.name} signs out ${account.id} (others hold: ${othersHold})`);
     t.open = undefined;
-    if (account.kind === "device" && device.selected === account.id) device.selected = undefined;
     await release();
+    signingOut.add(account.id);
     const warned = vi.mocked(console.warn).mock.calls.length;
-    const outcome = await t.lifecycle.signedOut(account.id, pending);
+    const outcome = await t.lifecycle.signedOut(account.id, pending).finally(() => {
+      if (!tabs.some((o) => o !== t && !o.gone && o.open?.account.id === account.id))
+        signingOut.delete(account.id);
+    });
     trace.push(`${t.name} signed out ${account.id}: ${outcome}`);
     if (outcome === "wiped" && pending > 0) {
       const counted = vi.mocked(console.warn).mock.calls.slice(warned).join(" ");
@@ -226,6 +245,9 @@ function browser() {
     close,
     crash,
     crashNextDelete: () => (crashNextDelete = true),
+    heldNextDelete: () => (heldNextDelete = true),
+    /** The account store forgets the guest's key (clearOnSignOut, or a link to a user). */
+    forgetGuestKey: () => device.kept.delete(guest.id),
     ledger: replicaLedger(REGISTRY),
   };
 }
@@ -236,6 +258,10 @@ beforeEach(() => {
     getItem: (key: string) => storage.get(key) ?? null,
     setItem: (key: string, value: string) => void storage.set(key, value),
     removeItem: (key: string) => void storage.delete(key),
+    key: (index: number) => [...storage.keys()][index] ?? null,
+    get length() {
+      return storage.size;
+    },
   });
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
@@ -252,7 +278,11 @@ describe("the ledger", () => {
       kind: "backend",
       identity: { issuer: "i", subject: "s", claims: { email: "x@example.com" } } as never,
     });
-    expect(JSON.stringify([...Object.values(localStorage)])).not.toContain("x@example.com");
+    const stored = Array.from({ length: localStorage.length }, (_, i) =>
+      localStorage.getItem(localStorage.key(i)!),
+    ).join("\n");
+    expect(stored).toContain('"subject":"s"');
+    expect(stored).not.toContain("x@example.com");
     expect(ledger.read()).toEqual([
       { account: "a", kind: "backend", identity: { issuer: "i", subject: "s" } },
     ]);
@@ -272,6 +302,18 @@ describe("the ledger", () => {
     expect(
       localStorage.getItem(`jazz-clear-on-sign-out-v1:${encodeURIComponent(REGISTRY)}`),
     ).toBeNull();
+  });
+
+  it("keeps each account under its own key, so two tabs recording at once keep both", () => {
+    const tabA = replicaLedger(REGISTRY);
+    const tabB = replicaLedger(REGISTRY);
+    tabA.record({ account: "a", kind: "device", identity: { issuer: "i", subject: "a" } });
+    tabB.record({ account: "b", kind: "backend", identity: { issuer: "i", subject: "b" } });
+    tabA.markWiping("a", true);
+    tabB.forget("b");
+    expect(replicaLedger(REGISTRY).read()).toEqual([
+      { account: "a", kind: "device", identity: { issuer: "i", subject: "a" }, wiping: true },
+    ]);
   });
 
   it("keeps a wipe's mark when the account is recorded again", () => {
@@ -343,7 +385,7 @@ describe("the lifecycle, scenario by scenario", () => {
       heldHere: () => false,
       deleteStore: async () => "deleted",
       backendUser: async () => (answer++ === 0 ? null : alice.identity),
-      selectedDeviceAccount: async () => undefined,
+      deviceKeyKept: async () => false,
     });
     await flaky.reconcile();
     expect(b.ledger.get(alice.id)).toBeDefined();
@@ -363,7 +405,7 @@ describe("the lifecycle, scenario by scenario", () => {
       backendUser: async () => {
         throw new TypeError("Failed to fetch");
       },
-      selectedDeviceAccount: async () => undefined,
+      deviceKeyKept: async () => false,
     });
     await offline.reconcile();
     expect(b.ledger.get(alice.id)).toBeDefined();
@@ -380,19 +422,54 @@ describe("the lifecycle, scenario by scenario", () => {
     expect(b.backend.answers).toBe(0);
   });
 
-  it("a guest store left behind by a killed tab is wiped once the device no longer selects that guest", async () => {
+  it("a guest store left behind by a killed tab is kept while the device keeps its key, and wiped once it doesn't", async () => {
     const b = browser();
     const [one, two] = [b.tab("A"), b.tab("B")];
     await b.open(one, guest);
     await b.open(two, guest);
     await b.signOut(one);
-    expect(b.device.selected).toBeUndefined();
     b.crash(two);
+    // Signed out, but its key is kept: it can be reopened, so its data stays.
+    await one.lifecycle.reconcile();
+    expect(b.deletes).toEqual([]);
+    b.forgetGuestKey();
     await one.lifecycle.reconcile();
     expect(b.deletes).toHaveLength(1);
+    expect(b.violations).toEqual([]);
   });
 
-  it("a guest still selected keeps its store when its tab closes", async () => {
+  it("a guest another user signed in over keeps its data while its key is kept", async () => {
+    const b = browser();
+    const one = b.tab("A");
+    await b.open(one, guest);
+    b.write(one);
+    await b.close(one);
+    await b.open(one, alice);
+    await b.tab("C").lifecycle.reconcile();
+    expect(b.stores.get(guest.id)?.pending).toBe(1);
+    expect(b.violations).toEqual([]);
+  });
+
+  it("keeps a crashed delete's mark when the next delete is held, and opens only once it finished", async () => {
+    const b = browser();
+    const one = b.tab("A");
+    await b.open(one, alice);
+    b.crashNextDelete();
+    await b.signOut(one).catch(() => {});
+    // The worker is closing: nothing deleted, and the mark must stay.
+    b.heldNextDelete();
+    await b.tab("C").lifecycle.reconcile();
+    expect(b.ledger.get(alice.id)?.wiping).toBe(true);
+    // An open waits for the wipe to finish rather than open half-deleted storage.
+    b.heldNextDelete();
+    const next = b.tab("D");
+    await b.open(next, alice);
+    expect(b.violations).toEqual([]);
+    expect(b.deletes).toHaveLength(1);
+    expect(b.ledger.get(alice.id)?.wiping).toBeUndefined();
+  });
+
+  it("a guest whose key is kept keeps its store when its tab closes", async () => {
     const b = browser();
     const one = b.tab("A");
     await b.open(one, guest);
@@ -446,7 +523,7 @@ describe("the lifecycle, scenario by scenario", () => {
       heldHere: () => false,
       deleteStore: async () => "held",
       backendUser: async () => null,
-      selectedDeviceAccount: async () => undefined,
+      deviceKeyKept: async () => false,
     });
     replicaLedger(REGISTRY).record({
       account: alice.id,
@@ -502,9 +579,13 @@ describe("the lifecycle, under random interleavings", () => {
           case 6:
             b.backend.user = random() < 0.5 ? null : alice.identity;
             return;
-          case 7:
-            if (random() < 0.1) b.crashNextDelete();
+          case 7: {
+            const roll = random();
+            if (roll < 0.1) b.crashNextDelete();
+            else if (roll < 0.2) b.heldNextDelete();
+            else if (roll < 0.3) b.forgetGuestKey();
             return;
+          }
           default:
             return page.lifecycle.reconcile();
         }
@@ -524,9 +605,12 @@ describe("the lifecycle, under random interleavings", () => {
       for (const page of pages) await page.lifecycle.reconcile();
       expect(b.violations).toEqual([]);
       // I3: once every tab signed out, the last out wiped (or a reconcile
-      // finished a crashed wipe). Only a guest the device still selects, whose
-      // tab went away without signing out, keeps its store: it's the device's own.
-      const kept = (account: string) => account === guest.id && b.device.selected === guest.id;
+      // finished a crashed wipe). Only a guest whose key the device keeps,
+      // whose tab went away without signing out, keeps its store: it can be
+      // reopened. A delete a closing worker held off waits for a next trigger.
+      b.forgetGuestKey();
+      for (const page of pages) await page.lifecycle.reconcile();
+      const kept = (_account: string) => false;
       expect(
         b.ledger.read().filter((entry) => !kept(entry.account)),
         b.trace.join("\n"),

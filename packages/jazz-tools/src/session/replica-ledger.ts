@@ -14,7 +14,9 @@
  * - **Held(n)**: n ≥ 1 tabs hold the lock. Nothing wipes it.
  * - **Orphaned**: an entry, no tab holds the lock, no wipe began. A tab
  *   closed while signed in, or a sign-out happened where no page saw it.
- *   It is wiped only with proof that its owner is not signed in.
+ *   It is wiped only with proof that no one can open it again: a backend
+ *   user the backend no longer names (twice), or a device account whose
+ *   key the device no longer keeps.
  * - **Wiping**: the entry is marked `wiping` (written before the delete
  *   starts). A crash mid-delete leaves it so; it is finished before the
  *   account opens again, without further proof: the data is already partly
@@ -44,66 +46,83 @@ export type ReplicaEntry = {
   wiping?: true;
 };
 
-const ledgerKey = (registry: string) => `jazz-replicas-v2:${encodeURIComponent(registry)}`;
+/** Each account's entry is its own key, so tabs writing at once never overwrite each other's. */
+const ledgerPrefix = (registry: string) => `jazz-replica-v2:${encodeURIComponent(registry)}:`;
 /** alpha.61's record of backend users only; read alongside, until the next breaking alpha. */
 const legacyKey = (registry: string) => `jazz-clear-on-sign-out-v1:${encodeURIComponent(registry)}`;
 
 /**
- * The durable list of accounts whose store may be on this device. An entry
- * is written before its store opens and dropped only once it is wiped.
+ * The durable list of accounts whose store may be on this device: one
+ * localStorage key per account. An entry is written before its store opens
+ * and dropped only once it is wiped.
  */
 export function replicaLedger(registry: string) {
-  const key = ledgerKey(registry);
+  const prefix = ledgerPrefix(registry);
   const legacy = legacyKey(registry);
-  const parse = (name: string): unknown[] => {
+  const storage = (): Storage | undefined => {
     try {
-      const value = JSON.parse(globalThis.localStorage?.getItem(name) ?? "[]");
+      return globalThis.localStorage;
+    } catch {
+      return undefined;
+    }
+  };
+  const parseEntry = (account: string): ReplicaEntry | undefined => {
+    try {
+      const value: unknown = JSON.parse(storage()?.getItem(prefix + account) ?? "null");
+      return isEntry(value) && value.account === account ? value : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const legacyOwners = (): unknown[] => {
+    try {
+      const value: unknown = JSON.parse(storage()?.getItem(legacy) ?? "[]");
       return Array.isArray(value) ? value : [];
     } catch {
       return [];
     }
   };
-  const store = (name: string, entries: unknown[]) => {
+  const legacyEntry = (account: string): ReplicaEntry | undefined => {
+    const owner = legacyOwners().find(
+      (candidate): candidate is Pick<ReplicaEntry, "account" | "identity"> =>
+        isIdentified(candidate) && candidate.account === account,
+    );
+    return owner && { account, kind: "backend", identity: owner.identity };
+  };
+  const put = (entry: ReplicaEntry) => {
     try {
-      if (entries.length === 0) globalThis.localStorage?.removeItem(name);
-      else globalThis.localStorage?.setItem(name, JSON.stringify(entries));
+      storage()?.setItem(prefix + entry.account, JSON.stringify(entry));
     } catch {
       // Without storage there is no later page to wipe on either.
     }
   };
-  const read = (): ReplicaEntry[] => {
-    const entries = parse(key).filter(isEntry);
-    for (const owner of parse(legacy)) {
-      if (!isIdentified(owner) || entries.some((entry) => entry.account === owner.account))
-        continue;
-      const { account, identity } = owner;
-      entries.push({ account, kind: "backend", identity });
-    }
-    return entries;
-  };
-  const write = (entries: ReplicaEntry[]) => {
-    store(key, entries);
-    // What an alpha.61 page reads: keep it to the accounts still listed.
-    const legacyOwners = parse(legacy).filter(
-      (owner) => isIdentified(owner) && entries.some((entry) => entry.account === owner.account),
-    );
-    store(legacy, legacyOwners);
-  };
-  const get = (account: string) => read().find((entry) => entry.account === account);
-  const update = (account: string, change: (entry: ReplicaEntry) => ReplicaEntry) =>
-    write(read().map((entry) => (entry.account === account ? change(entry) : entry)));
+  const get = (account: string) => parseEntry(account) ?? legacyEntry(account);
   return {
-    key,
+    /** The keys this ledger's entries live under start with it (for `storage` events). */
+    prefix,
     legacyKey: legacy,
     /** Whether entries persist here: without storage (disabled, or not a browser) nothing is recorded. */
     durable(): boolean {
       try {
-        return typeof globalThis.localStorage?.getItem === "function";
+        return typeof storage()?.getItem === "function";
       } catch {
         return false;
       }
     },
-    read,
+    read(): ReplicaEntry[] {
+      const accounts = new Set<string>();
+      const store = storage();
+      try {
+        for (let i = 0; i < (store?.length ?? 0); i++) {
+          const key = store!.key(i);
+          if (key?.startsWith(prefix)) accounts.add(key.slice(prefix.length));
+        }
+      } catch {
+        // Unreadable storage records nothing.
+      }
+      for (const owner of legacyOwners()) if (isIdentified(owner)) accounts.add(owner.account);
+      return [...accounts].map(get).filter((entry): entry is ReplicaEntry => entry !== undefined);
+    },
     get,
     /** `entry`'s account is about to keep a store here. A wipe already marked stays marked. */
     record(entry: Omit<ReplicaEntry, "wiping">) {
@@ -115,14 +134,25 @@ export function replicaLedger(registry: string) {
         identity: { issuer: identity.issuer, subject: identity.subject },
         ...(recorded?.wiping ? { wiping: true as const } : {}),
       };
-      if (!recorded) write([...read(), next]);
-      else if (JSON.stringify(recorded) !== JSON.stringify(next)) update(account, () => next);
+      if (JSON.stringify(parseEntry(account)) !== JSON.stringify(next)) put(next);
     },
     markWiping(account: string, wiping: boolean) {
-      update(account, ({ wiping: _wiping, ...entry }) => (wiping ? { ...entry, wiping } : entry));
+      const recorded = get(account);
+      if (!recorded) return;
+      const { wiping: _wiping, ...entry } = recorded;
+      put(wiping ? { ...entry, wiping } : entry);
     },
     forget(account: string) {
-      write(read().filter((entry) => entry.account !== account));
+      try {
+        storage()?.removeItem(prefix + account);
+        const owners = legacyOwners();
+        const kept = owners.filter((owner) => !(isIdentified(owner) && owner.account === account));
+        if (kept.length === owners.length) return;
+        if (kept.length === 0) storage()?.removeItem(legacy);
+        else storage()?.setItem(legacy, JSON.stringify(kept));
+      } catch {
+        // Nothing recorded, nothing to forget.
+      }
     },
   };
 }
@@ -165,9 +195,15 @@ const lockName = (registry: string, account: string) => `jazz-replica-v1:${regis
 
 /**
  * Hold `account`'s store open in this tab until the returned release is
- * called, so no tab wipes it meanwhile. Without Web Locks there is nothing to
+ * called, so no tab wipes it meanwhile. Every browser tab with a
+ * local-first client holds it, with `clearOnSignOut` or without: a store
+ * delete (`delete-store`) relies on it to know no tab is joining. Without Web Locks there is nothing to
  * hold, and none is needed: persistent browser storage requires them.
  */
+export function holdReplicaLock(registry: string, account: string) {
+  return holdLock(webLocks(), registry, account);
+}
+
 async function holdLock(
   locks: Locks | undefined,
   registry: string,
@@ -243,9 +279,9 @@ async function whileNoTabHolds<T>(
 /** As the backend watch confirms a signed-out answer before it signs anyone out. */
 export const CONFIRM_SIGNED_OUT_MS = 2_000;
 
-/** The account store couldn't be read: no device account counts as signed out. */
-const UNKNOWN = Symbol("unknown");
-
+/** How long an open waits for an unfinished wipe it can't finish yet: at most ~10 s. */
+const FINISH_WIPE_RETRY_MS = 100;
+const FINISH_WIPE_RETRIES = 100;
 /** How long the last tab out waits for another page's wipe or check to end: at most ~10 s. */
 const SIGNED_OUT_RETRY_MS = 50;
 const SIGNED_OUT_RETRIES = 200;
@@ -266,8 +302,8 @@ export function replicaLifecycle(options: {
   deleteStore(account: string): Promise<"deleted" | "held">;
   /** Who the backend signs in now. Throws when it can't be asked. */
   backendUser(): Promise<{ issuer: string; subject: string } | null>;
-  /** The device account this device's account store selects, which its tabs open. */
-  selectedDeviceAccount(): Promise<string | undefined>;
+  /** Whether this device's account store still keeps device account `account`'s key. */
+  deviceKeyKept(account: string): Promise<boolean>;
   confirmMs?: number;
   /** The browser's Web Locks, by default. */
   locks?: Locks;
@@ -299,13 +335,16 @@ export function replicaLifecycle(options: {
         if (!recorded || (!byThisPage && options.heldHere(account))) return "skipped";
         // A closed page wipes nothing it didn't sign out itself.
         if (!byThisPage && options.stopped?.()) return "skipped";
+        // A mark an earlier, crashed delete left must survive this attempt.
+        const crashed = ledger.get(account)?.wiping === true;
         ledger.markWiping(account, true);
         // A delete that fails leaves the mark: whether any of it went is
         // unknown, so the account's next open or a later reconcile finishes it.
         const deleted = await options.deleteStore(account);
         if (deleted === "held") {
-          // A tab of another build still has it open, and nothing was deleted.
-          ledger.markWiping(account, false);
+          // Nothing was deleted now: a tab (of any build) still has it open,
+          // or its worker is closing. Unmarked, unless an earlier delete crashed.
+          ledger.markWiping(account, crashed);
           return "held";
         }
         ledger.forget(account);
@@ -353,18 +392,22 @@ export function replicaLifecycle(options: {
       orphans.push(entry);
     }
     if (orphans.length === 0) return;
-    const selected = orphans.some((entry) => entry.kind === "device" && !entry.wiping)
-      ? await options.selectedDeviceAccount().catch(() => UNKNOWN)
-      : undefined;
+    // A device account whose key the device keeps can be opened again (it
+    // signed out, or another user signed in over it): its data stays. Only
+    // once the key is gone is its data no one's.
+    const keyGone = new Set<string>();
+    for (const entry of orphans) {
+      if (entry.kind !== "device" || entry.wiping) continue;
+      const kept = await options.deviceKeyKept(entry.account).catch(() => true);
+      if (!kept) keyGone.add(entry.account);
+    }
     const signedOut = await backendSignedOut(
       orphans.filter((entry) => entry.kind === "backend" && !entry.wiping),
     );
     for (const entry of orphans) {
       const proven =
         entry.wiping ||
-        (entry.kind === "device"
-          ? selected !== UNKNOWN && selected !== entry.account
-          : signedOut.has(entry.account));
+        (entry.kind === "device" ? keyGone.has(entry.account) : signedOut.has(entry.account));
       if (!proven) continue;
       try {
         await wipeOne(entry.account);
@@ -386,23 +429,31 @@ export function replicaLifecycle(options: {
      */
     async hold(entry: Omit<ReplicaEntry, "wiping">): Promise<() => Promise<void>> {
       const { account } = entry;
-      // A store marked `wiping` is finished first. "held" here means a tab of
-      // an older build has it open anyway: open alongside it.
-      if (ledger.get(account)?.wiping) await wipeOne(account, { byThisPage: true });
-      ledger.record(entry);
-      let release = await holdLock(locks, registry, account);
-      // Again once held: another tab's wipe may have forgotten it before.
-      ledger.record(entry);
-      if (ledger.get(account)?.wiping) {
-        // Another tab's wipe failed between the check and the lock: try it
-        // once more here. If it fails again, so does the open.
+      for (let attempt = 0; ; attempt++) {
+        // A store marked `wiping` (a crashed delete) is finished first: it is
+        // never opened half-deleted. A failing delete fails the open.
+        if (ledger.get(account)?.wiping) await wipeOne(account, { byThisPage: true });
+        if (ledger.get(account)?.wiping) {
+          // "held": a tab, or a closing worker, still has it. Wait for it.
+          if (attempt >= FINISH_WIPE_RETRIES)
+            throw new Error(
+              "Jazz can't open this account's local data yet: a wipe of it (clearOnSignOut) is unfinished while another tab still has it open. Close the account's other tabs and try again.",
+            );
+          await new Promise((resolve) => setTimeout(resolve, FINISH_WIPE_RETRY_MS));
+          continue;
+        }
+        ledger.record(entry);
+        const release = await holdLock(locks, registry, account);
+        // Again once held: another tab's wipe may have forgotten it before.
+        ledger.record(entry);
+        if (!ledger.get(account)?.wiping) return release;
+        // Another tab's delete failed between the check and the lock.
         await release();
-        await wipeOne(account, { byThisPage: true });
-        ledger.record(entry);
-        release = await holdLock(locks, registry, account);
-        ledger.record(entry);
       }
-      return release;
+    },
+    /** Whether a tab holds `account`'s store open (a look, taking no lock). */
+    heldByATab(account: string): Promise<boolean> {
+      return lockHeld(locks, registry, account);
     },
     /**
      * This tab signed `account` out and closed its client (letting go of its
@@ -426,9 +477,9 @@ export function replicaLifecycle(options: {
       }
     },
     /**
-     * Wipe every Orphaned store whose owner is proven signed out (a backend
-     * user the backend no longer names, twice; a device account the account
-     * store no longer selects) and finish every Wiping one. Single-flight: a
+     * Wipe every Orphaned store no one can open again (a backend user the
+     * backend no longer names, twice; a device account whose key the device
+     * no longer keeps) and finish every Wiping one. Single-flight: a
      * call while one runs runs once more after it.
      */
     reconcile(): Promise<void> {

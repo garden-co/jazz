@@ -70,6 +70,10 @@ async function setup(options: { guests?: boolean } = {}) {
     getItem: (key: string) => storage.get(key) ?? null,
     setItem: (key: string, value: string) => void storage.set(key, value),
     removeItem: (key: string) => void storage.delete(key),
+    key: (index: number) => [...storage.keys()][index] ?? null,
+    get length() {
+      return storage.size;
+    },
   });
   const jar = { user: "alice" as string | null };
   const realFetch = globalThis.fetch;
@@ -130,7 +134,7 @@ async function setup(options: { guests?: boolean } = {}) {
         },
       }),
     });
-  return { jar, open, wiped, hold, storage, page };
+  return { jar, open, wiped, hold, storage, page, store };
 }
 
 /** Web Locks as a browser has them: every page of the test shares them. */
@@ -278,7 +282,7 @@ it("lets a user who signs back in during the wipe open a fresh replica, still re
     .poll(() => second.getSnapshot().client?.session?.identity.subject, { timeout: 15_000 })
     .toBe("alice");
   // Her new replica is recorded, for a later missed sign-out.
-  const recorded = [...storage].find(([key]) => key.startsWith("jazz-replicas-v2:"));
+  const recorded = [...storage].find(([key]) => key.startsWith("jazz-replica-v2:"));
   expect(recorded?.[1]).toContain('"subject":"alice"');
   await second.close();
 }, 60_000);
@@ -300,7 +304,7 @@ it("finishes a wipe whose delete failed before the user's next sign-in opens the
     })
     .toBe(true);
   expect(wiped).toEqual([]);
-  const entry = () => [...storage].find(([key]) => key.startsWith("jazz-replicas-v2:"))?.[1] ?? "";
+  const entry = () => [...storage].find(([key]) => key.startsWith("jazz-replica-v2:"))?.[1] ?? "";
   expect(entry()).toContain('"wiping":true');
   // Alice signs back in: her half-deleted replica is finished first, then opened fresh.
   jar.user = "alice";
@@ -334,7 +338,7 @@ it("holds the user's sign-in until a delete that began finishes, however late", 
   await expect
     .poll(() => second.getSnapshot().client?.session?.identity.subject, { timeout: 15_000 })
     .toBe("alice");
-  const recorded = [...storage].find(([key]) => key.startsWith("jazz-replicas-v2:"));
+  const recorded = [...storage].find(([key]) => key.startsWith("jazz-replica-v2:"));
   expect(recorded?.[1]).toContain('"subject":"alice"');
 }, 60_000);
 
@@ -358,7 +362,7 @@ it("records a guest's replica as a device account, and keeps it while the device
   cleanups.push(() => page.close());
   await page.createLocalFirst();
   await expect.poll(() => isThinDb(page.getSnapshot().client!.db), { timeout: 15_000 }).toBe(false);
-  const entry = [...storage].find(([key]) => key.startsWith("jazz-replicas-v2:"))?.[1] ?? "";
+  const entry = [...storage].find(([key]) => key.startsWith("jazz-replica-v2:"))?.[1] ?? "";
   expect(entry).toContain('"kind":"device"');
   // Its tab closes without signing out: the guest is still the device's, and so is its data.
   await page.close();
@@ -375,7 +379,7 @@ it("leaves the replica and its entry while another tab holds it, and the last ta
   stubWebLocks();
   const { open, storage, wiped } = await setup();
   const recorded = () =>
-    [...storage].find(([key]) => key.startsWith("jazz-replicas-v2:"))?.[1] ?? "";
+    [...storage].find(([key]) => key.startsWith("jazz-replica-v2:"))?.[1] ?? "";
   const here = await signInLocalFirst(open);
   cleanups.push(() => here.close());
   const there = await signInLocalFirst(open);
@@ -432,4 +436,34 @@ it("signs out when the sign-out's delete fails, says so, and finishes the wipe l
   const next = await open();
   cleanups.push(() => next.close());
   await expect.poll(() => wiped, { timeout: 15_000 }).toEqual(["alice"]);
+}, 60_000);
+
+// #5397 review: with clearOnSignOut, a guest's key is forgotten only by the
+// sign-out that wiped its store. A tab signing out while another still has
+// the guest open keeps the key, and the last tab out decides.
+it("keeps a guest's key while another tab has it open, and the last tab out forgets it and wipes", async () => {
+  stubWebLocks();
+  const { jar, open, wiped, store } = await setup({ guests: true });
+  jar.user = null;
+  const here = await open();
+  cleanups.push(() => here.close());
+  await here.createLocalFirst();
+  await expect.poll(() => isThinDb(here.getSnapshot().client!.db), { timeout: 15_000 }).toBe(false);
+  const guest = here.getSnapshot().account!.id;
+  const there = await open();
+  cleanups.push(() => there.close());
+  await expect.poll(() => there.getSnapshot().account?.id, { timeout: 15_000 }).toBe(guest);
+  await expect
+    .poll(() => isThinDb(there.getSnapshot().client!.db), { timeout: 15_000 })
+    .toBe(false);
+  const roots = async () => JSON.parse((await store.read()) ?? "{}").roots as string[];
+  const [root] = await roots();
+
+  await here.logout();
+  expect(wiped).toEqual([]);
+  expect(await roots()).toEqual([root]);
+  // The last tab out wipes, and only then is the key gone.
+  await there.logout();
+  expect(wiped).toHaveLength(1);
+  expect(await roots()).toEqual([]);
 }, 60_000);

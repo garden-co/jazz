@@ -176,19 +176,35 @@ export async function accountForgotten(
   return (await forgottenReaders.get(accounts)?.(account)) ?? false;
 }
 
-const selectionReaders = new WeakMap<AccountManager<JWTAuth>, () => Promise<string | undefined>>();
+const keepNextSignedOutKey = new WeakSet<AccountManager<JWTAuth>>();
 
 /**
- * @internal The device account the store `accounts` keeps selects now (the
- * one this device's tabs open), as stored, not as this manager last saw it.
- * `undefined` when it selects none.
+ * @internal The next sign-out of `accounts` keeps the device account's key,
+ * even with `clearOnSignOut`: another tab still has its store open (its
+ * wipe was held off), so that tab, the last out, decides. Its own sign-out
+ * forgets the key; if it closes instead, the key and the data stay.
  */
-export async function storedSelectedAccount(
+export function keepDeviceKeyOnSignOut(accounts: AccountManager<JWTAuth>): void {
+  keepNextSignedOutKey.add(accounts);
+}
+
+const keptAccountReaders = new WeakMap<
+  AccountManager<JWTAuth>,
+  (account: string) => Promise<boolean>
+>();
+
+/**
+ * @internal Whether the store `accounts` keeps still holds the key of the
+ * device account `account` (as stored now, not as this manager last saw it):
+ * while it does, that account can be opened again, so its local data is kept.
+ */
+export async function storedKeepsDeviceAccount(
   accounts: AccountManager<JWTAuth>,
-): Promise<string | undefined> {
-  const read = selectionReaders.get(accounts);
-  if (!read) throw new Error("Jazz can't read this account store's selection");
-  return read();
+  account: string,
+): Promise<boolean> {
+  const read = keptAccountReaders.get(accounts);
+  if (!read) throw new Error("Jazz can't read this device's account store");
+  return read(account);
 }
 
 /**
@@ -318,6 +334,7 @@ export async function prepareAccountManager(options: {
       selectionChanged(next) {
         // Creating/restoring a local handle already queued its root and selection.
         if (next?.identity.issuer === "urn:jazz:local-first") {
+          keepNextSignedOutKey.delete(manager);
           delete stored.backendUser;
           delete stored.signedOut;
           return;
@@ -330,7 +347,11 @@ export async function prepareAccountManager(options: {
           const signedOutRoot =
             stored.selected === null ? undefined : stored.roots[stored.selected];
           const account = signedOutRoot === undefined ? undefined : rootAccount(signedOutRoot);
-          if (!remembers && account !== undefined) {
+          // Unless another tab still has the account's store open: the last
+          // tab out decides (`keepDeviceKeyOnSignOut`).
+          const keep = keepNextSignedOutKey.has(manager);
+          keepNextSignedOutKey.delete(manager);
+          if (!remembers && !keep && account !== undefined) {
             unforgetting.delete(account);
             forgetting.add(account);
             stored.roots.splice(stored.selected!, 1);
@@ -341,6 +362,7 @@ export async function prepareAccountManager(options: {
           void save().catch((error) => manager.reportPersistenceError(error));
           return;
         }
+        keepNextSignedOutKey.delete(manager);
         delete stored.signedOut;
         // A guest linked to this user (their sign-up): with no remembered
         // user, nothing on the device may reopen them, so forget the root.
@@ -411,10 +433,10 @@ export async function prepareAccountManager(options: {
     latest: async () => keptKey(decode(await options.store.read())),
     known: () => keptKey(stored),
   });
-  selectionReaders.set(manager, async () => {
+  keptAccountReaders.set(manager, async (account) => {
     const latest = decode(await options.store.read());
     dropForgotten(latest);
-    return latest.selected === null ? undefined : rootAccount(latest.roots[latest.selected]!);
+    return latest.roots.some((root) => rootAccount(root) === account);
   });
   const superseded = async (): Promise<never> => {
     stored.selected = null;

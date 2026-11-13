@@ -3,6 +3,7 @@ import {
   accountForgotten,
   ensureAutomaticLocalFirst,
   keptDeviceKey,
+  keepDeviceKeyOnSignOut,
   prepareAccountManager,
 } from "./persistence.js";
 import { createJazzSessionOwner } from "../session/state.js";
@@ -854,4 +855,23 @@ it("mints a device account on a device no one used yet, and keeps createLocalFir
   await next.settleSelection();
   expect(next.getLoggedIn()!.id).toBe(accountOf(guestRoot(2)));
   expect(JSON.parse(store.value()!).roots).toEqual([guestRoot(1), guestRoot(2)]);
+});
+
+it("keeps the key of a clearOnSignOut sign-out whose wipe another tab held off, once", async () => {
+  const store = storeWith(null);
+  const accounts = await deviceAccounts(store, guestRoot(1), false);
+  accounts.createLocalFirst();
+  await accounts.settleSelection();
+  // Another tab still has the store open: this sign-out keeps the key.
+  keepDeviceKeyOnSignOut(accounts);
+  accounts.logout();
+  await accounts.settleSelection();
+  expect(JSON.parse(store.value()!).roots).toEqual([guestRoot(1)]);
+  expect(await keptDeviceKey(accounts).latest()).toBe(guestRoot(1));
+  // The last tab out signs out without a hold: now it's forgotten.
+  accounts.restoreLocalFirst(guestRoot(1));
+  await accounts.settleSelection();
+  accounts.logout();
+  await accounts.settleSelection();
+  expect(store.value()).not.toContain(guestRoot(1));
 });
