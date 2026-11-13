@@ -206,17 +206,21 @@ vercel({ namespace: ({ environment }) => environment });
 - **Per branch** isolates each pull request: a migration or test data on one branch never reaches
   another. `perBranch` gives the same core names as earlier versions, so existing preview cores
   keep their data. A preview deployed without a Git branch (from the CLI outside a checkout, or
-  through the API) has no branch to name, and `vercel()` throws for it; use
+  through the API) has no branch to name, and the store throws when it opens; use
   `perBranch(branch) || "cli-previews"` to give such previews a core of their own.
 - **Shared** keeps one set of preview data that all branches see. It needs fewer cores, but the
   branches share one schema history too, so a schema change or migration deployed from one branch
   applies to the data every preview uses.
 - **Production's core is never shared.** A core trusts the environment whose deployment started it
-  first, so a preview can't use production's data, even with the same namespace.
+  first and refuses the others. So a fixed string namespace isn't a setup: whichever environment
+  deploys first pins the core, and if a preview starts it first, production's own deploys are
+  refused. Name production's core from `environment`, as both setups above do.
 
 To reset a preview's data, delete its Sandbox and the Drive attached to it (the one it mounts at
-`/data`) in the Vercel dashboard. The next request creates both again, with an empty database and a
-new app ID. Large values already in Vercel Blob or S3 stay there; delete them from the store if you
+`/data`) in the Vercel dashboard. This can't be undone. Production's Sandbox and Drive are in the
+same list with similar names, and a long preview Drive name is shortened with a hash, so check the
+Sandbox's name (`jazz-<project>-<namespace>`) and pick the Drive from the Sandbox itself. The next
+request creates both again, with an empty database and a new app ID. Large values already in Vercel Blob or S3 stay there; delete them from the store if you
 need to. Nothing deletes the cores of merged or deleted branches yet.
 
 Blob stores follow environments, not namespaces: connect one store to production and one to preview
@@ -264,9 +268,14 @@ and `branch` come from Vercel's system environment variables, which are exposed 
 `vercel()` throws, the browser stays on its loading state, so check the function logs when a
 deployment never finishes loading.
 
-Upgrading from `name`: `vercel({ name })` now throws. `name: "jazz-<project>-<rest>"` becomes
-`namespace: "<rest>"`, and the per-branch setup above keeps the default names earlier versions
-used.
+Upgrading from `name`: `vercel({ name })` now throws, and when it can, the error gives the exact
+namespace to use. A name of the form `jazz-<project>-<rest>` becomes `namespace: "<rest>"`, where
+`<project>` is your Vercel project ID lowercased, with each run of characters other than `a-z` and
+`0-9` turned into one `-` (`prj_AbC1` becomes `prj-abc1`). A name of any other form (`myapp-core`,
+uppercase letters, the raw `prj_…` ID) can't be reached by a namespace: that core keeps its data,
+but this version opens another one, and the error says so. Without `name`, earlier versions used
+the per-branch setup above, which keeps those cores. Copy that one when upgrading: the
+one-core-per-environment setup (as on the home page) moves previews onto a new, empty core.
 
 The default `coreTarballUrl` covers every published `jazz-tools` version, release candidates
 included; set it only for a build you made yourself. If the Sandbox can't download the core, the
@@ -275,8 +284,9 @@ app's core is refused.
 
 ## Limits
 
-- Each namespace gets one persistent Sandbox and its Drive. Two apps in one project need different
-  namespaces. The smallest size is 2 GB of memory and 1 vCPU.
+- Each namespace gets one persistent Sandbox and its Drive. Two apps in one Vercel project need
+  namespaces that differ per environment too, for example
+  `` ({ environment }) => `chat-${environment}` ``. The smallest size is 2 GB of memory and 1 vCPU.
 - Nothing cleans up the Sandboxes and Drives of merged or deleted branches yet; delete them in the
   Vercel dashboard.
 - The first request in an environment takes longer: it creates the Sandbox and downloads the Jazz
