@@ -581,6 +581,13 @@ impl Inner {
         // Tables the query itself reaches (joins, arrays, includes,
         // reachability): these always watch the whole table.
         let mut structural = BTreeSet::new();
+        // A policy can read another row of the root table. The query's
+        // root predicate cannot narrow changes to that supporting occurrence.
+        // The compiler reports it: counting the table's name in the SQL would
+        // also count a cut's or branch view's own extra reads of the table.
+        if compiled.policy_tables.contains(&root.stored) {
+            structural.insert(root.stored.clone());
+        }
         fn joins(
             out: &mut BTreeSet<String>,
             list: &[crate::query::JoinVia],
