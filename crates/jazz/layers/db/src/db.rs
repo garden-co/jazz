@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
+use std::task::{Poll, Waker};
 
 use crate::ids::{AuthorSubject, GlobalPhysicalColumnId, GlobalPhysicalTableId, RowUuid};
 use crate::protocol::{
@@ -33,7 +34,7 @@ use crate::tools::{CmpOp, PolicyExpr};
 mod fanout;
 pub use fanout::FanoutStats;
 #[cfg(any(test, feature = "testing"))]
-pub use fanout::set_correlation_filter_for_test;
+pub use fanout::{set_correlation_filter_for_test, set_policy_pins_for_test};
 #[path = "large_ops.rs"]
 mod large_ops;
 pub(crate) use large_ops::byte_splices;
@@ -901,6 +902,104 @@ impl Stamp {
 }
 
 const STATEMENT_CACHE_CAPACITY: usize = 512;
+
+/// One read's nesting of its relations (`Inner::node`), shared by every row
+/// it nests: one read, as one identity, through one view and cut. Its
+/// relations' rows depend only on the relation and the parent value, so
+/// the run builds each relation's SQL (and each parent-cell read) once and
+/// rebinds only the parent, and reads each (relation, parent value) once
+/// where values repeat (relations keyed by a parent's column).
+///
+/// It lives for one call and dies with it, so nothing it holds outlives the
+/// read: relations are keyed by address, valid while the run borrows the
+/// query that owns them.
+struct RelationRun<'q> {
+    prepared: &'q PreparedQuery,
+    read: &'q ReadSpec,
+    sessions: (Option<Session>, Session),
+    /// Whether to reuse at all (always, outside tests that compare with the
+    /// uncached path).
+    reuse: bool,
+    /// Per relation and parent shape (an array of references or a scalar):
+    /// its compiled children and the parameter holding the parent.
+    sql: HashMap<(*const crate::query::ArraySubquery, bool), (Compiled, usize)>,
+    /// Per relation: the read of its parent cell.
+    cells: HashMap<*const crate::query::ArraySubquery, crate::compile::CellRead>,
+    /// Per relation keyed by a parent's column, parent shape and bound
+    /// parent value: its children.
+    children:
+        HashMap<(*const crate::query::ArraySubquery, bool, Option<ParentKey>), Vec<ResultNode>>,
+}
+
+impl<'q> RelationRun<'q> {
+    fn new(
+        inner: &Inner,
+        prepared: &'q PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &'q ReadSpec,
+    ) -> Self {
+        Self {
+            prepared,
+            read,
+            sessions: inner.read_sessions(prepared, identity),
+            reuse: relation_reuse(),
+            sql: HashMap::new(),
+            cells: HashMap::new(),
+            children: HashMap::new(),
+        }
+    }
+
+    fn ctx<'a>(&'a self, inner: &'a Inner) -> Ctx<'a> {
+        let (policy, claims) = &self.sessions;
+        inner.read_ctx(self.prepared, policy.as_ref(), claims, self.read)
+    }
+}
+
+/// A bound parent value as a map key: equal keys bind equal SQL values.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ParentKey {
+    Null,
+    Integer(i64),
+    Real(u64),
+    Text(Vec<u8>),
+    Blob(Vec<u8>),
+}
+
+impl ParentKey {
+    fn of(value: &Sql) -> Self {
+        match value {
+            Sql::Null => Self::Null,
+            Sql::Integer(v) => Self::Integer(*v),
+            Sql::Real(v) => Self::Real(v.to_bits()),
+            Sql::Text(v) => Self::Text(v.clone()),
+            Sql::Blob(v) => Self::Blob(v.clone()),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static RELATION_REUSE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Whether relation nesting reuses SQL and rows within a read.
+fn relation_reuse() -> bool {
+    #[cfg(any(test, feature = "testing"))]
+    {
+        RELATION_REUSE.with(std::cell::Cell::get)
+    }
+    #[cfg(not(any(test, feature = "testing")))]
+    {
+        true
+    }
+}
+
+/// Tests only: nest relations without reusing SQL or rows within a read
+/// (`false`), on this thread, to compare with the reusing path.
+#[cfg(any(test, feature = "testing"))]
+pub fn set_relation_reuse_for_test(reuse: bool) {
+    RELATION_REUSE.with(|cell| cell.set(reuse));
+}
 
 /// The application tables a store holds, by their stored columns.
 fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> {
@@ -1961,8 +2060,49 @@ impl Db {
     /// The shared state, set up to run under this handle's schema.
     fn inner(&self) -> std::cell::RefMut<'_, Inner> {
         let mut inner = self.inner.borrow_mut();
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        inner.schema = self.execution_schema(&inner);
         inner
+    }
+
+    /// Retained current-governed views keep their names, but not an old owner
+    /// policy. Exact registered views and published bundle pins stay fixed.
+    fn execution_schema(&self, inner: &Inner) -> Rc<Schema> {
+        let Some(view) = &self.view else {
+            return inner.owner.clone();
+        };
+        match &view.policies_from {
+            Some(policies) if policies.bundle.is_none() => {
+                if Rc::ptr_eq(policies, &inner.owner) {
+                    view.clone()
+                } else {
+                    Rc::new((**view).clone().with_policies_of(inner.owner.clone()))
+                }
+            }
+            _ => view.clone(),
+        }
+    }
+
+    /// Keep prepared names while selecting policy from the executing handle.
+    fn execution_query<'a>(
+        &self,
+        prepared: &'a PreparedQuery,
+    ) -> std::borrow::Cow<'a, PreparedQuery> {
+        // A peek: choosing policies must not settle an open transaction's
+        // overlay; `inner()` would, on every identity read in the batch.
+        let inner = self.inner.staging();
+        let schema = self.execution_schema(&inner);
+        let names = prepared.schema.as_ref().unwrap_or(&inner.owner);
+        let governing = schema.policies_from.as_ref().unwrap_or(&schema);
+        let prior = names.policies_from.as_ref().unwrap_or(names);
+        if Rc::ptr_eq(prior, governing) {
+            return std::borrow::Cow::Borrowed(prepared);
+        }
+        std::borrow::Cow::Owned(PreparedQuery {
+            schema: Some(Rc::new(
+                (**names).clone().with_policies_of(governing.clone()),
+            )),
+            ..prepared.clone()
+        })
     }
 
     pub fn table(&self, table: impl Into<String>) -> Query {
@@ -2814,8 +2954,9 @@ impl Db {
         opts: ReadOpts,
         identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let prepared = self.execution_query(prepared);
         let inner = self.inner();
-        inner.run(prepared, Some(identity), &ReadSpec::of(&opts, &inner)?)
+        inner.run(&prepared, Some(identity), &ReadSpec::of(&opts, &inner)?)
     }
 
     pub async fn all_result_tree(
@@ -2826,12 +2967,11 @@ impl Db {
         let inner = self.inner();
         let read = ReadSpec::of(&opts, &inner)?;
         let roots = inner.run(prepared, None, &read)?;
+        let mut run = RelationRun::new(&inner, prepared, None, &read);
         let mut tree = Vec::with_capacity(roots.len());
         for row in roots {
             tree.push(inner.node(
-                prepared,
-                None,
-                &read,
+                &mut run,
                 &prepared.query.table,
                 &prepared.query.array_subqueries,
                 row,
@@ -3626,6 +3766,18 @@ impl Db {
 /// Why a replica refuses an upstream whose authority namespace is not the
 /// one it mirrors (INV-SYNC-54). Nothing on the wire tells a recreated server
 /// store from another app's, so the message names both, and the one way on.
+/// A store keeps `version` under other names than its authority, which never
+/// confirmed them: it was opened without the app's migrations.
+pub(crate) fn store_opened_without_migrations(version: &crate::ids::SchemaVersionId) -> Error {
+    Error::new(
+        ErrorCode::StoreOpenedWithoutMigrations,
+        format!(
+            "this store keeps schema version {} under other names than the server, which never confirmed them: it was opened without the app's migrations (React Native before alpha.61 dropped them). Syncing a store opened without the app's migrations is not supported yet: rebuild it, or reset it with deleteClientStorage(), which drops its unsynced writes",
+            uuid::Uuid::from_bytes(*version.as_bytes())
+        ),
+    )
+}
+
 pub(crate) fn authority_changed() -> Error {
     Error::new(
         ErrorCode::AuthorityChanged,
@@ -3869,6 +4021,12 @@ impl Inner {
         for (version, names, _) in &entries {
             match self.names.get(version) {
                 Some(local) if local == names => {}
+                // No authority ever confirmed this version's names here: the
+                // store minted them itself, opened without the lenses that
+                // lead to it (a client that dropped the app's migrations).
+                Some(_) if !self.names.confirmed(version) => {
+                    return Err(store_opened_without_migrations(version));
+                }
                 Some(_) => {
                     return Err(unsupported(format!(
                         "schema version {}, which this store stores otherwise than its upstream (it was opened without the app's lenses into it),",
@@ -4897,13 +5055,12 @@ impl Inner {
         } else {
             read
         };
+        let mut run = RelationRun::new(self, prepared, identity, read);
         roots
             .into_iter()
             .map(|row| {
                 self.node(
-                    prepared,
-                    identity,
-                    read,
+                    &mut run,
                     &prepared.query.table,
                     &prepared.query.array_subqueries,
                     row,
@@ -4924,11 +5081,10 @@ impl Inner {
         let roots = self.run(prepared, identity, read)?;
         let mut out = versions(&roots);
         if !prepared.query.array_subqueries.is_empty() {
+            let mut run = RelationRun::new(self, prepared, identity, read);
             for row in roots {
                 let node = self.node(
-                    prepared,
-                    identity,
-                    read,
+                    &mut run,
                     &prepared.query.table,
                     &prepared.query.array_subqueries,
                     row,
@@ -4960,49 +5116,118 @@ impl Inner {
     /// read's view and cut, settled-only and members-only as it is.
     fn node(
         &self,
-        prepared: &PreparedQuery,
-        identity: Option<AuthorSubject>,
-        read: &ReadSpec,
+        run: &mut RelationRun<'_>,
         table: &str,
         arrays: &[crate::query::ArraySubquery],
         row: CurrentRow,
     ) -> Result<ResultNode, Error> {
         let mut relations = BTreeMap::new();
         for array in arrays {
-            let (policy, claims) = self.read_sessions(prepared, identity);
-            let ctx = || self.read_ctx(prepared, policy.as_ref(), &claims, read);
             let parent = if array.outer_column == "id" {
                 Value::Uuid(row.id.0)
             } else {
-                let (sql, params, ty, tags) =
-                    ctx().compile_cell(table, &array.outer_column, row.id)?;
-                let cell: Option<Sql> = self
-                    .conn
-                    .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
-                    .optional()
-                    .map_err(storage)?;
-                match cell {
-                    Some(cell) => cell_from_sql(&ty, tags.as_ref(), cell.as_ref(), &self.chunks)?
-                        .unwrap_or(Value::Nullable(None)),
-                    None => Value::Nullable(None),
-                }
+                self.relation_parent(run, table, array, row.id)?
             };
-            let compiled = ctx().compile_children(array, &parent)?;
-            let children = self.execute(&compiled, &array.table)?;
-            let mut nodes = Vec::with_capacity(children.len());
-            for child in children {
-                nodes.push(self.node(
-                    prepared,
-                    identity,
-                    read,
-                    &array.table,
-                    &array.nested_arrays,
-                    child,
-                )?);
-            }
+            let nodes = self.relation(run, array, &parent)?;
             relations.insert(array.column_name.clone(), ResultRelation::Array(nodes));
         }
         Ok(ResultNode { row, relations })
+    }
+
+    /// The value of row `id` that `array` correlates its children with
+    /// (`array.outer_column`), read through the run's view and cut.
+    fn relation_parent(
+        &self,
+        run: &mut RelationRun<'_>,
+        table: &str,
+        array: &crate::query::ArraySubquery,
+        id: RowUuid,
+    ) -> Result<Value, Error> {
+        let key = array as *const crate::query::ArraySubquery;
+        let cell = match run.reuse.then(|| run.cells.get(&key)).flatten() {
+            Some(cached) => {
+                let mut cell = cached.clone();
+                cell.params[cell.id_param] = Sql::Blob(id.0.as_bytes().to_vec());
+                cell
+            }
+            None => {
+                let cell = run.ctx(self).compile_cell(table, &array.outer_column, id)?;
+                if run.reuse {
+                    run.cells.insert(key, cell.clone());
+                }
+                cell
+            }
+        };
+        let value: Option<Sql> = self
+            .conn
+            .cached_row(&cell.sql, params_from_iter(cell.params.iter()), |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(storage)?;
+        Ok(match value {
+            Some(value) => {
+                cell_from_sql(&cell.ty, cell.tags.as_ref(), value.as_ref(), &self.chunks)?
+                    .unwrap_or(Value::Nullable(None))
+            }
+            None => Value::Nullable(None),
+        })
+    }
+
+    /// The children `array` relates to `parent`, each with its own
+    /// relations. Within one run the same relation of the same parent value
+    /// reads the same rows, so a relation keyed by a parent's column (a
+    /// forward reference, or an array of them) reads them once. One keyed
+    /// by the parent's own id meets each parent once, so it is not kept.
+    fn relation(
+        &self,
+        run: &mut RelationRun<'_>,
+        array: &crate::query::ArraySubquery,
+        parent: &Value,
+    ) -> Result<Vec<ResultNode>, Error> {
+        let key = array as *const crate::query::ArraySubquery;
+        let elements = match parent {
+            Value::Nullable(Some(inner)) => matches!(**inner, Value::Array(_)),
+            value => matches!(value, Value::Array(_)),
+        };
+        let bound = crate::values::to_sql(parent)?;
+        let memo = (key, elements, bound.as_ref().map(ParentKey::of));
+        let memoise = run.reuse && array.outer_column != "id";
+        if memoise && let Some(nodes) = run.children.get(&memo) {
+            return Ok(nodes.clone());
+        }
+        // Only the parent's own parameter differs between parents of one
+        // shape (a scalar, or an array of references).
+        let compiled = match run
+            .reuse
+            .then(|| run.sql.get(&(key, elements)))
+            .flatten()
+            .zip(bound.as_ref())
+        {
+            Some(((cached, at), bound)) => {
+                let mut compiled = cached.clone();
+                compiled.params[*at] = bound.clone();
+                compiled
+            }
+            None => {
+                let (compiled, at) = run.ctx(self).compile_children(array, parent)?;
+                if run.reuse
+                    && let Some(at) = at
+                {
+                    run.sql.insert((key, elements), (compiled.clone(), at));
+                }
+                compiled
+            }
+        };
+        let children = self.execute(&compiled, &array.table)?;
+        let mut nodes = Vec::with_capacity(children.len());
+        for child in children {
+            nodes.push(self.node(run, &array.table, &array.nested_arrays, child)?);
+        }
+        if memoise {
+            run.children.insert(memo, nodes.clone());
+        }
+        Ok(nodes)
     }
 
     // ---- write primitives ---------------------------------------------
@@ -8499,6 +8724,7 @@ impl Store {
 
 struct Batch {
     kind: BatchKind,
+    reads_state: Rc<RefCell<TransactionReads>>,
     ops: Vec<(Rc<Schema>, StagedOp)>,
     /// The rows `ops` write, by stored table: a later staged write's
     /// evidence (see [`Db::in_overlay`]). Shared with that write's check
@@ -8512,6 +8738,60 @@ struct Batch {
     /// Leases of the streamed values the batch's writes hold: their chunks
     /// stay until the batch commits or is dropped.
     uploads: Vec<crate::db::large_ops::UploadLease>,
+}
+
+/// Per-batch identity and admission order; an old future never observes a reused ID.
+#[derive(Default)]
+struct TransactionReads {
+    queue: VecDeque<Rc<TransactionReadTicket>>,
+    closed: bool,
+}
+
+impl TransactionReads {
+    fn take_wakers(&self) -> Vec<Waker> {
+        self.queue
+            .iter()
+            .filter_map(|ticket| ticket.waker.borrow_mut().take())
+            .collect()
+    }
+}
+
+/// Keep at most the current task's waker for each admitted read.
+#[derive(Default)]
+struct TransactionReadTicket {
+    waker: RefCell<Option<Waker>>,
+}
+
+struct TransactionRead {
+    state: Rc<RefCell<TransactionReads>>,
+    ticket: Rc<TransactionReadTicket>,
+}
+
+impl Drop for TransactionRead {
+    fn drop(&mut self) {
+        let wakers = {
+            let mut state = self.state.borrow_mut();
+            let wakers = state.take_wakers();
+            state
+                .queue
+                .retain(|ticket| !Rc::ptr_eq(ticket, &self.ticket));
+            wakers
+        };
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+}
+
+fn close_transaction_reads(state: &Rc<RefCell<TransactionReads>>) {
+    let wakers = {
+        let mut state = state.borrow_mut();
+        state.closed = true;
+        state.take_wakers()
+    };
+    for waker in wakers {
+        waker.wake();
+    }
 }
 
 #[derive(Default)]
@@ -9029,6 +9309,7 @@ impl Db {
             id,
             Batch {
                 kind,
+                reads_state: Rc::default(),
                 ops: Vec::new(),
                 rows: Arc::default(),
                 edits: LargeEdits::default(),
@@ -9071,21 +9352,34 @@ impl Db {
     }
 
     pub fn abandon_transaction_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
-        self.inner
+        let batch = self
+            .inner
             .borrow_mut()
             .batches
             .remove(&id)
-            .map(drop)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        close_transaction_reads(&batch.reads_state);
+        Ok(())
     }
 
     fn take_batch(&self, id: OpenTransactionId) -> Result<Batch, Error> {
         self.inner().require_mutation_admission()?;
-        self.inner
+        let batch = self
+            .inner
             .borrow_mut()
             .batches
             .remove(&id)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        // Refuse before publication, and wake futures only after releasing Inner.
+        let unfinished = !batch.reads_state.borrow().queue.is_empty();
+        close_transaction_reads(&batch.reads_state);
+        if unfinished {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "transaction has unfinished reads",
+            ));
+        }
+        Ok(batch)
     }
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
@@ -9101,7 +9395,8 @@ impl Db {
     /// same rows at the same versions now as it did at the snapshot (this
     /// catches phantoms: rows that entered or left a predicate or window).
     /// The check and the apply run under one store borrow, so nothing can
-    /// commit in between.
+    /// commit in between. An unfinished admitted read refuses and consumes the
+    /// handle before any writes are published.
     pub async fn commit_serializable_handle(
         &self,
         id: OpenTransactionId,
@@ -9328,7 +9623,7 @@ impl Db {
         read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
         let mut inner = self.inner.staging();
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        inner.schema = self.execution_schema(&inner);
         let batch = inner
             .batches
             .get(&id)
@@ -9520,7 +9815,7 @@ impl Db {
         self.in_overlay(id, Some(&mut op), |_, _| Ok(()))
             .map_err(|error| self.serializable_write_conflict(id, &op, error))?;
         let mut inner = self.inner.staging();
-        let schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        let schema = self.execution_schema(&inner);
         let stored = match op.row() {
             Some(row) => Some((schema.table(op.table())?.stored.clone(), row)),
             None => None,
@@ -9585,7 +9880,7 @@ impl Db {
         let marks = {
             let mut inner = self.inner.staging();
             inner.require_mutation_admission()?;
-            inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+            inner.schema = self.execution_schema(&inner);
             edits.derived.extend(chunked.derived);
             edits.pending_nodes.extend(chunked.pending_nodes);
             let batch = inner
@@ -9803,6 +10098,7 @@ impl TxRef<'_> {
     /// As [`Self::all_prepared_as`], at `tier`: a `Remote` read waits for
     /// the authority's answer, offline too. `LocalOnly` never asks the
     /// authority; `LocalFirst` can answer offline from the replica's known cut.
+    /// Reads run in first-poll order, retaining the writes staged at that poll.
     /// The first successful serializable read fixes its snapshot for later reads.
     pub async fn all_prepared_at(
         &self,
@@ -9811,17 +10107,63 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
     ) -> Result<Vec<CurrentRow>, Error> {
-        // Capture before hydration: later writes must not leak into an
-        // already admitted read, including when another read is cancelled.
-        // Peeks skip the store gate, which would undo the cached overlay.
-        let prefix = self
-            .db
-            .inner
-            .staging()
-            .batches
-            .get(&self.id)
-            .ok_or_else(|| rejected("transaction is not open"))?
-            .prefix();
+        // Capture staging before queueing: later writes must not leak into
+        // the prefix this read admitted, even when its predecessor is cancelled.
+        let (prefix, state) = {
+            let inner = self.db.inner.staging();
+            let batch = inner
+                .batches
+                .get(&self.id)
+                .ok_or_else(|| rejected("transaction is not open"))?;
+            (batch.prefix(), batch.reads_state.clone())
+        };
+        let guard = TransactionRead {
+            state,
+            ticket: Rc::default(),
+        };
+        guard
+            .state
+            .borrow_mut()
+            .queue
+            .push_back(guard.ticket.clone());
+        let reading = self.read_admitted(prepared, include_deleted, identity, tier, prefix);
+        let mut reading = std::pin::pin!(reading);
+        std::future::poll_fn(|cx| {
+            {
+                let state = guard.state.borrow();
+                if state.closed {
+                    return Poll::Ready(Err(rejected("transaction is no longer open")));
+                }
+                {
+                    let mut waker = guard.ticket.waker.borrow_mut();
+                    if waker
+                        .as_ref()
+                        .is_none_or(|prior| !prior.will_wake(cx.waker()))
+                    {
+                        *waker = Some(cx.waker().clone());
+                    }
+                }
+                if !state
+                    .queue
+                    .front()
+                    .is_some_and(|ticket| Rc::ptr_eq(ticket, &guard.ticket))
+                {
+                    return Poll::Pending;
+                }
+            }
+            reading.as_mut().poll(cx)
+        })
+        .await
+    }
+
+    async fn read_admitted(
+        &self,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+        identity: Option<AuthorSubject>,
+        tier: ReadTier,
+        prefix: BatchPrefix,
+    ) -> Result<Vec<CurrentRow>, Error> {
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
         // the replica when the link cannot answer.
@@ -9912,21 +10254,28 @@ impl TxRef<'_> {
         }
         // Relations nest inside the overlay, so they see staged rows too.
         // Offloaded leaves are fetched as for any read.
-        let rows = self
+        let (rows, prepared) = self
             .db
             .fetching_with((), |()| {
-                self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
+                // Both remote hydration and offloaded chunks may yield while
+                // owner policies change. Resolve policy at each evaluation.
+                let prepared = match identity {
+                    Some(_) => self.db.execution_query(prepared),
+                    None => std::borrow::Cow::Borrowed(prepared),
+                };
+                let rows = self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
                     let read = ReadSpec {
                         include_deleted,
                         cut,
                         ..ReadSpec::default()
                     };
-                    let roots = inner.run(prepared, identity, &read)?;
-                    inner.nest_relations(prepared, identity, &read, roots)
-                })
+                    let roots = inner.run(&prepared, identity, &read)?;
+                    inner.nest_relations(&prepared, identity, &read, roots)
+                })?;
+                Ok((rows, prepared))
             })
             .await?;
-        self.db.record_read(self.id, prepared, include_deleted)?;
+        self.db.record_read(self.id, &prepared, include_deleted)?;
         Ok(rows)
     }
 

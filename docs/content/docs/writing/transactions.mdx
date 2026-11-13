@@ -197,3 +197,7 @@ commit result to wait for the authority to accept or reject the transaction. You
 durability tier, it is always settled by the authority.
 
 If a mergeable transaction has no writes, `commit()` throws. Call `rollback()` instead.
+
+Await every read you start through a transaction before you commit it. Committing while one of
+its reads is still pending throws a `not_observed` error, and the transaction ends without
+publishing anything.

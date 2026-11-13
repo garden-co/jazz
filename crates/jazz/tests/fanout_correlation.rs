@@ -32,10 +32,10 @@ use common::{
 
 // ---- harness ---------------------------------------------------------------
 
-type Snapshot = Vec<(RowUuid, Vec<(String, Option<Value>)>)>;
+pub(crate) type Snapshot = Vec<(RowUuid, Vec<(String, Option<Value>)>)>;
 
 /// A store on a SQLite file in its own scratch directory.
-struct Store {
+pub(crate) struct Store {
     db: Db,
     _dir: tempfile::TempDir,
 }
@@ -47,11 +47,11 @@ impl std::ops::Deref for Store {
     }
 }
 
-fn open(schema: JazzSchema, node: u8) -> Store {
+pub(crate) fn open(schema: JazzSchema, node: u8) -> Store {
     open_as(schema, node, AuthorSubject::SYSTEM)
 }
 
-fn open_as(schema: JazzSchema, node: u8, author: AuthorSubject) -> Store {
+pub(crate) fn open_as(schema: JazzSchema, node: u8, author: AuthorSubject) -> Store {
     let dir = tempfile::tempdir().unwrap();
     let path: PathBuf = dir.path().join("store.sqlite");
     let config = DbConfig::new(
@@ -66,12 +66,12 @@ fn open_as(schema: JazzSchema, node: u8, author: AuthorSubject) -> Store {
 }
 
 /// One subscription and the result its deltas maintain.
-struct Live {
-    name: String,
+pub(crate) struct Live {
+    pub(crate) name: String,
     query: PreparedQuery,
     identity: Option<AuthorSubject>,
     stream: SubscriptionStream,
-    rows: Snapshot,
+    pub(crate) rows: Snapshot,
 }
 
 fn owned(row: &jazz::db::CurrentRow) -> Vec<(String, Option<Value>)> {
@@ -80,15 +80,20 @@ fn owned(row: &jazz::db::CurrentRow) -> Vec<(String, Option<Value>)> {
         .collect()
 }
 
-fn snapshot(rows: &[jazz::db::CurrentRow]) -> Snapshot {
+pub(crate) fn snapshot(rows: &[jazz::db::CurrentRow]) -> Snapshot {
     rows.iter().map(|r| (r.row_uuid(), owned(r))).collect()
 }
 
-fn subscribe(db: &Db, name: &str, query: Query, identity: Option<AuthorSubject>) -> Live {
+pub(crate) fn subscribe(
+    db: &Db,
+    name: &str,
+    query: Query,
+    identity: Option<AuthorSubject>,
+) -> Live {
     subscribe_with(db, name, query, identity, ReadOpts::default())
 }
 
-fn subscribe_with(
+pub(crate) fn subscribe_with(
     db: &Db,
     name: &str,
     query: Query,
@@ -111,7 +116,7 @@ fn subscribe_with(
 }
 
 /// Applies queued deltas to the maintained result.
-fn apply(live: &mut Live) {
+pub(crate) fn apply(live: &mut Live) {
     while let Some(event) = live.stream.try_next_event() {
         let SubscriptionEvent::Delta {
             reset,
@@ -140,17 +145,22 @@ fn apply(live: &mut Live) {
     }
 }
 
-fn fresh(db: &Db, live: &Live, opts: ReadOpts) -> Snapshot {
+pub(crate) fn fresh(db: &Db, live: &Live, opts: ReadOpts) -> Snapshot {
     let rows = block_on(db.all_nested_for_test(&live.query, opts, live.identity)).unwrap();
     snapshot(&rows)
 }
 
 /// Every maintained result equals a fresh read; returns the fresh results.
-fn check(db: &Db, lives: &mut [Live], after: &str) -> Vec<Snapshot> {
+pub(crate) fn check(db: &Db, lives: &mut [Live], after: &str) -> Vec<Snapshot> {
     check_with(db, lives, after, ReadOpts::default())
 }
 
-fn check_with(db: &Db, lives: &mut [Live], after: &str, opts: ReadOpts) -> Vec<Snapshot> {
+pub(crate) fn check_with(
+    db: &Db,
+    lives: &mut [Live],
+    after: &str,
+    opts: ReadOpts,
+) -> Vec<Snapshot> {
     lives
         .iter_mut()
         .map(|live| {
@@ -166,28 +176,28 @@ fn check_with(db: &Db, lives: &mut [Live], after: &str, opts: ReadOpts) -> Vec<S
         .collect()
 }
 
-fn id(kind: u8, n: usize) -> RowUuid {
+pub(crate) fn id(kind: u8, n: usize) -> RowUuid {
     let mut bytes = [kind; 16];
     bytes[8..].copy_from_slice(&(n as u64).to_be_bytes());
     RowUuid::from_bytes(bytes)
 }
 
-fn uuid(row: RowUuid) -> Value {
+pub(crate) fn uuid(row: RowUuid) -> Value {
     Value::Uuid(row.0)
 }
 
-fn text(s: &str) -> Value {
+pub(crate) fn text(s: &str) -> Value {
     Value::String(s.to_owned())
 }
 
-fn cells(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
+pub(crate) fn cells(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
     pairs
         .iter()
         .map(|(k, v)| ((*k).to_owned(), v.clone()))
         .collect()
 }
 
-fn insert(db: &Db, table: &str, row: RowUuid, pairs: &[(&str, Value)]) {
+pub(crate) fn insert(db: &Db, table: &str, row: RowUuid, pairs: &[(&str, Value)]) {
     block_on(db.insert(
         table,
         cells(pairs),
@@ -199,19 +209,19 @@ fn insert(db: &Db, table: &str, row: RowUuid, pairs: &[(&str, Value)]) {
     .unwrap();
 }
 
-fn update(db: &Db, table: &str, row: RowUuid, pairs: &[(&str, Value)]) {
+pub(crate) fn update(db: &Db, table: &str, row: RowUuid, pairs: &[(&str, Value)]) {
     block_on(db.update(table, row, cells(pairs), Default::default())).unwrap();
 }
 
-fn delete(db: &Db, table: &str, row: RowUuid) {
+pub(crate) fn delete(db: &Db, table: &str, row: RowUuid) {
     block_on(db.delete(table, row, Default::default())).unwrap();
 }
 
-fn user(n: usize) -> AuthorSubject {
+pub(crate) fn user(n: usize) -> AuthorSubject {
     AuthorSubject::for_test_bytes([0x60 + n as u8; 16])
 }
 
-fn subject(n: usize) -> Value {
+pub(crate) fn subject(n: usize) -> Value {
     Value::String(user(n).principal_parts().1)
 }
 
@@ -304,7 +314,7 @@ fn replies() -> ArraySubquery {
         .order_by("sent_at", OrderDirection::Asc)
 }
 
-fn reran(db: &Db) -> u64 {
+pub(crate) fn reran(db: &Db) -> u64 {
     db.fanout_stats().reran
 }
 
