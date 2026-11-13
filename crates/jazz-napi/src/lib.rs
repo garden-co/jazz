@@ -48,6 +48,7 @@ mod rn_test_bridge;
 static GLOBAL: mimalloc_safe::MiMalloc = mimalloc_safe::MiMalloc;
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -979,7 +980,17 @@ pub type SubscriptionEvent =
 
 #[napi(js_name = "Subscription")]
 pub struct Subscription {
-    stream: Option<SubscriptionStream>,
+    stream: SubscriptionSlot,
+}
+
+/// Where a subscription's stream lives: read through this object, or moved
+/// into a [`SubscriptionPool`] that drains every pooled stream in one call.
+enum SubscriptionSlot {
+    Own(Option<Box<SubscriptionStream>>),
+    Pooled {
+        pool: Rc<RefCell<PoolStreams>>,
+        id: u32,
+    },
 }
 
 fn subscription_event(event: CoreEvent) -> napi::Result<SubscriptionEvent> {
@@ -1012,26 +1023,107 @@ fn subscription_event(event: CoreEvent) -> napi::Result<SubscriptionEvent> {
     )
 }
 
+/// Something events are taken from without waiting: a live stream, or a
+/// scripted source in tests.
+trait EventSource {
+    fn try_next(&mut self) -> Option<CoreEvent>;
+}
+
+impl EventSource for SubscriptionStream {
+    fn try_next(&mut self) -> Option<CoreEvent> {
+        self.try_next_event()
+    }
+}
+
+/// What one read of one stream produced.
+struct StreamRead<T> {
+    events: Vec<T>,
+    /// The stream delivered `Closed`: it has nothing more to say.
+    closed: bool,
+    /// Encoding an event failed. The events before it are kept; the stream
+    /// is not read further.
+    error: Option<napi::Error>,
+}
+
+/// Take every event `source` has now, encoding each.
+fn read_stream<S: EventSource, T>(
+    source: &mut S,
+    encode: &mut impl FnMut(CoreEvent) -> napi::Result<T>,
+) -> StreamRead<T> {
+    let mut read = StreamRead {
+        events: Vec::new(),
+        closed: false,
+        error: None,
+    };
+    while let Some(event) = source.try_next() {
+        let closed = matches!(event, CoreEvent::Closed);
+        match encode(event) {
+            Ok(event) => read.events.push(event),
+            Err(error) => {
+                read.error = Some(error);
+                return read;
+            }
+        }
+        if closed {
+            read.closed = true;
+            break;
+        }
+    }
+    read
+}
+
+/// Read every stream in `streams` that has something, in id order, and
+/// forget the ones that closed or failed. One stream's encode error fails
+/// only that stream's entry.
+fn drain_streams<S: EventSource, T>(
+    streams: &mut BTreeMap<u32, S>,
+    mut encode: impl FnMut(CoreEvent) -> napi::Result<T>,
+) -> Vec<(u32, StreamRead<T>)> {
+    let mut out = Vec::new();
+    streams.retain(|id, stream| {
+        let read = read_stream(stream, &mut encode);
+        let keep = !read.closed && read.error.is_none();
+        if !read.events.is_empty() || read.error.is_some() {
+            out.push((*id, read));
+        }
+        keep
+    });
+    out
+}
+
 #[napi]
 impl Subscription {
     /// Every event available now; empty until the next tick or local write
     /// has something to deliver.
     #[napi(js_name = "readAll")]
     pub fn read_all(&mut self) -> js::Result<Vec<SubscriptionEvent>> {
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or_else(|| napi::Error::from_reason("subscription is closed"))?;
-        let mut events = Vec::new();
-        while let Some(event) = stream.try_next_event() {
-            let closed = matches!(event, CoreEvent::Closed);
-            events.push(subscription_event(event)?);
-            if closed {
-                self.stream = None;
-                break;
+        let read = match &mut self.stream {
+            SubscriptionSlot::Own(stream) => {
+                let Some(source) = stream.as_mut() else {
+                    return Err(napi::Error::from_reason("subscription is closed").into());
+                };
+                let read = read_stream(source.as_mut(), &mut subscription_event);
+                if read.closed {
+                    *stream = None;
+                }
+                read
             }
+            SubscriptionSlot::Pooled { pool, id } => {
+                let mut pool = pool.borrow_mut();
+                let Some(source) = pool.streams.get_mut(id) else {
+                    return Err(napi::Error::from_reason("subscription is closed").into());
+                };
+                let read = read_stream(source, &mut subscription_event);
+                if read.closed {
+                    pool.streams.remove(id);
+                }
+                read
+            }
+        };
+        match read.error {
+            Some(error) => Err(error.into()),
+            None => Ok(read.events),
         }
-        Ok(events)
     }
 
     #[napi]
@@ -1039,9 +1131,130 @@ impl Subscription {
         self.read_all()
     }
 
+    /// Move this subscription's stream into `pool`, which then reads it in
+    /// [`SubscriptionPool::drain`]. Returns the id its batches carry.
+    #[napi(js_name = "joinPool")]
+    pub fn join_pool(&mut self, pool: &SubscriptionPool) -> js::Result<u32> {
+        let stream = match &mut self.stream {
+            SubscriptionSlot::Pooled { pool: joined, id } if Rc::ptr_eq(joined, &pool.streams) => {
+                return Ok(*id);
+            }
+            SubscriptionSlot::Pooled { .. } => {
+                return Err(napi::Error::from_reason("subscription is in another pool").into());
+            }
+            SubscriptionSlot::Own(stream) => stream
+                .take()
+                .ok_or_else(|| napi::Error::from_reason("subscription is closed"))?,
+        };
+        let mut streams = pool.streams.borrow_mut();
+        let id = streams.next_id;
+        streams.next_id = streams.next_id.wrapping_add(1);
+        streams.streams.insert(id, *stream);
+        drop(streams);
+        self.stream = SubscriptionSlot::Pooled {
+            pool: Rc::clone(&pool.streams),
+            id,
+        };
+        Ok(id)
+    }
+
     #[napi]
     pub fn close(&mut self) -> bool {
-        self.stream.take().is_some()
+        match &mut self.stream {
+            SubscriptionSlot::Own(stream) => stream.take().is_some(),
+            SubscriptionSlot::Pooled { pool, id } => pool.borrow_mut().streams.remove(id).is_some(),
+        }
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        // A collected subscription ends its pooled stream as an unpooled
+        // one ends with it.
+        self.close();
+    }
+}
+
+#[derive(Default)]
+struct PoolStreams {
+    next_id: u32,
+    streams: BTreeMap<u32, SubscriptionStream>,
+}
+
+/// One subscription's share of a [`SubscriptionPool::drain`].
+#[napi(object)]
+pub struct SubscriptionBatch {
+    /// The id [`Subscription::join_pool`] returned.
+    pub id: u32,
+    /// The events available now, oldest first.
+    pub events: Vec<SubscriptionEvent>,
+    /// Set when the stream failed after `events`; the stream has left the
+    /// pool. Other subscriptions in the same drain are unaffected.
+    pub error: Option<SubscriptionBatchError>,
+}
+
+#[napi(object)]
+pub struct SubscriptionBatchError {
+    pub message: String,
+    /// The stable core error code, or the napi status name.
+    pub code: String,
+}
+
+impl From<napi::Error> for SubscriptionBatchError {
+    fn from(error: napi::Error) -> Self {
+        let code = carried_core(&error)
+            .map(|(code, _)| code.to_owned())
+            .unwrap_or_else(|| error.status.as_ref().to_owned());
+        Self {
+            message: error.reason,
+            code,
+        }
+    }
+}
+
+/// Subscriptions read together: one [`drain`](Self::drain) call returns the
+/// events of every pooled subscription that has any, instead of one
+/// `readAll` call per subscription.
+#[napi(js_name = "SubscriptionPool")]
+pub struct SubscriptionPool {
+    streams: Rc<RefCell<PoolStreams>>,
+}
+
+impl Default for SubscriptionPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[napi]
+impl SubscriptionPool {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self {
+            streams: Rc::default(),
+        }
+    }
+
+    /// The events of every pooled subscription that has any now, by id.
+    /// Subscriptions with nothing are left out. A closed or failed stream
+    /// leaves the pool after its batch.
+    #[napi]
+    pub fn drain(&self) -> Vec<SubscriptionBatch> {
+        let mut streams = self.streams.borrow_mut();
+        drain_streams(&mut streams.streams, subscription_event)
+            .into_iter()
+            .map(|(id, read)| SubscriptionBatch {
+                id,
+                events: read.events,
+                error: read.error.map(SubscriptionBatchError::from),
+            })
+            .collect()
+    }
+
+    /// Pooled subscriptions still open.
+    #[napi(getter)]
+    pub fn size(&self) -> u32 {
+        self.streams.borrow().streams.len() as u32
     }
 }
 
@@ -1905,6 +2118,12 @@ impl NapiDb {
         })
     }
 
+    /// A pool that pooled subscriptions are read through, all in one call.
+    #[napi(js_name = "createSubscriptionPool")]
+    pub fn create_subscription_pool(&self) -> SubscriptionPool {
+        SubscriptionPool::new()
+    }
+
     #[napi]
     pub fn subscribe(
         &self,
@@ -1919,7 +2138,7 @@ impl NapiDb {
             .subscribe(&query, &json_or_null(opts), author.as_deref(), claims)
             .map_err(host_error)?;
         Ok(Subscription {
-            stream: Some(stream),
+            stream: SubscriptionSlot::Own(Some(Box::new(stream))),
         })
     }
 
@@ -2554,5 +2773,107 @@ mod native_root_tests {
         ] {
             assert!(names_foreign_store(name), "{name} should be refused");
         }
+    }
+}
+
+#[cfg(test)]
+mod subscription_pool_tests {
+    use super::{CoreEvent, EventSource, drain_streams};
+    use std::collections::{BTreeMap, VecDeque};
+
+    struct Scripted(VecDeque<CoreEvent>);
+
+    impl EventSource for Scripted {
+        fn try_next(&mut self) -> Option<CoreEvent> {
+            self.0.pop_front()
+        }
+    }
+
+    fn rejected(reason: &str) -> CoreEvent {
+        CoreEvent::Rejected {
+            code: jazz::db::ErrorCode::Query,
+            message: reason.to_owned(),
+            reason: reason.to_owned(),
+        }
+    }
+
+    fn scripted(events: Vec<CoreEvent>) -> Scripted {
+        Scripted(events.into())
+    }
+
+    /// Encodes an event as its reason; "unencodable" fails to encode.
+    fn encode(event: CoreEvent) -> napi::Result<String> {
+        match event {
+            CoreEvent::Rejected { reason, .. } if reason == "unencodable" => {
+                Err(napi::Error::from_reason("encode failed"))
+            }
+            CoreEvent::Rejected { reason, .. } => Ok(reason),
+            CoreEvent::Closed => Ok("closed".to_owned()),
+            CoreEvent::Delta { .. } => Ok("delta".to_owned()),
+        }
+    }
+
+    #[test]
+    fn drain_returns_only_streams_with_events_in_id_order() {
+        let mut streams = BTreeMap::from([
+            (1, scripted(vec![])),
+            (2, scripted(vec![rejected("a"), rejected("b")])),
+            (3, scripted(vec![])),
+            (4, scripted(vec![rejected("c")])),
+        ]);
+        let drained = drain_streams(&mut streams, encode);
+        let got: Vec<_> = drained
+            .iter()
+            .map(|(id, read)| (*id, read.events.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![(2, vec!["a".into(), "b".into()]), (4, vec!["c".into()])]
+        );
+        assert_eq!(streams.len(), 4, "open streams stay pooled");
+        assert!(drain_streams(&mut streams, encode).is_empty());
+    }
+
+    #[test]
+    fn an_encode_error_fails_only_its_own_stream() {
+        let mut streams = BTreeMap::from([
+            (
+                1,
+                scripted(vec![
+                    rejected("before"),
+                    rejected("unencodable"),
+                    rejected("after"),
+                ]),
+            ),
+            (2, scripted(vec![rejected("neighbour")])),
+        ]);
+        let drained = drain_streams(&mut streams, encode);
+        assert_eq!(drained.len(), 2);
+        let (id, failed) = &drained[0];
+        assert_eq!(*id, 1);
+        assert_eq!(failed.events, vec!["before".to_owned()]);
+        assert_eq!(failed.error.as_ref().unwrap().reason, "encode failed");
+        let (id, ok) = &drained[1];
+        assert_eq!(*id, 2);
+        assert_eq!(ok.events, vec!["neighbour".to_owned()]);
+        assert!(ok.error.is_none());
+        assert_eq!(
+            streams.keys().copied().collect::<Vec<_>>(),
+            vec![2],
+            "the failed stream leaves"
+        );
+    }
+
+    #[test]
+    fn a_closed_stream_leaves_after_its_last_batch() {
+        let mut streams =
+            BTreeMap::from([(7, scripted(vec![rejected("last"), CoreEvent::Closed]))]);
+        let drained = drain_streams(&mut streams, encode);
+        assert_eq!(
+            drained[0].1.events,
+            vec!["last".to_owned(), "closed".to_owned()]
+        );
+        assert!(drained[0].1.closed);
+        assert!(streams.is_empty());
     }
 }
