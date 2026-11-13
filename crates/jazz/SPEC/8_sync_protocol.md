@@ -1113,6 +1113,9 @@ those bytes are refused with it at once until the fetch backoff ends.
   The window is measured on the client's wall clock and the hour on the
   authority's: a client clock set back lengthens the window, and an
   authority clock set forward drops entries early.
+  During a rolling upgrade, a server from before the `jzTB` writer derives
+  `jzTW` for a marked client where a newer one derives `jzTB`, so a resend
+  that crosses server versions is not deduped against the first send.
   The authority does not record its own refusal: a resend of a
   write it refused runs again, against current state. On a replica, seq 0
   can answer a write still pending upstream. An insert with a key names its
