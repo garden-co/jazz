@@ -904,7 +904,8 @@ const STATEMENT_CACHE_CAPACITY: usize = 512;
 /// it nests: one read, as one identity, through one view and cut. Its
 /// relations' rows depend only on the relation and the parent value, so
 /// the run builds each relation's SQL (and each parent-cell read) once and
-/// rebinds only the parent, and reads each (relation, parent value) once.
+/// rebinds only the parent, and reads each (relation, parent value) once
+/// where values repeat (relations keyed by a parent's column).
 ///
 /// It lives for one call and dies with it, so nothing it holds outlives the
 /// read: relations are keyed by address, valid while the run borrows the
@@ -921,7 +922,8 @@ struct RelationRun<'q> {
     sql: HashMap<(*const crate::query::ArraySubquery, bool), (Compiled, usize)>,
     /// Per relation: the read of its parent cell.
     cells: HashMap<*const crate::query::ArraySubquery, crate::compile::CellRead>,
-    /// Per relation, parent shape and bound parent value: its children.
+    /// Per relation keyed by a parent's column, parent shape and bound
+    /// parent value: its children.
     children:
         HashMap<(*const crate::query::ArraySubquery, bool, Option<ParentKey>), Vec<ResultNode>>,
 }
@@ -5095,7 +5097,9 @@ impl Inner {
 
     /// The children `array` relates to `parent`, each with its own
     /// relations. Within one run the same relation of the same parent value
-    /// reads the same rows, so they are read once.
+    /// reads the same rows, so a relation keyed by a parent's column (a
+    /// forward reference, or an array of them) reads them once. One keyed
+    /// by the parent's own id meets each parent once, so it is not kept.
     fn relation(
         &self,
         run: &mut RelationRun<'_>,
@@ -5109,9 +5113,8 @@ impl Inner {
         };
         let bound = crate::values::to_sql(parent)?;
         let memo = (key, elements, bound.as_ref().map(ParentKey::of));
-        if run.reuse
-            && let Some(nodes) = run.children.get(&memo)
-        {
+        let memoise = run.reuse && array.outer_column != "id";
+        if memoise && let Some(nodes) = run.children.get(&memo) {
             return Ok(nodes.clone());
         }
         // Only the parent's own parameter differs between parents of one
@@ -5142,7 +5145,7 @@ impl Inner {
         for child in children {
             nodes.push(self.node(run, &array.table, &array.nested_arrays, child)?);
         }
-        if run.reuse {
+        if memoise {
             run.children.insert(memo, nodes.clone());
         }
         Ok(nodes)
