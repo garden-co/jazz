@@ -91,12 +91,23 @@ type FlushableRuntime = Runtime & { flush?: () => void };
 export const MAX_PENDING_MUTATION_ERROR_EVENTS = 256;
 
 /**
+ * Unsettled writes a backend context tracks for routing. Beyond the cap (say,
+ * while the sync server is down), new writes go untracked: a rejection of
+ * one is then treated as untraceable and reaches only backend-global `Db`s,
+ * never another user's.
+ */
+export const MAX_UNSETTLED_WRITE_ROUTES = 65_536;
+
+/**
  * How long a rejected write's route is kept for its mutation-error event when
  * a `wait()` may have claimed the rejection (and no event will come).
  */
 const REJECTED_WRITE_ROUTE_GRACE_MS = 60_000;
 
-/** The identity a backend `Db` writes as: its explicit session and attribution. */
+/**
+ * What a backend `Db` writes as: its explicit `Session` object (compared by
+ * reference) and attribution.
+ */
 interface BackendWriter {
   session: Session | undefined;
   attribution: string | undefined;
@@ -150,7 +161,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   /**
    * Who made each write that is still unsettled, recorded while any facade
    * listens for rejections. An entry ends when the write is accepted, or
-   * with its rejection's event.
+   * with its rejection's event. Bounded by {@link MAX_UNSETTLED_WRITE_ROUTES}.
    */
   private readonly unsettledWriters = new Map<TxId, BackendWriter>();
   /**
@@ -330,7 +341,8 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
    */
   private recordWriter(txId: TxId, writer: BackendWriter): void {
     const runtime = this.runtime;
-    if (!runtime || !this.anySinkListening()) return;
+    if (!runtime || this.unsettledWriters.size >= MAX_UNSETTLED_WRITE_ROUTES) return;
+    if (!this.anySinkListening()) return;
     this.unsettledWriters.set(txId, writer);
     const forget = () => {
       if (this.unsettledWriters.get(txId) === writer) this.unsettledWriters.delete(txId);
@@ -605,14 +617,17 @@ class BackendDb extends Db implements BackendMutationErrorSink {
    * active {@link WriteHandle.wait} call.
    *
    * On a backend context, a listener sees rejections of writes made through
-   * this `Db`, or through another `Db` of the same context that writes as the
-   * same session and attribution (`db()` and `asBackend()` both write as the
-   * backend itself). It never sees another user's rejection.
+   * this `Db`, or through another `Db` of the same context built from the
+   * same `Session` object (by reference) and attribution. `db()` and
+   * `asBackend()` both write as the backend itself, so they share theirs.
+   * Two `forSession()` `Db`s built from separate `Session` objects for the
+   * same user do not. It never sees another user's rejection.
    *
    * A `Db` with no per-request identity (`db()`, `asBackend()`) also receives
    * rejections Jazz cannot trace to the `Db` that made the write: writes made
-   * while no listener was attached anywhere, and in-flight writes from an
-   * earlier process settled during startup replay. Those that arrive before
+   * while no listener was attached anywhere (or beyond
+   * {@link MAX_UNSETTLED_WRITE_ROUTES} unsettled writes), and in-flight writes
+   * from an earlier process settled during startup replay. Those that arrive before
    * such a listener exists drain to the first one registered.
    *
    * The context holds this `Db` only weakly, so its listeners are released

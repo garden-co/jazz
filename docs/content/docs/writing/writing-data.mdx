@@ -463,9 +463,10 @@ it reconnects.
 keeps it so that a listener registered later can receive it.
 
 On a server, `jazz.db`, `jazz.forReqUser()` and `jazz.withAttribution()` from one `createJazz`
-share one runtime, but each rejection goes only to the `Db` that made the write, or to another `Db`
-that writes as the same session and attribution. A per-request handler never sees another user's
-rejection, so it can forward what it gets to its requester. Rejections Jazz can't trace to the `Db`
+share one runtime, but each rejection goes only to the `Db` that made the write. `jazz.db` and other
+backend-wide `Db`s, which all write as the backend, share theirs. A per-request handler never sees
+another user's rejection, even one from another request by the same user, so it can forward what it
+gets to its requester. Rejections Jazz can't trace to the `Db`
 that made them go only to `jazz.db`: writes made while no listener was registered anywhere, and writes
 that were still in flight when the process stopped and are settled on restart. Those that arrive before
 `jazz.db` has a listener wait for its first one. Jazz keeps up to 256 of them and reports how many it

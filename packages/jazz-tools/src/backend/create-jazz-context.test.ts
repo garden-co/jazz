@@ -5,7 +5,11 @@ import type { AppContext, Session } from "../runtime/context.js";
 import { SYSTEM_READ_SESSION } from "../runtime/system-identity.js";
 import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
-import { MAX_PENDING_MUTATION_ERROR_EVENTS, createJazzContext } from "./create-jazz-context.js";
+import {
+  MAX_PENDING_MUTATION_ERROR_EVENTS,
+  MAX_UNSETTLED_WRITE_ROUTES,
+  createJazzContext,
+} from "./create-jazz-context.js";
 
 const mocks = vi.hoisted(() => {
   const openMemory = vi.fn();
@@ -627,6 +631,101 @@ describe("backend/create-jazz-context", () => {
       worker.onMutationError(workerListener);
       expect(workerListener.mock.calls).toEqual([[replayed], [unknown]]);
       expect(perRequestListener).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("BC-U10d: every backend-global Db receives the backend's own and untraced rejections", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const context = createJazzContext({
+        appId: "server-app",
+        app: { wasmSchema: SCHEMA_A },
+        permissions: {},
+        driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+      });
+      const worker = context.asBackend();
+      const other = context.db();
+      const client = mocks.clients[0]!;
+      const emit = client.onMutationError.mock.calls[0]![0] as (event: unknown) => void;
+      const committed = client.observeCommittedWrites.mock.calls[0]![0] as (
+        txId: string,
+        session: Session | undefined,
+        attribution: string | undefined,
+      ) => void;
+      const workerListener = vi.fn();
+      worker.onMutationError(workerListener);
+      const otherListener = vi.fn();
+      const unsubscribe = other.onMutationError(otherListener);
+
+      // A write the backend made through one of them reaches both.
+      committed("00000000000070008000000000000001", undefined, undefined);
+      const own = mutationErrorEvent("00000000000070008000000000000001");
+      emit(own);
+      // A rejection traced to nobody reaches both as well.
+      const untraced = mutationErrorEvent("00000000000070008000000000000002");
+      emit(untraced);
+      expect(workerListener.mock.calls).toEqual([[own], [untraced]]);
+      expect(otherListener.mock.calls).toEqual([[own], [untraced]]);
+
+      unsubscribe();
+      const later = mutationErrorEvent("00000000000070008000000000000003");
+      emit(later);
+      expect(workerListener).toHaveBeenLastCalledWith(later);
+      expect(otherListener).toHaveBeenCalledTimes(2);
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("BC-U10e: past the routing cap, a rejection is untraced and never reaches another user", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const context = createJazzContext({
+        appId: "server-app",
+        app: { wasmSchema: SCHEMA_A },
+        permissions: {},
+        driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+      });
+      const alice: Session = {
+        issuer: "https://issuer.example",
+        user_id: "alice",
+        claims: {},
+        authMode: "external",
+      };
+      const bob: Session = { ...alice, user_id: "bob" };
+      const asAlice = context.forSession(alice);
+      const aliceListener = vi.fn();
+      asAlice.onMutationError(aliceListener);
+      const backend = context.db();
+      const backendListener = vi.fn();
+      backend.onMutationError(backendListener);
+      const client = mocks.clients[0]!;
+      const emit = client.onMutationError.mock.calls[0]![0] as (event: unknown) => void;
+      const committed = client.observeCommittedWrites.mock.calls[0]![0] as (
+        txId: string,
+        session: Session | undefined,
+        attribution: string | undefined,
+      ) => void;
+      const writers = (
+        context as unknown as { coreSource: { unsettledWriters: Map<string, unknown> } }
+      ).coreSource.unsettledWriters;
+
+      // The sync server is down: Alice's writes stay unsettled up to the cap.
+      for (let index = 0; index < MAX_UNSETTLED_WRITE_ROUTES + 1; index += 1) {
+        committed(index.toString(16).padStart(32, "0"), alice, undefined);
+      }
+      expect(writers.size).toBe(MAX_UNSETTLED_WRITE_ROUTES);
+      // Bob's write beyond the cap goes untracked.
+      const bobsTxId = "f".repeat(32);
+      committed(bobsTxId, bob, undefined);
+      expect(writers.has(bobsTxId)).toBe(false);
+      const bobs = mutationErrorEvent(bobsTxId);
+      emit(bobs);
+      expect(aliceListener).not.toHaveBeenCalled();
+      expect(backendListener).toHaveBeenCalledExactlyOnceWith(bobs);
     } finally {
       consoleError.mockRestore();
     }
