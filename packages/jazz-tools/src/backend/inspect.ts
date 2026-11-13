@@ -87,6 +87,8 @@ export interface InspectEvent {
   write: boolean;
   /** The id of the agent token, when one was used. */
   tokenId?: string;
+  /** The agent token's label (what the agent asked access for), when one was used. */
+  label?: string;
   /** Set when the call was refused or failed. */
   error?: InspectErrorCode;
 }
@@ -148,6 +150,7 @@ interface Admitted {
   tables?: string[];
   expiresAt?: number;
   tokenId?: string;
+  label?: string;
 }
 
 interface TokenClaims {
@@ -170,7 +173,8 @@ const PROVENANCE = ["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"];
 
 function defaultAudit(event: InspectEvent): void {
   const parts = [
-    `jazz inspect: ${event.by} (${event.via})`,
+    // The label is the agent's own text: quoted, so it can't forge a line.
+    `jazz inspect: ${event.by} (${event.via}${event.label ? ` ${JSON.stringify(event.label)}` : ""})`,
     event.op,
     event.table,
     event.as && `as ${event.as}`,
@@ -339,7 +343,7 @@ export function createInspector(deps: InspectorDeps) {
   async function mintToken(
     admitted: Admitted,
     request: Extract<InspectRequest, { op: "mint_token" }>,
-  ): Promise<{ token: string; expiresAt: number; tokenId: string }> {
+  ): Promise<{ token: string; expiresAt: number; tokenId: string; label?: string }> {
     // A token is a person's delegation: another token can't make one.
     if (admitted.via === "token") {
       throw new InspectError(
@@ -392,6 +396,7 @@ export function createInspector(deps: InspectorDeps) {
       token: `${INSPECT_TOKEN_PREFIX}${payload}.${mac}`,
       expiresAt: claims.exp,
       tokenId: claims.jti,
+      ...(claims.label ? { label: claims.label } : {}),
     };
   }
 
@@ -426,6 +431,7 @@ export function createInspector(deps: InspectorDeps) {
       ...(claims.tables ? { tables: claims.tables } : {}),
       expiresAt: claims.exp,
       tokenId: claims.jti,
+      ...(typeof claims.label === "string" && claims.label ? { label: claims.label } : {}),
     };
   }
 
@@ -604,7 +610,10 @@ export function createInspector(deps: InspectorDeps) {
     }
     const prepared = ops.map((op) => {
       if (!op || typeof op !== "object" || !["insert", "update", "delete"].includes(op.kind)) {
-        throw new InspectError("bad_request", "each op is an insert, update or delete");
+        throw new InspectError(
+          "bad_request",
+          `each op needs kind: "insert", "update" or "delete" (got ${String(JSON.stringify(op && typeof op === "object" ? ((op as { kind?: unknown }).kind ?? null) : op)).slice(0, 60)})`,
+        );
       }
       if (typeof op.table !== "string" || !op.table) {
         throw new InspectError("bad_request", `${op.kind} needs a table`);
@@ -779,6 +788,8 @@ export function createInspector(deps: InspectorDeps) {
           write: admitted.write,
           ...(admitted.tables ? { tables: admitted.tables } : {}),
           ...(admitted.expiresAt ? { expiresAt: admitted.expiresAt } : {}),
+          ...(admitted.label ? { label: admitted.label } : {}),
+          maxTokenTtlSeconds: settings().maxTtl,
           inspectorUrl: url,
           protocol: INSPECT_PROTOCOL_VERSION,
         };
@@ -923,7 +934,11 @@ export function createInspector(deps: InspectorDeps) {
         const minted = await mintToken(admitted, body);
         return {
           answer: { token: minted.token, expiresAt: minted.expiresAt },
-          event: { tokenId: minted.tokenId, write: body.write === true },
+          event: {
+            tokenId: minted.tokenId,
+            write: body.write === true,
+            ...(minted.label ? { label: minted.label } : {}),
+          },
         };
       }
       default:
@@ -992,6 +1007,7 @@ export function createInspector(deps: InspectorDeps) {
       op: body.op,
       write: false,
       ...(admitted.tokenId ? { tokenId: admitted.tokenId } : {}),
+      ...(admitted.label ? { label: admitted.label } : {}),
     };
     try {
       const { answer: result, event } = await answer(request, admitted, body);

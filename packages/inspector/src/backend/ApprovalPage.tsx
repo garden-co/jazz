@@ -62,6 +62,14 @@ export function ApprovalPage({
   const ttl = grant.ttlSeconds ?? 3600;
   const loopback = grant.callback !== undefined && isLoopbackCallback(grant.callback);
   const cannotWrite = write && !whoami.write;
+  // Checked here, before anyone approves: the backend would refuse to mint it.
+  const maxTtl = whoami.maxTokenTtlSeconds;
+  const badTtl =
+    !Number.isSafeInteger(ttl) || ttl < 60
+      ? "This request asks for a token that lasts less than a minute, which this app doesn't issue."
+      : maxTtl !== undefined && ttl > maxTtl
+        ? `This request asks for a token that lasts ${describeTtl(ttl)}, but this app's tokens last at most ${describeTtl(maxTtl)}. Ask again with a shorter --ttl.`
+        : null;
 
   const approve = async () => {
     setStep({ kind: "minting" });
@@ -123,11 +131,16 @@ export function ApprovalPage({
                 Your own access is read-only, so you can't approve write access.
               </p>
             ) : null}
+            {badTtl ? (
+              <p className={appStyles.errorText} role="alert">
+                {badTtl}
+              </p>
+            ) : null}
             <div className={appStyles.actionRow}>
               <button
                 type="button"
                 className={appStyles.actionButton}
-                disabled={cannotWrite || step.kind === "minting"}
+                disabled={cannotWrite || badTtl !== null || step.kind === "minting"}
                 onClick={() => void approve()}
               >
                 {step.kind === "minting" ? "Approving…" : "Approve"}

@@ -108,6 +108,10 @@ export interface InspectWhoami {
   tables?: string[];
   /** When an agent token stops working (Unix seconds). */
   expiresAt?: number;
+  /** The agent token's label: what the agent said it asked access for. */
+  label?: string;
+  /** The longest an agent token this backend mints may live (seconds). */
+  maxTokenTtlSeconds: number;
   /** Where the Inspector UI for this backend is. */
   inspectorUrl: string;
   protocol: typeof INSPECT_PROTOCOL_VERSION;
