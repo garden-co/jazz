@@ -1494,9 +1494,13 @@ impl Inner {
 /// target, so their output (built with the target) is read again.
 fn refresh_includes(group: &mut Group, changed: &BTreeSet<(String, RowUuid)>) {
     let refers = |row: &CurrentRow| {
-        row.cells.iter().any(|(name, value)| match value {
-            Some(Value::Uuid(id)) => changed.contains(&(name.clone(), RowUuid(*id))),
-            _ => false,
+        row.cells.iter().any(|(name, value)| {
+            // A nullable reference reads back wrapped.
+            let value = match value {
+                Some(Value::Nullable(Some(inner))) => Some(inner.as_ref()),
+                value => value.as_ref(),
+            };
+            matches!(value, Some(Value::Uuid(id)) if changed.contains(&(name.clone(), RowUuid(*id))))
         })
     };
     let updated: Vec<SubscriptionOutputRow> = group
