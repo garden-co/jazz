@@ -154,6 +154,12 @@ export declare class NapiDb {
    * this is not a query.
    */
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
+  /**
+   * The Inspector's `explain`: for each of `rows` (uuid strings) of
+   * `table`, which clauses of its read policy (the arms of its top-level
+   * `Or`) hold for `author` with `claims`.
+   */
+  explainReadClauses(table: string, rows: Array<string>, author: Uint8Array, claims?: JsonValue | undefined | null): ExplainedReadClauses
   subscribe(query: Uint8Array, opts?: { tier?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Subscription
   /** Apply received frames and send what is due on every link. */
   tick(): void
@@ -402,6 +408,18 @@ export interface E2EeSodiumStreamRecord {
 
 /** Verifies a detached Ed25519 signature; malformed sizes return false. */
 export declare function e2eeSodiumVerify(publicKey: Uint8Array, message: Uint8Array, signature: Uint8Array): boolean
+
+/** The Inspector's `explain`: how many clauses the read policy has, and the rows found. */
+export interface ExplainedReadClauses {
+  clauses: number
+  rows: Array<ExplainedReadRow>
+}
+
+/** One row of the Inspector's `explain`: whether each read-policy clause holds. */
+export interface ExplainedReadRow {
+  id: string
+  holds: Array<boolean>
+}
 
 export interface InsertOptions {
   rowId?: Uint8Array

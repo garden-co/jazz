@@ -234,6 +234,26 @@ describe("the Inspector a backend serves", () => {
     expect(screen.getByRole("link", { name: "Open todos in the data explorer" })).toBeTruthy();
   });
 
+  it("explains which clause lets the user viewed as read each row of a linked query", async () => {
+    const jazz = await backend();
+    await jazz.createAccountFor("alice");
+    const { call, calls } = callAs(jazz, { "x-staff": "ops@example.com" });
+    const link = inspectorLink(PAGE, { query: { table: "todos" }, as: "alice" });
+    render(<BackendApp pageUrl={link} call={call} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Explain why" }));
+    const explain = await screen.findByRole("region", { name: "Explain" });
+    expect(await within(explain).findByText('owner = "alice"')).toBeTruthy();
+    const rows = within(explain).getAllByRole("row").slice(1);
+    expect(rows.map((row) => within(row).getAllByRole("cell")[1]!.textContent).sort()).toEqual([
+      "no",
+      "yes",
+    ]);
+    expect(within(explain).getByText('0: owner = "alice"')).toBeTruthy();
+    expect(within(explain).getByText("no clause holds")).toBeTruthy();
+    expect(calls).toContainEqual(expect.objectContaining({ op: "explain", as: "alice" }));
+  });
+
   it("says who decides when the hook refuses", async () => {
     const jazz = await backend();
     const { call } = callAs(jazz, {});
