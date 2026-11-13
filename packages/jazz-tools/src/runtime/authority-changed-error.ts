@@ -23,9 +23,11 @@ export const AUTHORITY_CHANGED_ERROR_CODE = "authority_changed";
  * old server are lost with the store. If the server was replaced by
  * mistake, bring the old one back and call `db.reconnect()` instead.
  *
- * In the browser, a tab that syncs through a shared worker is not yet told
- * of a refusal its worker received, so its Global waits may keep waiting
- * (unverified path).
+ * In the browser, a tab that syncs through a shared worker is told of a
+ * refusal its worker received through its subscriptions: its remote
+ * subscriptions end with this error, while its local-first ones keep
+ * reading the worker's store. Its Global waits are not yet told, and may
+ * keep waiting (unverified path).
  *
  * Class identity does not survive native bindings or browser worker
  * messages, so detect it with {@link isAuthorityChangedError}, which checks

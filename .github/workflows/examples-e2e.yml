@@ -222,6 +222,7 @@ jobs:
           - record-player
           - music-agent
           - music-agent-hono
+          - auth-betterauth-chat
           - big-label
     steps:
       - name: Skip if variant doesn't match dispatch filter

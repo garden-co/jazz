@@ -208,6 +208,23 @@ it("keeps backend authority opaque, scoped, and revocable", async () => {
   expect(() => accountRegistry(backend)).toThrow(/invalid_account_handle/);
 });
 
+it("rejects a whitespace-only backend secret before asking the backend host (#2051)", async () => {
+  const admitBackend = vi.fn(async () => ({ nodeId: id }));
+  const manager = createAccountManagerWithRuntime({
+    registry,
+    localFirst: { create: () => ({ accountId: id, identity, auth: token() }) },
+    backend: { admitBackend },
+  });
+  for (const backendSecret of ["  ", "\n"]) {
+    await expect(admitBackendAccount(manager, { backendSecret })).rejects.toMatchObject({
+      code: "invalid_backend_secret",
+      message: expect.stringMatching(/backendSecret is only whitespace/),
+    });
+  }
+  expect(admitBackend).not.toHaveBeenCalled();
+  expect(manager.getLoggedIn()).toBeUndefined();
+});
+
 it("rejects unsupported backend hosts and fences late backend admission on logout", async () => {
   await expect(admitBackendAccount(setup(), { backendSecret: "secret" })).rejects.toThrow(
     /backend_host_unavailable/,

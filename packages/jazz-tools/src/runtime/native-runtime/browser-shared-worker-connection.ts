@@ -3,6 +3,8 @@ import {
   resolveBrowserWorkerRuntimeSources,
   resolveBrowserWorkerUrl,
 } from "../browser-worker-config.js";
+import { bundledBrowserWorkerType } from "../browser-worker-assets.js";
+import { isMetroBundle, METRO_SETUP_ERROR } from "../metro-setup-error.js";
 import {
   BrowserWorkerUnresponsiveError,
   deserializeBrowserRelayError,
@@ -46,19 +48,44 @@ function createBrokerSharedWorker(
   name: string,
 ): SharedWorker {
   if (usesJazzResolvedWorkerUrl(runtimeSources)) {
-    return new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), { type: "module", name });
+    return new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), {
+      // Metro cannot build the worker from the expression below. It names
+      // the worker it built by URL instead, as a classic script. A URL the
+      // app sets is started as a module, and the type is not part of the
+      // worker's name: under Metro, leave brokerWorkerUrl unset (documented).
+      type: (appServesWorker(runtimeSources) ? null : bundledBrowserWorkerType()) ?? "module",
+      name,
+    });
   }
-  return new SharedWorker(new URL("../../worker/jazz-broker-worker.js", import.meta.url), {
+  const worker = new SharedWorker(new URL("../../worker/jazz-broker-worker.js", import.meta.url), {
     type: "module",
     name,
   });
+  // Expo's Metro rewrites the expression above into a dedicated Worker, which
+  // has no port to attach a lease or a runtime to.
+  if (!("port" in worker)) {
+    (worker as { terminate?: () => void }).terminate?.();
+    throw new Error(METRO_SETUP_ERROR);
+  }
+  return worker;
 }
 
+function appServesWorker(runtimeSources: BrowserWorkerInitOptions["runtimeSources"]): boolean {
+  return Boolean(runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl);
+}
+
+/**
+ * Whether the worker starts from the URL Jazz resolves: one the app serves,
+ * a versioned one, or the one a bundler that can't build the worker from
+ * `new SharedWorker(new URL(...))` named for it (Metro).
+ */
 function usesJazzResolvedWorkerUrl(
   runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
 ): boolean {
-  return Boolean(
-    runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion,
+  return (
+    appServesWorker(runtimeSources) ||
+    Boolean(runtimeSources?.wasmVersion) ||
+    bundledBrowserWorkerType() !== null
   );
 }
 
@@ -84,6 +111,7 @@ function watchBrokerWorkerStart(
         ? resolveBrowserWorkerUrl(runtimeSources)
         : undefined,
       moduleUrl: import.meta.url,
+      metro: isMetroBundle(),
     }).then(onFailure);
   };
   const stop = () => {

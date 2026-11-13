@@ -1331,3 +1331,64 @@ describe("Viewing as a user whose permissions read claims", () => {
     expect(asAlice.warning).toBeUndefined();
   });
 });
+
+describe("Large values through the Inspector (#5202)", () => {
+  const filesApp = s.defineApp(
+    { files: s.table({ name: s.string(), data: s.bytes() }, {}) },
+    { migrations: "none" },
+  );
+  const filesPermissions = s.definePermissions(filesApp, ({ policy }) => {
+    policy.files.allowRead.always();
+  });
+
+  it("lists a row with a large value, and reads parts of it from the store", async () => {
+    const jazz = await createJazz({
+      app: filesApp,
+      permissions: filesPermissions,
+      store: memory(),
+      authenticate,
+      inspect: staffOnly,
+    });
+    cleanups.push(() => jazz.close());
+    const data = new Uint8Array(600 * 1024).map((_, index) => index % 251);
+    const { id } = await jazz.db
+      .insert(filesApp.files, { name: "photo.jpg", data })
+      .wait({ tier: "global" });
+
+    const listed = await ok(api(jazz, { op: "query", query: { table: "files" } }, STAFF));
+    expect(listed.rows).toHaveLength(1);
+    expect(listed.rows[0].data.$large).toMatchObject({ kind: "bytes", size: data.length });
+
+    const part = await ok(
+      api(jazz, { op: "get", table: "files", id, column: "data", from: 1000, to: 1010 }, STAFF),
+    );
+    expect(part.value).toEqual({
+      $bytes: Buffer.from(data.subarray(1000, 1010)).toString("base64"),
+    });
+
+    // Larger than one part: refused, not read whole.
+    expect(
+      await refused(api(jazz, { op: "get", table: "files", id, column: "data" }, STAFF)),
+    ).toMatchObject({ status: 400, message: expect.stringMatching(/ask for it in parts/) });
+    // Past the end: the store's refusal, as the caller's mistake.
+    expect(
+      await refused(
+        api(
+          jazz,
+          {
+            op: "get",
+            table: "files",
+            id,
+            column: "data",
+            from: data.length - 5,
+            to: data.length + 5,
+          },
+          STAFF,
+        ),
+      ),
+    ).toMatchObject({ status: 400, message: expect.stringMatching(/past the end of data/) });
+    expect(
+      (await ok(api(jazz, { op: "get", table: "files", id, column: "name" }, STAFF))).value,
+    ).toBe("photo.jpg");
+  });
+});

@@ -126,6 +126,16 @@ pub(crate) type MigrationsKey = (
     Vec<jazz::ids::MigrationLensId>,
 );
 
+/// An upstream the relay's database refused on its own (see
+/// [`Link::upstream_refusal`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UpstreamRefusal {
+    /// The core's stable error code (`ErrorCode::as_str`).
+    pub code: String,
+    /// The reason the relay reported the refusal with.
+    pub reason: String,
+}
+
 /// Immutable configuration used to start a relay owner thread.
 #[derive(Clone, Debug)]
 pub struct RelayOpenConfig {
@@ -450,6 +460,12 @@ impl NativeRelay {
     /// is the host's choice: a relay with a socket worker never uses it.
     pub fn wire(&self) -> Result<NativeRelayWire, RelayError> {
         self.run(|worker| Ok(worker.host_upstream()))
+    }
+
+    /// The last upstream the relay's database refused, if the connection
+    /// since has not been replaced.
+    pub(crate) fn upstream_refusal(&self) -> Result<Option<UpstreamRefusal>, RelayError> {
+        self.run(|worker| Ok(worker.refusal.clone()))
     }
 
     /// Diagnostics: attached peers and host-carried upstream queue depths.
@@ -799,7 +815,7 @@ impl Foreground {
                         tier,
                         delta,
                     },
-                    EventChunk::Rejected { detail } => {
+                    EventChunk::Rejected { detail, .. } => {
                         ForegroundSubscriptionEvent::Rejected { reason: detail }
                     }
                     EventChunk::Closed => {
@@ -864,6 +880,10 @@ pub(crate) struct RelayWorker {
     next_client: u64,
     /// The last drive failed; reported by the next foreground tick.
     drive_error: Option<String>,
+    /// The last upstream the relay's database refused: the core's stable
+    /// error code and the reason reported with it. Cleared when a new
+    /// upstream connection begins.
+    refusal: Option<UpstreamRefusal>,
     /// The last drive stopped at its round bound with work left.
     redrive: bool,
     /// When time-bound waits were last evaluated.
@@ -902,6 +922,17 @@ fn ensure_sqlite_store(path: &std::path::Path) -> Result<(), RelayError> {
     Ok(())
 }
 
+/// A relay store's config, for its persistent store and each session's.
+/// Like the client bindings' ([`binding_host::db_config`]), it has no chunk
+/// store, so a tick never runs chunk-store I/O (whose failures a later tick
+/// retries) and every tick error is treated as terminal by the JavaScript
+/// runtime (`core_tick_failed`). Adding a chunk store here means first
+/// giving hosts a way to tell those failures apart.
+fn relay_db_config(schema: JazzSchema, identity: DbIdentity, migrations: &Migrations) -> DbConfig {
+    DbConfig::new(schema, identity)
+        .with_migrations(migrations.schemas.clone(), migrations.lenses.clone())
+}
+
 impl RelayWorker {
     fn open(config: RelayOpenConfig) -> Result<Self, RelayError> {
         ensure_sqlite_store(&config.sqlite_path)?;
@@ -910,10 +941,7 @@ impl RelayWorker {
                 .map_err(|error| RelayError::Storage(error.to_string()))?;
         }
         let db = block_on(Db::open_at(
-            DbConfig::new(config.schema.clone(), config.identity).with_migrations(
-                config.migrations.schemas.clone(),
-                config.migrations.lenses.clone(),
-            ),
+            relay_db_config(config.schema.clone(), config.identity, &config.migrations),
             &config.sqlite_path,
             FileOptions::default(),
         ))
@@ -930,6 +958,7 @@ impl RelayWorker {
             clients: BTreeMap::new(),
             next_client: 0,
             drive_error: None,
+            refusal: None,
             redrive: false,
             timed: Instant::now(),
         })
@@ -1018,12 +1047,11 @@ impl RelayWorker {
             .db
             .check_serves(identity.author)
             .map_err(|error| RelayError::Host(error.into()))?;
-        let db = block_on(Db::open(
-            DbConfig::new(self.schema.clone(), identity).with_migrations(
-                self.migrations.schemas.clone(),
-                self.migrations.lenses.clone(),
-            ),
-        ))
+        let db = block_on(Db::open(relay_db_config(
+            self.schema.clone(),
+            identity,
+            &self.migrations,
+        )))
         .map_err(|error| RelayError::Host(error.into()))?;
         // Continue after the node's previous holder: its transaction ids
         // were (seq, node), and the relay deduplicates by them.
@@ -1109,6 +1137,7 @@ impl RelayWorker {
     /// Connect the relay's upstream through a fresh host-carried wire,
     /// replacing any earlier connection.
     fn begin_socket_upstream(&mut self) -> (u64, NativeRelayWire) {
+        self.refusal = None;
         if let Some(mut previous) = self.upstream.take() {
             previous.link.close();
             previous.wire.retire();
@@ -1147,6 +1176,21 @@ impl RelayWorker {
             Some(upstream) => upstream.wire.clone(),
             None => self.begin_socket_upstream().1,
         }
+    }
+
+    /// Stop the current upstream connection because the relay's database
+    /// refused it, recording the refusal's code and reason for foregrounds.
+    pub(crate) fn refuse_upstream(&mut self, error: &jazz::db::Error) {
+        let Some(upstream) = &self.upstream else {
+            return;
+        };
+        let reason = format!("native relay upstream refused: {error}");
+        tracing::warn!(target: "jazz_native_relay", "{reason}");
+        upstream.wire.refuse(reason.clone());
+        self.refusal = Some(UpstreamRefusal {
+            code: error.code.as_str().to_owned(),
+            reason,
+        });
     }
 
     /// Tick what asked for a tick and move frames until nothing moves.
@@ -1200,13 +1244,13 @@ impl RelayWorker {
         }
         // A refused upstream syncs nothing: stop its connection and say why,
         // rather than keeping the socket open.
-        if let Some(upstream) = &self.upstream
-            && upstream.wire.refusal().is_none()
-            && let Some(error) = upstream.link.upstream_refusal()
+        if let Some(error) = self
+            .upstream
+            .as_ref()
+            .filter(|upstream| upstream.wire.refusal().is_none())
+            .and_then(|upstream| upstream.link.upstream_refusal())
         {
-            let reason = format!("native relay upstream refused: {error}");
-            tracing::warn!(target: "jazz_native_relay", "{reason}");
-            upstream.wire.refuse(reason);
+            self.refuse_upstream(&error);
         }
         for client in self.clients.values_mut() {
             if let Err(error) = client.collect_events() {
@@ -2452,4 +2496,23 @@ pub enum RelayError {
     Drive(String),
     #[error("native relay socket: {0}")]
     Socket(String),
+}
+
+#[cfg(test)]
+mod relay_config_tests {
+    use super::*;
+
+    /// See [`relay_db_config`]: relay stores, like the bindings', have no
+    /// chunk store.
+    #[test]
+    fn relay_configs_have_no_chunk_store() {
+        let schema = JazzSchema::new(&jazz::tools::SchemaBuilder::new().build()).unwrap();
+        let identity = DbIdentity {
+            node: jazz::ids::NodeUuid::from_bytes([1; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let config = relay_db_config(schema, identity, &Migrations::default());
+        assert!(config.chunk_store.is_none());
+        assert!(!config.host_chunk_io);
+    }
 }

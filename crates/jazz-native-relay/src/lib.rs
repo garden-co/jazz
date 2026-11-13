@@ -47,10 +47,11 @@ use node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 /// existing commands, so a JS bundle and native build from different ABIs
 /// refuse to open rather than misread a failure; 3 added its `reason_name`;
 /// 4 ends each subscription delta with its updated rows' splices; 5 attaches
-/// the app's migrations beside its schema's tables.
+/// the app's migrations beside its schema's tables; 6 ends a tick's upstream
+/// failure with the refusal's error code.
 /// Append-only commands use optional native capabilities while existing
 /// command layouts remain stable.
-pub const NATIVE_RELAY_ABI_V1: u16 = 5;
+pub const NATIVE_RELAY_ABI_V1: u16 = 6;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_CANCELLED: u8 = 3;
@@ -554,6 +555,10 @@ pub struct NativeUpstreamFailure {
     pub sequence: u64,
     pub reason: String,
     pub retrying: bool,
+    /// The core's stable error code when the relay's database refused its
+    /// upstream (`authority_changed`, say), so the app can tell that refusal
+    /// apart as napi and wasm hosts do; `None` for any other failure.
+    pub code: Option<String>,
 }
 
 /// Source of [`NativeAuthRejection::sequence`] and
@@ -924,6 +929,7 @@ impl WorkerLink {
                         sequence: next_upstream_event(),
                         reason,
                         retrying,
+                        code: None,
                     },
                 });
                 self.status = Some(status);
@@ -1300,9 +1306,22 @@ impl NativeRelayHost {
     }
 
     fn private_scope_upstream_failure(&self, scope: &RelayScope) -> Option<NativeUpstreamFailure> {
-        self.private_scope_workers
+        let mut failure = self
+            .private_scope_workers
             .get(scope)
-            .and_then(|worker| worker.link().failure.clone())
+            .and_then(|worker| worker.link().failure.clone())?;
+        // A link stopped by the relay's own refusal carries its code.
+        if !failure.retrying
+            && let Some(refusal) = self
+                .relays
+                .values()
+                .find(|opened| &opened.scope == scope)
+                .and_then(|opened| opened.relay.upstream_refusal().ok().flatten())
+            && refusal.reason == failure.reason
+        {
+            failure.code = Some(refusal.code);
+        }
+        Some(failure)
     }
 
     fn execute(

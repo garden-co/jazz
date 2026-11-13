@@ -1813,3 +1813,69 @@ fn a_tabs_local_wait_the_worker_refuses_claims_the_refusal() {
     assert!(told.iter().any(|(id, _)| *id == first.tx_id), "{told:?}");
     assert_eq!(titles(&tab), ["kept"]);
 }
+
+/// Alice's bounded local-first read falls back while Bob stays silent. The
+/// existing SDK polls pending reads between event-loop turns, so no unrelated
+/// network progress or new scheduler hook is needed to finish this read.
+#[test]
+fn a_quiet_bounded_read_finishes_under_the_existing_polling_contract() {
+    let server = authority();
+    let client = open(0xd2);
+    client.set_remote_link_hint("live").unwrap();
+    let up = client.connect_upstream();
+    let down = server
+        .accept_subscriber(client.author(), Default::default())
+        .unwrap();
+    pump(&[(&up, &down)]);
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let mut read = client
+        .all(
+            query,
+            &json!({"tier":"local-first", "first_load_remote_wait_ms":25}),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(read.as_mut().poll(&mut context).is_pending());
+    block_on(client.tick()).unwrap();
+    let started = std::time::Instant::now();
+    loop {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            let rows = jazz::binding_codec::decode_rows(&result.unwrap()).unwrap();
+            assert_eq!(rows.iter().map(|batch| batch.rows.len()).sum::<usize>(), 0);
+            break;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "bounded read outlived its polling driver"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// Client bindings open stores without a chunk store, so a client tick never
+/// runs chunk-store I/O, whose failures a later tick retries. No error a
+/// client tick returns is retryable by design, and the JavaScript
+/// runtime treats every one as terminal (`core_tick_failed`). A binding that adds a
+/// chunk store must first give the host a way to tell those apart. The native
+/// relay pins the same for its stores (`relay_configs_have_no_chunk_store`).
+#[test]
+fn binding_configs_have_no_chunk_store() {
+    let identity = identity(1);
+    let config = binding_host::OpenConfig {
+        identity: binding_host::OpenIdentity {
+            node: identity.node,
+            author: identity.author,
+        },
+        row_id_seed: Some(7),
+        history_complete: false,
+        initial_sync_flush_every: None,
+        migrations: None,
+        system_node: None,
+    };
+    let db_config = binding_host::db_config(schema(), &config, identity);
+    assert!(db_config.chunk_store.is_none());
+    assert!(!db_config.host_chunk_io);
+}

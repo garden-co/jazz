@@ -53,15 +53,21 @@ Every call is audited, allowed or refused. By default that's one `console.info` 
 
 ## The Inspector page
 
-Open `/jazz/inspect/` on your app. Besides the data grid, it has:
+Open `/jazz/inspect/` on your app. The page itself, its HTML and scripts, loads for anyone who
+reaches that URL, without your `inspect` hook: it holds no data. Everything it shows comes from
+`<basePath>/inspect/api`, which only answers requests your `inspect` hook (or an approved token)
+lets in, so a visitor without access gets no data.
+
+Besides the data grid, it has:
 
 - **View as user**: browse the data under one user's permissions. If your permissions read `session.claims`, give that user's claims too ("with claims"): without them you see what a session with no claims would, and the Inspector says so.
 - **Sessions**: who is connected right now.
 - **Linked queries**: follow a query from a session or an agent's answer.
 
 Links into the Inspector carry their place in the URL fragment (`#q`, `#table`, `#row`, `#as`, `#claims`), and
-hold no credential, so you can paste them into a chat or an issue. A link viewing as a user with claims
-carries those claims, so treat it like them before pasting it somewhere public. The page can't be framed by other
+hold no credential, so you can paste them into a chat or an issue. Claims you view as with go into the
+fragment too, and so into the browser's history and every link you copy: use claims that describe the
+user (a role, a team), never real secrets such as tokens or passwords. The page can't be framed by other
 sites.
 
 ## Agents

@@ -2,11 +2,13 @@ import { signChallenge } from "../local-first-auth/index.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import {
   AccountAuthError,
+  isWhitespaceOnlySecret,
   LINK_GUEST_KEY_MISSING_MESSAGE,
   LINK_NEEDS_GUEST_MESSAGE,
   requestBackendLinkChallenge,
   requestBackendSignIn,
   readAccountAssignment,
+  WHITESPACE_BACKEND_SECRET,
 } from "./registry-client.js";
 export { AccountAuthError } from "./registry-client.js";
 import { isReservedJazzIssuer, parseJwtPayload } from "../runtime/client-session.js";
@@ -324,6 +326,12 @@ export function createAccountManagerWithRuntime(options: {
         if (!options.backend) throw new AccountAuthError("backend_host_unavailable");
         if (typeof auth?.backendSecret !== "string" || !auth.backendSecret)
           throw new AccountAuthError("invalid_backend_secret");
+        if (isWhitespaceOnlySecret(auth.backendSecret))
+          throw new AccountAuthError(
+            "invalid_backend_secret",
+            undefined,
+            WHITESPACE_BACKEND_SECRET,
+          );
         const backendSecret = auth.backendSecret;
         const { nodeId } = await options.backend.admitBackend({ backendSecret });
         assertCurrent(started);
