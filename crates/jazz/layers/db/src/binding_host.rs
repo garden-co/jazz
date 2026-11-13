@@ -612,7 +612,10 @@ pub fn open_identity(config: &mut OpenConfig, how: OpenAs<'_>) -> HostResult<(Db
     }
 }
 
-/// The [`DbConfig`] for `schema` under `config` and `identity`.
+/// The [`DbConfig`] for `schema` under `config` and `identity`. It has no
+/// chunk store: a binding's tick never fails for chunk-store I/O a later
+/// tick retries, and hosts treat every tick error (including local storage
+/// errors) as terminal.
 pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) -> DbConfig {
     let mut db_config = DbConfig::new(schema, identity);
     db_config.system_node = config.system_node;
@@ -1562,6 +1565,37 @@ impl Binding {
         Ok((id, future))
     }
 
+    /// The Inspector's `explain`: for each of `rows` (uuid strings) of
+    /// `table`, which clauses of its read policy (the arms of its top-level
+    /// `Or`) hold for `author` with `claims`. Answers the number of clauses,
+    /// and for each row found its id (hyphenated) and which clauses hold.
+    pub fn explain_read_clauses(
+        &self,
+        table: &str,
+        rows: &[String],
+        author: &[u8],
+        claims: Option<serde_json::Value>,
+    ) -> HostResult<(usize, Vec<(String, Vec<bool>)>)> {
+        let author = self.author_of(author)?;
+        let claims = self::claims(author, claims.unwrap_or(serde_json::Value::Null))?;
+        let rows = rows
+            .iter()
+            .map(|row| {
+                uuid::Uuid::parse_str(row)
+                    .map(|id| RowUuid::from_bytes(*id.as_bytes()))
+                    .map_err(|error| HostError::Argument(format!("row id {row}: {error}")))
+            })
+            .collect::<HostResult<Vec<_>>>()?;
+        let (clauses, found) = self.db.explain_read_clauses(table, &rows, author, claims)?;
+        Ok((
+            clauses,
+            found
+                .into_iter()
+                .map(|(id, holds)| (id.0.hyphenated().to_string(), holds))
+                .collect(),
+        ))
+    }
+
     /// Drop a pending advice request; it resolves `"unknown"`.
     pub fn cancel_permission_advice(&self, id: u64) {
         self.db.cancel_permission_advice_request(id);
@@ -1931,10 +1965,15 @@ pub enum EventChunk {
     },
     /// `{ type: "closed" }`.
     Closed,
-    /// `{ type: "rejected", reason: { type: "ServerFailure", detail } }`.
+    /// `{ type: "rejected", reason: { type: "ServerFailure", detail,
+    /// errorCode } }`.
     Rejected {
         /// Why.
         detail: String,
+        /// The rejection's core [`crate::db::ErrorCode`], as its
+        /// `as_str` spelling (`"authority_changed"`, …): what a host's
+        /// error `code` carries for the same error.
+        code: &'static str,
     },
 }
 
@@ -1956,7 +1995,10 @@ pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
             tier: format!("{tier:?}"),
         },
         SubscriptionEvent::Closed => EventChunk::Closed,
-        SubscriptionEvent::Rejected { reason, .. } => EventChunk::Rejected { detail: reason },
+        SubscriptionEvent::Rejected { code, reason, .. } => EventChunk::Rejected {
+            detail: reason,
+            code: code.as_str(),
+        },
     })
 }
 

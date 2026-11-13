@@ -20,18 +20,26 @@ let backendUser: { issuer: string; subject: string } | null = null;
 let backendUserAnswer: Promise<void> | undefined;
 // A failing backend: `backend-user` answers this code with a 500.
 let backendFailure: string | undefined;
+// How the backend says no one is signed in: 200 with no user (alpha.62 on),
+// or 401 (alpha.61 and earlier).
+let signedOutAs: 200 | 401 = 200;
 beforeEach(() => {
   vi.resetAllMocks();
   backendUser = null;
   backendUserAnswer = undefined;
   backendFailure = undefined;
+  signedOutAs = 200;
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (url: string) => {
-      if (!String(url).endsWith("/backend-user")) return new Response("not_found", { status: 404 });
+    vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (!url.endsWith("/backend-user")) return new Response("not_found", { status: 404 });
       await backendUserAnswer;
       if (backendFailure) return new Response(backendFailure, { status: 500 });
-      if (!backendUser) return new Response("signed_out", { status: 401 });
+      if (!backendUser)
+        return signedOutAs === 401
+          ? new Response("signed_out", { status: 401 })
+          : Response.json({ user: null });
       return Response.json({ identity: backendUser, account: "account-of-alice" });
     }),
   );
@@ -125,8 +133,44 @@ for (const [host, create, prepare, own] of [
       await session.close();
     });
 
+    it("asks the backend who is signed in with the app's bearer", async () => {
+      // A backend that authenticates by bearer, not cookie, answers only a
+      // request that carries it.
+      const alice = makeFakeAccount();
+      const accounts = new AccountManager({
+        createLocalFirst: () => makeFakeAccount(),
+        restoreLocalFirst: () => makeFakeAccount(),
+        loginWithBackend: async () => alice,
+        logout: vi.fn(),
+      });
+      prepare.mockResolvedValue(accounts);
+      mocks.client.mockResolvedValue({ shutdown: async () => {} });
+      backendUser = { issuer: "jazz:backend", subject: "alice" };
+      const session = await create({
+        scope: "app-1",
+        serverUrl: "https://jazz.example.com",
+        ...own,
+        bearer: async () => "bearer-of-alice",
+      });
+      const asked = vi
+        .mocked(fetch)
+        .mock.calls.map(([input]) => input)
+        .filter((input) =>
+          String(input instanceof Request ? input.url : input).endsWith("/backend-user"),
+        );
+      expect(asked).not.toHaveLength(0);
+      for (const request of asked) {
+        expect(request instanceof Request ? request.headers.get("authorization") : null).toBe(
+          "Bearer bearer-of-alice",
+        );
+      }
+      expect(session.getSnapshot().status).toBe("ready");
+      await session.close();
+    });
+
     it("opens signed out once the backend says no one is signed in, or can't be asked", async () => {
-      for (const answer of ["signed-out", "offline"] as const) {
+      for (const answer of ["signed-out", "signed-out-401", "offline"] as const) {
+        signedOutAs = answer === "signed-out-401" ? 401 : 200;
         const accounts = new AccountManager({
           createLocalFirst: () => makeFakeAccount(),
           restoreLocalFirst: () => makeFakeAccount(),

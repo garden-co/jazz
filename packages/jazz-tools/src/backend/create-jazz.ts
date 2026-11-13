@@ -90,7 +90,7 @@ import { NoJazzAccountError } from "./no-account-error.js";
 import { RequestAuthenticationError } from "./request-auth.js";
 import { optionalPeerImportError } from "./optional-peer.js";
 import { closingBeforeDeadline } from "./socket-deadline.js";
-import { vercelUpgradesSockets } from "./vercel-sockets.js";
+import { importWs, vercelUpgradesSockets } from "./ws-peer.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
@@ -1547,7 +1547,16 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
 
   async function askAuthenticate(request: Request): Promise<JazzUser | LocalFirstGuest | null> {
     if (!options.authenticate) return null;
-    return (await options.authenticate(request)) ?? null;
+    try {
+      return (await options.authenticate(request)) ?? null;
+    } catch (error) {
+      // The app's own code failed (a missing auth secret, its session store
+      // down). Its own API calls (forReqUser) get the error as it is; a Jazz
+      // route answers 500 and logs it, rather than reject (see `handle`).
+      const thrown = isObject(error) ? error : new Error(String(error));
+      thrownByAuthenticate.add(thrown);
+      throw thrown;
+    }
   }
 
   /** Whether the app lets `request` in as a device account (`acceptDeviceAccounts`). */
@@ -1700,12 +1709,17 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    * `authenticate` names, and whether the core already holds an account for
    * them. A browser's session asks this to follow the backend; only a sign-in
    * (`backend-sign-in`) or a link (`backend-link`) assigns an account, so a
-   * local-first guest whose user has none yet can still link to them.
+   * local-first guest whose user has none yet can still link to them. No one
+   * signed in answers 200 `{ user: null }`, not 401.
    */
   async function backendUser(request: Request): Promise<Response> {
     if (request.method !== "POST") return new Response(null, { status: 405 });
     const user = await authenticate(request);
-    if (!user) return new Response("signed_out", { status: 401 });
+    // No one signed in is an answer, not a refused request: 200, so a
+    // signed-out page load logs no red 4xx in devtools. The body has no
+    // `identity`, which every client (alpha.60 on) reads as signed out.
+    // Clients still read a 401 as signed out too, for older backends.
+    if (!user) return Response.json({ user: null }, { headers: { "Cache-Control": "no-store" } });
     let account: string | null;
     try {
       account = await existingAccountOf(user.userId);
@@ -1967,14 +1981,19 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     };
     const admit = async (prelude: Uint8Array): Promise<boolean> => {
       const admitted = await admitPrelude(request, prelude);
-      if (!admitted || ended) {
+      if (!admitted || admitted === UNVERIFIED_CREDENTIAL || ended) {
         // An auth failure, not a dropped link: the client stops retrying and
         // reports `offline: auth`, and its session asks the backend whether
-        // anyone is still signed in.
+        // anyone is still signed in. A credential that was sent and not
+        // accepted is `invalid` to the client; none at all is `missing`.
         if (!ended)
           onEvent(null, {
             kind: "message",
-            data: authFailedBatch("session missing: not signed in"),
+            data: authFailedBatch(
+              admitted === UNVERIFIED_CREDENTIAL
+                ? "session invalid: this backend did not accept the credential the client sent"
+                : "session missing: not signed in",
+            ),
           });
         onEvent(null, { kind: "close", code: 1008, reason: "not signed in" });
         end();
@@ -2091,6 +2110,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
                 // `authenticate` without `expiresAt` fails the same way every
                 // time: say why, once.
                 if (error instanceof AuthenticateExpiresAtError) warnMissingExpiry(error);
+                if (isThrownByAuthenticate(error)) console.error(AUTHENTICATE_THREW_MESSAGE, error);
                 onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
               }
               end();
@@ -2132,22 +2152,29 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    * the user `authenticate` finds on this request, with their account and
    * claims, vouched for with the backend secret. A local-first guest's
    * prelude passes through: the core verifies its self-signed token. Any
-   * other credential, or a prelude naming another user, is refused.
+   * other credential, or a prelude naming another user, is refused: with
+   * {@link UNVERIFIED_CREDENTIAL} when the client sent a token or backend
+   * client credential that doesn't verify here, with `null` when it sent
+   * none that names anyone.
    */
   async function admitPrelude(
     request: Request,
     prelude: Uint8Array,
-  ): Promise<{
-    prelude: Uint8Array;
-    userId: string | undefined;
-    /** The user (with the claims) `authenticate` named for a vouched session, and until when. */
-    user?: JazzUser & { expiresAt: number };
-    access: BackendAccess;
-    trusted: boolean;
-    expiresAt?: number;
-    /** A local-first guest, let in by `acceptDeviceAccounts`. */
-    guest?: true;
-  } | null> {
+  ): Promise<
+    | typeof UNVERIFIED_CREDENTIAL
+    | {
+        prelude: Uint8Array;
+        userId: string | undefined;
+        /** The user (with the claims) `authenticate` named for a vouched session, and until when. */
+        user?: JazzUser & { expiresAt: number };
+        access: BackendAccess;
+        trusted: boolean;
+        expiresAt?: number;
+        /** A local-first guest, let in by `acceptDeviceAccounts`. */
+        guest?: true;
+      }
+    | null
+  > {
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(new TextDecoder().decode(prelude)) as Record<string, unknown>;
@@ -2159,7 +2186,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       unknown
     >;
     const client = await backendClients.resolve(request);
-    if (client === "refused") return null;
+    if (client === "refused") return UNVERIFIED_CREDENTIAL;
     if (client?.kind === "backend") {
       // A trusted backend client syncs with this backend's authority: it
       // states a backend secret (any stand-in) and, to act for a user, that
@@ -2188,13 +2215,17 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       const localFirst =
         typeof token === "string" && parseJwtPayload(token)?.iss === LOCAL_FIRST_JWT_ISSUER;
       const alone = others.every((key) => parsed[key] == null && auth[key] == null);
-      if (!localFirst || !alone || parsed.local_first_audience != null) return null;
+      // A token this backend can't verify (an external JWT, a forged or
+      // malformed one), or one sent with other credentials or for another
+      // endpoint: a credential that was presented and not accepted.
+      if (!localFirst || !alone || parsed.local_first_audience != null)
+        return UNVERIFIED_CREDENTIAL;
       // A guest has no user here: its session is bound to its own key.
-      if (client) return null;
+      if (client) return UNVERIFIED_CREDENTIAL;
       const audience = guestAudience(request, token);
-      if (!audience) return null;
+      if (!audience) return UNVERIFIED_CREDENTIAL;
       // Guests are off unless the app's `authenticate` lets this one in.
-      if (!(await acceptsGuest(request))) return null;
+      if (!(await acceptsGuest(request))) return UNVERIFIED_CREDENTIAL;
       if (audience.endpoint === undefined) {
         // Its own token decides who it is; the backend's secret only vouches
         // for the bundle this socket is pinned to (see `pinnedSocket`).
@@ -2369,6 +2400,41 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       if (user?.userId !== socket.userId) return new Response("not signed in", { status: 403 });
     }
     return socket;
+  }
+
+  /**
+   * A client's DELETE, ending its stream session. The key alone proves the
+   * client here, unless the request is signed in as someone else: clients
+   * end their sessions as they sign out, once the app's sign-in has gone, so
+   * a signed-out request may end the session it holds the key of. A session
+   * that already ended is done (204): its client often learns that only
+   * from this answer (#5187).
+   */
+  async function endStream(id: string, request: Request): Promise<Response> {
+    const entry = streams.get(id);
+    if (!entry) {
+      const ended = endedStreams.get(id);
+      if (ended && holdsKey(request, ended.key)) return new Response(null, { status: 204 });
+      const refused = await ownStream(id, request);
+      return refused instanceof Response ? refused : new Response(null, { status: 204 });
+    }
+    if (!holdsKey(request, entry.key)) {
+      return new Response("not this stream's client", { status: 403 });
+    }
+    const socket = entry.session;
+    if (socket.trusted) {
+      const client = await backendClients.resolve(request);
+      if (client === null || client === "refused" || client.kind !== "backend") {
+        return new Response("not this backend client", { status: 403 });
+      }
+    } else if (socket.userId !== undefined) {
+      const user = await authenticate(request);
+      if (user && user.userId !== socket.userId) {
+        return new Response("signed in as someone else", { status: 403 });
+      }
+    }
+    socket.close();
+    return new Response(null, { status: 204 });
   }
 
   /**
@@ -2707,6 +2773,14 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
           headers: { "Cache-Control": "no-store" },
         });
       }
+      if (isThrownByAuthenticate(error)) {
+        // The reason (it can name the app's internals) stays in the logs.
+        console.error(AUTHENTICATE_THREW_MESSAGE, error);
+        return new Response(AUTHENTICATE_FAILED, {
+          status: 500,
+          headers: { "Cache-Control": "no-store" },
+        });
+      }
       if (!(error instanceof BackendClientsUnavailable)) throw error;
       // The reason stays in the backend's logs.
       console.error(error);
@@ -2749,12 +2823,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       const id = stream[1] && decodeURIComponent(stream[1]);
       if (!id && request.method === "POST") return openStream(request);
       if (id && request.method === "POST") return streamSend(id, request);
-      if (id && request.method === "DELETE") {
-        const socket = await ownStream(id, request);
-        if (socket instanceof Response) return socket;
-        socket.close();
-        return new Response(null, { status: 204 });
-      }
+      if (id && request.method === "DELETE") return endStream(id, request);
       return new Response(null, { status: 405 });
     }
     if (path.endsWith("/ws")) {
@@ -3504,10 +3573,11 @@ interface SocketUpgrader {
 }
 
 async function socketUpgrader(): Promise<SocketUpgrader> {
-  const { WebSocketServer } = (await import("ws" as string)) as {
-    WebSocketServer: new (options: { noServer: true; maxPayload: number }) => SocketUpgrader;
-  };
-  return new WebSocketServer({ noServer: true, maxPayload: MAX_STREAM_MESSAGE_BYTES });
+  const { WebSocketServer } = await importWs("attach()");
+  return new WebSocketServer({
+    noServer: true,
+    maxPayload: MAX_STREAM_MESSAGE_BYTES,
+  }) as SocketUpgrader;
 }
 
 /** A sync socket's path below `basePath`. */
@@ -3780,6 +3850,33 @@ function reauthenticateBatch(): Buffer {
     `${REAUTHENTICATE_WIRE_MESSAGE_PREFIX} the session reached the expiry authenticate gave it`,
   );
   return Buffer.from(encodeWebSocketFrameBatch([frame.finish()]));
+}
+
+/**
+ * What `admitPrelude` answers for a credential the client sent that doesn't
+ * verify on this backend: the client reports it as `invalid`, not `missing`.
+ */
+const UNVERIFIED_CREDENTIAL = "unverified-credential";
+
+/**
+ * What a Jazz route answers (500) when the app's `authenticate` threw. The
+ * error goes to the backend's log; the response carries only this code.
+ */
+const AUTHENTICATE_FAILED = "authenticate_failed";
+
+/** What the backend logs, before the error, when the app's `authenticate` threw. */
+const AUTHENTICATE_THREW_MESSAGE =
+  "createJazz: your authenticate threw, so Jazz answered this request with a 500. Fix the error below (a missing secret or environment variable is a common cause); authenticate should return null for a request with no signed-in user.";
+
+/** Errors the app's `authenticate` threw (or rejected with), as they reach a route. */
+const thrownByAuthenticate = new WeakSet<object>();
+
+function isThrownByAuthenticate(error: unknown): boolean {
+  return isObject(error) && thrownByAuthenticate.has(error);
+}
+
+function isObject(value: unknown): value is object {
+  return (typeof value === "object" && value !== null) || typeof value === "function";
 }
 
 function authFailedBatch(message: string): Buffer {

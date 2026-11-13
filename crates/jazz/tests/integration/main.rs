@@ -49,6 +49,8 @@ mod enum_tags;
 mod error_code_strings;
 #[path = "../existential_joins.rs"]
 mod existential_joins;
+#[path = "../explain_read_clauses.rs"]
+mod explain_read_clauses;
 #[path = "../fanout_differential.rs"]
 mod fanout_differential;
 #[path = "../flat_joins.rs"]
@@ -135,6 +137,8 @@ mod relay_local_seqs;
 mod relay_policy_subscriptions;
 #[path = "../relay_serves_on_arrival.rs"]
 mod relay_serves_on_arrival;
+#[path = "../relayed_read_refusal.rs"]
+mod relayed_read_refusal;
 #[path = "../remote_read_after_bulk_writes.rs"]
 mod remote_read_after_bulk_writes;
 #[path = "../reopened_admitted_versions.rs"]

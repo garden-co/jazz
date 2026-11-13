@@ -15,7 +15,12 @@ import {
   type InspectEnv,
   type StoredToken,
 } from "./client.js";
-import { InspectError, INSPECT_TOKEN_PREFIX, type InspectRequest } from "./protocol.js";
+import {
+  InspectError,
+  INSPECT_TOKEN_PREFIX,
+  type InspectAs,
+  type InspectRequest,
+} from "./protocol.js";
 
 export interface InspectCliIo {
   stdout: (text: string) => void;
@@ -36,6 +41,8 @@ export const INSPECT_HELP = `jazz-tools inspect: read and change an app's data t
   schema                        Tables, columns, history tables and permissions
   query '<json>' [--as <user>]  Run a query: {"table":"todos","where":{"done":false},
                                 "orderBy":[["title","asc"]],"limit":20}
+  explain '<json>' --as <user>  Why the user can or can't read each row the query
+                                matches: which read-policy clause allowed it
   get <table> <id> [--as <user>]
   history <table> <id>          The row's versions, with who made each
   insert <table> '<values>' [--id <id>] [--as <user>]
@@ -142,6 +149,7 @@ export async function runInspectCommand(args: string[], io: InspectCliIo): Promi
       callInspector(endpoint, request, {
         token: (await store.get(endpoint))?.token,
         fetch: io.fetch,
+        withoutToken: `run \`jazz-tools inspect login --app ${endpoint}\` to ask a person for one`,
       });
     const as = flag("--as");
     const claimsText = flag("--claims");
@@ -223,6 +231,21 @@ export async function runInspectCommand(args: string[], io: InspectCliIo): Promi
         return 0;
       case "schema":
         print(await call({ op: "schema" }));
+        return 0;
+      case "explain":
+        if (as === undefined) {
+          throw new InspectError(
+            "bad_request",
+            "explain needs --as <user>: the user to explain for",
+          );
+        }
+        print(
+          await call({
+            op: "explain",
+            query: json(rest[0], "the query") as never,
+            ...(asPart as { as: InspectAs }),
+          }),
+        );
         return 0;
       case "query":
         print(

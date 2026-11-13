@@ -175,12 +175,14 @@ export async function signedInIdentity(
   fetcher?: typeof fetch,
 ): Promise<BackendUser | null> {
   try {
+    // No one signed in: a backend answers 200 with no `identity` (alpha.62
+    // on: `{ user: null }`), or 401 (alpha.61 and earlier, caught below).
     const answer = (await requestBackendUser(registry, fetcher)) as {
       identity?: AccountIdentity;
       account?: string | null;
       claims?: unknown;
-    };
-    if (!answer.identity) return null;
+    } | null;
+    if (!answer?.identity) return null;
     const { claims } = answer;
     return {
       ...answer.identity,

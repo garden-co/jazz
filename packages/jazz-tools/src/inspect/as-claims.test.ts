@@ -61,6 +61,19 @@ describe("claims with `as`", () => {
     ).not.toBe(0);
     expect(out).toMatch(/--claims must be a JSON object/);
     expect(bodies).toHaveLength(sent);
+    // explain needs the user to explain for.
+    expect(await runInspectCommand(["explain", '{"table":"expenses"}', ...app], io)).not.toBe(0);
+    expect(out).toMatch(/explain needs --as/);
+    expect(
+      await runInspectCommand(
+        ["explain", '{"table":"expenses"}', "--as", "m", "--claims", '{"role":"manager"}', ...app],
+        io,
+      ),
+    ).toBe(0);
+    expect(bodies.at(-1)).toMatchObject({
+      op: "explain",
+      as: { userId: "m", claims: { role: "manager" } },
+    });
   });
 
   it("MCP tools take claims next to as", async () => {

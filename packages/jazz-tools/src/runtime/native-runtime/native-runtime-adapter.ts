@@ -5,6 +5,7 @@ import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
 import { isAuthorityChangedError, upstreamRefusalError } from "../authority-changed-error.js";
+import { CoreTickFailedError, isCoreTickFailedError } from "../core-tick-failed-error.js";
 import { formatUuid, formatUuidAt } from "../hex.js";
 
 export { formatUuid };
@@ -49,6 +50,7 @@ import type {
   MutationErrorEvent,
   MutationResult,
   OpenTransactionId,
+  ExplainedRows,
   PermissionAdvice,
   Runtime,
   RuntimeWriteWaitOptions,
@@ -376,6 +378,12 @@ type NativeDb = {
     author?: Uint8Array,
     claims?: Record<string, unknown>,
   ): NativePermissionAdviceResult;
+  explainReadClauses?(
+    table: string,
+    rows: string[],
+    author: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): ExplainedRows;
   requestUpdatePermissionAdvice?(
     table: string,
     rowId: Uint8Array,
@@ -2258,6 +2266,20 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
+  /**
+   * The Inspector's `explain`: for each of `rows` of `table`, which clauses
+   * of its read policy (the arms of its top-level `Or`) hold for `session`.
+   * Backend only.
+   */
+  explainReadClauses(table: string, rows: string[], session: Session): ExplainedRows {
+    if (!this.trustedBackend) throw new Error("explain runs only on a trusted backend");
+    const explain = this.db.explainReadClauses;
+    if (!explain) throw new Error("explain is not supported yet by this runtime");
+    const native = readSession(JSON.stringify(session));
+    if (!native?.identity) throw new Error("explain needs a user to explain for");
+    return explain.call(this.db, table, rows, native.identity, native.claims);
+  }
+
   requestInsertPermissionAdvice(
     table: string,
     values: InsertValues,
@@ -3936,6 +3958,11 @@ export class NativeRuntimeAdapter implements Runtime {
     this.coreTickScheduled = true;
     queueMicrotask(() => {
       this.coreTickScheduled = false;
+      if (!this.coreProgressAllowed()) return;
+      if (this.coreOperation) {
+        this.coreTickAgain = true;
+        return;
+      }
       void this.runCoreTick().catch((error) => {
         // Native revocation can retire a foreground after its wake crossed
         // into the JS queue. Native liveness distinguishes that stale wake
@@ -3946,7 +3973,13 @@ export class NativeRuntimeAdapter implements Runtime {
           reportAsyncRuntimeError(livenessError);
           return;
         }
-        reportAsyncRuntimeError(error);
+        // A core failure belongs to no single connection: whichever one is
+        // current when it happens (or is being reestablished) publishes it.
+        if (this.serverTransport !== null || this.serverEndpointUrl !== null) {
+          this.handleServerTransportError(error);
+        } else {
+          reportAsyncRuntimeError(error);
+        }
       });
     });
   }
@@ -3989,7 +4022,16 @@ export class NativeRuntimeAdapter implements Runtime {
     try {
       for (let round = 0; ; round += 1) {
         this.coreTickAgain = false;
-        await this.db.tick();
+        try {
+          await this.db.tick();
+        } catch (error) {
+          // Client stores have no chunk store, whose failed I/O a later tick
+          // retries, so no client tick error is retryable by design. The rest
+          // (core failures, and local storage errors such as a full disk or
+          // OPFS quota after the tick consumed its input) are treated as
+          // terminal.
+          throw new CoreTickFailedError(error);
+        }
         // Commits and the server's verdicts change the pending count.
         this.syncStatusPublisher.changed();
         this.reportSlowQueries();
@@ -4384,7 +4426,14 @@ export class NativeRuntimeAdapter implements Runtime {
     generation = this.serverConnectionGeneration,
     reconnecting = false,
   ): void {
-    if (generation !== this.serverConnectionGeneration) return;
+    // A stale connection's errors are dropped, but a core failure belongs to
+    // no connection: one raised while a reconnect replaced the connection
+    // it began on is still the open client's failure.
+    if (
+      generation !== this.serverConnectionGeneration &&
+      (this.closed || !isCoreTickFailedError(error))
+    )
+      return;
     const message = errorMessage(error);
     if (this.serverTransportError && message === "websocket closed") {
       // Keep the more telling error already published; only its escalation
@@ -7189,7 +7238,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       type: "rejected";
       reason:
         | { type: "UnsupportedShapeCapability"; detail: string }
-        | { type: "ServerFailure"; code: string }
+        | { type: "ServerFailure"; code: string; errorCode?: string }
         | { type: "InvalidAuthoritySourceClosure"; transition: string }
         | { type: "ShapeRegistrationPendingCatalogueAdmission" };
     }
@@ -7230,7 +7279,7 @@ function normalizeSubscriptionRejectionReason(
   reason: unknown,
 ):
   | { type: "UnsupportedShapeCapability"; detail: string }
-  | { type: "ServerFailure"; code: string }
+  | { type: "ServerFailure"; code: string; errorCode?: string }
   | { type: "InvalidAuthoritySourceClosure"; transition: string }
   | { type: "ShapeRegistrationPendingCatalogueAdmission" } {
   if (!reason || typeof reason !== "object") {
@@ -7240,6 +7289,7 @@ function normalizeSubscriptionRejectionReason(
     type?: unknown;
     detail?: unknown;
     code?: unknown;
+    errorCode?: unknown;
     transition?: unknown;
   };
   if (record.type === "UnsupportedShapeCapability" && typeof record.detail === "string") {
@@ -7251,7 +7301,10 @@ function normalizeSubscriptionRejectionReason(
   // NAPI names the server's reason `code`, WASM `detail`.
   const failure = record.code ?? record.detail;
   if (record.type === "ServerFailure" && typeof failure === "string") {
-    return { type: "ServerFailure", code: failure };
+    // The core error code, when the binding carries it (NAPI and WASM).
+    return typeof record.errorCode === "string"
+      ? { type: "ServerFailure", code: failure, errorCode: record.errorCode }
+      : { type: "ServerFailure", code: failure };
   }
   if (record.type === "InvalidAuthoritySourceClosure" && typeof record.transition === "string") {
     return {
@@ -7265,7 +7318,7 @@ function normalizeSubscriptionRejectionReason(
 function subscriptionRejectionError(
   reason:
     | { type: "UnsupportedShapeCapability"; detail: string }
-    | { type: "ServerFailure"; code: string }
+    | { type: "ServerFailure"; code: string; errorCode?: string }
     | { type: "InvalidAuthoritySourceClosure"; transition: string }
     | { type: "ShapeRegistrationPendingCatalogueAdmission" },
 ): Error {
@@ -7277,7 +7330,12 @@ function subscriptionRejectionError(
         : reason.type === "InvalidAuthoritySourceClosure"
           ? reason.transition
           : "catalogue admission pending";
-  return new Error(`Subscription rejected: ${reason.type}: ${detail}`);
+  const message = `Subscription rejected: ${reason.type}: ${detail}`;
+  // A core rejection keeps its code, as a thrown core error does: a
+  // refused upstream's `authority_changed` reads as AuthorityChangedError.
+  const code = reason.type === "ServerFailure" ? reason.errorCode : undefined;
+  if (code === undefined) return new Error(message);
+  return upstreamRefusalError({ code, message }) ?? new Error(message);
 }
 
 function subscriptionSource(
