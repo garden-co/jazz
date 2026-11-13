@@ -1,5 +1,10 @@
 import { commands } from "vitest/browser";
 
+import {
+  TRANSPORT_CONTROL_COMMAND_NAMES,
+  type JazzServerTransportControlBrowserCommands,
+} from "./transport-control-commands.js";
+
 import type { JazzServerInfo } from "./testing-server.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
@@ -36,24 +41,10 @@ export interface JazzServerBrowserCommands {
   ): Promise<{ status: number; headers: [string, string][]; body: string }>;
 }
 
-export interface JazzServerTransportControlBrowserCommands {
-  jazzServerTransportControlCreate(serverUrl: string): Promise<string>;
-  jazzServerTransportControlBlock(url: string, direction: "both" | "inbound"): Promise<void>;
-  jazzServerTransportControlUnblock(url: string): Promise<void>;
-  jazzServerTransportControlDown(url: string): Promise<void>;
-  jazzServerTransportControlUp(url: string, serverUrl?: string): Promise<void>;
-  jazzServerTransportControlStop(proxyUrl: string): Promise<void>;
-}
+export type { JazzServerTransportControlBrowserCommands };
 
 export function jazzServerTransportControlBrowserCommands(): JazzServerTransportControlBrowserCommands {
-  if (
-    !hasFunction(commands, "jazzServerTransportControlCreate") ||
-    !hasFunction(commands, "jazzServerTransportControlBlock") ||
-    !hasFunction(commands, "jazzServerTransportControlUnblock") ||
-    !hasFunction(commands, "jazzServerTransportControlDown") ||
-    !hasFunction(commands, "jazzServerTransportControlUp") ||
-    !hasFunction(commands, "jazzServerTransportControlStop")
-  ) {
+  if (!TRANSPORT_CONTROL_COMMAND_NAMES.every((name) => hasFunction(commands, name))) {
     throw new Error("Browser test project is missing the Jazz server transport-control commands.");
   }
   return commands as unknown as JazzServerTransportControlBrowserCommands;

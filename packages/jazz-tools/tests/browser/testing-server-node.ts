@@ -1,3 +1,4 @@
+import { transportControlBrowserCommands } from "./transport-control-commands.js";
 import {
   startLocalJazzServer,
   startTestJazz,
@@ -281,4 +282,21 @@ export async function stopJazzServerTransportControl(url: string): Promise<void>
   const control = transportControl(url);
   transportControls.delete(url);
   await control.stop();
+}
+
+/**
+ * Every transport-control command the browser harness needs, for a browser
+ * test project's `test.browser.commands`: spread it there instead of listing
+ * the commands one by one (see transport-control-commands.ts).
+ */
+export function jazzServerTransportControlCommands() {
+  return transportControlBrowserCommands({
+    jazzServerTransportControlCreate: createJazzServerTransportControl,
+    jazzServerTransportControlBlock: async (url, direction) =>
+      blockJazzServerTransport(url, direction),
+    jazzServerTransportControlUnblock: async (url) => unblockJazzServerTransport(url),
+    jazzServerTransportControlDown: async (url) => downJazzServerTransport(url),
+    jazzServerTransportControlUp: upJazzServerTransport,
+    jazzServerTransportControlStop: stopJazzServerTransportControl,
+  });
 }
