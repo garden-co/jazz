@@ -817,10 +817,11 @@ pending writes belong to the history it followed, so:
 - its remote reads (those open and those opened later) fail with the error,
   and so do `Global` waits on its writes still pending; `Local` waits and
   local reads are served as before, and the pending writes are kept;
-- a relay fails the live reads it relays for its sessions the same way,
-  with the same code, whatever their tier: it never settles one from its
-  own store while the link is refused, and settles it again once a new
-  link answers its upstream read;
+- a relay fails the `Remote` reads it relays for its sessions (live and
+  one-shot, open and opened later) the same way, with the same code, once
+  each; its sessions' local-first reads read its store, their local view,
+  as when there is no server. A read opened on a new link before its
+  `Welcome` is not failed with the last link's refusal;
 - the link reports the refusal to its host (`Db::upstream_refusal`), which
   stops it instead of retrying: a retry would be refused the same way. Only
   a new link (an explicit reconnect) tries again, so the old authority back

@@ -971,6 +971,10 @@ pub struct SubscriptionServerFailureReason {
     pub reason_type: String,
     /// The server's reason.
     pub code: String,
+    /// The rejection's core error code (`"authority_changed"`, …), as a
+    /// thrown core error's `code`.
+    #[napi(js_name = "errorCode")]
+    pub error_code: String,
 }
 
 #[napi]
@@ -998,11 +1002,12 @@ fn subscription_event(event: CoreEvent) -> napi::Result<SubscriptionEvent> {
                 settled,
                 tier,
             }),
-            EventChunk::Rejected { detail } => Either3::B(SubscriptionRejectedEvent {
+            EventChunk::Rejected { detail, code } => Either3::B(SubscriptionRejectedEvent {
                 event_type: "rejected".to_owned(),
                 reason: SubscriptionServerFailureReason {
                     reason_type: "ServerFailure".to_owned(),
                     code: detail,
+                    error_code: code.to_owned(),
                 },
             }),
             EventChunk::Closed => Either3::C(SubscriptionClosedEvent {

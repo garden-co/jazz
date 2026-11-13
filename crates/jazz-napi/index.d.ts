@@ -513,6 +513,11 @@ export interface SubscriptionServerFailureReason {
   type: 'ServerFailure'
   /** The server's reason. */
   code: string
+  /**
+   * The rejection's core error code (`"authority_changed"`, …), as a
+   * thrown core error's `code`.
+   */
+  errorCode: string
 }
 
 export interface UpdateOptions {

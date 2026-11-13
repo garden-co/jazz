@@ -7238,7 +7238,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       type: "rejected";
       reason:
         | { type: "UnsupportedShapeCapability"; detail: string }
-        | { type: "ServerFailure"; code: string }
+        | { type: "ServerFailure"; code: string; errorCode?: string }
         | { type: "InvalidAuthoritySourceClosure"; transition: string }
         | { type: "ShapeRegistrationPendingCatalogueAdmission" };
     }
@@ -7279,7 +7279,7 @@ function normalizeSubscriptionRejectionReason(
   reason: unknown,
 ):
   | { type: "UnsupportedShapeCapability"; detail: string }
-  | { type: "ServerFailure"; code: string }
+  | { type: "ServerFailure"; code: string; errorCode?: string }
   | { type: "InvalidAuthoritySourceClosure"; transition: string }
   | { type: "ShapeRegistrationPendingCatalogueAdmission" } {
   if (!reason || typeof reason !== "object") {
@@ -7289,6 +7289,7 @@ function normalizeSubscriptionRejectionReason(
     type?: unknown;
     detail?: unknown;
     code?: unknown;
+    errorCode?: unknown;
     transition?: unknown;
   };
   if (record.type === "UnsupportedShapeCapability" && typeof record.detail === "string") {
@@ -7300,7 +7301,10 @@ function normalizeSubscriptionRejectionReason(
   // NAPI names the server's reason `code`, WASM `detail`.
   const failure = record.code ?? record.detail;
   if (record.type === "ServerFailure" && typeof failure === "string") {
-    return { type: "ServerFailure", code: failure };
+    // The core error code, when the binding carries it (NAPI and WASM).
+    return typeof record.errorCode === "string"
+      ? { type: "ServerFailure", code: failure, errorCode: record.errorCode }
+      : { type: "ServerFailure", code: failure };
   }
   if (record.type === "InvalidAuthoritySourceClosure" && typeof record.transition === "string") {
     return {
@@ -7314,7 +7318,7 @@ function normalizeSubscriptionRejectionReason(
 function subscriptionRejectionError(
   reason:
     | { type: "UnsupportedShapeCapability"; detail: string }
-    | { type: "ServerFailure"; code: string }
+    | { type: "ServerFailure"; code: string; errorCode?: string }
     | { type: "InvalidAuthoritySourceClosure"; transition: string }
     | { type: "ShapeRegistrationPendingCatalogueAdmission" },
 ): Error {
@@ -7326,7 +7330,12 @@ function subscriptionRejectionError(
         : reason.type === "InvalidAuthoritySourceClosure"
           ? reason.transition
           : "catalogue admission pending";
-  return new Error(`Subscription rejected: ${reason.type}: ${detail}`);
+  const message = `Subscription rejected: ${reason.type}: ${detail}`;
+  // A core rejection keeps its code, as a thrown core error does: a
+  // refused upstream's `authority_changed` reads as AuthorityChangedError.
+  const code = reason.type === "ServerFailure" ? reason.errorCode : undefined;
+  if (code === undefined) return new Error(message);
+  return upstreamRefusalError({ code, message }) ?? new Error(message);
 }
 
 function subscriptionSource(
