@@ -1981,9 +1981,12 @@ impl Db {
         &self,
         prepared: &'a PreparedQuery,
     ) -> std::borrow::Cow<'a, PreparedQuery> {
-        let inner = self.inner();
+        // A peek: choosing policies must not settle an open transaction's
+        // overlay; `inner()` would, on every identity read in the batch.
+        let inner = self.inner.staging();
+        let schema = self.execution_schema(&inner);
         let names = prepared.schema.as_ref().unwrap_or(&inner.owner);
-        let governing = inner.schema.policies_from.as_ref().unwrap_or(&inner.schema);
+        let governing = schema.policies_from.as_ref().unwrap_or(&schema);
         let prior = names.policies_from.as_ref().unwrap_or(names);
         if Rc::ptr_eq(prior, governing) {
             return std::borrow::Cow::Borrowed(prepared);
