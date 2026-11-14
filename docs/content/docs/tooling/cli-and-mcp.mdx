@@ -68,20 +68,31 @@ anywhere else needs `https://`.
 
 ### Reading and writing
 
-| Command                                            | What it does                                                               |
-| :------------------------------------------------- | :------------------------------------------------------------------------- |
-| `schema`                                           | Tables, columns, history tables and permissions                            |
-| `query '<json>'`                                   | Runs a query, e.g. `'{"table":"todos","where":{"done":false},"limit":20}'` |
-| `get <table> <id>`                                 | One row, with who created and last changed it                              |
-| `history <table> <id>`                             | Every version of a row, with who wrote each                                |
-| `insert <table> '<values>' [--id <id>]`            | Inserts a row                                                              |
-| `update <table> <id> '<values>'`                   | Changes a row's columns                                                    |
-| `delete <table> <id>`                              | Deletes a row                                                              |
-| `explain '<query json>' --as <user>`               | Which read policy allowed or denied each row for that user                 |
-| `sessions`                                         | Sync sessions connected to the backend instance that answers               |
-| `link ['<query json>'] [--table <t>] [--row <id>]` | An Inspector URL that opens on exactly this, with no credential in it      |
+| Command                                                 | What it does                                                                            |
+| :------------------------------------------------------ | :-------------------------------------------------------------------------------------- |
+| `schema`                                                | Tables, columns, history tables and permissions                                         |
+| `query '<json>'`                                        | Runs a query, e.g. `'{"table":"todos","where":{"done":false},"limit":20}'`              |
+| `get <table> <id> [--column <c> [--from <n> --to <n>]]` | One row, with who created and last changed it; with `--column`, one value or part of it |
+| `history <table> <id>`                                  | Every version of a row, with who wrote each                                             |
+| `insert <table> '<values>' [--id <id>]`                 | Inserts a row                                                                           |
+| `update <table> <id> '<values>'`                        | Changes a row's columns                                                                 |
+| `delete <table> <id>`                                   | Deletes a row                                                                           |
+| `explain '<query json>' --as <user>`                    | Which read policy allowed or denied each row for that user                              |
+| `sessions`                                              | Sync sessions connected to the backend instance that answers                            |
+| `link ['<query json>'] [--table <t>] [--row <id>]`      | An Inspector URL that opens on exactly this, with no credential in it                   |
 
 Writes need a token that allows them, and change real data.
+
+#### Large values
+
+A value whose JSON would be over 32 KB is summarized in rows, so the row is still listed:
+`{ "$large": { "kind": "bytes" | "text" | "json", "size": …, "preview": "…" } }`. `size` counts
+bytes, UTF-16 units or JSON characters, and `preview` is the first 200. Fetch the value with
+`get <table> <id> --column <column>`, which answers `{ value, size }`. For a bytes or text column,
+add `--from` and `--to` (exclusive, required with `--from`) to read only that part from the store;
+the answer is `{ value, from, to }`. A part is at most 512 KB of bytes or 256K characters, and a
+value larger than one answer is refused with "ask for it in parts with from and to". A range past
+the end is refused too: the row's `$large.size` says where the end is.
 
 #### Queries
 
@@ -122,18 +133,18 @@ for example to Claude Code:
 claude mcp add jazz -- npx jazz-tools inspect mcp --app https://my-app.com
 ```
 
-| Tool             | Arguments                                 | What it does                                                         |
-| :--------------- | :---------------------------------------- | :------------------------------------------------------------------- |
-| `whoami`         |                                           | Who the backend says the agent is, what it may do, the Inspector URL |
-| `request_access` | `write`, `ttlSeconds`, `tables`, `reason` | Asks a person to approve a token; returns the URL to give them       |
-| `schema`         |                                           | Tables, columns, history tables and permissions                      |
-| `query`          | `query`, `as`, `claims`                   | Runs a query                                                         |
-| `get`            | `table`, `id`, `as`, `claims`             | One row                                                              |
-| `history`        | `table`, `id`                             | Every version of a row                                               |
-| `write`          | `ops`, `as`, `claims`                     | Inserts, updates and deletes rows in one transaction                 |
-| `explain`        | `query`, `as`, `claims`                   | Which read policy allowed or denied each row                         |
-| `sessions`       |                                           | Connected sync sessions                                              |
-| `inspector_link` | `query`, `table`, `row`, `as`, `claims`   | An Inspector URL to show a person what the agent means               |
+| Tool             | Arguments                                             | What it does                                                         |
+| :--------------- | :---------------------------------------------------- | :------------------------------------------------------------------- |
+| `whoami`         |                                                       | Who the backend says the agent is, what it may do, the Inspector URL |
+| `request_access` | `write`, `ttlSeconds`, `tables`, `reason`             | Asks a person to approve a token; returns the URL to give them       |
+| `schema`         |                                                       | Tables, columns, history tables and permissions                      |
+| `query`          | `query`, `as`, `claims`                               | Runs a query                                                         |
+| `get`            | `table`, `id`, `as`, `claims`, `column`, `from`, `to` | One row, or one value (or part of it)                                |
+| `history`        | `table`, `id`                                         | Every version of a row                                               |
+| `write`          | `ops`, `as`, `claims`                                 | Inserts, updates and deletes rows in one transaction                 |
+| `explain`        | `query`, `as`, `claims`                               | Which read policy allowed or denied each row                         |
+| `sessions`       |                                                       | Connected sync sessions                                              |
+| `inspector_link` | `query`, `table`, `row`, `as`, `claims`               | An Inspector URL to show a person what the agent means               |
 
 `write` takes `ops`, 1 to 1000 writes applied in one transaction, each one of:
 
