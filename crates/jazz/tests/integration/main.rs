@@ -101,6 +101,8 @@ mod maybe_conflicting;
 mod mirrored_lens_defaults;
 #[path = "../mutation_admission.rs"]
 mod mutation_admission;
+#[path = "../nested_exists_outer_row.rs"]
+mod nested_exists_outer_row;
 #[path = "../nested_relation_reuse.rs"]
 mod nested_relation_reuse;
 #[path = "../order_by_unselected_column.rs"]
