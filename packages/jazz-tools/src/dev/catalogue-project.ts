@@ -50,7 +50,13 @@ import { fetchSchemaHashes, fetchStoredWasmSchema } from "./catalogue-api.js";
 import { renderMigrationStub, UNFILLED_STUB_TODO } from "./migrations.js";
 import { normalizeSchemaHashInput } from "./schema-utils.js";
 import { legacySchemaHash } from "./legacy-schema-hash.js";
-import { buildAppFiles, checkAppFiles, writeAppFiles, type BuiltAppFiles } from "./app-files.js";
+import {
+  buildAppFiles,
+  checkAppFiles,
+  unsupportedWarning,
+  writeAppFiles,
+  type BuiltAppFiles,
+} from "./app-files.js";
 import {
   assertMigrationMatchesCanonicalBundle,
   computeSchemaHash,
@@ -232,10 +238,9 @@ export async function validateProject(
   const appFiles = await localAppFiles(compiled, migrationsDir);
   const appFilesWarnings: string[] = [];
   if ("unsupported" in appFiles) {
-    // Every .62 app has a form in the files (SPEC 10.10): this is a bug.
-    throw new Error(
-      `${appFiles.unsupported} Please report it at https://github.com/garden-co/jazz/issues: every app should have its jazz.app.json and jazz.permissions.json.`,
-    );
+    // The app runs as on .62; the format just can't say it yet. Writer
+    // refusals warn: only drift between files and code refuses.
+    appFilesWarnings.push(unsupportedWarning(appFiles.unsupported));
   } else if (options.check) {
     await checkAppFiles(options.schemaDir, compiled.schemaFile, appFiles.files);
   } else {

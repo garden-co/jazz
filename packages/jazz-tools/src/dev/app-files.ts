@@ -55,13 +55,17 @@ export interface AppFilesInput {
 /** The writer's result: both files, or why the format can't express the app yet. */
 export type BuiltAppFiles = { files: AppFiles } | { unsupported: string };
 
+/** The code jazz-napi gives a writer or reader refusal that only says the format can't express something yet. */
+export const APP_FILES_UNSUPPORTED = "JAZZ_APP_FILES_UNSUPPORTED";
+
 /**
  * A writer refusal that only says the format can't express something yet
- * (a catalogue-native enum, a relation the grammar can't spell). The app
- * itself is fine: a .62 server takes it, so tooling warns and goes on.
+ * (a catalogue-native enum column, say). The app itself is fine: a .62
+ * server takes it, so tooling warns and goes on. Told by the error's code,
+ * which Jazz's Rust writer sets, never by its wording.
  */
-export function isUnsupportedYet(message: string): boolean {
-  return /not supported in jazz\.(?:app|permissions)\.json yet/.test(message);
+export function isUnsupportedYet(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === APP_FILES_UNSUPPORTED;
 }
 
 /** Build both files with Jazz's Rust writer; throws for anything a deploy would refuse too. */
@@ -80,8 +84,9 @@ export async function buildAppFiles(input: AppFilesInput): Promise<BuiltAppFiles
   try {
     return { files: writeAppArtifact(JSON.stringify(engineInput, runtimeSchemaJsonReplacer)) };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (isUnsupportedYet(message)) return { unsupported: message };
+    if (isUnsupportedYet(error)) {
+      return { unsupported: error instanceof Error ? error.message : String(error) };
+    }
     throw error;
   }
 }
@@ -165,6 +170,14 @@ export async function checkAppFiles(
   }
 }
 
+/** createJazz's warning for an app whose files the format can't express yet. */
+export function unsupportedAtStartupWarning(message: string): string {
+  return (
+    `jazz.app.json and jazz.permissions.json can't describe this app yet (${message.replace(/[.\s]*$/, "")}), ` +
+    `so it starts without checking them, as on .62. See ${APP_FILES_DOCS}.`
+  );
+}
+
 /** The warning for an app whose files the format can't express yet. */
 export function unsupportedWarning(message: string): string {
   return (
@@ -207,13 +220,14 @@ export async function checkRunningApp(
   cwd: string = process.cwd(),
   warn: (message: string) => void = console.warn,
 ): Promise<void> {
+  // A project that hasn't adopted the files runs as on .62: no writer at startup.
   const committed = await committedAppFiles(cwd);
+  if (!committed) return;
   const built = await buildAppFiles(input);
   if ("unsupported" in built) {
-    warn(`jazz: ${unsupportedWarning(built.unsupported)}`);
+    warn(`jazz: ${unsupportedAtStartupWarning(built.unsupported)}`);
     return;
   }
-  if (!committed) return;
   const { loadAppArtifact } = await import("jazz-napi");
   const read = (files: AppFiles) =>
     loadAppArtifact(files.app, files.permissions) as { current: string; bundle: string };
@@ -222,8 +236,8 @@ export async function checkRunningApp(
     theirs = read(committed);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (isUnsupportedYet(message)) {
-      warn(`jazz: ${unsupportedWarning(message)}`);
+    if (isUnsupportedYet(error)) {
+      warn(`jazz: ${unsupportedAtStartupWarning(message)}`);
       return;
     }
     throw new Error(
