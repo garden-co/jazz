@@ -53,6 +53,7 @@ import { legacySchemaHash } from "./legacy-schema-hash.js";
 import {
   buildAppFiles,
   checkAppFiles,
+  removeStaleAppFiles,
   unsupportedWarning,
   writeAppFiles,
   type BuiltAppFiles,
@@ -239,6 +240,13 @@ export async function validateProject(
   const appFilesWarnings: string[] = [];
   if ("unsupported" in appFiles) {
     appFilesWarnings.push(unsupportedWarning(appFiles.unsupported));
+    appFilesWarnings.push(
+      ...(await removeStaleAppFiles(
+        options.schemaDir,
+        compiled.schemaFile,
+        options.check === true,
+      )),
+    );
   } else if (options.check) {
     await checkAppFiles(options.schemaDir, compiled.schemaFile, appFiles.files);
   } else {

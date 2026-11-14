@@ -1,1602 +1,366 @@
 {
-  "codegen": {
-    "slices": {},
-    "tables": {
-      "better_auth_account": {
-        "relations": {
-          "user": {
-            "column": "userId",
-            "table": "better_auth_user",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "better_auth_account": {
+      "columns": {
+        "accountId": "string",
+        "providerId": "string",
+        "userId": "uuid",
+        "password": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
       },
-      "better_auth_session": {
-        "relations": {
-          "user": {
-            "column": "userId",
-            "table": "better_auth_user",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_jwks": {
+      "columns": {
+        "publicKey": "string",
+        "privateKey": "string",
+        "createdAt": "timestamp",
+        "expiresAt": "timestamp?",
+        "alg": "string?",
+        "crv": "string?"
+      }
+    },
+    "better_auth_session": {
+      "columns": {
+        "expiresAt": "timestamp",
+        "token": "string",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "ipAddress": "string?",
+        "userAgent": "string?",
+        "userId": "uuid"
       },
-      "better_auth_user": {
-        "relations": {
-          "better_auth_accountViaUser": {
-            "relation": "user",
-            "table": "better_auth_account",
-            "type": "Reverse"
-          },
-          "better_auth_sessionViaUser": {
-            "relation": "user",
-            "table": "better_auth_session",
-            "type": "Reverse"
-          }
-        },
-        "ts_only": []
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_user": {
+      "columns": {
+        "name": "string",
+        "email": "string",
+        "emailVerified": "boolean",
+        "image": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
       },
-      "customers": {
-        "relations": {
-          "district": {
-            "column": "district_id",
-            "table": "districts",
-            "type": "Forward"
-          },
-          "ordersViaCustomer": {
-            "relation": "customer",
-            "table": "orders",
-            "type": "Reverse"
-          },
-          "paymentsViaCustomer": {
-            "relation": "customer",
-            "table": "payments",
-            "type": "Reverse"
-          },
-          "warehouse": {
-            "column": "warehouse_id",
-            "table": "warehouses",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "relations": {
+        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
+        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
+      }
+    },
+    "better_auth_verification": {
+      "columns": {
+        "identifier": "string",
+        "value": "string",
+        "expiresAt": "timestamp",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "customers": {
+      "columns": {
+        "warehouse_id": "uuid",
+        "district_id": "uuid",
+        "name": "string",
+        "balance_cents": "int"
       },
-      "deliveries": {
-        "relations": {
-          "district": {
-            "column": "district_id",
-            "table": "districts",
-            "type": "Forward"
-          },
-          "order": {
-            "column": "order_id",
-            "table": "orders",
-            "type": "Forward"
-          },
-          "warehouse": {
-            "column": "warehouse_id",
-            "table": "warehouses",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "relations": {
+        "district": { "rel": "districts", "column": "district_id" },
+        "ordersViaCustomer": { "reverse": "orders", "relation": "customer" },
+        "paymentsViaCustomer": { "reverse": "payments", "relation": "customer" },
+        "warehouse": { "rel": "warehouses", "column": "warehouse_id" }
       },
-      "districts": {
-        "relations": {
-          "customersViaDistrict": {
-            "relation": "district",
-            "table": "customers",
-            "type": "Reverse"
-          },
-          "deliveriesViaDistrict": {
-            "relation": "district",
-            "table": "deliveries",
-            "type": "Reverse"
-          },
-          "ordersViaDistrict": {
-            "relation": "district",
-            "table": "orders",
-            "type": "Reverse"
-          },
-          "warehouse": {
-            "column": "warehouse_id",
-            "table": "warehouses",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "indexes": ["warehouse_id", "district_id", "name"]
+    },
+    "deliveries": {
+      "columns": {
+        "warehouse_id": "uuid",
+        "district_id": "uuid",
+        "order_id": "uuid",
+        "status": "string"
       },
-      "items": {
-        "relations": {
-          "order_linesViaItem": {
-            "relation": "item",
-            "table": "order_lines",
-            "type": "Reverse"
-          },
-          "stockViaItem": {
-            "relation": "item",
-            "table": "stock",
-            "type": "Reverse"
-          }
-        },
-        "ts_only": []
+      "relations": {
+        "district": { "rel": "districts", "column": "district_id" },
+        "order": { "rel": "orders", "column": "order_id" },
+        "warehouse": { "rel": "warehouses", "column": "warehouse_id" }
       },
-      "order_lines": {
-        "relations": {
-          "item": {
-            "column": "item_id",
-            "table": "items",
-            "type": "Forward"
-          },
-          "order": {
-            "column": "order_id",
-            "table": "orders",
-            "type": "Forward"
-          },
-          "warehouse": {
-            "column": "warehouse_id",
-            "table": "warehouses",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "indexes": ["warehouse_id", "order_id"]
+    },
+    "districts": {
+      "columns": { "warehouse_id": "uuid", "name": "string", "next_order_number": "int" },
+      "relations": {
+        "customersViaDistrict": { "reverse": "customers", "relation": "district" },
+        "deliveriesViaDistrict": { "reverse": "deliveries", "relation": "district" },
+        "ordersViaDistrict": { "reverse": "orders", "relation": "district" },
+        "warehouse": { "rel": "warehouses", "column": "warehouse_id" }
       },
-      "orders": {
-        "relations": {
-          "customer": {
-            "column": "customer_id",
-            "table": "customers",
-            "type": "Forward"
-          },
-          "deliveriesViaOrder": {
-            "relation": "order",
-            "table": "deliveries",
-            "type": "Reverse"
-          },
-          "district": {
-            "column": "district_id",
-            "table": "districts",
-            "type": "Forward"
-          },
-          "order_linesViaOrder": {
-            "relation": "order",
-            "table": "order_lines",
-            "type": "Reverse"
-          },
-          "paymentsViaOrder": {
-            "relation": "order",
-            "table": "payments",
-            "type": "Reverse"
-          },
-          "warehouse": {
-            "column": "warehouse_id",
-            "table": "warehouses",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "indexes": ["warehouse_id", "name"]
+    },
+    "items": {
+      "columns": {
+        "sku": "string",
+        "name": "string",
+        "unit_price_cents": "int",
+        "operator_id": "uuid"
       },
-      "payments": {
-        "relations": {
-          "customer": {
-            "column": "customer_id",
-            "table": "customers",
-            "type": "Forward"
-          },
-          "order": {
-            "column": "order_id",
-            "table": "orders",
-            "type": "Forward"
-          },
-          "warehouse": {
-            "column": "warehouse_id",
-            "table": "warehouses",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "relations": {
+        "order_linesViaItem": { "reverse": "order_lines", "relation": "item" },
+        "stockViaItem": { "reverse": "stock", "relation": "item" }
       },
-      "stock": {
-        "relations": {
-          "item": {
-            "column": "item_id",
-            "table": "items",
-            "type": "Forward"
-          },
-          "warehouse": {
-            "column": "warehouse_id",
-            "table": "warehouses",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "indexes": ["operator_id"]
+    },
+    "order_lines": {
+      "columns": {
+        "warehouse_id": "uuid",
+        "order_id": "uuid",
+        "line_number": "int",
+        "item_id": "uuid",
+        "quantity": "int",
+        "amount_cents": "int"
       },
-      "warehouse_operators": {
-        "relations": {
-          "warehouse": {
-            "column": "warehouse_id",
-            "table": "warehouses",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "relations": {
+        "item": { "rel": "items", "column": "item_id" },
+        "order": { "rel": "orders", "column": "order_id" },
+        "warehouse": { "rel": "warehouses", "column": "warehouse_id" }
       },
-      "warehouses": {
-        "relations": {
-          "customersViaWarehouse": {
-            "relation": "warehouse",
-            "table": "customers",
-            "type": "Reverse"
-          },
-          "deliveriesViaWarehouse": {
-            "relation": "warehouse",
-            "table": "deliveries",
-            "type": "Reverse"
-          },
-          "districtsViaWarehouse": {
-            "relation": "warehouse",
-            "table": "districts",
-            "type": "Reverse"
-          },
-          "operatorsViaWarehouse": {
-            "relation": "warehouse",
-            "table": "warehouse_operators",
-            "type": "Reverse"
-          },
-          "order_linesViaWarehouse": {
-            "relation": "warehouse",
-            "table": "order_lines",
-            "type": "Reverse"
-          },
-          "ordersViaWarehouse": {
-            "relation": "warehouse",
-            "table": "orders",
-            "type": "Reverse"
-          },
-          "paymentsViaWarehouse": {
-            "relation": "warehouse",
-            "table": "payments",
-            "type": "Reverse"
-          },
-          "stockViaWarehouse": {
-            "relation": "warehouse",
-            "table": "stock",
-            "type": "Reverse"
+      "indexes": ["warehouse_id", "order_id"]
+    },
+    "orders": {
+      "columns": {
+        "warehouse_id": "uuid",
+        "district_id": "uuid",
+        "customer_id": "uuid",
+        "order_number": "int",
+        "status": "string",
+        "total_cents": "int",
+        "idempotency_key": "string",
+        "reserved_lines": "string?"
+      },
+      "relations": {
+        "customer": { "rel": "customers", "column": "customer_id" },
+        "deliveriesViaOrder": { "reverse": "deliveries", "relation": "order" },
+        "district": { "rel": "districts", "column": "district_id" },
+        "order_linesViaOrder": { "reverse": "order_lines", "relation": "order" },
+        "paymentsViaOrder": { "reverse": "payments", "relation": "order" },
+        "warehouse": { "rel": "warehouses", "column": "warehouse_id" }
+      },
+      "indexes": [
+        "warehouse_id",
+        "district_id",
+        "customer_id",
+        "status",
+        "order_number",
+        "idempotency_key"
+      ]
+    },
+    "payments": {
+      "columns": {
+        "warehouse_id": "uuid",
+        "customer_id": "uuid",
+        "order_id": "uuid?",
+        "amount_cents": "int",
+        "idempotency_key": "string"
+      },
+      "relations": {
+        "customer": { "rel": "customers", "column": "customer_id" },
+        "order": { "rel": "orders", "column": "order_id" },
+        "warehouse": { "rel": "warehouses", "column": "warehouse_id" }
+      },
+      "indexes": ["warehouse_id", "order_id", "idempotency_key"]
+    },
+    "stock": {
+      "columns": {
+        "warehouse_id": "uuid",
+        "item_id": "uuid",
+        "on_hand": "int",
+        "reorder_level": "int"
+      },
+      "relations": {
+        "item": { "rel": "items", "column": "item_id" },
+        "warehouse": { "rel": "warehouses", "column": "warehouse_id" }
+      },
+      "indexes": ["warehouse_id", "item_id", "on_hand"]
+    },
+    "warehouse_operators": {
+      "columns": { "warehouse_id": "uuid", "account_id": "uuid", "name": "string" },
+      "relations": { "warehouse": { "rel": "warehouses", "column": "warehouse_id" } },
+      "indexes": ["warehouse_id", "account_id"]
+    },
+    "warehouses": {
+      "columns": { "name": "string", "region": "string", "operator_id": "uuid" },
+      "relations": {
+        "customersViaWarehouse": { "reverse": "customers", "relation": "warehouse" },
+        "deliveriesViaWarehouse": { "reverse": "deliveries", "relation": "warehouse" },
+        "districtsViaWarehouse": { "reverse": "districts", "relation": "warehouse" },
+        "operatorsViaWarehouse": { "reverse": "warehouse_operators", "relation": "warehouse" },
+        "order_linesViaWarehouse": { "reverse": "order_lines", "relation": "warehouse" },
+        "ordersViaWarehouse": { "reverse": "orders", "relation": "warehouse" },
+        "paymentsViaWarehouse": { "reverse": "payments", "relation": "warehouse" },
+        "stockViaWarehouse": { "reverse": "stock", "relation": "warehouse" }
+      },
+      "indexes": ["operator_id"]
+    }
+  },
+  "history": {
+    "7ce960ad34dc": {
+      "tables": {
+        "better_auth_account": {
+          "columns": {
+            "issuer": "string",
+            "accountId": "string",
+            "providerId": "string",
+            "userId": { "type": "uuid", "references": "better_auth_user" },
+            "password": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
           }
         },
-        "ts_only": []
+        "better_auth_jwks": {
+          "columns": {
+            "publicKey": "string",
+            "privateKey": "string",
+            "createdAt": "timestamp",
+            "expiresAt": "timestamp?",
+            "alg": "string?",
+            "crv": "string?"
+          }
+        },
+        "better_auth_session": {
+          "columns": {
+            "expiresAt": "timestamp",
+            "token": "string",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp",
+            "ipAddress": "string?",
+            "userAgent": "string?",
+            "userId": { "type": "uuid", "references": "better_auth_user" }
+          }
+        },
+        "better_auth_user": {
+          "columns": {
+            "name": "string",
+            "email": "string",
+            "emailVerified": "boolean",
+            "image": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_verification": {
+          "columns": {
+            "identifier": "string",
+            "value": "string",
+            "expiresAt": "timestamp",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "customers": {
+          "columns": {
+            "warehouse_id": { "type": "uuid", "references": "warehouses" },
+            "district_id": { "type": "uuid", "references": "districts" },
+            "name": "string",
+            "balance_cents": "int"
+          },
+          "indexes": ["warehouse_id", "district_id", "name"]
+        },
+        "deliveries": {
+          "columns": {
+            "warehouse_id": { "type": "uuid", "references": "warehouses" },
+            "district_id": { "type": "uuid", "references": "districts" },
+            "order_id": { "type": "uuid", "references": "orders" },
+            "status": "string"
+          },
+          "indexes": ["warehouse_id", "order_id"]
+        },
+        "districts": {
+          "columns": {
+            "warehouse_id": { "type": "uuid", "references": "warehouses" },
+            "name": "string",
+            "next_order_number": "int"
+          },
+          "indexes": ["warehouse_id", "name"]
+        },
+        "items": {
+          "columns": {
+            "sku": "string",
+            "name": "string",
+            "unit_price_cents": "int",
+            "operator_id": "uuid"
+          },
+          "indexes": ["operator_id"]
+        },
+        "order_lines": {
+          "columns": {
+            "warehouse_id": { "type": "uuid", "references": "warehouses" },
+            "order_id": { "type": "uuid", "references": "orders" },
+            "line_number": "int",
+            "item_id": { "type": "uuid", "references": "items" },
+            "quantity": "int",
+            "amount_cents": "int"
+          },
+          "indexes": ["warehouse_id", "order_id"]
+        },
+        "orders": {
+          "columns": {
+            "warehouse_id": { "type": "uuid", "references": "warehouses" },
+            "district_id": { "type": "uuid", "references": "districts" },
+            "customer_id": { "type": "uuid", "references": "customers" },
+            "order_number": "int",
+            "status": "string",
+            "total_cents": "int",
+            "idempotency_key": "string",
+            "reserved_lines": "string?"
+          },
+          "indexes": [
+            "warehouse_id",
+            "district_id",
+            "customer_id",
+            "status",
+            "order_number",
+            "idempotency_key"
+          ]
+        },
+        "payments": {
+          "columns": {
+            "warehouse_id": { "type": "uuid", "references": "warehouses" },
+            "customer_id": { "type": "uuid", "references": "customers" },
+            "order_id": { "type": "uuid", "optional": true, "references": "orders" },
+            "amount_cents": "int",
+            "idempotency_key": "string"
+          },
+          "indexes": ["warehouse_id", "order_id", "idempotency_key"]
+        },
+        "stock": {
+          "columns": {
+            "warehouse_id": { "type": "uuid", "references": "warehouses" },
+            "item_id": { "type": "uuid", "references": "items" },
+            "on_hand": "int",
+            "reorder_level": "int"
+          },
+          "indexes": ["warehouse_id", "item_id", "on_hand"]
+        },
+        "warehouse_operators": {
+          "columns": {
+            "warehouse_id": { "type": "uuid", "references": "warehouses" },
+            "account_id": "uuid",
+            "name": "string"
+          },
+          "indexes": ["warehouse_id", "account_id"]
+        },
+        "warehouses": {
+          "columns": { "name": "string", "region": "string", "operator_id": "uuid" },
+          "indexes": ["operator_id"]
+        }
       }
     }
   },
-  "current": "36b03f261e65be21093aa294715b621b753dbc531e003f1487436c1946f174f9",
-  "format": 1,
   "migrations": [
     {
-      "forward": [
-        {
-          "operations": [
-            {
-              "column": "issuer",
-              "column_type": {
-                "type": "Text"
-              },
-              "default": {
-                "type": "Text",
-                "value": ""
-              },
-              "type": "Drop"
-            }
-          ],
-          "table": "better_auth_account"
-        }
-      ],
-      "from": "7ce960ad34dc4f77c92e07727acc3113ccf803934671a1fe2f46cf736d2641ce",
-      "to": "36b03f261e65be21093aa294715b621b753dbc531e003f1487436c1946f174f9"
-    }
-  ],
-  "schemas": [
-    {
-      "hash": "7ce960ad34dc4f77c92e07727acc3113ccf803934671a1fe2f46cf736d2641ce",
-      "tables": {
-        "better_auth_account": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "issuer",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "accountId",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "providerId",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "userId",
-              "nullable": false,
-              "references": "better_auth_user"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "password",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "better_auth_jwks": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "publicKey",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "privateKey",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "alg",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "crv",
-              "nullable": true
-            }
-          ]
-        },
-        "better_auth_session": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "token",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "ipAddress",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "userAgent",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "userId",
-              "nullable": false,
-              "references": "better_auth_user"
-            }
-          ]
-        },
-        "better_auth_user": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "email",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Boolean"
-              },
-              "name": "emailVerified",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "image",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "better_auth_verification": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "identifier",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "value",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "customers": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "warehouse_id",
-              "nullable": false,
-              "references": "warehouses"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "district_id",
-              "nullable": false,
-              "references": "districts"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "balance_cents",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "warehouse_id",
-            "district_id",
-            "name"
-          ]
-        },
-        "deliveries": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "warehouse_id",
-              "nullable": false,
-              "references": "warehouses"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "district_id",
-              "nullable": false,
-              "references": "districts"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "order_id",
-              "nullable": false,
-              "references": "orders"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "status",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "warehouse_id",
-            "order_id"
-          ]
-        },
-        "districts": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "warehouse_id",
-              "nullable": false,
-              "references": "warehouses"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "next_order_number",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "warehouse_id",
-            "name"
-          ]
-        },
-        "items": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "sku",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "unit_price_cents",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "operator_id",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "operator_id"
-          ]
-        },
-        "order_lines": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "warehouse_id",
-              "nullable": false,
-              "references": "warehouses"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "order_id",
-              "nullable": false,
-              "references": "orders"
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "line_number",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "item_id",
-              "nullable": false,
-              "references": "items"
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "quantity",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "amount_cents",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "warehouse_id",
-            "order_id"
-          ]
-        },
-        "orders": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "warehouse_id",
-              "nullable": false,
-              "references": "warehouses"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "district_id",
-              "nullable": false,
-              "references": "districts"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "customer_id",
-              "nullable": false,
-              "references": "customers"
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "order_number",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "status",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "total_cents",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "idempotency_key",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "reserved_lines",
-              "nullable": true
-            }
-          ],
-          "indexed_columns": [
-            "warehouse_id",
-            "district_id",
-            "customer_id",
-            "status",
-            "order_number",
-            "idempotency_key"
-          ]
-        },
-        "payments": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "warehouse_id",
-              "nullable": false,
-              "references": "warehouses"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "customer_id",
-              "nullable": false,
-              "references": "customers"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "order_id",
-              "nullable": true,
-              "references": "orders"
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "amount_cents",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "idempotency_key",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "warehouse_id",
-            "order_id",
-            "idempotency_key"
-          ]
-        },
-        "stock": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "warehouse_id",
-              "nullable": false,
-              "references": "warehouses"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "item_id",
-              "nullable": false,
-              "references": "items"
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "on_hand",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "reorder_level",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "warehouse_id",
-            "item_id",
-            "on_hand"
-          ]
-        },
-        "warehouse_operators": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "warehouse_id",
-              "nullable": false,
-              "references": "warehouses"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "account_id",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "warehouse_id",
-            "account_id"
-          ]
-        },
-        "warehouses": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "region",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "operator_id",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "operator_id"
-          ]
-        }
-      }
-    },
-    {
-      "hash": "36b03f261e65be21093aa294715b621b753dbc531e003f1487436c1946f174f9",
-      "tables": {
-        "better_auth_account": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "accountId",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "providerId",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "userId",
-              "nullable": false,
-              "references": "better_auth_user"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "password",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "better_auth_jwks": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "publicKey",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "privateKey",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "alg",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "crv",
-              "nullable": true
-            }
-          ]
-        },
-        "better_auth_session": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "token",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "ipAddress",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "userAgent",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "userId",
-              "nullable": false,
-              "references": "better_auth_user"
-            }
-          ]
-        },
-        "better_auth_user": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "email",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Boolean"
-              },
-              "name": "emailVerified",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "image",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "better_auth_verification": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "identifier",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "value",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "customers": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "warehouse_id",
-              "nullable": false,
-              "references": "warehouses"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "district_id",
-              "nullable": false,
-              "references": "districts"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "balance_cents",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "warehouse_id",
-            "district_id",
-            "name"
-          ]
-        },
-        "deliveries": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "warehouse_id",
-              "nullable": false,
-              "references": "warehouses"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "district_id",
-              "nullable": false,
-              "references": "districts"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "order_id",
-              "nullable": false,
-              "references": "orders"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "status",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "warehouse_id",
-            "order_id"
-          ]
-        },
-        "districts": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "warehouse_id",
-              "nullable": false,
-              "references": "warehouses"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "next_order_number",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "warehouse_id",
-            "name"
-          ]
-        },
-        "items": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "sku",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "unit_price_cents",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "operator_id",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "operator_id"
-          ]
-        },
-        "order_lines": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "warehouse_id",
-              "nullable": false,
-              "references": "warehouses"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "order_id",
-              "nullable": false,
-              "references": "orders"
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "line_number",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "item_id",
-              "nullable": false,
-              "references": "items"
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "quantity",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "amount_cents",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "warehouse_id",
-            "order_id"
-          ]
-        },
-        "orders": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "warehouse_id",
-              "nullable": false,
-              "references": "warehouses"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "district_id",
-              "nullable": false,
-              "references": "districts"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "customer_id",
-              "nullable": false,
-              "references": "customers"
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "order_number",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "status",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "total_cents",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "idempotency_key",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "reserved_lines",
-              "nullable": true
-            }
-          ],
-          "indexed_columns": [
-            "warehouse_id",
-            "district_id",
-            "customer_id",
-            "status",
-            "order_number",
-            "idempotency_key"
-          ]
-        },
-        "payments": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "warehouse_id",
-              "nullable": false,
-              "references": "warehouses"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "customer_id",
-              "nullable": false,
-              "references": "customers"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "order_id",
-              "nullable": true,
-              "references": "orders"
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "amount_cents",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "idempotency_key",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "warehouse_id",
-            "order_id",
-            "idempotency_key"
-          ]
-        },
-        "stock": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "warehouse_id",
-              "nullable": false,
-              "references": "warehouses"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "item_id",
-              "nullable": false,
-              "references": "items"
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "on_hand",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "reorder_level",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "warehouse_id",
-            "item_id",
-            "on_hand"
-          ]
-        },
-        "warehouse_operators": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "warehouse_id",
-              "nullable": false,
-              "references": "warehouses"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "account_id",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "warehouse_id",
-            "account_id"
-          ]
-        },
-        "warehouses": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "region",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "operator_id",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "operator_id"
-          ]
-        }
+      "from": "7ce960ad34dc",
+      "migrate": {
+        "better_auth_account": { "issuer": { "drop": "string", "backwardsDefault": "" } }
       }
     }
   ]

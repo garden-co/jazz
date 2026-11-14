@@ -1,114 +1,24 @@
 {
-  "codegen": {
-    "slices": {},
-    "tables": {
-      "scenarios": {
-        "relations": {
-          "base_scenario": {
-            "column": "base_scenario_id",
-            "table": "scenarios",
-            "type": "Forward"
-          },
-          "scenariosViaBase_scenario": {
-            "relation": "base_scenario",
-            "table": "scenarios",
-            "type": "Reverse"
-          },
-          "tasksViaScenario": {
-            "relation": "scenario",
-            "table": "tasks",
-            "type": "Reverse"
-          }
-        },
-        "ts_only": []
-      },
-      "tasks": {
-        "relations": {
-          "scenario": {
-            "column": "scenario_id",
-            "table": "scenarios",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
-      }
-    }
-  },
-  "current": "abdfc2124f3969743e0af7adecced972d005a1de444bb94f37592ff4b5740f6d",
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
   "format": 1,
-  "migrations": [],
-  "schemas": [
-    {
-      "hash": "abdfc2124f3969743e0af7adecced972d005a1de444bb94f37592ff4b5740f6d",
-      "tables": {
-        "scenarios": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "base_scenario_id",
-              "nullable": true,
-              "references": "scenarios"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "base_snapshot_ref",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "open",
-                  "approved",
-                  "archived"
-                ]
-              },
-              "name": "status",
-              "nullable": false
-            }
-          ]
-        },
-        "tasks": {
-          "branch_by": [
-            "scenario_id"
-          ],
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "scenario_id",
-              "nullable": false,
-              "references": "scenarios"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "title",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "estimate",
-              "nullable": false
-            }
-          ]
-        }
+  "tables": {
+    "scenarios": {
+      "columns": {
+        "name": "string",
+        "base_scenario_id": "uuid?",
+        "base_snapshot_ref": "string?",
+        "status": { "enum": ["open", "approved", "archived"] }
+      },
+      "relations": {
+        "base_scenario": { "rel": "scenarios", "column": "base_scenario_id" },
+        "scenariosViaBase_scenario": { "reverse": "scenarios", "relation": "base_scenario" },
+        "tasksViaScenario": { "reverse": "tasks", "relation": "scenario" }
       }
+    },
+    "tasks": {
+      "columns": { "scenario_id": "uuid", "title": "string", "estimate": "int" },
+      "relations": { "scenario": { "rel": "scenarios", "column": "scenario_id" } },
+      "branchBy": ["scenario_id"]
     }
-  ]
+  }
 }

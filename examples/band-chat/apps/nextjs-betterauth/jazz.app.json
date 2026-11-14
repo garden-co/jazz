@@ -1,1300 +1,278 @@
 {
-  "codegen": {
-    "slices": {},
-    "tables": {
-      "better_auth_account": {
-        "relations": {
-          "user": {
-            "column": "userId",
-            "table": "better_auth_user",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "better_auth_account": {
+      "columns": {
+        "accountId": "string",
+        "providerId": "string",
+        "userId": "uuid",
+        "password": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
       },
-      "better_auth_session": {
-        "relations": {
-          "user": {
-            "column": "userId",
-            "table": "better_auth_user",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_jwks": {
+      "columns": {
+        "publicKey": "string",
+        "privateKey": "string",
+        "createdAt": "timestamp",
+        "expiresAt": "timestamp?",
+        "alg": "string?",
+        "crv": "string?"
+      }
+    },
+    "better_auth_session": {
+      "columns": {
+        "expiresAt": "timestamp",
+        "token": "string",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "ipAddress": "string?",
+        "userAgent": "string?",
+        "userId": "uuid"
       },
-      "better_auth_user": {
-        "relations": {
-          "better_auth_accountViaUser": {
-            "relation": "user",
-            "table": "better_auth_account",
-            "type": "Reverse"
-          },
-          "better_auth_sessionViaUser": {
-            "relation": "user",
-            "table": "better_auth_session",
-            "type": "Reverse"
-          }
-        },
-        "ts_only": []
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_user": {
+      "columns": {
+        "name": "string",
+        "email": "string",
+        "emailVerified": "boolean",
+        "image": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
       },
-      "canvases": {
-        "relations": {
-          "messagesViaCanvas": {
-            "relation": "canvas",
-            "table": "messages",
-            "type": "Reverse"
-          },
-          "room": {
-            "column": "roomId",
-            "table": "rooms",
-            "type": "Forward"
-          },
-          "strokesViaCanvas": {
-            "relation": "canvas",
-            "table": "strokes",
-            "type": "Reverse"
-          }
-        },
-        "ts_only": []
+      "relations": {
+        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
+        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
+      }
+    },
+    "better_auth_verification": {
+      "columns": {
+        "identifier": "string",
+        "value": "string",
+        "expiresAt": "timestamp",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "canvases": {
+      "columns": { "roomId": "uuid", "title": "string" },
+      "relations": {
+        "messagesViaCanvas": { "reverse": "messages", "relation": "canvas" },
+        "room": { "rel": "rooms", "column": "roomId" },
+        "strokesViaCanvas": { "reverse": "strokes", "relation": "canvas" }
+      }
+    },
+    "joinRequests": {
+      "columns": { "roomId": "uuid", "requester": "uuid", "profileId": "uuid" },
+      "relations": {
+        "profile": { "rel": "profiles", "column": "profileId" },
+        "room": { "rel": "rooms", "column": "roomId" }
+      }
+    },
+    "messages": {
+      "columns": {
+        "roomId": "uuid",
+        "senderId": "uuid",
+        "text": "string",
+        "attachment": "bytes?",
+        "attachmentName": "string?",
+        "attachmentType": "string?",
+        "attachmentSize": "int?",
+        "canvasId": "uuid?"
       },
-      "joinRequests": {
-        "relations": {
-          "profile": {
-            "column": "profileId",
-            "table": "profiles",
-            "type": "Forward"
-          },
-          "room": {
-            "column": "roomId",
-            "table": "rooms",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "relations": {
+        "canvas": { "rel": "canvases", "column": "canvasId" },
+        "reactionsViaMessage": { "reverse": "reactions", "relation": "message" },
+        "room": { "rel": "rooms", "column": "roomId" },
+        "sender": { "rel": "profiles", "column": "senderId" }
+      }
+    },
+    "profiles": {
+      "columns": {
+        "author": "uuid",
+        "displayName": "string",
+        "avatar": "bytes?",
+        "avatarType": "string?"
       },
-      "messages": {
-        "relations": {
-          "canvas": {
-            "column": "canvasId",
-            "table": "canvases",
-            "type": "Forward"
-          },
-          "reactionsViaMessage": {
-            "relation": "message",
-            "table": "reactions",
-            "type": "Reverse"
-          },
-          "room": {
-            "column": "roomId",
-            "table": "rooms",
-            "type": "Forward"
-          },
-          "sender": {
-            "column": "senderId",
-            "table": "profiles",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "relations": {
+        "joinRequestsViaProfile": { "reverse": "joinRequests", "relation": "profile" },
+        "membershipsViaProfile": { "reverse": "roomMembers", "relation": "memberProfile" },
+        "messagesViaSender": { "reverse": "messages", "relation": "sender" }
+      }
+    },
+    "reactions": {
+      "columns": { "roomId": "uuid", "messageId": "uuid", "author": "uuid", "emoji": "string" },
+      "relations": {
+        "message": { "rel": "messages", "column": "messageId" },
+        "room": { "rel": "rooms", "column": "roomId" }
+      }
+    },
+    "readMarkers": {
+      "columns": { "roomId": "uuid", "reader": "uuid", "lastReadAt": "timestamp" },
+      "relations": { "room": { "rel": "rooms", "column": "roomId" } }
+    },
+    "roomMembers": {
+      "columns": { "roomId": "uuid", "memberAuthor": "uuid", "memberProfileId": "uuid?" },
+      "relations": {
+        "memberProfile": { "rel": "profiles", "column": "memberProfileId" },
+        "room": { "rel": "rooms", "column": "roomId" }
+      }
+    },
+    "rooms": {
+      "columns": { "name": "string" },
+      "relations": {
+        "canvasesViaRoom": { "reverse": "canvases", "relation": "room" },
+        "joinRequestsViaRoom": { "reverse": "joinRequests", "relation": "room" },
+        "messagesViaRoom": { "reverse": "messages", "relation": "room" },
+        "reactionsViaRoom": { "reverse": "reactions", "relation": "room" },
+        "readMarkersViaRoom": { "reverse": "readMarkers", "relation": "room" },
+        "roomMembersViaRoom": { "reverse": "roomMembers", "relation": "room" }
+      }
+    },
+    "strokes": {
+      "columns": {
+        "canvasId": "uuid",
+        "roomId": "uuid",
+        "author": "uuid",
+        "color": "string",
+        "width": "int",
+        "points": { "array": "int" }
       },
-      "profiles": {
-        "relations": {
-          "joinRequestsViaProfile": {
-            "relation": "profile",
-            "table": "joinRequests",
-            "type": "Reverse"
-          },
-          "membershipsViaProfile": {
-            "relation": "memberProfile",
-            "table": "roomMembers",
-            "type": "Reverse"
-          },
-          "messagesViaSender": {
-            "relation": "sender",
-            "table": "messages",
-            "type": "Reverse"
-          }
-        },
-        "ts_only": []
-      },
-      "reactions": {
-        "relations": {
-          "message": {
-            "column": "messageId",
-            "table": "messages",
-            "type": "Forward"
-          },
-          "room": {
-            "column": "roomId",
-            "table": "rooms",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
-      },
-      "readMarkers": {
-        "relations": {
-          "room": {
-            "column": "roomId",
-            "table": "rooms",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
-      },
-      "roomMembers": {
-        "relations": {
-          "memberProfile": {
-            "column": "memberProfileId",
-            "table": "profiles",
-            "type": "Forward"
-          },
-          "room": {
-            "column": "roomId",
-            "table": "rooms",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
-      },
-      "rooms": {
-        "relations": {
-          "canvasesViaRoom": {
-            "relation": "room",
-            "table": "canvases",
-            "type": "Reverse"
-          },
-          "joinRequestsViaRoom": {
-            "relation": "room",
-            "table": "joinRequests",
-            "type": "Reverse"
-          },
-          "messagesViaRoom": {
-            "relation": "room",
-            "table": "messages",
-            "type": "Reverse"
-          },
-          "reactionsViaRoom": {
-            "relation": "room",
-            "table": "reactions",
-            "type": "Reverse"
-          },
-          "readMarkersViaRoom": {
-            "relation": "room",
-            "table": "readMarkers",
-            "type": "Reverse"
-          },
-          "roomMembersViaRoom": {
-            "relation": "room",
-            "table": "roomMembers",
-            "type": "Reverse"
-          }
-        },
-        "ts_only": []
-      },
-      "strokes": {
-        "relations": {
-          "canvas": {
-            "column": "canvasId",
-            "table": "canvases",
-            "type": "Forward"
-          },
-          "room": {
-            "column": "roomId",
-            "table": "rooms",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "relations": {
+        "canvas": { "rel": "canvases", "column": "canvasId" },
+        "room": { "rel": "rooms", "column": "roomId" }
       }
     }
   },
-  "current": "2322e143bd2759b30f51c27f300fb37206653faf1142a5cc7b16fc9f821ff7a7",
-  "format": 1,
-  "migrations": [
-    {
-      "forward": [
-        {
-          "operations": [
-            {
-              "column": "issuer",
-              "column_type": {
-                "type": "Text"
-              },
-              "default": {
-                "type": "Text",
-                "value": ""
-              },
-              "type": "Drop"
-            }
-          ],
-          "table": "better_auth_account"
-        }
-      ],
-      "from": "0fe493411de2f896802f229b2d445a17fcb95794a8c492906c2ba22c1cf7a8d0",
-      "to": "2322e143bd2759b30f51c27f300fb37206653faf1142a5cc7b16fc9f821ff7a7"
-    }
-  ],
-  "schemas": [
-    {
-      "hash": "0fe493411de2f896802f229b2d445a17fcb95794a8c492906c2ba22c1cf7a8d0",
+  "history": {
+    "0fe493411de2": {
       "tables": {
         "better_auth_account": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "issuer",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "accountId",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "providerId",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "userId",
-              "nullable": false,
-              "references": "better_auth_user"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "password",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
+          "columns": {
+            "issuer": "string",
+            "accountId": "string",
+            "providerId": "string",
+            "userId": { "type": "uuid", "references": "better_auth_user" },
+            "password": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
         },
         "better_auth_jwks": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "publicKey",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "privateKey",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "alg",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "crv",
-              "nullable": true
-            }
-          ]
+          "columns": {
+            "publicKey": "string",
+            "privateKey": "string",
+            "createdAt": "timestamp",
+            "expiresAt": "timestamp?",
+            "alg": "string?",
+            "crv": "string?"
+          }
         },
         "better_auth_session": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "token",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "ipAddress",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "userAgent",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "userId",
-              "nullable": false,
-              "references": "better_auth_user"
-            }
-          ]
+          "columns": {
+            "expiresAt": "timestamp",
+            "token": "string",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp",
+            "ipAddress": "string?",
+            "userAgent": "string?",
+            "userId": { "type": "uuid", "references": "better_auth_user" }
+          }
         },
         "better_auth_user": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "email",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Boolean"
-              },
-              "name": "emailVerified",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "image",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
+          "columns": {
+            "name": "string",
+            "email": "string",
+            "emailVerified": "boolean",
+            "image": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
         },
         "better_auth_verification": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "identifier",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "value",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
+          "columns": {
+            "identifier": "string",
+            "value": "string",
+            "expiresAt": "timestamp",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
         },
         "canvases": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "roomId",
-              "nullable": false,
-              "references": "rooms"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "title",
-              "nullable": false
-            }
-          ]
+          "columns": { "roomId": { "type": "uuid", "references": "rooms" }, "title": "string" }
         },
         "joinRequests": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "roomId",
-              "nullable": false,
-              "references": "rooms"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "requester",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "profileId",
-              "nullable": false,
-              "references": "profiles"
-            }
-          ]
+          "columns": {
+            "roomId": { "type": "uuid", "references": "rooms" },
+            "requester": "uuid",
+            "profileId": { "type": "uuid", "references": "profiles" }
+          }
         },
         "messages": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "roomId",
-              "nullable": false,
-              "references": "rooms"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "senderId",
-              "nullable": false,
-              "references": "profiles"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "text",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Bytea"
-              },
-              "name": "attachment",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "attachmentName",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "attachmentType",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "attachmentSize",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "canvasId",
-              "nullable": true,
-              "references": "canvases"
-            }
-          ]
+          "columns": {
+            "roomId": { "type": "uuid", "references": "rooms" },
+            "senderId": { "type": "uuid", "references": "profiles" },
+            "text": "string",
+            "attachment": "bytes?",
+            "attachmentName": "string?",
+            "attachmentType": "string?",
+            "attachmentSize": "int?",
+            "canvasId": { "type": "uuid", "optional": true, "references": "canvases" }
+          }
         },
         "profiles": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "author",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "displayName",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Bytea"
-              },
-              "name": "avatar",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "avatarType",
-              "nullable": true
-            }
-          ]
+          "columns": {
+            "author": "uuid",
+            "displayName": "string",
+            "avatar": "bytes?",
+            "avatarType": "string?"
+          }
         },
         "reactions": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "roomId",
-              "nullable": false,
-              "references": "rooms"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "messageId",
-              "nullable": false,
-              "references": "messages"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "author",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "emoji",
-              "nullable": false
-            }
-          ]
+          "columns": {
+            "roomId": { "type": "uuid", "references": "rooms" },
+            "messageId": { "type": "uuid", "references": "messages" },
+            "author": "uuid",
+            "emoji": "string"
+          }
         },
         "readMarkers": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "roomId",
-              "nullable": false,
-              "references": "rooms"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "reader",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "lastReadAt",
-              "nullable": false
-            }
-          ]
+          "columns": {
+            "roomId": { "type": "uuid", "references": "rooms" },
+            "reader": "uuid",
+            "lastReadAt": "timestamp"
+          }
         },
         "roomMembers": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "roomId",
-              "nullable": false,
-              "references": "rooms"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "memberAuthor",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "memberProfileId",
-              "nullable": true,
-              "references": "profiles"
-            }
-          ]
+          "columns": {
+            "roomId": { "type": "uuid", "references": "rooms" },
+            "memberAuthor": "uuid",
+            "memberProfileId": { "type": "uuid", "optional": true, "references": "profiles" }
+          }
         },
-        "rooms": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            }
-          ]
-        },
+        "rooms": { "columns": { "name": "string" } },
         "strokes": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "canvasId",
-              "nullable": false,
-              "references": "canvases"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "roomId",
-              "nullable": false,
-              "references": "rooms"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "author",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "color",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "width",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "element": {
-                  "type": "Integer"
-                },
-                "type": "Array"
-              },
-              "name": "points",
-              "nullable": false
-            }
-          ]
+          "columns": {
+            "canvasId": { "type": "uuid", "references": "canvases" },
+            "roomId": { "type": "uuid", "references": "rooms" },
+            "author": "uuid",
+            "color": "string",
+            "width": "int",
+            "points": { "array": "int" }
+          }
         }
       }
-    },
+    }
+  },
+  "migrations": [
     {
-      "hash": "2322e143bd2759b30f51c27f300fb37206653faf1142a5cc7b16fc9f821ff7a7",
-      "tables": {
-        "better_auth_account": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "accountId",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "providerId",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "userId",
-              "nullable": false,
-              "references": "better_auth_user"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "password",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "better_auth_jwks": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "publicKey",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "privateKey",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "alg",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "crv",
-              "nullable": true
-            }
-          ]
-        },
-        "better_auth_session": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "token",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "ipAddress",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "userAgent",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "userId",
-              "nullable": false,
-              "references": "better_auth_user"
-            }
-          ]
-        },
-        "better_auth_user": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "email",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Boolean"
-              },
-              "name": "emailVerified",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "image",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "better_auth_verification": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "identifier",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "value",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "canvases": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "roomId",
-              "nullable": false,
-              "references": "rooms"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "title",
-              "nullable": false
-            }
-          ]
-        },
-        "joinRequests": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "roomId",
-              "nullable": false,
-              "references": "rooms"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "requester",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "profileId",
-              "nullable": false,
-              "references": "profiles"
-            }
-          ]
-        },
-        "messages": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "roomId",
-              "nullable": false,
-              "references": "rooms"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "senderId",
-              "nullable": false,
-              "references": "profiles"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "text",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Bytea"
-              },
-              "name": "attachment",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "attachmentName",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "attachmentType",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "attachmentSize",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "canvasId",
-              "nullable": true,
-              "references": "canvases"
-            }
-          ]
-        },
-        "profiles": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "author",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "displayName",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Bytea"
-              },
-              "name": "avatar",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "avatarType",
-              "nullable": true
-            }
-          ]
-        },
-        "reactions": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "roomId",
-              "nullable": false,
-              "references": "rooms"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "messageId",
-              "nullable": false,
-              "references": "messages"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "author",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "emoji",
-              "nullable": false
-            }
-          ]
-        },
-        "readMarkers": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "roomId",
-              "nullable": false,
-              "references": "rooms"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "reader",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "lastReadAt",
-              "nullable": false
-            }
-          ]
-        },
-        "roomMembers": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "roomId",
-              "nullable": false,
-              "references": "rooms"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "memberAuthor",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "memberProfileId",
-              "nullable": true,
-              "references": "profiles"
-            }
-          ]
-        },
-        "rooms": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            }
-          ]
-        },
-        "strokes": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "canvasId",
-              "nullable": false,
-              "references": "canvases"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "roomId",
-              "nullable": false,
-              "references": "rooms"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "author",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "color",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "width",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "element": {
-                  "type": "Integer"
-                },
-                "type": "Array"
-              },
-              "name": "points",
-              "nullable": false
-            }
-          ]
-        }
+      "from": "0fe493411de2",
+      "migrate": {
+        "better_auth_account": { "issuer": { "drop": "string", "backwardsDefault": "" } }
       }
     }
   ]

@@ -1,48 +1,14 @@
 {
-  "codegen": {
-    "slices": {},
-    "tables": {}
-  },
-  "current": "e26d5055b2f2734daa2182431b71c58abc26f6ef632385d451a997cf5b0003b7",
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
   "format": 1,
-  "migrations": [],
-  "schemas": [
-    {
-      "hash": "e26d5055b2f2734daa2182431b71c58abc26f6ef632385d451a997cf5b0003b7",
-      "tables": {
-        "messages": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "author_name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "chat_id",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "text",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "sent_at",
-              "nullable": false
-            }
-          ]
-        }
+  "tables": {
+    "messages": {
+      "columns": {
+        "author_name": "string",
+        "chat_id": "string",
+        "text": "string",
+        "sent_at": "timestamp"
       }
     }
-  ]
+  }
 }

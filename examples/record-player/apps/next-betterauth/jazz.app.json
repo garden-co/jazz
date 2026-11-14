@@ -1,1062 +1,232 @@
 {
-  "codegen": {
-    "slices": {},
-    "tables": {
-      "albums": {
-        "relations": {
-          "tracksViaAlbum": {
-            "relation": "album",
-            "table": "tracks",
-            "type": "Reverse"
-          }
-        },
-        "ts_only": []
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "albums": {
+      "columns": {
+        "title": "string",
+        "artist": "string",
+        "cover_locator": "string?",
+        "cover_image": "bytes?",
+        "cover_mime": "string?"
       },
-      "better_auth_account": {
-        "relations": {
-          "user": {
-            "column": "userId",
-            "table": "better_auth_user",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "relations": { "tracksViaAlbum": { "reverse": "tracks", "relation": "album" } },
+      "indexes": ["title"]
+    },
+    "better_auth_account": {
+      "columns": {
+        "accountId": "string",
+        "providerId": "string",
+        "userId": "uuid",
+        "password": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
       },
-      "better_auth_session": {
-        "relations": {
-          "user": {
-            "column": "userId",
-            "table": "better_auth_user",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_jwks": {
+      "columns": {
+        "publicKey": "string",
+        "privateKey": "string",
+        "createdAt": "timestamp",
+        "expiresAt": "timestamp?",
+        "alg": "string?",
+        "crv": "string?"
+      }
+    },
+    "better_auth_session": {
+      "columns": {
+        "expiresAt": "timestamp",
+        "token": "string",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "userId": "uuid",
+        "ipAddress": "string?",
+        "userAgent": "string?"
       },
-      "better_auth_user": {
-        "relations": {
-          "better_auth_accountViaUser": {
-            "relation": "user",
-            "table": "better_auth_account",
-            "type": "Reverse"
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_user": {
+      "columns": {
+        "name": "string",
+        "email": "string",
+        "emailVerified": "boolean",
+        "image": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": {
+        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
+        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
+      }
+    },
+    "better_auth_verification": {
+      "columns": {
+        "identifier": "string",
+        "value": "string",
+        "expiresAt": "timestamp",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "invitations": {
+      "columns": {
+        "playlist_id": "uuid",
+        "subject": "uuid",
+        "role": { "enum": ["listener", "editor"] },
+        "status": { "enum": ["pending", "accepted", "revoked"] }
+      },
+      "relations": { "playlist": { "rel": "playlists", "column": "playlist_id" } }
+    },
+    "playback_positions": {
+      "columns": { "playlist_id": "uuid", "track_id": "uuid", "position_ms": "int" },
+      "relations": {
+        "playlist": { "rel": "playlists", "column": "playlist_id" },
+        "track": { "rel": "tracks", "column": "track_id" }
+      }
+    },
+    "playlist_entries": {
+      "columns": { "playlist_id": "uuid", "track_id": "uuid", "position": "float" },
+      "relations": {
+        "playlist": { "rel": "playlists", "column": "playlist_id" },
+        "track": { "rel": "tracks", "column": "track_id" }
+      },
+      "indexes": ["playlist_id", "position"]
+    },
+    "playlists": {
+      "columns": { "name": "string" },
+      "relations": {
+        "invitationsViaPlaylist": { "reverse": "invitations", "relation": "playlist" },
+        "playback_positionsViaPlaylist": { "reverse": "playback_positions", "relation": "playlist" },
+        "playlist_entriesViaPlaylist": { "reverse": "playlist_entries", "relation": "playlist" }
+      }
+    },
+    "tracks": {
+      "columns": {
+        "album_id": "uuid",
+        "title": "string",
+        "ordinal": "int",
+        "duration_ms": "int",
+        "audio_bytes": "bytes?",
+        "audio_mime": "string?",
+        "audio_byte_length": "int?"
+      },
+      "relations": {
+        "album": { "rel": "albums", "column": "album_id" },
+        "playback_positionsViaTrack": { "reverse": "playback_positions", "relation": "track" },
+        "playlist_entriesViaTrack": { "reverse": "playlist_entries", "relation": "track" }
+      },
+      "indexes": ["album_id", "ordinal"]
+    }
+  },
+  "history": {
+    "0f7261148930": {
+      "tables": {
+        "albums": {
+          "columns": {
+            "title": "string",
+            "artist": "string",
+            "cover_locator": "string?",
+            "cover_image": "bytes?",
+            "cover_mime": "string?"
           },
-          "better_auth_sessionViaUser": {
-            "relation": "user",
-            "table": "better_auth_session",
-            "type": "Reverse"
+          "indexes": ["title"]
+        },
+        "better_auth_account": {
+          "columns": {
+            "issuer": "string",
+            "accountId": "string",
+            "providerId": "string",
+            "userId": { "type": "uuid", "references": "better_auth_user" },
+            "password": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
           }
         },
-        "ts_only": []
-      },
-      "invitations": {
-        "relations": {
-          "playlist": {
-            "column": "playlist_id",
-            "table": "playlists",
-            "type": "Forward"
+        "better_auth_jwks": {
+          "columns": {
+            "publicKey": "string",
+            "privateKey": "string",
+            "createdAt": "timestamp",
+            "expiresAt": "timestamp?",
+            "alg": "string?",
+            "crv": "string?"
           }
         },
-        "ts_only": []
-      },
-      "playback_positions": {
-        "relations": {
-          "playlist": {
-            "column": "playlist_id",
-            "table": "playlists",
-            "type": "Forward"
-          },
-          "track": {
-            "column": "track_id",
-            "table": "tracks",
-            "type": "Forward"
+        "better_auth_session": {
+          "columns": {
+            "expiresAt": "timestamp",
+            "token": "string",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp",
+            "userId": { "type": "uuid", "references": "better_auth_user" },
+            "ipAddress": "string?",
+            "userAgent": "string?"
           }
         },
-        "ts_only": []
-      },
-      "playlist_entries": {
-        "relations": {
-          "playlist": {
-            "column": "playlist_id",
-            "table": "playlists",
-            "type": "Forward"
-          },
-          "track": {
-            "column": "track_id",
-            "table": "tracks",
-            "type": "Forward"
+        "better_auth_user": {
+          "columns": {
+            "name": "string",
+            "email": "string",
+            "emailVerified": "boolean",
+            "image": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
           }
         },
-        "ts_only": []
-      },
-      "playlists": {
-        "relations": {
-          "invitationsViaPlaylist": {
-            "relation": "playlist",
-            "table": "invitations",
-            "type": "Reverse"
-          },
-          "playback_positionsViaPlaylist": {
-            "relation": "playlist",
-            "table": "playback_positions",
-            "type": "Reverse"
-          },
-          "playlist_entriesViaPlaylist": {
-            "relation": "playlist",
-            "table": "playlist_entries",
-            "type": "Reverse"
+        "better_auth_verification": {
+          "columns": {
+            "identifier": "string",
+            "value": "string",
+            "expiresAt": "timestamp",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
           }
         },
-        "ts_only": []
-      },
-      "tracks": {
-        "relations": {
-          "album": {
-            "column": "album_id",
-            "table": "albums",
-            "type": "Forward"
-          },
-          "playback_positionsViaTrack": {
-            "relation": "track",
-            "table": "playback_positions",
-            "type": "Reverse"
-          },
-          "playlist_entriesViaTrack": {
-            "relation": "track",
-            "table": "playlist_entries",
-            "type": "Reverse"
+        "invitations": {
+          "columns": {
+            "playlist_id": { "type": "uuid", "references": "playlists" },
+            "subject": "uuid",
+            "role": { "enum": ["listener", "editor"] },
+            "status": { "enum": ["pending", "accepted", "revoked"] }
           }
         },
-        "ts_only": []
+        "playback_positions": {
+          "columns": {
+            "playlist_id": { "type": "uuid", "references": "playlists" },
+            "track_id": { "type": "uuid", "references": "tracks" },
+            "position_ms": "int"
+          }
+        },
+        "playlist_entries": {
+          "columns": {
+            "playlist_id": { "type": "uuid", "references": "playlists" },
+            "track_id": { "type": "uuid", "references": "tracks" },
+            "position": "float"
+          },
+          "indexes": ["playlist_id", "position"]
+        },
+        "playlists": { "columns": { "name": "string" } },
+        "tracks": {
+          "columns": {
+            "album_id": { "type": "uuid", "references": "albums" },
+            "title": "string",
+            "ordinal": "int",
+            "duration_ms": "int",
+            "audio_bytes": "bytes?",
+            "audio_mime": "string?",
+            "audio_byte_length": "int?"
+          },
+          "indexes": ["album_id", "ordinal"]
+        }
       }
     }
   },
-  "current": "fa66c6bd2a11cdf22cc6efb1e5c7737070b322de45163e636068309507671292",
-  "format": 1,
   "migrations": [
     {
-      "forward": [
-        {
-          "operations": [
-            {
-              "column": "issuer",
-              "column_type": {
-                "type": "Text"
-              },
-              "default": {
-                "type": "Text",
-                "value": ""
-              },
-              "type": "Drop"
-            }
-          ],
-          "table": "better_auth_account"
-        }
-      ],
-      "from": "0f726114893031ae7b5326c91ab91869f9713d0d54b9a9e753957080ee66370c",
-      "to": "fa66c6bd2a11cdf22cc6efb1e5c7737070b322de45163e636068309507671292"
-    }
-  ],
-  "schemas": [
-    {
-      "hash": "0f726114893031ae7b5326c91ab91869f9713d0d54b9a9e753957080ee66370c",
-      "tables": {
-        "albums": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "title",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "artist",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "cover_locator",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Bytea"
-              },
-              "name": "cover_image",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "cover_mime",
-              "nullable": true
-            }
-          ],
-          "indexed_columns": [
-            "title"
-          ]
-        },
-        "better_auth_account": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "issuer",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "accountId",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "providerId",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "userId",
-              "nullable": false,
-              "references": "better_auth_user"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "password",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "better_auth_jwks": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "publicKey",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "privateKey",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "alg",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "crv",
-              "nullable": true
-            }
-          ]
-        },
-        "better_auth_session": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "token",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "userId",
-              "nullable": false,
-              "references": "better_auth_user"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "ipAddress",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "userAgent",
-              "nullable": true
-            }
-          ]
-        },
-        "better_auth_user": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "email",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Boolean"
-              },
-              "name": "emailVerified",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "image",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "better_auth_verification": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "identifier",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "value",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "invitations": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "playlist_id",
-              "nullable": false,
-              "references": "playlists"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "subject",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "listener",
-                  "editor"
-                ]
-              },
-              "name": "role",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "pending",
-                  "accepted",
-                  "revoked"
-                ]
-              },
-              "name": "status",
-              "nullable": false
-            }
-          ]
-        },
-        "playback_positions": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "playlist_id",
-              "nullable": false,
-              "references": "playlists"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "track_id",
-              "nullable": false,
-              "references": "tracks"
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "position_ms",
-              "nullable": false
-            }
-          ]
-        },
-        "playlist_entries": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "playlist_id",
-              "nullable": false,
-              "references": "playlists"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "track_id",
-              "nullable": false,
-              "references": "tracks"
-            },
-            {
-              "column_type": {
-                "type": "Double"
-              },
-              "name": "position",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "playlist_id",
-            "position"
-          ]
-        },
-        "playlists": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            }
-          ]
-        },
-        "tracks": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "album_id",
-              "nullable": false,
-              "references": "albums"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "title",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "ordinal",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "duration_ms",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Bytea"
-              },
-              "name": "audio_bytes",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "audio_mime",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "audio_byte_length",
-              "nullable": true
-            }
-          ],
-          "indexed_columns": [
-            "album_id",
-            "ordinal"
-          ]
-        }
-      }
-    },
-    {
-      "hash": "fa66c6bd2a11cdf22cc6efb1e5c7737070b322de45163e636068309507671292",
-      "tables": {
-        "albums": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "title",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "artist",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "cover_locator",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Bytea"
-              },
-              "name": "cover_image",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "cover_mime",
-              "nullable": true
-            }
-          ],
-          "indexed_columns": [
-            "title"
-          ]
-        },
-        "better_auth_account": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "accountId",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "providerId",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "userId",
-              "nullable": false,
-              "references": "better_auth_user"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "password",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "better_auth_jwks": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "publicKey",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "privateKey",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "alg",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "crv",
-              "nullable": true
-            }
-          ]
-        },
-        "better_auth_session": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "token",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "userId",
-              "nullable": false,
-              "references": "better_auth_user"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "ipAddress",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "userAgent",
-              "nullable": true
-            }
-          ]
-        },
-        "better_auth_user": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "email",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Boolean"
-              },
-              "name": "emailVerified",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "image",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "better_auth_verification": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "identifier",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "value",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "invitations": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "playlist_id",
-              "nullable": false,
-              "references": "playlists"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "subject",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "listener",
-                  "editor"
-                ]
-              },
-              "name": "role",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "pending",
-                  "accepted",
-                  "revoked"
-                ]
-              },
-              "name": "status",
-              "nullable": false
-            }
-          ]
-        },
-        "playback_positions": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "playlist_id",
-              "nullable": false,
-              "references": "playlists"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "track_id",
-              "nullable": false,
-              "references": "tracks"
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "position_ms",
-              "nullable": false
-            }
-          ]
-        },
-        "playlist_entries": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "playlist_id",
-              "nullable": false,
-              "references": "playlists"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "track_id",
-              "nullable": false,
-              "references": "tracks"
-            },
-            {
-              "column_type": {
-                "type": "Double"
-              },
-              "name": "position",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "playlist_id",
-            "position"
-          ]
-        },
-        "playlists": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            }
-          ]
-        },
-        "tracks": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "album_id",
-              "nullable": false,
-              "references": "albums"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "title",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "ordinal",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "duration_ms",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Bytea"
-              },
-              "name": "audio_bytes",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "audio_mime",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "audio_byte_length",
-              "nullable": true
-            }
-          ],
-          "indexed_columns": [
-            "album_id",
-            "ordinal"
-          ]
-        }
+      "from": "0f7261148930",
+      "migrate": {
+        "better_auth_account": { "issuer": { "drop": "string", "backwardsDefault": "" } }
       }
     }
   ]

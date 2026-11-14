@@ -1,2375 +1,324 @@
 {
-  "bundle": "a640c7a879dc3ace9ac71d72a46c1986c1d05a48da7d66010082e046c3042a8b",
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
   "format": 1,
-  "permissions": {
+  "tables": {
     "better_auth_account": {
-      "delete": {
-        "using": {
-          "type": "False"
-        }
-      },
-      "insert": {
-        "with_check": {
-          "type": "False"
-        }
-      },
-      "select": {
-        "using": {
-          "type": "False"
-        }
-      },
-      "update": {
-        "using": {
-          "type": "False"
-        },
-        "with_check": {
-          "type": "False"
-        }
-      }
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
     },
-    "better_auth_jwks": {
-      "delete": {
-        "using": {
-          "type": "False"
-        }
-      },
-      "insert": {
-        "with_check": {
-          "type": "False"
-        }
-      },
-      "select": {
-        "using": {
-          "type": "False"
-        }
-      },
-      "update": {
-        "using": {
-          "type": "False"
-        },
-        "with_check": {
-          "type": "False"
-        }
-      }
-    },
+    "better_auth_jwks": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
     "better_auth_session": {
-      "delete": {
-        "using": {
-          "type": "False"
-        }
-      },
-      "insert": {
-        "with_check": {
-          "type": "False"
-        }
-      },
-      "select": {
-        "using": {
-          "type": "False"
-        }
-      },
-      "update": {
-        "using": {
-          "type": "False"
-        },
-        "with_check": {
-          "type": "False"
-        }
-      }
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
     },
-    "better_auth_user": {
-      "delete": {
-        "using": {
-          "type": "False"
-        }
-      },
-      "insert": {
-        "with_check": {
-          "type": "False"
-        }
-      },
-      "select": {
-        "using": {
-          "type": "False"
-        }
-      },
-      "update": {
-        "using": {
-          "type": "False"
-        },
-        "with_check": {
-          "type": "False"
-        }
-      }
-    },
+    "better_auth_user": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
     "better_auth_verification": {
-      "delete": {
-        "using": {
-          "type": "False"
-        }
-      },
-      "insert": {
-        "with_check": {
-          "type": "False"
-        }
-      },
-      "select": {
-        "using": {
-          "type": "False"
-        }
-      },
-      "update": {
-        "using": {
-          "type": "False"
-        },
-        "with_check": {
-          "type": "False"
-        }
-      }
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
     },
     "customers": {
-      "delete": {
-        "using": {
-          "exprs": [
-            {
-              "operation": "Update",
-              "type": "Inherits",
-              "via_column": "warehouse_id"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "account_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "user"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "warehouse_operators",
-              "type": "Exists"
-            }
-          ],
-          "type": "Or"
-        }
-      },
+      "read": "true",
       "insert": {
-        "with_check": {
-          "exprs": [
-            {
-              "exprs": [
-                {
-                  "operation": "Update",
-                  "type": "Inherits",
-                  "via_column": "warehouse_id"
-                },
-                {
-                  "condition": {
-                    "exprs": [
-                      {
-                        "column": "warehouse_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "warehouse_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      },
-                      {
-                        "column": "account_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "user"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      }
-                    ],
-                    "type": "And"
-                  },
-                  "table": "warehouse_operators",
-                  "type": "Exists"
-                }
-              ],
-              "type": "Or"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "district_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "districts",
-              "type": "Exists"
-            }
-          ],
-          "type": "And"
-        }
-      },
-      "select": {
-        "using": {
-          "type": "True"
-        }
+        "allOf": [
+          {
+            "anyOf": [
+              "allowedTo.update(warehouse)",
+              "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+            ]
+          },
+          "exists districts(id = this.district_id, warehouse_id = this.warehouse_id)"
+        ]
       },
       "update": {
-        "using": {
-          "exprs": [
-            {
-              "operation": "Update",
-              "type": "Inherits",
-              "via_column": "warehouse_id"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "account_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "user"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "warehouse_operators",
-              "type": "Exists"
-            }
-          ],
-          "type": "Or"
+        "old": {
+          "anyOf": [
+            "allowedTo.update(warehouse)",
+            "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+          ]
         },
-        "with_check": {
-          "exprs": [
+        "new": {
+          "allOf": [
             {
-              "exprs": [
-                {
-                  "operation": "Update",
-                  "type": "Inherits",
-                  "via_column": "warehouse_id"
-                },
-                {
-                  "condition": {
-                    "exprs": [
-                      {
-                        "column": "warehouse_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "warehouse_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      },
-                      {
-                        "column": "account_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "user"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      }
-                    ],
-                    "type": "And"
-                  },
-                  "table": "warehouse_operators",
-                  "type": "Exists"
-                }
-              ],
-              "type": "Or"
+              "anyOf": [
+                "allowedTo.update(warehouse)",
+                "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+              ]
             },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "district_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "districts",
-              "type": "Exists"
-            }
-          ],
-          "type": "And"
+            "exists districts(id = this.district_id, warehouse_id = this.warehouse_id)"
+          ]
         }
+      },
+      "delete": {
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
       }
     },
     "deliveries": {
-      "delete": {
-        "using": {
-          "exprs": [
-            {
-              "operation": "Update",
-              "type": "Inherits",
-              "via_column": "warehouse_id"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "account_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "user"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "warehouse_operators",
-              "type": "Exists"
-            }
-          ],
-          "type": "Or"
-        }
-      },
+      "read": "true",
       "insert": {
-        "with_check": {
-          "exprs": [
-            {
-              "exprs": [
-                {
-                  "operation": "Update",
-                  "type": "Inherits",
-                  "via_column": "warehouse_id"
-                },
-                {
-                  "condition": {
-                    "exprs": [
-                      {
-                        "column": "warehouse_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "warehouse_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      },
-                      {
-                        "column": "account_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "user"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      }
-                    ],
-                    "type": "And"
-                  },
-                  "table": "warehouse_operators",
-                  "type": "Exists"
-                }
-              ],
-              "type": "Or"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "order_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "district_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "district_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "orders",
-              "type": "Exists"
-            }
-          ],
-          "type": "And"
-        }
-      },
-      "select": {
-        "using": {
-          "type": "True"
-        }
+        "allOf": [
+          {
+            "anyOf": [
+              "allowedTo.update(warehouse)",
+              "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+            ]
+          },
+          "exists orders(id = this.order_id, warehouse_id = this.warehouse_id, district_id = this.district_id)"
+        ]
       },
       "update": {
-        "using": {
-          "exprs": [
-            {
-              "operation": "Update",
-              "type": "Inherits",
-              "via_column": "warehouse_id"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "account_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "user"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "warehouse_operators",
-              "type": "Exists"
-            }
-          ],
-          "type": "Or"
+        "old": {
+          "anyOf": [
+            "allowedTo.update(warehouse)",
+            "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+          ]
         },
-        "with_check": {
-          "exprs": [
+        "new": {
+          "allOf": [
             {
-              "exprs": [
-                {
-                  "operation": "Update",
-                  "type": "Inherits",
-                  "via_column": "warehouse_id"
-                },
-                {
-                  "condition": {
-                    "exprs": [
-                      {
-                        "column": "warehouse_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "warehouse_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      },
-                      {
-                        "column": "account_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "user"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      }
-                    ],
-                    "type": "And"
-                  },
-                  "table": "warehouse_operators",
-                  "type": "Exists"
-                }
-              ],
-              "type": "Or"
+              "anyOf": [
+                "allowedTo.update(warehouse)",
+                "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+              ]
             },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "order_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "district_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "district_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "orders",
-              "type": "Exists"
-            }
-          ],
-          "type": "And"
+            "exists orders(id = this.order_id, warehouse_id = this.warehouse_id, district_id = this.district_id)"
+          ]
         }
+      },
+      "delete": {
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
       }
     },
     "districts": {
-      "delete": {
-        "using": {
-          "exprs": [
-            {
-              "operation": "Update",
-              "type": "Inherits",
-              "via_column": "warehouse_id"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "account_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "user"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "warehouse_operators",
-              "type": "Exists"
-            }
-          ],
-          "type": "Or"
-        }
-      },
+      "read": "true",
       "insert": {
-        "with_check": {
-          "exprs": [
-            {
-              "operation": "Update",
-              "type": "Inherits",
-              "via_column": "warehouse_id"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "account_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "user"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "warehouse_operators",
-              "type": "Exists"
-            }
-          ],
-          "type": "Or"
-        }
-      },
-      "select": {
-        "using": {
-          "type": "True"
-        }
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
       },
       "update": {
-        "using": {
-          "exprs": [
-            {
-              "operation": "Update",
-              "type": "Inherits",
-              "via_column": "warehouse_id"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "account_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "user"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "warehouse_operators",
-              "type": "Exists"
-            }
-          ],
-          "type": "Or"
-        },
-        "with_check": {
-          "exprs": [
-            {
-              "operation": "Update",
-              "type": "Inherits",
-              "via_column": "warehouse_id"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "account_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "user"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "warehouse_operators",
-              "type": "Exists"
-            }
-          ],
-          "type": "Or"
-        }
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
+      },
+      "delete": {
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
       }
     },
     "items": {
-      "delete": {
-        "using": {
-          "column": "operator_id",
-          "op": "Eq",
-          "type": "Cmp",
-          "value": {
-            "path": [
-              "user"
-            ],
-            "type": "SessionRef"
-          }
-        }
-      },
-      "insert": {
-        "with_check": {
-          "column": "operator_id",
-          "op": "Eq",
-          "type": "Cmp",
-          "value": {
-            "path": [
-              "user"
-            ],
-            "type": "SessionRef"
-          }
-        }
-      },
-      "select": {
-        "using": {
-          "type": "True"
-        }
-      },
-      "update": {
-        "using": {
-          "column": "operator_id",
-          "op": "Eq",
-          "type": "Cmp",
-          "value": {
-            "path": [
-              "user"
-            ],
-            "type": "SessionRef"
-          }
-        },
-        "with_check": {
-          "column": "operator_id",
-          "op": "Eq",
-          "type": "Cmp",
-          "value": {
-            "path": [
-              "user"
-            ],
-            "type": "SessionRef"
-          }
-        }
-      }
+      "read": "true",
+      "insert": "operator_id = session.user",
+      "update": "operator_id = session.user",
+      "delete": "operator_id = session.user"
     },
     "order_lines": {
-      "delete": {
-        "using": {
-          "exprs": [
-            {
-              "operation": "Update",
-              "type": "Inherits",
-              "via_column": "warehouse_id"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "account_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "user"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "warehouse_operators",
-              "type": "Exists"
-            }
-          ],
-          "type": "Or"
-        }
-      },
+      "read": "true",
       "insert": {
-        "with_check": {
-          "exprs": [
-            {
-              "exprs": [
-                {
-                  "operation": "Update",
-                  "type": "Inherits",
-                  "via_column": "warehouse_id"
-                },
-                {
-                  "condition": {
-                    "exprs": [
-                      {
-                        "column": "warehouse_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "warehouse_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      },
-                      {
-                        "column": "account_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "user"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      }
-                    ],
-                    "type": "And"
-                  },
-                  "table": "warehouse_operators",
-                  "type": "Exists"
-                }
-              ],
-              "type": "Or"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "order_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "orders",
-              "type": "Exists"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "item_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "item_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "stock",
-              "type": "Exists"
-            }
-          ],
-          "type": "And"
-        }
-      },
-      "select": {
-        "using": {
-          "type": "True"
-        }
+        "allOf": [
+          {
+            "anyOf": [
+              "allowedTo.update(warehouse)",
+              "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+            ]
+          },
+          "exists orders(id = this.order_id, warehouse_id = this.warehouse_id)",
+          "exists stock(warehouse_id = this.warehouse_id, item_id = this.item_id)"
+        ]
       },
       "update": {
-        "using": {
-          "exprs": [
-            {
-              "operation": "Update",
-              "type": "Inherits",
-              "via_column": "warehouse_id"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "account_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "user"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "warehouse_operators",
-              "type": "Exists"
-            }
-          ],
-          "type": "Or"
+        "old": {
+          "anyOf": [
+            "allowedTo.update(warehouse)",
+            "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+          ]
         },
-        "with_check": {
-          "exprs": [
+        "new": {
+          "allOf": [
             {
-              "exprs": [
-                {
-                  "operation": "Update",
-                  "type": "Inherits",
-                  "via_column": "warehouse_id"
-                },
-                {
-                  "condition": {
-                    "exprs": [
-                      {
-                        "column": "warehouse_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "warehouse_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      },
-                      {
-                        "column": "account_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "user"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      }
-                    ],
-                    "type": "And"
-                  },
-                  "table": "warehouse_operators",
-                  "type": "Exists"
-                }
-              ],
-              "type": "Or"
+              "anyOf": [
+                "allowedTo.update(warehouse)",
+                "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+              ]
             },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "order_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "orders",
-              "type": "Exists"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "item_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "item_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "stock",
-              "type": "Exists"
-            }
-          ],
-          "type": "And"
+            "exists orders(id = this.order_id, warehouse_id = this.warehouse_id)",
+            "exists stock(warehouse_id = this.warehouse_id, item_id = this.item_id)"
+          ]
         }
+      },
+      "delete": {
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
       }
     },
     "orders": {
-      "delete": {
-        "using": {
-          "exprs": [
-            {
-              "operation": "Update",
-              "type": "Inherits",
-              "via_column": "warehouse_id"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "account_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "user"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "warehouse_operators",
-              "type": "Exists"
-            }
-          ],
-          "type": "Or"
-        }
-      },
+      "read": "true",
       "insert": {
-        "with_check": {
-          "exprs": [
-            {
-              "exprs": [
-                {
-                  "operation": "Update",
-                  "type": "Inherits",
-                  "via_column": "warehouse_id"
-                },
-                {
-                  "condition": {
-                    "exprs": [
-                      {
-                        "column": "warehouse_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "warehouse_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      },
-                      {
-                        "column": "account_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "user"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      }
-                    ],
-                    "type": "And"
-                  },
-                  "table": "warehouse_operators",
-                  "type": "Exists"
-                }
-              ],
-              "type": "Or"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "district_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "districts",
-              "type": "Exists"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "customer_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "district_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "district_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "customers",
-              "type": "Exists"
-            }
-          ],
-          "type": "And"
-        }
-      },
-      "select": {
-        "using": {
-          "type": "True"
-        }
+        "allOf": [
+          {
+            "anyOf": [
+              "allowedTo.update(warehouse)",
+              "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+            ]
+          },
+          "exists districts(id = this.district_id, warehouse_id = this.warehouse_id)",
+          "exists customers(id = this.customer_id, warehouse_id = this.warehouse_id, district_id = this.district_id)"
+        ]
       },
       "update": {
-        "using": {
-          "exprs": [
-            {
-              "operation": "Update",
-              "type": "Inherits",
-              "via_column": "warehouse_id"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "account_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "user"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "warehouse_operators",
-              "type": "Exists"
-            }
-          ],
-          "type": "Or"
+        "old": {
+          "anyOf": [
+            "allowedTo.update(warehouse)",
+            "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+          ]
         },
-        "with_check": {
-          "exprs": [
+        "new": {
+          "allOf": [
             {
-              "exprs": [
-                {
-                  "operation": "Update",
-                  "type": "Inherits",
-                  "via_column": "warehouse_id"
-                },
-                {
-                  "condition": {
-                    "exprs": [
-                      {
-                        "column": "warehouse_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "warehouse_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      },
-                      {
-                        "column": "account_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "user"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      }
-                    ],
-                    "type": "And"
-                  },
-                  "table": "warehouse_operators",
-                  "type": "Exists"
-                }
-              ],
-              "type": "Or"
+              "anyOf": [
+                "allowedTo.update(warehouse)",
+                "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+              ]
             },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "district_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "districts",
-              "type": "Exists"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "customer_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "district_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "district_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "customers",
-              "type": "Exists"
-            }
-          ],
-          "type": "And"
+            "exists districts(id = this.district_id, warehouse_id = this.warehouse_id)",
+            "exists customers(id = this.customer_id, warehouse_id = this.warehouse_id, district_id = this.district_id)"
+          ]
         }
+      },
+      "delete": {
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
       }
     },
     "payments": {
-      "delete": {
-        "using": {
-          "exprs": [
-            {
-              "operation": "Update",
-              "type": "Inherits",
-              "via_column": "warehouse_id"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "account_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "user"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "warehouse_operators",
-              "type": "Exists"
-            }
-          ],
-          "type": "Or"
-        }
-      },
+      "read": "true",
       "insert": {
-        "with_check": {
-          "exprs": [
-            {
-              "exprs": [
-                {
-                  "operation": "Update",
-                  "type": "Inherits",
-                  "via_column": "warehouse_id"
-                },
-                {
-                  "condition": {
-                    "exprs": [
-                      {
-                        "column": "warehouse_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "warehouse_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      },
-                      {
-                        "column": "account_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "user"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      }
-                    ],
-                    "type": "And"
-                  },
-                  "table": "warehouse_operators",
-                  "type": "Exists"
-                }
-              ],
-              "type": "Or"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "customer_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "customers",
-              "type": "Exists"
-            },
-            {
-              "exprs": [
-                {
-                  "column": "order_id",
-                  "type": "IsNull"
-                },
-                {
-                  "condition": {
-                    "exprs": [
-                      {
-                        "column": "id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "order_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      },
-                      {
-                        "column": "warehouse_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "warehouse_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      },
-                      {
-                        "column": "customer_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "customer_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      }
-                    ],
-                    "type": "And"
-                  },
-                  "table": "orders",
-                  "type": "Exists"
-                }
-              ],
-              "type": "Or"
-            }
-          ],
-          "type": "And"
-        }
-      },
-      "select": {
-        "using": {
-          "type": "True"
-        }
+        "allOf": [
+          {
+            "anyOf": [
+              "allowedTo.update(warehouse)",
+              "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+            ]
+          },
+          "exists customers(id = this.customer_id, warehouse_id = this.warehouse_id)",
+          {
+            "anyOf": [
+              "order_id = null",
+              "exists orders(id = this.order_id, warehouse_id = this.warehouse_id, customer_id = this.customer_id)"
+            ]
+          }
+        ]
       },
       "update": {
-        "using": {
-          "exprs": [
-            {
-              "operation": "Update",
-              "type": "Inherits",
-              "via_column": "warehouse_id"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "account_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "user"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "warehouse_operators",
-              "type": "Exists"
-            }
-          ],
-          "type": "Or"
+        "old": {
+          "anyOf": [
+            "allowedTo.update(warehouse)",
+            "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+          ]
         },
-        "with_check": {
-          "exprs": [
+        "new": {
+          "allOf": [
             {
-              "exprs": [
-                {
-                  "operation": "Update",
-                  "type": "Inherits",
-                  "via_column": "warehouse_id"
-                },
-                {
-                  "condition": {
-                    "exprs": [
-                      {
-                        "column": "warehouse_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "warehouse_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      },
-                      {
-                        "column": "account_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "user"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      }
-                    ],
-                    "type": "And"
-                  },
-                  "table": "warehouse_operators",
-                  "type": "Exists"
-                }
-              ],
-              "type": "Or"
+              "anyOf": [
+                "allowedTo.update(warehouse)",
+                "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+              ]
             },
+            "exists customers(id = this.customer_id, warehouse_id = this.warehouse_id)",
             {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "customer_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "customers",
-              "type": "Exists"
-            },
-            {
-              "exprs": [
-                {
-                  "column": "order_id",
-                  "type": "IsNull"
-                },
-                {
-                  "condition": {
-                    "exprs": [
-                      {
-                        "column": "id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "order_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      },
-                      {
-                        "column": "warehouse_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "warehouse_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      },
-                      {
-                        "column": "customer_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "customer_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      }
-                    ],
-                    "type": "And"
-                  },
-                  "table": "orders",
-                  "type": "Exists"
-                }
-              ],
-              "type": "Or"
+              "anyOf": [
+                "order_id = null",
+                "exists orders(id = this.order_id, warehouse_id = this.warehouse_id, customer_id = this.customer_id)"
+              ]
             }
-          ],
-          "type": "And"
+          ]
         }
+      },
+      "delete": {
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
       }
     },
     "stock": {
-      "delete": {
-        "using": {
-          "exprs": [
-            {
-              "operation": "Update",
-              "type": "Inherits",
-              "via_column": "warehouse_id"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "account_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "user"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "warehouse_operators",
-              "type": "Exists"
-            }
-          ],
-          "type": "Or"
-        }
-      },
+      "read": "true",
       "insert": {
-        "with_check": {
-          "exprs": [
-            {
-              "exprs": [
-                {
-                  "operation": "Update",
-                  "type": "Inherits",
-                  "via_column": "warehouse_id"
-                },
-                {
-                  "condition": {
-                    "exprs": [
-                      {
-                        "column": "warehouse_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "warehouse_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      },
-                      {
-                        "column": "account_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "user"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      }
-                    ],
-                    "type": "And"
-                  },
-                  "table": "warehouse_operators",
-                  "type": "Exists"
-                }
-              ],
-              "type": "Or"
-            },
-            {
-              "condition": {
-                "column": "id",
-                "op": "Eq",
-                "type": "Cmp",
-                "value": {
-                  "path": [
-                    "__jazz_outer_row",
-                    "item_id"
-                  ],
-                  "type": "SessionRef"
-                }
-              },
-              "table": "items",
-              "type": "Exists"
-            },
-            {
-              "exprs": [
-                {
-                  "column": "on_hand",
-                  "op": "Ge",
-                  "type": "Cmp",
-                  "value": {
-                    "type": "Literal",
-                    "value": {
-                      "type": "Integer",
-                      "value": 0
-                    }
-                  }
-                },
-                {
-                  "column": "reorder_level",
-                  "op": "Ge",
-                  "type": "Cmp",
-                  "value": {
-                    "type": "Literal",
-                    "value": {
-                      "type": "Integer",
-                      "value": 0
-                    }
-                  }
-                },
-                {
-                  "column": "reorder_level",
-                  "op": "Le",
-                  "type": "Cmp",
-                  "value": {
-                    "type": "Literal",
-                    "value": {
-                      "type": "Integer",
-                      "value": 100
-                    }
-                  }
-                }
-              ],
-              "type": "And"
-            }
-          ],
-          "type": "And"
-        }
-      },
-      "select": {
-        "using": {
-          "type": "True"
-        }
+        "allOf": [
+          {
+            "anyOf": [
+              "allowedTo.update(warehouse)",
+              "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+            ]
+          },
+          "exists items(id = this.item_id)",
+          { "allOf": ["on_hand >= 0", "reorder_level >= 0", "reorder_level <= 100"] }
+        ]
       },
       "update": {
-        "using": {
-          "exprs": [
-            {
-              "operation": "Update",
-              "type": "Inherits",
-              "via_column": "warehouse_id"
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "warehouse_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "account_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "user"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "warehouse_operators",
-              "type": "Exists"
-            }
-          ],
-          "type": "Or"
+        "old": {
+          "anyOf": [
+            "allowedTo.update(warehouse)",
+            "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+          ]
         },
-        "with_check": {
-          "exprs": [
+        "new": {
+          "allOf": [
             {
-              "exprs": [
-                {
-                  "operation": "Update",
-                  "type": "Inherits",
-                  "via_column": "warehouse_id"
-                },
-                {
-                  "condition": {
-                    "exprs": [
-                      {
-                        "column": "warehouse_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "__jazz_outer_row",
-                            "warehouse_id"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      },
-                      {
-                        "column": "account_id",
-                        "op": "Eq",
-                        "type": "Cmp",
-                        "value": {
-                          "path": [
-                            "user"
-                          ],
-                          "type": "SessionRef"
-                        }
-                      }
-                    ],
-                    "type": "And"
-                  },
-                  "table": "warehouse_operators",
-                  "type": "Exists"
-                }
-              ],
-              "type": "Or"
+              "anyOf": [
+                "allowedTo.update(warehouse)",
+                "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+              ]
             },
-            {
-              "condition": {
-                "column": "id",
-                "op": "Eq",
-                "type": "Cmp",
-                "value": {
-                  "path": [
-                    "__jazz_outer_row",
-                    "item_id"
-                  ],
-                  "type": "SessionRef"
-                }
-              },
-              "table": "items",
-              "type": "Exists"
-            },
-            {
-              "exprs": [
-                {
-                  "column": "on_hand",
-                  "op": "Ge",
-                  "type": "Cmp",
-                  "value": {
-                    "type": "Literal",
-                    "value": {
-                      "type": "Integer",
-                      "value": 0
-                    }
-                  }
-                },
-                {
-                  "column": "reorder_level",
-                  "op": "Ge",
-                  "type": "Cmp",
-                  "value": {
-                    "type": "Literal",
-                    "value": {
-                      "type": "Integer",
-                      "value": 0
-                    }
-                  }
-                },
-                {
-                  "column": "reorder_level",
-                  "op": "Le",
-                  "type": "Cmp",
-                  "value": {
-                    "type": "Literal",
-                    "value": {
-                      "type": "Integer",
-                      "value": 100
-                    }
-                  }
-                }
-              ],
-              "type": "And"
-            }
-          ],
-          "type": "And"
+            "exists items(id = this.item_id)",
+            { "allOf": ["on_hand >= 0", "reorder_level >= 0", "reorder_level <= 100"] }
+          ]
         }
+      },
+      "delete": {
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
       }
     },
     "warehouse_operators": {
-      "delete": {
-        "using": {
-          "exprs": [
-            {
-              "operation": "Update",
-              "type": "Inherits",
-              "via_column": "warehouse_id"
-            },
-            {
-              "column": "account_id",
-              "op": "Eq",
-              "type": "Cmp",
-              "value": {
-                "path": [
-                  "user"
-                ],
-                "type": "SessionRef"
-              }
-            }
-          ],
-          "type": "Or"
-        }
-      },
-      "insert": {
-        "with_check": {
-          "operation": "Update",
-          "type": "Inherits",
-          "via_column": "warehouse_id"
-        }
-      },
-      "select": {
-        "using": {
-          "type": "True"
-        }
-      },
-      "update": {
-        "using": {
-          "type": "False"
-        },
-        "with_check": {
-          "type": "False"
-        }
-      }
+      "read": "true",
+      "insert": "allowedTo.update(warehouse)",
+      "update": "false",
+      "delete": { "anyOf": ["allowedTo.update(warehouse)", "account_id = session.user"] }
     },
     "warehouses": {
-      "insert": {
-        "with_check": {
-          "column": "operator_id",
-          "op": "Eq",
-          "type": "Cmp",
-          "value": {
-            "path": [
-              "user"
-            ],
-            "type": "SessionRef"
-          }
-        }
-      },
-      "select": {
-        "using": {
-          "type": "True"
-        }
-      },
+      "read": "true",
+      "insert": "operator_id = session.user",
       "update": {
-        "using": {
-          "column": "operator_id",
-          "op": "Eq",
-          "type": "Cmp",
-          "value": {
-            "path": [
-              "user"
-            ],
-            "type": "SessionRef"
-          }
-        },
-        "with_check": {
-          "exprs": [
-            {
-              "column": "operator_id",
-              "op": "Eq",
-              "type": "Cmp",
-              "value": {
-                "path": [
-                  "user"
-                ],
-                "type": "SessionRef"
-              }
-            },
-            {
-              "condition": {
-                "exprs": [
-                  {
-                    "column": "warehouse_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  },
-                  {
-                    "column": "account_id",
-                    "op": "Eq",
-                    "type": "Cmp",
-                    "value": {
-                      "path": [
-                        "__jazz_outer_row",
-                        "operator_id"
-                      ],
-                      "type": "SessionRef"
-                    }
-                  }
-                ],
-                "type": "And"
-              },
-              "table": "warehouse_operators",
-              "type": "Exists"
-            }
-          ],
-          "type": "Or"
+        "old": "operator_id = session.user",
+        "new": {
+          "anyOf": [
+            "operator_id = session.user",
+            "exists warehouse_operators(warehouse_id = this.id, account_id = this.operator_id)"
+          ]
         }
       }
     }
-  },
-  "schema": "36b03f261e65be21093aa294715b621b753dbc531e003f1487436c1946f174f9"
+  }
 }

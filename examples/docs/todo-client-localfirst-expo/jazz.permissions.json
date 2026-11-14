@@ -1,118 +1,16 @@
 {
-  "bundle": "11075ec10dda373bfe5063666cc0a50507498e903ccd208929521a3fd84006f0",
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
   "format": 1,
-  "permissions": {
-    "projects": {
-      "insert": {
-        "with_check": {
-          "type": "True"
-        }
-      },
-      "select": {
-        "using": {
-          "type": "True"
-        }
-      }
-    },
+  "tables": {
+    "projects": { "read": "true", "insert": "true" },
     "todos": {
-      "delete": {
-        "using": {
-          "exprs": [
-            {
-              "column": "owner_id",
-              "op": "Eq",
-              "type": "Cmp",
-              "value": {
-                "path": [
-                  "user"
-                ],
-                "type": "SessionRef"
-              }
-            },
-            {
-              "column": "done",
-              "op": "Eq",
-              "type": "Cmp",
-              "value": {
-                "type": "Literal",
-                "value": {
-                  "type": "Boolean",
-                  "value": false
-                }
-              }
-            }
-          ],
-          "type": "And"
-        }
-      },
-      "insert": {
-        "with_check": {
-          "column": "owner_id",
-          "op": "Eq",
-          "type": "Cmp",
-          "value": {
-            "path": [
-              "user"
-            ],
-            "type": "SessionRef"
-          }
-        }
-      },
-      "select": {
-        "using": {
-          "column": "owner_id",
-          "op": "Eq",
-          "type": "Cmp",
-          "value": {
-            "path": [
-              "user"
-            ],
-            "type": "SessionRef"
-          }
-        }
-      },
+      "read": "owner_id = session.user",
+      "insert": "owner_id = session.user",
       "update": {
-        "using": {
-          "exprs": [
-            {
-              "column": "owner_id",
-              "op": "Eq",
-              "type": "Cmp",
-              "value": {
-                "path": [
-                  "user"
-                ],
-                "type": "SessionRef"
-              }
-            },
-            {
-              "column": "done",
-              "op": "Eq",
-              "type": "Cmp",
-              "value": {
-                "type": "Literal",
-                "value": {
-                  "type": "Boolean",
-                  "value": false
-                }
-              }
-            }
-          ],
-          "type": "And"
-        },
-        "with_check": {
-          "column": "owner_id",
-          "op": "Eq",
-          "type": "Cmp",
-          "value": {
-            "path": [
-              "user"
-            ],
-            "type": "SessionRef"
-          }
-        }
-      }
+        "old": { "allOf": ["owner_id = session.user", "done = false"] },
+        "new": "owner_id = session.user"
+      },
+      "delete": { "allOf": ["owner_id = session.user", "done = false"] }
     }
-  },
-  "schema": "86cb6a677db0e9bcf52e9907941801bcbf2cb3944c7a8c5ff6b257051c1bc104"
+  }
 }

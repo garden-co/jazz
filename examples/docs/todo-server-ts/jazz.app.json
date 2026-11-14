@@ -1,106 +1,25 @@
 {
-  "codegen": {
-    "slices": {},
-    "tables": {
-      "projects": {
-        "relations": {
-          "todos": {
-            "relation": "project",
-            "table": "todos",
-            "type": "Reverse"
-          }
-        },
-        "ts_only": []
-      },
-      "todos": {
-        "relations": {
-          "children": {
-            "relation": "parent",
-            "table": "todos",
-            "type": "Reverse"
-          },
-          "parent": {
-            "column": "parentId",
-            "table": "todos",
-            "type": "Forward"
-          },
-          "project": {
-            "column": "projectId",
-            "table": "projects",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
-      }
-    }
-  },
-  "current": "47de365ee426116c99016cbf3ce31e22e568a18d72dd9c0d22ba1ce3a3c6bc62",
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
   "format": 1,
-  "migrations": [],
-  "schemas": [
-    {
-      "hash": "47de365ee426116c99016cbf3ce31e22e568a18d72dd9c0d22ba1ce3a3c6bc62",
-      "tables": {
-        "projects": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            }
-          ]
-        },
-        "todos": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "title",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Boolean"
-              },
-              "name": "done",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "description",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "parentId",
-              "nullable": true,
-              "references": "todos"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "projectId",
-              "nullable": true,
-              "references": "projects"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "owner_id",
-              "nullable": false
-            }
-          ]
-        }
+  "tables": {
+    "projects": {
+      "columns": { "name": "string" },
+      "relations": { "todos": { "reverse": "todos", "relation": "project" } }
+    },
+    "todos": {
+      "columns": {
+        "title": "string",
+        "done": "boolean",
+        "description": "string?",
+        "parentId": "uuid?",
+        "projectId": "uuid?",
+        "owner_id": "uuid"
+      },
+      "relations": {
+        "children": { "reverse": "todos", "relation": "parent" },
+        "parent": { "rel": "todos", "column": "parentId" },
+        "project": { "rel": "projects", "column": "projectId" }
       }
     }
-  ]
+  }
 }

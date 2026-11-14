@@ -1,1814 +1,400 @@
 {
-  "codegen": {
-    "slices": {},
-    "tables": {
-      "attachments": {
-        "relations": {
-          "page": {
-            "column": "pageId",
-            "table": "pages",
-            "type": "Forward"
-          },
-          "workspace": {
-            "column": "workspaceId",
-            "table": "workspaces",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "attachments": {
+      "columns": {
+        "workspaceId": "uuid",
+        "pageId": "uuid",
+        "name": "string",
+        "mimeType": "string",
+        "byteLength": "int",
+        "bytes": "bytes"
       },
-      "better_auth_account": {
-        "relations": {
-          "user": {
-            "column": "userId",
-            "table": "better_auth_user",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "relations": {
+        "page": { "rel": "pages", "column": "pageId" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
       },
-      "better_auth_session": {
-        "relations": {
-          "user": {
-            "column": "userId",
-            "table": "better_auth_user",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "indexes": ["pageId"]
+    },
+    "better_auth_account": {
+      "columns": {
+        "accountId": "string",
+        "providerId": "string",
+        "userId": "uuid",
+        "password": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
       },
-      "better_auth_user": {
-        "relations": {
-          "better_auth_accountViaUser": {
-            "relation": "user",
-            "table": "better_auth_account",
-            "type": "Reverse"
-          },
-          "better_auth_sessionViaUser": {
-            "relation": "user",
-            "table": "better_auth_session",
-            "type": "Reverse"
-          }
-        },
-        "ts_only": []
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_jwks": {
+      "columns": {
+        "publicKey": "string",
+        "privateKey": "string",
+        "createdAt": "timestamp",
+        "expiresAt": "timestamp?",
+        "alg": "string?",
+        "crv": "string?"
+      }
+    },
+    "better_auth_session": {
+      "columns": {
+        "expiresAt": "timestamp",
+        "token": "string",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "ipAddress": "string?",
+        "userAgent": "string?",
+        "userId": "uuid"
       },
-      "blocks": {
-        "relations": {
-          "attachment": {
-            "column": "attachmentId",
-            "table": "attachments",
-            "type": "Forward"
-          },
-          "page": {
-            "column": "pageId",
-            "table": "pages",
-            "type": "Forward"
-          },
-          "parentBlock": {
-            "column": "parentBlockId",
-            "table": "blocks",
-            "type": "Forward"
-          },
-          "workspace": {
-            "column": "workspaceId",
-            "table": "workspaces",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_user": {
+      "columns": {
+        "name": "string",
+        "email": "string",
+        "emailVerified": "boolean",
+        "image": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
       },
-      "invites": {
-        "relations": {
-          "page": {
-            "column": "pageId",
-            "table": "pages",
-            "type": "Forward"
-          },
-          "workspace": {
-            "column": "workspaceId",
-            "table": "workspaces",
-            "type": "Forward"
-          }
+      "relations": {
+        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
+        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
+      }
+    },
+    "better_auth_verification": {
+      "columns": {
+        "identifier": "string",
+        "value": "string",
+        "expiresAt": "timestamp",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "blocks": {
+      "columns": {
+        "workspaceId": "uuid",
+        "pageId": "uuid",
+        "parentBlockId": "uuid?",
+        "position": "float",
+        "kind": {
+          "enum": ["paragraph", "heading", "todo", "bullet", "quote", "divider", "image", "file"]
         },
-        "ts_only": []
+        "text": "string",
+        "checked": "boolean",
+        "attachmentId": "uuid?"
       },
-      "issues": {
-        "relations": {
-          "database": {
-            "column": "databaseId",
-            "table": "pages",
-            "type": "Forward"
-          },
-          "page": {
-            "column": "pageId",
-            "table": "pages",
-            "type": "Forward"
-          },
-          "workspace": {
-            "column": "workspaceId",
-            "table": "workspaces",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "relations": {
+        "attachment": { "rel": "attachments", "column": "attachmentId" },
+        "page": { "rel": "pages", "column": "pageId" },
+        "parentBlock": { "rel": "blocks", "column": "parentBlockId" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
       },
-      "members": {
-        "relations": {
-          "workspace": {
-            "column": "workspaceId",
-            "table": "workspaces",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "indexes": ["pageId", "position"]
+    },
+    "invites": {
+      "columns": {
+        "workspaceId": "uuid",
+        "pageId": "uuid?",
+        "role": { "enum": ["member", "viewer", "editor"] },
+        "token": "string",
+        "label": "string"
       },
-      "pageGrants": {
-        "relations": {
-          "page": {
-            "column": "pageId",
-            "table": "pages",
-            "type": "Forward"
-          },
-          "workspace": {
-            "column": "workspaceId",
-            "table": "workspaces",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "relations": {
+        "page": { "rel": "pages", "column": "pageId" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
       },
-      "pages": {
-        "relations": {
-          "blocksViaPage": {
-            "relation": "page",
-            "table": "blocks",
-            "type": "Reverse"
-          },
-          "childrenViaParent": {
-            "relation": "parent",
-            "table": "pages",
-            "type": "Reverse"
-          },
-          "grantsViaPage": {
-            "relation": "page",
-            "table": "pageGrants",
-            "type": "Reverse"
-          },
-          "issuesViaPage": {
-            "relation": "page",
-            "table": "issues",
-            "type": "Reverse"
-          },
-          "parent": {
-            "column": "parentId",
-            "table": "pages",
-            "type": "Forward"
-          },
-          "sheetsViaPage": {
-            "relation": "page",
-            "table": "songSheets",
-            "type": "Reverse"
-          },
-          "workspace": {
-            "column": "workspaceId",
-            "table": "workspaces",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "indexes": ["token", "pageId", "workspaceId"]
+    },
+    "issues": {
+      "columns": {
+        "workspaceId": "uuid",
+        "pageId": "uuid",
+        "databaseId": "uuid",
+        "status": { "enum": ["backlog", "todo", "in_progress", "done"] },
+        "priority": { "enum": ["none", "low", "medium", "high", "urgent"] },
+        "assignee": "uuid?",
+        "labels": { "array": "string" }
       },
-      "sheetComments": {
-        "relations": {
-          "page": {
-            "column": "pageId",
-            "table": "pages",
-            "type": "Forward"
-          },
-          "workspace": {
-            "column": "workspaceId",
-            "table": "workspaces",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "relations": {
+        "database": { "rel": "pages", "column": "databaseId" },
+        "page": { "rel": "pages", "column": "pageId" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
       },
-      "sheetPresence": {
-        "relations": {
-          "page": {
-            "column": "pageId",
-            "table": "pages",
-            "type": "Forward"
-          },
-          "workspace": {
-            "column": "workspaceId",
-            "table": "workspaces",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "indexes": ["databaseId", "status", "pageId"]
+    },
+    "members": {
+      "columns": {
+        "workspaceId": "uuid",
+        "account": "uuid",
+        "displayName": "string",
+        "role": { "enum": ["owner", "member", "viewer", "guest"] }
       },
-      "songSheets": {
-        "relations": {
-          "page": {
-            "column": "pageId",
-            "table": "pages",
-            "type": "Forward"
-          },
-          "workspace": {
-            "column": "workspaceId",
-            "table": "workspaces",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+      "relations": { "workspace": { "rel": "workspaces", "column": "workspaceId" } },
+      "indexes": ["workspaceId", "account"]
+    },
+    "pageGrants": {
+      "columns": {
+        "workspaceId": "uuid",
+        "pageId": "uuid",
+        "account": "uuid",
+        "role": { "enum": ["editor", "viewer"] }
       },
-      "workspaces": {
-        "relations": {
-          "membersViaWorkspace": {
-            "relation": "workspace",
-            "table": "members",
-            "type": "Reverse"
-          },
-          "pagesViaWorkspace": {
-            "relation": "workspace",
-            "table": "pages",
-            "type": "Reverse"
-          }
-        },
-        "ts_only": []
+      "relations": {
+        "page": { "rel": "pages", "column": "pageId" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
+      },
+      "indexes": ["pageId", "account", "workspaceId"]
+    },
+    "pages": {
+      "columns": {
+        "workspaceId": "uuid",
+        "parentId": "uuid?",
+        "title": "string",
+        "kind": { "enum": ["doc", "issues", "issue", "song"] }
+      },
+      "relations": {
+        "blocksViaPage": { "reverse": "blocks", "relation": "page" },
+        "childrenViaParent": { "reverse": "pages", "relation": "parent" },
+        "grantsViaPage": { "reverse": "pageGrants", "relation": "page" },
+        "issuesViaPage": { "reverse": "issues", "relation": "page" },
+        "parent": { "rel": "pages", "column": "parentId" },
+        "sheetsViaPage": { "reverse": "songSheets", "relation": "page" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
+      },
+      "indexes": ["workspaceId", "parentId"]
+    },
+    "sheetComments": {
+      "columns": {
+        "workspaceId": "uuid",
+        "pageId": "uuid",
+        "author": "uuid",
+        "range": { "json": true },
+        "text": "string",
+        "resolved": "boolean"
+      },
+      "relations": {
+        "page": { "rel": "pages", "column": "pageId" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
+      },
+      "indexes": ["pageId"]
+    },
+    "sheetPresence": {
+      "columns": {
+        "workspaceId": "uuid",
+        "pageId": "uuid",
+        "account": "uuid",
+        "cursor": { "json": true },
+        "selection": { "json": true, "optional": true },
+        "seenAt": "float"
+      },
+      "relations": {
+        "page": { "rel": "pages", "column": "pageId" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
+      },
+      "indexes": ["pageId"],
+      "history": "latest"
+    },
+    "songSheets": {
+      "columns": {
+        "workspaceId": "uuid",
+        "pageId": "uuid",
+        "body": { "type": "string", "merge": "markdown" }
+      },
+      "relations": {
+        "page": { "rel": "pages", "column": "pageId" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
+      },
+      "indexes": ["pageId"]
+    },
+    "workspaces": {
+      "columns": { "name": "string" },
+      "relations": {
+        "membersViaWorkspace": { "reverse": "members", "relation": "workspace" },
+        "pagesViaWorkspace": { "reverse": "pages", "relation": "workspace" }
       }
     }
   },
-  "current": "553979b0f2b20e85b22e5f83f56318fe11425287aea9f72eca6eb235c5512511",
-  "format": 1,
+  "history": {
+    "f9c2e1ab9391": {
+      "tables": {
+        "attachments": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "pageId": { "type": "uuid", "references": "pages" },
+            "name": "string",
+            "mimeType": "string",
+            "byteLength": "int",
+            "bytes": "bytes"
+          },
+          "indexes": ["pageId"]
+        },
+        "better_auth_account": {
+          "columns": {
+            "issuer": "string",
+            "accountId": "string",
+            "providerId": "string",
+            "userId": { "type": "uuid", "references": "better_auth_user" },
+            "password": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_jwks": {
+          "columns": {
+            "publicKey": "string",
+            "privateKey": "string",
+            "createdAt": "timestamp",
+            "expiresAt": "timestamp?",
+            "alg": "string?",
+            "crv": "string?"
+          }
+        },
+        "better_auth_session": {
+          "columns": {
+            "expiresAt": "timestamp",
+            "token": "string",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp",
+            "ipAddress": "string?",
+            "userAgent": "string?",
+            "userId": { "type": "uuid", "references": "better_auth_user" }
+          }
+        },
+        "better_auth_user": {
+          "columns": {
+            "name": "string",
+            "email": "string",
+            "emailVerified": "boolean",
+            "image": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_verification": {
+          "columns": {
+            "identifier": "string",
+            "value": "string",
+            "expiresAt": "timestamp",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "blocks": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "pageId": { "type": "uuid", "references": "pages" },
+            "parentBlockId": { "type": "uuid", "optional": true, "references": "blocks" },
+            "position": "float",
+            "kind": {
+              "enum": [
+                "paragraph",
+                "heading",
+                "todo",
+                "bullet",
+                "quote",
+                "divider",
+                "image",
+                "file"
+              ]
+            },
+            "text": "string",
+            "checked": "boolean",
+            "attachmentId": { "type": "uuid", "optional": true, "references": "attachments" }
+          },
+          "indexes": ["pageId", "position"]
+        },
+        "invites": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "pageId": { "type": "uuid", "optional": true, "references": "pages" },
+            "role": { "enum": ["member", "viewer", "editor"] },
+            "token": "string",
+            "label": "string"
+          },
+          "indexes": ["token", "pageId", "workspaceId"]
+        },
+        "issues": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "pageId": { "type": "uuid", "references": "pages" },
+            "databaseId": { "type": "uuid", "references": "pages" },
+            "status": { "enum": ["backlog", "todo", "in_progress", "done"] },
+            "priority": { "enum": ["none", "low", "medium", "high", "urgent"] },
+            "assignee": "uuid?",
+            "labels": { "array": "string" }
+          },
+          "indexes": ["databaseId", "status", "pageId"]
+        },
+        "members": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "account": "uuid",
+            "displayName": "string",
+            "role": { "enum": ["owner", "member", "viewer", "guest"] }
+          },
+          "indexes": ["workspaceId", "account"]
+        },
+        "pageGrants": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "pageId": { "type": "uuid", "references": "pages" },
+            "account": "uuid",
+            "role": { "enum": ["editor", "viewer"] }
+          },
+          "indexes": ["pageId", "account", "workspaceId"]
+        },
+        "pages": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "parentId": { "type": "uuid", "optional": true, "references": "pages" },
+            "title": "string",
+            "kind": { "enum": ["doc", "issues", "issue", "song"] }
+          },
+          "indexes": ["workspaceId", "parentId"]
+        },
+        "sheetComments": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "pageId": { "type": "uuid", "references": "pages" },
+            "author": "uuid",
+            "range": { "json": true },
+            "text": "string",
+            "resolved": "boolean"
+          },
+          "indexes": ["pageId"]
+        },
+        "sheetPresence": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "pageId": { "type": "uuid", "references": "pages" },
+            "account": "uuid",
+            "cursor": { "json": true },
+            "selection": { "json": true, "optional": true },
+            "seenAt": "float"
+          },
+          "indexes": ["pageId"],
+          "history": "latest"
+        },
+        "songSheets": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "pageId": { "type": "uuid", "references": "pages" },
+            "body": { "type": "string", "merge": "markdown" }
+          },
+          "indexes": ["pageId"]
+        },
+        "workspaces": { "columns": { "name": "string" } }
+      }
+    }
+  },
   "migrations": [
     {
-      "forward": [
-        {
-          "operations": [
-            {
-              "column": "issuer",
-              "column_type": {
-                "type": "Text"
-              },
-              "default": {
-                "type": "Text",
-                "value": ""
-              },
-              "type": "Drop"
-            }
-          ],
-          "table": "better_auth_account"
-        }
-      ],
-      "from": "f9c2e1ab9391434b67488cb23410ed340cd4836de7fbc3ce673ed2a56bc07f2c",
-      "to": "553979b0f2b20e85b22e5f83f56318fe11425287aea9f72eca6eb235c5512511"
-    }
-  ],
-  "schemas": [
-    {
-      "hash": "f9c2e1ab9391434b67488cb23410ed340cd4836de7fbc3ce673ed2a56bc07f2c",
-      "tables": {
-        "attachments": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "pageId",
-              "nullable": false,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "mimeType",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "byteLength",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Bytea"
-              },
-              "name": "bytes",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "pageId"
-          ]
-        },
-        "better_auth_account": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "issuer",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "accountId",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "providerId",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "userId",
-              "nullable": false,
-              "references": "better_auth_user"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "password",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "better_auth_jwks": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "publicKey",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "privateKey",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "alg",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "crv",
-              "nullable": true
-            }
-          ]
-        },
-        "better_auth_session": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "token",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "ipAddress",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "userAgent",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "userId",
-              "nullable": false,
-              "references": "better_auth_user"
-            }
-          ]
-        },
-        "better_auth_user": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "email",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Boolean"
-              },
-              "name": "emailVerified",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "image",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "better_auth_verification": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "identifier",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "value",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "blocks": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "pageId",
-              "nullable": false,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "parentBlockId",
-              "nullable": true,
-              "references": "blocks"
-            },
-            {
-              "column_type": {
-                "type": "Double"
-              },
-              "name": "position",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "paragraph",
-                  "heading",
-                  "todo",
-                  "bullet",
-                  "quote",
-                  "divider",
-                  "image",
-                  "file"
-                ]
-              },
-              "name": "kind",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "text",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Boolean"
-              },
-              "name": "checked",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "attachmentId",
-              "nullable": true,
-              "references": "attachments"
-            }
-          ],
-          "indexed_columns": [
-            "pageId",
-            "position"
-          ]
-        },
-        "invites": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "pageId",
-              "nullable": true,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "member",
-                  "viewer",
-                  "editor"
-                ]
-              },
-              "name": "role",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "token",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "label",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "token",
-            "pageId",
-            "workspaceId"
-          ]
-        },
-        "issues": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "pageId",
-              "nullable": false,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "databaseId",
-              "nullable": false,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "backlog",
-                  "todo",
-                  "in_progress",
-                  "done"
-                ]
-              },
-              "name": "status",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "none",
-                  "low",
-                  "medium",
-                  "high",
-                  "urgent"
-                ]
-              },
-              "name": "priority",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "assignee",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "element": {
-                  "type": "Text"
-                },
-                "type": "Array"
-              },
-              "name": "labels",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "databaseId",
-            "status",
-            "pageId"
-          ]
-        },
-        "members": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "account",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "displayName",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "owner",
-                  "member",
-                  "viewer",
-                  "guest"
-                ]
-              },
-              "name": "role",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "workspaceId",
-            "account"
-          ]
-        },
-        "pageGrants": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "pageId",
-              "nullable": false,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "account",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "editor",
-                  "viewer"
-                ]
-              },
-              "name": "role",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "pageId",
-            "account",
-            "workspaceId"
-          ]
-        },
-        "pages": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "parentId",
-              "nullable": true,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "title",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "doc",
-                  "issues",
-                  "issue",
-                  "song"
-                ]
-              },
-              "name": "kind",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "workspaceId",
-            "parentId"
-          ]
-        },
-        "sheetComments": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "pageId",
-              "nullable": false,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "author",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Json"
-              },
-              "name": "range",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "text",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Boolean"
-              },
-              "name": "resolved",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "pageId"
-          ]
-        },
-        "sheetPresence": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "pageId",
-              "nullable": false,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "account",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Json"
-              },
-              "name": "cursor",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Json"
-              },
-              "name": "selection",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Double"
-              },
-              "name": "seenAt",
-              "nullable": false
-            }
-          ],
-          "history": "Latest",
-          "indexed_columns": [
-            "pageId"
-          ]
-        },
-        "songSheets": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "pageId",
-              "nullable": false,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "merge_strategy": "Markdown",
-              "name": "body",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "pageId"
-          ]
-        },
-        "workspaces": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            }
-          ]
-        }
-      }
-    },
-    {
-      "hash": "553979b0f2b20e85b22e5f83f56318fe11425287aea9f72eca6eb235c5512511",
-      "tables": {
-        "attachments": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "pageId",
-              "nullable": false,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "mimeType",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Integer"
-              },
-              "name": "byteLength",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Bytea"
-              },
-              "name": "bytes",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "pageId"
-          ]
-        },
-        "better_auth_account": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "accountId",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "providerId",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "userId",
-              "nullable": false,
-              "references": "better_auth_user"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "password",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "better_auth_jwks": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "publicKey",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "privateKey",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "alg",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "crv",
-              "nullable": true
-            }
-          ]
-        },
-        "better_auth_session": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "token",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "ipAddress",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "userAgent",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "userId",
-              "nullable": false,
-              "references": "better_auth_user"
-            }
-          ]
-        },
-        "better_auth_user": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "email",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Boolean"
-              },
-              "name": "emailVerified",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "image",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "better_auth_verification": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "identifier",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "value",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "expiresAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "createdAt",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Timestamp"
-              },
-              "name": "updatedAt",
-              "nullable": false
-            }
-          ]
-        },
-        "blocks": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "pageId",
-              "nullable": false,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "parentBlockId",
-              "nullable": true,
-              "references": "blocks"
-            },
-            {
-              "column_type": {
-                "type": "Double"
-              },
-              "name": "position",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "paragraph",
-                  "heading",
-                  "todo",
-                  "bullet",
-                  "quote",
-                  "divider",
-                  "image",
-                  "file"
-                ]
-              },
-              "name": "kind",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "text",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Boolean"
-              },
-              "name": "checked",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "attachmentId",
-              "nullable": true,
-              "references": "attachments"
-            }
-          ],
-          "indexed_columns": [
-            "pageId",
-            "position"
-          ]
-        },
-        "invites": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "pageId",
-              "nullable": true,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "member",
-                  "viewer",
-                  "editor"
-                ]
-              },
-              "name": "role",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "token",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "label",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "token",
-            "pageId",
-            "workspaceId"
-          ]
-        },
-        "issues": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "pageId",
-              "nullable": false,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "databaseId",
-              "nullable": false,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "backlog",
-                  "todo",
-                  "in_progress",
-                  "done"
-                ]
-              },
-              "name": "status",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "none",
-                  "low",
-                  "medium",
-                  "high",
-                  "urgent"
-                ]
-              },
-              "name": "priority",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "assignee",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "element": {
-                  "type": "Text"
-                },
-                "type": "Array"
-              },
-              "name": "labels",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "databaseId",
-            "status",
-            "pageId"
-          ]
-        },
-        "members": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "account",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "displayName",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "owner",
-                  "member",
-                  "viewer",
-                  "guest"
-                ]
-              },
-              "name": "role",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "workspaceId",
-            "account"
-          ]
-        },
-        "pageGrants": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "pageId",
-              "nullable": false,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "account",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "editor",
-                  "viewer"
-                ]
-              },
-              "name": "role",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "pageId",
-            "account",
-            "workspaceId"
-          ]
-        },
-        "pages": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "parentId",
-              "nullable": true,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "title",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Enum",
-                "variants": [
-                  "doc",
-                  "issues",
-                  "issue",
-                  "song"
-                ]
-              },
-              "name": "kind",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "workspaceId",
-            "parentId"
-          ]
-        },
-        "sheetComments": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "pageId",
-              "nullable": false,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "author",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Json"
-              },
-              "name": "range",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "text",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Boolean"
-              },
-              "name": "resolved",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "pageId"
-          ]
-        },
-        "sheetPresence": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "pageId",
-              "nullable": false,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "account",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Json"
-              },
-              "name": "cursor",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Json"
-              },
-              "name": "selection",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "type": "Double"
-              },
-              "name": "seenAt",
-              "nullable": false
-            }
-          ],
-          "history": "Latest",
-          "indexed_columns": [
-            "pageId"
-          ]
-        },
-        "songSheets": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "workspaceId",
-              "nullable": false,
-              "references": "workspaces"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "pageId",
-              "nullable": false,
-              "references": "pages"
-            },
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "merge_strategy": "Markdown",
-              "name": "body",
-              "nullable": false
-            }
-          ],
-          "indexed_columns": [
-            "pageId"
-          ]
-        },
-        "workspaces": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            }
-          ]
-        }
+      "from": "f9c2e1ab9391",
+      "migrate": {
+        "better_auth_account": { "issuer": { "drop": "string", "backwardsDefault": "" } }
       }
     }
   ]

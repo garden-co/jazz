@@ -1,373 +1,42 @@
 {
-  "bundle": "3ad46fc9a1e6f99bcf09f587de4ad541a57975747eddd06d12180db9f05456d3",
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
   "format": 1,
-  "permissions": {
+  "tables": {
     "messages": {
-      "delete": {
-        "using": {
-          "exprs": [
-            {
-              "exprs": [
-                {
-                  "column": "chat_id",
-                  "op": "Eq",
-                  "type": "Cmp",
-                  "value": {
-                    "type": "Literal",
-                    "value": {
-                      "type": "Text",
-                      "value": "announcements"
-                    }
-                  }
-                },
-                {
-                  "op": "Eq",
-                  "path": [
-                    "claims",
-                    "role"
-                  ],
-                  "type": "SessionCmp",
-                  "value": {
-                    "type": "Text",
-                    "value": "admin"
-                  }
-                }
-              ],
-              "type": "And"
-            },
-            {
-              "exprs": [
-                {
-                  "column": "chat_id",
-                  "op": "Eq",
-                  "type": "Cmp",
-                  "value": {
-                    "type": "Literal",
-                    "value": {
-                      "type": "Text",
-                      "value": "chat-01"
-                    }
-                  }
-                },
-                {
-                  "exprs": [
-                    {
-                      "column": "$createdBy.account",
-                      "op": "Eq",
-                      "type": "Cmp",
-                      "value": {
-                        "path": [
-                          "user"
-                        ],
-                        "type": "SessionRef"
-                      }
-                    },
-                    {
-                      "op": "Eq",
-                      "path": [
-                        "claims",
-                        "role"
-                      ],
-                      "type": "SessionCmp",
-                      "value": {
-                        "type": "Text",
-                        "value": "admin"
-                      }
-                    }
-                  ],
-                  "type": "Or"
-                }
-              ],
-              "type": "And"
-            }
-          ],
-          "type": "Or"
-        }
+      "read": {
+        "anyOf": [
+          "chat_id = 'announcements'",
+          { "allOf": ["chat_id = 'chat-01'", "session.claims.role in ['admin', 'member']"] }
+        ]
       },
       "insert": {
-        "with_check": {
-          "exprs": [
-            {
-              "exprs": [
-                {
-                  "column": "chat_id",
-                  "op": "Eq",
-                  "type": "Cmp",
-                  "value": {
-                    "type": "Literal",
-                    "value": {
-                      "type": "Text",
-                      "value": "announcements"
-                    }
-                  }
-                },
-                {
-                  "op": "Eq",
-                  "path": [
-                    "claims",
-                    "role"
-                  ],
-                  "type": "SessionCmp",
-                  "value": {
-                    "type": "Text",
-                    "value": "admin"
-                  }
-                }
-              ],
-              "type": "And"
-            },
-            {
-              "exprs": [
-                {
-                  "column": "chat_id",
-                  "op": "Eq",
-                  "type": "Cmp",
-                  "value": {
-                    "type": "Literal",
-                    "value": {
-                      "type": "Text",
-                      "value": "chat-01"
-                    }
-                  }
-                },
-                {
-                  "path": [
-                    "claims",
-                    "role"
-                  ],
-                  "type": "SessionInList",
-                  "values": [
-                    {
-                      "type": "Text",
-                      "value": "admin"
-                    },
-                    {
-                      "type": "Text",
-                      "value": "member"
-                    }
-                  ]
-                }
-              ],
-              "type": "And"
-            }
-          ],
-          "type": "Or"
-        }
-      },
-      "select": {
-        "using": {
-          "exprs": [
-            {
-              "column": "chat_id",
-              "op": "Eq",
-              "type": "Cmp",
-              "value": {
-                "type": "Literal",
-                "value": {
-                  "type": "Text",
-                  "value": "announcements"
-                }
-              }
-            },
-            {
-              "exprs": [
-                {
-                  "column": "chat_id",
-                  "op": "Eq",
-                  "type": "Cmp",
-                  "value": {
-                    "type": "Literal",
-                    "value": {
-                      "type": "Text",
-                      "value": "chat-01"
-                    }
-                  }
-                },
-                {
-                  "path": [
-                    "claims",
-                    "role"
-                  ],
-                  "type": "SessionInList",
-                  "values": [
-                    {
-                      "type": "Text",
-                      "value": "admin"
-                    },
-                    {
-                      "type": "Text",
-                      "value": "member"
-                    }
-                  ]
-                }
-              ],
-              "type": "And"
-            }
-          ],
-          "type": "Or"
-        }
+        "anyOf": [
+          { "allOf": ["chat_id = 'announcements'", "session.claims.role = 'admin'"] },
+          { "allOf": ["chat_id = 'chat-01'", "session.claims.role in ['admin', 'member']"] }
+        ]
       },
       "update": {
-        "using": {
-          "exprs": [
-            {
-              "exprs": [
-                {
-                  "column": "chat_id",
-                  "op": "Eq",
-                  "type": "Cmp",
-                  "value": {
-                    "type": "Literal",
-                    "value": {
-                      "type": "Text",
-                      "value": "announcements"
-                    }
-                  }
-                },
-                {
-                  "op": "Eq",
-                  "path": [
-                    "claims",
-                    "role"
-                  ],
-                  "type": "SessionCmp",
-                  "value": {
-                    "type": "Text",
-                    "value": "admin"
-                  }
-                }
-              ],
-              "type": "And"
-            },
-            {
-              "exprs": [
-                {
-                  "column": "chat_id",
-                  "op": "Eq",
-                  "type": "Cmp",
-                  "value": {
-                    "type": "Literal",
-                    "value": {
-                      "type": "Text",
-                      "value": "chat-01"
-                    }
-                  }
-                },
-                {
-                  "exprs": [
-                    {
-                      "column": "$createdBy.account",
-                      "op": "Eq",
-                      "type": "Cmp",
-                      "value": {
-                        "path": [
-                          "user"
-                        ],
-                        "type": "SessionRef"
-                      }
-                    },
-                    {
-                      "op": "Eq",
-                      "path": [
-                        "claims",
-                        "role"
-                      ],
-                      "type": "SessionCmp",
-                      "value": {
-                        "type": "Text",
-                        "value": "admin"
-                      }
-                    }
-                  ],
-                  "type": "Or"
-                }
-              ],
-              "type": "And"
-            }
-          ],
-          "type": "Or"
-        },
-        "with_check": {
-          "exprs": [
-            {
-              "exprs": [
-                {
-                  "column": "chat_id",
-                  "op": "Eq",
-                  "type": "Cmp",
-                  "value": {
-                    "type": "Literal",
-                    "value": {
-                      "type": "Text",
-                      "value": "announcements"
-                    }
-                  }
-                },
-                {
-                  "op": "Eq",
-                  "path": [
-                    "claims",
-                    "role"
-                  ],
-                  "type": "SessionCmp",
-                  "value": {
-                    "type": "Text",
-                    "value": "admin"
-                  }
-                }
-              ],
-              "type": "And"
-            },
-            {
-              "exprs": [
-                {
-                  "column": "chat_id",
-                  "op": "Eq",
-                  "type": "Cmp",
-                  "value": {
-                    "type": "Literal",
-                    "value": {
-                      "type": "Text",
-                      "value": "chat-01"
-                    }
-                  }
-                },
-                {
-                  "exprs": [
-                    {
-                      "column": "$createdBy.account",
-                      "op": "Eq",
-                      "type": "Cmp",
-                      "value": {
-                        "path": [
-                          "user"
-                        ],
-                        "type": "SessionRef"
-                      }
-                    },
-                    {
-                      "op": "Eq",
-                      "path": [
-                        "claims",
-                        "role"
-                      ],
-                      "type": "SessionCmp",
-                      "value": {
-                        "type": "Text",
-                        "value": "admin"
-                      }
-                    }
-                  ],
-                  "type": "Or"
-                }
-              ],
-              "type": "And"
-            }
-          ],
-          "type": "Or"
-        }
+        "anyOf": [
+          { "allOf": ["chat_id = 'announcements'", "session.claims.role = 'admin'"] },
+          {
+            "allOf": [
+              "chat_id = 'chat-01'",
+              { "anyOf": ["$createdBy.account = session.user", "session.claims.role = 'admin'"] }
+            ]
+          }
+        ]
+      },
+      "delete": {
+        "anyOf": [
+          { "allOf": ["chat_id = 'announcements'", "session.claims.role = 'admin'"] },
+          {
+            "allOf": [
+              "chat_id = 'chat-01'",
+              { "anyOf": ["$createdBy.account = session.user", "session.claims.role = 'admin'"] }
+            ]
+          }
+        ]
       }
     }
-  },
-  "schema": "e26d5055b2f2734daa2182431b71c58abc26f6ef632385d451a997cf5b0003b7"
+  }
 }
