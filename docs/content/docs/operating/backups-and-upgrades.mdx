@@ -48,6 +48,14 @@ can't talk to a newer backend.
 Back up before you upgrade. Releases don't migrate a data directory back to an older format, so
 rolling back means restoring the backup.
 
+On Vercel, there's no supported way to back up or export a `vercel()` core's data yet
+([jazz#5441](https://github.com/garden-co/jazz/issues/5441)). Upgrading keeps the data as long as
+`namespace` names the same core, and a different namespace opens a new, empty one. Keeping the old
+deployment isn't a fallback: the core always runs the newest `jazz-tools` its Drive has seen, so
+once the new deployment has woken it, promoting the old deployment again doesn't roll back its data.
+To try an upgrade first, deploy it to a preview branch: with the per-branch setup, that preview gets
+a core of its own, separate from production's (a dry run with its own data, not a copy).
+
 ## Upgrading from alpha.61
 
 - **`createJazz` refuses `{ migrations: "none" }` with a store that keeps its data.** An app
@@ -67,6 +75,37 @@ rolling back means restoring the backup.
   then run `npx jazz-tools migrations create`. It records `schema.ts` as the app's first version
   and generates `migrations/index.ts`. Commit the `migrations/` directory with your schema. See
   [Shipping migrations with your app](/docs/schemas/migrations#shipping-migrations-with-your-app).
+
+- **Schema history first.** If your app still uses `{ migrations: "none" }`, run
+  `npx jazz-tools migrations create` on your current, unchanged `schema.ts` before anything below
+  changes the schema. That snapshot is the first version later migrations start from. Change the
+  schema first and the backend refuses to start (`disconnected_migration_graph`), which takes the
+  whole app down, sign-in included.
+- **`vercel()` takes a required `namespace`**, which replaces `name` and decides which core, and so
+  which data, a deployment uses. To keep the cores earlier versions created, use the per-branch
+  setup in [Production, previews and development](/docs/setup/deployment/vercel#production-previews-and-development);
+  another namespace starts an empty core.
+- **Better Auth 1.7.22.** The Better Auth adapter now targets Better Auth `~1.7.22`, and
+  `better_auth_account` loses its required `issuer` column. Upgrade in this order, after the
+  schema-history step above, and deploy it all in one release:
+  1. Upgrade `better-auth` to 1.7.22 (or a later 1.7.x) and `jazz-tools`.
+  2. Regenerate the auth tables:
+     `npx auth@latest generate --config ./auth-generate.ts --output ./schema-better-auth/schema.ts --yes`.
+  3. Write the migration with `npx jazz-tools migrations create --name remove-better-auth-issuer`,
+     give the dropped column a backwards default (`issuer: m.drop.string({ backwardsDefault: "" })`),
+     and run `npx jazz-tools validate`.
+  4. Deploy the backend with the new schema and migration. Better Auth 1.7.3 and later can't create
+     accounts against the old schema, so sign-ups fail until it's published. The adapter refuses to
+     start while your schema still requires `issuer`, with an error that links here.
+- **React Native: ship a new native build.** This release raises the native relay ABI to 6, so a
+  JavaScript bundle needs a native build from the same release; an over-the-air update alone
+  isn't enough.
+- **`clearOnSignOut` in the browser** no longer retries in the background. A store left behind by a
+  tab that closed while signed in is wiped when another open page becomes visible or its session
+  changes, or on the next page load. A guest's data is wiped once the device no longer keeps the
+  guest's key (it was linked to a user).
+- **A signed-out `backend-user` answers 200** with `{ "user": null }` instead of `401`. Clients read
+  both as signed out; if you alert on its 401s, expect fewer.
 
 ## Upgrading from alpha.60
 

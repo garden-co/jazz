@@ -76,8 +76,9 @@ export const { GET, POST, DELETE } = jazz.next();
 ```
 
 Then deploy as usual with `git push` or `vercel deploy`. Your functions authenticate to Vercel with
-their own OIDC token, and the core's secrets are generated inside the Sandbox, so there are no
-environment variables to set.
+their own OIDC token, and the core's secrets are generated inside the Sandbox, so Jazz needs no
+environment variables of its own. Your auth may: Better Auth, for example, needs
+`BETTER_AUTH_SECRET` in each environment.
 
 On Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/functions`). Under plain
 `next dev`, which can't upgrade sockets, the browser
