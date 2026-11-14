@@ -8,8 +8,9 @@
 //!
 //! Nesting also reads a level's rows a relation at a time (one statement
 //! for all of that level's parents, each parent's offset and limit applied
-//! by a window), which must again read exactly what the per-parent path
-//! does. Every comparison runs the three paths in [`MODES`].
+//! by a correlated subquery, or for an array of references by a window),
+//! which must again read exactly what the per-parent path does, with about
+//! as little work. Every comparison runs the three paths in [`MODES`].
 
 use std::collections::BTreeMap;
 
@@ -1589,5 +1590,230 @@ mod branch_views {
         }
         removed.sort();
         (shown(added), shown(updated), removed)
+    }
+
+    /// A page of a reverse relation read through a branch view (or a
+    /// snapshot) does about the work of the per-parent statements: the
+    /// batch reads it per parent there, since a batched statement would
+    /// read the view's `UNION ALL` whole for every parent.
+    #[test]
+    fn a_page_through_a_view_does_about_the_per_parent_work() {
+        const POSTS: usize = 5;
+        const PER_POST: usize = 600;
+        let schema = compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("posts")
+                        .column("branch_id", ColumnType::Uuid)
+                        .column("rank", ColumnType::Integer)
+                        .branch_by("branch_id")
+                        .policies(read_and_allow_all_writes(PolicyExpr::True)),
+                )
+                .table(
+                    TableSchemaBuilder::new("comments")
+                        .column("branch_id", ColumnType::Uuid)
+                        .fk_column("post", "posts")
+                        .column("rank", ColumnType::Integer)
+                        .composite_index(["post", "rank"])
+                        .branch_by("branch_id")
+                        .policies(read_and_allow_all_writes(PolicyExpr::True)),
+                )
+                .build(),
+        );
+        let db = block_on(Db::open(DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x56; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        let insert = |table: &str, row: RowUuid, values, target| {
+            block_on(db.insert(
+                table,
+                values,
+                InsertOptions {
+                    row_id: Some(row),
+                    target,
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        };
+        for p in 0..POSTS {
+            insert(
+                "posts",
+                id(5, p),
+                cells(vec![("rank", Value::I32(p as i32))]),
+                ExactWriteTarget::Branch(base()),
+            );
+            for k in 0..PER_POST {
+                // A third of the comments only the head has.
+                let branch = if k % 3 == 0 { head() } else { base() };
+                insert(
+                    "comments",
+                    id(6, p * PER_POST + k),
+                    cells(vec![
+                        ("post", post(p)),
+                        ("rank", Value::I32((k / 2) as i32)),
+                    ]),
+                    ExactWriteTarget::Branch(branch),
+                );
+            }
+        }
+        block_on(db.tick()).unwrap();
+        let frozen = block_on(db.capture_snapshot()).unwrap();
+        let views = [
+            (
+                "head over live base",
+                ReadOpts::default().branch_view(head(), Some(BranchViewBase::Current(base()))),
+            ),
+            (
+                "head over frozen base",
+                ReadOpts::default()
+                    .branch_view(head(), Some(BranchViewBase::snapshot(base(), frozen))),
+            ),
+            ("base", ReadOpts::default().branch_view(base(), None)),
+        ];
+        for (view, opts) in &views {
+            for (offset, limit) in [(0, Some(1)), (PER_POST - 3, None)] {
+                let mut page = ArraySubquery::new("comments", "comments", "post", "id")
+                    .order_by("rank", OrderDirection::Desc)
+                    .offset(offset);
+                if let Some(limit) = limit {
+                    page = page.limit(limit);
+                }
+                let prepared = db
+                    .prepare_query(&Query::from("posts").array_subquery(page))
+                    .unwrap();
+                let read = |mode| {
+                    set_mode(mode);
+                    jazz::db::take_vm_steps_for_test();
+                    let tree = block_on(db.all_result_tree(&prepared, opts.clone())).unwrap();
+                    (tree, jazz::db::take_vm_steps_for_test())
+                };
+                let (per_parent, per_parent_steps) = read((true, false));
+                let (batched, batched_steps) = read((true, true));
+                set_mode((true, true));
+                assert_eq!(batched, per_parent, "{view}, offset {offset}");
+                assert!(
+                    batched_steps <= 2 * per_parent_steps + 1_000,
+                    "{view}, offset {offset}, limit {limit:?}: batched read took \
+                     {batched_steps} SQLite steps, per parent {per_parent_steps}"
+                );
+            }
+        }
+    }
+}
+
+/// A paged reverse relation, batched, reads each parent's page as that
+/// parent's own statement does: from the relation's index, stopping at the
+/// page's end. A room list with each room's newest message must not read
+/// every message of every room (alpha.62 numbered them all in a window and
+/// kept one per room: the BandChat inbox went from ~15 ms to ~1.2 s).
+#[test]
+fn a_paged_relation_reads_each_parents_page_not_all_its_children() {
+    const BUSY_ROOMS: usize = 4;
+    const PER_ROOM: usize = 1_500;
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("rooms")
+                    .column("name", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("messages")
+                    .fk_column("room", "rooms")
+                    .column("body", ColumnType::Text)
+                    .column("sent_at", ColumnType::BigInt)
+                    .composite_index(["room", "sent_at"])
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x12; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    // Busy rooms, a room with two messages and an empty one.
+    let rooms = BUSY_ROOMS + 2;
+    block_on(db.transaction(async |tx| {
+        for r in 0..rooms {
+            tx.insert(
+                "rooms",
+                cells(vec![("name", Value::String(format!("room {r}")))]),
+                InsertOptions {
+                    row_id: Some(id(2, r)),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            let count = match r {
+                r if r < BUSY_ROOMS => PER_ROOM,
+                r if r == BUSY_ROOMS => 2,
+                _ => 0,
+            };
+            for k in 0..count {
+                // Equal send times in pairs: ties are broken by id.
+                tx.insert(
+                    "messages",
+                    cells(vec![
+                        ("room", uuid(id(2, r))),
+                        ("body", Value::String(format!("room {r} message {k}"))),
+                        ("sent_at", Value::I64((k / 2) as i64)),
+                    ]),
+                    InsertOptions {
+                        row_id: Some(id(4, r * PER_ROOM + k)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }))
+    .unwrap();
+    block_on(db.tick()).unwrap();
+
+    let pages = [
+        (0, Some(1)),
+        (1, Some(2)),
+        (3, Some(3)),
+        (PER_ROOM - 2, None),
+    ];
+    for (offset, limit) in pages {
+        let mut newest = ArraySubquery::new("messagesViaRoom", "messages", "room", "id")
+            .order_by("sent_at", OrderDirection::Desc)
+            .offset(offset);
+        if let Some(limit) = limit {
+            newest = newest.limit(limit);
+        }
+        let query = Query::from("rooms").array_subquery(newest);
+        let prepared = db.prepare_query(&query).unwrap();
+        let read = |mode| {
+            set_mode(mode);
+            let roots = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+            jazz::db::take_vm_steps_for_test();
+            let rows = db.nest_relations(&prepared, roots).unwrap();
+            (rows, jazz::db::take_vm_steps_for_test())
+        };
+        let (per_parent, per_parent_steps) = read((true, false));
+        let (batched, batched_steps) = read((true, true));
+        set_mode((true, true));
+        assert_eq!(batched, per_parent, "offset {offset}, limit {limit:?}");
+        assert_eq!(batched.len(), rooms);
+        // The per-parent statements seek each room's index range; the
+        // batched one must do about as little, nowhere near the 6,000
+        // messages the busy rooms hold.
+        assert!(
+            batched_steps <= 2 * per_parent_steps + 1_000,
+            "offset {offset}, limit {limit:?}: batched read took {batched_steps} SQLite steps, \
+             per parent {per_parent_steps}"
+        );
     }
 }
