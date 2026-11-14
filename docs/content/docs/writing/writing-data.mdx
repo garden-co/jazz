@@ -266,7 +266,7 @@ To download, select the column. For a large file, read it a page at a time with 
 
 ```ts
 const row = await db.one(app.files.where({ id }).select("name", "type", "content"));
-const url = URL.createObjectURL(new Blob([row!.content], { type: row!.type }));
+const url = URL.createObjectURL(new Blob([new Uint8Array(row!.content)], { type: row!.type }));
 
 // Or the first megabyte only:
 const head = await db.one(app.files.where({ id }).select({ content: { from: 0, to: 1_048_576 } }));

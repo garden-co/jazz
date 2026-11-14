@@ -33,9 +33,16 @@ export function resolveBrowserWorkerUrl(runtimeSources?: RuntimeSourcesConfig): 
       runtimeSources,
     );
   }
+  const prebundledUrl = vitePrebundledBrokerWorkerUrl(browserRuntimeModuleUrl());
+  if (prebundledUrl) {
+    // Appended as text: re-serializing the query would turn Vite's exact
+    // `worker_file&type=module` marker into `worker_file=&type=module`.
+    return runtimeSources?.wasmVersion
+      ? `${prebundledUrl}&jazz-runtime-version=${encodeURIComponent(runtimeSources.wasmVersion)}`
+      : prebundledUrl;
+  }
   // Keep this literal statically analyzable so bundlers emit the worker asset.
-  const bundledUrl =
-    vitePrebundledBrokerWorkerUrl(browserRuntimeModuleUrl()) ?? bundledBrowserWorkerUrl();
+  const bundledUrl = bundledBrowserWorkerUrl();
   return versionRuntimeAssetUrl(
     resolveConfiguredUrl(bundledUrl, typeof location !== "undefined" ? location.href : undefined),
     runtimeSources,
@@ -49,6 +56,9 @@ export function resolveBrowserWorkerUrl(runtimeSources?: RuntimeSourcesConfig): 
  */
 const VITE_PREBUNDLED_MODULE_PATH =
   /^(.*?\/)node_modules\/\.vite\/(?:.*\/)?deps(?:_[^/]*)?\/[^/]+$/;
+
+/** Vite's marker for a module worker entry, exactly as Vite writes it. */
+const VITE_WORKER_ENTRY_QUERY = "worker_file&type=module";
 
 /** The package export the Vite dev server resolves to the broker worker entry. */
 export const BROKER_WORKER_EXPORT = "jazz-tools/_worker/broker";
@@ -65,6 +75,13 @@ export const BROKER_WORKER_EXPORT = "jazz-tools/_worker/broker";
  * package, wherever the package manager put it: `<base>@id/<bare id>` asks it
  * to, through jazz-tools' own `exports`. This covers every Vite version, and
  * nothing outside the dev server's pre-bundle takes this path.
+ *
+ * The URL carries Vite's own worker-entry query, `worker_file&type=module`, as
+ * every worker URL Vite generates does. Without it the dev server treats the
+ * bare id as one more dependency and pre-bundles the worker into `.vite/deps`
+ * too, which moves the worker's own `new URL("jazz_wasm_bg.wasm",
+ * import.meta.url)` there: the worker starts, and then loads index.html as its
+ * WASM. With it, the dev server serves the worker from the package's files.
  */
 export function vitePrebundledBrokerWorkerUrl(moduleUrl: string): string | undefined {
   let url: URL;
@@ -75,7 +92,9 @@ export function vitePrebundledBrokerWorkerUrl(moduleUrl: string): string | undef
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
   const match = VITE_PREBUNDLED_MODULE_PATH.exec(url.pathname);
-  return match ? `${url.origin}${match[1]}@id/${BROKER_WORKER_EXPORT}` : undefined;
+  return match
+    ? `${url.origin}${match[1]}@id/${BROKER_WORKER_EXPORT}?${VITE_WORKER_ENTRY_QUERY}`
+    : undefined;
 }
 
 /**
