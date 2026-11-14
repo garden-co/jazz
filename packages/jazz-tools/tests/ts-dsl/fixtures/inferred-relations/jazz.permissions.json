@@ -3,54 +3,10 @@
   "format": 1,
   "tables": {
     "people": {
-      "read": {
-        "exists": {
-          "type": "Project",
-          "columns": [
-            {
-              "alias": "id",
-              "expr": { "type": "Column", "column": { "column": "id", "scope": "__hop_0" } }
-            }
-          ],
-          "input": {
-            "type": "Join",
-            "join_kind": "Inner",
-            "left": { "type": "TableScan", "table": "people" },
-            "on": [
-              {
-                "left": { "column": "id", "scope": "people" },
-                "right": { "column": "person_ids", "scope": "__hop_0" }
-              }
-            ],
-            "right": { "type": "TableScan", "alias": "__hop_0", "table": "records" }
-          }
-        }
-      }
+      "read": "exists (from people join records as __hop_0 on people.id = __hop_0.person_ids select __hop_0.id as id)"
     },
     "records": {
-      "read": {
-        "exists": {
-          "type": "Project",
-          "columns": [
-            {
-              "alias": "id",
-              "expr": { "type": "Column", "column": { "column": "id", "scope": "__hop_0" } }
-            }
-          ],
-          "input": {
-            "type": "Join",
-            "join_kind": "Inner",
-            "left": { "type": "TableScan", "table": "records" },
-            "on": [
-              {
-                "left": { "column": "person_ids", "scope": "records" },
-                "right": { "column": "id", "scope": "__hop_0" }
-              }
-            ],
-            "right": { "type": "TableScan", "alias": "__hop_0", "table": "people" }
-          }
-        }
-      }
+      "read": "exists (from records join people as __hop_0 on records.person_ids = __hop_0.id select __hop_0.id as id)"
     }
   }
 }

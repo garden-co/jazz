@@ -18,52 +18,7 @@
                 {
                   "allOf": [
                     "exists folders(id = this.folder_id, owner_id = session.user)",
-                    {
-                      "exists": {
-                        "type": "Project",
-                        "columns": [
-                          {
-                            "alias": "id",
-                            "expr": {
-                              "type": "Column",
-                              "column": { "column": "id", "scope": "__hop_0" }
-                            }
-                          }
-                        ],
-                        "input": {
-                          "type": "Filter",
-                          "input": {
-                            "type": "Join",
-                            "join_kind": "Inner",
-                            "left": { "type": "TableScan", "table": "files" },
-                            "on": [
-                              {
-                                "left": { "column": "folder_id", "scope": "files" },
-                                "right": { "column": "id", "scope": "__hop_0" }
-                              }
-                            ],
-                            "right": { "type": "TableScan", "alias": "__hop_0", "table": "folders" }
-                          },
-                          "predicate": {
-                            "type": "And",
-                            "exprs": [
-                              {
-                                "type": "Cmp",
-                                "left": { "column": "id", "scope": "files" },
-                                "op": "Eq",
-                                "right": { "type": "OuterColumn", "column": { "column": "id" } }
-                              },
-                              {
-                                "type": "Cmp",
-                                "left": { "column": "owner_id", "scope": "__hop_0" },
-                                "op": "Eq",
-                                "right": { "type": "SessionRef", "path": ["user"] }
-                              }
-                            ]
-                          }
-                        }
-                      }
-                    }
+                    "exists (from files join folders as __hop_0 on files.folder_id = __hop_0.id where files.id = outer.id and __hop_0.owner_id = session.user select __hop_0.id as id)"
                   ]
                 }
               ]

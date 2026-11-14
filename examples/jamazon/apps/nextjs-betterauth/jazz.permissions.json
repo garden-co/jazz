@@ -43,13 +43,13 @@
     },
     "categories": { "read": "true", "insert": "false", "update": "false", "delete": "false" },
     "orderEvents": {
-      "read": "allowedTo.read(order)",
+      "read": "allowedTo.read(`order`)",
       "insert": "false",
       "update": "false",
       "delete": "false"
     },
     "orderLines": {
-      "read": "allowedTo.read(order)",
+      "read": "allowedTo.read(`order`)",
       "insert": "false",
       "update": "false",
       "delete": "false"
@@ -61,7 +61,7 @@
       "delete": "false"
     },
     "payments": {
-      "read": "allowedTo.read(order)",
+      "read": "allowedTo.read(`order`)",
       "insert": "false",
       "update": "false",
       "delete": "false"

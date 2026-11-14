@@ -61,10 +61,10 @@
       "delete": "author = session.user"
     },
     "session_members": {
-      "read": "allowedTo.read(session)",
-      "insert": "allowedTo.update(session)",
+      "read": "allowedTo.read(`session`)",
+      "insert": "allowedTo.update(`session`)",
       "update": "false",
-      "delete": "allowedTo.update(session)"
+      "delete": "allowedTo.update(`session`)"
     },
     "sessions": {
       "read": {
