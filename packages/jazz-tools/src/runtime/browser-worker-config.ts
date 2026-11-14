@@ -50,7 +50,7 @@ export function resolveBrowserWorkerUrl(runtimeSources?: RuntimeSourcesConfig): 
 const VITE_PREBUNDLED_MODULE_PATH =
   /^(.*?\/)node_modules\/\.vite\/(?:.*\/)?deps(?:_[^/]*)?\/[^/]+$/;
 
-/** The package export the Vite dev server resolves to the broker worker script. */
+/** The package export the Vite dev server resolves to the broker worker entry. */
 export const BROKER_WORKER_EXPORT = "jazz-tools/_worker/broker";
 
 /**

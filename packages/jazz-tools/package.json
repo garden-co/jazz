@@ -131,7 +131,7 @@
       "types": "./dist/_dev/inspector-client.d.ts",
       "default": "./dist/_dev/inspector-client.js"
     },
-    "./_worker/broker": "./dist/worker/jazz-broker-worker.js",
+    "./_worker/broker": "./dist/worker/vite-dev-broker.js",
     "./_dev/native-binding-codec": {
       "types": "./dist/_dev/native-binding-codec.d.ts",
       "default": "./dist/_dev/native-binding-codec.js"

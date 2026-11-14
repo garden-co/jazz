@@ -131,11 +131,24 @@ for (const { name, specifier, literalBreaks } of viteMajors) {
     const workerUrl = vitePrebundledBrokerWorkerUrl(chunkUrl);
     assert.equal(workerUrl, new URL("@id/jazz-tools/_worker/broker", origin).href);
 
-    const worker = await fetch(workerUrl);
-    assert.equal(worker.status, 200, `Vite ${version} did not serve ${workerUrl}`);
-    assert.match(worker.headers.get("content-type") ?? "", /javascript/);
-    const source = await worker.text();
+    // The export is a dev-only entry whose one import is the bundled worker.
+    // The dev server serves it either as is, importing the worker, or with
+    // the worker inlined by its own dependency optimizer.
+    const entry = await fetch(workerUrl);
+    assert.equal(entry.status, 200, `Vite ${version} did not serve ${workerUrl}`);
+    assert.match(entry.headers.get("content-type") ?? "", /javascript/);
+    let source = await entry.text();
     assert.doesNotMatch(source, /<!doctype html>/i);
+    if (!/installJazzBrokerWorker/.test(source)) {
+      const bundled = [...source.matchAll(/^\s*import\s+["']([^"']+)["']/gm)]
+        .map((match) => match[1])
+        .find((specifier) => /jazz-broker-worker\.js/.test(specifier));
+      assert.ok(bundled, `the worker entry neither contains nor imports the worker:\n${source}`);
+      const worker = await fetch(new URL(bundled, workerUrl));
+      assert.equal(worker.status, 200);
+      assert.match(worker.headers.get("content-type") ?? "", /javascript/);
+      source = await worker.text();
+    }
     assert.match(source, /installJazzBrokerWorker/);
   });
 }
