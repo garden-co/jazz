@@ -1,60 +1,55 @@
-//! An app's two language-neutral files: `jazz.app.json` (its schema
-//! versions, migrations and codegen metadata, which the app and its clients
-//! ship) and `jazz.permissions.json` (the current version's permissions and
-//! their bundle id, which only backends read, so no client bundle carries
-//! the app's policies).
+//! An app's two readable files (SPEC §10.10): `jazz.app.json` (its tables,
+//! relations, schema history and migrations, which the app and its clients
+//! ship) and `jazz.permissions.json` (the current version's permissions,
+//! which only backends read, so no client bundle carries the app's
+//! policies).
 //!
-//! `jazz-tools validate` compiles `schema.ts`, `migrations/` and
-//! `permissions.ts` and hands the result to [`write`], the files' only
-//! writer. A backend reads both with [`load`], publishes
-//! [`LoadedApp::deployment_request`] at startup and pins its sessions to
-//! [`LoadedApp::bundle`]. A client reads `jazz.app.json` alone with
-//! [`load_client`] and opens along its schema versions and lenses.
+//! In stage 1 `jazz-tools validate` compiles the TS DSL to them through
+//! [`write`], the files' only writer. A backend reads both with [`load`],
+//! publishes [`LoadedApp::deployment_request`] at startup and pins its
+//! sessions to [`LoadedApp::bundle`]. A client reads `jazz.app.json` alone
+//! with [`load_client`]. Neither file carries a schema hash or bundle id:
+//! loading computes them.
 //!
-//! The files' JSON is their own: every type below mirrors an engine type
-//! field for field, so the engine's wire and catalogue encodings stay as
-//! they are while the file follows one convention throughout. Fields are
-//! snake_case, sum types carry an internal `"type"` tag with PascalCase
-//! names, and [`Value`] keeps its adjacent `{"type", "value"}` form. Unknown
-//! fields are refused everywhere.
-//! (Variants without fields are written as empty struct variants, e.g.
-//! `Text {}`, because serde ignores extra keys on internally tagged unit
-//! variants.) The format is specified field by field in SPEC §10.10.
+//! Policies are expression strings in a small SQL-like grammar
+//! ([`expr`]); errors point at the exact spot inside the string and suggest
+//! the nearest names.
+
+mod app_file;
+pub mod expr;
+pub mod json;
+mod permissions_file;
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::catalogue::{BundleId, Permissions, bundle_id, permissions_of};
-use crate::query::{
-    OrderDirection, RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr,
-    RelationJoinCondition, RelationJoinKind, RelationKeyRef, RelationOrderBy, RelationPredicate,
-    RelationProjectColumn, RelationProjectExpr, RelationRowIdRef, RelationUnionArm,
-    RelationValueRef,
-};
 use crate::schema::JazzSchema;
-use crate::tools::public_schema::{
-    CmpOp, ColumnDescriptor, ColumnMergeStrategy, ColumnType, HistoryRetention, Operation,
-    PolicyExpr, PolicyValue, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
-};
-use crate::tools::public_schema::{EnumCaseDescriptor, OperationPolicy, RowDescriptor};
+use crate::tools::public_schema::{Schema, SchemaHash, TableName, TablePolicies, TableSchema};
 
 use super::published::{
-    ClientMigrations, PublishLensOp, PublishMigrationRequest, PublishTableLens, PublishedSchema,
-    check_decoded_client_migrations, lower_client_migrations, lower_migration, parse_schema_hash,
+    ClientMigrations, PublishMigrationRequest, PublishedSchema, check_decoded_client_migrations,
+    lower_client_migrations, lower_migration, parse_schema_hash,
 };
 use super::{DeploymentRequest, structural};
+use json::Json;
 
 /// The `format` of both files this version of Jazz reads and writes.
 pub const FORMAT: u32 = 1;
 
-/// The app's file: schema versions, migrations and codegen metadata.
+/// The app's file: tables, relations, history and migrations.
 pub const APP_FILE: &str = "jazz.app.json";
-/// The backend's file: the current version's permissions and their bundle.
+/// The backend's file: the current version's permissions.
 pub const PERMISSIONS_FILE: &str = "jazz.permissions.json";
 
+/// The JSON Schemas the files name in `$schema`.
+pub const APP_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.app.schema.json";
+pub const PERMISSIONS_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.permissions.schema.json";
+
 /// Why a `jazz.app.json` or `jazz.permissions.json` was refused. Every
-/// message names the file and the field.
+/// message names the file and the JSON path, and inside an expression the
+/// exact spot.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{file}: {message}")]
 pub struct ArtifactError {
@@ -74,6 +69,10 @@ impl ArtifactError {
         }
     }
 
+    fn at(file: &'static str, (path, message): (String, String)) -> Self {
+        Self::in_file(file, format!("{path}: {message}"))
+    }
+
     /// The file refused: [`APP_FILE`] or [`PERMISSIONS_FILE`].
     pub fn file(&self) -> &'static str {
         self.file
@@ -88,478 +87,11 @@ impl ArtifactError {
 const REGENERATE: &str = "regenerate it with `jazz-tools validate`";
 
 // ============================================================================
-// The file
+// Codegen metadata
 // ============================================================================
 
-/// `jazz.app.json` as it is on disk.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AppArtifact {
-    /// Major version of this format; readers refuse others.
-    pub format: u32,
-    /// Hash of the schema version the app's code is written against.
-    pub current: String,
-    /// Every schema version the app still ships, oldest first.
-    pub schemas: Vec<ArtifactSchema>,
-    #[serde(default)]
-    pub migrations: Vec<ArtifactMigration>,
-    /// Authoring metadata for typed code in each language. It never
-    /// affects a schema hash or a bundle id.
-    #[serde(default)]
-    pub codegen: Codegen,
-}
-
-/// `jazz.permissions.json` as it is on disk: what only a backend reads.
-/// Clients ship `jazz.app.json` alone, so they never carry the app's
-/// policies.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PermissionsArtifact {
-    /// Major version of this format; readers refuse others.
-    pub format: u32,
-    /// Hash of the schema the permissions were compiled for: the `current`
-    /// of the `jazz.app.json` written with them.
-    pub schema: String,
-    /// Permissions for `schema`, by table.
-    #[serde(default)]
-    pub permissions: BTreeMap<String, ArtifactTablePolicies>,
-    /// Id of the permissions bundle `schema` and `permissions` make.
-    pub bundle: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactSchema {
-    pub hash: String,
-    pub tables: BTreeMap<String, ArtifactTable>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactTable {
-    pub columns: Vec<ArtifactColumn>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub indexed_columns: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub composite_indexes: Vec<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub branch_by: Vec<String>,
-    #[serde(default, skip_serializing_if = "ArtifactHistory::is_full")]
-    pub history: ArtifactHistory,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ArtifactHistory {
-    #[default]
-    Full,
-    Latest,
-}
-
-impl ArtifactHistory {
-    fn is_full(&self) -> bool {
-        *self == Self::Full
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactColumn {
-    pub name: String,
-    pub column_type: ArtifactColumnType,
-    pub nullable: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub references: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub merge_strategy: Option<ColumnMergeStrategy>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", deny_unknown_fields)]
-pub enum ArtifactColumnType {
-    Integer {},
-    BigInt {},
-    Double {},
-    Boolean {},
-    Text {},
-    Timestamp {},
-    Uuid {},
-    TransactionId {},
-    Bytea {},
-    Enum {
-        variants: Vec<String>,
-    },
-    EnumPayload {
-        cases: Vec<ArtifactEnumCase>,
-    },
-    Json {
-        /// JSON Schema (draft-07) the values must satisfy.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        schema: Option<serde_json::Value>,
-    },
-    Array {
-        element: Box<ArtifactColumnType>,
-    },
-    Row {
-        columns: Vec<ArtifactColumn>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactEnumCase {
-    pub name: String,
-    pub fields: Vec<ArtifactColumn>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactMigration {
-    pub from: String,
-    pub to: String,
-    pub forward: Vec<ArtifactTableLens>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactTableLens {
-    pub table: String,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub added: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub removed: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub renamed_from: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub operations: Vec<ArtifactLensOp>,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", deny_unknown_fields)]
-pub enum ArtifactLensOp {
-    /// A column the target has and the source lacks; source rows read
-    /// `default` for it.
-    Introduce {
-        column: String,
-        column_type: ArtifactColumnType,
-        default: Value,
-    },
-    /// A column the source has and the target lacks; going back, target
-    /// rows read `default` for it.
-    Drop {
-        column: String,
-        column_type: ArtifactColumnType,
-        default: Value,
-    },
-    Rename {
-        from: String,
-        to: String,
-    },
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactTablePolicies {
-    #[serde(default, skip_serializing_if = "ArtifactOperationPolicy::is_empty")]
-    pub select: ArtifactOperationPolicy,
-    #[serde(default, skip_serializing_if = "ArtifactOperationPolicy::is_empty")]
-    pub insert: ArtifactOperationPolicy,
-    #[serde(default, skip_serializing_if = "ArtifactOperationPolicy::is_empty")]
-    pub update: ArtifactOperationPolicy,
-    #[serde(default, skip_serializing_if = "ArtifactOperationPolicy::is_empty")]
-    pub delete: ArtifactOperationPolicy,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactOperationPolicy {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub using: Option<ArtifactPolicyExpr>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub with_check: Option<ArtifactPolicyExpr>,
-}
-
-impl ArtifactOperationPolicy {
-    fn is_empty(&self) -> bool {
-        self.using.is_none() && self.with_check.is_none()
-    }
-}
-
-/// [`PolicyExpr`], with relation expressions in this file's form.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", deny_unknown_fields)]
-pub enum ArtifactPolicyExpr {
-    Cmp {
-        column: String,
-        op: CmpOp,
-        value: ArtifactPolicyValue,
-    },
-    SessionCmp {
-        path: Vec<String>,
-        op: CmpOp,
-        value: Value,
-    },
-    IsNull {
-        column: String,
-    },
-    SessionIsNull {
-        path: Vec<String>,
-    },
-    IsNotNull {
-        column: String,
-    },
-    SessionIsNotNull {
-        path: Vec<String>,
-    },
-    Contains {
-        column: String,
-        value: ArtifactPolicyValue,
-    },
-    SessionContains {
-        path: Vec<String>,
-        value: Value,
-    },
-    In {
-        column: String,
-        session_path: Vec<String>,
-    },
-    InList {
-        column: String,
-        values: Vec<ArtifactPolicyValue>,
-    },
-    SessionInList {
-        path: Vec<String>,
-        values: Vec<Value>,
-    },
-    Exists {
-        table: String,
-        condition: Box<ArtifactPolicyExpr>,
-    },
-    ExistsRel {
-        rel: ArtifactRelationExpr,
-    },
-    Inherits {
-        operation: Operation,
-        via_column: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_depth: Option<usize>,
-    },
-    InheritsReferencing {
-        operation: Operation,
-        source_table: String,
-        via_column: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_depth: Option<usize>,
-    },
-    And {
-        exprs: Vec<ArtifactPolicyExpr>,
-    },
-    Or {
-        exprs: Vec<ArtifactPolicyExpr>,
-    },
-    Not {
-        expr: Box<ArtifactPolicyExpr>,
-    },
-    True {},
-    False {},
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", deny_unknown_fields)]
-pub enum ArtifactPolicyValue {
-    Literal { value: Value },
-    SessionRef { path: Vec<String> },
-}
-
-/// [`RelationExpr`], internally tagged. (The engine's own form is
-/// externally tagged because it is also postcard-encoded on the query wire,
-/// which internal tags don't support.)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", deny_unknown_fields)]
-pub enum ArtifactRelationExpr {
-    TableScan {
-        table: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        alias: Option<String>,
-    },
-    Filter {
-        input: Box<ArtifactRelationExpr>,
-        predicate: ArtifactPredicate,
-    },
-    Union {
-        inputs: Vec<ArtifactUnionArm>,
-    },
-    Join {
-        left: Box<ArtifactRelationExpr>,
-        right: Box<ArtifactRelationExpr>,
-        on: Vec<ArtifactJoinCondition>,
-        join_kind: ArtifactJoinKind,
-    },
-    Project {
-        input: Box<ArtifactRelationExpr>,
-        columns: Vec<ArtifactProjectColumn>,
-    },
-    Gather {
-        seed: Box<ArtifactRelationExpr>,
-        step: Box<ArtifactRelationExpr>,
-        frontier_key: ArtifactKeyRef,
-        /// Maximum recursion depth; absent means until a fixpoint.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_depth: Option<usize>,
-        dedupe_key: Vec<ArtifactKeyRef>,
-    },
-    Distinct {
-        input: Box<ArtifactRelationExpr>,
-        key: Vec<ArtifactKeyRef>,
-    },
-    OrderBy {
-        input: Box<ArtifactRelationExpr>,
-        terms: Vec<ArtifactOrderBy>,
-    },
-    Offset {
-        input: Box<ArtifactRelationExpr>,
-        offset: usize,
-    },
-    Limit {
-        input: Box<ArtifactRelationExpr>,
-        limit: usize,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactUnionArm {
-    pub label: String,
-    pub input: ArtifactRelationExpr,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactJoinCondition {
-    pub left: ArtifactColumnRef,
-    pub right: ArtifactColumnRef,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ArtifactJoinKind {
-    Inner,
-    Left,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactProjectColumn {
-    pub alias: String,
-    pub expr: ArtifactKeyRef,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactOrderBy {
-    pub column: ArtifactColumnRef,
-    pub direction: ArtifactDirection,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ArtifactDirection {
-    Asc,
-    Desc,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactColumnRef {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
-    pub column: String,
-}
-
-/// A column or a row id, as join keys, dedupe keys and projections name
-/// them.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", deny_unknown_fields)]
-pub enum ArtifactKeyRef {
-    Column { column: ArtifactColumnRef },
-    RowId { row: ArtifactRowId },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ArtifactRowId {
-    Current,
-    Outer,
-    Frontier,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", deny_unknown_fields)]
-pub enum ArtifactPredicate {
-    Cmp {
-        left: ArtifactColumnRef,
-        op: RelationCmpOp,
-        right: ArtifactValueRef,
-    },
-    IsNull {
-        column: ArtifactColumnRef,
-    },
-    IsNotNull {
-        column: ArtifactColumnRef,
-    },
-    In {
-        left: ArtifactColumnRef,
-        values: Vec<ArtifactValueRef>,
-    },
-    Contains {
-        left: ArtifactColumnRef,
-        right: ArtifactValueRef,
-    },
-    EnumMatch {
-        column: ArtifactColumnRef,
-        case: String,
-        payload: Box<ArtifactPredicate>,
-    },
-    And {
-        exprs: Vec<ArtifactPredicate>,
-    },
-    Or {
-        exprs: Vec<ArtifactPredicate>,
-    },
-    Not {
-        expr: Box<ArtifactPredicate>,
-    },
-    True {},
-    False {},
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", deny_unknown_fields)]
-pub enum ArtifactValueRef {
-    /// A literal in the relation IR's JSON form, kept as the engine reads it.
-    Literal {
-        value: serde_json::Value,
-    },
-    Param {
-        name: String,
-    },
-    SessionRef {
-        path: Vec<String>,
-    },
-    OuterColumn {
-        column: ArtifactColumnRef,
-    },
-    FrontierColumn {
-        column: ArtifactColumnRef,
-    },
-    RowId {
-        row: ArtifactRowId,
-    },
-}
-
-/// What typed code in each language needs beyond the engine's schema.
+/// What typed code in each language needs beyond the engine's schema: the
+/// relations, the columns only TypeScript computes, the exported slices.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Codegen {
@@ -601,11 +133,20 @@ pub enum TsOnlyColumn {
     Transform { column: String },
 }
 
+impl Codegen {
+    fn relations(&self) -> BTreeMap<String, BTreeMap<String, CodegenRelation>> {
+        self.tables
+            .iter()
+            .map(|(table, info)| (table.clone(), info.relations.clone()))
+            .collect()
+    }
+}
+
 // ============================================================================
 // Reading
 // ============================================================================
 
-/// A `jazz.app.json` that passed every check.
+/// An app's files that passed every check.
 #[derive(Debug, Clone)]
 pub struct LoadedApp {
     history: History,
@@ -687,72 +228,38 @@ impl LoadedApp {
     }
 }
 
-/// Read and check an app's two files, as a backend does: `app` is its
-/// `jazz.app.json` and `permissions` its `jazz.permissions.json`, which
-/// must have been written together (its `schema` is the app's `current`).
+/// Read and check an app's two files, as a backend does.
 pub fn load(app: &[u8], permissions: &[u8]) -> Result<LoadedApp, ArtifactError> {
-    let artifact: AppArtifact = parse(APP_FILE, app)?;
-    let permissions: PermissionsArtifact = parse(PERMISSIONS_FILE, permissions)?;
-    check(artifact, permissions, BundleCheck::Verify)
-}
-
-/// `json` as the file `file`, once its `format` is one this version reads.
-fn parse<T: serde::de::DeserializeOwned>(
-    file: &'static str,
-    json: &[u8],
-) -> Result<T, ArtifactError> {
-    serde_json::from_value(read_format(file, json)?)
-        .map_err(|error| ArtifactError::in_file(file, format!("{error}; {REGENERATE}")))
-}
-
-/// The file as JSON, once its `format` is one this version reads. The
-/// format comes first, so a file from a newer Jazz is refused for what it is
-/// rather than for the fields this version doesn't know.
-fn read_format(file: &'static str, json: &[u8]) -> Result<serde_json::Value, ArtifactError> {
-    let refuse = |message: String| ArtifactError::in_file(file, message);
-    let raw: serde_json::Value =
-        serde_json::from_slice(json).map_err(|error| refuse(format!("not JSON: {error}")))?;
-    match raw.get("format").and_then(serde_json::Value::as_u64) {
-        Some(format) if format == u64::from(FORMAT) => Ok(raw),
-        Some(format) => Err(refuse(format!(
-            "format {format} is not supported by this version of Jazz, which reads format {FORMAT}"
-        ))),
-        None if raw.get("format").is_none() => Err(refuse("no `format`".into())),
-        None => Err(refuse(format!(
-            "`format` must be the integer {FORMAT}, not {}",
-            raw["format"]
-        ))),
-    }
-}
-
-/// `jazz.app.json` as a client reads it: its codegen section is skipped
-/// unread, so a client build carries no relation code.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ClientArtifact {
-    #[allow(dead_code)]
-    format: u32,
-    current: String,
-    schemas: Vec<ArtifactSchema>,
-    #[serde(default)]
-    migrations: Vec<ArtifactMigration>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    codegen: serde::de::IgnoredAny,
+    let app_file = read_app(app)?;
+    let history = check_history(&app_file)?;
+    // Lenses, as a deployment and `jazz-tools validate` check them. Where a
+    // migration sits in the whole history is the store's to judge: its
+    // catalogue may hold versions this file no longer ships.
+    check_decoded_client_migrations(history.bundle(), history.current)
+        .map_err(|error| ArtifactError::new(format!("migrations: {error}")))?;
+    check_codegen(&app_file.codegen, history.current_schema())?;
+    let relations = app_file.codegen.relations();
+    let permissions_json = read_format(PERMISSIONS_FILE, permissions)?;
+    let permissions =
+        permissions_file::read(&permissions_json, history.current_schema(), &relations)
+            .map_err(|refusal| ArtifactError::at(PERMISSIONS_FILE, refusal))?;
+    let bundle = compute_bundle(history.current_schema(), &permissions)?;
+    Ok(LoadedApp {
+        history,
+        bundle,
+        permissions,
+        codegen: app_file.codegen,
+    })
 }
 
 /// Read a `jazz.app.json` for a client: the schema versions and lenses it
-/// opens along. It runs [`load`]'s checks of the versions and migrations
-/// ([`check_history`]) and lowers every lens as [`load`] does, refusing one
-/// that doesn't lower. It skips what a client never uses (the codegen
-/// section's references) and the deployment's review of each lens, which
-/// the writer ran and every backend runs again before it publishes:
-/// carrying that review would grow a client build by about half again what
-/// this reader costs. The permissions are in `jazz.permissions.json`, which
-/// a client never has.
+/// opens along. Its references are checked as [`load`] checks them and
+/// every lens is lowered; the deployment's review of each lens is the
+/// writer's and every backend's, and the codegen metadata a code
+/// generator's.
 pub fn load_client(json: &[u8]) -> Result<crate::db::Migrations, ArtifactError> {
-    let artifact: ClientArtifact = parse(APP_FILE, json)?;
-    let history = check_history(&artifact.current, &artifact.schemas, &artifact.migrations)?;
+    let app_file = read_app(json)?;
+    let history = check_history(&app_file)?;
     let (schemas, lenses) = lower_client_migrations(history.bundle())
         .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
     Ok(crate::db::Migrations { schemas, lenses })
@@ -767,34 +274,44 @@ pub fn client_migrations(app: Option<&[u8]>) -> Result<crate::db::Migrations, St
     }
 }
 
-/// `config` opening along what `app` (a `jazz.app.json`) ships.
-pub fn with_client_migrations(
-    config: crate::db::DbConfig,
-    app: Option<&[u8]>,
-) -> Result<crate::db::DbConfig, String> {
-    match app {
-        None => Ok(config),
-        Some(_) => {
-            let migrations = client_migrations(app)?;
-            Ok(config.with_migrations(migrations.schemas, migrations.lenses))
-        }
+fn read_app(json: &[u8]) -> Result<app_file::AppFile, ArtifactError> {
+    let root = read_format(APP_FILE, json)?;
+    app_file::read(&root).map_err(|refusal| ArtifactError::at(APP_FILE, refusal))
+}
+
+/// The file as JSON, once its `format` is one this version reads. The
+/// format comes first, so a file from a newer Jazz is refused for what it is
+/// rather than for the fields this version doesn't know.
+fn read_format(file: &'static str, json: &[u8]) -> Result<Json, ArtifactError> {
+    let refuse = |message: String| ArtifactError::in_file(file, message);
+    let root = json::parse(json).map_err(refuse)?;
+    let Some(object) = root.as_object() else {
+        return Err(refuse(format!(
+            "must be a JSON object, not {}",
+            root.kind()
+        )));
+    };
+    match object.iter().find(|(k, _)| k == "format").map(|(_, v)| v) {
+        None => Err(refuse(format!(
+            "no `format`; the file starts {{ \"format\": {FORMAT}, … }}"
+        ))),
+        Some(Json::Number(n)) if n == &FORMAT.to_string() => Ok(root),
+        Some(Json::Number(n)) if n.parse::<u64>().is_ok() => Err(refuse(format!(
+            "format {n} is not supported by this version of Jazz, which reads format {FORMAT}"
+        ))),
+        Some(other) => Err(refuse(format!(
+            "`format` must be the integer {FORMAT}, not {}",
+            json::print(other).trim_end()
+        ))),
     }
 }
 
-/// Whether [`check`] compares the file's `bundle` with the computed id, or
-/// leaves it to the writer to fill in.
-#[derive(PartialEq)]
-enum BundleCheck {
-    Verify,
-    Compute,
-}
-
-/// What [`load`] and [`load_client`] both check of a file: its schema
-/// versions and the migrations between them.
+/// What [`load`] and [`load_client`] check of the app file's history: its
+/// schema versions and the migrations between them.
 #[derive(Debug, Clone)]
 struct History {
     current: SchemaHash,
-    /// Oldest first, policy-free.
+    /// Oldest first, policy-free, the current one last.
     schemas: Vec<(SchemaHash, Schema)>,
     migrations: Vec<PublishMigrationRequest>,
 }
@@ -823,120 +340,48 @@ impl History {
             .1
     }
 
-    /// The schema versions and lenses a client opens along, once [`check`]
-    /// reviewed the lenses.
     fn client_migrations(&self) -> crate::db::Migrations {
         let (schemas, lenses) = lower_client_migrations(self.bundle()).expect("checked on load");
         crate::db::Migrations { schemas, lenses }
     }
 }
 
-/// Each schema must match its hash and appear once, and `current` and every
-/// migration endpoint must be among them.
-fn check_history(
-    current: &str,
-    entries: &[ArtifactSchema],
-    artifact_migrations: &[ArtifactMigration],
-) -> Result<History, ArtifactError> {
-    let current = hash_field("current", current)?;
-
-    let mut schemas = Vec::new();
-    for (index, entry) in entries.iter().enumerate() {
-        let claimed = hash_field(&format!("schemas[{index}].hash"), &entry.hash)?;
-        let schema = schema_from_artifact(&entry.tables);
-        let actual = SchemaHash::compute(&schema);
-        if actual != claimed {
+/// Hash every version (the file names none), refuse repeats, and give each
+/// migration its endpoints' hashes.
+fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
+    let current = SchemaHash::compute(&file.current);
+    let mut schemas: Vec<(SchemaHash, Schema)> = Vec::new();
+    let mut by_name = BTreeMap::new();
+    for (name, schema) in &file.history {
+        let hash = SchemaHash::compute(schema);
+        if hash == current {
             return Err(ArtifactError::new(format!(
-                "schemas[{index}].hash is {claimed} but the schema hashes to {actual}; {REGENERATE}"
+                "history.{name} is the current schema; a version appears once"
             )));
         }
-        if schemas.iter().any(|(hash, _)| *hash == actual) {
+        if let Some((other, _)) = by_name.iter().find(|(_, h)| **h == hash) {
             return Err(ArtifactError::new(format!(
-                "schemas[{index}] repeats schema {actual}"
+                "history.{name} repeats history.{other}"
             )));
         }
-        schemas.push((actual, schema));
+        by_name.insert(name.clone(), hash);
+        schemas.push((hash, schema.clone()));
     }
-    if !schemas.iter().any(|(hash, _)| *hash == current) {
-        return Err(ArtifactError::new(format!(
-            "current schema {current} is not among `schemas`"
-        )));
-    }
-
-    let mut migrations = Vec::new();
-    for (index, migration) in artifact_migrations.iter().enumerate() {
-        for (field, hash) in [("from", &migration.from), ("to", &migration.to)] {
-            let path = format!("migrations[{index}].{field}");
-            let hash = hash_field(&path, hash)?;
-            if !schemas.iter().any(|(known, _)| *known == hash) {
-                return Err(ArtifactError::new(format!(
-                    "{path} names schema {hash}, which is not among `schemas`"
-                )));
-            }
-        }
-        migrations.push(migration_from_artifact(migration));
-    }
-
+    schemas.push((current, file.current.clone()));
+    let migrations = file
+        .migrations
+        .iter()
+        .map(|(from, to, forward)| PublishMigrationRequest {
+            from_hash: by_name[from].to_string(),
+            to_hash: to.as_ref().map_or(current, |to| by_name[to]).to_string(),
+            forward: forward.clone(),
+        })
+        .collect();
     Ok(History {
         current,
         schemas,
         migrations,
     })
-}
-
-fn check(
-    artifact: AppArtifact,
-    permission_file: PermissionsArtifact,
-    bundle_check: BundleCheck,
-) -> Result<LoadedApp, ArtifactError> {
-    let history = check_history(&artifact.current, &artifact.schemas, &artifact.migrations)?;
-    // Lenses, as a deployment and `jazz-tools validate` check them. Where a
-    // migration sits in the whole history is the store's to judge: its
-    // catalogue may hold versions this file no longer ships.
-    check_decoded_client_migrations(history.bundle(), history.current)
-        .map_err(|error| ArtifactError::new(format!("migrations: {error}")))?;
-    let current_schema = history.current_schema();
-    check_codegen(&artifact.codegen, current_schema)?;
-
-    let refuse = |message: String| ArtifactError::in_file(PERMISSIONS_FILE, message);
-    let schema = parse_schema_hash(&permission_file.schema)
-        .map_err(|error| refuse(format!("schema: {error}")))?;
-    if schema != history.current {
-        return Err(refuse(format!(
-            "`schema` is {schema} but {APP_FILE}'s current schema is {}: the two files were not written together; {REGENERATE}",
-            history.current
-        )));
-    }
-    let mut permissions = Permissions::new();
-    for (table, policies) in &permission_file.permissions {
-        let name = TableName::from(table.as_str());
-        if !current_schema.contains_key(&name) {
-            return Err(refuse(format!(
-                "permissions.{table}: the current schema has no table {table}"
-            )));
-        }
-        permissions.insert(name, table_policies_from_artifact(policies));
-    }
-    let bundle = compute_bundle(current_schema, &permissions)?;
-    if bundle_check == BundleCheck::Verify {
-        let claimed = BundleId::from_hex(&permission_file.bundle)
-            .ok_or_else(|| refuse("`bundle` is not a 64-character hex id".into()))?;
-        if claimed != bundle {
-            return Err(refuse(format!(
-                "`bundle` is {claimed} but the current schema and permissions make {bundle}; {REGENERATE}"
-            )));
-        }
-    }
-    Ok(LoadedApp {
-        history,
-        bundle,
-        permissions,
-        codegen: artifact.codegen,
-    })
-}
-
-fn hash_field(path: &str, text: &str) -> Result<SchemaHash, ArtifactError> {
-    parse_schema_hash(text).map_err(|error| ArtifactError::new(format!("{path}: {error}")))
 }
 
 /// The bundle id the server computes when this backend publishes: the
@@ -1065,954 +510,133 @@ pub struct WrittenApp {
 
 /// Build, check and render an app's `jazz.app.json` and
 /// `jazz.permissions.json`: the files' only writer. The texts are
-/// canonical, so committed files can be compared byte for byte with a fresh
-/// build.
+/// canonical, so committed files can be compared byte for byte with a
+/// fresh build. What the files can't express yet is refused with an error
+/// saying "not supported in … yet", naming the table, column or policy; and
+/// what they express must read back to exactly the engine input (schema
+/// hashes, lenses, permissions), or it is refused the same way.
 pub fn write(input: ArtifactInput) -> Result<WrittenApp, ArtifactError> {
-    let schemas = input
+    let current_hash = parse_schema_hash(&input.current)
+        .map_err(|error| ArtifactError::new(format!("current: {error}")))?;
+    let schemas: Vec<(SchemaHash, Schema)> = input
         .schemas
         .into_iter()
-        .enumerate()
-        .map(|(index, schema)| {
+        .map(|schema| {
             let schema = structural(schema);
-            Ok(ArtifactSchema {
-                hash: SchemaHash::compute(&schema).to_string(),
-                tables: schema_to_artifact(&schema)
-                    .map_err(|error| ArtifactError::new(format!("schemas[{index}]: {error}")))?,
-            })
+            (SchemaHash::compute(&schema), schema)
         })
+        .collect();
+    let Some(current) = schemas
+        .iter()
+        .find(|(hash, _)| *hash == current_hash)
+        .map(|(_, schema)| schema.clone())
+    else {
+        return Err(ArtifactError::new(format!(
+            "current schema {current_hash} is not among the schemas given"
+        )));
+    };
+    let names: Vec<(SchemaHash, String)> = schemas
+        .iter()
+        .filter(|(hash, _)| *hash != current_hash)
+        .map(|(hash, _)| (*hash, app_file::version_name(hash)))
+        .collect();
+    let history: Vec<(String, &Schema)> = schemas
+        .iter()
+        .filter(|(hash, _)| *hash != current_hash)
+        .map(|(hash, schema)| (app_file::version_name(hash), schema))
+        .collect();
+    let name_of = |hash: &str| -> Result<Option<String>, ArtifactError> {
+        let hash = parse_schema_hash(hash).map_err(ArtifactError::new)?;
+        if hash == current_hash {
+            return Ok(None);
+        }
+        names
+            .iter()
+            .find(|(h, _)| *h == hash)
+            .map(|(_, name)| Some(name.clone()))
+            .ok_or_else(|| {
+                ArtifactError::new(format!(
+                    "a migration names schema {hash}, which isn't given"
+                ))
+            })
+    };
+    let migrations = input
+        .migrations
+        .iter()
+        .map(|m| Ok((name_of(&m.from_hash)?, name_of(&m.to_hash)?, m)))
         .collect::<Result<Vec<_>, ArtifactError>>()?;
-    let permissions = input
+    let app_json = app_file::write(&current, &history, &migrations, &input.codegen)
+        .map_err(ArtifactError::new)?;
+    let relations = input.codegen.relations();
+    let permissions: Permissions = input
         .permissions
+        .into_iter()
+        .filter(|(_, p)| *p != TablePolicies::default())
+        .collect();
+    let permissions_json = permissions_file::write(&permissions, &current, &relations)
+        .map_err(|error| ArtifactError::in_file(PERMISSIONS_FILE, error))?;
+    let written = WrittenApp {
+        app: json::print(&with_schema(app_json, APP_SCHEMA_URL)),
+        permissions: json::print(&with_schema(permissions_json, PERMISSIONS_SCHEMA_URL)),
+    };
+
+    // Read the files back as a backend will.
+    let loaded = load(written.app.as_bytes(), written.permissions.as_bytes())?;
+    let round_trip = |what: &str| {
+        ArtifactError::new(expr::unsupported(&format!(
+            "{what}, which the file can't express exactly,"
+        )))
+    };
+    if loaded.current_hash() != current_hash {
+        return Err(round_trip("the current schema"));
+    }
+    let given: Vec<SchemaHash> = schemas.iter().map(|(h, _)| *h).collect();
+    if loaded
+        .schemas()
         .iter()
-        .filter(|(_, policies)| **policies != TablePolicies::default())
-        .map(|(table, policies)| {
-            Ok((
-                table.as_str().to_string(),
-                table_policies_to_artifact(policies).map_err(|error| {
-                    ArtifactError::in_file(
-                        PERMISSIONS_FILE,
-                        format!("permissions.{table}: {error}"),
-                    )
-                })?,
-            ))
-        })
-        .collect::<Result<BTreeMap<_, _>, ArtifactError>>()?;
-    let artifact = AppArtifact {
-        format: FORMAT,
-        current: input.current.clone(),
-        schemas,
-        migrations: input
-            .migrations
+        .map(|(h, _)| *h)
+        .collect::<Vec<_>>()
+        .len()
+        != given.len()
+        || !given
             .iter()
-            .map(migration_to_artifact)
-            .collect::<Result<_, _>>()?,
-        codegen: input.codegen,
+            .all(|h| loaded.schemas().iter().any(|(l, _)| l == h))
+    {
+        return Err(round_trip("an earlier schema version"));
+    }
+    for (table, policies) in &permissions {
+        if loaded.permissions().get(table) != Some(policies) {
+            return Err(ArtifactError::in_file(
+                PERMISSIONS_FILE,
+                expr::unsupported(&format!(
+                    "tables.{table}: a policy that doesn't read back the same"
+                )),
+            ));
+        }
+    }
+    if loaded.permissions().len() != permissions.len() {
+        return Err(round_trip("the permissions"));
+    }
+    let normal = |migrations: &[PublishMigrationRequest]| {
+        let mut migrations = migrations.to_vec();
+        for migration in &mut migrations {
+            migration.forward.sort_by(|a, b| a.table.cmp(&b.table));
+        }
+        serde_json::to_value(migrations).ok()
     };
-    let mut permission_file = PermissionsArtifact {
-        format: FORMAT,
-        schema: input.current,
-        permissions,
-        bundle: String::new(),
+    if normal(loaded.migrations()) != normal(&input.migrations) {
+        return Err(round_trip("a migration"));
+    }
+    Ok(written)
+}
+
+/// `file` with `$schema` first.
+fn with_schema(file: Json, url: &str) -> Json {
+    let Json::Object(mut entries) = file else {
+        return file;
     };
-    // Check the files as a reader will, computing the bundle id on the way.
-    permission_file.bundle = check(
-        artifact.clone(),
-        permission_file.clone(),
-        BundleCheck::Compute,
-    )?
-    .bundle
-    .to_hex();
-    Ok(WrittenApp {
-        app: render(&artifact),
-        permissions: render(&permission_file),
-    })
-}
-
-/// The canonical text of either file: object keys sorted, arrays in their
-/// order, two-space indent, trailing newline.
-pub fn render<T: Serialize>(artifact: &T) -> String {
-    fn sorted(value: serde_json::Value) -> serde_json::Value {
-        match value {
-            serde_json::Value::Object(map) => {
-                let entries: BTreeMap<String, serde_json::Value> =
-                    map.into_iter().map(|(k, v)| (k, sorted(v))).collect();
-                serde_json::Value::Object(entries.into_iter().collect())
-            }
-            serde_json::Value::Array(items) => {
-                serde_json::Value::Array(items.into_iter().map(sorted).collect())
-            }
-            other => other,
-        }
-    }
-    let value = sorted(serde_json::to_value(artifact).expect("artifact serializes"));
-    let mut text = serde_json::to_string_pretty(&value).expect("JSON value serializes");
-    text.push('\n');
-    text
-}
-
-// ============================================================================
-// Engine forms <-> file forms
-// ============================================================================
-
-fn schema_to_artifact(schema: &Schema) -> Result<BTreeMap<String, ArtifactTable>, String> {
-    schema
-        .iter()
-        .map(|(name, table)| {
-            let columns = table
-                .columns
-                .columns
-                .iter()
-                .map(column_to_artifact)
-                .collect::<Result<_, _>>()
-                .map_err(|error| format!("table {name}: {error}"))?;
-            Ok((
-                name.as_str().to_string(),
-                ArtifactTable {
-                    columns,
-                    indexed_columns: table
-                        .indexed_columns
-                        .as_ref()
-                        .map(|columns| columns.iter().map(|c| c.as_str().to_string()).collect()),
-                    composite_indexes: table
-                        .composite_indexes
-                        .iter()
-                        .map(|index| index.iter().map(|c| c.as_str().to_string()).collect())
-                        .collect(),
-                    branch_by: table
-                        .branch_by
-                        .iter()
-                        .map(|c| c.as_str().to_string())
-                        .collect(),
-                    history: match table.history {
-                        HistoryRetention::Full => ArtifactHistory::Full,
-                        HistoryRetention::Latest => ArtifactHistory::Latest,
-                    },
-                },
-            ))
-        })
-        .collect()
-}
-
-fn schema_from_artifact(tables: &BTreeMap<String, ArtifactTable>) -> Schema {
-    let mut schema = Schema::new();
-    for (name, table) in tables {
-        let columns = table.columns.iter().map(column_from_artifact).collect();
-        let table_schema = TableSchema {
-            columns: RowDescriptor { columns },
-            indexed_columns: table
-                .indexed_columns
-                .as_ref()
-                .map(|columns| columns.iter().map(|c| c.as_str().into()).collect()),
-            composite_indexes: table
-                .composite_indexes
-                .iter()
-                .map(|index| index.iter().map(|c| c.as_str().into()).collect())
-                .collect(),
-            policies: TablePolicies::default(),
-            branch_by: table.branch_by.iter().map(|c| c.as_str().into()).collect(),
-            history: match table.history {
-                ArtifactHistory::Full => HistoryRetention::Full,
-                ArtifactHistory::Latest => HistoryRetention::Latest,
-            },
-        };
-        schema.insert(TableName::from(name.as_str()), table_schema);
-    }
-    schema
-}
-
-fn column_to_artifact(column: &ColumnDescriptor) -> Result<ArtifactColumn, String> {
-    Ok(ArtifactColumn {
-        name: column.name_str().to_string(),
-        column_type: column_type_to_artifact(&column.column_type)
-            .map_err(|error| format!("column {}: {error}", column.name_str()))?,
-        nullable: column.nullable,
-        references: column.references.as_ref().map(|t| t.as_str().to_string()),
-        default: column.default.clone(),
-        merge_strategy: column.merge_strategy,
-    })
-}
-
-fn column_from_artifact(column: &ArtifactColumn) -> ColumnDescriptor {
-    let mut descriptor = ColumnDescriptor::new(
-        column.name.as_str(),
-        column_type_from_artifact(&column.column_type),
-    );
-    descriptor.nullable = column.nullable;
-    descriptor.references = column.references.as_deref().map(TableName::from);
-    descriptor.default = column.default.clone();
-    descriptor.merge_strategy = column.merge_strategy;
-    descriptor
-}
-
-fn column_type_to_artifact(column_type: &ColumnType) -> Result<ArtifactColumnType, String> {
-    Ok(match column_type {
-        ColumnType::Integer => ArtifactColumnType::Integer {},
-        ColumnType::BigInt => ArtifactColumnType::BigInt {},
-        ColumnType::Double => ArtifactColumnType::Double {},
-        ColumnType::Boolean => ArtifactColumnType::Boolean {},
-        ColumnType::Text => ArtifactColumnType::Text {},
-        ColumnType::Timestamp => ArtifactColumnType::Timestamp {},
-        ColumnType::Uuid => ArtifactColumnType::Uuid {},
-        ColumnType::TransactionId => ArtifactColumnType::TransactionId {},
-        ColumnType::Bytea => ArtifactColumnType::Bytea {},
-        ColumnType::Enum { variants } => ArtifactColumnType::Enum {
-            variants: variants.clone(),
-        },
-        ColumnType::EnumPayload { cases } => ArtifactColumnType::EnumPayload {
-            cases: cases
-                .iter()
-                .map(|case| {
-                    Ok(ArtifactEnumCase {
-                        name: case.name.clone(),
-                        fields: case
-                            .fields
-                            .iter()
-                            .map(column_to_artifact)
-                            .collect::<Result<_, String>>()?,
-                    })
-                })
-                .collect::<Result<_, String>>()?,
-        },
-        ColumnType::Json { schema } => ArtifactColumnType::Json {
-            schema: schema.clone(),
-        },
-        ColumnType::Array { element } => ArtifactColumnType::Array {
-            element: Box::new(column_type_to_artifact(element)?),
-        },
-        ColumnType::Row { columns } => ArtifactColumnType::Row {
-            columns: columns
-                .columns
-                .iter()
-                .map(column_to_artifact)
-                .collect::<Result<_, _>>()?,
-        },
-        ColumnType::ScalarEnum { .. } | ColumnType::CatalogueEnumPayload { .. } => {
-            return Err(
-                "catalogue-native enum types are not supported in jazz.app.json yet".into(),
-            );
-        }
-    })
-}
-
-fn column_type_from_artifact(column_type: &ArtifactColumnType) -> ColumnType {
-    match column_type {
-        ArtifactColumnType::Integer {} => ColumnType::Integer,
-        ArtifactColumnType::BigInt {} => ColumnType::BigInt,
-        ArtifactColumnType::Double {} => ColumnType::Double,
-        ArtifactColumnType::Boolean {} => ColumnType::Boolean,
-        ArtifactColumnType::Text {} => ColumnType::Text,
-        ArtifactColumnType::Timestamp {} => ColumnType::Timestamp,
-        ArtifactColumnType::Uuid {} => ColumnType::Uuid,
-        ArtifactColumnType::TransactionId {} => ColumnType::TransactionId,
-        ArtifactColumnType::Bytea {} => ColumnType::Bytea,
-        ArtifactColumnType::Enum { variants } => ColumnType::Enum {
-            variants: variants.clone(),
-        },
-        ArtifactColumnType::EnumPayload { cases } => ColumnType::EnumPayload {
-            cases: cases
-                .iter()
-                .map(|case| EnumCaseDescriptor {
-                    name: case.name.clone(),
-                    fields: case.fields.iter().map(column_from_artifact).collect(),
-                })
-                .collect(),
-        },
-        ArtifactColumnType::Json { schema } => ColumnType::Json {
-            schema: schema.clone(),
-        },
-        ArtifactColumnType::Array { element } => ColumnType::Array {
-            element: Box::new(column_type_from_artifact(element)),
-        },
-        ArtifactColumnType::Row { columns } => ColumnType::Row {
-            columns: Box::new(RowDescriptor {
-                columns: columns.iter().map(column_from_artifact).collect(),
-            }),
-        },
-    }
-}
-
-fn migration_to_artifact(
-    migration: &PublishMigrationRequest,
-) -> Result<ArtifactMigration, ArtifactError> {
-    let path = format!("migration {} -> {}", migration.from_hash, migration.to_hash);
-    Ok(ArtifactMigration {
-        from: migration.from_hash.clone(),
-        to: migration.to_hash.clone(),
-        forward: migration
-            .forward
-            .iter()
-            .map(|lens| {
-                Ok(ArtifactTableLens {
-                    table: lens.table.clone(),
-                    added: lens.added,
-                    removed: lens.removed,
-                    renamed_from: lens.renamed_from.clone(),
-                    operations: lens
-                        .operations
-                        .iter()
-                        .map(|op| {
-                            Ok(match op {
-                                PublishLensOp::Introduce {
-                                    column,
-                                    column_type,
-                                    value,
-                                } => ArtifactLensOp::Introduce {
-                                    column: column.clone(),
-                                    column_type: column_type_to_artifact(column_type)?,
-                                    default: value.clone(),
-                                },
-                                PublishLensOp::Drop {
-                                    column,
-                                    column_type,
-                                    value,
-                                } => ArtifactLensOp::Drop {
-                                    column: column.clone(),
-                                    column_type: column_type_to_artifact(column_type)?,
-                                    default: value.clone(),
-                                },
-                                PublishLensOp::Rename { column, value } => ArtifactLensOp::Rename {
-                                    from: column.clone(),
-                                    to: value.clone(),
-                                },
-                            })
-                        })
-                        .collect::<Result<_, String>>()
-                        .map_err(|error| ArtifactError::new(format!("{path}: {error}")))?,
-                })
-            })
-            .collect::<Result<_, ArtifactError>>()?,
-    })
-}
-
-fn migration_from_artifact(migration: &ArtifactMigration) -> PublishMigrationRequest {
-    PublishMigrationRequest {
-        from_hash: migration.from.clone(),
-        to_hash: migration.to.clone(),
-        forward: migration
-            .forward
-            .iter()
-            .map(|lens| PublishTableLens {
-                table: lens.table.clone(),
-                added: lens.added,
-                removed: lens.removed,
-                renamed_from: lens.renamed_from.clone(),
-                operations: lens
-                    .operations
-                    .iter()
-                    .map(|op| match op {
-                        ArtifactLensOp::Introduce {
-                            column,
-                            column_type,
-                            default,
-                        } => PublishLensOp::Introduce {
-                            column: column.clone(),
-                            column_type: column_type_from_artifact(column_type),
-                            value: default.clone(),
-                        },
-                        ArtifactLensOp::Drop {
-                            column,
-                            column_type,
-                            default,
-                        } => PublishLensOp::Drop {
-                            column: column.clone(),
-                            column_type: column_type_from_artifact(column_type),
-                            value: default.clone(),
-                        },
-                        ArtifactLensOp::Rename { from, to } => PublishLensOp::Rename {
-                            column: from.clone(),
-                            value: to.clone(),
-                        },
-                    })
-                    .collect(),
-            })
-            .collect(),
-    }
-}
-
-fn table_policies_to_artifact(policies: &TablePolicies) -> Result<ArtifactTablePolicies, String> {
-    let operation = |policy: &OperationPolicy| -> Result<ArtifactOperationPolicy, String> {
-        Ok(ArtifactOperationPolicy {
-            using: policy.using.as_ref().map(policy_to_artifact).transpose()?,
-            with_check: policy
-                .with_check
-                .as_ref()
-                .map(policy_to_artifact)
-                .transpose()?,
-        })
-    };
-    Ok(ArtifactTablePolicies {
-        select: operation(&policies.select)?,
-        insert: operation(&policies.insert)?,
-        update: operation(&policies.update)?,
-        delete: operation(&policies.delete)?,
-    })
-}
-
-fn table_policies_from_artifact(policies: &ArtifactTablePolicies) -> TablePolicies {
-    let operation = |policy: &ArtifactOperationPolicy| OperationPolicy {
-        using: policy.using.as_ref().map(policy_from_artifact),
-        with_check: policy.with_check.as_ref().map(policy_from_artifact),
-    };
-    TablePolicies {
-        select: operation(&policies.select),
-        insert: operation(&policies.insert),
-        update: operation(&policies.update),
-        delete: operation(&policies.delete),
-    }
-}
-
-fn policy_value_to_artifact(value: &PolicyValue) -> ArtifactPolicyValue {
-    match value {
-        PolicyValue::Literal(value) => ArtifactPolicyValue::Literal {
-            value: value.clone(),
-        },
-        PolicyValue::SessionRef(path) => ArtifactPolicyValue::SessionRef { path: path.clone() },
-    }
-}
-
-fn policy_value_from_artifact(value: &ArtifactPolicyValue) -> PolicyValue {
-    match value {
-        ArtifactPolicyValue::Literal { value } => PolicyValue::Literal(value.clone()),
-        ArtifactPolicyValue::SessionRef { path } => PolicyValue::SessionRef(path.clone()),
-    }
-}
-
-fn policy_to_artifact(expr: &PolicyExpr) -> Result<ArtifactPolicyExpr, String> {
-    let all = |exprs: &[PolicyExpr]| -> Result<Vec<_>, String> {
-        exprs.iter().map(policy_to_artifact).collect()
-    };
-    Ok(match expr {
-        PolicyExpr::Cmp { column, op, value } => ArtifactPolicyExpr::Cmp {
-            column: column.clone(),
-            op: op.clone(),
-            value: policy_value_to_artifact(value),
-        },
-        PolicyExpr::SessionCmp { path, op, value } => ArtifactPolicyExpr::SessionCmp {
-            path: path.clone(),
-            op: op.clone(),
-            value: value.clone(),
-        },
-        PolicyExpr::IsNull { column } => ArtifactPolicyExpr::IsNull {
-            column: column.clone(),
-        },
-        PolicyExpr::SessionIsNull { path } => {
-            ArtifactPolicyExpr::SessionIsNull { path: path.clone() }
-        }
-        PolicyExpr::IsNotNull { column } => ArtifactPolicyExpr::IsNotNull {
-            column: column.clone(),
-        },
-        PolicyExpr::SessionIsNotNull { path } => {
-            ArtifactPolicyExpr::SessionIsNotNull { path: path.clone() }
-        }
-        PolicyExpr::Contains { column, value } => ArtifactPolicyExpr::Contains {
-            column: column.clone(),
-            value: policy_value_to_artifact(value),
-        },
-        PolicyExpr::SessionContains { path, value } => ArtifactPolicyExpr::SessionContains {
-            path: path.clone(),
-            value: value.clone(),
-        },
-        PolicyExpr::In {
-            column,
-            session_path,
-        } => ArtifactPolicyExpr::In {
-            column: column.clone(),
-            session_path: session_path.clone(),
-        },
-        PolicyExpr::InList { column, values } => ArtifactPolicyExpr::InList {
-            column: column.clone(),
-            values: values.iter().map(policy_value_to_artifact).collect(),
-        },
-        PolicyExpr::SessionInList { path, values } => ArtifactPolicyExpr::SessionInList {
-            path: path.clone(),
-            values: values.clone(),
-        },
-        PolicyExpr::Exists { table, condition } => ArtifactPolicyExpr::Exists {
-            table: table.clone(),
-            condition: Box::new(policy_to_artifact(condition)?),
-        },
-        PolicyExpr::ExistsRel { rel } => ArtifactPolicyExpr::ExistsRel {
-            rel: relation_to_artifact(rel),
-        },
-        PolicyExpr::Inherits {
-            operation,
-            via_column,
-            max_depth,
-        } => ArtifactPolicyExpr::Inherits {
-            operation: *operation,
-            via_column: via_column.clone(),
-            max_depth: *max_depth,
-        },
-        PolicyExpr::InheritsReferencing {
-            operation,
-            source_table,
-            via_column,
-            max_depth,
-        } => ArtifactPolicyExpr::InheritsReferencing {
-            operation: *operation,
-            source_table: source_table.clone(),
-            via_column: via_column.clone(),
-            max_depth: *max_depth,
-        },
-        PolicyExpr::And(exprs) => ArtifactPolicyExpr::And { exprs: all(exprs)? },
-        PolicyExpr::Or(exprs) => ArtifactPolicyExpr::Or { exprs: all(exprs)? },
-        PolicyExpr::Not(expr) => ArtifactPolicyExpr::Not {
-            expr: Box::new(policy_to_artifact(expr)?),
-        },
-        PolicyExpr::True => ArtifactPolicyExpr::True {},
-        PolicyExpr::False => ArtifactPolicyExpr::False {},
-    })
-}
-
-fn policy_from_artifact(expr: &ArtifactPolicyExpr) -> PolicyExpr {
-    let all = |exprs: &[ArtifactPolicyExpr]| exprs.iter().map(policy_from_artifact).collect();
-    match expr {
-        ArtifactPolicyExpr::Cmp { column, op, value } => PolicyExpr::Cmp {
-            column: column.clone(),
-            op: op.clone(),
-            value: policy_value_from_artifact(value),
-        },
-        ArtifactPolicyExpr::SessionCmp { path, op, value } => PolicyExpr::SessionCmp {
-            path: path.clone(),
-            op: op.clone(),
-            value: value.clone(),
-        },
-        ArtifactPolicyExpr::IsNull { column } => PolicyExpr::IsNull {
-            column: column.clone(),
-        },
-        ArtifactPolicyExpr::SessionIsNull { path } => {
-            PolicyExpr::SessionIsNull { path: path.clone() }
-        }
-        ArtifactPolicyExpr::IsNotNull { column } => PolicyExpr::IsNotNull {
-            column: column.clone(),
-        },
-        ArtifactPolicyExpr::SessionIsNotNull { path } => {
-            PolicyExpr::SessionIsNotNull { path: path.clone() }
-        }
-        ArtifactPolicyExpr::Contains { column, value } => PolicyExpr::Contains {
-            column: column.clone(),
-            value: policy_value_from_artifact(value),
-        },
-        ArtifactPolicyExpr::SessionContains { path, value } => PolicyExpr::SessionContains {
-            path: path.clone(),
-            value: value.clone(),
-        },
-        ArtifactPolicyExpr::In {
-            column,
-            session_path,
-        } => PolicyExpr::In {
-            column: column.clone(),
-            session_path: session_path.clone(),
-        },
-        ArtifactPolicyExpr::InList { column, values } => PolicyExpr::InList {
-            column: column.clone(),
-            values: values.iter().map(policy_value_from_artifact).collect(),
-        },
-        ArtifactPolicyExpr::SessionInList { path, values } => PolicyExpr::SessionInList {
-            path: path.clone(),
-            values: values.clone(),
-        },
-        ArtifactPolicyExpr::Exists { table, condition } => PolicyExpr::Exists {
-            table: table.clone(),
-            condition: Box::new(policy_from_artifact(condition)),
-        },
-        ArtifactPolicyExpr::ExistsRel { rel } => PolicyExpr::ExistsRel {
-            rel: relation_from_artifact(rel),
-        },
-        ArtifactPolicyExpr::Inherits {
-            operation,
-            via_column,
-            max_depth,
-        } => PolicyExpr::Inherits {
-            operation: *operation,
-            via_column: via_column.clone(),
-            max_depth: *max_depth,
-        },
-        ArtifactPolicyExpr::InheritsReferencing {
-            operation,
-            source_table,
-            via_column,
-            max_depth,
-        } => PolicyExpr::InheritsReferencing {
-            operation: *operation,
-            source_table: source_table.clone(),
-            via_column: via_column.clone(),
-            max_depth: *max_depth,
-        },
-        ArtifactPolicyExpr::And { exprs } => PolicyExpr::And(all(exprs)),
-        ArtifactPolicyExpr::Or { exprs } => PolicyExpr::Or(all(exprs)),
-        ArtifactPolicyExpr::Not { expr } => PolicyExpr::Not(Box::new(policy_from_artifact(expr))),
-        ArtifactPolicyExpr::True {} => PolicyExpr::True,
-        ArtifactPolicyExpr::False {} => PolicyExpr::False,
-    }
-}
-
-fn column_ref_to_artifact(column: &RelationColumnRef) -> ArtifactColumnRef {
-    ArtifactColumnRef {
-        scope: column.scope.clone(),
-        column: column.column.clone(),
-    }
-}
-
-fn column_ref_from_artifact(column: &ArtifactColumnRef) -> RelationColumnRef {
-    RelationColumnRef {
-        scope: column.scope.clone(),
-        column: column.column.clone(),
-    }
-}
-
-fn row_id_to_artifact(row: RelationRowIdRef) -> ArtifactRowId {
-    match row {
-        RelationRowIdRef::Current => ArtifactRowId::Current,
-        RelationRowIdRef::Outer => ArtifactRowId::Outer,
-        RelationRowIdRef::Frontier => ArtifactRowId::Frontier,
-    }
-}
-
-fn row_id_from_artifact(row: ArtifactRowId) -> RelationRowIdRef {
-    match row {
-        ArtifactRowId::Current => RelationRowIdRef::Current,
-        ArtifactRowId::Outer => RelationRowIdRef::Outer,
-        ArtifactRowId::Frontier => RelationRowIdRef::Frontier,
-    }
-}
-
-fn key_to_artifact(key: &RelationKeyRef) -> ArtifactKeyRef {
-    match key {
-        RelationKeyRef::Column(column) => ArtifactKeyRef::Column {
-            column: column_ref_to_artifact(column),
-        },
-        RelationKeyRef::RowId(row) => ArtifactKeyRef::RowId {
-            row: row_id_to_artifact(*row),
-        },
-    }
-}
-
-fn key_from_artifact(key: &ArtifactKeyRef) -> RelationKeyRef {
-    match key {
-        ArtifactKeyRef::Column { column } => {
-            RelationKeyRef::Column(column_ref_from_artifact(column))
-        }
-        ArtifactKeyRef::RowId { row } => RelationKeyRef::RowId(row_id_from_artifact(*row)),
-    }
-}
-
-fn relation_to_artifact(expr: &RelationExpr) -> ArtifactRelationExpr {
-    let boxed = |expr: &RelationExpr| Box::new(relation_to_artifact(expr));
-    match expr {
-        RelationExpr::TableScan { table, alias } => ArtifactRelationExpr::TableScan {
-            table: table.clone(),
-            alias: alias.clone(),
-        },
-        RelationExpr::Filter { input, predicate } => ArtifactRelationExpr::Filter {
-            input: boxed(input),
-            predicate: predicate_to_artifact(predicate),
-        },
-        RelationExpr::Union { inputs } => ArtifactRelationExpr::Union {
-            inputs: inputs
-                .iter()
-                .map(|arm| ArtifactUnionArm {
-                    label: arm.label.clone(),
-                    input: relation_to_artifact(&arm.input),
-                })
-                .collect(),
-        },
-        RelationExpr::Join {
-            left,
-            right,
-            on,
-            join_kind,
-        } => ArtifactRelationExpr::Join {
-            left: boxed(left),
-            right: boxed(right),
-            on: on
-                .iter()
-                .map(|condition| ArtifactJoinCondition {
-                    left: column_ref_to_artifact(&condition.left),
-                    right: column_ref_to_artifact(&condition.right),
-                })
-                .collect(),
-            join_kind: match join_kind {
-                RelationJoinKind::Inner => ArtifactJoinKind::Inner,
-                RelationJoinKind::Left => ArtifactJoinKind::Left,
-            },
-        },
-        RelationExpr::Project { input, columns } => ArtifactRelationExpr::Project {
-            input: boxed(input),
-            columns: columns
-                .iter()
-                .map(|column| ArtifactProjectColumn {
-                    alias: column.alias.clone(),
-                    expr: match &column.expr {
-                        RelationProjectExpr::Column(column) => ArtifactKeyRef::Column {
-                            column: column_ref_to_artifact(column),
-                        },
-                        RelationProjectExpr::RowId(row) => ArtifactKeyRef::RowId {
-                            row: row_id_to_artifact(*row),
-                        },
-                    },
-                })
-                .collect(),
-        },
-        RelationExpr::Gather {
-            seed,
-            step,
-            frontier_key,
-            bound,
-            dedupe_key,
-        } => ArtifactRelationExpr::Gather {
-            seed: boxed(seed),
-            step: boxed(step),
-            frontier_key: key_to_artifact(frontier_key),
-            max_depth: match bound {
-                RecursionBound::Fixpoint => None,
-                RecursionBound::MaxDepth(depth) => Some(*depth),
-            },
-            dedupe_key: dedupe_key.iter().map(key_to_artifact).collect(),
-        },
-        RelationExpr::Distinct { input, key } => ArtifactRelationExpr::Distinct {
-            input: boxed(input),
-            key: key.iter().map(key_to_artifact).collect(),
-        },
-        RelationExpr::OrderBy { input, terms } => ArtifactRelationExpr::OrderBy {
-            input: boxed(input),
-            terms: terms
-                .iter()
-                .map(|term| ArtifactOrderBy {
-                    column: column_ref_to_artifact(&term.column),
-                    direction: match term.direction {
-                        OrderDirection::Asc => ArtifactDirection::Asc,
-                        OrderDirection::Desc => ArtifactDirection::Desc,
-                    },
-                })
-                .collect(),
-        },
-        RelationExpr::Offset { input, offset } => ArtifactRelationExpr::Offset {
-            input: boxed(input),
-            offset: *offset,
-        },
-        RelationExpr::Limit { input, limit } => ArtifactRelationExpr::Limit {
-            input: boxed(input),
-            limit: *limit,
-        },
-    }
-}
-
-fn relation_from_artifact(expr: &ArtifactRelationExpr) -> RelationExpr {
-    let boxed = |expr: &ArtifactRelationExpr| Box::new(relation_from_artifact(expr));
-    match expr {
-        ArtifactRelationExpr::TableScan { table, alias } => RelationExpr::TableScan {
-            table: table.clone(),
-            alias: alias.clone(),
-        },
-        ArtifactRelationExpr::Filter { input, predicate } => RelationExpr::Filter {
-            input: boxed(input),
-            predicate: predicate_from_artifact(predicate),
-        },
-        ArtifactRelationExpr::Union { inputs } => RelationExpr::Union {
-            inputs: inputs
-                .iter()
-                .map(|arm| RelationUnionArm {
-                    label: arm.label.clone(),
-                    input: relation_from_artifact(&arm.input),
-                })
-                .collect(),
-        },
-        ArtifactRelationExpr::Join {
-            left,
-            right,
-            on,
-            join_kind,
-        } => RelationExpr::Join {
-            left: boxed(left),
-            right: boxed(right),
-            on: on
-                .iter()
-                .map(|condition| RelationJoinCondition {
-                    left: column_ref_from_artifact(&condition.left),
-                    right: column_ref_from_artifact(&condition.right),
-                })
-                .collect(),
-            join_kind: match join_kind {
-                ArtifactJoinKind::Inner => RelationJoinKind::Inner,
-                ArtifactJoinKind::Left => RelationJoinKind::Left,
-            },
-        },
-        ArtifactRelationExpr::Project { input, columns } => RelationExpr::Project {
-            input: boxed(input),
-            columns: columns
-                .iter()
-                .map(|column| RelationProjectColumn {
-                    alias: column.alias.clone(),
-                    expr: match &column.expr {
-                        ArtifactKeyRef::Column { column } => {
-                            RelationProjectExpr::Column(column_ref_from_artifact(column))
-                        }
-                        ArtifactKeyRef::RowId { row } => {
-                            RelationProjectExpr::RowId(row_id_from_artifact(*row))
-                        }
-                    },
-                })
-                .collect(),
-        },
-        ArtifactRelationExpr::Gather {
-            seed,
-            step,
-            frontier_key,
-            max_depth,
-            dedupe_key,
-        } => RelationExpr::Gather {
-            seed: boxed(seed),
-            step: boxed(step),
-            frontier_key: key_from_artifact(frontier_key),
-            bound: match max_depth {
-                None => RecursionBound::Fixpoint,
-                Some(depth) => RecursionBound::MaxDepth(*depth),
-            },
-            dedupe_key: dedupe_key.iter().map(key_from_artifact).collect(),
-        },
-        ArtifactRelationExpr::Distinct { input, key } => RelationExpr::Distinct {
-            input: boxed(input),
-            key: key.iter().map(key_from_artifact).collect(),
-        },
-        ArtifactRelationExpr::OrderBy { input, terms } => RelationExpr::OrderBy {
-            input: boxed(input),
-            terms: terms
-                .iter()
-                .map(|term| RelationOrderBy {
-                    column: column_ref_from_artifact(&term.column),
-                    direction: match term.direction {
-                        ArtifactDirection::Asc => OrderDirection::Asc,
-                        ArtifactDirection::Desc => OrderDirection::Desc,
-                    },
-                })
-                .collect(),
-        },
-        ArtifactRelationExpr::Offset { input, offset } => RelationExpr::Offset {
-            input: boxed(input),
-            offset: *offset,
-        },
-        ArtifactRelationExpr::Limit { input, limit } => RelationExpr::Limit {
-            input: boxed(input),
-            limit: *limit,
-        },
-    }
-}
-
-fn value_ref_to_artifact(value: &RelationValueRef) -> ArtifactValueRef {
-    match value {
-        RelationValueRef::Literal(value) => ArtifactValueRef::Literal {
-            value: value.clone(),
-        },
-        RelationValueRef::Param(name) => ArtifactValueRef::Param { name: name.clone() },
-        RelationValueRef::SessionRef(path) => ArtifactValueRef::SessionRef { path: path.clone() },
-        RelationValueRef::OuterColumn(column) => ArtifactValueRef::OuterColumn {
-            column: column_ref_to_artifact(column),
-        },
-        RelationValueRef::FrontierColumn(column) => ArtifactValueRef::FrontierColumn {
-            column: column_ref_to_artifact(column),
-        },
-        RelationValueRef::RowId(row) => ArtifactValueRef::RowId {
-            row: row_id_to_artifact(*row),
-        },
-    }
-}
-
-fn value_ref_from_artifact(value: &ArtifactValueRef) -> RelationValueRef {
-    match value {
-        ArtifactValueRef::Literal { value } => RelationValueRef::Literal(value.clone()),
-        ArtifactValueRef::Param { name } => RelationValueRef::Param(name.clone()),
-        ArtifactValueRef::SessionRef { path } => RelationValueRef::SessionRef(path.clone()),
-        ArtifactValueRef::OuterColumn { column } => {
-            RelationValueRef::OuterColumn(column_ref_from_artifact(column))
-        }
-        ArtifactValueRef::FrontierColumn { column } => {
-            RelationValueRef::FrontierColumn(column_ref_from_artifact(column))
-        }
-        ArtifactValueRef::RowId { row } => RelationValueRef::RowId(row_id_from_artifact(*row)),
-    }
-}
-
-fn predicate_to_artifact(predicate: &RelationPredicate) -> ArtifactPredicate {
-    let all = |exprs: &[RelationPredicate]| exprs.iter().map(predicate_to_artifact).collect();
-    match predicate {
-        RelationPredicate::Cmp { left, op, right } => ArtifactPredicate::Cmp {
-            left: column_ref_to_artifact(left),
-            op: *op,
-            right: value_ref_to_artifact(right),
-        },
-        RelationPredicate::IsNull { column } => ArtifactPredicate::IsNull {
-            column: column_ref_to_artifact(column),
-        },
-        RelationPredicate::IsNotNull { column } => ArtifactPredicate::IsNotNull {
-            column: column_ref_to_artifact(column),
-        },
-        RelationPredicate::In { left, values } => ArtifactPredicate::In {
-            left: column_ref_to_artifact(left),
-            values: values.iter().map(value_ref_to_artifact).collect(),
-        },
-        RelationPredicate::Contains { left, right } => ArtifactPredicate::Contains {
-            left: column_ref_to_artifact(left),
-            right: value_ref_to_artifact(right),
-        },
-        RelationPredicate::EnumMatch {
-            column,
-            case,
-            payload,
-        } => ArtifactPredicate::EnumMatch {
-            column: column_ref_to_artifact(column),
-            case: case.clone(),
-            payload: Box::new(predicate_to_artifact(payload)),
-        },
-        RelationPredicate::And(exprs) => ArtifactPredicate::And { exprs: all(exprs) },
-        RelationPredicate::Or(exprs) => ArtifactPredicate::Or { exprs: all(exprs) },
-        RelationPredicate::Not(expr) => ArtifactPredicate::Not {
-            expr: Box::new(predicate_to_artifact(expr)),
-        },
-        RelationPredicate::True => ArtifactPredicate::True {},
-        RelationPredicate::False => ArtifactPredicate::False {},
-    }
-}
-
-fn predicate_from_artifact(predicate: &ArtifactPredicate) -> RelationPredicate {
-    let all = |exprs: &[ArtifactPredicate]| exprs.iter().map(predicate_from_artifact).collect();
-    match predicate {
-        ArtifactPredicate::Cmp { left, op, right } => RelationPredicate::Cmp {
-            left: column_ref_from_artifact(left),
-            op: *op,
-            right: value_ref_from_artifact(right),
-        },
-        ArtifactPredicate::IsNull { column } => RelationPredicate::IsNull {
-            column: column_ref_from_artifact(column),
-        },
-        ArtifactPredicate::IsNotNull { column } => RelationPredicate::IsNotNull {
-            column: column_ref_from_artifact(column),
-        },
-        ArtifactPredicate::In { left, values } => RelationPredicate::In {
-            left: column_ref_from_artifact(left),
-            values: values.iter().map(value_ref_from_artifact).collect(),
-        },
-        ArtifactPredicate::Contains { left, right } => RelationPredicate::Contains {
-            left: column_ref_from_artifact(left),
-            right: value_ref_from_artifact(right),
-        },
-        ArtifactPredicate::EnumMatch {
-            column,
-            case,
-            payload,
-        } => RelationPredicate::EnumMatch {
-            column: column_ref_from_artifact(column),
-            case: case.clone(),
-            payload: Box::new(predicate_from_artifact(payload)),
-        },
-        ArtifactPredicate::And { exprs } => RelationPredicate::And(all(exprs)),
-        ArtifactPredicate::Or { exprs } => RelationPredicate::Or(all(exprs)),
-        ArtifactPredicate::Not { expr } => {
-            RelationPredicate::Not(Box::new(predicate_from_artifact(expr)))
-        }
-        ArtifactPredicate::True {} => RelationPredicate::True,
-        ArtifactPredicate::False {} => RelationPredicate::False,
-    }
+    entries.insert(0, ("$schema".into(), Json::string(url)));
+    Json::Object(entries)
 }
 
 #[cfg(test)]

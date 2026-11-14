@@ -1,250 +1,53 @@
 {
-  "codegen": {
-    "slices": {
-      "sharing": [
-        "shares"
-      ]
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "shares": {
+      "columns": { "todo": "uuid?", "user": "uuid" },
+      "relations": { "todo": { "rel": "todos", "column": "todo" } },
+      "history": "latest"
     },
-    "tables": {
-      "shares": {
-        "relations": {
-          "todo": {
-            "column": "todo",
-            "table": "todos",
-            "type": "Forward"
-          }
-        },
-        "ts_only": []
+    "todos": {
+      "columns": {
+        "name": "string",
+        "owner": "uuid?",
+        "tags": { "array": "string" },
+        "status": { "enum": { "open": {}, "done": { "at": "timestamp" } }, "optional": true },
+        "meta": { "json": { "type": "object" }, "optional": true }
       },
-      "todos": {
-        "relations": {
-          "shares": {
-            "relation": "todo",
-            "table": "shares",
-            "type": "Reverse"
+      "relations": { "shares": { "reverse": "shares", "relation": "todo" } },
+      "indexes": ["owner"],
+      "tsOnly": { "shareCount": "computed", "meta": "transform" }
+    }
+  },
+  "history": {
+    "00304e9bce65": {
+      "tables": {
+        "shares": {
+          "columns": {
+            "todo": { "type": "uuid", "optional": true, "references": "todos" },
+            "user": "uuid"
           }
         },
-        "ts_only": [
-          {
-            "column": "shareCount",
-            "type": "Computed"
-          },
-          {
-            "column": "meta",
-            "type": "Transform"
-          }
-        ]
+        "todos": { "columns": { "title": "string", "owner": "uuid?" } }
       }
     }
   },
-  "current": "265ab41aff8d6fb9e536ffe8ff509f21a43703d7869b95c1e9bee20435cec010",
-  "format": 1,
   "migrations": [
     {
-      "forward": [
-        {
-          "operations": [
-            {
-              "from": "title",
-              "to": "name",
-              "type": "Rename"
-            },
-            {
-              "column": "tags",
-              "column_type": {
-                "element": {
-                  "type": "Text"
-                },
-                "type": "Array"
-              },
-              "default": {
-                "type": "Array",
-                "value": []
-              },
-              "type": "Introduce"
-            },
-            {
-              "column": "status",
-              "column_type": {
-                "cases": [
-                  {
-                    "fields": [],
-                    "name": "open"
-                  },
-                  {
-                    "fields": [
-                      {
-                        "column_type": {
-                          "type": "Timestamp"
-                        },
-                        "name": "at",
-                        "nullable": false
-                      }
-                    ],
-                    "name": "done"
-                  }
-                ],
-                "type": "EnumPayload"
-              },
-              "default": {
-                "type": "Null"
-              },
-              "type": "Introduce"
-            },
-            {
-              "column": "meta",
-              "column_type": {
-                "schema": {
-                  "type": "object"
-                },
-                "type": "Json"
-              },
-              "default": {
-                "type": "Null"
-              },
-              "type": "Introduce"
-            }
-          ],
-          "table": "todos"
+      "from": "00304e9bce65",
+      "migrate": {
+        "todos": {
+          "name": { "renameFrom": "title" },
+          "tags": { "add": { "array": "string" }, "default": [] },
+          "status": {
+            "add": { "enum": { "open": {}, "done": { "at": "timestamp" } } },
+            "default": null
+          },
+          "meta": { "add": { "json": { "type": "object" } }, "default": null }
         }
-      ],
-      "from": "00304e9bce654854715acb046544cdc240ddd11dbb5cd5d20dad8366e02bc738",
-      "to": "265ab41aff8d6fb9e536ffe8ff509f21a43703d7869b95c1e9bee20435cec010"
+      }
     }
   ],
-  "schemas": [
-    {
-      "hash": "00304e9bce654854715acb046544cdc240ddd11dbb5cd5d20dad8366e02bc738",
-      "tables": {
-        "shares": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "todo",
-              "nullable": true,
-              "references": "todos"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "user",
-              "nullable": false
-            }
-          ]
-        },
-        "todos": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "title",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "owner",
-              "nullable": true
-            }
-          ]
-        }
-      }
-    },
-    {
-      "hash": "265ab41aff8d6fb9e536ffe8ff509f21a43703d7869b95c1e9bee20435cec010",
-      "tables": {
-        "shares": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "todo",
-              "nullable": true,
-              "references": "todos"
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "user",
-              "nullable": false
-            }
-          ],
-          "history": "Latest"
-        },
-        "todos": {
-          "columns": [
-            {
-              "column_type": {
-                "type": "Text"
-              },
-              "name": "name",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "type": "Uuid"
-              },
-              "name": "owner",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "element": {
-                  "type": "Text"
-                },
-                "type": "Array"
-              },
-              "name": "tags",
-              "nullable": false
-            },
-            {
-              "column_type": {
-                "cases": [
-                  {
-                    "fields": [],
-                    "name": "open"
-                  },
-                  {
-                    "fields": [
-                      {
-                        "column_type": {
-                          "type": "Timestamp"
-                        },
-                        "name": "at",
-                        "nullable": false
-                      }
-                    ],
-                    "name": "done"
-                  }
-                ],
-                "type": "EnumPayload"
-              },
-              "name": "status",
-              "nullable": true
-            },
-            {
-              "column_type": {
-                "schema": {
-                  "type": "object"
-                },
-                "type": "Json"
-              },
-              "name": "meta",
-              "nullable": true
-            }
-          ],
-          "indexed_columns": [
-            "owner"
-          ]
-        }
-      }
-    }
-  ]
+  "slices": { "sharing": ["shares"] }
 }

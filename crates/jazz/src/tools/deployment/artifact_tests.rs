@@ -1,7 +1,9 @@
 use super::*;
 use crate::tools::deployment::{DeploymentCatalogue, prepare_deployment};
-use crate::tools::public_schema::{EnumCaseDescriptor, SchemaBuilder};
-use std::collections::BTreeSet;
+use crate::tools::public_schema::{
+    CmpOp, ColumnDescriptor, ColumnType, EnumCaseDescriptor, HistoryRetention, Operation,
+    OperationPolicy, PolicyExpr, PolicyValue, RowDescriptor, SchemaBuilder, TableName,
+};
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/app-artifact");
 
@@ -209,25 +211,21 @@ fn shared_todos() -> ArtifactInput {
     }))
     .unwrap();
     let user = || vec!["user".to_string()];
-    let shared_with_me = PolicyExpr::ExistsRel {
-        rel: RelationExpr::Filter {
-            input: Box::new(RelationExpr::TableScan {
-                table: "shares".into(),
-                alias: None,
-            }),
-            predicate: RelationPredicate::And(vec![
-                RelationPredicate::Cmp {
-                    left: RelationColumnRef::unscoped("todo"),
-                    op: RelationCmpOp::Eq,
-                    right: RelationValueRef::RowId(RelationRowIdRef::Outer),
-                },
-                RelationPredicate::Cmp {
-                    left: RelationColumnRef::unscoped("user"),
-                    op: RelationCmpOp::Eq,
-                    right: RelationValueRef::SessionRef(user()),
-                },
-            ]),
-        },
+    // As TS compiles `policy.shares.exists.where({ todo: todo.id, user: session.user })`.
+    let shared_with_me = PolicyExpr::Exists {
+        table: "shares".into(),
+        condition: Box::new(PolicyExpr::And(vec![
+            PolicyExpr::Cmp {
+                column: "todo".into(),
+                op: CmpOp::Eq,
+                value: PolicyValue::SessionRef(vec!["__jazz_outer_row".into(), "id".into()]),
+            },
+            PolicyExpr::Cmp {
+                column: "user".into(),
+                op: CmpOp::Eq,
+                value: PolicyValue::SessionRef(user()),
+            },
+        ])),
     };
     let mine = PolicyExpr::Cmp {
         column: "owner".into(),
@@ -334,64 +332,49 @@ fn the_writer_reproduces_each_fixture_byte_for_byte() {
 }
 
 #[test]
-fn written_files_load_and_render_back_to_themselves() {
+fn written_files_read_back_to_the_engine_input() {
     for input in [todo_server(), shared_todos()] {
-        let written = write(input).unwrap();
-        let loaded = load(written.app.as_bytes(), written.permissions.as_bytes()).unwrap();
-        let app: AppArtifact = serde_json::from_str(&written.app).unwrap();
-        let permissions: PermissionsArtifact = serde_json::from_str(&written.permissions).unwrap();
-        assert_eq!(render(&app), written.app);
-        assert_eq!(render(&permissions), written.permissions);
-        assert_eq!(loaded.bundle().to_hex(), permissions.bundle);
-        assert_eq!(permissions.schema, app.current);
+        let hashes: Vec<SchemaHash> = input
+            .schemas
+            .iter()
+            .map(|s| SchemaHash::compute(&structural(s.clone())))
+            .collect();
+        let current = input.current.clone();
+        let permissions = input.permissions.clone();
+        let mut target = input
+            .schemas
+            .iter()
+            .map(|s| structural(s.clone()))
+            .find(|s| SchemaHash::compute(s).to_string() == current)
+            .unwrap();
+        let loaded = loaded(input);
+        assert_eq!(loaded.current_hash().to_string(), current);
+        assert_eq!(
+            loaded.schemas().iter().map(|(h, _)| *h).collect::<Vec<_>>(),
+            hashes
+        );
+        assert_eq!(loaded.permissions(), &permissions);
+        for (name, policies) in &permissions {
+            target.get_mut(name).unwrap().policies = policies.clone();
+        }
+        // The bundle is the one a store computes for the same permissions.
+        let config = crate::db::DbConfig::new(
+            JazzSchema::new(&target).unwrap(),
+            crate::db::DbIdentity {
+                node: crate::ids::NodeUuid::from_bytes([1; 16]),
+                author: crate::ids::AuthorSubject::SYSTEM,
+            },
+        );
+        let db = crate::db::block_on(crate::db::Db::open(config)).unwrap();
+        assert_eq!(
+            loaded.bundle(),
+            crate::db::block_on(db.publish_bundle(&target)).unwrap()
+        );
     }
 }
 
 #[test]
-fn the_app_file_holds_no_permissions() {
-    let written = write(shared_todos()).unwrap();
-    let app: serde_json::Value = serde_json::from_str(&written.app).unwrap();
-    let keys: Vec<_> = app.as_object().unwrap().keys().cloned().collect();
-    assert_eq!(
-        keys,
-        ["codegen", "current", "format", "migrations", "schemas"]
-    );
-    assert!(
-        !written.app.contains("ExistsRel"),
-        "a policy in jazz.app.json"
-    );
-    assert!(written.permissions.contains("ExistsRel"));
-}
-
-#[test]
-fn the_bundle_is_the_one_a_store_publishes_for_the_same_schema() {
-    let input = todo_server();
-    let mut target = input.schemas[0].clone();
-    for (name, policies) in &input.permissions {
-        target.get_mut(name).unwrap().policies = policies.clone();
-    }
-    let loaded = loaded(input);
-    let config = crate::db::DbConfig::new(
-        JazzSchema::new(&target).unwrap(),
-        crate::db::DbIdentity {
-            node: crate::ids::NodeUuid::from_bytes([1; 16]),
-            author: crate::ids::AuthorSubject::SYSTEM,
-        },
-    );
-    let db = crate::db::block_on(crate::db::Db::open(config)).unwrap();
-    let published = crate::db::block_on(db.publish_bundle(&target)).unwrap();
-    assert_eq!(loaded.bundle(), published);
-}
-
-#[test]
-fn policies_and_relation_expressions_survive_the_file_form() {
-    let input = shared_todos();
-    let permissions = input.permissions.clone();
-    assert_eq!(loaded(input).permissions(), &permissions);
-}
-
-#[test]
-fn a_loaded_file_feeds_clients_and_a_deployment() {
+fn a_loaded_app_feeds_clients_and_a_deployment() {
     let loaded = loaded(shared_todos());
     let migrations = loaded.client_migrations();
     assert_eq!(migrations.schemas.len(), 2);
@@ -410,199 +393,357 @@ fn a_loaded_file_feeds_clients_and_a_deployment() {
 }
 
 #[test]
-fn the_files_use_one_tagging_convention() {
+fn the_files_read_like_the_dsl() {
     let written = write(shared_todos()).unwrap();
-    let text = format!("{}{}", written.app, written.permissions);
-    // Relation IR inside a policy is internally tagged, like everything else.
-    assert!(text.contains("\"type\": \"ExistsRel\""));
-    assert!(text.contains("\"type\": \"Filter\""));
-    assert!(!text.contains("\"Filter\": {"));
-    // snake_case fields, PascalCase tags.
-    for camel in [
-        "fromHash",
-        "toHash",
-        "renamedFrom",
-        "branchBy",
-        "columnType",
-        "tsOnly",
+    // No hashes, no bundle ids, no permissions in the clients' file.
+    for absent in [
+        "bundle",
+        "\"hash\"",
+        "permissions",
+        "using",
+        "with_check",
+        "Select",
     ] {
-        assert!(!text.contains(camel), "{camel} in the file");
+        assert!(
+            !written.app.contains(absent),
+            "{absent} in jazz.app.json:\n{}",
+            written.app
+        );
     }
-    assert!(text.contains("\"type\": \"Rename\""));
-    assert!(text.contains("\"history\": \"Latest\""));
+    assert!(!written.permissions.contains("bundle"));
+    for present in [
+        "\"owner\": \"uuid?\"",
+        "\"tags\": { \"array\": \"string\" }",
+        "\"todo\": { \"rel\": \"todos\", \"column\": \"todo\" }",
+        "\"shares\": { \"reverse\": \"shares\", \"relation\": \"todo\" }",
+        "\"history\": \"latest\"",
+        "\"renameFrom\": \"title\"",
+    ] {
+        assert!(
+            written.app.contains(present),
+            "{present} not in:\n{}",
+            written.app
+        );
+    }
+    for present in [
+        "\"anyOf\": [\"owner = session.user\", \"exists shares(todo = this.id, user = session.user)\"]",
+        "\"read\": \"allowedTo.read(todo)\"",
+        "\"delete\": { \"allOf\": [\"owner = session.user\", \"not owner = null\"] }",
+    ] {
+        assert!(
+            written.permissions.contains(present),
+            "{present} not in:\n{}",
+            written.permissions
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The grammar
+// ---------------------------------------------------------------------------
+
+/// Compile `source` as `table`'s read policy, in `shared-todos`' current
+/// schema, with `defs`.
+fn read_policy(table: &str, source: &str, defs: serde_json::Value) -> Result<PolicyExpr, String> {
+    let written = write(shared_todos()).unwrap();
+    // `allowedTo` needs the table it inherits from to have the policy.
+    let other = if table == "shares" { "todos" } else { "shares" };
+    let file = serde_json::json!({
+        "format": 1, "defs": defs,
+        "tables": { table: { "read": source }, other: { "read": "true", "update": "true" } },
+    });
+    let loaded =
+        load(written.app.as_bytes(), file.to_string().as_bytes()).map_err(|e| e.to_string())?;
+    Ok(loaded.permissions()[&TableName::from(table)]
+        .select
+        .using
+        .clone()
+        .unwrap())
+}
+
+/// Print `expr` as `table`'s policy text in `shared-todos`.
+fn printed(table: &str, expr: &PolicyExpr) -> String {
+    let codegen = shared_todos().codegen;
+    let relations = codegen.relations();
+    let loaded = loaded(shared_todos());
+    let defs = expr::Defs::new();
+    let context = expr::Context {
+        schema: loaded.current_schema(),
+        relations: &relations,
+        defs: &defs,
+    };
+    expr::print(expr, &context, table).unwrap()
+}
+
+#[test]
+fn every_construct_reads_and_prints_back() {
+    for (table, source) in [
+        ("todos", "true"),
+        ("todos", "false"),
+        ("todos", "owner = session.user"),
+        ("todos", "owner != null"),
+        ("todos", "owner = null"),
+        ("todos", "name != 'it''s'"),
+        ("todos", "name in ['a', 'b']"),
+        ("todos", "owner in session.claims.people"),
+        ("todos", "tags contains 'urgent'"),
+        ("todos", "session.claims.role = 'admin'"),
+        ("todos", "session.claims.role in ['admin', 'editor']"),
+        ("todos", "session.claims.team = null"),
+        ("todos", "session.claims.labels contains 'x'"),
+        ("todos", "$createdBy.account = session.user"),
+        (
+            "todos",
+            "exists shares(todo = this.id, user = session.user)",
+        ),
+        ("todos", "exists shares()"),
+        ("todos", "allowedTo.read(shares)"),
+        ("shares", "allowedTo.read(todo)"),
+        ("shares", "allowedTo.update(todo, maxDepth: 3)"),
+        ("todos", "not owner = session.user"),
+        ("todos", "owner = session.user or name = 'x'"),
+        (
+            "todos",
+            "(owner = session.user or name = 'x') and tags contains 'y'",
+        ),
+        ("todos", "not (owner = null or name = 'x')"),
+    ] {
+        let compiled = read_policy(table, source, serde_json::json!({}))
+            .unwrap_or_else(|e| panic!("{source}: {e}"));
+        assert_eq!(printed(table, &compiled), source, "{source} printed as");
+    }
+}
+
+#[test]
+fn equivalent_spellings_compile_alike() {
+    let same = |a: &str, b: &str| {
+        assert_eq!(
+            read_policy("todos", a, serde_json::json!({})).unwrap(),
+            read_policy("todos", b, serde_json::json!({})).unwrap(),
+            "{a} vs {b}"
+        );
+    };
+    same("session.user = owner", "owner = session.user");
+    same("this.owner = session.user", "owner = session.user");
+    same("owner=session.user", "owner  =  session.user");
+    same("((owner = session.user))", "owner = session.user");
+}
+
+#[test]
+fn defs_expand_where_they_are_called() {
+    let defs = serde_json::json!({
+        "sharedWith($todo)": "exists shares(todo = $todo, user = session.user)",
+        "mineOrShared($todo)": { "anyOf": ["owner = session.user", "sharedWith($todo)"] },
+    });
+    assert_eq!(
+        read_policy("todos", "mineOrShared(this.id)", defs).unwrap(),
+        read_policy(
+            "todos",
+            "owner = session.user or exists shares(todo = this.id, user = session.user)",
+            serde_json::json!({})
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn recursive_defs_are_refused() {
+    let defs = serde_json::json!({
+        "a($x)": "b($x)",
+        "b($x)": "a($x) or owner = session.user",
+    });
+    let error = read_policy("todos", "a(this.id)", defs).unwrap_err();
+    assert!(
+        error.contains("definitions may not be recursive"),
+        "{error}"
+    );
+    assert!(error.contains("a → b"), "{error}");
+}
+
+#[test]
+fn expression_errors_point_at_the_spot_and_suggest() {
+    let error = read_policy(
+        "todos",
+        "exists shares(todo = this.id, usr = session.user)",
+        serde_json::json!({}),
+    )
+    .unwrap_err();
+    assert!(
+        error.starts_with("jazz.permissions.json: tables.todos.read:"),
+        "{error}"
+    );
+    assert!(
+        error.contains("unknown column `usr` in shares; did you mean `user`?"),
+        "{error}"
+    );
+    assert!(
+        error.contains("\n                                ^^^\n"),
+        "{error}"
+    );
+    assert!(error.contains(expr::GRAMMAR_URL), "{error}");
+
+    for (source, message) in [
+        ("ownr = session.user", "did you mean `owner`?"),
+        (
+            "exists share(todo = this.id)",
+            "unknown table `share`; did you mean `shares`?",
+        ),
+        (
+            "allowedTo.read(share)",
+            "unknown relation `share` on todos; did you mean `shares`?",
+        ),
+        ("allowedTo.raed(shares)", "did you mean `read`?"),
+        ("owner == session.user", "comparisons use `=`, not `==`"),
+        ("name = \"x\"", "strings use single quotes"),
+        (
+            "owner = session.usr",
+            "a session value is `session.user` or `session.claims.<name>`",
+        ),
+        (
+            "owner = session.user name = 'x'",
+            "join conditions with `and` or `or`",
+        ),
+        ("unknownDef(this.id)", "unknown definition `unknownDef`"),
+        ("owner < null", "only `=` and `!=` compare with null"),
+        ("owner = 'not-a-uuid'", "is not a UUID"),
+        (
+            "owner = name",
+            "comparing two columns is not supported in jazz.permissions.json yet",
+        ),
+        (
+            "exists shares(todo = this.id).todo(name = 'x')",
+            "not supported in jazz.permissions.json yet",
+        ),
+        ("", "an empty expression"),
+    ] {
+        let error = read_policy("todos", source, serde_json::json!({})).unwrap_err();
+        assert!(error.contains(message), "{source}: {error}");
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Refusals
 // ---------------------------------------------------------------------------
 
-/// `shared-todos`, loaded after `edit` changed its `jazz.app.json`.
-fn edited(edit: impl FnOnce(&mut serde_json::Value)) -> Result<LoadedApp, ArtifactError> {
+fn edited_app(edit: impl FnOnce(&mut serde_json::Value)) -> String {
     let written = write(shared_todos()).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&written.app).unwrap();
     edit(&mut value);
-    load(
-        &serde_json::to_vec(&value).unwrap(),
-        written.permissions.as_bytes(),
-    )
+    load(value.to_string().as_bytes(), written.permissions.as_bytes())
+        .expect_err("the edit must be refused")
+        .to_string()
 }
 
-/// The refusal of [`edited`], which must be about `jazz.app.json`.
-fn refused(edit: impl FnOnce(&mut serde_json::Value)) -> String {
-    let error = edited(edit).expect_err("the edit must be refused");
-    assert_eq!(error.file(), APP_FILE, "{error}");
-    error.message().to_string()
-}
-
-/// `shared-todos`, loaded after `edit` changed its `jazz.permissions.json`.
-fn edited_permissions(
-    edit: impl FnOnce(&mut serde_json::Value),
-) -> Result<LoadedApp, ArtifactError> {
+fn edited_permissions(edit: impl FnOnce(&mut serde_json::Value)) -> String {
     let written = write(shared_todos()).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&written.permissions).unwrap();
     edit(&mut value);
-    load(written.app.as_bytes(), &serde_json::to_vec(&value).unwrap())
+    load(written.app.as_bytes(), value.to_string().as_bytes())
+        .expect_err("the edit must be refused")
+        .to_string()
 }
 
-/// The refusal of [`edited_permissions`], which must be about that file.
-fn permissions_refused(edit: impl FnOnce(&mut serde_json::Value)) -> String {
-    let error = edited_permissions(edit).expect_err("the edit must be refused");
-    assert_eq!(error.file(), PERMISSIONS_FILE, "{error}");
-    error.message().to_string()
+#[test]
+fn unknown_keys_are_refused_at_every_level_with_the_nearest() {
+    let error = edited_app(|v| v["tabels"] = serde_json::json!({}));
+    assert!(
+        error.contains("unknown key `tabels`; did you mean `tables`?"),
+        "{error}"
+    );
+    let error = edited_app(|v| v["tables"]["todos"]["colums"] = serde_json::json!({}));
+    assert!(
+        error.contains("tables.todos: unknown key `colums`; did you mean `columns`?"),
+        "{error}"
+    );
+    let error = edited_app(|v| {
+        v["tables"]["todos"]["columns"]["owner"] =
+            serde_json::json!({"type": "uuid", "nullable": true})
+    });
+    assert!(error.contains("unknown key `nullable`"), "{error}");
+    let error = edited_app(|v| v["tables"]["todos"]["columns"]["owner"] = serde_json::json!("uid"));
+    assert!(
+        error.contains("unknown type `uid`; did you mean `uuid`?"),
+        "{error}"
+    );
+    let error = edited_permissions(|v| v["tables"]["todos"]["select"] = serde_json::json!("true"));
+    assert!(error.contains("unknown operation `select`"), "{error}");
+    let error = edited_permissions(|v| v["tables"]["todo"] = serde_json::json!({}));
+    assert!(
+        error.contains("jazz.app.json has no table `todo`; did you mean `todos`?"),
+        "{error}"
+    );
+    // `$comment` is allowed everywhere.
+    let written = write(shared_todos()).unwrap();
+    let mut app: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    app["tables"]["todos"]["$comment"] = "A to-do".into();
+    let mut permissions: serde_json::Value = serde_json::from_str(&written.permissions).unwrap();
+    permissions["tables"]["shares"]["read"] =
+        serde_json::json!({"$comment": "Inherited", "where": "allowedTo.read(todo)"});
+    load(
+        app.to_string().as_bytes(),
+        permissions.to_string().as_bytes(),
+    )
+    .unwrap();
 }
 
 #[test]
 fn an_unknown_format_is_refused_before_anything_else() {
-    let error = refused(|v| {
+    let error = edited_app(|v| {
         v["format"] = 2.into();
         v["something_new"] = true.into();
     });
     assert!(error.contains("format 2 is not supported"), "{error}");
-    assert!(
-        refused(|v| v
+    let error = edited_permissions(|v| v["format"] = "1".into());
+    assert!(error.contains("`format` must be the integer 1"), "{error}");
+    let error = edited_app(|v| {
+        v.as_object_mut().unwrap().remove("format");
+    });
+    assert!(error.contains("no `format`"), "{error}");
+}
+
+#[test]
+fn migrations_must_name_versions_and_pass_their_lens_checks() {
+    let error = edited_app(|v| v["migrations"][0]["from"] = "nope".into());
+    assert!(error.contains("no version `nope` in `history`"), "{error}");
+    let error = edited_app(|v| {
+        v["migrations"][0]["migrate"]["todos"]
             .as_object_mut()
             .unwrap()
-            .remove("format")
-            .map(drop)
-            .unwrap())
-        .contains("no `format`")
-    );
-    let error = permissions_refused(|v| v["format"] = 2.into());
-    assert!(error.contains("format 2 is not supported"), "{error}");
+            .remove("name");
+    });
+    assert!(error.contains("migrations:"), "{error}");
 }
 
 #[test]
-fn unknown_fields_are_refused_at_every_level() {
-    for edit in [
-        (|v: &mut serde_json::Value| v["extra"] = true.into()) as fn(&mut serde_json::Value),
-        |v| v["schemas"][0]["tables"]["todos"]["policies"] = serde_json::json!({}),
-        |v| v["schemas"][0]["tables"]["todos"]["columns"][0]["sparse"] = true.into(),
-        |v| v["codegen"]["tables"]["todos"]["relations"]["shares"]["kind"] = "reverse".into(),
-        // A single file from before the permissions moved out of it.
-        |v| v["permissions"] = serde_json::json!({}),
-        |v| v["bundle"] = "0".repeat(64).into(),
-    ] {
-        let error = refused(edit);
-        assert!(error.contains("unknown field"), "{error}");
-    }
-    for edit in [
-        (|v: &mut serde_json::Value| v["extra"] = true.into()) as fn(&mut serde_json::Value),
-        |v| v["permissions"]["todos"]["select"]["using"]["exprs"][1]["rel"]["extra"] = 1.into(),
-    ] {
-        let error = permissions_refused(edit);
-        assert!(error.contains("unknown field"), "{error}");
-    }
-}
-
-#[test]
-fn the_permissions_must_be_for_the_apps_current_schema() {
-    let first = write(todo_server()).unwrap();
-    let error = permissions_refused(|v| v["schema"] = "0".repeat(64).into());
-    assert!(error.contains("were not written together"), "{error}");
-    // Another app's permissions file, however well-formed, is refused.
-    let written = write(shared_todos()).unwrap();
-    let error = load(written.app.as_bytes(), first.permissions.as_bytes()).unwrap_err();
-    assert_eq!(error.file(), PERMISSIONS_FILE);
+fn relations_must_name_real_columns() {
+    let error =
+        edited_app(|v| v["tables"]["shares"]["relations"]["todo"]["column"] = "nope".into());
     assert!(
-        error.message().contains("were not written together"),
+        error.contains("names column `nope`, which shares doesn't have"),
         "{error}"
     );
 }
 
 #[test]
-fn a_schema_must_match_its_hash() {
-    let error = refused(|v| v["schemas"][0]["tables"]["todos"]["columns"][0]["name"] = "x".into());
-    assert!(error.contains("schemas[0].hash is"), "{error}");
-    assert!(error.contains("jazz-tools validate"), "{error}");
-}
-
-#[test]
-fn current_and_migrations_must_name_shipped_schemas() {
-    let missing = "0".repeat(64);
-    let error = refused(|v| v["current"] = missing.clone().into());
-    assert!(error.contains("is not among `schemas`"), "{error}");
-    let error = refused(|v| v["migrations"][0]["from"] = missing.clone().into());
-    assert!(error.contains("migrations[0].from names schema"), "{error}");
-}
-
-#[test]
-fn a_lens_that_does_not_reproduce_its_target_is_refused() {
-    let error = refused(|v| {
-        let ops = v["migrations"][0]["forward"][0]["operations"]
-            .as_array_mut()
-            .unwrap();
-        ops.retain(|op| op["type"] != "Rename");
+fn what_the_files_cant_say_is_refused_by_name() {
+    let mut input = shared_todos();
+    input
+        .permissions
+        .get_mut(&TableName::from("todos"))
+        .unwrap()
+        .select = OperationPolicy::using(PolicyExpr::ExistsRel {
+        rel: crate::query::RelationExpr::TableScan {
+            table: "shares".into(),
+            alias: None,
+        },
     });
-    assert!(error.starts_with("migrations:"), "{error}");
-}
-
-#[test]
-fn the_bundle_must_match_the_current_permissions() {
-    let error = permissions_refused(|v| {
-        v["permissions"]["shares"]["select"]["using"] = serde_json::json!({"type": "False"})
-    });
-    assert!(error.contains("`bundle` is"), "{error}");
-}
-
-#[test]
-fn permissions_must_compile_against_the_current_schema() {
-    let error = permissions_refused(|v| v["permissions"]["gone"] = serde_json::json!({}));
-    assert!(error.contains("permissions.gone"), "{error}");
-    let error = permissions_refused(|v| {
-        v["permissions"]["todos"]["insert"]["with_check"]["column"] = "nope".into()
-    });
-    assert!(error.starts_with("permissions:"), "{error}");
-}
-
-#[test]
-fn codegen_must_name_what_the_current_schema_has() {
-    let error = refused(|v| v["codegen"]["tables"]["nope"] = serde_json::json!({}));
-    assert!(error.contains("codegen.tables.nope"), "{error}");
-    let error = refused(|v| {
-        v["codegen"]["tables"]["shares"]["relations"]["todo"]["column"] = "nope".into()
-    });
-    assert!(error.contains("has no column nope"), "{error}");
-    let error = refused(|v| {
-        v["codegen"]["tables"]["todos"]["relations"]["shares"]["relation"] = "nope".into()
-    });
-    assert!(error.contains("no forward relation nope"), "{error}");
-    let error =
-        refused(|v| v["codegen"]["tables"]["todos"]["ts_only"][1]["column"] = "nope".into());
-    assert!(error.contains("ts_only[1]"), "{error}");
-    let error = refused(|v| v["codegen"]["slices"]["sharing"] = serde_json::json!(["nope"]));
-    assert!(error.contains("codegen.slices.sharing"), "{error}");
-}
-
-#[test]
-fn the_writer_refuses_what_a_reader_would() {
-    let mut input = todo_server();
-    input.current = "0".repeat(64);
+    let error = write(input).unwrap_err().to_string();
     assert!(
-        write(input)
-            .unwrap_err()
-            .message()
-            .contains("not among `schemas`")
+        error.contains("not supported in jazz.permissions.json yet"),
+        "{error}"
     );
+    assert!(error.contains("tables.todos.read"), "{error}");
+
     let mut input = todo_server();
     input.schemas[0]
         .get_mut(&TableName::from("todos"))
@@ -613,12 +754,14 @@ fn the_writer_refuses_what_a_reader_would() {
         name: "e".into(),
         variants: vec!["a".into()],
     };
+    input.current = SchemaHash::compute(&structural(input.schemas[0].clone())).to_string();
+    let error = write(input).unwrap_err().to_string();
     assert!(
-        write(input)
-            .unwrap_err()
-            .message()
-            .contains("not supported in jazz.app.json yet")
+        error.contains("not supported in jazz.permissions.json yet")
+            || error.contains("not supported"),
+        "{error}"
     );
+    assert!(error.contains("catalogue-native enum"), "{error}");
 }
 
 #[test]
@@ -635,525 +778,48 @@ fn embedded_schema_policies_are_dropped_as_a_deployment_drops_them() {
     assert_eq!(write(input).unwrap(), plain);
 }
 
-// ---------------------------------------------------------------------------
-// Every variant through the file form
-// ---------------------------------------------------------------------------
-
-/// Each engine variant the file mirrors, once. The `match`es below have no
-/// wildcard, so a variant added to the engine fails to compile here until it
-/// is added to this test (and to the mirror).
-fn every_policy_variant() -> PolicyExpr {
-    let path = || vec!["claims".to_string(), "team".to_string()];
-    let column = |name: &str| RelationColumnRef {
-        scope: Some("t".into()),
-        column: name.into(),
-    };
-    let scan = |table: &str| RelationExpr::TableScan {
-        table: table.into(),
-        alias: Some("t".into()),
-    };
-    let predicate = RelationPredicate::Or(vec![
-        RelationPredicate::Cmp {
-            left: column("a"),
-            op: RelationCmpOp::Ge,
-            right: RelationValueRef::Literal(serde_json::json!({"type": "Integer", "value": 3})),
-        },
-        RelationPredicate::IsNull {
-            column: column("b"),
-        },
-        RelationPredicate::IsNotNull {
-            column: column("c"),
-        },
-        RelationPredicate::In {
-            left: column("d"),
-            values: vec![
-                RelationValueRef::Param("p".into()),
-                RelationValueRef::SessionRef(path()),
-                RelationValueRef::OuterColumn(column("e")),
-                RelationValueRef::FrontierColumn(column("f")),
-                RelationValueRef::RowId(RelationRowIdRef::Current),
-                RelationValueRef::RowId(RelationRowIdRef::Outer),
-                RelationValueRef::RowId(RelationRowIdRef::Frontier),
-            ],
-        },
-        RelationPredicate::Contains {
-            left: column("g"),
-            right: RelationValueRef::Literal(serde_json::json!("bare")),
-        },
-        RelationPredicate::EnumMatch {
-            column: column("h"),
-            case: "done".into(),
-            payload: Box::new(RelationPredicate::True),
-        },
-        RelationPredicate::And(vec![RelationPredicate::Not(Box::new(
-            RelationPredicate::False,
-        ))]),
-    ]);
-    let key = RelationKeyRef::Column(column("id"));
-    let rel = RelationExpr::Limit {
-        input: Box::new(RelationExpr::Offset {
-            input: Box::new(RelationExpr::OrderBy {
-                input: Box::new(RelationExpr::Distinct {
-                    input: Box::new(RelationExpr::Project {
-                        input: Box::new(RelationExpr::Join {
-                            left: Box::new(RelationExpr::Filter {
-                                input: Box::new(scan("a")),
-                                predicate,
-                            }),
-                            right: Box::new(RelationExpr::Union {
-                                inputs: vec![
-                                    RelationUnionArm {
-                                        label: "arm".into(),
-                                        input: RelationExpr::Gather {
-                                            seed: Box::new(scan("b")),
-                                            step: Box::new(scan("c")),
-                                            frontier_key: RelationKeyRef::RowId(
-                                                RelationRowIdRef::Frontier,
-                                            ),
-                                            bound: RecursionBound::MaxDepth(4),
-                                            dedupe_key: vec![key.clone()],
-                                        },
-                                    },
-                                    RelationUnionArm {
-                                        label: "fixpoint".into(),
-                                        input: RelationExpr::Gather {
-                                            seed: Box::new(scan("b")),
-                                            step: Box::new(scan("c")),
-                                            frontier_key: key.clone(),
-                                            bound: RecursionBound::Fixpoint,
-                                            dedupe_key: vec![],
-                                        },
-                                    },
-                                ],
-                            }),
-                            on: vec![RelationJoinCondition {
-                                left: column("x"),
-                                right: column("y"),
-                            }],
-                            join_kind: RelationJoinKind::Left,
-                        }),
-                        columns: vec![
-                            RelationProjectColumn {
-                                alias: "c".into(),
-                                expr: RelationProjectExpr::Column(column("c")),
-                            },
-                            RelationProjectColumn {
-                                alias: "id".into(),
-                                expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
-                            },
-                        ],
-                    }),
-                    key: vec![key],
-                }),
-                terms: vec![
-                    RelationOrderBy {
-                        column: column("c"),
-                        direction: OrderDirection::Desc,
-                    },
-                    RelationOrderBy {
-                        column: column("id"),
-                        direction: OrderDirection::Asc,
-                    },
-                ],
-            }),
-            offset: 2,
-        }),
-        limit: 10,
-    };
-    let inner_join = PolicyExpr::ExistsRel {
-        rel: RelationExpr::Join {
-            left: Box::new(scan("a")),
-            right: Box::new(scan("b")),
-            on: vec![],
-            join_kind: RelationJoinKind::Inner,
-        },
-    };
-    PolicyExpr::Or(vec![
-        PolicyExpr::Cmp {
-            column: "a".into(),
-            op: CmpOp::Le,
-            value: PolicyValue::Literal(Value::Integer(3)),
-        },
-        PolicyExpr::SessionCmp {
-            path: path(),
-            op: CmpOp::Ne,
-            value: Value::Text("x".into()),
-        },
-        PolicyExpr::IsNull { column: "b".into() },
-        PolicyExpr::SessionIsNull { path: path() },
-        PolicyExpr::IsNotNull { column: "c".into() },
-        PolicyExpr::SessionIsNotNull { path: path() },
-        PolicyExpr::Contains {
-            column: "d".into(),
-            value: PolicyValue::SessionRef(path()),
-        },
-        PolicyExpr::SessionContains {
-            path: path(),
-            value: Value::Text("y".into()),
-        },
-        PolicyExpr::In {
-            column: "e".into(),
-            session_path: path(),
-        },
-        PolicyExpr::InList {
-            column: "f".into(),
-            values: vec![
-                PolicyValue::Literal(Value::BigInt(1 << 40)),
-                PolicyValue::SessionRef(path()),
-            ],
-        },
-        PolicyExpr::SessionInList {
-            path: path(),
-            values: vec![Value::Boolean(true), Value::Null],
-        },
-        PolicyExpr::Exists {
-            table: "shares".into(),
-            condition: Box::new(PolicyExpr::True),
-        },
-        PolicyExpr::ExistsRel { rel },
-        inner_join,
-        PolicyExpr::Inherits {
-            operation: Operation::Update,
-            via_column: "parent".into(),
-            max_depth: Some(3),
-        },
-        PolicyExpr::InheritsReferencing {
-            operation: Operation::Delete,
-            source_table: "shares".into(),
-            via_column: "todo".into(),
-            max_depth: None,
-        },
-        PolicyExpr::And(vec![PolicyExpr::Not(Box::new(PolicyExpr::False))]),
-    ])
-}
-
-/// Names of the variants `expr` uses, collected exhaustively.
-fn policy_variants(expr: &PolicyExpr, seen: &mut BTreeSet<&'static str>) {
-    fn rel(expr: &RelationExpr, seen: &mut BTreeSet<&'static str>) {
-        let name = match expr {
-            RelationExpr::TableScan { .. } => "TableScan",
-            RelationExpr::Filter { input, predicate } => {
-                rel(input, seen);
-                pred(predicate, seen);
-                "Filter"
-            }
-            RelationExpr::Union { inputs } => {
-                inputs.iter().for_each(|arm| rel(&arm.input, seen));
-                "Union"
-            }
-            RelationExpr::Join {
-                left,
-                right,
-                join_kind,
-                ..
-            } => {
-                rel(left, seen);
-                rel(right, seen);
-                match join_kind {
-                    RelationJoinKind::Inner => seen.insert("Join.Inner"),
-                    RelationJoinKind::Left => seen.insert("Join.Left"),
-                };
-                "Join"
-            }
-            RelationExpr::Project { input, columns } => {
-                rel(input, seen);
-                for column in columns {
-                    match column.expr {
-                        RelationProjectExpr::Column(_) => seen.insert("Project.Column"),
-                        RelationProjectExpr::RowId(_) => seen.insert("Project.RowId"),
-                    };
-                }
-                "Project"
-            }
-            RelationExpr::Gather {
-                seed, step, bound, ..
-            } => {
-                rel(seed, seen);
-                rel(step, seen);
-                match bound {
-                    RecursionBound::Fixpoint => seen.insert("Gather.Fixpoint"),
-                    RecursionBound::MaxDepth(_) => seen.insert("Gather.MaxDepth"),
-                };
-                "Gather"
-            }
-            RelationExpr::Distinct { input, .. } => {
-                rel(input, seen);
-                "Distinct"
-            }
-            RelationExpr::OrderBy { input, .. } => {
-                rel(input, seen);
-                "OrderBy"
-            }
-            RelationExpr::Offset { input, .. } => {
-                rel(input, seen);
-                "Offset"
-            }
-            RelationExpr::Limit { input, .. } => {
-                rel(input, seen);
-                "Limit"
-            }
-        };
-        seen.insert(name);
-    }
-    fn value(value: &RelationValueRef, seen: &mut BTreeSet<&'static str>) {
-        let name = match value {
-            RelationValueRef::Literal(_) => "Value.Literal",
-            RelationValueRef::Param(_) => "Value.Param",
-            RelationValueRef::SessionRef(_) => "Value.SessionRef",
-            RelationValueRef::OuterColumn(_) => "Value.OuterColumn",
-            RelationValueRef::FrontierColumn(_) => "Value.FrontierColumn",
-            RelationValueRef::RowId(row) => match row {
-                RelationRowIdRef::Current => "Value.RowId.Current",
-                RelationRowIdRef::Outer => "Value.RowId.Outer",
-                RelationRowIdRef::Frontier => "Value.RowId.Frontier",
-            },
-        };
-        seen.insert(name);
-    }
-    fn pred(predicate: &RelationPredicate, seen: &mut BTreeSet<&'static str>) {
-        let name = match predicate {
-            RelationPredicate::Cmp { right, .. } => {
-                value(right, seen);
-                "Pred.Cmp"
-            }
-            RelationPredicate::IsNull { .. } => "Pred.IsNull",
-            RelationPredicate::IsNotNull { .. } => "Pred.IsNotNull",
-            RelationPredicate::In { values, .. } => {
-                values.iter().for_each(|v| value(v, seen));
-                "Pred.In"
-            }
-            RelationPredicate::Contains { right, .. } => {
-                value(right, seen);
-                "Pred.Contains"
-            }
-            RelationPredicate::EnumMatch { payload, .. } => {
-                pred(payload, seen);
-                "Pred.EnumMatch"
-            }
-            RelationPredicate::And(all) => {
-                all.iter().for_each(|p| pred(p, seen));
-                "Pred.And"
-            }
-            RelationPredicate::Or(all) => {
-                all.iter().for_each(|p| pred(p, seen));
-                "Pred.Or"
-            }
-            RelationPredicate::Not(inner) => {
-                pred(inner, seen);
-                "Pred.Not"
-            }
-            RelationPredicate::True => "Pred.True",
-            RelationPredicate::False => "Pred.False",
-        };
-        seen.insert(name);
-    }
-    let name = match expr {
-        PolicyExpr::Cmp { .. } => "Cmp",
-        PolicyExpr::SessionCmp { .. } => "SessionCmp",
-        PolicyExpr::IsNull { .. } => "IsNull",
-        PolicyExpr::SessionIsNull { .. } => "SessionIsNull",
-        PolicyExpr::IsNotNull { .. } => "IsNotNull",
-        PolicyExpr::SessionIsNotNull { .. } => "SessionIsNotNull",
-        PolicyExpr::Contains { .. } => "Contains",
-        PolicyExpr::SessionContains { .. } => "SessionContains",
-        PolicyExpr::In { .. } => "In",
-        PolicyExpr::InList { .. } => "InList",
-        PolicyExpr::SessionInList { .. } => "SessionInList",
-        PolicyExpr::Exists { condition, .. } => {
-            policy_variants(condition, seen);
-            "Exists"
-        }
-        PolicyExpr::ExistsRel { rel: r } => {
-            rel(r, seen);
-            "ExistsRel"
-        }
-        PolicyExpr::Inherits { .. } => "Inherits",
-        PolicyExpr::InheritsReferencing { .. } => "InheritsReferencing",
-        PolicyExpr::And(all) => {
-            all.iter().for_each(|e| policy_variants(e, seen));
-            "And"
-        }
-        PolicyExpr::Or(all) => {
-            all.iter().for_each(|e| policy_variants(e, seen));
-            "Or"
-        }
-        PolicyExpr::Not(inner) => {
-            policy_variants(inner, seen);
-            "Not"
-        }
-        PolicyExpr::True => "True",
-        PolicyExpr::False => "False",
-    };
-    seen.insert(name);
-}
-
-#[test]
-fn every_policy_and_relation_variant_survives_the_file_form() {
-    let expr = every_policy_variant();
-    let mut seen = BTreeSet::new();
-    policy_variants(&expr, &mut seen);
-    // 20 policy variants, 10 relation variants (+2 join kinds, 2 projections,
-    // 2 bounds), 11 predicates, 8 value refs.
-    assert_eq!(seen.len(), 20 + 10 + 6 + 11 + 8, "{seen:?}");
-    // Through text, as a reader sees it. (These expressions only need to be
-    // well-formed, not to compile against a schema, so this exercises the
-    // mirror on its own; the fixtures cover compiling ones end to end.)
-    let file = policy_to_artifact(&expr).unwrap();
-    let text = serde_json::to_string(&file).unwrap();
-    let read: ArtifactPolicyExpr = serde_json::from_str(&text).unwrap();
-    assert_eq!(policy_from_artifact(&read), expr);
-}
-
-fn every_column_type() -> Vec<ColumnType> {
-    let field = ColumnDescriptor::new("at", ColumnType::Timestamp);
-    let types = vec![
-        ColumnType::Integer,
-        ColumnType::BigInt,
-        ColumnType::Double,
-        ColumnType::Boolean,
-        ColumnType::Text,
-        ColumnType::Timestamp,
-        ColumnType::Uuid,
-        ColumnType::TransactionId,
-        ColumnType::Bytea,
-        ColumnType::Enum {
-            variants: vec!["a".into(), "b".into()],
-        },
-        ColumnType::EnumPayload {
-            cases: vec![EnumCaseDescriptor {
-                name: "done".into(),
-                fields: vec![field.clone()],
-            }],
-        },
-        ColumnType::Json { schema: None },
-        ColumnType::Json {
-            schema: Some(serde_json::json!({"type": "array"})),
-        },
-        ColumnType::Array {
-            element: Box::new(ColumnType::Text),
-        },
-        ColumnType::Row {
-            columns: Box::new(RowDescriptor {
-                columns: vec![field],
-            }),
-        },
-    ];
-    // Exhaustive, so a new engine column type fails to compile here.
-    for column_type in &types {
-        match column_type {
-            ColumnType::Integer
-            | ColumnType::BigInt
-            | ColumnType::Double
-            | ColumnType::Boolean
-            | ColumnType::Text
-            | ColumnType::Timestamp
-            | ColumnType::Uuid
-            | ColumnType::TransactionId
-            | ColumnType::Bytea
-            | ColumnType::Enum { .. }
-            | ColumnType::EnumPayload { .. }
-            | ColumnType::Json { .. }
-            | ColumnType::Array { .. }
-            | ColumnType::Row { .. } => {}
-            // Refused by the writer: see the_writer_refuses_what_a_reader_would.
-            ColumnType::ScalarEnum { .. } | ColumnType::CatalogueEnumPayload { .. } => {
-                unreachable!()
-            }
-        }
-    }
-    types
-}
-
-#[test]
-fn every_column_type_survives_the_file_form() {
-    for column_type in every_column_type() {
-        let mut column = nullable("c", column_type);
-        column.default = Some(Value::Null);
-        column.merge_strategy = None;
-        let file = column_to_artifact(&column).unwrap();
-        let read: ArtifactColumn =
-            serde_json::from_str(&serde_json::to_string(&file).unwrap()).unwrap();
-        assert_eq!(column_from_artifact(&read), column);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Malformed input
-// ---------------------------------------------------------------------------
-
-#[test]
-fn fieldless_variants_refuse_extra_keys_too() {
-    let error = refused(|v| {
-        v["schemas"][0]["tables"]["todos"]["columns"][0]["column_type"] =
-            serde_json::json!({"type": "Text", "schema": {}})
-    });
-    assert!(error.contains("unknown field"), "{error}");
-    let error = permissions_refused(|v| {
-        v["permissions"]["shares"]["select"]["using"] =
-            serde_json::json!({"type": "True", "column": "x"})
-    });
-    assert!(error.contains("unknown field"), "{error}");
-}
-
-#[test]
-fn a_format_that_is_not_the_integer_is_named() {
-    for format in [
-        serde_json::json!(1.0),
-        serde_json::json!("1"),
-        serde_json::json!(null),
-    ] {
-        let error = refused(|v| v["format"] = format.clone());
-        assert!(error.contains("`format` must be the integer 1"), "{error}");
-    }
-}
-
 #[test]
 fn malformed_files_are_refused_not_panicked_on() {
     let written = write(shared_todos()).unwrap();
-    let (text, permissions) = (&written.app, &written.permissions);
+    let (app, permissions) = (&written.app, &written.permissions);
+    let mut deep = String::new();
+    for _ in 0..10_000 {
+        deep.push('[');
+    }
     for input in [
         b"".as_slice(),
         b"not json",
-        &text.as_bytes()[..text.len() / 2],
+        &app.as_bytes()[..app.len() / 2],
         b"[]",
         b"{\"format\": 1}",
+        deep.as_bytes(),
     ] {
         assert!(load(input, permissions.as_bytes()).is_err());
-        assert!(load(text.as_bytes(), input).is_err());
+        assert!(load(app.as_bytes(), input).is_err() || input == b"{\"format\": 1}");
+        assert!(load_client(input).is_err());
     }
-    for edit in [
-        (|v: &mut serde_json::Value| v["schemas"] = "x".into()) as fn(&mut serde_json::Value),
-        |v| v["schemas"][0]["tables"]["todos"]["columns"] = 1.into(),
-        |v| v["schemas"][0]["tables"]["todos"]["columns"][0]["nullable"] = "no".into(),
-        |v| v["migrations"][0]["forward"][0]["operations"][0]["type"] = "Explode".into(),
-        |v| v["current"] = 7.into(),
-    ] {
-        assert!(edited(edit).is_err());
+    let mut long = String::from("true");
+    for _ in 0..2_000 {
+        long = format!("not ({long})");
     }
-    for edit in [
-        (|v: &mut serde_json::Value| v["bundle"] = "not hex".into()) as fn(&mut serde_json::Value),
-        |v| v["schema"] = 7.into(),
-        |v| v["permissions"] = "x".into(),
-    ] {
-        assert!(edited_permissions(edit).is_err());
+    let _ = read_policy("todos", &long, serde_json::json!({}));
+}
+
+// ---------------------------------------------------------------------------
+// The client reader
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_file_both_readers_accept_gives_clients_the_same_migrations() {
+    for input in [todo_server(), shared_todos()] {
+        let written = write(input).unwrap();
+        let full = load(written.app.as_bytes(), written.permissions.as_bytes())
+            .unwrap()
+            .client_migrations();
+        let client = load_client(written.app.as_bytes()).unwrap();
+        assert_eq!(client.schemas, full.schemas);
+        assert_eq!(client.lenses, full.lenses);
     }
-    // Deep nesting is refused by the JSON parser's depth limit, before any
-    // recursive conversion runs.
-    let mut deep = String::from(r#"{"type": "True"}"#);
-    for _ in 0..10_000 {
-        deep = format!(r#"{{"type": "Not", "expr": {deep}}}"#);
-    }
-    let mut value: serde_json::Value = serde_json::from_str(permissions).unwrap();
-    value["permissions"]["shares"]["select"]["using"] = serde_json::json!("PLACEHOLDER");
-    let file = serde_json::to_string(&value)
-        .unwrap()
-        .replace("\"PLACEHOLDER\"", &deep);
-    assert!(
-        load(text.as_bytes(), file.as_bytes())
-            .unwrap_err()
-            .message()
-            .contains("not JSON")
-    );
 }
 
 // ---------------------------------------------------------------------------
