@@ -11,7 +11,7 @@ session cookie, so the browser holds no token of its own. After sign-in,
 organization and its first admin membership for the stable Better Auth user ID,
 while the operations UI renders inside `JazzProvider`. Browser clients never get
 backend authority, and normal membership and tenant mutations remain policy
-checked at the Jazz edge.
+checked by the Jazz server.
 
 ## The app
 
@@ -47,7 +47,7 @@ case-sensitive.
 | viewer | read the label                                                     |
 
 `src/roles.ts` describes the roles for the UI, which hides or disables what a
-role can't do. `permissions.ts` enforces the same rules at the Jazz edge, so a
+role can't do. `permissions.ts` enforces the same rules on the Jazz server, so a
 write sent anyway is refused. `tests/roles.server.test.ts` proves it against a
 real local server: no self-promotion, no admin inserts, no cross-tenant team or
 catalogue references, viewers can't write, editors can't manage teams or
@@ -135,4 +135,4 @@ repository's deterministic development/build fixtures are not production
 fallbacks: startup fails if a production secret is absent.
 
 The deployed authority receipt also proves cross-tenant assignments are denied
-by the edge rather than hidden by a synthetic fixture.
+by the server rather than hidden by a synthetic fixture.
