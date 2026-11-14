@@ -8,6 +8,9 @@ To authenticate users with Jazz, sign in your users with your auth library as us
 expires and any claims, which your permission policies can use. In the browser, `JazzProvider` asks your backend who is
 signed in; after your own sign-in or sign-out, call `refresh()` on the session.
 
+Using [Better Auth](/docs/setup/auth/better-auth)? Jazz can be its database too, so you don't need
+a separate PostgreSQL or other database for it.
+
 ## Your backend decides
 
 When Jazz runs inside your [main backend](/docs/how-jazz-works#how-a-backend-talks-to-jazz), auth is one function. Your
@@ -15,7 +18,7 @@ backend already knows who is signed in, so it tells Jazz:
 
 ```ts title="jazz.server.ts"
 import { createJazz, sqlite } from "jazz-tools/backend";
-import { auth } from "./auth"; // your Better Auth instance
+import { auth } from "./auth"; // your Better Auth instance, which can keep its tables in Jazz too
 import { app } from "./schema";
 import permissions from "./permissions";
 
