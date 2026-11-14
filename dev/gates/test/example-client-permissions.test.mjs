@@ -18,9 +18,13 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const PERMISSIONS_IMPORT =
   /\bfrom\s+["'](?:(?:\.{1,2}\/)+(?:src\/(?:lib\/)?)?|@\/|\$lib\/)permissions(?:\.[jt]s)?["']|\bimport\(\s*["'](?:\.{1,2}\/)+permissions(?:\.[jt]s)?["']\s*\)/;
 
-/** Paths that never reach a client bundle. */
+/**
+ * Paths that never reach a client bundle: tests, benchmarks, scripts, and
+ * anything whose path names it a server (`server/`, `jazz-server.ts`,
+ * `todo-server-ts/`, `*-server-snippet.ts`).
+ */
 const NOT_CLIENT =
-  /(?:^|\/)(?:tests?|__tests__|benchmarks?|scripts|server|api)\/|\.(?:test|spec|server)\.[cm]?[jt]sx?$|(?:^|\/)(?:permissions|backend[^/]*|server|jazz\.server|middleware|instrumentation)\.[cm]?[jt]sx?$|(?:^|\/)route\.[jt]s$/;
+  /server|(?:^|\/)(?:tests?|__tests__|benchmarks?|scripts|api)\/|\.(?:test|spec|server)\.[cm]?[jt]sx?$|(?:^|\/)(?:permissions|backend[^/]*|server|jazz\.server|middleware|instrumentation)\.[cm]?[jt]sx?$|(?:^|\/)route\.[jt]s$/;
 
 function trackedSources() {
   return execFileSync(
@@ -60,4 +64,6 @@ test("the check recognises a client import and a server one", () => {
   assert.ok(!NOT_CLIENT.test("examples/x/src/components/Cart.tsx"));
   assert.ok(NOT_CLIENT.test("examples/x/src/lib/jazz.server.ts"));
   assert.ok(NOT_CLIENT.test("examples/x/app/api/jazz/route.ts"));
+  assert.ok(NOT_CLIENT.test("examples/x/lib/jazz-server.ts"));
+  assert.ok(NOT_CLIENT.test("examples/todo-server-ts/src/main.ts"));
 });
