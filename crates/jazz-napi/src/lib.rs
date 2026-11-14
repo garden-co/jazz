@@ -88,7 +88,7 @@ pub type JsonValue = serde_json::Value;
 /// Validate a schema and its embedded permissions without opening a database.
 #[napi(js_name = "validateSchema")]
 pub fn validate_schema(schema: Uint8Array) -> js::Result<()> {
-    binding_host::decode_schema(&schema).map_err(host_error)?;
+    binding_host::validate_deployable_schema(&schema).map_err(host_error)?;
     Ok(())
 }
 
@@ -99,6 +99,60 @@ pub fn validate_schema(schema: Uint8Array) -> js::Result<()> {
 pub fn check_client_migrations(migrations: String, target: String) -> napi::Result<()> {
     jazz::tools::deployment::published::check_client_migrations(migrations.as_bytes(), &target)
         .map_err(napi::Error::from_reason)
+}
+
+/// An app's two files, as [`write_app_artifact`] renders them.
+#[napi(object)]
+pub struct WrittenAppFiles {
+    /// `jazz.app.json`, which the app and its clients ship.
+    pub app: String,
+    /// `jazz.permissions.json`, which only its backends read.
+    pub permissions: String,
+}
+
+/// Build the `jazz.app.json` and `jazz.permissions.json` texts from what
+/// `jazz-tools validate` compiled (an
+/// [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput) as
+/// JSON): the files' only writer, which refuses what a reader would.
+#[napi(js_name = "writeAppArtifact")]
+pub fn write_app_artifact(input: String) -> js::Result<WrittenAppFiles> {
+    use jazz::tools::deployment::artifact;
+    let input: artifact::ArtifactInput = serde_json::from_str(&input)
+        .map_err(|error| napi::Error::from_reason(format!("jazz.app.json input: {error}")))?;
+    let written = artifact::write(input).map_err(artifact_error)?;
+    Ok(WrittenAppFiles {
+        app: written.app,
+        permissions: written.permissions,
+    })
+}
+
+/// Read and check an app's `jazz.app.json` (`app`) and
+/// `jazz.permissions.json` (`permissions`) as a backend does. Returns the
+/// current schema hash and the bundle id the two files make.
+#[napi(js_name = "loadAppArtifact")]
+pub fn load_app_artifact(app: String, permissions: String) -> js::Result<JsonValue> {
+    let loaded = jazz::tools::deployment::artifact::load(app.as_bytes(), permissions.as_bytes())
+        .map_err(artifact_error)?;
+    Ok(serde_json::json!({
+        "current": loaded.current_hash().to_string(),
+        "bundle": loaded.bundle().to_hex(),
+    }))
+}
+
+/// An app-file refusal: what the files can't express (yet) throws with
+/// `error.code` [`UNSUPPORTED_CODE`](jazz::tools::deployment::artifact::UNSUPPORTED_CODE)
+/// (`"JAZZ_APP_FILES_UNSUPPORTED"`); every other refusal keeps the default
+/// `GenericFailure`.
+fn artifact_error(error: jazz::tools::deployment::artifact::ArtifactError) -> BindingError {
+    use jazz::tools::deployment::artifact;
+    if error.is_unsupported() {
+        BindingError(napi::Error::new(
+            JsErrorCode(artifact::UNSUPPORTED_CODE.to_owned()),
+            error.to_string(),
+        ))
+    } else {
+        napi::Error::from_reason(error.to_string()).into()
+    }
 }
 
 /// Exact build/ABI fingerprint for the generated native artifact.

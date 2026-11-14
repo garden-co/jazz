@@ -3,7 +3,7 @@
 import type { Db } from "jazz-tools";
 import { useAll } from "jazz-tools/react";
 import { useMemo } from "react";
-import { MAX_LINE_QUANTITY } from "@/permissions";
+import { MAX_LINE_QUANTITY } from "@/src/store/limits";
 import { app, type Cart, type CartLine, type Product, type Stock } from "@/schema";
 import { ids } from "@/src/lib/ids";
 import { shippingCents } from "./pricing";

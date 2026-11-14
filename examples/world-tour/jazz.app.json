@@ -1,0 +1,63 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "bandInvites": {
+      "columns": { "bandId": "uuid", "code": "string" },
+      "relations": { "band": { "rel": "bands", "column": "bandId" } }
+    },
+    "bands": {
+      "columns": { "name": "string", "ownerId": "uuid" },
+      "relations": {
+        "invitesViaBand": { "reverse": "bandInvites", "relation": "band" },
+        "membersViaBand": { "reverse": "members", "relation": "band" },
+        "stopsViaBand": { "reverse": "stops", "relation": "band" }
+      }
+    },
+    "members": {
+      "columns": { "bandId": "uuid", "userId": "uuid", "name": "string", "inviteCode": "string?" },
+      "relations": { "band": { "rel": "bands", "column": "bandId" } }
+    },
+    "stopNotes": {
+      "columns": {
+        "stopId": "uuid",
+        "bandId": "uuid",
+        "body": { "type": "string", "merge": "markdown" }
+      },
+      "relations": {
+        "band": { "rel": "bands", "column": "bandId" },
+        "stop": { "rel": "stops", "column": "stopId" }
+      }
+    },
+    "stops": {
+      "columns": {
+        "bandId": "uuid",
+        "venueId": "uuid",
+        "date": "timestamp",
+        "status": { "enum": ["confirmed", "tentative", "cancelled"] },
+        "publicDescription": { "type": "string", "merge": "markdown" }
+      },
+      "relations": {
+        "band": { "rel": "bands", "column": "bandId" },
+        "notesViaStop": { "reverse": "stopNotes", "relation": "stop" },
+        "venue": { "rel": "venues", "column": "venueId" }
+      }
+    },
+    "venues": {
+      "columns": {
+        "name": "string",
+        "city": "string",
+        "country": "string",
+        "lat": "float",
+        "lng": "float",
+        "capacity": "int?",
+        "ownerId": "uuid",
+        "bandId": "uuid?"
+      },
+      "relations": {
+        "band": { "rel": "bands", "column": "bandId" },
+        "stopsViaVenue": { "reverse": "stops", "relation": "venue" }
+      }
+    }
+  }
+}
