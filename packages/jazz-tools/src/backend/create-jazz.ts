@@ -2661,7 +2661,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     };
   }
 
-  const streamAuthReuseMs =
+  /** `streamAuthReuseSeconds`, read live so a hot reload's options apply. */
+  const streamAuthReuseMs = () =>
     (options.streamAuthReuseSeconds ?? DEFAULT_STREAM_AUTH_REUSE_SECONDS) * 1000;
   // HTTP stream sessions, by id, with the key that proves a request comes
   // from the client that opened them.
@@ -2798,7 +2799,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       if (
         checked &&
         checked.credentials === credentials &&
-        performance.now() - checked.askedAt < streamAuthReuseMs &&
+        performance.now() - checked.askedAt < streamAuthReuseMs() &&
         Date.now() < checked.userUntil
       ) {
         return socket;
@@ -2810,7 +2811,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       if (user?.userId !== socket.userId) return new Response("not signed in", { status: 403 });
       // Keep only the latest ask's answer (a slower earlier one must not
       // undo a refusal since), and none once the session ended meanwhile.
-      if (streamAuthReuseMs > 0 && entry.authAsks === ask && streams.get(id) === entry) {
+      if (streamAuthReuseMs() > 0 && entry.authAsks === ask && streams.get(id) === entry) {
         entry.checked = { credentials, userUntil: user.expiresAt * 1000, askedAt };
       }
     }
