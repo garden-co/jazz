@@ -12,9 +12,16 @@
   Everyone starts on a device account, so the board works before
   sign-up and offline. Creating an account links a Better Auth identity to
   that same account through this app's backend (see Account.svelte).
+  `localFirst: "now"` opens the local-first client at once: a guest's board
+  lives on the device from the first visit, so there is no thin phase.
 -->
 <JazzProvider
-  config={{ serverUrl: "/jazz", initial: "device", client: () => import("jazz-tools/local-first") }}
+  config={{
+    serverUrl: "/jazz",
+    initial: "device",
+    client: () => import("jazz-tools/local-first"),
+    localFirst: "now",
+  }}
 >
   {@render children()}
   {#snippet loading()}<p class="status" role="status">Opening StagePlan…</p>{/snippet}
