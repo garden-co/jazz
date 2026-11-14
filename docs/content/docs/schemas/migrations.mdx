@@ -110,7 +110,9 @@ Index changes (`indexOnly`, `compositeIndex`) don't need a migration either: the
 rows are found, not the rows, so the backend deploys them as they are.
 
 Permission-only changes in `permissions.ts` don't need a migration; they go live when your main
-backend restarts with them. See [Declarative Permissions](/docs/schemas/policies) for details.
+backend restarts with them. Run `npx jazz-tools validate` after editing them, so `jazz.app.json`
+holds them: until then the backend refuses to start, saying the file is out of date with
+`permissions.ts`. See [Declarative Permissions](/docs/schemas/policies) for details.
 
 ## The migration file
 

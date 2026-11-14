@@ -94,7 +94,7 @@ describe("cli migrations", () => {
     );
     expect(unchangedValidate).toContain(
       "schema.ts matches its latest snapshot, so no migration is needed. " +
-        "Changes to permissions.ts never need one: your backend publishes them when it starts.",
+        "Changes to permissions.ts never need one: they go into jazz.app.json, which your backend publishes when it starts.",
     );
 
     await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithTodoNotes()));
