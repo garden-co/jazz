@@ -53,6 +53,50 @@ async function withStore<T>(
   }
 }
 
+/**
+ * A page's copy of this memory, in Web Storage, which it reads at once:
+ * looking `url` up in IndexedDB before the socket opens costs a page
+ * ~10-20 ms on every load. Workers have no Web Storage and use IndexedDB alone.
+ */
+const MIRROR_PREFIX = "jazz-stream-endpoint:";
+
+function pageStorage(): Storage | undefined {
+  if (typeof document === "undefined") return undefined;
+  try {
+    return (globalThis as { localStorage?: Storage }).localStorage ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * {@link recallStreamEndpoint} at once, from a page's copy: `undefined`
+ * where there is none to ask (a worker, Node, storage refused). A page
+ * that has none for `url` gets `false`. Only an endpoint a worker alone
+ * learned (it writes IndexedDB only) is then missed, and the page tries
+ * one socket before it learns the endpoint itself.
+ */
+export function recallStreamEndpointNow(url: string, now = Date.now()): boolean | undefined {
+  const storage = pageStorage();
+  if (!storage) return undefined;
+  try {
+    const until = storage.getItem(MIRROR_PREFIX + url);
+    return until !== null && Number(until) > now;
+  } catch {
+    return undefined;
+  }
+}
+
+function mirror(update: (storage: Storage) => void): void {
+  const storage = pageStorage();
+  if (!storage) return;
+  try {
+    update(storage);
+  } catch {
+    // Storage full or refused: IndexedDB still has it.
+  }
+}
+
 /** Whether `url`'s backend said, within {@link STREAM_ENDPOINT_MEMORY_MS}, that it serves the stream instead. */
 export async function recallStreamEndpoint(url: string, now = Date.now()): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -67,6 +111,9 @@ export async function recallStreamEndpoint(url: string, now = Date.now()): Promi
 
 /** Remember that `url`'s backend serves the stream instead of sockets. */
 export function rememberStreamEndpoint(url: string, now = Date.now()): Promise<void> {
+  mirror((storage) =>
+    storage.setItem(MIRROR_PREFIX + url, String(now + STREAM_ENDPOINT_MEMORY_MS)),
+  );
   return withStore("readwrite", (store) => store.put(now + STREAM_ENDPOINT_MEMORY_MS, url)).then(
     () => undefined,
     () => undefined,
@@ -75,6 +122,7 @@ export function rememberStreamEndpoint(url: string, now = Date.now()): Promise<v
 
 /** Forget `url`: its stream was refused, so the next session tries a socket again. */
 export function forgetStreamEndpoint(url: string): Promise<void> {
+  mirror((storage) => storage.removeItem(MIRROR_PREFIX + url));
   return withStore("readwrite", (store) => store.delete(url)).then(
     () => undefined,
     () => undefined,
