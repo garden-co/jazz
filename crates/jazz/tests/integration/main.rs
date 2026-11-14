@@ -248,3 +248,26 @@ mod write_receipt_owner;
 
 #[path = "../transaction_read_prefix.rs"]
 mod transaction_read_prefix;
+
+#[path = "../audit_permissions_backend_revocation.rs"]
+mod audit_permissions_backend_revocation;
+#[path = "../audit_reopen_lens_table.rs"]
+mod audit_reopen_lens_table;
+#[path = "../audit_reopen_schema_dropped.rs"]
+mod audit_reopen_schema_dropped;
+#[path = "../audit_storage_values_lost_tail.rs"]
+mod audit_storage_values_lost_tail;
+#[path = "../audit_sync_offline_reset.rs"]
+mod audit_sync_offline_reset;
+
+#[path = "../audit_permissions_backend_scope_move.rs"]
+mod audit_permissions_backend_scope_move;
+#[path = "../audit_reopen_schema_added.rs"]
+mod audit_reopen_schema_added;
+#[path = "../audit_storage_values_text_threshold.rs"]
+mod audit_storage_values_text_threshold;
+#[path = "../audit_sync_offline_tabs.rs"]
+mod audit_sync_offline_tabs;
+
+#[path = "../audit_reopen_schema_bundles.rs"]
+mod audit_reopen_schema_bundles;
