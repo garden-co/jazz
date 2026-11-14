@@ -92,6 +92,7 @@ const REVIEWED_CALLS = new Set([
   "backend/vercel-store.ts: <value>.repeat",
   "classic-api.ts: classicFunction",
   "classic-api.ts: classicNamespace",
+  "dev/app-files.ts: join",
   "dev/inspector-overlay/loader.ts: HostBinding",
   "dsl.ts: AddBuilder",
   "dsl.ts: DropBuilder",
