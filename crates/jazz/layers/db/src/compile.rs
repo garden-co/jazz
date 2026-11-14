@@ -19,8 +19,8 @@ use crate::records::{Value, ValueType};
 use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
 
 use crate::values::{
-    STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, query_error, quote, to_sql,
-    unsupported,
+    STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, claim_as, claims_as,
+    query_error, quote, to_sql, unsupported, unwrap_nullable_type,
 };
 
 mod history;
@@ -656,6 +656,23 @@ impl<'a> Ctx<'a> {
             None => Ok(Term::Missing),
             Some(value) => self.value_term(&value),
         }
+    }
+
+    /// `session.<path>` compared with a value of type `ty`: a provider claim
+    /// converts as [`claim_as`] says (one rule for every policy form and
+    /// query); the session's own parts keep their types.
+    fn claim_term(
+        &mut self,
+        session: &Session,
+        path: &[String],
+        ty: Option<&ValueType>,
+    ) -> Result<Term, Error> {
+        let value = session.resolve(path);
+        let value = match ty {
+            Some(ty) if is_claim(path) => value.and_then(|value| claim_as(ty, value)),
+            _ => value,
+        };
+        self.present(value)
     }
 
     /// A table by this schema's name for it; its stored name joins the
@@ -2029,10 +2046,14 @@ impl<'a> Ctx<'a> {
                         check_candidate(table, column, option)?;
                     }
                 }
+                let ty = match left {
+                    Operand::Column(column) => table.column_type(column).cloned(),
+                    _ => None,
+                };
                 let left = self.operand(left, table, alias)?;
                 let options = options
                     .iter()
-                    .map(|option| self.operand(option, table, alias))
+                    .map(|option| self.operand_as(option, ty.as_ref(), table, alias))
                     .collect::<Result<Vec<_>, _>>()?;
                 let sql = self.in_list(left, options)?;
                 if id {
@@ -2073,9 +2094,39 @@ impl<'a> Ctx<'a> {
         table: &Table,
         alias: &str,
     ) -> Result<String, Error> {
-        let left = self.operand(left, table, alias)?;
-        let right = self.operand(right, table, alias)?;
+        let (left, right) = match (left, right) {
+            (Operand::Column(column), other) => (
+                self.operand(left, table, alias)?,
+                self.operand_as(other, table.column_type(column), table, alias)?,
+            ),
+            (other, Operand::Column(column)) => (
+                self.operand_as(other, table.column_type(column), table, alias)?,
+                self.operand(right, table, alias)?,
+            ),
+            _ => (
+                self.operand(left, table, alias)?,
+                self.operand(right, table, alias)?,
+            ),
+        };
         self.cmp(op, left, right)
+    }
+
+    /// [`Self::operand`] compared with a column of type `ty`: a provider
+    /// claim converts as [`claim_as`] says, as it does in a policy.
+    fn operand_as(
+        &mut self,
+        operand: &Operand,
+        ty: Option<&ValueType>,
+        table: &Table,
+        alias: &str,
+    ) -> Result<Term, Error> {
+        match (operand, ty) {
+            (Operand::Claim(key), Some(ty)) if is_provider_claim_key(key) => {
+                let value = self.claims.claim(key).and_then(|value| claim_as(ty, value));
+                self.present(value)
+            }
+            _ => self.operand(operand, table, alias),
+        }
     }
 
     // ---- policies -------------------------------------------------------
@@ -2215,17 +2266,9 @@ impl<'a> Ctx<'a> {
                 column,
                 op,
                 value: PolicyValue::SessionRef(path),
-            } if is_uuid(table, column)
-                && path.first().map(String::as_str) != Some("__jazz_outer_row") =>
-            {
-                // A claim is JSON, so a UUID claim arrives as its string:
-                // compare it with a UUID column as the UUID it spells.
-                let value = match session.resolve(path) {
-                    Some(Value::String(text)) => text.parse().map(Value::Uuid).ok(),
-                    value => value,
-                };
+            } if is_claim(path) => {
                 let left = self.column_term(table, alias, column)?;
-                let right = self.present(value)?;
+                let right = self.claim_term(session, path, table.column_type(column))?;
                 self.cmp(op.clone(), left, right)?
             }
             PolicyExpr::Cmp { column, op, value } => {
@@ -2234,9 +2277,9 @@ impl<'a> Ctx<'a> {
                 self.cmp(op.clone(), left, right)?
             }
             PolicyExpr::SessionCmp { path, op, value } => {
-                let left = session.resolve(path);
-                let left = self.present(left)?;
-                let right = self.value_term(&public_value(value)?)?;
+                let right = public_value(value)?;
+                let left = self.claim_term(session, path, literal_type(&right).as_ref())?;
+                let right = self.value_term(&right)?;
                 self.cmp(op.clone(), left, right)?
             }
             PolicyExpr::IsNull { column } => {
@@ -2249,7 +2292,19 @@ impl<'a> Ctx<'a> {
             PolicyExpr::SessionIsNotNull { path } => bool_sql(session.is_not_null(path)),
             PolicyExpr::Contains { column, value } => {
                 let left = self.column_term(table, alias, column)?;
-                let right = self.policy_value(value, outer, session)?;
+                let right = match value {
+                    // An array column holds elements of its element type; a
+                    // text column contains text.
+                    PolicyValue::SessionRef(path) if is_claim(path) => {
+                        let ty = match table.column_type(column).map(unwrap_nullable_type) {
+                            Some(ValueType::Array(element)) => Some(element.as_ref().clone()),
+                            Some(_) => Some(ValueType::String),
+                            None => None,
+                        };
+                        self.claim_term(session, path, ty.as_ref())?
+                    }
+                    value => self.policy_value(value, outer, session)?,
+                };
                 if is_array(table, column) {
                     self.array_contains(left, right)
                 } else {
@@ -2261,30 +2316,43 @@ impl<'a> Ctx<'a> {
                 session_path,
             } => {
                 let left = self.column_term(table, alias, column)?;
-                let options = match session.resolve(session_path) {
-                    Some(Value::Array(values)) => values
-                        .iter()
-                        .map(|value| self.value_term(value))
-                        .collect::<Result<Vec<_>, _>>()?,
-                    Some(value) => vec![self.value_term(&value)?],
-                    None => Vec::new(),
+                let values = match (session.resolve(session_path), table.column_type(column)) {
+                    (Some(claim), Some(ty)) if is_claim(session_path) => claims_as(ty, claim),
+                    (Some(Value::Array(values)), _) => values,
+                    (Some(value), _) => vec![value],
+                    (None, _) => Vec::new(),
                 };
+                let options = values
+                    .iter()
+                    .map(|value| self.value_term(value))
+                    .collect::<Result<Vec<_>, _>>()?;
                 self.in_list(left, options)?
             }
             PolicyExpr::InList { column, values } => {
                 let left = self.column_term(table, alias, column)?;
+                let ty = table.column_type(column);
                 let options = values
                     .iter()
-                    .map(|value| self.policy_value(value, outer, session))
+                    .map(|value| match value {
+                        PolicyValue::SessionRef(path) if is_claim(path) => {
+                            self.claim_term(session, path, ty)
+                        }
+                        value => self.policy_value(value, outer, session),
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 self.in_list(left, options)?
             }
             PolicyExpr::SessionInList { path, values } => {
-                let left = session.resolve(path);
-                let left = self.present(left)?;
+                let values = values
+                    .iter()
+                    .map(public_value)
+                    .collect::<Result<Vec<_>, _>>()?;
+                // The literals share one type; a claim compares as it.
+                let ty = values.iter().find_map(literal_type);
+                let left = self.claim_term(session, path, ty.as_ref())?;
                 let options = values
                     .iter()
-                    .map(|value| self.value_term(&public_value(value)?))
+                    .map(|value| self.value_term(value))
                     .collect::<Result<Vec<_>, _>>()?;
                 self.in_list(left, options)?
             }
@@ -2715,6 +2783,36 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// [`Self::rel_value`] compared with a value of type `ty`: a claim
+    /// converts as [`claim_as`] says, as it does in a plain policy.
+    fn rel_value_as(
+        &mut self,
+        value: &RelationValueRef,
+        ty: Option<&ValueType>,
+        rel: &Rel,
+        scope: &RelScope<'_>,
+    ) -> Result<Term, Error> {
+        match value {
+            RelationValueRef::SessionRef(path) if is_claim(path) => {
+                self.claim_term(scope.session, path, ty)
+            }
+            value => self.rel_value(value, rel, scope),
+        }
+    }
+
+    /// The type of relation column `column` (nullability removed), when it
+    /// resolves to a table's column.
+    fn rel_column_type(&self, rel: &Rel, column: &RelationColumnRef) -> Option<ValueType> {
+        let sql = self.resolve(rel, column).ok()?;
+        rel.from.iter().find_map(|src| {
+            let table = &self.schema.tables[src.table.as_ref()?];
+            (sql.starts_with(&format!("{}.", src.alias)) && table.has_column(&column.column))
+                .then(|| table.column_type(&column.column))
+                .flatten()
+                .map(|ty| unwrap_nullable_type(ty).clone())
+        })
+    }
+
     fn rel_predicate(
         &mut self,
         predicate: &RelationPredicate,
@@ -2783,8 +2881,9 @@ impl<'a> Ctx<'a> {
                 self.author_cmp(table, &alias, &left.column, &op, path, scope.session)?
             }
             RelationPredicate::Cmp { left, op, right } => {
+                let ty = self.rel_column_type(rel, left);
+                let right = self.rel_value_as(right, ty.as_ref(), rel, scope)?;
                 let left = self.resolve_term(rel, left)?;
-                let right = self.rel_value(right, rel, scope)?;
                 let op = match op {
                     RelationCmpOp::Eq => CmpOp::Eq,
                     RelationCmpOp::Ne => CmpOp::Ne,
@@ -2802,16 +2901,22 @@ impl<'a> Ctx<'a> {
                 format!("({} IS NOT NULL)", self.resolve(rel, column)?)
             }
             RelationPredicate::In { left, values } => {
+                let ty = self.rel_column_type(rel, left);
                 let left = self.resolve_term(rel, left)?;
                 let options = values
                     .iter()
-                    .map(|value| self.rel_value(value, rel, scope))
+                    .map(|value| self.rel_value_as(value, ty.as_ref(), rel, scope))
                     .collect::<Result<Vec<_>, _>>()?;
                 self.in_list(left, options)?
             }
             RelationPredicate::Contains { left, right } => {
+                let ty = match self.rel_column_type(rel, left) {
+                    Some(ValueType::Array(element)) => Some(*element),
+                    Some(_) => Some(ValueType::String),
+                    None => None,
+                };
                 let left = self.resolve_term(rel, left)?;
-                let right = self.rel_value(right, rel, scope)?;
+                let right = self.rel_value_as(right, ty.as_ref(), rel, scope)?;
                 self.contains(left, right)
             }
             RelationPredicate::EnumMatch { .. } => {
@@ -3135,11 +3240,28 @@ fn check_haystack(table: &Table, column: &str) -> Result<(), Error> {
     }
 }
 
-/// Whether `column` is a UUID column (nullable or not).
-fn is_uuid(table: &Table, column: &str) -> bool {
-    table.column(column).is_some_and(|column| match &column.ty {
-        ValueType::Nullable(inner) => matches!(**inner, ValueType::Uuid),
-        ty => matches!(ty, ValueType::Uuid),
+/// Whether `path` names a provider claim (`session.claims.*`), whose type
+/// is known only from what it is compared with ([`claim_as`]).
+pub(crate) fn is_claim(path: &[String]) -> bool {
+    path.len() >= 2 && path[0] == "claims"
+}
+
+/// Whether an [`Operand::Claim`] key names a provider claim
+/// (`session.claims.*`) rather than a part of the session itself.
+fn is_provider_claim_key(key: &str) -> bool {
+    key.starts_with('\0')
+}
+
+/// The type a policy literal compares a claim as.
+fn literal_type(value: &Value) -> Option<ValueType> {
+    Some(match value {
+        Value::Uuid(_) => ValueType::Uuid,
+        Value::String(_) => ValueType::String,
+        Value::I32(_) | Value::I64(_) | Value::U8(_) | Value::U16(_) | Value::U32(_) => {
+            ValueType::I64
+        }
+        Value::U64(_) | Value::U48(_) => ValueType::U64,
+        _ => return None,
     })
 }
 

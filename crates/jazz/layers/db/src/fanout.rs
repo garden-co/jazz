@@ -829,8 +829,10 @@ impl Inner {
                 .and_then(|author| self.read_sessions(prepared, Some(author)).0)
                 .filter(|s| !s.system)
                 .and_then(|session| {
+                    // The policy names columns as its governing schema does.
+                    let governing = policies.by_stored(&root.stored).unwrap_or(root);
                     root.policy(Operation::Select)
-                        .and_then(|p| row_pin(p, &session))
+                        .and_then(|p| row_pin(governing, p, &session))
                 })
                 .and_then(|(column, value)| {
                     let governing = policies.by_stored(&root.stored)?;
@@ -2480,6 +2482,7 @@ fn root_key(query: &Query, binding: &BTreeMap<String, Value>) -> Option<(String,
 /// understand (then no table is pinned). A table seen twice with different
 /// pins, or nested inside another EXISTS, is not pinned.
 pub(super) fn policy_pins(
+    schema: &Schema,
     policy: &PolicyExpr,
     session: &Session,
     pins: &mut HashMap<String, Option<(String, String)>>,
@@ -2487,11 +2490,11 @@ pub(super) fn policy_pins(
     use crate::tools::PolicyValue;
     match policy {
         PolicyExpr::And(list) | PolicyExpr::Or(list) => {
-            list.iter().all(|p| policy_pins(p, session, pins))
+            list.iter().all(|p| policy_pins(schema, p, session, pins))
         }
         // A pin bounds which rows can change an EXISTS's value, whatever
         // surrounds it, so negation keeps it sound.
-        PolicyExpr::Not(inner) => policy_pins(inner, session, pins),
+        PolicyExpr::Not(inner) => policy_pins(schema, inner, session, pins),
         PolicyExpr::Exists { table, condition } => {
             let conjuncts: Vec<&PolicyExpr> = match condition.as_ref() {
                 PolicyExpr::And(list) => list.iter().collect(),
@@ -2506,8 +2509,13 @@ pub(super) fn policy_pins(
                         value: PolicyValue::SessionRef(path),
                     } if path.first().map(String::as_str) != Some("__jazz_outer_row") => {
                         if pin.is_none() {
-                            pin = session
-                                .resolve(path)
+                            // The value the compiled comparison holds the
+                            // column to (a claim as the column's type).
+                            let ty = schema
+                                .table(table)
+                                .ok()
+                                .and_then(|table| table.column_type(column).cloned());
+                            pin = session_value_for(path, ty.as_ref(), session)
                                 .as_ref()
                                 .and_then(canon_value)
                                 .map(|v| (column.clone(), v));
@@ -2784,8 +2792,11 @@ fn value_pin(table: &Table, conjunct: &PolicyExpr, session: &Session) -> Option<
         ValueType::Nullable(inner) => inner.as_ref(),
         ty => ty,
     };
-    let value = match (ty, session.resolve(path)?) {
-        (ValueType::Uuid, Value::String(text)) => Value::Uuid(text.parse().ok()?),
+    let mut value = session.resolve(path)?;
+    if crate::compile::is_claim(path) {
+        value = crate::values::claim_as(ty, value)?;
+    }
+    let value = match (ty, value) {
         (ValueType::Uuid, value @ Value::Uuid(_)) => value,
         (ValueType::String, value @ Value::String(_)) => value,
         (_, value @ Value::String(_)) if stored.tags.is_some() => value,
@@ -2838,20 +2849,32 @@ pub(super) fn stored_pins(
 
 /// `column = session value` required of the protected row itself: the
 /// policy is that comparison, or a conjunction containing it.
-fn row_pin(policy: &PolicyExpr, session: &Session) -> Option<(String, String)> {
+fn row_pin(table: &Table, policy: &PolicyExpr, session: &Session) -> Option<(String, String)> {
     use crate::tools::PolicyValue;
     match policy {
         PolicyExpr::Cmp {
             column,
             op: CmpOp::Eq,
             value: PolicyValue::SessionRef(path),
-        } if path.first().map(String::as_str) != Some("__jazz_outer_row") => session
-            .resolve(path)
-            .as_ref()
-            .and_then(canon_value)
-            .map(|value| (column.clone(), value)),
-        PolicyExpr::And(list) => list.iter().find_map(|p| row_pin(p, session)),
+        } if path.first().map(String::as_str) != Some("__jazz_outer_row") => {
+            session_value_for(path, table.column_type(column), session)
+                .as_ref()
+                .and_then(canon_value)
+                .map(|value| (column.clone(), value))
+        }
+        PolicyExpr::And(list) => list.iter().find_map(|p| row_pin(table, p, session)),
         _ => None,
+    }
+}
+
+/// `session.<path>` as a policy compares it with a column of type `ty`: a
+/// provider claim converted by [`crate::values::claim_as`], as the
+/// compiled policy converts it, so a pin holds the value the policy does.
+fn session_value_for(path: &[String], ty: Option<&ValueType>, session: &Session) -> Option<Value> {
+    let value = session.resolve(path)?;
+    match ty {
+        Some(ty) if crate::compile::is_claim(path) => crate::values::claim_as(ty, value),
+        _ => Some(value),
     }
 }
 
