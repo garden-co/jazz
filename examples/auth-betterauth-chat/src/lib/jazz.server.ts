@@ -1,5 +1,5 @@
 import { app } from "../../schema";
-import permissions from "../../permissions";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
 import type { Jazz } from "jazz-tools/backend";
 
 // This is a workaround to resolve correctly NAPI modules in the monorepo

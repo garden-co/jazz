@@ -28,6 +28,9 @@ import {
   jazzAppSignUp,
   jazzAppRequest,
   jazzServerInfo,
+  jazzAppArtifact,
+  jazzDeploy,
+  jazzDeployApp,
   stopJazzServerByUrl,
   jazzServerTransportControlCommands,
 } from "./tests/browser/testing-server-node.js";
@@ -238,6 +241,10 @@ export default defineConfig({
           console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
         },
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
+        jazzDeploy: async (_context, options) => jazzDeploy(options),
+        jazzDeployApp: async (_context, options) => jazzDeployApp(options),
+        jazzAppArtifact: async (_context, versions, migrations, permissions) =>
+          jazzAppArtifact(versions, migrations, permissions),
         jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
         jazzAppUser: async (_context, frontUrl, userId, claims) =>
           jazzAppUser(frontUrl, userId, claims),

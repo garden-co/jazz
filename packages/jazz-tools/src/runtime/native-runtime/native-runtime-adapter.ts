@@ -1,4 +1,4 @@
-import type { ClientMigrations } from "../client-migrations.js";
+import type { AppArtifact } from "../app-artifact.js";
 import { streamingChunks } from "../streaming-source.js";
 import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
@@ -97,7 +97,7 @@ import {
   type QueryPredicate,
   type QueryPredicateOp,
   type ValueType,
-  clientMigrationsBytes,
+  appArtifactBytes,
 } from "./native-codec.js";
 import { exactSignedI64 } from "./exact-integer.js";
 import { encodeSchema } from "./schema-codec.js";
@@ -285,7 +285,7 @@ type NativeDb = {
     /** The upstream refused the scope's credential, with its reason. */
     authRejected?: string | null;
   };
-  registerSchema(schema: Uint8Array, migrations?: Uint8Array): NativeDb;
+  registerSchema(schema: Uint8Array, artifact?: Uint8Array): NativeDb;
   beginTransaction(
     openTransactionId: string,
     kind: TransactionKind,
@@ -1089,15 +1089,15 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  /** The migrations this runtime's app ships (see {@link ClientMigrations}). */
-  readonly migrations: ClientMigrations | undefined;
+  /** The `jazz.app.json` this runtime's app ships (see {@link AppArtifact}). */
+  readonly artifact: AppArtifact | undefined;
 
-  /** A view of `schema`, whose app ships `migrations` (see {@link ClientMigrations}). */
-  registerSchemaView(schema: WasmSchema, migrations?: ClientMigrations): NativeRuntimeAdapter {
+  /** A view of `schema`, whose app ships `artifact` (see {@link AppArtifact}). */
+  registerSchemaView(schema: WasmSchema, artifact?: AppArtifact): NativeRuntimeAdapter {
     return new NativeRuntimeAdapter(null, schema, this.node, this.peerIdentity, 1, true, {
       db: this.db.registerSchema(
         encodeSchema(schema),
-        migrations ? clientMigrationsBytes(migrations) : undefined,
+        artifact ? appArtifactBytes(artifact) : undefined,
       ),
       // Registered schema views are façades over this same native open. The
       // capability is private to the owner and must survive view creation so
@@ -1130,8 +1130,8 @@ export class NativeRuntimeAdapter implements Runtime {
       slowQueryLog?: SlowQueryLogOptions;
       /** How this runtime opens its server socket, when not the platform's own WebSocket. */
       webSocket?: WebSocketConstructor;
-      /** The app's versions and migrations: see {@link ClientMigrations}. */
-      migrations?: ClientMigrations;
+      /** The app's `jazz.app.json`: see {@link AppArtifact}. */
+      artifact?: AppArtifact;
     },
   ) {
     this.ownerRuntime = opts?.owner?.ownerRuntime ?? this;
@@ -1157,11 +1157,11 @@ export class NativeRuntimeAdapter implements Runtime {
       historyComplete,
       opts?.initialSyncFlushEvery,
       opts?.selfSignedClientProof,
-      opts?.migrations,
+      opts?.artifact,
       opts?.systemNode,
     );
     this.peerIdentity = author;
-    this.migrations = opts?.owner?.migrations ?? opts?.migrations;
+    this.artifact = opts?.owner?.artifact ?? opts?.artifact;
     this.schemaHash = serializeRuntimeSchema(schema);
     if (opts?.db) {
       this.db = opts.db;

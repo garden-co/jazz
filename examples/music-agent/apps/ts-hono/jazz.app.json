@@ -1,0 +1,1578 @@
+{
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "artists": {
+        "relations": {
+          "calendarEventsViaArtist": {
+            "relation": "artist",
+            "table": "calendarEvents",
+            "type": "Reverse"
+          },
+          "conversationsViaArtist": {
+            "relation": "artist",
+            "table": "conversations",
+            "type": "Reverse"
+          },
+          "songsViaArtist": {
+            "relation": "artist",
+            "table": "songs",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "attachments": {
+        "relations": {
+          "conversation": {
+            "column": "conversationId",
+            "table": "conversations",
+            "type": "Forward"
+          },
+          "turn": {
+            "column": "turnId",
+            "table": "turns",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "better_auth_account": {
+        "relations": {
+          "user": {
+            "column": "userId",
+            "table": "better_auth_user",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "better_auth_session": {
+        "relations": {
+          "user": {
+            "column": "userId",
+            "table": "better_auth_user",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "better_auth_user": {
+        "relations": {
+          "better_auth_accountViaUser": {
+            "relation": "user",
+            "table": "better_auth_account",
+            "type": "Reverse"
+          },
+          "better_auth_sessionViaUser": {
+            "relation": "user",
+            "table": "better_auth_session",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "calendarEvents": {
+        "relations": {
+          "artist": {
+            "column": "artistId",
+            "table": "artists",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "conversations": {
+        "relations": {
+          "artist": {
+            "column": "artistId",
+            "table": "artists",
+            "type": "Forward"
+          },
+          "attachmentsViaConversation": {
+            "relation": "conversation",
+            "table": "attachments",
+            "type": "Reverse"
+          },
+          "toolCallsViaConversation": {
+            "relation": "conversation",
+            "table": "toolCalls",
+            "type": "Reverse"
+          },
+          "turnsViaConversation": {
+            "relation": "conversation",
+            "table": "turns",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "songs": {
+        "relations": {
+          "artist": {
+            "column": "artistId",
+            "table": "artists",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "toolCalls": {
+        "relations": {
+          "conversation": {
+            "column": "conversationId",
+            "table": "conversations",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "turns": {
+        "relations": {
+          "attachmentsViaTurn": {
+            "relation": "turn",
+            "table": "attachments",
+            "type": "Reverse"
+          },
+          "childrenViaParent": {
+            "relation": "parent",
+            "table": "turns",
+            "type": "Reverse"
+          },
+          "conversation": {
+            "column": "conversationId",
+            "table": "conversations",
+            "type": "Forward"
+          },
+          "parent": {
+            "column": "parentId",
+            "table": "turns",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "ab70708b1e97287537c8675ff0dba1cabde8b4d584cc896aec8bcec588cb632d",
+  "format": 1,
+  "migrations": [
+    {
+      "forward": [
+        {
+          "operations": [
+            {
+              "column": "issuer",
+              "column_type": {
+                "type": "Text"
+              },
+              "default": {
+                "type": "Text",
+                "value": ""
+              },
+              "type": "Drop"
+            }
+          ],
+          "table": "better_auth_account"
+        }
+      ],
+      "from": "5c11d90336bf4b28b4d6f5d0db9bc18f3c744527135959aa7bbda98dd4ee8c99",
+      "to": "ab70708b1e97287537c8675ff0dba1cabde8b4d584cc896aec8bcec588cb632d"
+    }
+  ],
+  "schemas": [
+    {
+      "hash": "5c11d90336bf4b28b4d6f5d0db9bc18f3c744527135959aa7bbda98dd4ee8c99",
+      "tables": {
+        "artists": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "ownerAccount",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "homeCity",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "genre",
+              "nullable": false
+            }
+          ]
+        },
+        "attachments": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "conversationId",
+              "nullable": false,
+              "references": "conversations"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "turnId",
+              "nullable": false,
+              "references": "turns"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "filename",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "mediaType",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "byteLength",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Bytea"
+              },
+              "name": "payload",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "conversationId"
+          ]
+        },
+        "better_auth_account": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "issuer",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "accountId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "providerId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "password",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_jwks": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "publicKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "privateKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "alg",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "crv",
+              "nullable": true
+            }
+          ]
+        },
+        "better_auth_session": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "token",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "ipAddress",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "userAgent",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            }
+          ]
+        },
+        "better_auth_user": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "email",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "emailVerified",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "image",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_verification": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "identifier",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "value",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "calendarEvents": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "ownerAccount",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "artistId",
+              "nullable": false,
+              "references": "artists"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "date",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "show",
+                  "hold",
+                  "travel",
+                  "studio"
+                ]
+              },
+              "name": "kind",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "city",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "ownerAccount",
+            "date"
+          ]
+        },
+        "conversations": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "ownerAccount",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "artistId",
+              "nullable": false,
+              "references": "artists"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "headTurnId",
+              "nullable": true
+            }
+          ],
+          "indexed_columns": [
+            "ownerAccount"
+          ]
+        },
+        "profiles": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "accountId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "authUserId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "displayName",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "accountId",
+            "authUserId"
+          ]
+        },
+        "songs": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "ownerAccount",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "artistId",
+              "nullable": false,
+              "references": "artists"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "durationSeconds",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              "name": "energy",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "ownerAccount"
+          ]
+        },
+        "toolCalls": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "conversationId",
+              "nullable": false,
+              "references": "conversations"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "turnId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "ordinal",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "argumentsJson",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "resultJson",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "running",
+                  "complete",
+                  "error"
+                ]
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "durationMs",
+              "nullable": true
+            }
+          ],
+          "indexed_columns": [
+            "conversationId"
+          ]
+        },
+        "turns": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "conversationId",
+              "nullable": false,
+              "references": "conversations"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "parentId",
+              "nullable": true,
+              "references": "turns"
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "user",
+                  "assistant"
+                ]
+              },
+              "name": "role",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "body",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "queued",
+                  "streaming",
+                  "complete",
+                  "interrupted",
+                  "failed"
+                ]
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "provider",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "error",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "runnerId",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "heartbeatAt",
+              "nullable": true
+            }
+          ],
+          "indexed_columns": [
+            "conversationId",
+            "status"
+          ]
+        },
+        "venues": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "ownerAccount",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "city",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "capacity",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "style",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "bookingContact",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "ownerAccount",
+            "city"
+          ]
+        }
+      }
+    },
+    {
+      "hash": "ab70708b1e97287537c8675ff0dba1cabde8b4d584cc896aec8bcec588cb632d",
+      "tables": {
+        "artists": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "ownerAccount",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "homeCity",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "genre",
+              "nullable": false
+            }
+          ]
+        },
+        "attachments": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "conversationId",
+              "nullable": false,
+              "references": "conversations"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "turnId",
+              "nullable": false,
+              "references": "turns"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "filename",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "mediaType",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "byteLength",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Bytea"
+              },
+              "name": "payload",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "conversationId"
+          ]
+        },
+        "better_auth_account": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "accountId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "providerId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "password",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_jwks": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "publicKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "privateKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "alg",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "crv",
+              "nullable": true
+            }
+          ]
+        },
+        "better_auth_session": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "token",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "ipAddress",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "userAgent",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            }
+          ]
+        },
+        "better_auth_user": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "email",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "emailVerified",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "image",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_verification": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "identifier",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "value",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "calendarEvents": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "ownerAccount",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "artistId",
+              "nullable": false,
+              "references": "artists"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "date",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "show",
+                  "hold",
+                  "travel",
+                  "studio"
+                ]
+              },
+              "name": "kind",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "city",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "ownerAccount",
+            "date"
+          ]
+        },
+        "conversations": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "ownerAccount",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "artistId",
+              "nullable": false,
+              "references": "artists"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "headTurnId",
+              "nullable": true
+            }
+          ],
+          "indexed_columns": [
+            "ownerAccount"
+          ]
+        },
+        "profiles": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "accountId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "authUserId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "displayName",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "accountId",
+            "authUserId"
+          ]
+        },
+        "songs": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "ownerAccount",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "artistId",
+              "nullable": false,
+              "references": "artists"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "durationSeconds",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              "name": "energy",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "ownerAccount"
+          ]
+        },
+        "toolCalls": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "conversationId",
+              "nullable": false,
+              "references": "conversations"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "turnId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "ordinal",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "argumentsJson",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "resultJson",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "running",
+                  "complete",
+                  "error"
+                ]
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "durationMs",
+              "nullable": true
+            }
+          ],
+          "indexed_columns": [
+            "conversationId"
+          ]
+        },
+        "turns": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "conversationId",
+              "nullable": false,
+              "references": "conversations"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "parentId",
+              "nullable": true,
+              "references": "turns"
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "user",
+                  "assistant"
+                ]
+              },
+              "name": "role",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "body",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "queued",
+                  "streaming",
+                  "complete",
+                  "interrupted",
+                  "failed"
+                ]
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "provider",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "error",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "runnerId",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "heartbeatAt",
+              "nullable": true
+            }
+          ],
+          "indexed_columns": [
+            "conversationId",
+            "status"
+          ]
+        },
+        "venues": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "ownerAccount",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "city",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "capacity",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "style",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "bookingContact",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "ownerAccount",
+            "city"
+          ]
+        }
+      }
+    }
+  ]
+}

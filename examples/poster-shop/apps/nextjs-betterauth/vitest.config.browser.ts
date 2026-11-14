@@ -7,6 +7,7 @@ import topLevelAwait from "vite-plugin-top-level-await";
 import wasm from "vite-plugin-wasm";
 import {
   jazzServerInfo,
+  jazzDeployApp,
   stopJazzServerByUrl,
   jazzServerTransportControlCommands,
   jazzAppFront,
@@ -112,6 +113,7 @@ export default defineConfig({
       instances: [{ browser: "chromium", headless: true }],
       commands: {
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
+        jazzDeployApp: async (_context, options) => jazzDeployApp(options),
         jazzServerStop: async (_context, url) => stopJazzServerByUrl(url),
         ...jazzServerTransportControlCommands(),
         posterShopOpenConnectedPeer: async ({ context, page }, input) =>

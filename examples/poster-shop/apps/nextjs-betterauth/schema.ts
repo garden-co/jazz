@@ -1,6 +1,6 @@
 import { schema as s } from "jazz-tools";
 import { schema as betterAuthSchema } from "./schema-better-auth/schema";
-import { migrations } from "./migrations";
+import artifact from "./jazz.app.json" with { type: "json" };
 
 const schema = {
   ...betterAuthSchema,
@@ -133,7 +133,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+export const app: s.App<AppSchema> = s.defineApp(schema, { artifact });
 export type Canvas = s.RowOf<typeof app.canvases>;
 export type Layer = s.RowOf<typeof app.layers>;
 export type Shape = s.RowOf<typeof app.shapes>;

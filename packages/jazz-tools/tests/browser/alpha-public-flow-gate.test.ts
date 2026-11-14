@@ -7,7 +7,7 @@ import {
   type Query,
   type RowOf,
 } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { deploy } from "./deploy.js";
 import {
   TestCleanup,
   createBrowserTestDb,

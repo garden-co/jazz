@@ -4,7 +4,7 @@ import { Db, type QueryBuilder } from "../../src/runtime/db.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { ReadTier } from "../../src/runtime/client.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { deploy } from "./deploy.js";
 import {
   TestCleanup,
   createBrowserTestDb as createDb,

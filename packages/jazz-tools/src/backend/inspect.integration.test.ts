@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defineShippedApp } from "../testing/client-migrations.js";
+import { defineShippedApp } from "../testing/app-artifact.js";
 import { schema as s } from "../index.js";
 import {
   createJazz,
@@ -26,17 +26,20 @@ import { requestApproval, tokenStore } from "../inspect/client.js";
 import { runInspectCommand } from "../inspect/cli.js";
 import { runMcpServer } from "../inspect/mcp.js";
 
-const app = await defineShippedApp({
-  todos: s.table({ title: s.string(), owner: s.uuid(), secretNote: s.string().optional() }, {}),
-  notes: s.table({ body: s.string() }, {}),
-});
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user });
-  policy.todos.allowInsert.where({ owner: session.user });
-  policy.todos.allowUpdate.never();
-  policy.todos.allowDelete.never();
-  policy.notes.allowRead.never();
-});
+const { app, permissions } = await defineShippedApp(
+  {
+    todos: s.table({ title: s.string(), owner: s.uuid(), secretNote: s.string().optional() }, {}),
+    notes: s.table({ body: s.string() }, {}),
+  },
+  (app) =>
+    s.definePermissions(app, ({ policy, session }) => {
+      policy.todos.allowRead.where({ owner: session.user });
+      policy.todos.allowInsert.where({ owner: session.user });
+      policy.todos.allowUpdate.never();
+      policy.todos.allowDelete.never();
+      policy.notes.allowRead.never();
+    }),
+);
 
 const cleanups: Array<() => Promise<unknown>> = [];
 const savedNodeEnv = process.env.NODE_ENV;

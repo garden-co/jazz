@@ -1,0 +1,3432 @@
+{
+  "bundle": "91247cb1d708ce14c8c2e83d3f1677d4b8b0303e482a9f18e359c91a604ff9c7",
+  "format": 1,
+  "permissions": {
+    "attachments": {
+      "delete": {
+        "using": {
+          "operation": "Update",
+          "type": "Inherits",
+          "via_column": "pageId"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "pageId"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "pageId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "pages",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "pageId"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_account": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_jwks": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_session": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_user": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_verification": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "blocks": {
+      "delete": {
+        "using": {
+          "operation": "Update",
+          "type": "Inherits",
+          "via_column": "pageId"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "pageId"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "pageId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "pages",
+              "type": "Exists"
+            },
+            {
+              "exprs": [
+                {
+                  "column": "parentBlockId",
+                  "type": "IsNull"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "parentBlockId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "pageId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "pageId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "blocks",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "pageId"
+        }
+      },
+      "update": {
+        "using": {
+          "operation": "Update",
+          "type": "Inherits",
+          "via_column": "pageId"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "pageId"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "pageId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "pageId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "blocks",
+              "type": "Exists"
+            },
+            {
+              "exprs": [
+                {
+                  "column": "parentBlockId",
+                  "type": "IsNull"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "parentBlockId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "pageId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "pageId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "blocks",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "invites": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "exprs": [
+                    {
+                      "column": "pageId",
+                      "type": "IsNull"
+                    },
+                    {
+                      "column": "role",
+                      "type": "InList",
+                      "values": [
+                        {
+                          "type": "Literal",
+                          "value": {
+                            "type": "Text",
+                            "value": "member"
+                          }
+                        },
+                        {
+                          "type": "Literal",
+                          "value": {
+                            "type": "Text",
+                            "value": "viewer"
+                          }
+                        }
+                      ]
+                    }
+                  ],
+                  "type": "And"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "role",
+                        "type": "InList",
+                        "values": [
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "owner"
+                            }
+                          }
+                        ]
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "members",
+                  "type": "Exists"
+                }
+              ],
+              "type": "And"
+            },
+            {
+              "exprs": [
+                {
+                  "column": "role",
+                  "type": "InList",
+                  "values": [
+                    {
+                      "type": "Literal",
+                      "value": {
+                        "type": "Text",
+                        "value": "editor"
+                      }
+                    },
+                    {
+                      "type": "Literal",
+                      "value": {
+                        "type": "Text",
+                        "value": "viewer"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "role",
+                        "type": "InList",
+                        "values": [
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "owner"
+                            }
+                          },
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "member"
+                            }
+                          }
+                        ]
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "members",
+                  "type": "Exists"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "pageId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "pages",
+                  "type": "Exists"
+                }
+              ],
+              "type": "And"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "exprs": [
+                    {
+                      "column": "pageId",
+                      "type": "IsNull"
+                    },
+                    {
+                      "column": "role",
+                      "type": "InList",
+                      "values": [
+                        {
+                          "type": "Literal",
+                          "value": {
+                            "type": "Text",
+                            "value": "member"
+                          }
+                        },
+                        {
+                          "type": "Literal",
+                          "value": {
+                            "type": "Text",
+                            "value": "viewer"
+                          }
+                        }
+                      ]
+                    }
+                  ],
+                  "type": "And"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "role",
+                        "type": "InList",
+                        "values": [
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "owner"
+                            }
+                          }
+                        ]
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "members",
+                  "type": "Exists"
+                }
+              ],
+              "type": "And"
+            },
+            {
+              "exprs": [
+                {
+                  "column": "role",
+                  "type": "InList",
+                  "values": [
+                    {
+                      "type": "Literal",
+                      "value": {
+                        "type": "Text",
+                        "value": "editor"
+                      }
+                    },
+                    {
+                      "type": "Literal",
+                      "value": {
+                        "type": "Text",
+                        "value": "viewer"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "role",
+                        "type": "InList",
+                        "values": [
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "owner"
+                            }
+                          },
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "member"
+                            }
+                          }
+                        ]
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "members",
+                  "type": "Exists"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "pageId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "pages",
+                  "type": "Exists"
+                }
+              ],
+              "type": "And"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "select": {
+        "using": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "exprs": [
+                    {
+                      "column": "pageId",
+                      "type": "IsNull"
+                    },
+                    {
+                      "column": "role",
+                      "type": "InList",
+                      "values": [
+                        {
+                          "type": "Literal",
+                          "value": {
+                            "type": "Text",
+                            "value": "member"
+                          }
+                        },
+                        {
+                          "type": "Literal",
+                          "value": {
+                            "type": "Text",
+                            "value": "viewer"
+                          }
+                        }
+                      ]
+                    }
+                  ],
+                  "type": "And"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "role",
+                        "type": "InList",
+                        "values": [
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "owner"
+                            }
+                          }
+                        ]
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "members",
+                  "type": "Exists"
+                }
+              ],
+              "type": "And"
+            },
+            {
+              "exprs": [
+                {
+                  "column": "role",
+                  "type": "InList",
+                  "values": [
+                    {
+                      "type": "Literal",
+                      "value": {
+                        "type": "Text",
+                        "value": "editor"
+                      }
+                    },
+                    {
+                      "type": "Literal",
+                      "value": {
+                        "type": "Text",
+                        "value": "viewer"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "role",
+                        "type": "InList",
+                        "values": [
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "owner"
+                            }
+                          },
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "member"
+                            }
+                          }
+                        ]
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "members",
+                  "type": "Exists"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "pageId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "pages",
+                  "type": "Exists"
+                }
+              ],
+              "type": "And"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "issues": {
+      "delete": {
+        "using": {
+          "operation": "Update",
+          "type": "Inherits",
+          "via_column": "pageId"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "pageId"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "pageId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "parentId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "databaseId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "kind",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "type": "Literal",
+                      "value": {
+                        "type": "Text",
+                        "value": "issue"
+                      }
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "pages",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "databaseId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "kind",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "type": "Literal",
+                      "value": {
+                        "type": "Text",
+                        "value": "issues"
+                      }
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "pages",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "pageId"
+        }
+      },
+      "update": {
+        "using": {
+          "operation": "Update",
+          "type": "Inherits",
+          "via_column": "pageId"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "pageId"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "pageId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "pageId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "databaseId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "databaseId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "issues",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "members": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "role",
+                    "type": "InList",
+                    "values": [
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "owner"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "members",
+              "type": "Exists"
+            },
+            {
+              "column": "account",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "role",
+                    "type": "InList",
+                    "values": [
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "owner"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "members",
+              "type": "Exists"
+            },
+            {
+              "exprs": [
+                {
+                  "exprs": [
+                    {
+                      "column": "account",
+                      "op": "Eq",
+                      "type": "Cmp",
+                      "value": {
+                        "path": [
+                          "user"
+                        ],
+                        "type": "SessionRef"
+                      }
+                    },
+                    {
+                      "column": "role",
+                      "op": "Eq",
+                      "type": "Cmp",
+                      "value": {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "owner"
+                        }
+                      }
+                    }
+                  ],
+                  "type": "And"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "$createdBy.account",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "workspaces",
+                  "type": "Exists"
+                }
+              ],
+              "type": "And"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "select": {
+        "using": {
+          "exprs": [
+            {
+              "column": "account",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "members",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "update": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "workspaceId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "workspaceId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "account",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "role",
+                "type": "InList",
+                "values": [
+                  {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Text",
+                      "value": "owner"
+                    }
+                  }
+                ]
+              }
+            ],
+            "type": "And"
+          },
+          "table": "members",
+          "type": "Exists"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "role",
+                    "type": "InList",
+                    "values": [
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "owner"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "members",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "account"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "members",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "pageGrants": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "role",
+                        "type": "InList",
+                        "values": [
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "owner"
+                            }
+                          },
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "member"
+                            }
+                          }
+                        ]
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "members",
+                  "type": "Exists"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "pageId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "pages",
+                  "type": "Exists"
+                }
+              ],
+              "type": "And"
+            },
+            {
+              "column": "account",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "role",
+                    "type": "InList",
+                    "values": [
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "owner"
+                        }
+                      },
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "member"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "members",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "pageId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "pages",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "exprs": [
+            {
+              "column": "account",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "exprs": [
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "role",
+                        "type": "InList",
+                        "values": [
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "owner"
+                            }
+                          },
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "member"
+                            }
+                          }
+                        ]
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "members",
+                  "type": "Exists"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "pageId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "pages",
+                  "type": "Exists"
+                }
+              ],
+              "type": "And"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "update": {
+        "using": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "role",
+                    "type": "InList",
+                    "values": [
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "owner"
+                        }
+                      },
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "member"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "members",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "pageId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "pages",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "role",
+                        "type": "InList",
+                        "values": [
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "owner"
+                            }
+                          },
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "member"
+                            }
+                          }
+                        ]
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "members",
+                  "type": "Exists"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "pageId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "pages",
+                  "type": "Exists"
+                }
+              ],
+              "type": "And"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "pageId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "pageId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "account"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "pageGrants",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "pages": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "role",
+                    "type": "InList",
+                    "values": [
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "owner"
+                        }
+                      },
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "member"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "members",
+              "type": "Exists"
+            },
+            {
+              "max_depth": 8,
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "parentId"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "column": "parentId",
+                  "type": "IsNull"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "parentId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "pages",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "exprs": [
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "role",
+                        "type": "InList",
+                        "values": [
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "owner"
+                            }
+                          },
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "member"
+                            }
+                          }
+                        ]
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "members",
+                  "type": "Exists"
+                },
+                {
+                  "max_depth": 8,
+                  "operation": "Update",
+                  "type": "Inherits",
+                  "via_column": "parentId"
+                }
+              ],
+              "type": "Or"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "role",
+                    "type": "InList",
+                    "values": [
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "owner"
+                        }
+                      },
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "member"
+                        }
+                      },
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "viewer"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "members",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "pageId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "pageGrants",
+              "type": "Exists"
+            },
+            {
+              "max_depth": 8,
+              "operation": "Select",
+              "type": "Inherits",
+              "via_column": "parentId"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "update": {
+        "using": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "role",
+                        "type": "InList",
+                        "values": [
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "owner"
+                            }
+                          },
+                          {
+                            "type": "Literal",
+                            "value": {
+                              "type": "Text",
+                              "value": "member"
+                            }
+                          }
+                        ]
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "members",
+                  "type": "Exists"
+                },
+                {
+                  "max_depth": 8,
+                  "operation": "Update",
+                  "type": "Inherits",
+                  "via_column": "parentId"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "pageId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "role",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "type": "Literal",
+                      "value": {
+                        "type": "Text",
+                        "value": "editor"
+                      }
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "pageGrants",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "kind",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "kind"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "pages",
+              "type": "Exists"
+            },
+            {
+              "exprs": [
+                {
+                  "column": "parentId",
+                  "type": "IsNull"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "parentId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "workspaceId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "workspaceId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "pages",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "exprs": [
+                {
+                  "exprs": [
+                    {
+                      "condition": {
+                        "exprs": [
+                          {
+                            "column": "workspaceId",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "__jazz_outer_row",
+                                "workspaceId"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          },
+                          {
+                            "column": "account",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "user"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          },
+                          {
+                            "column": "role",
+                            "type": "InList",
+                            "values": [
+                              {
+                                "type": "Literal",
+                                "value": {
+                                  "type": "Text",
+                                  "value": "owner"
+                                }
+                              },
+                              {
+                                "type": "Literal",
+                                "value": {
+                                  "type": "Text",
+                                  "value": "member"
+                                }
+                              }
+                            ]
+                          }
+                        ],
+                        "type": "And"
+                      },
+                      "table": "members",
+                      "type": "Exists"
+                    },
+                    {
+                      "max_depth": 8,
+                      "operation": "Update",
+                      "type": "Inherits",
+                      "via_column": "parentId"
+                    }
+                  ],
+                  "type": "Or"
+                },
+                {
+                  "exprs": [
+                    {
+                      "condition": {
+                        "exprs": [
+                          {
+                            "column": "pageId",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "__jazz_outer_row",
+                                "id"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          },
+                          {
+                            "column": "account",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "user"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          },
+                          {
+                            "column": "role",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "type": "Literal",
+                              "value": {
+                                "type": "Text",
+                                "value": "editor"
+                              }
+                            }
+                          }
+                        ],
+                        "type": "And"
+                      },
+                      "table": "pageGrants",
+                      "type": "Exists"
+                    },
+                    {
+                      "condition": {
+                        "exprs": [
+                          {
+                            "column": "id",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "__jazz_outer_row",
+                                "id"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          },
+                          {
+                            "column": "parentId",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "__jazz_outer_row",
+                                "parentId"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          }
+                        ],
+                        "type": "And"
+                      },
+                      "table": "pages",
+                      "type": "Exists"
+                    }
+                  ],
+                  "type": "And"
+                }
+              ],
+              "type": "Or"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "sheetComments": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "column": "author",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "pageId"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "column": "author",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "operation": "Select",
+              "type": "Inherits",
+              "via_column": "pageId"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "pageId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "kind",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "type": "Literal",
+                      "value": {
+                        "type": "Text",
+                        "value": "song"
+                      }
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "pages",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "pageId"
+        }
+      },
+      "update": {
+        "using": {
+          "exprs": [
+            {
+              "column": "author",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "pageId"
+            }
+          ],
+          "type": "Or"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "operation": "Select",
+              "type": "Inherits",
+              "via_column": "pageId"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "pageId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "pageId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "author",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "author"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "sheetComments",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "sheetPresence": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "column": "account",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "pageId"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "column": "account",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "operation": "Select",
+              "type": "Inherits",
+              "via_column": "pageId"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "pageId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "kind",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "type": "Literal",
+                      "value": {
+                        "type": "Text",
+                        "value": "song"
+                      }
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "pages",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "pageId"
+        }
+      },
+      "update": {
+        "using": {
+          "column": "account",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "column": "account",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "pageId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "pageId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "sheetPresence",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "songSheets": {
+      "delete": {
+        "using": {
+          "operation": "Update",
+          "type": "Inherits",
+          "via_column": "pageId"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "pageId"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "pageId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "kind",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "type": "Literal",
+                      "value": {
+                        "type": "Text",
+                        "value": "song"
+                      }
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "pages",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "pageId"
+        }
+      },
+      "update": {
+        "using": {
+          "operation": "Update",
+          "type": "Inherits",
+          "via_column": "pageId"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "pageId"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "pageId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "pageId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "workspaceId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "workspaceId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "songSheets",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "workspaces": {
+      "delete": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "workspaceId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "account",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "role",
+                "type": "InList",
+                "values": [
+                  {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Text",
+                      "value": "owner"
+                    }
+                  }
+                ]
+              }
+            ],
+            "type": "And"
+          },
+          "table": "members",
+          "type": "Exists"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "True"
+        }
+      },
+      "select": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "workspaceId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "account",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "members",
+          "type": "Exists"
+        }
+      },
+      "update": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "workspaceId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "account",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "role",
+                "type": "InList",
+                "values": [
+                  {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Text",
+                      "value": "owner"
+                    }
+                  }
+                ]
+              }
+            ],
+            "type": "And"
+          },
+          "table": "members",
+          "type": "Exists"
+        },
+        "with_check": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "workspaceId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "account",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "role",
+                "type": "InList",
+                "values": [
+                  {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Text",
+                      "value": "owner"
+                    }
+                  }
+                ]
+              }
+            ],
+            "type": "And"
+          },
+          "table": "members",
+          "type": "Exists"
+        }
+      }
+    }
+  },
+  "schema": "553979b0f2b20e85b22e5f83f56318fe11425287aea9f72eca6eb235c5512511"
+}

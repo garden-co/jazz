@@ -1,4 +1,4 @@
-import { appMigrations, startLocalJazzServer } from "jazz-tools/testing";
+import { appArtifact, appPermissions, startLocalJazzServer } from "jazz-tools/testing";
 import { deploy } from "jazz-tools/dev";
 import { defineApp } from "jazz-tools";
 import {
@@ -11,8 +11,13 @@ import { permissions, todoSchema } from "../tests/browser/schema.ts";
 import { createJazz, remote, type Jazz } from "jazz-tools/backend";
 
 // The browser tests' app ships no migrations (`{ migrations: "none" }`), which
-// createJazz refuses with remote(): the backend runs it with its one version.
-const app = defineApp(todoSchema, { migrations: await appMigrations(todoSchema) });
+// createJazz refuses with remote(): the backend runs it with its one version,
+// in a jazz.app.json, and the jazz.permissions.json of the permissions it
+// serves with.
+const appServing = async (serverPermissions: typeof permissions) => {
+  const app = defineApp(todoSchema, { artifact: await appArtifact(todoSchema) });
+  return { app, permissionsFile: await appPermissions(app, serverPermissions) };
+};
 
 const SEED_BATCH_SIZE = 50;
 /** "First seeded todo" and "Second seeded todo", which tests look for by name. */
@@ -22,6 +27,7 @@ export default async function runServer({
   port = TEST_PORT,
   serverPermissions = permissions,
 }: { port?: number; serverPermissions?: typeof permissions } = {}) {
+  const { app, permissionsFile } = await appServing(serverPermissions);
   const serverHandle = await startLocalJazzServer({
     appId: APP_ID,
     port,
@@ -41,7 +47,7 @@ export default async function runServer({
     // Seed through the app's backend, as the app writes its own data.
     jazz = createJazz({
       app,
-      permissions: serverPermissions,
+      permissions: permissionsFile,
       store: remote({
         url: serverHandle.url,
         appId: serverHandle.appId,

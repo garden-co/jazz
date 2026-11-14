@@ -1,6 +1,6 @@
 import { schema as s } from "jazz-tools";
 import { schema as betterAuthSchema } from "./schema-better-auth/schema";
-import { migrations } from "./migrations";
+import artifact from "./jazz.app.json" with { type: "json" };
 
 /**
  * BandBook is a Notion-style workspace: a tree of pages, each holding an
@@ -191,7 +191,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+export const app: s.App<AppSchema> = s.defineApp(schema, { artifact });
 export type Workspace = s.RowOf<typeof app.workspaces>;
 export type Member = s.RowOf<typeof app.members>;
 export type Page = s.RowOf<typeof app.pages>;

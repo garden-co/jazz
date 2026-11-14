@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { commands } from "vitest/browser";
 import { accountRegistryUrl } from "../../src/accounts/context.js";
 import { generateAuthSecret } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { deploy } from "./deploy.js";
 import { recoveryApp, recoveryPermissions } from "./indexeddb-pending-recovery-fixture.js";
 import type { RecoveryConfig, RecoveryRows } from "./indexeddb-pending-recovery-fixture.js";
 import {

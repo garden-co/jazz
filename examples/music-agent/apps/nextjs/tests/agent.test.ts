@@ -3,8 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import type { Db } from "jazz-tools";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import { app } from "../schema";
-import permissions from "../permissions";
-
+import permissions from "../jazz.permissions.json" with { type: "json" };
 // The agent runs exactly as it does in the app: backend authority against a
 // Jazz server that enforces the app's schema and permissions.
 let server: LocalJazzServerHandle;

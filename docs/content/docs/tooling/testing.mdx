@@ -160,7 +160,7 @@ as its store and a stand-in `authenticate`:
 
 ```typescript
 import { startTestJazz, type TestJazz } from "jazz-tools/testing";
-import permissions from "../permissions.js";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 import { app } from "../schema.js";
 
 const testJazz: TestJazz = await startTestJazz({ app, permissions });
@@ -220,7 +220,7 @@ store and sign in through it the way the browser does:
 ```typescript custom="noscroll"
 import { afterEach, expect, it } from "vitest";
 import { createJazz, memory, type Jazz } from "jazz-tools/backend";
-import permissions from "../permissions.js";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 import { app } from "../schema.js";
 
 let jazz: Jazz | undefined;
@@ -303,7 +303,7 @@ old schema keeps reading and writing through the migration's lens:
 ```typescript custom="noscroll"
 import { schema as s, migration as m } from "jazz-tools";
 import { createJazzClient } from "jazz-tools/client";
-import { appMigrations, startTestJazz, type TestJazz } from "jazz-tools/testing";
+import { appArtifact, appPermissions, startTestJazz, type TestJazz } from "jazz-tools/testing";
 import { expect, it, vi } from "vitest";
 
 async function clientAs(testJazz: TestJazz, userId: string) {
@@ -335,31 +335,32 @@ const migration = m.defineMigration({
   migrate: { todos: { tags: m.add.array({ of: s.string(), default: [] }) } },
 });
 
-// In an app these come from the generated `migrations/index.ts`. A test that
-// defines its schemas in code builds the same bundle with `appMigrations`.
-const oldApp = s.defineApp(oldSchema, {
-  migrations: await appMigrations(oldSchema),
-});
+// In an app these come from `jazz.app.json` and `jazz.permissions.json`. A
+// test that defines its schemas in code builds the same files with
+// `appArtifact` and `appPermissions`.
+const oldApp = s.defineApp(oldSchema, { artifact: await appArtifact(oldSchema) });
 const newApp = s.defineApp(newSchema, {
-  migrations: await appMigrations(oldSchema, { to: newSchema, migration }),
+  artifact: await appArtifact(oldSchema, { steps: [{ to: newSchema, migration }] }),
 });
 const allowAll = (app: typeof oldApp | typeof newApp) =>
   s.definePermissions(app, ({ policy }) => [
     policy.todos.allowRead.always(),
     policy.todos.allowInsert.always(),
   ]);
+const oldPermissions = await appPermissions(oldApp, allowAll(oldApp));
+const newPermissions = await appPermissions(newApp, allowAll(newApp));
 
 it("lets old-schema clients write rows new-schema clients can read", async () => {
   const testJazz = await startTestJazz({
     app: oldApp,
-    permissions: allowAll(oldApp),
+    permissions: oldPermissions,
   });
   const alice = await clientAs(testJazz, "alice");
   const oldDb = alice.db;
 
   await testJazz.redeploy({
     app: newApp,
-    permissions: allowAll(newApp),
+    permissions: newPermissions,
     migration,
   });
   const bob = await clientAs(testJazz, "bob");

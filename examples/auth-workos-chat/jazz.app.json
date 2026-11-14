@@ -1,0 +1,48 @@
+{
+  "codegen": {
+    "slices": {},
+    "tables": {}
+  },
+  "current": "e26d5055b2f2734daa2182431b71c58abc26f6ef632385d451a997cf5b0003b7",
+  "format": 1,
+  "migrations": [],
+  "schemas": [
+    {
+      "hash": "e26d5055b2f2734daa2182431b71c58abc26f6ef632385d451a997cf5b0003b7",
+      "tables": {
+        "messages": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "author_name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "chat_id",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "text",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "sent_at",
+              "nullable": false
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

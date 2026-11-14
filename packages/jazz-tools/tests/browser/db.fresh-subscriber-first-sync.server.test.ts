@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { generateAuthSecret, schema, type Db } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { deploy } from "./deploy.js";
 import { TestCleanup, createBrowserTestDb, uniqueDbName, waitForCondition } from "./support.js";
 import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
 

@@ -1,4 +1,4 @@
-import { shippedMigrations } from "../client-migrations.js";
+import { shippedArtifact } from "../app-artifact.js";
 import { copyAccountConfigAdmission } from "../../accounts/config-capability.js";
 import { getRuntimeSchemaCacheKey } from "../../drivers/schema-wire.js";
 import type { WasmSchema } from "../../drivers/types.js";
@@ -133,7 +133,7 @@ export abstract class ConnectionManager {
     const client = runtimeSource.createClient({
       config: runtimeConfig,
       schema: runtimeSchema,
-      migrations: shippedMigrations(schema),
+      artifact: shippedArtifact(schema),
       onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
       foregroundNodeLease: this.foregroundNodeLease,
     });

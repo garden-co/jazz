@@ -123,7 +123,7 @@ export declare class NapiDb {
   static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
   /**
    * Register and return a typed view backed by this same runtime owner,
-   * of an app shipping `migrations` (its bundle as JSON).
+   * of an app shipping `migrations` (its `jazz.app.json`).
    */
   registerSchema(schema: Uint8Array, migrations?: Uint8Array | undefined | null): NapiDb
   /** Begin one owner-wide transaction. */
@@ -382,13 +382,6 @@ export declare function captureTextAnchor(text: string, version: number | undefi
 /** The range `start..end` (UTF-16 code units) of `text`. */
 export declare function captureTextRange(text: string, version: number | undefined | null, start: number, end: number): JsonValue
 
-/**
- * Check an app's shipped migrations (the `ClientMigrations` JSON) leading
- * to the schema hash `target` as a deployment to a new authority would,
- * without opening a database. `jazz-tools validate` runs it.
- */
-export declare function checkClientMigrations(migrations: string, target: string): void
-
 export interface DeleteOptions {
   author?: Uint8Array
   attribution?: Uint8Array
@@ -478,6 +471,15 @@ export interface JazzCoreSocketEvent {
 export type JsonValue =
   any
 
+/**
+ * Read and check an app's `jazz.app.json` (`app`) and
+ * `jazz.permissions.json` (`permissions`) as a backend does. Returns the
+ * current schema hash, the bundle id, and the deployment the backend
+ * publishes in the form `POST .../admin/bundles` takes (`targetSchemaHash`,
+ * `schemas`, `migrations`, `permissions`).
+ */
+export declare function loadAppArtifact(app: string, permissions: string): JsonValue
+
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
 
 /** Exact build/ABI fingerprint for the generated native artifact. */
@@ -495,6 +497,12 @@ export interface RestoreOptions {
   branch?: JsonValue
   updatedAtMs?: number
 }
+
+/**
+ * The structural hash of a schema (its tables as JSON), as every store and
+ * `jazz.app.json` compute it. Embedded policies don't count.
+ */
+export declare function schemaHash(tables: string): string
 
 /**
  * Serve a production core (the `jazz_server::run` shell: connection and
@@ -596,4 +604,20 @@ export interface VerifyTokenResult {
   ok: boolean
   id: string
   error?: string
+}
+
+/**
+ * Build the canonical `jazz.app.json` and `jazz.permissions.json` texts
+ * from what `jazz-tools validate` compiled (an
+ * [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput) as
+ * JSON): the files' only writer, which refuses what a reader would.
+ */
+export declare function writeAppArtifact(input: string): WrittenAppFiles
+
+/** An app's two files, as [`write_app_artifact`] renders them. */
+export interface WrittenAppFiles {
+  /** `jazz.app.json`, which the app and its clients ship. */
+  app: string
+  /** `jazz.permissions.json`, which only its backends read. */
+  permissions: string
 }

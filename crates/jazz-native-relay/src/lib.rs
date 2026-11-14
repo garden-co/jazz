@@ -48,10 +48,12 @@ use node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 /// refuse to open rather than misread a failure; 3 added its `reason_name`;
 /// 4 ends each subscription delta with its updated rows' splices; 5 attaches
 /// the app's migrations beside its schema's tables; 6 ends a tick's upstream
-/// failure with the refusal's error code.
+/// failure with the refusal's error code; 7 attaches the app's
+/// `jazz.app.json` (`app`) beside its schema's tables instead of its
+/// migrations.
 /// Append-only commands use optional native capabilities while existing
 /// command layouts remain stable.
-pub const NATIVE_RELAY_ABI_V1: u16 = 6;
+pub const NATIVE_RELAY_ABI_V1: u16 = 7;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_CANCELLED: u8 = 3;
@@ -1944,18 +1946,18 @@ impl NativeRelayHost {
             return Err(JazzNativeRelayStatus::LifecycleFailure);
         }
         reject_bearer_claims(&request.claims)?;
-        // The attached schema, and beside its tables the migrations the app
-        // ships, if any (`ClientMigrations` in jazz-tools).
+        // The attached schema, and beside its tables the app's
+        // `jazz.app.json`, if it ships one, for its versions and migrations.
         let mut public_schema = serde_json::from_str::<serde_json::Value>(&request.schema_json)
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         let migrations = public_schema
             .as_object_mut()
-            .and_then(|fields| fields.remove("migrations"))
+            .and_then(|fields| fields.remove("app"))
             .map(|bundle| serde_json::to_vec(&bundle))
             .transpose()
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         let migrations =
-            jazz::tools::deployment::published::lowered_client_migrations(migrations.as_deref())
+            jazz::tools::deployment::artifact::client_migrations(migrations.as_deref())
                 .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         let public_schema = serde_json::from_value(public_schema)
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;

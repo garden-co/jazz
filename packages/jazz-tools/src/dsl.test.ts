@@ -5,7 +5,7 @@ import type { StandardJSONSchemaV1 } from "@standard-schema/spec";
 import { getCollectedSchema, resetCollectedState, table } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import { resolveSchemaSource } from "./schema-source.js";
-import { structuralSchemaHash } from "./dev/schema-utils.js";
+import { computeSchemaHash } from "./schema-hash.js";
 import { defineApp, defineSchema, defineTable } from "./typed-app.js";
 import type { AddOp } from "./schema.js";
 
@@ -31,7 +31,7 @@ describe("enum DSL invariants", () => {
     );
   });
 
-  it("preserves scalar enum declaration order in both schema data and identity", () => {
+  it("preserves scalar enum declaration order in both schema data and identity", async () => {
     const wasmSchemaFor = (variants: [string, ...string[]]) => {
       resetCollectedState();
       table("tasks", { status: s.enum(...variants) });
@@ -44,8 +44,8 @@ describe("enum DSL invariants", () => {
       variants: ["complete", "incomplete", "blocked"],
     });
 
-    expect(structuralSchemaHash(wasmSchemaFor(["complete", "incomplete"]))).not.toBe(
-      structuralSchemaHash(wasmSchemaFor(["incomplete", "complete"])),
+    expect(await computeSchemaHash(wasmSchemaFor(["complete", "incomplete"]))).not.toBe(
+      await computeSchemaHash(wasmSchemaFor(["incomplete", "complete"])),
     );
   });
 

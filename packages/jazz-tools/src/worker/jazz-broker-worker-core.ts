@@ -1216,7 +1216,7 @@ async function initialize(context: RuntimeContext): Promise<void> {
       false,
       options.initialSyncFlushEvery,
       proof,
-      options.migrations,
+      options.artifact,
     );
     if (proof && typeof wasmModule.WasmDb.openBrowserWithSelfSignedProof !== "function") {
       throw new Error(

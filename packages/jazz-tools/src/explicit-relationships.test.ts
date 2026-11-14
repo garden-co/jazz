@@ -9,7 +9,7 @@ import { migration as m } from "./migration-namespace.js";
 import { analyzeRelations } from "./codegen/relation-analyzer.js";
 import { schemaDefinitionToAst } from "./migrations.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
-import { structuralSchemaHash } from "./dev/schema-utils.js";
+import { computeSchemaHash } from "./schema-hash.js";
 
 const definition = () => ({
   posts: s.table(
@@ -88,7 +88,7 @@ describe("explicit relationships", () => {
       ],
     });
     expect(app.wasmSchema.posts!.columns).toEqual(legacy.posts!.columns);
-    expect(await structuralSchemaHash(app.wasmSchema)).toBe(await structuralSchemaHash(legacy));
+    expect(await computeSchemaHash(app.wasmSchema)).toBe(await computeSchemaHash(legacy));
     const renamed = structuredClone(app.wasmSchema);
     renamed.posts!.relations!.writer = renamed.posts!.relations!.author!;
     delete renamed.posts!.relations!.author;
@@ -98,7 +98,7 @@ describe("explicit relationships", () => {
         .get("posts")
         ?.map((r) => r.name),
     ).toContain("writer");
-    expect(await structuralSchemaHash(renamed)).toBe(await structuralSchemaHash(legacy));
+    expect(await computeSchemaHash(renamed)).toBe(await computeSchemaHash(legacy));
   });
   it("does not infer relationships from reference metadata or UUID spelling", () => {
     const schema = {

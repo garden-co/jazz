@@ -24,7 +24,7 @@ backend as Jazz, so `authenticate` asks it directly who the request's session co
 import { betterAuth } from "better-auth";
 import { createJazz, sqlite } from "jazz-tools/backend";
 import { app } from "./schema";
-import permissions from "./permissions";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const auth = betterAuth({
   // database: your own, or Jazz itself (see "Store Better Auth's tables in Jazz" below)
@@ -195,7 +195,7 @@ Import the generated tables in your app's `schema.ts` and merge them into the ap
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
+import artifact from "./jazz.app.json" with { type: "json" };
 import { schema as betterauthSchema } from "./schema-better-auth/schema";
 
 const schema = {
@@ -213,7 +213,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+export const app: s.App<AppSchema> = s.defineApp(schema, { artifact });
 ```
 
 The generated `schema-better-auth/schema.ts` also ships a `permissions` export that denies all operations on the Better Auth tables. Merge it with your own permissions so regular client sessions can't read or write Better Auth rows — the adapter itself uses `jazz.db`, which has backend permissions.
@@ -249,7 +249,7 @@ import { betterAuth } from "better-auth";
 import { createJazz, sqlite } from "jazz-tools/backend";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { app } from "./schema";
-import permissions from "./permissions";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 import { authOptions } from "./auth-options";
 
 export const jazz = createJazz({

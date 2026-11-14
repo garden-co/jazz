@@ -17,7 +17,7 @@ browsers and apps, and decides who each user is. Other trusted machines reach Ja
 ```ts title="jazz.server.ts"
 import { createJazz, sqlite } from "jazz-tools/backend";
 import { app } from "./schema";
-import permissions from "./permissions";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,
@@ -181,7 +181,7 @@ and point `createJazz` at it with `remote()`:
 ```ts title="jazz.server.ts"
 import { createJazz, remote } from "jazz-tools/backend";
 import { app } from "./schema";
-import permissions from "./permissions";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,

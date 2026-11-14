@@ -12,7 +12,7 @@ import {
 } from "../testing/index.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { type Db } from "./db.js";
-import { appMigrations } from "../testing/client-migrations.js";
+import { appArtifact, appPermissions } from "../testing/app-artifact.js";
 import { createDb } from "./default-create-db.js";
 import { waitForRows } from "./testing/support.js";
 
@@ -57,27 +57,36 @@ const migration = m.defineMigration({
   },
 });
 
-// Each app ships its migrations, as its generated module would hold them.
+// Permissions are defined against drafts of the apps; each app ships them in
+// its jazz.app.json, as `jazz-tools validate` would write it.
+const oldPermissions = s.definePermissions(
+  s.defineApp(oldSchema, { migrations: "none" }),
+  ({ policy }) => [
+    policy.todos.allowRead.always(),
+    policy.todos.allowInsert.always(),
+    policy.todos.allowUpdate.always(),
+    policy.todos.allowDelete.always(),
+  ],
+);
+
+const newPermissions = s.definePermissions(
+  s.defineApp(newSchema, { migrations: "none" }),
+  ({ policy }) => [
+    policy.todos.allowRead.always(),
+    policy.todos.allowInsert.always(),
+    policy.todos.allowUpdate.always(),
+    policy.todos.allowDelete.always(),
+  ],
+);
+
 const oldApp: s.App<OldAppSchema> = s.defineApp(oldSchema, {
-  migrations: await appMigrations(oldSchema),
+  artifact: await appArtifact(oldSchema),
 });
 const newApp: s.App<NewAppSchema> = s.defineApp(newSchema, {
-  migrations: await appMigrations(oldSchema, { to: newSchema, migration }),
+  artifact: await appArtifact(oldSchema, {
+    steps: [{ to: newSchema, migration }],
+  }),
 });
-
-const oldPermissions = s.definePermissions(oldApp, ({ policy }) => [
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-  policy.todos.allowUpdate.always(),
-  policy.todos.allowDelete.always(),
-]);
-
-const newPermissions = s.definePermissions(newApp, ({ policy }) => [
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-  policy.todos.allowUpdate.always(),
-  policy.todos.allowDelete.always(),
-]);
 
 describe("schema migrations", () => {
   let server: LocalJazzServerHandle;
@@ -109,7 +118,11 @@ describe("schema migrations", () => {
       permissions: newPermissions,
       migration,
     });
-    front = await startTestJazz({ app: newApp, permissions: newPermissions, core: server });
+    front = await startTestJazz({
+      app: newApp,
+      permissions: await appPermissions(newApp, newPermissions),
+      core: server,
+    });
 
     oldDb = await createDb({ ...(await localAccountConfig(appId, front.url)) });
     newDb = await createDb({ ...(await localAccountConfig(appId, front.url)) });
@@ -185,25 +198,35 @@ it("publishes UUID reference identity lenses and relates rows written before pub
     }),
   };
   const migration = m.defineMigration({ from: before, to: after });
-  const beforeApp = s.defineApp(before, { migrations: await appMigrations(before) }),
+  const permissionsBefore = s.definePermissions(
+    s.defineApp(before, { migrations: "none" }),
+    ({ policy }) => [
+      policy.users.allowRead.always(),
+      policy.users.allowInsert.always(),
+      policy.records.allowRead.always(),
+      policy.records.allowInsert.always(),
+    ],
+  );
+  const permissionsAfter = s.definePermissions(
+    s.defineApp(after, { migrations: "none" }),
+    ({ policy }) => [
+      policy.users.allowRead.always(),
+      policy.users.allowInsert.always(),
+      policy.records.allowRead.always(),
+      policy.records.allowInsert.always(),
+    ],
+  );
+  const beforeApp = s.defineApp(before, {
+      artifact: await appArtifact(before),
+    }),
     afterApp = s.defineApp(after, {
-      migrations: await appMigrations(before, { to: after, migration }),
+      artifact: await appArtifact(before, {
+        steps: [{ to: after, migration }],
+      }),
     });
-  const permissionsBefore = s.definePermissions(beforeApp, ({ policy }) => [
-    policy.users.allowRead.always(),
-    policy.users.allowInsert.always(),
-    policy.records.allowRead.always(),
-    policy.records.allowInsert.always(),
-  ]);
-  const permissionsAfter = s.definePermissions(afterApp, ({ policy }) => [
-    policy.users.allowRead.always(),
-    policy.users.allowInsert.always(),
-    policy.records.allowRead.always(),
-    policy.records.allowInsert.always(),
-  ]);
   const server = await startTestJazz({
     app: beforeApp,
-    permissions: permissionsBefore,
+    permissions: await appPermissions(beforeApp, permissionsBefore),
     coreOptions: { inMemory: true },
   });
   let oldDb: Db | undefined, newDb: Db | undefined;
@@ -221,7 +244,11 @@ it("publishes UUID reference identity lenses and relates rows written before pub
       })
       .wait({ tier: "global" });
     expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
-    await server.redeploy({ app: afterApp, permissions: permissionsAfter, migration });
+    await server.redeploy({
+      app: afterApp,
+      permissions: await appPermissions(afterApp, permissionsAfter),
+      migration,
+    });
     newDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
     const rows = await waitForRows(
       newDb,
@@ -305,7 +332,11 @@ it("publishes generated default-bearing relation migrations and preserves them a
       schema: beforeApp,
       permissions: permissionsBefore,
     });
-    front = await startTestJazz({ app: beforeApp, permissions: permissionsBefore, core: server });
+    front = await startTestJazz({
+      app: beforeApp,
+      permissions: permissionsBefore,
+      core: server,
+    });
     oldDb = await createDb(await localAccountConfig(appId, front.url));
     const owner = await oldDb
       .insert(beforeApp.users, { name: "Existing owner" })
@@ -382,15 +413,18 @@ it("publishes generated default-bearing relation migrations and preserves them a
       expect(wasmSchemasEqual(stored.schema, expected)).toBe(true);
       expect(await computeSchemaHash(stored.schema)).toBe(schemaHash);
     }
-    // The app as it ships after `migrations create`: its migrations module
-    // now holds the generated migration.
+    // The app as it ships after `migrations create`: its jazz.app.json now
+    // holds the generated migration.
     const shippedApp = s.defineApp(after, {
-      migrations: await appMigrations(before, {
-        to: after,
-        migration: await loadDefinedMigration(migrationFile),
+      artifact: await appArtifact(before, {
+        steps: [{ to: after, migration: await loadDefinedMigration(migrationFile) }],
       }),
     });
-    front = await startTestJazz({ app: shippedApp, permissions: permissionsAfter, core: server });
+    front = await startTestJazz({
+      app: shippedApp,
+      permissions: await appPermissions(shippedApp, permissionsAfter),
+      core: server,
+    });
     newDb = await createDb(await localAccountConfig(appId, front.url));
     const rows = await waitForRows(
       newDb,
@@ -445,27 +479,35 @@ it("a client shipping the app's migrations writes a renamed column where the ser
     to: after,
     migrate: { notes: { body: m.renameFrom("title") } },
   });
-  const beforeApp = s.defineApp(before, { migrations: await appMigrations(before) }),
+  const allowBefore = s.definePermissions(
+    s.defineApp(before, { migrations: "none" }),
+    ({ policy }) => [policy.notes.allowRead.always(), policy.notes.allowInsert.always()],
+  );
+  const allowAfter = s.definePermissions(
+    s.defineApp(after, { migrations: "none" }),
+    ({ policy }) => [policy.notes.allowRead.always(), policy.notes.allowInsert.always()],
+  );
+  const beforeApp = s.defineApp(before, {
+      artifact: await appArtifact(before),
+    }),
     afterApp = s.defineApp(after, {
-      migrations: await appMigrations(before, { to: after, migration: rename }),
+      artifact: await appArtifact(before, {
+        steps: [{ to: after, migration: rename }],
+      }),
     });
-  const allowBefore = s.definePermissions(beforeApp, ({ policy }) => [
-    policy.notes.allowRead.always(),
-    policy.notes.allowInsert.always(),
-  ]);
-  const allowAfter = s.definePermissions(afterApp, ({ policy }) => [
-    policy.notes.allowRead.always(),
-    policy.notes.allowInsert.always(),
-  ]);
   const server = await startTestJazz({
     app: beforeApp,
-    permissions: allowBefore,
+    permissions: await appPermissions(beforeApp, allowBefore),
     coreOptions: { inMemory: true },
   });
   let oldDb: Db | undefined, newDb: Db | undefined;
   try {
     const { appId, url: serverUrl } = server;
-    await server.redeploy({ app: afterApp, permissions: allowAfter, migration: rename });
+    await server.redeploy({
+      app: afterApp,
+      permissions: await appPermissions(afterApp, allowAfter),
+      migration: rename,
+    });
     newDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
     oldDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
     const created = await newDb

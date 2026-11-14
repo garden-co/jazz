@@ -113,12 +113,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         schema.len()
     );
 
-    // The app's schema versions and lenses, as `jazz-tools validate` writes
-    // them beside schema.ts, so this client stores each version as the
-    // server does.
-    let migrations = jazz::tools::deployment::published::client_migrations_module(
-        &std::fs::read_to_string(format!("{schema_root}/migrations/index.ts"))?,
+    // The app's schema versions and lenses, from the jazz.app.json and
+    // jazz.permissions.json `jazz-tools validate` writes beside schema.ts, so
+    // this client stores each version as the server does.
+    let read = |file: &str| std::fs::read(format!("{schema_root}/{file}"));
+    let app = jazz::tools::deployment::artifact::load(
+        &read(jazz::tools::deployment::artifact::APP_FILE)?,
+        &read(jazz::tools::deployment::artifact::PERMISSIONS_FILE)?,
     )?;
+    if jazz::tools::SchemaHash::compute(&schema) != app.current_hash() {
+        return Err(format!(
+            "jazz.app.json is not for this schema.ts (its current schema is {}): \
+             run `npx jazz-tools validate` and commit jazz.app.json and jazz.permissions.json",
+            app.current_hash()
+        )
+        .into());
+    }
+    let migrations = app.client_migrations();
 
     // Create Jazz client
     let app_id = AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id));

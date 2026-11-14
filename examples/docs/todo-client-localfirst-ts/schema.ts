@@ -1,5 +1,5 @@
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
+import artifact from "./jazz.app.json" with { type: "json" };
 
 const schema = {
   // #region schema-todo-client-ts
@@ -30,7 +30,7 @@ const schema = {
 
 // #region schema-define-app-ts
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+export const app: s.App<AppSchema> = s.defineApp(schema, { artifact });
 
 export type Todo = s.RowOf<typeof app.todos>;
 // #endregion schema-define-app-ts

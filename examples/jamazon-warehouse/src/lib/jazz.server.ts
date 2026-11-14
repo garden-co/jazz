@@ -1,4 +1,4 @@
-import permissions from "@/permissions";
+import permissions from "@/jazz.permissions.json" with { type: "json" };
 import { app } from "@/schema";
 import type { Jazz } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";

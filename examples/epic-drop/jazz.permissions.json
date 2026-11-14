@@ -1,0 +1,1157 @@
+{
+  "bundle": "878bb73d35c0f73c1bade0bf305a36edf9f6327bc8cecb30bc1c2cfa47c7d172",
+  "format": 1,
+  "permissions": {
+    "files": {
+      "delete": {
+        "using": {
+          "operation": "Update",
+          "type": "Inherits",
+          "via_column": "folder_id"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "column": "owner_id",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "folder_id"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "folder_id"
+        }
+      },
+      "update": {
+        "using": {
+          "operation": "Update",
+          "type": "Inherits",
+          "via_column": "folder_id"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "folder_id"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "owner_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "owner_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "files",
+              "type": "Exists"
+            },
+            {
+              "exprs": [
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "folder_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "folder_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "files",
+                  "type": "Exists"
+                },
+                {
+                  "column": "owner_id",
+                  "op": "Eq",
+                  "type": "Cmp",
+                  "value": {
+                    "path": [
+                      "user"
+                    ],
+                    "type": "SessionRef"
+                  }
+                },
+                {
+                  "exprs": [
+                    {
+                      "condition": {
+                        "exprs": [
+                          {
+                            "column": "id",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "__jazz_outer_row",
+                                "folder_id"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          },
+                          {
+                            "column": "owner_id",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "user"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          }
+                        ],
+                        "type": "And"
+                      },
+                      "table": "folders",
+                      "type": "Exists"
+                    },
+                    {
+                      "rel": {
+                        "columns": [
+                          {
+                            "alias": "id",
+                            "expr": {
+                              "column": {
+                                "column": "id",
+                                "scope": "__hop_0"
+                              },
+                              "type": "Column"
+                            }
+                          }
+                        ],
+                        "input": {
+                          "input": {
+                            "join_kind": "Inner",
+                            "left": {
+                              "table": "files",
+                              "type": "TableScan"
+                            },
+                            "on": [
+                              {
+                                "left": {
+                                  "column": "folder_id",
+                                  "scope": "files"
+                                },
+                                "right": {
+                                  "column": "id",
+                                  "scope": "__hop_0"
+                                }
+                              }
+                            ],
+                            "right": {
+                              "alias": "__hop_0",
+                              "table": "folders",
+                              "type": "TableScan"
+                            },
+                            "type": "Join"
+                          },
+                          "predicate": {
+                            "exprs": [
+                              {
+                                "left": {
+                                  "column": "id",
+                                  "scope": "files"
+                                },
+                                "op": "Eq",
+                                "right": {
+                                  "column": {
+                                    "column": "id"
+                                  },
+                                  "type": "OuterColumn"
+                                },
+                                "type": "Cmp"
+                              },
+                              {
+                                "left": {
+                                  "column": "owner_id",
+                                  "scope": "__hop_0"
+                                },
+                                "op": "Eq",
+                                "right": {
+                                  "path": [
+                                    "user"
+                                  ],
+                                  "type": "SessionRef"
+                                },
+                                "type": "Cmp"
+                              }
+                            ],
+                            "type": "And"
+                          },
+                          "type": "Filter"
+                        },
+                        "type": "Project"
+                      },
+                      "type": "ExistsRel"
+                    }
+                  ],
+                  "type": "And"
+                }
+              ],
+              "type": "Or"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "folderInvites": {
+      "delete": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "folder_id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "owner_id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "folders",
+          "type": "Exists"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "folder_id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "owner_id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "folders",
+          "type": "Exists"
+        }
+      },
+      "select": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "folder_id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "owner_id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "folders",
+          "type": "Exists"
+        }
+      }
+    },
+    "folderMembers": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "column": "user_id",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "folder_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "owner_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "folders",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "column": "user_id",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "folder_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "owner_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "folder_owner_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "folders",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "folder_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "folder_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "code",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "invite_code"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "role",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "role"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "folderInvites",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "exprs": [
+            {
+              "column": "user_id",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "folder_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "owner_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "folders",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "update": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "folder_id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "owner_id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "folders",
+          "type": "Exists"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "folder_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "owner_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "folders",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "folder_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "folder_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "user_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "user_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "folder_owner_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "folder_owner_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "folderMembers",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "folders": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "column": "owner_id",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "max_depth": 8,
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "parent_id"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "column": "parent_id",
+                  "type": "IsNull"
+                },
+                {
+                  "max_depth": 8,
+                  "operation": "Update",
+                  "type": "Inherits",
+                  "via_column": "parent_id"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "exprs": [
+                {
+                  "exprs": [
+                    {
+                      "column": "parent_id",
+                      "type": "IsNull"
+                    },
+                    {
+                      "column": "owner_id",
+                      "op": "Eq",
+                      "type": "Cmp",
+                      "value": {
+                        "path": [
+                          "user"
+                        ],
+                        "type": "SessionRef"
+                      }
+                    }
+                  ],
+                  "type": "And"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "parent_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "owner_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "owner_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "folders",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "exprs": [
+            {
+              "column": "owner_id",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "folder_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "user_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "folderMembers",
+              "type": "Exists"
+            },
+            {
+              "max_depth": 8,
+              "operation": "Select",
+              "type": "Inherits",
+              "via_column": "parent_id"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "update": {
+        "using": {
+          "exprs": [
+            {
+              "column": "owner_id",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "folder_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "user_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "role",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "type": "Literal",
+                      "value": {
+                        "type": "Text",
+                        "value": "editor"
+                      }
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "folderMembers",
+              "type": "Exists"
+            },
+            {
+              "max_depth": 8,
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "parent_id"
+            }
+          ],
+          "type": "Or"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "owner_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "owner_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "folders",
+              "type": "Exists"
+            },
+            {
+              "exprs": [
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "parent_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "parent_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "folders",
+                  "type": "Exists"
+                },
+                {
+                  "exprs": [
+                    {
+                      "column": "parent_id",
+                      "type": "IsNull"
+                    },
+                    {
+                      "condition": {
+                        "exprs": [
+                          {
+                            "column": "id",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "__jazz_outer_row",
+                                "id"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          },
+                          {
+                            "column": "parent_id",
+                            "type": "IsNull"
+                          }
+                        ],
+                        "type": "And"
+                      },
+                      "table": "folders",
+                      "type": "Exists"
+                    }
+                  ],
+                  "type": "And"
+                },
+                {
+                  "exprs": [
+                    {
+                      "column": "owner_id",
+                      "op": "Eq",
+                      "type": "Cmp",
+                      "value": {
+                        "path": [
+                          "user"
+                        ],
+                        "type": "SessionRef"
+                      }
+                    },
+                    {
+                      "exprs": [
+                        {
+                          "column": "parent_id",
+                          "type": "IsNull"
+                        },
+                        {
+                          "condition": {
+                            "exprs": [
+                              {
+                                "column": "id",
+                                "op": "Eq",
+                                "type": "Cmp",
+                                "value": {
+                                  "path": [
+                                    "__jazz_outer_row",
+                                    "parent_id"
+                                  ],
+                                  "type": "SessionRef"
+                                }
+                              },
+                              {
+                                "column": "owner_id",
+                                "op": "Eq",
+                                "type": "Cmp",
+                                "value": {
+                                  "path": [
+                                    "user"
+                                  ],
+                                  "type": "SessionRef"
+                                }
+                              }
+                            ],
+                            "type": "And"
+                          },
+                          "table": "folders",
+                          "type": "Exists"
+                        }
+                      ],
+                      "type": "Or"
+                    }
+                  ],
+                  "type": "And"
+                }
+              ],
+              "type": "Or"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "profiles": {
+      "insert": {
+        "with_check": {
+          "column": "id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "select": {
+        "using": {
+          "exprs": [
+            {
+              "column": "id",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "operation": "Select",
+              "source_table": "folderMembers",
+              "type": "InheritsReferencing",
+              "via_column": "user_id"
+            },
+            {
+              "operation": "Select",
+              "source_table": "folderMembers",
+              "type": "InheritsReferencing",
+              "via_column": "folder_owner_id"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "update": {
+        "using": {
+          "column": "id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        },
+        "with_check": {
+          "column": "id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      }
+    }
+  },
+  "schema": "63f6bc222535168c0d2103c511fd1ad6c93fa24cf36df4aff0735964b3712314"
+}

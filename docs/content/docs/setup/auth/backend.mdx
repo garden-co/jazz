@@ -20,7 +20,7 @@ backend already knows who is signed in, so it tells Jazz:
 import { createJazz, sqlite } from "jazz-tools/backend";
 import { auth } from "./auth"; // your Better Auth instance, which can keep its tables in Jazz too
 import { app } from "./schema";
-import permissions from "./permissions";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,
@@ -334,11 +334,11 @@ column and base your policies on it:
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
+import artifact from "./jazz.app.json" with { type: "json" };
 
 export const app = s.defineApp(
   { todos: s.table({ title: s.string(), owner_id: s.uuid() }, {}) },
-  { migrations },
+  { artifact },
 );
 ```
 

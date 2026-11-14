@@ -2,6 +2,7 @@
 //! current stored state under the same serialization boundary as the eventual
 //! commit. A prepared value is not a concurrency token or a publication receipt.
 
+pub mod artifact;
 mod compatible;
 pub use compatible::schemas_are_compatible;
 mod migration_validation;
@@ -94,8 +95,8 @@ pub enum DeploymentError {
     Cycle { schemas: Vec<SchemaHash> },
     #[error(
         "migration history has disconnected roots: {}. No migration connects these schema versions. \
-         Run `jazz-tools migrations create --name <name>` to write the missing migration and add it \
-         to migrations/index.ts, then deploy again. If one of them is \
+         Run `jazz-tools migrations create --name <name>` to write the missing migration (it \
+         rewrites jazz.app.json), then deploy again. If one of them is \
          a version your store already runs that migrations/snapshots has no snapshot of, check out \
          that schema.ts and run `jazz-tools migrations create` to snapshot it first",
         display_hashes(.roots, ", ")

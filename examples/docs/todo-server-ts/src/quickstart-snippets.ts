@@ -3,8 +3,7 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { createJazz, sqlite } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
-import permissions from "../permissions.js";
-
+import permissions from "../jazz.permissions.json" with { type: "json" };
 // Your own auth decides who a request is (a session cookie, a header).
 // `sessionExpiresAt`: when that session expires, in Unix seconds.
 declare function currentUser(

@@ -1,0 +1,286 @@
+{
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "canvases": {
+        "relations": {
+          "chat": {
+            "column": "chatId",
+            "table": "chats",
+            "type": "Forward"
+          },
+          "strokesViaCanvas": {
+            "relation": "canvas",
+            "table": "strokes",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "chatMembers": {
+        "relations": {
+          "chat": {
+            "column": "chatId",
+            "table": "chats",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "chats": {
+        "relations": {
+          "canvasesViaChat": {
+            "relation": "chat",
+            "table": "canvases",
+            "type": "Reverse"
+          },
+          "chatMembersViaChat": {
+            "relation": "chat",
+            "table": "chatMembers",
+            "type": "Reverse"
+          },
+          "messagesViaChat": {
+            "relation": "chat",
+            "table": "messages",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "messages": {
+        "relations": {
+          "chat": {
+            "column": "chatId",
+            "table": "chats",
+            "type": "Forward"
+          },
+          "reactionsViaMessage": {
+            "relation": "message",
+            "table": "reactions",
+            "type": "Reverse"
+          },
+          "sender": {
+            "column": "senderId",
+            "table": "profiles",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "profiles": {
+        "relations": {
+          "messagesViaSender": {
+            "relation": "sender",
+            "table": "messages",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "reactions": {
+        "relations": {
+          "message": {
+            "column": "messageId",
+            "table": "messages",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "strokes": {
+        "relations": {
+          "canvas": {
+            "column": "canvasId",
+            "table": "canvases",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "d2a80e62507db102419178e0a94d1b199e3dcba1fb12a3a05df38e8dcf3355bf",
+  "format": 1,
+  "migrations": [],
+  "schemas": [
+    {
+      "hash": "d2a80e62507db102419178e0a94d1b199e3dcba1fb12a3a05df38e8dcf3355bf",
+      "tables": {
+        "canvases": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "chatId",
+              "nullable": false,
+              "references": "chats"
+            }
+          ]
+        },
+        "chatMembers": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "chatId",
+              "nullable": false,
+              "references": "chats"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "joinCode",
+              "nullable": true
+            }
+          ]
+        },
+        "chats": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "isPublic",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "joinCode",
+              "nullable": true
+            }
+          ]
+        },
+        "messages": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "chatId",
+              "nullable": false,
+              "references": "chats"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "text",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "senderId",
+              "nullable": false,
+              "references": "profiles"
+            }
+          ]
+        },
+        "profiles": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "avatar",
+              "nullable": true
+            }
+          ]
+        },
+        "reactions": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "messageId",
+              "nullable": false,
+              "references": "messages"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "emoji",
+              "nullable": false
+            }
+          ]
+        },
+        "strokes": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "canvasId",
+              "nullable": false,
+              "references": "canvases"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "color",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "width",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "pointsJson",
+              "nullable": false
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defineShippedApp } from "../testing/client-migrations.js";
+import { appArtifact, appPermissions } from "../testing/app-artifact.js";
 import { schema as s } from "../index.js";
 import {
   acceptDeviceAccounts,
@@ -30,13 +30,17 @@ import type { SandboxHandle, SandboxSdk } from "./vercel-store.js";
 // (`serveCore`) with only its secrets, and a `vercel()` core's from the
 // Sandbox start script.
 
-const app = await defineShippedApp({ todos: s.table({ title: s.string(), owner: s.uuid() }, {}) });
-const permissions = s.definePermissions(app, ({ policy, session }) => {
+const definition = { todos: s.table({ title: s.string(), owner: s.uuid() }, {}) };
+const app = s.defineApp(definition, { artifact: await appArtifact(definition) });
+/** What permissions.ts makes: clients take it. */
+const rules = s.definePermissions(app, ({ policy, session }) => {
   policy.todos.allowRead.where({ owner: session.user });
   policy.todos.allowInsert.where({ owner: session.user });
   policy.todos.allowUpdate.never();
   policy.todos.allowDelete.never();
 });
+/** The app's jazz.permissions.json: its backend takes it. */
+const permissions = await appPermissions(app, rules);
 
 // The Sandbox loads the addon with require(); its ES entry doesn't export serveCore.
 const { serveCore } = createRequire(import.meta.url)("jazz-napi") as typeof import("jazz-napi");
@@ -235,7 +239,7 @@ async function appOn(store: JazzStore, guests: boolean) {
   const session = await createJazzClient({
     appId: jazz.appId,
     app,
-    permissions,
+    permissions: rules,
     serverUrl: `http://127.0.0.1:${port}${jazz.basePath}`,
     driver: { type: "memory" },
     initial: "device",

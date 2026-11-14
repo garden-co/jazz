@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { schema as s } from "../../src/schema-namespace.js";
 import { migration as m } from "../../src/migration-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
-import { appMigrations, startTestJazz } from "../../src/testing/index.js";
+import { appArtifact, appPermissions, startTestJazz } from "../../src/testing/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
 // A React Native client opens its native store along the migrations the app
@@ -17,19 +17,26 @@ it("reads rows written before the app renamed a column, from a server with schem
     to: after,
     migrate: { notes: { body: m.renameFrom("title") } },
   });
-  const beforeApp = s.defineApp(before, { migrations: await appMigrations(before) });
-  const afterApp = s.defineApp(after, {
-    migrations: await appMigrations(before, { to: after, migration: rename }),
+  const allowBefore = s.definePermissions(
+    s.defineApp(before, { migrations: "none" }),
+    ({ policy }) => [policy.notes.allowRead.always(), policy.notes.allowInsert.always()],
+  );
+  const allowAfter = s.definePermissions(
+    s.defineApp(after, { migrations: "none" }),
+    ({ policy }) => [policy.notes.allowRead.always(), policy.notes.allowInsert.always()],
+  );
+  const beforeApp = s.defineApp(before, {
+    artifact: await appArtifact(before),
   });
-  const allowBefore = s.definePermissions(beforeApp, ({ policy }) => [
-    policy.notes.allowRead.always(),
-    policy.notes.allowInsert.always(),
-  ]);
-  const allowAfter = s.definePermissions(afterApp, ({ policy }) => [
-    policy.notes.allowRead.always(),
-    policy.notes.allowInsert.always(),
-  ]);
-  const backend = await startTestJazz({ app: beforeApp, permissions: allowBefore });
+  const afterApp = s.defineApp(after, {
+    artifact: await appArtifact(before, {
+      steps: [{ to: after, migration: rename }],
+    }),
+  });
+  const backend = await startTestJazz({
+    app: beforeApp,
+    permissions: await appPermissions(beforeApp, allowBefore),
+  });
   try {
     let written: { id: string; title: string } | undefined;
     await withNativeRelayFixture(
@@ -43,7 +50,11 @@ it("reads rows written before the app renamed a column, from a server with schem
       },
       { appId: backend.appId, upstream: { backend, userId: "native-alice" } },
     );
-    await backend.redeploy({ app: afterApp, permissions: allowAfter, migration: rename });
+    await backend.redeploy({
+      app: afterApp,
+      permissions: await appPermissions(afterApp, allowAfter),
+      migration: rename,
+    });
 
     await withNativeRelayFixture(
       afterApp,

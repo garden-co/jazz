@@ -1,0 +1,106 @@
+{
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "projects": {
+        "relations": {
+          "todos": {
+            "relation": "project",
+            "table": "todos",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "todos": {
+        "relations": {
+          "children": {
+            "relation": "parent",
+            "table": "todos",
+            "type": "Reverse"
+          },
+          "parent": {
+            "column": "parentId",
+            "table": "todos",
+            "type": "Forward"
+          },
+          "project": {
+            "column": "projectId",
+            "table": "projects",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "86cb6a677db0e9bcf52e9907941801bcbf2cb3944c7a8c5ff6b257051c1bc104",
+  "format": 1,
+  "migrations": [],
+  "schemas": [
+    {
+      "hash": "86cb6a677db0e9bcf52e9907941801bcbf2cb3944c7a8c5ff6b257051c1bc104",
+      "tables": {
+        "projects": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            }
+          ]
+        },
+        "todos": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "done",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "description",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "owner_id",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "parentId",
+              "nullable": true,
+              "references": "todos"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "projectId",
+              "nullable": true,
+              "references": "projects"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -59,14 +59,14 @@ describe("cli migrations", () => {
 
   // An app on its own store (`sqlite()`) has no server to fetch a baseline
   // from: the docs' first step snapshots schema.ts, and the next schema
-  // change migrates from it, with migrations/index.ts kept up to date
+  // change migrates from it, with jazz.app.json kept up to date
   // (alpha.60 adopter pass V4).
   it("snapshots schema.ts on the first offline run and migrates from it next", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
     const shipping = (source: string) =>
-      `import { migrations } from "./migrations/index.ts";\n` +
-      source.replace('{ migrations: "none" }', "{ migrations }");
+      `import artifact from "./jazz.app.json" with { type: "json" };\n` +
+      source.replace('{ migrations: "none" }', "{ artifact }");
     await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithoutInlinePermissions()));
     await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
     // The generated stub imports jazz-tools, as in an app.
@@ -85,8 +85,8 @@ describe("cli migrations", () => {
     const first = await createCatalogueMigration({ schemaDir: root, migrationsDir });
     assert(first.status === "initial-snapshot");
     expect(await fileExists(first.snapshotPath)).toBe(true);
-    const index = () => readFile(join(migrationsDir, "index.ts"), "utf8");
-    expect(await index()).toContain(first.hash);
+    const index = () => readFile(join(root, "jazz.app.json"), "utf8");
+    expect(JSON.parse(await index())).toMatchObject({ format: 1, current: first.hash });
     // Unchanged schema: validate says what it found, and that permissions
     // never need a migration (#4773).
     const { logs: unchangedValidate } = await captureConsoleLogs(() =>
@@ -94,7 +94,7 @@ describe("cli migrations", () => {
     );
     expect(unchangedValidate).toContain(
       "schema.ts matches its latest snapshot, so no migration is needed. " +
-        "Changes to permissions.ts never need one: your backend publishes them when it starts.",
+        "Changes to permissions.ts never need one: they go into jazz.permissions.json, which your backend publishes when it starts.",
     );
 
     await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithTodoNotes()));
@@ -111,50 +111,55 @@ describe("cli migrations", () => {
     });
     assert(second.status === "generated");
     expect(second.fromHash).toBe(first.hash);
-    // The stub is in migrations/index.ts without another `validate`.
-    const bundled = await index();
-    expect(bundled).toContain(`"fromHash": "${first.hash}"`);
-    expect(bundled).toContain(`"toHash": "${second.toHash}"`);
+    // The stub is in jazz.app.json without another `validate`.
+    const bundled = JSON.parse(await index());
+    expect(bundled.current).toBe(second.toHash);
+    expect(bundled.migrations).toMatchObject([{ from: first.hash, to: second.toHash }]);
+    // And the backend's jazz.permissions.json moved to the new version with it.
+    const permissionsFile = JSON.parse(await readFile(join(root, "jazz.permissions.json"), "utf8"));
+    expect(permissionsFile).toMatchObject({ format: 1, schema: second.toHash });
+    expect(bundled).not.toHaveProperty("permissions");
+    expect(bundled).not.toHaveProperty("bundle");
+    await validate({ schemaDir: root, check: true });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  // An app still on `{ migrations: "none" }` got snapshots and a stub but no
-  // migrations/index.ts, and nothing said why (alpha.61 adopter round).
-  it("tells an app on migrations: none to import its migrations, then writes index.ts", async () => {
+  // An app still on `{ migrations: "none" }` got snapshots and a stub but
+  // shipped none of them, and nothing said why (alpha.61 adopter round).
+  it("tells an app on migrations: none to import its jazz.app.json", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
-    const index = join(root, "migrations", "index.ts");
+    const artifact = join(root, "jazz.app.json");
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
     await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
-    const hint = 'Add `import { migrations } from "./migrations";` to schema.ts';
+    const hint = 'Add `import artifact from "./jazz.app.json" with { type: "json" };` to schema.ts';
 
     // Nothing to ship yet: no hint before the first snapshot, and looking
     // for snapshots creates no migrations directory.
     const { logs: fresh } = await captureConsoleLogs(() => validate({ schemaDir: root }));
     expect(fresh.join("\n")).not.toContain(hint);
     expect(await fileExists(migrationsDir)).toBe(false);
+    // The file is written whether or not schema.ts imports it.
+    expect(await fileExists(artifact)).toBe(true);
 
     const { logs: created } = await captureConsoleLogs(() =>
       createMigration({ schemaDir: root, migrationsDir }),
     );
     expect(created.join("\n")).toContain(hint);
-    expect(await fileExists(index)).toBe(false);
 
     const { logs: validated } = await captureConsoleLogs(() => validate({ schemaDir: root }));
     expect(validated.join("\n")).toContain(hint);
-    expect(await fileExists(index)).toBe(false);
 
-    // Following the hint: the import, then validate, writes the module.
+    // Following the hint: the import, and the hint is gone.
     await writeFile(
       join(root, "schema.ts"),
-      `import { migrations } from "./migrations";\n` +
-        rootSchemaWithoutInlinePermissions().replace('{ migrations: "none" }', "{ migrations }"),
+      `import artifact from "./jazz.app.json" with { type: "json" };\n` +
+        rootSchemaWithoutInlinePermissions().replace('{ migrations: "none" }', "{ artifact }"),
     );
     const { logs: shipped } = await captureConsoleLogs(() => validate({ schemaDir: root }));
     expect(shipped.join("\n")).not.toContain(hint);
-    const module = await readFile(index, "utf8");
-    expect(module).toContain("`jazz-tools validate` and `jazz-tools migrations create` rewrite it");
-    expect(module).not.toContain("`deploy`");
+    expect(JSON.parse(await readFile(artifact, "utf8"))).toMatchObject({ format: 1 });
+    expect(await fileExists(join(migrationsDir, "index.ts"))).toBe(false);
   });
 
   it("counts the steps a stub leaves to fill in", async () => {
@@ -179,8 +184,8 @@ describe("cli migrations", () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
     const shipping = (source: string) =>
-      `import { migrations } from "./migrations/index.ts";\n` +
-      source.replace('{ migrations: "none" }', "{ migrations }");
+      `import artifact from "./jazz.app.json" with { type: "json" };\n` +
+      source.replace('{ migrations: "none" }', "{ artifact }");
     await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithTodoNotes()));
     await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
     await mkdir(join(root, "node_modules"), { recursive: true });
@@ -239,7 +244,7 @@ describe("cli migrations", () => {
     const migrationsDir = join(root, "migrations");
     const tasks = (status: string, labels: string) => `
 import { schema as s } from ${JSON.stringify(fileURLToPath(new URL("./index.ts", import.meta.url)))};
-import { migrations } from "./migrations/index.ts";
+import artifact from "./jazz.app.json" with { type: "json" };
 
 const schema = {
   tasks: s.table({
@@ -250,7 +255,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+export const app: s.App<AppSchema> = s.defineApp(schema, { artifact });
 `;
     await writeFile(join(root, "schema.ts"), tasks('"todo", "done"', '"bug"'));
     await writeFile(

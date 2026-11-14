@@ -32,19 +32,22 @@ import { build } from "esbuild";
 import type { WasmSchema } from "../drivers/types.js";
 import type { DefinedMigration } from "../migrations.js";
 import {
-  CLIENT_MIGRATIONS_MODULE,
-  clientMigrationsPath,
+  appArtifactPath,
+  appPermissionsPath,
+  GENERATED_MIGRATIONS_MODULE_HEADER,
   hasRootSchema,
+  importsAppArtifact,
   loadCompiledSchema,
-  importsClientMigrations,
   rootSchemaFile,
-  writeClientMigrationsModule,
   type LoadedSchemaProject,
 } from "../schema-loader.js";
 import {
   collectMissingExplicitPolicyDiagnostics,
   mergePermissionsIntoWasmSchema,
+  normalizePermissionsForWasm,
 } from "../schema-permissions.js";
+import { recordedTsOnlyColumns, sliceTables, tsOnlyColumns } from "../typed-app.js";
+import type { SchemaDefinition } from "../typed-app.js";
 import { collectConventionalProvenanceDiagnostics } from "../provenance-guidance.js";
 import { fetchSchemaHashes, fetchStoredWasmSchema } from "./catalogue-api.js";
 import { renderMigrationStub, UNFILLED_STUB_TODO } from "./migrations.js";
@@ -224,9 +227,21 @@ export async function validateProject(
   } else {
     retired = await retireLegacyMigrations(migrationsDir, compiled.wasmSchema);
   }
-  await checkLocalMigrations(compiled.wasmSchema, migrationsDir);
+  const artifact = await buildAppArtifact(compiled, migrationsDir);
   const schema = await schemaSnapshotStatus(migrationsDir, compiled.wasmSchema);
-  if (!options.check) await writeLocalClientMigrations(options.schemaDir, migrationsDir);
+  const generated = await generatedMigrationsModule(compiled.schemaFile);
+  if (options.check) {
+    await checkAppArtifact(options.schemaDir, compiled.schemaFile, artifact);
+    if (generated) throw new Error(generatedMigrationsModuleMessage(options.schemaDir, generated));
+  } else {
+    await writeAppArtifact(compiled.schemaFile, artifact);
+    if (generated) {
+      await unlink(generated);
+      retired.push(
+        `Removed ${relative(options.schemaDir, generated)}, which jazz-tools generated before alpha.63: jazz.app.json replaces it.`,
+      );
+    }
+  }
   const unshipped = await unshippedMigrationsWarning(options.schemaDir, migrationsDir);
   return {
     schema,
@@ -1290,10 +1305,12 @@ export async function createMigration(
   const result = await withMigrationDirectoryLock(storage, async () =>
     createMigrationUnlocked(options, storage),
   );
-  // The app ships migrations/index.ts: what this wrote belongs in it now,
-  // not only after the next `validate`.
-  if (result.status !== "unchanged" && (await hasRootSchema(options.schemaDir))) {
-    await writeLocalClientMigrations(options.schemaDir, options.migrationsDir);
+  // The app ships jazz.app.json: what this wrote belongs in it now, not only
+  // after the next `validate`. A stub with steps left to fill in isn't a
+  // migration yet: `validate` writes the file once it is filled in.
+  const unfilled = result.status === "generated" && result.unfilledSteps > 0;
+  if (result.status !== "unchanged" && !unfilled && (await hasRootSchema(options.schemaDir))) {
+    await writeLocalAppArtifact(options.schemaDir, options.migrationsDir);
   }
   return result;
 }
@@ -1622,66 +1639,158 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     });
   }
   if (result.changed) emit(options, { type: "permissions-published", schemaHash: toHash });
-  // Clients ship what the server now holds, so they store each column where
-  // it does, even before their first sync (see ClientMigrations).
-  const bundled = new Map<string, WasmSchema>();
-  for (const hash of [
-    ...schemas.keys(),
-    ...edges.flatMap((edge) => [edge.fromHash, edge.toHash]),
-  ]) {
-    if (!bundled.has(hash)) bundled.set(hash, await loadCanonicalSchema(hash));
-  }
-  await writeClientMigrations(compiled.schemaFile, bundled, edges);
+  // The app's jazz.app.json, as validate writes it: clients store each
+  // column where the server does, even before their first sync.
+  await writeLocalAppArtifact(options.schemaDir, migrationsDir);
   return { ...result, schema: { ...result.schema, schemaFile: compiled.schemaFile } };
 }
 
-/**
- * The module an app imports its `migrations` from, in the `migrations`
- * directory beside schema.ts. For an app whose schema.ts imports it,
- * `jazz-tools` writes it on every validate and `migrations create`, so it
- * exists even while the app has a single schema version.
- */
-export const CLIENT_MIGRATIONS_FILE = CLIENT_MIGRATIONS_MODULE;
-
-/** A migration file in a migrations directory (not the generated module). */
+/** A migration file in a migrations directory. */
 function isMigrationFile(fileName: string): boolean {
-  return fileName.endsWith(".ts") && fileName !== CLIENT_MIGRATIONS_FILE;
+  return fileName.endsWith(".ts") && fileName !== "index.ts";
 }
 
 type MigrationEdge = { fromHash: string; toHash: string; migration: DefinedMigration };
 
-/** Write the app's schema versions and the migrations between them. */
-async function writeClientMigrations(
-  schemaFile: string,
-  schemas: ReadonlyMap<string, WasmSchema>,
-  edges: ReadonlyArray<MigrationEdge>,
-): Promise<void> {
-  if (!(await importsClientMigrations(schemaFile))) return;
-  const path = clientMigrationsPath(schemaFile);
-  await assertNoSymlinkComponents(dirname(path), true);
-  await writeClientMigrationsModule(path, clientMigrationsJson(schemas, edges));
-}
-
-/** The app's schema versions and migrations as JSON, as it ships them to clients. */
-function clientMigrationsJson(
-  schemas: ReadonlyMap<string, WasmSchema>,
-  edges: ReadonlyArray<MigrationEdge>,
-): string {
-  const bundle = {
-    // As a deployment sends them (`{ tables }`), which the bindings decode.
-    schemas: [...schemas]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([hash, schema]) => ({
-        hash,
-        schema: { tables: mergePermissionsIntoWasmSchema(schema, {}) },
-      })),
+/**
+ * The `jazz.app.json` and `jazz.permissions.json` this project builds from
+ * schema.ts, permissions.ts, its snapshots and its migration files: the
+ * canonical texts Jazz's Rust writer renders, which refuses what a deploy or
+ * a reader would.
+ */
+async function buildAppArtifact(
+  compiled: LoadedSchemaProject & { permissions: NonNullable<LoadedSchemaProject["permissions"]> },
+  migrationsDir: string,
+): Promise<AppFiles> {
+  const { current, schemas, order, edges } = await localClientMigrations(
+    compiled.wasmSchema,
+    migrationsDir,
+  );
+  const input = {
+    current,
+    // As a deployment sends them (`{ tables }`), oldest first.
+    schemas: order.map((hash) => ({
+      tables: mergePermissionsIntoWasmSchema(schemas.get(hash)!, {}),
+    })),
     migrations: edges.map((edge) => ({
       fromHash: edge.fromHash,
       toHash: edge.toHash,
       forward: serializeForwardLenses(edge.migration.forward),
     })),
+    permissions: normalizePermissionsForWasm(compiled.permissions),
+    codegen: await appCodegen(compiled),
   };
-  return JSON.stringify(bundle, runtimeSchemaJsonReplacer, 2);
+  const { writeAppArtifact } = await import("jazz-napi");
+  try {
+    return writeAppArtifact(JSON.stringify(input, runtimeSchemaJsonReplacer));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      message.startsWith("jazz.app.json: migrations:")
+        ? `The migrations in ${basename(migrationsDir)} would not deploy: ${message.slice("jazz.app.json: migrations: ".length)}`
+        : message,
+    );
+  }
+}
+
+/**
+ * What typed code in other languages needs beyond the schema: the DSL's
+ * relations, the columns only TypeScript computes, and the slices schema.ts
+ * exports, by export name.
+ */
+async function appCodegen(compiled: LoadedSchemaProject): Promise<unknown> {
+  const tsOnly =
+    recordedTsOnlyColumns(compiled.wasmSchema) ?? definitionTsOnlyColumns(compiled.module) ?? {};
+  const tables: Record<string, { relations?: unknown; ts_only?: unknown }> = {};
+  for (const [name, table] of Object.entries(compiled.wasmSchema)) {
+    const relations = Object.fromEntries(
+      Object.entries(table.relations ?? {}).map(([relation, target]) => [
+        relation,
+        target.kind === "forward"
+          ? { type: "Forward", table: target.table, column: target.column }
+          : { type: "Reverse", table: target.table, relation: target.relation },
+      ]),
+    );
+    const columns = tsOnly[name] ?? [];
+    if (Object.keys(relations).length === 0 && columns.length === 0) continue;
+    tables[name] = { relations, ts_only: columns };
+  }
+  const slices: Record<string, string[]> = {};
+  for (const [name, value] of Object.entries(compiled.module ?? {})) {
+    const sliced = sliceTables(value, compiled.wasmSchema);
+    if (sliced) slices[name] = sliced;
+  }
+  return { tables, slices };
+}
+
+/** The TS-only columns of a schema.ts that exports its definition rather than an app. */
+function definitionTsOnlyColumns(
+  module: Record<string, unknown> | undefined,
+): ReturnType<typeof tsOnlyColumns> | undefined {
+  const definition = module?.schema ?? module?.schemaDef;
+  if (typeof definition !== "object" || definition === null || "wasmSchema" in definition) {
+    return undefined;
+  }
+  try {
+    return tsOnlyColumns(definition as SchemaDefinition);
+  } catch {
+    // Not a definition: the schema came from elsewhere, with nothing TS-only.
+    return undefined;
+  }
+}
+
+/** An app's two files, as Jazz's Rust writer renders them. */
+interface AppFiles {
+  /** `jazz.app.json`, which the app and its clients ship. */
+  app: string;
+  /** `jazz.permissions.json`, which only its backends read. */
+  permissions: string;
+}
+
+/** Each of `files` with the path it is written to, beside `schemaFile`. */
+function appFilePaths(schemaFile: string, files: AppFiles): Array<[path: string, text: string]> {
+  return [
+    [appArtifactPath(schemaFile), files.app],
+    [appPermissionsPath(schemaFile), files.permissions],
+  ];
+}
+
+/** Write the app's two files, leaving each alone when unchanged so a watcher sees no edit. */
+async function writeAppArtifact(schemaFile: string, files: AppFiles): Promise<void> {
+  for (const [path, text] of appFilePaths(schemaFile, files)) {
+    await assertNoSymlinkComponents(path, true);
+    if ((await readFile(path, "utf8").catch(() => null)) === text) continue;
+    await writeFile(path, text);
+  }
+}
+
+/** `validate --check`: the committed files must be what validate would write. */
+async function checkAppArtifact(
+  schemaDir: string,
+  schemaFile: string,
+  files: AppFiles,
+): Promise<void> {
+  for (const [path, text] of appFilePaths(schemaFile, files)) {
+    const committed = await readFile(path, "utf8").catch(() => null);
+    if (committed === text) continue;
+    const shown = relative(schemaDir, path) || path;
+    throw new Error(
+      committed === null
+        ? `${shown} is missing. Run \`jazz-tools validate\` to write it, and commit it.`
+        : `${shown} is not what schema.ts, permissions.ts and the migrations make: run \`jazz-tools validate\` and commit the jazz.app.json and jazz.permissions.json it writes.`,
+    );
+  }
+}
+
+/** The migrations/index.ts beside `schemaFile`, if jazz-tools generated it before alpha.63. */
+async function generatedMigrationsModule(schemaFile: string): Promise<string | null> {
+  const path = join(dirname(schemaFile), "migrations", "index.ts");
+  const text = await readFile(path, "utf8").catch(() => null);
+  return text?.startsWith(GENERATED_MIGRATIONS_MODULE_HEADER) ? path : null;
+}
+
+function generatedMigrationsModuleMessage(schemaDir: string, path: string): string {
+  return `${relative(schemaDir, path)} was generated by jazz-tools before alpha.63, which ships jazz.app.json instead: run \`jazz-tools validate\` to remove it.`;
 }
 
 /** Where `validate` moves migrations that predate SHA-256 schema hashes. */
@@ -1973,17 +2082,16 @@ async function checkLegacyMigrations(
 }
 
 /**
- * The warning for a project that has schema snapshots but whose schema.ts
- * doesn't import `./migrations`: `jazz-tools` writes migrations/index.ts only
- * for an app that imports it, so such an app (still on `{ migrations: "none" }`)
- * ships none of its migrations, and nothing else would say so.
+ * The warning for a project whose schema.ts doesn't import its
+ * `jazz.app.json`: such an app (still on `{ migrations: "none" }`) ships none
+ * of its schema versions, and nothing else would say so.
  */
 export async function unshippedMigrationsWarning(
   schemaDir: string,
   migrationsDir?: string,
 ): Promise<string | null> {
   const schemaFile = rootSchemaFile(schemaDir);
-  if (!schemaFile || (await importsClientMigrations(schemaFile))) return null;
+  if (!schemaFile || (await importsAppArtifact(schemaFile))) return null;
   // Only reads: validate --check must not create the migrations directory.
   const dir = resolvedMigrationsDir(schemaDir, migrationsDir);
   const committed = (await new MigrationStorage(dir).listSnapshots()).filter((entry) =>
@@ -1992,60 +2100,40 @@ export async function unshippedMigrationsWarning(
   if (committed.length === 0) return null;
   const shown = (path: string) => relative(schemaDir, path) || ".";
   return (
-    `${basename(schemaFile)} doesn't import its migrations, so jazz-tools did not write ` +
-    `${shown(clientMigrationsPath(schemaFile))} and the app ships none of the schema versions in ` +
+    `${basename(schemaFile)} doesn't import ${shown(appArtifactPath(schemaFile))}, so the app ships none of the schema versions in ` +
     `${shown(dir)}. ` +
-    'Add `import { migrations } from "./migrations";` to schema.ts, pass `{ migrations }` to ' +
-    '`defineApp` (instead of `{ migrations: "none" }`), and run `jazz-tools validate` again.'
+    'Add `import artifact from "./jazz.app.json" with { type: "json" };` to schema.ts and pass `{ artifact }` to ' +
+    '`defineApp` (instead of `{ migrations: "none" }`).'
   );
 }
 
-/**
- * Write the app's migrations module from what this project holds locally:
- * schema.ts, its snapshots and its migration files.
- */
-async function writeLocalClientMigrations(schemaDir: string, migrationsDir: string): Promise<void> {
+/** Write the app's `jazz.app.json` from what this project holds locally. */
+async function writeLocalAppArtifact(schemaDir: string, migrationsDir: string): Promise<void> {
   const compiled = await loadCompiledSchema(schemaDir);
-  if (!(await importsClientMigrations(compiled.schemaFile))) return;
-  const { schemas, edges } = await localClientMigrations(compiled.wasmSchema, migrationsDir);
-  await writeClientMigrations(compiled.schemaFile, schemas, edges);
-}
-
-/**
- * Check the project's migrations up to `schema` as a deploy of them to a
- * new authority would, so validate refuses what deploy would refuse.
- */
-async function checkLocalMigrations(schema: WasmSchema, migrationsDir: string): Promise<void> {
-  const { current, schemas, edges } = await localClientMigrations(schema, migrationsDir);
-  if (schemas.size < 2) return;
-  if (typeof process === "undefined" || !process.versions?.node) return;
-  const { checkClientMigrations } = await import("jazz-napi");
-  try {
-    checkClientMigrations(clientMigrationsJson(schemas, edges), current);
-  } catch (error) {
-    throw new Error(
-      `The migrations in ${basename(migrationsDir)} would not deploy: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-  }
+  // The file holds the app's permissions: a project without permissions.ts
+  // has none to write yet, and `validate` refuses it, saying so.
+  if (compiled.permissionsFile !== join(compiled.rootDir, "permissions.ts")) return;
+  const project = ensurePermissionsProject(compiled);
+  await writeAppArtifact(project.schemaFile, await buildAppArtifact(project, migrationsDir));
 }
 
 /** The snapshots and migration files in `migrationsDir`, leading to `schema`. */
 async function localClientMigrations(
   schema: WasmSchema,
   migrationsDir: string,
-): Promise<{ current: string; schemas: Map<string, WasmSchema>; edges: MigrationEdge[] }> {
+): Promise<{
+  current: string;
+  schemas: Map<string, WasmSchema>;
+  /** The hashes of `schemas`, oldest first. */
+  order: string[];
+  edges: MigrationEdge[];
+}> {
   const current = {
     hash: await computeSchemaHash(schema),
     schema,
   };
-  const schemas = new Map<string, WasmSchema>(
-    (await new MigrationStorage(migrationsDir).listSnapshots()).map(({ hash, schema }) => [
-      hash,
-      schema,
-    ]),
-  );
+  const snapshots = await new MigrationStorage(migrationsDir).listSnapshots();
+  const schemas = new Map<string, WasmSchema>(snapshots.map(({ hash, schema }) => [hash, schema]));
   schemas.set(current.hash, current.schema);
   const edges: MigrationEdge[] = [];
   // A migration joins two known versions: with one, none can, so none is loaded.
@@ -2069,5 +2157,44 @@ async function localClientMigrations(
       if (fromHash && toHash) edges.push({ fromHash, toHash, migration });
     }
   }
-  return { current: current.hash, schemas, edges };
+  // Snapshot file names start with when they were taken; schema.ts is newest.
+  const names = new Map(snapshots.map(({ hash, fileName }) => [hash, fileName]));
+  const key = (hash: string) => (hash === current.hash ? "\uffff" : (names.get(hash) ?? hash));
+  return {
+    current: current.hash,
+    schemas,
+    order: oldestFirst([...schemas.keys()], edges, key),
+    edges,
+  };
+}
+
+/**
+ * `hashes` with every migration's source before its target, and otherwise
+ * in `key` order, so the same project always lists its versions alike.
+ */
+function oldestFirst(
+  hashes: string[],
+  edges: ReadonlyArray<{ fromHash: string; toHash: string }>,
+  key: (hash: string) => string,
+): string[] {
+  const incoming = new Map(hashes.map((hash) => [hash, 0]));
+  for (const { toHash } of edges) incoming.set(toHash, (incoming.get(toHash) ?? 0) + 1);
+  const byKey = (a: string, b: string) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0);
+  const ready = hashes.filter((hash) => incoming.get(hash) === 0).sort(byKey);
+  const order: string[] = [];
+  while (ready.length > 0) {
+    const next = ready.shift()!;
+    order.push(next);
+    for (const { fromHash, toHash } of edges) {
+      if (fromHash !== next) continue;
+      const left = incoming.get(toHash)! - 1;
+      incoming.set(toHash, left);
+      if (left === 0) {
+        ready.push(toHash);
+        ready.sort(byKey);
+      }
+    }
+  }
+  // A cycle leaves versions out: the writer refuses it by name.
+  return [...order, ...hashes.filter((hash) => !order.includes(hash)).sort(byKey)];
 }

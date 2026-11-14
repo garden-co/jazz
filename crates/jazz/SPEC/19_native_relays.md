@@ -155,12 +155,13 @@ object or a method that accepts it. Its exact top-level fields are:
 }
 ```
 
-Beside its `tables`, the schema JSON may carry `migrations`: the app's
-`ClientMigrations` bundle, its earlier schema versions and the lenses between
-them. The relay and every foreground open along it, as every other client does
-(SPEC 10.7), so their stores name each column after the version that
-introduced it, where the server keeps it. A private session attaches the same
-schema JSON (native relay ABI 5).
+Beside its `tables`, the schema JSON may carry `app`: the app's
+`jazz.app.json` (SPEC 10.10), whose schema versions and the lenses between
+them the relay reads with `artifact::load_client`. The relay and every
+foreground open along them, as every other client does (SPEC 10.7), so their
+stores name each column after the version that introduced it, where the
+server keeps it. A private session attaches the same schema JSON (native
+relay ABI 7; ABI 5 and 6 attached the bundle as `migrations`).
 
 Unknown fields at the top level, scope, or identity level fail closed. Rust
 parses the schema JSON, serializes it to its normalized JSON spelling, builds
@@ -232,7 +233,8 @@ splices (`updated_splices`, SPEC 18). ABI 5 (alpha.61) attaches the app's
 migrations beside its schema's tables (see "Trusted platform admission
 codec"). ABI 6 (alpha.62) ends a tick's upstream failure with the
 refusal's stable error code, when the relay's database refused its
-upstream. The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
+upstream. ABI 7 (alpha.63) attaches the app's `jazz.app.json` as `app`
+instead of its migrations. The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
 the current version.
 
 The ABI stays coarse and binary:

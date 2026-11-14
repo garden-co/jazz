@@ -6,7 +6,8 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, vi } from "vitest";
-import { structuralSchemaHash } from "../../src/dev/schema-utils.js";
+import { computeSchemaHash } from "../../src/schema-hash.js";
+import type { WasmSchema } from "../../src/drivers/types.js";
 import { createMigration as rawCreateMigration } from "../../src/cli.js";
 
 export function createCliFixtures(moduleUrl: string) {
@@ -204,7 +205,7 @@ export function createCliFixtures(moduleUrl: string) {
   }
 
   async function computeTestSchemaHash(schema: object): Promise<string> {
-    return structuralSchemaHash(schema as Parameters<typeof structuralSchemaHash>[0]);
+    return computeSchemaHash(schema as WasmSchema);
   }
 
   function rootSchemaWithoutInlinePermissions(indexImportPath: string = indexPath): string {

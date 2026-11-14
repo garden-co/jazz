@@ -56,6 +56,82 @@ once the new deployment has woken it, promoting the old deployment again doesn't
 To try an upgrade first, deploy it to a preview branch: with the per-branch setup, that preview gets
 a core of its own, separate from production's (a dry run with its own data, not a copy).
 
+## Upgrading from alpha.62
+
+Alpha.63 describes an app in two generated files beside `schema.ts`, which replace the generated
+`migrations/index.ts`:
+
+- `jazz.app.json` holds its schema versions, the migrations between them and metadata for typed
+  code. The app and its clients ship it.
+- `jazz.permissions.json` holds the permissions of its current version and their bundle id. Only
+  backends read it, so client bundles no longer carry your compiled permissions.
+
+Data needs no changes.
+
+1. **Replace the migrations import in `schema.ts`** with the app file's, and pass it to `defineApp`
+   (or `defineSliceableApp`):
+
+   ```ts title="schema.ts"
+   // Remove: import { migrations } from "./migrations";
+   import artifact from "./jazz.app.json" with { type: "json" };
+
+   export const app = s.defineApp(schema, { artifact });
+   ```
+
+   Remove the old import before the next step: `validate` deletes the generated
+   `migrations/index.ts`, and a `schema.ts` that still imports it no longer loads. An app that
+   still passes `{ migrations }` throws an error that says what to change.
+   `{ migrations: "none" }` stays for apps that only run on `memory()`, such as tests. `schema.ts`
+   imports only `jazz.app.json`, never `jazz.permissions.json`.
+
+2. **Pass `jazz.permissions.json` to `createJazz`** instead of what `permissions.ts` exports:
+
+   ```ts title="server.ts"
+   // Remove: import permissions from "./permissions";
+   import permissions from "./jazz.permissions.json" with { type: "json" };
+
+   export const jazz = createJazz({ app, permissions, store: sqlite({ path: "./data/jazz" }) });
+   ```
+
+   `createJazz` refuses the `definePermissions(...)` object for an app that ships its
+   `jazz.app.json`, saying to pass `jazz.permissions.json`. The same goes for `startTestJazz`,
+   `startLocalJazzServer` and `deployApp`. An app on `{ migrations: "none" }` still passes the
+   `definePermissions(...)` object. `permissions.ts` stays: it is what `validate` compiles into
+   `jazz.permissions.json`.
+
+3. **Run `npx jazz-tools validate`.** It writes both files and removes the `migrations/index.ts`
+   that earlier versions generated. `migrations create` and `deploy` keep both up to date from now
+   on. `migrations/snapshots/` and your migration files stay: they are the history the files are
+   built from.
+
+4. **Commit `jazz.app.json` and `jazz.permissions.json`.** To catch a file that's out of date, add
+   `npx jazz-tools validate --check` to CI: it fails when either committed file differs from what
+   `schema.ts`, `permissions.ts` and your migrations make, or is missing. Both files are compared
+   byte for byte, so keep formatters off them: add `jazz.app.json` and `jazz.permissions.json` to
+   `.prettierignore`, Biome's `files.ignore`, or your formatter's ignore file (the old module
+   carried `prettier-ignore` comments, which JSON can't).
+
+5. **Let TypeScript import JSON.** Set `"resolveJsonModule": true` in `tsconfig.json`, with `module`
+   set to `esnext`, `nodenext` or `preserve` (or `moduleResolution: "bundler"`).
+
+6. **Tests that build apps in code** move from `appMigrations` to `appArtifact` and
+   `appPermissions` in `jazz-tools/testing`: `appArtifact(before, { steps: [{ to: after, migration }] })`
+   gives the app's `jazz.app.json` for `defineApp(after, { artifact })`, and
+   `appPermissions(app, s.definePermissions(app, ...))` gives the `jazz.permissions.json` a backend
+   (`createJazz`, `startTestJazz`) takes.
+
+After you edit `permissions.ts`, run `npx jazz-tools validate` and commit `jazz.permissions.json`:
+the backend publishes what that file holds, so until you do, it keeps serving the old permissions.
+`validate --check` in CI catches a file you forgot.
+
+`createJazz` now publishes exactly what the two files hold and pins its sessions to the permissions
+file's bundle. It refuses to start when `jazz.app.json` is out of date with `schema.ts` (your
+schema isn't the file's current version), or when the two files weren't written together. Run
+`npx jazz-tools validate` and commit both files.
+
+React Native: the native relay ABI is now 7, so the JavaScript bundle and the native build must both
+come from alpha.63.
+
 ## Upgrading from alpha.61
 
 - **`createJazz` refuses `{ migrations: "none" }` with a store that keeps its data.** An app

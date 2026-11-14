@@ -14,8 +14,8 @@ import { computeSchemaHash } from "../../src/dev/catalogue.js";
 import { deploy, startLocalJazzServer, startTestJazz } from "../../src/testing/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { localAccountConfig } from "../../src/runtime/testing/account-fixtures.js";
-import { appMigrations } from "../../src/testing/client-migrations.js";
-import { shipMigrations } from "../../src/runtime/client-migrations.js";
+import { appArtifact, appPermissions } from "../../src/testing/app-artifact.js";
+import { shipArtifact } from "../../src/runtime/app-artifact.js";
 import type { Db } from "../../src/runtime/db.js";
 
 const schemaV1 = {
@@ -73,10 +73,17 @@ describe("adding an enum variant in a migration", () => {
       to: schemaV2,
     });
     await deploy({ ...deployment, schema: v2, permissions: permissionsV2, migration });
-    // v2 ships its migration, as its generated module holds it, before its
-    // backend boots.
-    shipMigrations(v2.wasmSchema, await appMigrations(v1, { to: v2, migration }));
-    server = await startTestJazz({ app: v2, permissions: permissionsV2, core });
+    // v2 ships its migration in its jazz.app.json, before its backend boots.
+    shipArtifact(v2.wasmSchema, {
+      artifact: await appArtifact(v1, {
+        steps: [{ to: v2, migration }],
+      }),
+    });
+    server = await startTestJazz({
+      app: v2,
+      permissions: await appPermissions(v2, permissionsV2),
+      core,
+    });
   }
 
   async function open() {

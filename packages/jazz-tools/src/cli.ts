@@ -62,7 +62,7 @@ const MIGRATE_ALPHA59_MOVED =
  */
 const SCHEMA_UNCHANGED_NOTE =
   "schema.ts matches its latest snapshot, so no migration is needed. " +
-  "Changes to permissions.ts never need one: your backend publishes them when it starts.";
+  "Changes to permissions.ts never need one: they go into jazz.permissions.json, which your backend publishes when it starts.";
 
 function parseArgs(args: string[]): { command: string; options: BuildOptions } {
   const command = args[0] || "";

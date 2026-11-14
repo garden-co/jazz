@@ -4,7 +4,7 @@ import { migration as m } from "../migration-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
-import { appMigrations } from "../testing/client-migrations.js";
+import { appArtifact, appPermissions } from "../testing/app-artifact.js";
 import { startTestJazz } from "../testing/index.js";
 
 it("preserves rows and their relationship through table and reference-column renames", async () => {
@@ -37,25 +37,35 @@ it("preserves rows and their relationship through table and reference-column ren
       },
     },
   });
-  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+  const oldPermissions = definePermissions(
+    s.defineApp(before, { migrations: "none" }),
+    ({ policy }) => {
+      policy.users.allowRead.always();
+      policy.users.allowInsert.always();
+      policy.notes.allowRead.always();
+      policy.notes.allowInsert.always();
+    },
+  );
+  const newPermissions = definePermissions(
+    s.defineApp(after, { migrations: "none" }),
+    ({ policy }) => {
+      policy.people.allowRead.always();
+      policy.people.allowInsert.always();
+      policy.messages.allowRead.always();
+      policy.messages.allowInsert.always();
+    },
+  );
+  const oldApp = s.defineApp(before, {
+    artifact: await appArtifact(before),
+  });
   const newApp = s.defineApp(after, {
-    migrations: await appMigrations(before, { to: after, migration }),
-  });
-  const oldPermissions = definePermissions(oldApp, ({ policy }) => {
-    policy.users.allowRead.always();
-    policy.users.allowInsert.always();
-    policy.notes.allowRead.always();
-    policy.notes.allowInsert.always();
-  });
-  const newPermissions = definePermissions(newApp, ({ policy }) => {
-    policy.people.allowRead.always();
-    policy.people.allowInsert.always();
-    policy.messages.allowRead.always();
-    policy.messages.allowInsert.always();
+    artifact: await appArtifact(before, {
+      steps: [{ to: after, migration }],
+    }),
   });
   const server = await startTestJazz({
     app: oldApp,
-    permissions: oldPermissions,
+    permissions: await appPermissions(oldApp, oldPermissions),
     coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
@@ -69,7 +79,11 @@ it("preserves rows and their relationship through table and reference-column ren
     await db.shutdown();
     db = undefined;
 
-    await server.redeploy({ app: newApp, permissions: newPermissions, migration });
+    await server.redeploy({
+      app: newApp,
+      permissions: await appPermissions(newApp, newPermissions),
+      migration,
+    });
     db = await createDb(account);
     expect(await db.all(newApp.people, { tier: "remote" })).toEqual([owner]);
     expect(

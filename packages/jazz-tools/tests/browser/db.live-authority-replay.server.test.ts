@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
 import { generateAuthSecret, type Db } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { deploy } from "./deploy.js";
 import {
   liveAuthorityApp as app,
   liveAuthorityPermissions,

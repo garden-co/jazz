@@ -8,7 +8,8 @@ import {
 import type { JazzServerInfo } from "./testing-server.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
-import type { ClientMigrations } from "../../src/runtime/client-migrations.js";
+import type { AppArtifact, AppPermissions } from "../../src/runtime/app-artifact.js";
+import type { BackendPermissions, DeployResult } from "../../src/dev/catalogue.js";
 
 export interface JazzServerBrowserCommands {
   jazzServerInfo(appId?: string): Promise<JazzServerInfo>;
@@ -17,9 +18,9 @@ export interface JazzServerBrowserCommands {
     coreUrl: string,
     app: {
       schema: WasmSchema;
-      /** What the app ships (`defineApp(schema, { migrations })`): a command drops the schema's own record of it. */
-      migrations?: ClientMigrations;
-      permissions: CompiledPermissionsMap;
+      /** What the app ships (`defineApp(schema, { artifact })`): a command drops the schema's own record of it. */
+      artifact?: AppArtifact;
+      permissions: BackendPermissions;
       pageOrigin: string;
     },
   ): Promise<string>;
@@ -48,6 +49,59 @@ export function jazzServerTransportControlBrowserCommands(): JazzServerTransport
     throw new Error("Browser test project is missing the Jazz server transport-control commands.");
   }
   return commands as unknown as JazzServerTransportControlBrowserCommands;
+}
+
+export interface JazzDeployBrowserCommands {
+  /** See `jazzDeploy` in testing-server-node.ts. */
+  jazzDeploy(options: {
+    appId: string;
+    serverUrl: string;
+    adminSecret: string;
+    schema: WasmSchema;
+    permissions: CompiledPermissionsMap;
+  }): Promise<DeployResult>;
+}
+
+export function jazzDeployBrowserCommands(): JazzDeployBrowserCommands {
+  if (!hasFunction(commands, "jazzDeploy")) {
+    throw new Error("Browser test project is missing the jazzDeploy command.");
+  }
+  return commands as unknown as JazzDeployBrowserCommands;
+}
+
+export interface JazzDeployAppBrowserCommands {
+  /** See `jazzDeployApp` in testing-server-node.ts. */
+  jazzDeployApp(options: {
+    appId: string;
+    serverUrl: string;
+    adminSecret: string;
+    schema: WasmSchema;
+    artifact?: AppArtifact;
+    permissions: BackendPermissions;
+  }): Promise<DeployResult>;
+}
+
+export function jazzDeployAppBrowserCommands(): JazzDeployAppBrowserCommands {
+  if (!hasFunction(commands, "jazzDeployApp")) {
+    throw new Error("Browser test project is missing the jazzDeployApp command.");
+  }
+  return commands as unknown as JazzDeployAppBrowserCommands;
+}
+
+export interface JazzAppArtifactBrowserCommands {
+  /** See `jazzAppArtifact` in testing-server-node.ts: a browser can't build one. */
+  jazzAppArtifact(
+    versions: WasmSchema[],
+    migrations: unknown[][],
+    permissions?: CompiledPermissionsMap,
+  ): Promise<{ artifact: AppArtifact; permissions: AppPermissions }>;
+}
+
+export function jazzAppArtifactBrowserCommands(): JazzAppArtifactBrowserCommands {
+  if (!hasFunction(commands, "jazzAppArtifact")) {
+    throw new Error("Browser test project is missing the jazzAppArtifact command.");
+  }
+  return commands as unknown as JazzAppArtifactBrowserCommands;
 }
 
 export interface JazzTopologyBrowserCommands {

@@ -513,15 +513,16 @@ fn tick_events_command_and_response_have_pinned_bytes() {
 /// A core with schema history (a root version, then a head) stores a column
 /// where the version that introduced it put it. A replica attached with the
 /// head alone would name it after the head instead, and read nothing from
-/// that core. So the attach carries the app's migrations beside its tables:
+/// that core. So the attach carries the app's `jazz.app.json` beside its
+/// tables:
 ///
 /// ```
-/// app ─{tables, migrations}─► relay store: same column     as core
+/// app ─{tables, app}───────► relay store: same column     as core
 /// app ─{tables}────────────►  relay store: another column  than core
 /// ```
 #[test]
 fn an_attached_schema_stores_columns_where_its_shipped_migrations_put_them() {
-    use jazz::tools::deployment::published::with_client_migrations;
+    use jazz::tools::deployment::artifact::{self, with_client_migrations};
     use jazz::tools::{Schema, SchemaHash};
     let todos = |column: &str| -> Schema {
         let allow = PolicyExpr::True;
@@ -544,11 +545,9 @@ fn an_attached_schema_stores_columns_where_its_shipped_migrations_put_them() {
         SchemaHash::compute(&root_schema).to_string(),
         SchemaHash::compute(&head).to_string(),
     );
-    let bundle = serde_json::json!({
-        "schemas": [
-            {"hash": root_hash, "schema": root_schema},
-            {"hash": head_hash, "schema": head},
-        ],
+    let input = serde_json::json!({
+        "current": head_hash,
+        "schemas": [root_schema, head],
         "migrations": [{
             "fromHash": root_hash,
             "toHash": head_hash,
@@ -558,6 +557,12 @@ fn an_attached_schema_stores_columns_where_its_shipped_migrations_put_them() {
             }],
         }],
     });
+    let bundle: serde_json::Value = serde_json::from_str(
+        &artifact::write(serde_json::from_value(input).unwrap())
+            .unwrap()
+            .app,
+    )
+    .unwrap();
     let head_schema = JazzSchema::new(&head).unwrap();
     let stored_column = |path: &std::path::Path| -> String {
         rusqlite::Connection::open(path)
@@ -612,14 +617,14 @@ fn an_attached_schema_stores_columns_where_its_shipped_migrations_put_them() {
     };
     let tables = serde_json::to_value(head_schema.public_schema()).unwrap();
     let mut shipped = tables.clone();
-    shipped["migrations"] = bundle;
+    shipped["app"] = bundle;
 
     let root = tempfile::tempdir().unwrap();
     assert_eq!(attach(shipped, "with-history", root.path()), on_core);
     assert_ne!(attach(tables, "head-only", root.path()), on_core);
 }
 
-/// A bundle the relay cannot lower refuses the attach: the store must not open
+/// An app file the relay cannot read refuses the attach: the store must not open
 /// with columns stored where the authority does not keep them.
 #[test]
 fn an_attached_schema_with_malformed_migrations_is_refused() {
@@ -638,7 +643,7 @@ fn an_attached_schema_with_malformed_migrations_is_refused() {
         })
         .unwrap();
     let mut payload = serde_json::to_value(schema().public_schema()).unwrap();
-    payload["migrations"] = serde_json::json!({"schemas": "nope"});
+    payload["app"] = serde_json::json!({"format": 1, "schemas": "nope"});
     assert!(matches!(
         host.attach_canonical_schema(pending, &payload.to_string()),
         Err(JazzNativeRelayStatus::LifecycleFailure)

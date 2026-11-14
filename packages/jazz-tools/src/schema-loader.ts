@@ -1,10 +1,11 @@
 import { existsSync } from "fs";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { basename, dirname, join, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { build, type Plugin } from "esbuild";
 import { schemaToWasm } from "./codegen/schema-reader.js";
+import { APP_ARTIFACT_FILE, APP_PERMISSIONS_FILE } from "./runtime/app-artifact.js";
 import type { SchemaDefinition } from "./typed-app.js";
 import type { Column, OperationPolicy, Schema, SqlType, TablePolicies } from "./schema.js";
 import type {
@@ -41,6 +42,8 @@ export interface LoadedSchemaProject {
   permissions?: CompiledPermissionsMap;
   schema: Schema;
   wasmSchema: WasmSchema;
+  /** schema.ts's exports, for what `jazz.app.json`'s codegen section names (slices). */
+  module?: Record<string, unknown>;
 }
 
 type LoadedTsModule = {
@@ -73,10 +76,69 @@ async function bundleToTempFile(filePath: string, tempDir: string): Promise<stri
     // require of the platform .node binding once the bundle runs from outside
     // the package directory.
     external: ["jazz-napi", "*.node"],
-    plugins: [localJazzToolsPlugin()],
+    plugins: [localJazzToolsPlugin(), ownAppArtifactPlugin(appArtifactPath(resolve(filePath)))],
   });
 
   return outFile;
+}
+
+/**
+ * schema.ts imports the `jazz.app.json` that `jazz-tools validate` writes
+ * from it. Compiling the schema never depends on that file: it may not exist
+ * yet, hold a merge conflict, or come from an older jazz-tools, and validate
+ * is how it is rewritten. So when it is missing or not a file `defineApp`
+ * takes ({@link hasCurrentShape}), the bundle sees a placeholder in its place,
+ * which nothing compiling the schema looks at. When it is there, the bundle
+ * gets it as it is, for callers that run the loaded app (the dev server,
+ * tests); a stale one is refused where it is used, as any app's would be.
+ */
+/**
+ * Whether `text` is a `jazz.app.json` `defineApp` takes: not a merge
+ * conflict, nor a file an older jazz-tools wrote (one that held the
+ * permissions too), which validate rewrites from the schema.
+ */
+function hasCurrentShape(text: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  const file = parsed as Record<string, unknown> | null;
+  return (
+    typeof file === "object" &&
+    file !== null &&
+    typeof file.format === "number" &&
+    typeof file.current === "string" &&
+    Array.isArray(file.schemas) &&
+    !("permissions" in file) &&
+    !("bundle" in file)
+  );
+}
+
+function ownAppArtifactPlugin(artifactPath: string): Plugin {
+  const placeholder = {
+    format: 1,
+    current: "0".repeat(64),
+    schemas: [],
+    migrations: [],
+  };
+  return {
+    name: "jazz-own-app-artifact",
+    setup(build) {
+      build.onResolve({ filter: /jazz\.app\.json$/ }, (args) =>
+        resolve(args.resolveDir, args.path) === artifactPath
+          ? { path: artifactPath, namespace: "jazz-own-app-artifact" }
+          : undefined,
+      );
+      build.onLoad({ filter: /.*/, namespace: "jazz-own-app-artifact" }, async () => {
+        const committed = await readFile(artifactPath, "utf8").catch(() => null);
+        let contents = JSON.stringify(placeholder);
+        if (committed !== null && hasCurrentShape(committed)) contents = committed;
+        return { contents, loader: "json" };
+      });
+    },
+  };
 }
 
 function localJazzToolsPlugin(): Plugin {
@@ -527,47 +589,26 @@ export function rootSchemaFile(schemaDir: string): string | null {
   return resolveRootSchemaFiles(schemaDir)?.schemaFile ?? null;
 }
 
-/** The generated module an app imports its `migrations` from. */
-export const CLIENT_MIGRATIONS_MODULE = "index.ts";
-
-const IMPORTS_CLIENT_MIGRATIONS = /from\s+["']\.\/migrations(?:\/index(?:\.[jt]s)?)?["']/;
-
-/**
- * Whether schema.ts imports its migrations module: the CLI keeps the module
- * current only for an app that does.
- */
-export async function importsClientMigrations(schemaFile: string): Promise<boolean> {
-  return IMPORTS_CLIENT_MIGRATIONS.test(await readFile(schemaFile, "utf8"));
+/** The file an app's `jazz.app.json` is, beside its schema.ts. */
+export function appArtifactPath(schemaFile: string): string {
+  return join(dirname(schemaFile), APP_ARTIFACT_FILE);
 }
 
-/** Where the migrations module of the app whose schema is `schemaFile` lives. */
-export function clientMigrationsPath(schemaFile: string): string {
-  return join(dirname(schemaFile), "migrations", CLIENT_MIGRATIONS_MODULE);
+/** The file an app's `jazz.permissions.json` is, beside its schema.ts. */
+export function appPermissionsPath(schemaFile: string): string {
+  return join(dirname(schemaFile), APP_PERMISSIONS_FILE);
 }
 
-/**
- * Write the migrations module with `bundle` (its JSON), or empty, leaving
- * it alone when unchanged so a watcher sees no edit.
- */
-export async function writeClientMigrationsModule(
-  path: string,
-  bundle: string | null,
-): Promise<void> {
-  const contents = [
-    "// Generated by jazz-tools from schema.ts and its migrations. Do not edit:",
-    "// `jazz-tools validate` and `jazz-tools migrations create` rewrite it.",
-    'import type { ClientMigrations } from "jazz-tools";',
-    "",
-    "// JSON, which Rust apps read too: formatters leave it as it is.",
-    "// biome-ignore format: generated JSON",
-    "// prettier-ignore",
-    `export const migrations: ClientMigrations = ${bundle ?? JSON.stringify({ schemas: [], migrations: [] })};`,
-    "",
-  ].join("\n");
-  if ((await readFile(path, "utf8").catch(() => null)) === contents) return;
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, contents);
+const IMPORTS_APP_ARTIFACT = /from\s+["']\.\/jazz\.app\.json["']/;
+
+/** Whether schema.ts imports its `jazz.app.json`, as an app passing it to `defineApp` does. */
+export async function importsAppArtifact(schemaFile: string): Promise<boolean> {
+  return IMPORTS_APP_ARTIFACT.test(await readFile(schemaFile, "utf8"));
 }
+
+/** The first line of the migrations/index.ts jazz-tools generated up to alpha.62. */
+export const GENERATED_MIGRATIONS_MODULE_HEADER =
+  "// Generated by jazz-tools from schema.ts and its migrations. Do not edit:";
 
 export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchemaProject> {
   const resolved = resolveRootSchemaFiles(schemaDir);
@@ -579,14 +620,6 @@ export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchem
         `Pass --schema-dir <path> to point at a different root.`,
     );
   }
-  // schema.ts imports the migrations module `jazz-tools` generates from it:
-  // a fresh project gets an empty one, which validate and migrations create
-  // write whole.
-  const migrationsModule = clientMigrationsPath(resolved.schemaFile);
-  if (!existsSync(migrationsModule) && (await importsClientMigrations(resolved.schemaFile))) {
-    await writeClientMigrationsModule(migrationsModule, null);
-  }
-
   const loadedModule = await loadTsModule(resolved.schemaFile);
   const loadedSchema = schemaInputFromLoadedModule(resolved.schemaFile, loadedModule);
   let schema = loadedSchema.schema;
@@ -631,5 +664,6 @@ export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchem
     permissions,
     schema,
     wasmSchema: loadedSchema.wasmSchema ?? schemaToWasm(schema),
+    module: loadedModule.module,
   };
 }

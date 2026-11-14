@@ -154,11 +154,14 @@ describe("React Native account preparation", () => {
       openAttached: vi.fn(),
     };
     mocks.install.mockReturnValue(native);
-    const migrations = {
-      schemas: [{ hash: "root", schema: { tables: {} } }],
-      migrations: [{ fromHash: "root", toHash: "head", forward: [] }],
+    // The native side reads and checks it; this test only sees it handed over.
+    const artifact = {
+      format: 1,
+      current: "head",
+      schemas: [{ hash: "root", tables: {} }],
+      migrations: [{ from: "root", to: "head", forward: [] }],
     };
-    const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations });
+    const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { artifact });
     const config = { appId: "native-history", serverUrl: "https://core.example", store: store() };
     const manager = await createAccountManager(config);
     const db = await createDb({ appId: config.appId, account: manager.createLocalFirst() });
@@ -167,7 +170,8 @@ describe("React Native account preparation", () => {
 
     const payload = JSON.parse(native.attachAccountSchema.mock.calls[0]![1]);
     expect(Object.keys(payload.tables)).toEqual(["notes"]);
-    expect(payload.migrations).toEqual(migrations);
+    expect(payload.app).toEqual(artifact);
+    expect(payload.migrations).toBeUndefined();
     await db.shutdown();
   });
 

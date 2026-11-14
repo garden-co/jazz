@@ -10,7 +10,6 @@ export default nativeBinding;
 export const {
   captureTextAnchor,
   captureTextRange,
-  checkClientMigrations,
   E2EeSodiumStream,
   e2eeSodiumDecrypt,
   e2eeSodiumEncrypt,
@@ -25,6 +24,7 @@ export const {
   JazzCore,
   JazzCoreSocket,
   JazzServer,
+  loadAppArtifact,
   NapiDb,
   StreamingMutation,
   Subscription,
@@ -35,5 +35,7 @@ export const {
   nativeArtifactFingerprint,
   resolveTextAnchor,
   resolveTextRange,
+  schemaHash,
   validateSchema,
+  writeAppArtifact,
 } = nativeBinding;

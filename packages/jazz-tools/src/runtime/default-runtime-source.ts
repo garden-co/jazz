@@ -1,5 +1,5 @@
 import { clientScope } from "./client-scope.js";
-import type { ClientMigrations } from "./client-migrations.js";
+import type { AppArtifact } from "./app-artifact.js";
 import { JazzClient, type ConnectRuntimeOptions } from "./client.js";
 import { loadWasmModule, type WasmModule } from "./wasm-loader.js";
 import { textAnchorsFrom, type TextAnchors } from "./text-anchors.js";
@@ -177,7 +177,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
   override createClient({
     config,
     schema,
-    migrations,
+    artifact,
     onAuthFailure,
     foregroundNodeLease,
   }: RuntimeClientContext<DbConfig>): JazzClient {
@@ -217,7 +217,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         // End users see a browser's console: plan and SQL go to debug.
         ...(isBrowserRuntime() ? { consoleDetail: "summary" as const } : {}),
       },
-      migrations,
+      artifact,
       bearer && config.serverUrl ? bearerWebSocket(config.serverUrl, bearer) : undefined,
     );
     if (foregroundNodeLease) {
@@ -339,7 +339,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         author,
         selfSignedClientProof,
         initialSyncFlushEvery: initialSyncFlushEvery(config),
-        migrations: runtime.migrations,
+        artifact: runtime.artifact,
         appId: clientScope(config),
         slowQueryThresholdMs: config.slowQueryThresholdMs,
         storageOwner: createBrowserStorageOwner(config),
@@ -406,7 +406,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     selfSignedClientProof?: NativeSelfSignedClientProof,
     backendMode = false,
     slowQueryLog?: SlowQueryLogOptions,
-    migrations?: ClientMigrations,
+    artifact?: AppArtifact,
     webSocket?: WebSocketConstructor,
   ): NativeRuntimeAdapter {
     if (!this.ownerRuntime || this.ownerRuntime.isClosed()) {
@@ -422,7 +422,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
           selfSignedClientProof,
           backendMode,
           slowQueryLog,
-          migrations,
+          artifact,
           webSocket,
         },
       );
@@ -430,7 +430,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     }
     return Object.keys(schema).length === 0
       ? this.ownerRuntime
-      : this.ownerRuntime.registerSchemaView(schema, migrations);
+      : this.ownerRuntime.registerSchemaView(schema, artifact);
   }
 
   override installTelemetry({

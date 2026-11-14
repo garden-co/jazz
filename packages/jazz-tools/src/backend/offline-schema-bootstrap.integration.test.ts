@@ -5,23 +5,30 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { defineMigration, schema as s } from "../index.js";
 import { deploy, startLocalJazzServer, startTestJazz, type TestJazz } from "../testing/index.js";
-import { appMigrations } from "../testing/client-migrations.js";
+import { appArtifact, appPermissions } from "../testing/app-artifact.js";
 import { createJazzClient } from "./index.js";
 
 const before = { entries: s.table({ text: s.string() }, {}) };
 const after = { ...before, controls: s.table({ value: s.string() }, {}) };
 const migration = defineMigration({ from: before, to: after, createTables: { controls: true } });
-// Each app ships its migrations, as its generated module would hold them.
-const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
-const newApp = s.defineApp(after, {
-  migrations: await appMigrations(before, { to: after, migration }),
-});
-const oldPermissions = s.definePermissions(oldApp, ({ policy }) => {
+// Permissions are defined against drafts of the apps; each app ships them in
+// its jazz.app.json, as `jazz-tools validate` would write it.
+const oldDraft = s.defineApp(before, { migrations: "none" });
+const newDraft = s.defineApp(after, { migrations: "none" });
+const oldPermissions = s.definePermissions(oldDraft, ({ policy }) => {
   policy.entries.allowRead.always();
 });
-const newPermissions = s.definePermissions(newApp, ({ policy }) => {
+const newPermissions = s.definePermissions(newDraft, ({ policy }) => {
   policy.entries.allowRead.always();
   policy.controls.allowRead.always();
+});
+const oldApp = s.defineApp(before, {
+  artifact: await appArtifact(before),
+});
+const newApp = s.defineApp(after, {
+  artifact: await appArtifact(before, {
+    steps: [{ to: after, migration }],
+  }),
 });
 
 // A backend runs createJazz, which keeps no store of its own (the core does),
@@ -39,7 +46,7 @@ describe("offline persistent schema bootstrap", () => {
       let server = await startLocalJazzServer({
         ...settings,
         schema: oldApp,
-        permissions: oldPermissions,
+        permissions: await appPermissions(oldApp, oldPermissions),
       });
       type Session = Awaited<ReturnType<typeof createJazzClient>>;
       const sessions = new Set<Session>();
@@ -55,7 +62,7 @@ describe("offline persistent schema bootstrap", () => {
         await front?.stop();
         front = await startTestJazz({
           app: frontApp,
-          permissions: frontPermissions,
+          permissions: await appPermissions(frontApp, frontPermissions),
           core: server,
           port,
         });

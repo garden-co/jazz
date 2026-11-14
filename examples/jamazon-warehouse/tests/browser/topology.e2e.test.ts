@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { Db } from "../../../../packages/jazz-tools/src/runtime/db.js";
 import { createBrowserTestDb } from "../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
-import { deployApp } from "../../../../packages/jazz-tools/src/dev/catalogue.js";
+import { deployApp } from "../../../../packages/jazz-tools/tests/browser/deploy.js";
 import {
   TestCleanup,
   uniqueDbName,
@@ -19,7 +19,7 @@ import {
   loginAtJazzAppUser,
   startJazzApp,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
-import permissions from "../../permissions.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
 import { app } from "../../schema.js";
 import {
   purchase,

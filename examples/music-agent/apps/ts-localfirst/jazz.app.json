@@ -1,0 +1,203 @@
+{
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "attachments": {
+        "relations": {
+          "turn": {
+            "column": "turn_id",
+            "table": "turns",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "conversations": {
+        "relations": {
+          "turnsViaConversation": {
+            "relation": "conversation",
+            "table": "turns",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "tool_calls": {
+        "relations": {
+          "turn": {
+            "column": "turn_id",
+            "table": "turns",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "turns": {
+        "relations": {
+          "attachmentsViaTurn": {
+            "relation": "turn",
+            "table": "attachments",
+            "type": "Reverse"
+          },
+          "conversation": {
+            "column": "conversation_id",
+            "table": "conversations",
+            "type": "Forward"
+          },
+          "tool_callsViaTurn": {
+            "relation": "turn",
+            "table": "tool_calls",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "26ed4a1743c7b8329712ce43758fb2524472f51d2a6b6d01e9da58989a854fe4",
+  "format": 1,
+  "migrations": [],
+  "schemas": [
+    {
+      "hash": "26ed4a1743c7b8329712ce43758fb2524472f51d2a6b6d01e9da58989a854fe4",
+      "tables": {
+        "attachments": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "turn_id",
+              "nullable": false,
+              "references": "turns"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "filename",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "media_type",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Bytea"
+              },
+              "name": "payload",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "byte_length",
+              "nullable": false
+            }
+          ]
+        },
+        "conversations": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "created_at",
+              "nullable": false
+            }
+          ]
+        },
+        "tool_calls": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "turn_id",
+              "nullable": false,
+              "references": "turns"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "arguments_json",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "result_json",
+              "nullable": false
+            }
+          ]
+        },
+        "turns": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "conversation_id",
+              "nullable": false,
+              "references": "conversations"
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "user",
+                  "assistant",
+                  "tool"
+                ]
+              },
+              "name": "role",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "ordinal",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "body",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "created_at",
+              "nullable": false
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

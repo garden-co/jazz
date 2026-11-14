@@ -1,6 +1,6 @@
 import { schema as s } from "jazz-tools";
 import { schema as betterAuthSchema } from "./schema-better-auth/schema";
-import { migrations } from "./migrations";
+import artifact from "./jazz.app.json" with { type: "json" };
 
 /**
  * Stock rows may not declare a reorder level above this cap. The invariant is
@@ -178,7 +178,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+export const app: s.App<AppSchema> = s.defineApp(schema, { artifact });
 export type Warehouse = s.RowOf<typeof app.warehouses>;
 export type District = s.RowOf<typeof app.districts>;
 export type Item = s.RowOf<typeof app.items>;

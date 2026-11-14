@@ -4,8 +4,7 @@ import { createServer } from "node:http";
 import { WorkOS } from "@workos-inc/node";
 import { WORKOS_CLIENT_ID } from "../constants.js";
 import { app as schema } from "../schema.js";
-import permissions from "../permissions.js";
-
+import permissions from "../jazz.permissions.json" with { type: "json" };
 // This is a workaround to resolve correctly NAPI modules in the monorepo
 // Real-world apps should just `import { createJazz } from "jazz-tools/backend"`
 import { createRequire } from "node:module";

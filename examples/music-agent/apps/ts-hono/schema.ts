@@ -1,6 +1,6 @@
 import { schema as s } from "jazz-tools";
 import { schema as betterAuthSchema } from "./schema-better-auth/schema";
-import { migrations } from "./migrations";
+import artifact from "./jazz.app.json" with { type: "json" };
 
 const schema = {
   ...betterAuthSchema,
@@ -136,7 +136,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+export const app: s.App<AppSchema> = s.defineApp(schema, { artifact });
 export type Conversation = s.RowOf<typeof app.conversations>;
 export type Turn = s.RowOf<typeof app.turns>;
 /** Turns as the UI reads them: with Jazz's own creation time (`$createdAt`). */

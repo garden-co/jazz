@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import { topologyReceipt } from "./vitest-receipts.mjs";
 import {
   jazzServerInfo,
+  jazzDeployApp,
   jazzAppFront,
   jazzAppRequest,
   jazzAppUser,
@@ -59,6 +60,7 @@ export default defineConfig({
       commands: {
         jazzBrowserTopologyLog,
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
+        jazzDeployApp: async (_context, options) => jazzDeployApp(options),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
         jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
         jazzAppUser: async (_context, frontUrl, userId, claims) =>

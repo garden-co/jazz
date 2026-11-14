@@ -49,7 +49,7 @@ const schema = {
     },
   ),
 };
-const app = s.defineApp(schema, { migrations });
+const app = s.defineApp(schema, { artifact });
 ```
 
 `author` is the public relation name, `users` is its target table, and `authorId` is the
@@ -122,23 +122,28 @@ When you change your schema on a shared app, prepare any required migration and 
 
 ## Exporting the app
 
-`s.defineApp(schema, { migrations })` converts your schema definition into a typed `app` object.
+`s.defineApp(schema, { artifact })` converts your schema definition into a typed `app` object.
 This is what you pass to queries, mutations, and subscriptions throughout your application code.
 
-`migrations` comes from `migrations/index.ts` beside your `schema.ts`. `jazz-tools` writes that
-file on every `validate` and `migrations create` of an app that imports it, even while your app has a single
-schema version, so the import always looks the same:
+`artifact` is `jazz.app.json` beside your `schema.ts`. `jazz-tools` writes that file, and
+`jazz.permissions.json` beside it, on every `validate`, `migrations create` and `deploy`, even while
+your app has a single schema version, so the import always looks the same:
 
 ```ts title="schema.ts"
-import { migrations } from "./migrations";
+import artifact from "./jazz.app.json" with { type: "json" };
 ```
 
-For a new app, run `npx jazz-tools validate` once to create it.
+For a new app, run `npx jazz-tools validate` once to create it. TypeScript needs
+`"resolveJsonModule": true` in `tsconfig.json` for the import.
 
-The file holds every schema version of your app and the migrations between them. Clients use it to
-lay out storage exactly like the server does and to read data written under older versions. A client
-whose schema is missing from it refuses to open with a message telling you to regenerate it. Commit
-the file with your schema. `{ migrations: "none" }` is only for an app that runs on a `memory()`
+`jazz.app.json` holds every schema version of your app and the migrations between them. Clients use
+it to lay out storage exactly like the server does and to read data written under older versions.
+The permissions of the current version are in `jazz.permissions.json`, which only your backend
+imports (`createJazz({ app, permissions })`), so client bundles never carry them; `schema.ts`
+imports only `jazz.app.json`. Your main backend publishes both when it starts. Commit both files
+with your schema, and run `npx jazz-tools validate --check` in CI to catch one that's out of date.
+Keep formatters off them (add both to `.prettierignore` or your formatter's ignore file): the check
+compares bytes. `{ migrations: "none" }` is only for an app that runs on a `memory()`
 store, such as one defined inside a test: `createJazz` refuses it with `sqlite()`, `vercel()` or
 `remote()`, whose data would outlive the app's first schema change.
 
@@ -160,7 +165,7 @@ Extract precise TypeScript types from any table handle:
 
 ## Very Large Schemas
 
-For most apps, `s.defineApp(schema, { migrations })` is the right export: it gives you one typed table handle for
+For most apps, `s.defineApp(schema, { artifact })` is the right export: it gives you one typed table handle for
 each table in the schema, and Jazz uses the same schema for runtime validation, migrations, query
 planning, and TypeScript inference.
 
@@ -169,12 +174,12 @@ tables, while a given feature area only works with a much smaller subset. Becaus
 and reverse relations are declared in the app schema, asking TypeScript to understand the whole
 graph can make editor and build performance worse than the code you are writing actually needs.
 
-Use `s.defineSliceableApp(schema, { migrations })` when you want one complete runtime schema but smaller typed app
+Use `s.defineSliceableApp(schema, { artifact })` when you want one complete runtime schema but smaller typed app
 surfaces:
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
+import artifact from "./jazz.app.json" with { type: "json" };
 
 const schema = {
   accounts: s.table({ name: s.string() }, {}),
@@ -215,7 +220,7 @@ const schema = {
   ),
 };
 
-const sliceableApp = s.defineSliceableApp(schema, { migrations });
+const sliceableApp = s.defineSliceableApp(schema, { artifact });
 
 export const commerceApp = sliceableApp.slice(
   "accounts",

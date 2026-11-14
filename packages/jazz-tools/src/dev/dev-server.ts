@@ -10,8 +10,8 @@ import { join } from "node:path";
 import { JazzServer } from "jazz-napi";
 import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
-import { shippedMigrations } from "../runtime/client-migrations.js";
-import { deployApp } from "./catalogue.js";
+import { shippedArtifact, shipsMigrations } from "../runtime/app-artifact.js";
+import { deployApp, resolveAppPermissions, type BackendPermissions } from "./catalogue.js";
 
 export { deploy, type DeployOptions } from "./catalogue.js";
 
@@ -46,7 +46,7 @@ interface LocalJazzServerOptions {
 
 export type StartLocalJazzServerOptions = LocalJazzServerOptions &
   (
-    | { schema: SchemaSourceInput; permissions: CompiledPermissionsMap }
+    | { schema: SchemaSourceInput; permissions: BackendPermissions }
     | { schema?: undefined; permissions?: undefined }
   );
 
@@ -110,17 +110,21 @@ export async function startLocalJazzServer(
   // its current schema, the server would take that as the app's first
   // version, and refuse the app's own deployment and clients opening with
   // its lenses.
-  const shipsMigrations =
-    declared !== undefined && (shippedMigrations(declared.schema)?.migrations.length ?? 0) > 0;
-  if (shipsMigrations && options.trustedWorkload !== undefined) {
+  const shipsHistory = declared !== undefined && shipsMigrations(shippedArtifact(declared.schema));
+  if (shipsHistory && options.trustedWorkload !== undefined) {
     throw new Error(
       "startLocalJazzServer: an app that ships migrations is not supported with trustedWorkload yet; start without schema and deploy the app with its admin secret.",
     );
   }
   const schema =
-    declared === undefined || shipsMigrations
+    declared === undefined || shipsHistory
       ? undefined
-      : encodeSchema(mergePermissionsIntoWasmSchema(declared.schema, declared.permissions));
+      : encodeSchema(
+          mergePermissionsIntoWasmSchema(
+            declared.schema,
+            (await resolveAppPermissions(declared.source, declared.permissions)).permissions,
+          ),
+        );
   const appId = options.appId ?? DEFAULT_APP_ID;
   // Ask the server to bind port 0 when callers do not require a particular
   // address. Unlike probing a candidate port first, this is atomic and remains
@@ -166,7 +170,7 @@ export async function startLocalJazzServer(
     console.log(`[jazz-server] started on ${server.url}`);
   }
 
-  if (shipsMigrations && declared) {
+  if (shipsHistory && declared) {
     try {
       await deployApp({
         appId: server.appId,

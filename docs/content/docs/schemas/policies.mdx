@@ -37,7 +37,7 @@ We can define permissions in `permissions.ts`:
 <Callout type="info">
   Write your permissions policies in `permissions.ts` next to `schema.ts`. By default Jazz looks for both files at your project root — except in SvelteKit projects, where they should live in `src/lib/` (the standard location for shared app code).
 
-Run `npx jazz-tools validate` before publishing to surface missing table or operation grants that will deny access. You do not need to write a schema migration to update permissions policies. Updated policies go live when your main backend restarts or deploys with them.
+After you edit `permissions.ts`, run `npx jazz-tools validate`: it writes the new policies into `jazz.permissions.json`, which your backend passes to `createJazz` and publishes, and surfaces missing table or operation grants that will deny access. Commit the file with your change: until you do, the backend keeps serving the old permissions, and `validate --check` in CI fails. You do not need to write a schema migration to update permissions policies. Updated policies go live when your main backend restarts or deploys with them. Clients never import `jazz.permissions.json`, so your policies stay out of client bundles.
 
 </Callout>
 

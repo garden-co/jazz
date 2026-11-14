@@ -8,7 +8,7 @@
 
 import { afterEach, expect, it } from "vitest";
 import { ReadTier, generateAuthSecret, schema, type Db } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { deploy } from "./deploy.js";
 import {
   TestCleanup,
   createBrowserTestDb,

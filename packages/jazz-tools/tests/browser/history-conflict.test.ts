@@ -14,7 +14,7 @@ import type { Db, TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { deploy } from "./deploy.js";
 import {
   getJazzServerInfo,
   startJazzApp,

@@ -167,7 +167,7 @@ class NodeUserRuntimeSource extends RuntimeSource {
   override createClient({
     config,
     schema,
-    migrations,
+    artifact,
     onAuthFailure,
   }: RuntimeClientContext): RuntimeClient {
     const declaredSchema = resolveSchemaSource(this.host.app);
@@ -211,7 +211,7 @@ class NodeUserRuntimeSource extends RuntimeSource {
         readAuthorizationHost: "client-local",
         webSocket: this.host.webSocket,
         slowQueryLog: { appId: this.host.appId, thresholdMs: this.host.slowQueryThresholdMs },
-        migrations,
+        artifact,
       },
     );
     const context: AppContext = { ...config, appId: clientScope(config), schema: runtimeSchema };

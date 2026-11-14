@@ -1,5 +1,5 @@
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
+import artifact from "./jazz.app.json" with { type: "json" };
 
 const schema = {
   profiles: s.table(
@@ -68,7 +68,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+export const app: s.App<AppSchema> = s.defineApp(schema, { artifact });
 
 export type Profile = s.RowOf<typeof app.profiles>;
 export type Chat = s.RowOf<typeof app.chats>;

@@ -6,8 +6,8 @@ import { computeSchemaHash } from "../../src/dev/catalogue.js";
 import { deploy, startLocalJazzServer, startTestJazz } from "../../src/testing/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { localAccountConfig } from "../../src/runtime/testing/account-fixtures.js";
-import { appMigrations } from "../../src/testing/client-migrations.js";
-import { shipMigrations } from "../../src/runtime/client-migrations.js";
+import { appArtifact, appPermissions } from "../../src/testing/app-artifact.js";
+import { shipArtifact } from "../../src/runtime/app-artifact.js";
 import type { Db, QueryBuilder } from "../../src/runtime/db.js";
 
 const app = s.defineApp(
@@ -759,9 +759,17 @@ describe("TS Query API history schema migrations", () => {
     });
     await deploy({ ...deployment, schema: v2, permissions: permissionsV2, migration });
     // Clients reach the core through the app's backend, which runs the latest deploy.
-    server = await startTestJazz({ app: v2, permissions: permissionsV2, core });
-    // v2 ships the migration, as its generated module would hold it.
-    shipMigrations(v2.wasmSchema, await appMigrations(v1, { to: v2, migration }));
+    // v2 ships the migration in its jazz.app.json, as `validate` would write it.
+    shipArtifact(v2.wasmSchema, {
+      artifact: await appArtifact(v1, {
+        steps: [{ to: v2, migration }],
+      }),
+    });
+    server = await startTestJazz({
+      app: v2,
+      permissions: await appPermissions(v2, permissionsV2),
+      core,
+    });
     writer = await createDb({
       ...(await localAccountConfig(server.appId, server.url)),
       driver: { type: "persistent" },

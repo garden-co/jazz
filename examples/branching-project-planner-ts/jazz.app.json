@@ -1,0 +1,114 @@
+{
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "scenarios": {
+        "relations": {
+          "base_scenario": {
+            "column": "base_scenario_id",
+            "table": "scenarios",
+            "type": "Forward"
+          },
+          "scenariosViaBase_scenario": {
+            "relation": "base_scenario",
+            "table": "scenarios",
+            "type": "Reverse"
+          },
+          "tasksViaScenario": {
+            "relation": "scenario",
+            "table": "tasks",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "tasks": {
+        "relations": {
+          "scenario": {
+            "column": "scenario_id",
+            "table": "scenarios",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "abdfc2124f3969743e0af7adecced972d005a1de444bb94f37592ff4b5740f6d",
+  "format": 1,
+  "migrations": [],
+  "schemas": [
+    {
+      "hash": "abdfc2124f3969743e0af7adecced972d005a1de444bb94f37592ff4b5740f6d",
+      "tables": {
+        "scenarios": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "base_scenario_id",
+              "nullable": true,
+              "references": "scenarios"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "base_snapshot_ref",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "open",
+                  "approved",
+                  "archived"
+                ]
+              },
+              "name": "status",
+              "nullable": false
+            }
+          ]
+        },
+        "tasks": {
+          "branch_by": [
+            "scenario_id"
+          ],
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "scenario_id",
+              "nullable": false,
+              "references": "scenarios"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "estimate",
+              "nullable": false
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

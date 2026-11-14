@@ -7,6 +7,7 @@ import {
   type TestJazz,
 } from "jazz-tools/testing";
 import permissions from "../permissions";
+import permissionsFile from "../jazz.permissions.json" with { type: "json" };
 import { app } from "../schema";
 import { memoryAccountStore } from "../../../../testing/accounts";
 
@@ -26,13 +27,13 @@ describe("Better Auth storage boundary", () => {
   it("allows backend persistence across reopen while denying client reads and writes", async () => {
     // Published as the app's createJazz publishes it, with the migrations
     // it ships.
-    server = await startLocalJazzServer({ schema: app, permissions });
+    server = await startLocalJazzServer({ schema: app, permissions: permissionsFile });
 
     // The app's backend, as its server runs it.
     const openSession = () =>
       createJazz({
         app,
-        permissions,
+        permissions: permissionsFile,
         store: remote({ url: server!.url, appId: server!.appId, secret: server!.adminSecret }),
       });
 
@@ -49,7 +50,7 @@ describe("Better Auth storage boundary", () => {
 
     // An ordinary client is a device account (a guest), syncing through the app's
     // backend: a core admits only its app's backend.
-    front = await startTestJazz({ core: server, app, permissions });
+    front = await startTestJazz({ core: server, app, permissions: permissionsFile });
     client = await createJazzClient({
       app,
       permissions,
