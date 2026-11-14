@@ -4,6 +4,7 @@ import {
   keptDeviceKey,
 } from "../accounts/persistence.js";
 import { NoKeptDeviceAccountError } from "./no-kept-device-account-error.js";
+import { deviceAccountStoreMissing } from "../accounts/process-store.js";
 import { admitBackendAccount, type AccountHandle, type AccountManager } from "../accounts/state.js";
 import type { JWTAuth, BackendAuth } from "../accounts/enrollment.js";
 import {
@@ -223,8 +224,11 @@ export async function createJazzSessionOwner<
 }): Promise<SessionCore<Client> & Extra> {
   const { accounts, openClient } = options;
   let selected = accounts.getLoggedIn();
-  if (!selected && options.initial === "local-first")
+  if (!selected && options.initial === "local-first") {
+    const missing = deviceAccountStoreMissing(accounts, 'initial: "device"');
+    if (missing) throw missing;
     selected = await ensureAutomaticLocalFirst(accounts);
+  }
   if (options.backend)
     selected = await admitBackendAccount(accounts as AccountManager<unknown>, options.backend);
   await accounts.settleSelection();
@@ -472,8 +476,14 @@ export async function createJazzSessionOwner<
   const session: SessionCore<Client> = {
     getSnapshot: () => snapshot,
     subscribe: listeners.subscribe,
-    createLocalFirst: () => run("createLocalFirst", () => accounts.createLocalFirst()),
+    createLocalFirst: () => {
+      const missing = deviceAccountStoreMissing(accounts, "createDeviceAccount()");
+      if (missing) return Promise.reject(missing);
+      return run("createLocalFirst", () => accounts.createLocalFirst());
+    },
     restoreLocalFirst: (secret) => {
+      const missing = deviceAccountStoreMissing(accounts, "restoreDeviceAccount(key)");
+      if (missing) return Promise.reject(missing);
       // A malformed secret is the caller's mistake: refuse it before the
       // current client is shut down, so the session goes on as it was.
       try {
@@ -484,6 +494,8 @@ export async function createJazzSessionOwner<
       return run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret));
     },
     reopenLocalFirst: async () => {
+      const missing = deviceAccountStoreMissing(accounts, "reopenDeviceAccount()");
+      if (missing) throw missing;
       // Looked up first: with none kept, the session goes on as it was.
       const key = await keptDeviceKey(accounts).latest();
       if (!key) throw new NoKeptDeviceAccountError("reopenDeviceAccount()");

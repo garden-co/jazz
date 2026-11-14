@@ -43,7 +43,9 @@ export async function createAccountManager(config: AccountManagerConfig) {
     );
   }
   if (!config.store)
-    throw new Error("React Native accounts require an atomic OS-protected AccountStore");
+    throw new Error(
+      "createJazzClient from jazz-tools/react-native needs a `store`: an atomic AccountStore ({ read, update }) backed by OS-protected storage. jazz-tools/expo supplies one from expo-secure-store.",
+    );
   installNativeRuntimeEntropy(generateSecret);
   return prepareAccountManager({
     appId: clientScope(config),
