@@ -83,17 +83,18 @@ function appServesWorker(runtimeSources: BrowserWorkerInitOptions["runtimeSource
 
 /**
  * Whether the worker starts from the URL Jazz resolves: one the app serves,
- * a versioned one, or the one a bundler that can't build the worker from
+ * or the one a bundler that can't build the worker from
  * `new SharedWorker(new URL(...))` named for it (Metro).
+ *
+ * A `wasmVersion` alone doesn't: the bundler's worker URL already changes
+ * with its bytes, and the realm name carries the versioned asset scope
+ * (`createBrowserSharedWorkerBaseName`), so tabs of another deployment never
+ * share the worker.
  */
 function usesJazzResolvedWorkerUrl(
   runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
 ): boolean {
-  return (
-    appServesWorker(runtimeSources) ||
-    Boolean(runtimeSources?.wasmVersion) ||
-    bundledBrowserWorkerType() !== null
-  );
+  return appServesWorker(runtimeSources) || bundledBrowserWorkerType() !== null;
 }
 
 /**
