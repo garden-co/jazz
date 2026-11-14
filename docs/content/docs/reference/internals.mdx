@@ -120,7 +120,8 @@ const schema = {
 
 A composite index takes two or more distinct declared columns, or the provenance timestamps
 `$createdAt` and `$updatedAt`, which every row carries. Adding one doesn't need a migration
-(see [Migrations](/docs/schemas/migrations)).
+(see [Migrations](/docs/schemas/migrations)), but it does change the schema's hash: run
+`jazz-tools validate` and commit the regenerated `migrations/index.ts` with the index.
 
 ### Deletion
 
