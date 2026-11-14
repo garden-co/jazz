@@ -10,7 +10,6 @@ use crate::tools::public_schema::{OperationPolicy, PolicyExpr, Schema, TableName
 use super::CodegenRelation;
 use super::expr::{self, Context, Def, DefBody, Defs};
 use super::json::Json;
-use super::structured;
 
 /// A refusal at a JSON path of the permissions file.
 pub type Refusal = (String, String);
@@ -190,11 +189,6 @@ fn is_two_sided(value: &Json) -> bool {
 }
 
 fn read_body(value: &Json, path: &str) -> Result<DefBody, Refusal> {
-    if structured::is_structured(value) {
-        return structured::read(value)
-            .map(DefBody::Fixed)
-            .map_err(|e| refuse(path, e));
-    }
     match value {
         Json::String(source) => {
             let ast = expr::parse(source).map_err(|e| refuse(path, e.render(source)))?;
@@ -254,9 +248,6 @@ fn compile(
             let ast = expr::parse(source).map_err(|e| refuse(path, e.render(source)))?;
             expr::compile(&ast, context, table).map_err(|e| refuse(path, e.render(source)))
         }
-        Json::Object(_) if structured::is_structured(value) => {
-            structured::read(value).map_err(|e| refuse(path, e))
-        }
         Json::Object(_) => {
             let body = read_body(value, path)?;
             compile_body(&body, path, context, table)
@@ -278,7 +269,6 @@ fn compile_body(
         DefBody::Expr(ast, source) => {
             expr::compile(ast, context, table).map_err(|e| refuse(path, e.render(source)))
         }
-        DefBody::Fixed(expr) => Ok(expr.clone()),
         DefBody::AnyOf(items) => Ok(PolicyExpr::Or(
             items
                 .iter()
@@ -401,19 +391,11 @@ fn policy_json(expr: &PolicyExpr, context: &Context<'_>, table: &str) -> Result<
                     .collect::<Result<_, _>>()?,
             ),
         )])),
-        other => Ok(leaf_json(other, context, table)),
+        other => leaf_json(other, context, table),
     }
 }
 
-/// A leaf as an expression string when the string compiles back to exactly
-/// `expr`; otherwise in its structured form, which always does. So every
-/// policy the engine holds round-trips through the file.
-fn leaf_json(expr: &PolicyExpr, context: &Context<'_>, table: &str) -> Json {
-    if let Ok(text) = expr::print(expr, context, table)
-        && let Ok(ast) = expr::parse(&text)
-        && expr::compile(&ast, context, table).as_ref() == Ok(expr)
-    {
-        return Json::String(text);
-    }
-    structured::write(expr)
+/// A leaf as the expression string that compiles back to exactly `expr`.
+fn leaf_json(expr: &PolicyExpr, context: &Context<'_>, table: &str) -> Result<Json, String> {
+    expr::print(expr, context, table).map(Json::String)
 }

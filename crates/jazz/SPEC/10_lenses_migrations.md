@@ -910,46 +910,12 @@ is denied, as today.
 **Policy**, where a policy can appear:
 
 - an expression string (the grammar below);
-- `{"anyOf": [Policy, …]}` or `{"allOf": [Policy, …]}`;
-- `{"$comment": "…", "where": Policy}`, a commented policy;
-- a structured policy, the engine's own form in this file's JSON:
-  - `{"exists": RelationExpr}`: holds when the relation yields a row
-    (`ExistsRel`: `policy.exists(…)`, `hopTo`, joins, unions, projections,
-    gathers, ordering and limits);
-  - an internally tagged PolicyExpr, `{"type": "<Variant>", …}`, whose
-    variants and fields are the engine's PolicyExpr (§7) field for field:
-    `Cmp {column, op, value}`, `SessionCmp {path, op, value}`,
-    `IsNull {column}`, `IsNotNull {column}`, `SessionIsNull {path}`,
-    `SessionIsNotNull {path}`, `Contains {column, value}`,
-    `SessionContains {path, value}`, `In {column, session_path}`,
-    `InList {column, values}`, `SessionInList {path, values}`,
-    `Exists {table, condition}`, `ExistsRel {rel}`,
-    `Inherits {operation, via_column, max_depth?}`,
-    `InheritsReferencing {operation, source_table, via_column, max_depth?}`,
-    `And {exprs}`, `Or {exprs}`, `Not {expr}`, `True`, `False`. A
-    PolicyValue is `{"type": "Literal", "value": Value}` or
-    `{"type": "SessionRef", "path": […]}`.
+- `{"anyOf": [Policy, …]}` or `{"allOf": [Policy, …]}` (non-empty);
+- `{"$comment": "…", "where": Policy}`, a commented policy.
 
-  A **RelationExpr** is internally tagged too: `TableScan {table, alias?}`,
-  `Filter {input, predicate}`, `Union {inputs: [{label, input}]}`,
-  `Join {left, right, on: [{left, right}], join_kind: "Inner" | "Left"}`,
-  `Project {input, columns: [{alias, expr: KeyRef}]}`,
-  `Gather {seed, step, frontier_key, max_depth?, dedupe_key}`,
-  `Distinct {input, key}`, `OrderBy {input, terms: [{column, direction}]}`,
-  `Offset {input, offset}`, `Limit {input, limit}`. A ColumnRef is
-  `{scope?, column}`; a KeyRef is `{"type": "Column", column}` or
-  `{"type": "RowId", row: "Current" | "Outer" | "Frontier"}`; a
-  **Predicate** is `Cmp {left, op, right}`, `IsNull {column}`,
-  `IsNotNull {column}`, `In {left, values}`, `Contains {left, right}`,
-  `EnumMatch {column, case, payload}`, `And {exprs}`, `Or {exprs}`,
-  `Not {expr}`, `True` or `False`; a **ValueRef** is `Literal {value}`,
-  `Param {name}`, `SessionRef {path}`, `OuterColumn {column}`,
-  `FrontierColumn {column}` or `RowId {row}`.
-
-Structured policies are part of the format: every policy the engine holds
-has one, so every policy a TS app can declare round-trips through this file.
-The writer uses an expression string wherever the string compiles back to
-exactly the same policy, and the structured form otherwise.
+There is no other form: every policy the engine holds has an expression
+string, so every policy a TS app can declare round-trips through this file
+as text.
 
 **`defs`.** A key is a signature `name($param, …)`. Its value is a Policy in
 which `$param` stands for a value. A call `name(arg, …)` passes values or
@@ -959,7 +925,8 @@ policy terminates. Files compiled from TS inline their helpers and have no
 `defs`.
 
 **Expressions.** SQL-like, with JSON's double quotes left to the file:
-string literals use single quotes.
+string literals use single quotes, and a name that isn't a plain identifier
+(or is a keyword) is quoted with backticks, `` `order` ``.
 
 ```ebnf
 expr        = disjunction ;
@@ -967,6 +934,7 @@ disjunction = conjunction , { "or" , conjunction } ;
 conjunction = negation , { "and" , negation } ;
 negation    = "not" , negation | atom ;
 atom        = "(" , expr , ")" | "true" | "false"
+            | ( "anyOf" | "allOf" ) , "(" , [ expr , { "," , expr } ] , ")"
             | exists | allowed | call | comparison ;
 
 comparison  = operand , ( cmp_op , operand
@@ -974,22 +942,69 @@ comparison  = operand , ( cmp_op , operand
                         | "contains" , operand ) ;
 cmp_op      = "=" | "!=" | "<" | "<=" | ">" | ">=" ;
 operand     = column | value ;
-column      = [ "this." ] , ( ident | magic ) ;
+column      = [ ( "this" | "outer" | name ) , "." ] , ( name | magic ) ;
 magic       = ( "$createdBy" | "$updatedBy" | "$deletedBy" ) , [ "." , ( "account" | "identity" ) ]
             | "$createdAt" | "$updatedAt" | "$deletedAt" ;
 value       = literal | "null" | session | param ;
-session     = "session.user" | "session.claims." , ident , { "." , ident } ;
+session     = "session" , "." , name , { "." , name } ;
 param       = "$" , ident ;
-literal     = string | number | "true" | "false" ;
 list        = "[" , [ value , { "," , value } ] , "]" ;
 
-exists      = "exists" , ident , "(" , [ conditions ] , ")" ,
-              { "." , ident , "(" , [ conditions ] , ")" } ;
+literal     = string | number | "true" | "false" | typed ;
+typed       = "literal" , "(" , ( string | number | "true" | "false" | "null" ) , ")"
+            | ( "int" | "bigint" | "timestamp" ) , "(" , number , ")"
+            | "double" , "(" , ( number | string ) , ")"   (* 'NaN', 'inf', '-inf' *)
+            | ( "text" | "uuid" | "bytes" | "txid" ) , "(" , string , ")"
+            | "bool" , "(" , ( "true" | "false" ) , ")"
+            | "array" , "(" , [ typed_arg , { "," , typed_arg } ] , ")"
+            | "row" , "(" , ( "uuid" , "(" , string , ")" | "null" ) , { "," , typed_arg } , ")"
+            | "enumcase" , "(" , string , { "," , typed_arg } , ")" ;
+typed_arg   = typed | "null" ;
+
+exists      = "exists" , source , [ "as" , name ] , "(" , [ conditions ] , ")" ,
+              { "." , name , "(" , [ conditions ] , ")" }
+            | "exists" , "(" , query , ")" ;
+source      = name ;
 conditions  = expr , { "," , expr } ;
-allowed     = "allowedTo." , ( "read" | "insert" | "update" | "delete" ) ,
-              "(" , ident , [ "," , "maxDepth" , ":" , integer ] , ")" ;
+allowed     = "allowedTo." , ( "read" | "insert" | "update" | "delete" ) , "(" ,
+              ( name | "via" , [ name , "." ] , name ) ,
+              [ "," , "maxDepth" , ":" , integer ] , ")" ;
 call        = ident , "(" , [ operand , { "," , operand } ] , ")" ;
 
+(* The relation IR, inside `exists ( … )`. *)
+query       = "from" , from_source , { clause } ;
+from_source = name , [ "as" , name ] | "(" , query , ")" | union | recursive ;
+clause      = [ "left" ] , "join" , from_source ,
+                [ "on" , colref , "=" , colref , { "and" , colref , "=" , colref } ]
+            | "where" , predicate
+            | "select" , ( key , "as" , name , { "," , key , "as" , name } | "(" , ")" )
+            | "distinct" , "on" , "(" , [ key , { "," , key } ] , ")"
+            | "order" , "by" , ( colref , [ "asc" | "desc" ] ,
+                                 { "," , colref , [ "asc" | "desc" ] } | "(" , ")" )
+            | "limit" , integer | "offset" , integer ;
+union       = "union" , "(" , [ name , ":" , query , { "," , name , ":" , query } ] , ")" ;
+recursive   = "recursive" , "(" , "seed" , ":" , query , "," , "step" , ":" , query , "," ,
+              "frontier" , ":" , key , "," , "dedupe" , ":" , "(" , [ key , { "," , key } ] , ")" ,
+              "," , "maxDepth" , ":" , ( integer | "fixpoint" ) , ")" ;
+key         = colref | "id" , "(" , ( "row" | "outer" | "frontier" ) , ")" ;
+colref      = [ name , "." ] , name ;
+
+predicate   = p_or ;
+p_or        = p_and , { "or" , p_and } ;
+p_and       = p_not , { "and" , p_not } ;
+p_not       = "not" , p_not | p_atom ;
+p_atom      = "(" , predicate , ")" | "true" | "false"
+            | ( "anyOf" | "allOf" ) , "(" , [ predicate , { "," , predicate } ] , ")"
+            | colref , ( cmp_op , value_ref | "=" , "null" | "!=" , "null"
+                       | "in" , "[" , [ value_ref , { "," , value_ref } ] , "]"
+                       | "contains" , value_ref
+                       | "is" , name , "(" , predicate , ")" ) ;
+value_ref   = r_literal | session | "param" , "." , name
+            | ( "outer" | "frontier" ) , "." , colref
+            | "id" , "(" , ( "row" | "outer" | "frontier" ) , ")" ;
+r_literal   = string | number | "true" | "false" | typed | "json" , "(" , string , ")" ;
+
+name        = ident | "`" , { char - "`" | "``" } , "`" ;
 ident       = letter , { letter | digit | "_" } ;
 string      = "'" , { char - "'" | "''" } , "'" ;
 number      = [ "-" ] , digit , { digit } , [ "." , digit , { digit } ] ;
@@ -997,39 +1012,77 @@ number      = [ "-" ] , digit , { digit } , [ "." , digit , { digit } ] ;
 
 Meaning:
 
-- A bare column names a column of the table the expression is about. Inside
-  `exists t(…)` it names a column of `t`. `this.col` always names a column of
-  the row being checked.
-- `exists t(c₁, c₂, …)` holds when some row of `t` satisfies every
-  condition. `.rel(…)` hops along `t`'s relation `rel` to the rows it leads
-  to, filtered by that hop's conditions (`hopTo`). Hops, `exists` inside
-  `exists`, and comparisons between two columns are written in the
-  structured form for now (below); readable spellings for them, with
-  aliases for outer rows (`exists chats as c(…)`, then `c.id`), are planned.
-- `allowedTo.op(rel)` holds when the row that relation `rel` leads to allows
-  `op` (`allowedTo.read`, …). A reverse relation inherits from the rows
-  pointing here; `maxDepth` bounds recursive chains.
-- `col = null` and `col != null` test for null (`not col = null` is the
-  engine's `Not(IsNull)`, kept apart from `col != null`). `col in [v, …]` and
-  `col in session.claims.teams` test membership; `col contains v` tests an
-  array column. A comparison compares a column with a value, or a session
-  claim with a literal.
-- A literal takes the type of the column it is compared with; one that can't
-  (e.g. `'x'` for an `int`, a non-UUID for a `uuid`) is refused. Compared with
-  a session claim, `'…'` is text, `1` an int, `1.5` a float.
-- Inside `exists`, `this.col` is a value (the checked row's column), so
-  `exists chats(id = this.chatId)` compares `chats.id` with it.
+- **Scopes.** At the top of a policy, a bare column (or `this.col`, or
+  `<table>.col`) names a column of the row being checked. Inside
+  `exists t(…)` (or `exists t as a(…)`), a bare column (or `a.col`) names a
+  column of `t`, and the checked row is a value: `this.col`, `outer.col` or
+  `<table>.col`. In an `exists` inside another `exists`, a condition names
+  only its own row's columns: the engine's evaluation paths disagree there
+  about which row an outer column is (the checked row or the enclosing
+  `exists`'s), so the writer spells such a reference by its raw session path,
+  `session.__jazz_outer_row.col`, which keeps the engine's policy exact.
+- **Session values.** `session.user`, `session.claims.<path>`,
+  `session.identity.subject`, `session.identity.issuer` and
+  `session.authMode`; any other path is refused as a typo.
+- **Comparisons.** A comparison compares a column with a value, a column
+  with another column (`ownerId = authorId` inside one table is refused, as
+  the engine has no such policy; a column of the enclosing row is a value:
+  `id = this.chatId`), or a session claim with a literal. `col = null` and
+  `col != null` test for null (`not col = null` is the engine's
+  `Not(IsNull)`, kept apart from `col != null`), and `col = literal(null)`
+  compares with a null value. `col in [v, …]` and `col in session.claims.teams`
+  test membership; `col contains v` tests text or an array column.
+- **Literals.** A plain literal takes the type of the column it is compared
+  with; one that can't (e.g. `'x'` for an `int`, a non-UUID for a `uuid`) is
+  refused. Compared with a session claim, `'…'` is text, `1` an int, `1.5` a
+  float. A typed literal (`int(5)`, `text('5')`, `uuid('…')`,
+  `timestamp(1700000000000000)`, `bytes('0aff')`, `array(int(1), int(2))`,
+  `row(null, text('a'))`, `enumcase('closed', timestamp(5))`) is exactly that
+  value, whatever it is compared with; the writer uses one only where a plain
+  literal would read back as another value.
+- **`exists`.** `exists t(c₁, c₂, …)` holds when some row of `t` satisfies
+  every condition (the engine's `Exists`; one condition is that condition, no
+  conditions is `true`, and `allOf(c)` keeps a one-item `And`).
+  `exists t(…).rel(…)` hops along `t`'s relation `rel` to the rows it leads to,
+  filtered by that hop's conditions (`hopTo`); it is the relation
+  `from t join <target> as __hop_0 on … where … select __hop_0.id as id`
+  TS builds, and the writer prints it as that relation. A hop's conditions
+  compare its table's columns with values and with the checked row's
+  (`this.col`).
+  `exists ( query )` is any relation (`ExistsRel`).
+- **Relations.** A query reads like SQL, each clause wrapping what comes
+  before it in order: `from t as a` is `TableScan`, `join` and `left join` are
+  `Join` (an absent `on` joins every pair), `where` is `Filter`, `select` is
+  `Project`, `distinct on` is `Distinct`, `order by` is `OrderBy` (`asc` is
+  the default), `limit`/`offset` are `Limit`/`Offset`, `union(label: q, …)` is
+  `Union` and `recursive(seed: …, step: …, frontier: …, dedupe: (…), maxDepth:
+n | fixpoint)` is `Gather`. In a predicate, a column is `scope.col` or
+  `col`; `outer.col` and `frontier.col` are the outer and frontier rows'
+  columns, `id(row)`, `id(outer)` and `id(frontier)` their row ids,
+  `param.name` a query parameter, `session.…` a session value, `col is
+case(p)` an enum case whose payload satisfies `p` (`EnumMatch`), and
+  `json('…')` a literal JSON value the relation IR holds as is.
+- **Inheritance.** `allowedTo.op(rel)` holds when the row relation `rel`
+  leads to allows `op`. `allowedTo.op(via col)` names the forward column
+  itself and `allowedTo.op(via t.col)` the rows of `t` pointing here, for a
+  link no relation names. `maxDepth` bounds recursive chains.
+- `anyOf(…)` and `allOf(…)` inside an expression are `Or`/`And` of any
+  number of items; the writer uses them only for fewer than two.
 - Nesting deeper than 64 levels is refused.
-- `and` binds tighter than `or`; `not` tighter than both.
+- `and` binds tighter than `or`; `not` tighter than both. The writer adds
+  parentheses wherever a nested `and`/`or` must stay its own node.
 
 Policies map one to one onto the engine's PolicyExpr (§7): comparisons to
-`Cmp`/`SessionCmp`/`IsNull`/`IsNotNull`/`In`/`InList`/`Contains`, `exists`
-to `Exists`/`ExistsRel`, `allowedTo` to `Inherits`/`InheritsReferencing`,
-`anyOf`/`or` to `Or`, `allOf`/`and` and condition lists to `And`, `not` to
-`Not`. `this.col` inside `exists` is the session path
-`["__jazz_outer_row", col]` the TS DSL compiles it to. The writer prints
-top-level `Or`/`And` as `anyOf`/`allOf` objects and everything else as one
-string, or as a structured policy where no string reproduces it exactly.
+`Cmp`/`SessionCmp`/`IsNull`/`IsNotNull`/`In`/`InList`/`SessionInList`/
+`Contains`/`SessionContains`, `exists` to `Exists`/`ExistsRel`, `allowedTo` to
+`Inherits`/`InheritsReferencing`, `anyOf`/`or` to `Or`, `allOf`/`and` and
+condition lists to `And`, `not` to `Not`. The checked row inside `exists`
+(`this.col`, `c.col`, `outer.col`) is the session path
+`["__jazz_outer_row", col]` the TS DSL compiles it to. The writer prints top-level `Or`/`And` as `anyOf`/`allOf`
+objects and every other policy as one string: the shortest spelling that
+reads back as exactly the same policy, and otherwise the explicit spelling
+(typed literals, `literal(null)`, `session.__jazz_outer_row.col`,
+`exists ( from … )`, `via`), which always does.
 No policy is refused for its shape: only what a deployment would refuse.
 
 **Errors.** Every refusal names the file, the JSON path and, inside an
