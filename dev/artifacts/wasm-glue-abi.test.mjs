@@ -52,3 +52,29 @@ test("instantiates the generated import object against its binary", async () => 
     generatedGlue("__wbg_wasmwrite_new: () => {}"),
   );
 });
+
+// The published broker worker is minified: `__wbg_get_imports` and `import0`
+// are renamed, and only the import object's keys and its `__proto__: null`
+// opening survive.
+function minifiedGlue(imports) {
+  return `function a(){let b={__proto__:null,${imports}};return{wbg:b}}`;
+}
+
+test("accepts callable glue in a minified import object", () => {
+  assert.equal(
+    verifyWasmGlueAbi(wasmWithWasmWriteImport, minifiedGlue("__wbg_wasmwrite_new:function(){}")),
+    null,
+  );
+});
+
+test("rejects a stale minified glue/WASM pair", () => {
+  assert.match(
+    verifyWasmGlueAbi(wasmWithWasmWriteImport, minifiedGlue("__wbg_other_new:()=>{}")),
+    /wbg\.__wbg_wasmwrite_new/,
+  );
+});
+
+test("rejects minified glue with two candidate import objects", () => {
+  const glue = `${minifiedGlue("__wbg_wasmwrite_new:()=>{}")}${minifiedGlue("__wbg_wasmwrite_new:()=>{}")}`;
+  assert.match(verifyWasmGlueAbi(wasmWithWasmWriteImport, glue), /generated import object/);
+});
