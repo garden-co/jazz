@@ -1,4 +1,5 @@
-import { jazzDeployBrowserCommands } from "./browser-commands.js";
+import { jazzDeployAppBrowserCommands, jazzDeployBrowserCommands } from "./browser-commands.js";
+import { shippedArtifact } from "../../src/runtime/app-artifact.js";
 import type { DeployResult } from "../../src/dev/catalogue.js";
 import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../../src/schema-source.js";
@@ -20,6 +21,29 @@ export async function deploy(options: {
     serverUrl: options.serverUrl,
     adminSecret: options.adminSecret,
     schema: resolveSchemaSource(options.schema),
+    permissions: options.permissions,
+  });
+}
+
+/**
+ * `deployApp` from a browser test: publishes `app` as createJazz would, from
+ * the Node side of the runner (`jazzDeployApp`), with the `jazz.app.json` its
+ * `defineApp` recorded.
+ */
+export async function deployApp(options: {
+  appId: string;
+  serverUrl: string;
+  adminSecret: string;
+  app: SchemaSourceInput;
+  permissions: CompiledPermissionsMap;
+}): Promise<DeployResult> {
+  const schema = resolveSchemaSource(options.app);
+  return jazzDeployAppBrowserCommands().jazzDeployApp({
+    appId: options.appId,
+    serverUrl: options.serverUrl,
+    adminSecret: options.adminSecret,
+    schema,
+    artifact: shippedArtifact(schema),
     permissions: options.permissions,
   });
 }

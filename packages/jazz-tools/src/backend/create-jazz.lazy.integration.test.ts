@@ -14,15 +14,14 @@ import { createJazz, memory, sqlite, type Jazz } from "./index.js";
 // `createJazz` at a module's top level: it opens nothing until first use,
 // and a later call for the same store (a hot reload) reuses its core.
 
-const { app, permissions } = await defineShippedApp(
-  { todos: s.table({ title: s.string(), owner: s.uuid() }, {}) },
-  (app) =>
-    s.definePermissions(app, ({ policy, session }) => {
-      policy.todos.allowRead.where({ owner: session.user });
-      policy.todos.allowInsert.where({ owner: session.user });
-      policy.todos.allowUpdate.never();
-      policy.todos.allowDelete.never();
-    }),
+const definition = { todos: s.table({ title: s.string(), owner: s.uuid() }, {}) };
+const { app, permissions } = await defineShippedApp(definition, (app) =>
+  s.definePermissions(app, ({ policy, session }) => {
+    policy.todos.allowRead.where({ owner: session.user });
+    policy.todos.allowInsert.where({ owner: session.user });
+    policy.todos.allowUpdate.never();
+    policy.todos.allowDelete.never();
+  }),
 );
 
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -246,10 +245,13 @@ describe("createJazz, opened on first use", () => {
   it("keeps the backend's session across a reload, and lets writes in flight finish", async () => {
     const path = await tempDir();
     const request = new Request("http://app.test/api");
+    // The rules the app's jazz.app.json holds, rebuilt as a reload rebuilds them.
     const rules = () =>
       s.definePermissions(app, ({ policy, session }) => {
         policy.todos.allowRead.where({ owner: session.user });
         policy.todos.allowInsert.where({ owner: session.user });
+        policy.todos.allowUpdate.never();
+        policy.todos.allowDelete.never();
       });
     const jazz = createJazz({
       app,
@@ -269,15 +271,23 @@ describe("createJazz, opened on first use", () => {
     await inFlight.wait({ tier: "global" });
     await userDb.insert(app.todos, { title: "same bundle", owner: user }).wait({ tier: "global" });
 
-    // Changed permissions publish another bundle: what the old session had
-    // in flight, and a db a request still holds, still finish.
+    // Changed permissions (and so a regenerated jazz.app.json) publish
+    // another bundle: what the old session had in flight, and a db a request
+    // still holds, still finish.
     const pending = jazz.db.insert(app.todos, { title: "across bundles", owner });
-    const changed = s.definePermissions(app, ({ policy, session }) => {
-      policy.todos.allowRead.where({ owner: session.user });
-      policy.todos.allowInsert.where({ owner: session.user });
-      policy.todos.allowUpdate.where({ owner: session.user });
+    const { app: changedApp, permissions: changed } = await defineShippedApp(definition, (app) =>
+      s.definePermissions(app, ({ policy, session }) => {
+        policy.todos.allowRead.where({ owner: session.user });
+        policy.todos.allowInsert.where({ owner: session.user });
+        policy.todos.allowUpdate.where({ owner: session.user });
+      }),
+    );
+    createJazz({
+      app: changedApp,
+      permissions: changed,
+      store: sqlite({ path }),
+      authenticate: as("a"),
     });
-    createJazz({ app, permissions: changed, store: sqlite({ path }), authenticate: as("a") });
     await jazz.ready();
     await pending.wait({ tier: "global" });
     await userDb.insert(app.todos, { title: "old bundle", owner: user }).wait({ tier: "global" });

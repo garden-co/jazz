@@ -84,10 +84,12 @@ async function bundleToTempFile(filePath: string, tempDir: string): Promise<stri
 
 /**
  * schema.ts imports the `jazz.app.json` that `jazz-tools validate` writes
- * from it. Compiling schema.ts must not read that file: it may not exist yet,
- * be stale, or hold a merge conflict, and validate is how it is rewritten. So
- * the bundle sees a placeholder in its place, which nothing compiling the
- * schema looks at. Any other JSON file is bundled as it is.
+ * from it. Compiling the schema never depends on that file: it may not exist
+ * yet, or hold a merge conflict, and validate is how it is rewritten. So when
+ * it is missing or isn't JSON, the bundle sees a placeholder in its place,
+ * which nothing compiling the schema looks at. When it is there, the bundle
+ * gets it as it is, for callers that run the loaded app (the dev server,
+ * tests); a stale one is refused where it is used, as any app's would be.
  */
 function ownAppArtifactPlugin(artifactPath: string): Plugin {
   const placeholder = {
@@ -105,10 +107,19 @@ function ownAppArtifactPlugin(artifactPath: string): Plugin {
           ? { path: artifactPath, namespace: "jazz-own-app-artifact" }
           : undefined,
       );
-      build.onLoad({ filter: /.*/, namespace: "jazz-own-app-artifact" }, () => ({
-        contents: JSON.stringify(placeholder),
-        loader: "json",
-      }));
+      build.onLoad({ filter: /.*/, namespace: "jazz-own-app-artifact" }, async () => {
+        const committed = await readFile(artifactPath, "utf8").catch(() => null);
+        let contents = JSON.stringify(placeholder);
+        if (committed !== null) {
+          try {
+            JSON.parse(committed);
+            contents = committed;
+          } catch {
+            // A merge conflict, say: validate rewrites it from the schema.
+          }
+        }
+        return { contents, loader: "json" };
+      });
     },
   };
 }

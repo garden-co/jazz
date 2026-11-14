@@ -48,13 +48,16 @@ it("upgrades an existing issuer-era account through createJazz and signs in afte
   // The example's own history: its snapshots and its issuer-removal migration.
   const migration = await loadDefinedMigration(join(directory, "remove-better-auth-issuer.ts"));
   const oldApp = s.defineApp(legacyDefinition, {
-    artifact: await appArtifact(oldSchema, { permissions }),
+    artifact: await appArtifact({ wasmSchema: oldSchema }, { permissions }),
   });
   const newApp = s.defineApp(currentDefinition, {
-    artifact: await appArtifact(oldSchema, {
-      steps: [{ to: newSchema, migration }],
-      permissions,
-    }),
+    artifact: await appArtifact(
+      { wasmSchema: oldSchema },
+      {
+        steps: [{ to: { wasmSchema: newSchema }, migration }],
+        permissions,
+      },
+    ),
   });
   expect(await computeSchemaHash(oldApp.wasmSchema)).toBe(predecessor);
   expect(await computeSchemaHash(newApp.wasmSchema)).toBe(current);

@@ -9,6 +9,7 @@ import {
   jazzAppUser,
   jazzServerInfo,
   stopJazzServerByUrl,
+  jazzDeploy,
 } from "../../packages/jazz-tools/tests/browser/testing-server-node.js";
 import { TEST_APP_ID } from "./tests/browser/test-constants.js";
 
@@ -27,6 +28,7 @@ export default defineConfig(async (): Promise<ViteUserConfig> => {
         provider: playwright(),
         instances: [{ browser: "chromium", headless: true }],
         commands: {
+          jazzDeploy: async (_context, options) => jazzDeploy(options),
           jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
           jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
           jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),

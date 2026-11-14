@@ -30,6 +30,7 @@ import {
   jazzServerInfo,
   jazzAppArtifact,
   jazzDeploy,
+  jazzDeployApp,
   stopJazzServerByUrl,
   jazzServerTransportControlCommands,
 } from "./tests/browser/testing-server-node.js";
@@ -241,6 +242,7 @@ export default defineConfig({
         },
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
         jazzDeploy: async (_context, options) => jazzDeploy(options),
+        jazzDeployApp: async (_context, options) => jazzDeployApp(options),
         jazzAppArtifact: async (_context, versions, migrations, permissions) =>
           jazzAppArtifact(versions, migrations, permissions),
         jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),

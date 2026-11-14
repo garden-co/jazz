@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { AccountHandle } from "../../../../../../packages/jazz-tools/src/accounts/state.js";
-import { deployApp } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
+import { deployApp } from "../../../../../../packages/jazz-tools/tests/browser/deploy.js";
 import { createDb } from "../../../../../../packages/jazz-tools/src/runtime/default-create-db.js";
 import { PersistedWriteRejectedError } from "../../../../../../packages/jazz-tools/src/runtime/client.js";
 import type { Db } from "../../../../../../packages/jazz-tools/src/runtime/db.js";

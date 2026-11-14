@@ -12,7 +12,7 @@ import {
   type CompiledPermissionsMap,
 } from "../../src/schema-permissions.js";
 import { runtimeSchemaJsonReplacer } from "../../src/drivers/schema-wire.js";
-import { deploy, type DeployResult } from "../../src/dev/catalogue.js";
+import { deploy, deployApp, type DeployResult } from "../../src/dev/catalogue.js";
 import { shipArtifact, type AppArtifact } from "../../src/runtime/app-artifact.js";
 import {
   createTransportControl,
@@ -112,6 +112,26 @@ export async function jazzDeploy(options: {
   permissions: CompiledPermissionsMap;
 }): Promise<DeployResult> {
   return deploy(options);
+}
+
+/**
+ * `deployApp` from a browser test: publishes the app whose schema is
+ * `schema` as createJazz would, from its `jazz.app.json` (`artifact`) when it
+ * ships one. A browser can't: reading the file takes jazz-napi, and the
+ * artifact `defineApp` recorded doesn't survive the trip here, so it comes
+ * along explicitly.
+ */
+export async function jazzDeployApp(options: {
+  appId: string;
+  serverUrl: string;
+  adminSecret: string;
+  schema: WasmSchema;
+  artifact?: AppArtifact;
+  permissions: CompiledPermissionsMap;
+}): Promise<DeployResult> {
+  const { schema, artifact, ...rest } = options;
+  shipArtifact(schema, artifact ? { artifact } : { migrations: "none" });
+  return deployApp({ ...rest, app: schema });
 }
 
 /**

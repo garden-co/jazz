@@ -69,6 +69,25 @@ export function jazzDeployBrowserCommands(): JazzDeployBrowserCommands {
   return commands as unknown as JazzDeployBrowserCommands;
 }
 
+export interface JazzDeployAppBrowserCommands {
+  /** See `jazzDeployApp` in testing-server-node.ts. */
+  jazzDeployApp(options: {
+    appId: string;
+    serverUrl: string;
+    adminSecret: string;
+    schema: WasmSchema;
+    artifact?: AppArtifact;
+    permissions: CompiledPermissionsMap;
+  }): Promise<DeployResult>;
+}
+
+export function jazzDeployAppBrowserCommands(): JazzDeployAppBrowserCommands {
+  if (!hasFunction(commands, "jazzDeployApp")) {
+    throw new Error("Browser test project is missing the jazzDeployApp command.");
+  }
+  return commands as unknown as JazzDeployAppBrowserCommands;
+}
+
 export interface JazzAppArtifactBrowserCommands {
   /** See `jazzAppArtifact` in testing-server-node.ts: a browser can't build one. */
   jazzAppArtifact(

@@ -16,7 +16,7 @@ import {
   acquireBrowserTestAccount,
   createBrowserTestDb,
 } from "../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
-import { deploy } from "../../../../packages/jazz-tools/src/dev/catalogue.js";
+import { deploy } from "../../../../packages/jazz-tools/tests/browser/deploy.js";
 import {
   getJazzServerInfo,
   jazzAppUserUrl,
