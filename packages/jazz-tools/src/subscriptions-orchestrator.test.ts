@@ -800,17 +800,18 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     vi.useFakeTimers();
     const harness = createUnitHarness();
     try {
-      const { entry } = harness.makeEntry();
+      const { key, entry } = harness.makeEntry();
       const off = entry.subscribe({});
       harness.emit(0, makeDelta([makeTodo("opening")]));
       off();
       for (let index = 0; index < 2; index++) {
         await vi.advanceTimersByTimeAsync(10_000);
         harness.emit(0, makeDelta([makeTodo(`update-${index}`)]));
-        expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+        expect((harness.manager as any).slots.has(key)).toBe(true);
       }
       await vi.advanceTimersByTimeAsync(10_000);
       expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+      expect((harness.manager as any).slots.has(key)).toBe(false);
     } finally {
       await harness.manager.shutdown();
     }
@@ -820,7 +821,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     vi.useFakeTimers();
     const harness = createUnitHarness();
     try {
-      const { entry } = harness.makeEntry();
+      const { key, entry } = harness.makeEntry();
       entry.subscribe({})();
       await vi.advanceTimersByTimeAsync(20_000);
       const onfulfilled = vi.fn();
@@ -831,9 +832,10 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
       off();
       await vi.advanceTimersByTimeAsync(29_999);
-      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+      expect((harness.manager as any).slots.has(key)).toBe(true);
       await vi.advanceTimersByTimeAsync(1);
       expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+      expect((harness.manager as any).slots.has(key)).toBe(false);
     } finally {
       await harness.manager.shutdown();
     }
@@ -853,9 +855,12 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(harness.manager.getCacheEntry(key)).toBe(entry);
       const onfulfilled = vi.fn();
       const off = entry.subscribe({ onfulfilled });
-      await vi.advanceTimersByTimeAsync(30_000);
+      // The committing reader sees the first result at once, and the entry
+      // resubscribes (it was parked while nobody listened).
       expect(onfulfilled).toHaveBeenCalledWith([makeTodo("delayed")]);
-      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+      expect(harness.calls).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(harness.calls[1]?.unsubscribe).not.toHaveBeenCalled();
       off();
     } finally {
       await harness.manager.shutdown();
@@ -882,6 +887,157 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     } finally {
       await harness.manager.shutdown();
     }
+  });
+
+  describe("parking unused entries", () => {
+    const opened = async (harness: UnitHarness) => {
+      const { key, entry } = harness.makeEntry();
+      const off = entry.subscribe({});
+      harness.emit(0, makeDelta([makeTodo("a"), makeTodo("b")]));
+      off();
+      return { key, entry };
+    };
+
+    it("keeps a settled entry live for the grace, then drops its source subscription", async () => {
+      vi.useFakeTimers();
+      const harness = createUnitHarness();
+      try {
+        const { key, entry } = await opened(harness);
+        await vi.advanceTimersByTimeAsync(999);
+        expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+        // The last result stays readable without a subscription.
+        expect(harness.manager.peekState<Todo>(key)).toMatchObject({
+          status: "fulfilled",
+          data: [makeTodo("a"), makeTodo("b")],
+        });
+        expect(harness.manager.getCacheEntry(key)).toBe(entry);
+        expect(harness.calls).toHaveLength(1);
+      } finally {
+        await harness.manager.shutdown();
+      }
+    });
+
+    it("a remount within the grace keeps the same subscription", async () => {
+      vi.useFakeTimers();
+      const harness = createUnitHarness();
+      try {
+        const { entry } = await opened(harness);
+        await vi.advanceTimersByTimeAsync(500);
+        const off = entry.subscribe({});
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(harness.calls).toHaveLength(1);
+        expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+        off();
+      } finally {
+        await harness.manager.shutdown();
+      }
+    });
+
+    it("ignores what the parked subscription still delivers", async () => {
+      vi.useFakeTimers();
+      const harness = createUnitHarness();
+      try {
+        const { key } = await opened(harness);
+        await vi.advanceTimersByTimeAsync(1_000);
+        harness.emit(0, makeDelta([makeTodo("late")]));
+        expect(harness.manager.peekState<Todo>(key)).toMatchObject({
+          data: [makeTodo("a"), makeTodo("b")],
+        });
+      } finally {
+        await harness.manager.shutdown();
+      }
+    });
+
+    it("a returning reader sees the parked result at once, then the fresh opening", async () => {
+      vi.useFakeTimers();
+      const harness = createUnitHarness();
+      try {
+        const { key, entry } = await opened(harness);
+        await vi.advanceTimersByTimeAsync(10_000);
+
+        const onfulfilled = vi.fn();
+        const onReset = vi.fn();
+        const onDelta = vi.fn();
+        const off = harness.manager
+          .getCacheEntry<Todo>(key)
+          .subscribe({ onfulfilled, onReset, onDelta });
+        expect(onfulfilled).toHaveBeenCalledWith([makeTodo("a"), makeTodo("b")]);
+        expect(harness.calls).toHaveLength(2);
+        expect(harness.calls[1]?.query).toBe(harness.calls[0]?.query);
+        expect(harness.calls[1]?.options).toEqual(harness.calls[0]?.options);
+
+        // Rows changed while parked: the fresh subscription's opening reset
+        // replaces the parked result rather than merging into it.
+        harness.emit(1, {
+          delta: [],
+          reset: true,
+          all: [makeTodo("b", "edited"), makeTodo("c")],
+        } as SubscriptionDelta<Todo>);
+        expect(onReset).toHaveBeenCalledOnce();
+        expect(onfulfilled).toHaveBeenLastCalledWith([makeTodo("b", "edited"), makeTodo("c")]);
+        expect(onDelta).not.toHaveBeenCalled();
+        expect(entry.state).toMatchObject({
+          data: [makeTodo("b", "edited"), makeTodo("c")],
+        });
+
+        // Unused again: parks again after the grace, cleans up after the deadline.
+        off();
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(harness.calls[1]?.unsubscribe).toHaveBeenCalledOnce();
+        await vi.advanceTimersByTimeAsync(29_000);
+        expect((harness.manager as any).slots.has(key)).toBe(false);
+      } finally {
+        await harness.manager.shutdown();
+      }
+    });
+
+    it("still cleans up a parked entry at its unused deadline", async () => {
+      vi.useFakeTimers();
+      const harness = createUnitHarness();
+      try {
+        const { key } = await opened(harness);
+        await vi.advanceTimersByTimeAsync(29_999);
+        expect((harness.manager as any).slots.has(key)).toBe(true);
+        await vi.advanceTimersByTimeAsync(1);
+        expect((harness.manager as any).slots.has(key)).toBe(false);
+        expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+      } finally {
+        await harness.manager.shutdown();
+      }
+    });
+
+    it("does not park a pending entry", async () => {
+      vi.useFakeTimers();
+      const harness = createUnitHarness();
+      try {
+        const { entry } = harness.makeEntry();
+        entry.subscribe({})();
+        await vi.advanceTimersByTimeAsync(20_000);
+        expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+        // Settling with nobody listening starts the grace.
+        harness.emit(0, makeDelta([makeTodo("a")]));
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+      } finally {
+        await harness.manager.shutdown();
+      }
+    });
+
+    it("a session change drops parked entries", async () => {
+      vi.useFakeTimers();
+      const harness = createUnitHarness("orchestrator-unit", { user_id: "alice" } as Session);
+      try {
+        const { key } = await opened(harness);
+        await vi.advanceTimersByTimeAsync(1_000);
+        harness.setSession({ user_id: "bob" } as Session);
+        expect((harness.manager as any).slots.has(key)).toBe(false);
+        expect(harness.calls).toHaveLength(1);
+      } finally {
+        await harness.manager.shutdown();
+      }
+    });
   });
 
   it("SO-U16 resubscribe before timeout cancels cleanup", async () => {
