@@ -50,6 +50,15 @@
   setJazzSession(session);
   const snapshotStore = writable(session.getSnapshot());
   const retry = () => session.retry().catch(() => {});
+  // The client as its own signal, changing only when the session's client
+  // does. Passing `$snapshotStore.client` straight on would re-read the whole
+  // store: every new snapshot with the same client (the in-place
+  // local-first upgrade publishes one) would re-run the client provider,
+  // which clears its context and remounts the app, dropping component state
+  // such as a half-typed form (#5459).
+  const client = $derived(
+    $snapshotStore.status === "ready" ? $snapshotStore.client : undefined,
+  );
   onMount(() => {
     const lease = attachJazzSessionConsumer(session);
     const update = () => {
@@ -84,9 +93,9 @@
     <p role="status">Loading...</p>
   {/if}
 {/snippet}
-{#if $snapshotStore.status === "ready" && $snapshotStore.client}
-  {#key $snapshotStore.client}
-    <JazzSvelteClientProvider client={$snapshotStore.client}>
+{#if client}
+  {#key client}
+    <JazzSvelteClientProvider {client}>
       {#snippet children()}{@render children()}{/snippet}
       {#snippet fallback()}{@render pending()}{/snippet}
     </JazzSvelteClientProvider>
