@@ -1,0 +1,56 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "people": {
+      "read": {
+        "exists": {
+          "type": "Project",
+          "columns": [
+            {
+              "alias": "id",
+              "expr": { "type": "Column", "column": { "column": "id", "scope": "__hop_0" } }
+            }
+          ],
+          "input": {
+            "type": "Join",
+            "join_kind": "Inner",
+            "left": { "type": "TableScan", "table": "people" },
+            "on": [
+              {
+                "left": { "column": "id", "scope": "people" },
+                "right": { "column": "person_ids", "scope": "__hop_0" }
+              }
+            ],
+            "right": { "type": "TableScan", "alias": "__hop_0", "table": "records" }
+          }
+        }
+      }
+    },
+    "records": {
+      "read": {
+        "exists": {
+          "type": "Project",
+          "columns": [
+            {
+              "alias": "id",
+              "expr": { "type": "Column", "column": { "column": "id", "scope": "__hop_0" } }
+            }
+          ],
+          "input": {
+            "type": "Join",
+            "join_kind": "Inner",
+            "left": { "type": "TableScan", "table": "records" },
+            "on": [
+              {
+                "left": { "column": "person_ids", "scope": "records" },
+                "right": { "column": "id", "scope": "__hop_0" }
+              }
+            ],
+            "right": { "type": "TableScan", "alias": "__hop_0", "table": "people" }
+          }
+        }
+      }
+    }
+  }
+}

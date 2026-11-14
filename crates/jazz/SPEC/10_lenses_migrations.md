@@ -901,7 +901,9 @@ Every migration must pass the lens checks a deployment runs (§10.6).
 **TablePolicies** `{read?, insert?, update?, delete?}`. An absent operation
 is denied, as today.
 
-- `read`, `insert`, `delete`: a Policy.
+- `read`, `insert`, `delete`: a Policy. A policy with both sides (a read
+  or delete with a check, an insert with `using`), which the DSL doesn't
+  write but the engine can hold, is `{"using": Policy, "withCheck": Policy}`.
 - `update`: a Policy (the same check before and after), or
   `{"old": Policy, "new": Policy}` (`whereOld` / `whereNew`).
 
@@ -909,7 +911,45 @@ is denied, as today.
 
 - an expression string (the grammar below);
 - `{"anyOf": [Policy, …]}` or `{"allOf": [Policy, …]}`;
-- `{"$comment": "…", "where": Policy}`, a commented policy.
+- `{"$comment": "…", "where": Policy}`, a commented policy;
+- a structured policy, the engine's own form in this file's JSON:
+  - `{"exists": RelationExpr}`: holds when the relation yields a row
+    (`ExistsRel`: `policy.exists(…)`, `hopTo`, joins, unions, projections,
+    gathers, ordering and limits);
+  - an internally tagged PolicyExpr, `{"type": "<Variant>", …}`, whose
+    variants and fields are the engine's PolicyExpr (§7) field for field:
+    `Cmp {column, op, value}`, `SessionCmp {path, op, value}`,
+    `IsNull {column}`, `IsNotNull {column}`, `SessionIsNull {path}`,
+    `SessionIsNotNull {path}`, `Contains {column, value}`,
+    `SessionContains {path, value}`, `In {column, session_path}`,
+    `InList {column, values}`, `SessionInList {path, values}`,
+    `Exists {table, condition}`, `ExistsRel {rel}`,
+    `Inherits {operation, via_column, max_depth?}`,
+    `InheritsReferencing {operation, source_table, via_column, max_depth?}`,
+    `And {exprs}`, `Or {exprs}`, `Not {expr}`, `True`, `False`. A
+    PolicyValue is `{"type": "Literal", "value": Value}` or
+    `{"type": "SessionRef", "path": […]}`.
+
+  A **RelationExpr** is internally tagged too: `TableScan {table, alias?}`,
+  `Filter {input, predicate}`, `Union {inputs: [{label, input}]}`,
+  `Join {left, right, on: [{left, right}], join_kind: "Inner" | "Left"}`,
+  `Project {input, columns: [{alias, expr: KeyRef}]}`,
+  `Gather {seed, step, frontier_key, max_depth?, dedupe_key}`,
+  `Distinct {input, key}`, `OrderBy {input, terms: [{column, direction}]}`,
+  `Offset {input, offset}`, `Limit {input, limit}`. A ColumnRef is
+  `{scope?, column}`; a KeyRef is `{"type": "Column", column}` or
+  `{"type": "RowId", row: "Current" | "Outer" | "Frontier"}`; a
+  **Predicate** is `Cmp {left, op, right}`, `IsNull {column}`,
+  `IsNotNull {column}`, `In {left, values}`, `Contains {left, right}`,
+  `EnumMatch {column, case, payload}`, `And {exprs}`, `Or {exprs}`,
+  `Not {expr}`, `True` or `False`; a **ValueRef** is `Literal {value}`,
+  `Param {name}`, `SessionRef {path}`, `OuterColumn {column}`,
+  `FrontierColumn {column}` or `RowId {row}`.
+
+Structured policies are part of the format: every policy the engine holds
+has one, so every policy a TS app can declare round-trips through this file.
+The writer uses an expression string wherever the string compiles back to
+exactly the same policy, and the structured form otherwise.
 
 **`defs`.** A key is a signature `name($param, …)`. Its value is a Policy in
 which `$param` stands for a value. A call `name(arg, …)` passes values or
@@ -962,8 +1002,10 @@ Meaning:
   the row being checked.
 - `exists t(c₁, c₂, …)` holds when some row of `t` satisfies every
   condition. `.rel(…)` hops along `t`'s relation `rel` to the rows it leads
-  to, filtered by that hop's conditions (`hopTo`); hops, and `exists` inside
-  `exists`, parse but are not supported in jazz.permissions.json yet.
+  to, filtered by that hop's conditions (`hopTo`). Hops, `exists` inside
+  `exists`, and comparisons between two columns are written in the
+  structured form for now (below); readable spellings for them, with
+  aliases for outer rows (`exists chats as c(…)`, then `c.id`), are planned.
 - `allowedTo.op(rel)` holds when the row that relation `rel` leads to allows
   `op` (`allowedTo.read`, …). A reverse relation inherits from the rows
   pointing here; `maxDepth` bounds recursive chains.
@@ -975,8 +1017,7 @@ Meaning:
 - A literal takes the type of the column it is compared with; one that can't
   (e.g. `'x'` for an `int`, a non-UUID for a `uuid`) is refused. Compared with
   a session claim, `'…'` is text, `1` an int, `1.5` a float.
-- Comparing two columns of the row is not supported yet. Inside `exists`,
-  `this.col` is a value (the checked row's column), so
+- Inside `exists`, `this.col` is a value (the checked row's column), so
   `exists chats(id = this.chatId)` compares `chats.id` with it.
 - Nesting deeper than 64 levels is refused.
 - `and` binds tighter than `or`; `not` tighter than both.
@@ -988,10 +1029,8 @@ to `Exists`/`ExistsRel`, `allowedTo` to `Inherits`/`InheritsReferencing`,
 `Not`. `this.col` inside `exists` is the session path
 `["__jazz_outer_row", col]` the TS DSL compiles it to. The writer prints
 top-level `Or`/`And` as `anyOf`/`allOf` objects and everything else as one
-string. Relation expressions (`ExistsRel`: `policy.exists(…)`, `hopTo`,
-joins, projections, unions) are refused by the writer with a "not supported
-in jazz.permissions.json yet" error naming the policy; `validate` then
-reports it and leaves the TS app as it runs.
+string, or as a structured policy where no string reproduces it exactly.
+No policy is refused for its shape: only what a deployment would refuse.
 
 **Errors.** Every refusal names the file, the JSON path and, inside an
 expression, the exact span, with a suggestion and a correct example:

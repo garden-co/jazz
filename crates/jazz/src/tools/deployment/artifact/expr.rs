@@ -955,6 +955,8 @@ pub struct Def {
 #[derive(Debug, Clone)]
 pub enum DefBody {
     Expr(Ast, String),
+    /// A structured policy (SPEC §10.10): the engine's form, as written.
+    Fixed(PolicyExpr),
     AnyOf(Vec<DefBody>),
     AllOf(Vec<DefBody>),
 }
@@ -1063,6 +1065,7 @@ fn compile_body(
 ) -> Result<PolicyExpr, ExprError> {
     match body {
         DefBody::Expr(ast, _) => compile_in(ast, context, scope),
+        DefBody::Fixed(expr) => Ok(expr.clone()),
         DefBody::AnyOf(items) => Ok(PolicyExpr::Or(
             items
                 .iter()
