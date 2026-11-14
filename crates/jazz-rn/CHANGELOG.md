@@ -1,5 +1,20 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.62
+
+### Patch Changes
+
+- 56b3e92: Update live results with a forward include when the included row changes through a nullable reference.
+- 3e1622a: React Native now tells a relay's refused upstream apart by its error code, as Node and browser clients do. When the server serves another authority history than the device's store, the client reports an `AuthorityChangedError` and the link reads `{ state: "offline", reason: "authority-changed" }`, not a bare "stopped". This raises the native relay ABI to 6, so ship a new native build with this release.
+- 83ecc46: A React Native relay whose database refuses its upstream (for example, it cannot mirror the server's catalogue) now stops that connection and reports the refusal as a non-retrying upstream failure, with a warning in the log, instead of keeping a socket open that never syncs and reporting nothing.
+- 1a0d90a: React Native devices whose store alpha.60 opened without the app's migrations recover. When the server refuses such a store (the new `store_opened_without_migrations` error code), a store holding no unsynced writes is rebuilt and syncs again from the server, with nothing for the app to do. One that does hold writes is kept, and `db.deleteClientStorage()` (which before did nothing on React Native) now deletes the account's native store, keeping the account, so the app can reset it; that drops those writes. See "Upgrading from alpha.60" in the docs.
+
+  On React Native, `clearOnSignOut` and `logout({ wipeData: true })` now really delete the signed-out account's local store too (before, they did nothing there), closing every client of that account in the app first. Unsynced writes, and refused writes kept for retry, go with it.
+
+- 4d6f815: Keep a transaction's reads inside its lifetime. Reads run in the order they were started, see the writes staged before them, and share one serializable snapshot. Committing while a read started through the transaction is still pending now fails with a `not_observed` error and ends the transaction without publishing it, instead of publishing before the read answered. Await every transaction read before committing.
+  - jazz-rn-ios@2.0.0-alpha.62
+  - jazz-rn-android@2.0.0-alpha.62
+
 ## 2.0.0-alpha.61
 
 ### Patch Changes
