@@ -1406,7 +1406,7 @@ fn relation_hops_and_nested_exists_round_trip() {
     let text = printed("todos", &hop);
     assert_eq!(
         text,
-        "exists (from shares join todos as __hop_0 on shares.todo = __hop_0.id where shares.todo = outer.id and __hop_0.owner = session.user select __hop_0.id as id)"
+        "exists shares(todo = this.id).todo(owner = session.user)"
     );
     // The hop sugar compiles to the same relation.
     assert_eq!(
@@ -1479,6 +1479,145 @@ fn relation_hops_and_nested_exists_round_trip() {
         printed("todos", &deep),
         "exists shares(exists todos(id = session.__jazz_outer_row.todo))"
     );
+}
+
+/// epic-drop's file move check, as its permissions.ts compiles it:
+/// `policy.exists(policy.files.where({ id: file.id }).hopTo("folder").where({ owner_id: me }))`.
+#[test]
+fn epic_drops_hop_prints_as_a_hop() {
+    let schema = schema(vec![
+        (
+            "folders",
+            table(vec![
+                ColumnDescriptor::new("name", ColumnType::Text),
+                ColumnDescriptor::new("owner_id", ColumnType::Uuid),
+                uuid_fk("parent_id", "folders"),
+            ]),
+        ),
+        (
+            "files",
+            table(vec![
+                ColumnDescriptor::new("name", ColumnType::Text),
+                uuid_fk("folder_id", "folders"),
+                ColumnDescriptor::new("owner_id", ColumnType::Uuid),
+            ]),
+        ),
+    ]);
+    let relations: BTreeMap<String, BTreeMap<String, CodegenRelation>> = [
+        (
+            "files".to_string(),
+            [(
+                "folder".to_string(),
+                CodegenRelation::Forward {
+                    table: "folders".into(),
+                    column: "folder_id".into(),
+                },
+            )]
+            .into(),
+        ),
+        (
+            "folders".to_string(),
+            [
+                (
+                    "parent".to_string(),
+                    CodegenRelation::Forward {
+                        table: "folders".into(),
+                        column: "parent_id".into(),
+                    },
+                ),
+                (
+                    "filesViaFolder".to_string(),
+                    CodegenRelation::Reverse {
+                        table: "files".into(),
+                        relation: "folder".into(),
+                    },
+                ),
+            ]
+            .into(),
+        ),
+    ]
+    .into();
+    // The IR TS's `relationToIr` builds for it.
+    let rel: RelationExpr = serde_json::from_value(serde_json::json!({
+        "Project": {
+            "input": { "Filter": {
+                "input": { "Join": {
+                    "left": { "TableScan": { "table": "files" } },
+                    "right": { "TableScan": { "table": "folders", "alias": "__hop_0" } },
+                    "on": [{
+                        "left": { "scope": "files", "column": "folder_id" },
+                        "right": { "scope": "__hop_0", "column": "id" }
+                    }],
+                    "join_kind": "Inner"
+                } },
+                "predicate": { "And": [
+                    { "Cmp": {
+                        "left": { "scope": "files", "column": "id" },
+                        "op": "Eq",
+                        "right": { "OuterColumn": { "column": "id" } }
+                    } },
+                    { "Cmp": {
+                        "left": { "scope": "__hop_0", "column": "owner_id" },
+                        "op": "Eq",
+                        "right": { "SessionRef": ["user"] }
+                    } }
+                ] }
+            } },
+            "columns": [{
+                "alias": "id",
+                "expr": { "Column": { "scope": "__hop_0", "column": "id" } }
+            }]
+        }
+    }))
+    .unwrap();
+    let hop = PolicyExpr::ExistsRel { rel };
+    let defs = expr::Defs::new();
+    let context = expr::Context {
+        schema: &schema,
+        relations: &relations,
+        defs: &defs,
+    };
+    let text = expr::print(&hop, &context, "files").unwrap();
+    assert_eq!(
+        text,
+        "exists files(id = this.id).folder(owner_id = session.user)"
+    );
+    assert!(!text.contains("__hop"), "{text}");
+    let back = expr::compile(&expr::parse(&text).unwrap(), &context, "files").unwrap();
+    assert_eq!(back, hop);
+
+    // And through the file, inside the update check as epic-drop has it.
+    let policy = PolicyExpr::And(vec![
+        PolicyExpr::Inherits {
+            operation: Operation::Update,
+            via_column: "folder_id".into(),
+            max_depth: None,
+        },
+        PolicyExpr::Or(vec![
+            PolicyExpr::Cmp {
+                column: "owner_id".into(),
+                op: CmpOp::Eq,
+                value: PolicyValue::SessionRef(vec!["user".into()]),
+            },
+            hop.clone(),
+        ]),
+    ]);
+    let mut permissions = crate::catalogue::Permissions::new();
+    let policies = TablePolicies {
+        update: OperationPolicy::using_and_check(PolicyExpr::True, policy),
+        ..TablePolicies::default()
+    };
+    permissions.insert(TableName::from("files"), policies.clone());
+    let file = permissions_file::write(&permissions, &schema, &relations).unwrap();
+    let text = json::print(&file);
+    assert!(
+        text.contains("exists files(id = this.id).folder(owner_id = session.user)"),
+        "{text}"
+    );
+    assert!(!text.contains("__hop"), "{text}");
+    let read = permissions_file::read(&json::parse(text.as_bytes()).unwrap(), &schema, &relations)
+        .unwrap_or_else(|e| panic!("{e:?}\n{text}"));
+    assert_eq!(read[&TableName::from("files")], policies, "{text}");
 }
 
 #[test]
