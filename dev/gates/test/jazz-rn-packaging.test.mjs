@@ -107,10 +107,10 @@ test("native header staging preserves every relay function used by the JSI bridg
       ),
       "the checked-in header must match the canonical header copied by platform builds",
     );
-    const bridge = await readFile(
-      new URL("crates/jazz-rn/native/foreground-runtime.cpp", repository),
-      "utf8",
-    );
+    const bridge = [
+      await readFile(new URL("crates/jazz-rn/native/foreground-runtime.cpp", repository), "utf8"),
+      await readFile(new URL("crates/jazz-rn/ios/JazzRelay.mm", repository), "utf8"),
+    ].join("\n");
     const functions = new Set(
       [...bridge.matchAll(/\b(jazz_native_relay_[a-z_0-9]+)\s*\(/g)].map((match) => match[1]),
     );
