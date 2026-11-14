@@ -13,7 +13,7 @@ import { useAll } from "jazz-tools/react";
 import { Link } from "@astryxdesign/core/Link";
 import NextLink from "next/link";
 import { useState } from "react";
-import { MAX_LINE_QUANTITY } from "@/permissions";
+import { MAX_LINE_QUANTITY } from "@/src/store/limits";
 import { app } from "@/schema";
 import { useCart } from "@/src/store/cart";
 import { formatMoney } from "@/src/store/pricing";
