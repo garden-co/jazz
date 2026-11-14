@@ -197,16 +197,14 @@ type BuildersEqual<
 
 /**
  * Whether `TRight` is the enum `TLeft` (or an array of it) with variants
- * added, anywhere in the list: rows of `TLeft` pass unchanged.
+ * appended to its list: rows of `TLeft` pass unchanged and sort as before.
  */
 type SqlTypeAddsEnumVariants<TLeft, TRight> = TLeft extends {
   kind: "ENUM";
-  variants: readonly (infer TLeftVariant)[];
+  variants: infer TLeftVariants extends readonly string[];
 }
-  ? TRight extends { kind: "ENUM"; variants: readonly (infer TRightVariant)[] }
-    ? [TLeftVariant] extends [TRightVariant]
-      ? true
-      : false
+  ? TRight extends { kind: "ENUM"; variants: readonly [...TLeftVariants, ...string[]] }
+    ? true
     : false
   : TLeft extends { kind: "ARRAY"; element: infer TLeftElement }
     ? TRight extends { kind: "ARRAY"; element: infer TRightElement }
@@ -503,7 +501,7 @@ type UnsupportedSharedColumnChanges<
       : {
           readonly table: TTable;
           readonly column: TColumn;
-          readonly problem: "Columns with the same name must keep the same type, optionality, and ref target (an enum may only gain variants)";
+          readonly problem: "Columns with the same name must keep the same type, optionality, and ref target (an enum may only gain variants at the end)";
         };
   }[CommonColumnName<TTo, TTable, SourceColumnName<TFrom, TTo, TRenameTables, TTable>>];
 }[MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>];

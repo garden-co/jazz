@@ -530,22 +530,25 @@ fn tasks(status: &[&str], labels: &[&str]) -> Schema {
 }
 
 /// A migration with no steps may add enum variants to a kept column, also
-/// an array of enums, declared anywhere in the list: the rows it already
-/// holds pass unchanged. One that drops a variant (a removal, or a rename
-/// without a value mapping) is refused, naming the variant.
+/// an array of enums, at the end of its list: the rows it already holds
+/// pass unchanged and sort as before, so no store renumbers its tags. One
+/// that drops a variant (a removal, or a rename without a value mapping)
+/// is refused, naming the variant, and so is one that moves a variant
+/// (a reorder, or an addition before the end).
 ///
 /// ```
-/// v1 status(todo, done)          ──empty lens──► v2 status(blocked, todo, done) ✓
-///    labels(bug)[]                                  labels(bug, ui)[]
-/// v1 status(todo, done)          ──empty lens──► status(todo, finished)        ✗ "done"
+/// v1 status(todo, done) ──empty lens──► v2 status(todo, done, blocked)  ✓
+///    labels(bug)[]                         labels(bug, ui)[]
+/// v1 status(todo, done) ──empty lens──► status(todo, finished)         ✗ drops "done"
+/// v1 status(todo, done) ──empty lens──► status(blocked, todo, done)    ✗ reorders
 /// ```
 #[test]
 fn an_empty_migration_may_add_enum_variants_but_not_drop_them() {
     let v1 = tasks(&["todo", "done"], &["bug"]);
     for added in [
-        tasks(&["blocked", "todo", "done"], &["bug"]),
+        tasks(&["todo", "done", "blocked"], &["bug"]),
         tasks(&["todo", "done"], &["bug", "ui"]),
-        tasks(&["done", "blocked", "todo"], &["ui", "bug"]),
+        tasks(&["todo", "done", "blocked", "archived"], &["bug", "ui"]),
     ] {
         let prepared = prepare_deployment(
             &DeploymentCatalogue::default(),
@@ -557,6 +560,28 @@ fn an_empty_migration_may_add_enum_variants_but_not_drop_them() {
         )
         .expect("adding enum variants needs no migration steps");
         assert_eq!(prepared.migrations().len(), 1);
+    }
+
+    for moved in [
+        tasks(&["blocked", "todo", "done"], &["bug"]),
+        tasks(&["todo", "blocked", "done"], &["bug"]),
+        tasks(&["done", "todo"], &["bug"]),
+        tasks(&["todo", "done"], &["ui", "bug"]),
+    ] {
+        let refused = prepare_deployment(
+            &DeploymentCatalogue::default(),
+            request(
+                &moved,
+                &[v1.clone(), moved.clone()],
+                vec![migration(&v1, &moved, vec![])],
+            ),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.contains("reorders its enum variants; add new variants at the end"),
+            "{refused}"
+        );
     }
 
     for (dropped, variant) in [

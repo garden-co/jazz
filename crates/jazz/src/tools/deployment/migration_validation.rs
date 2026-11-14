@@ -39,12 +39,9 @@ fn optional(column: &ColumnSchema) -> bool {
     matches!(column.column_type, crate::records::ValueType::Nullable(_))
 }
 
-/// The enum variants `produced` declares that `target` does not, when the
-/// two columns differ only there.
-fn missing_enum_variants<'a>(
-    produced: &'a ColumnSchema,
-    target: &ColumnSchema,
-) -> Option<Vec<&'a String>> {
+/// Why `produced`'s enum variants don't reach `target`'s, when the two
+/// columns differ only there.
+fn enum_variants_problem(produced: &ColumnSchema, target: &ColumnSchema) -> Option<String> {
     let (Some(produced_variants), Some(target_variants)) = (
         produced.enum_variants.as_ref(),
         target.enum_variants.as_ref(),
@@ -59,8 +56,18 @@ fn missing_enum_variants<'a>(
     let missing = produced_variants
         .iter()
         .filter(|variant| !target_variants.contains(variant))
+        .map(|variant| format!("{variant:?}"))
         .collect::<Vec<_>>();
-    (!missing.is_empty()).then_some(missing)
+    Some(if missing.is_empty() {
+        "reorders its enum variants; add new variants at the end of the list".to_owned()
+    } else {
+        format!(
+            "no longer declares enum variant{} {}; adding enum variants is supported, renaming \
+             or removing them is not yet",
+            if missing.len() == 1 { "" } else { "s" },
+            missing.join(", ")
+        )
+    })
 }
 
 pub fn validate_migration_lens_between(
@@ -234,10 +241,12 @@ pub fn validate_migration_lens_between(
         }
         // Ordinary defaults affect future inserts, not existing-row projection.
         // Branch defaults were checked above because they determine row identity.
-        // A kept column may gain enum variants: rows written under the source
-        // hold only its variants, which the target still declares, so they
-        // pass unchanged. A variant the target no longer declares is refused
-        // below (renaming or removing one needs a value mapping).
+        // A kept column may gain enum variants at the end of its list: rows
+        // written under the source hold only its variants, which the target
+        // still declares in the same order, so they pass unchanged and sort
+        // as before (no store renumbers its tags). A variant the target no
+        // longer declares (renaming or removing one needs a value mapping),
+        // or one it moves, is refused below.
         for column in columns.values_mut() {
             column.default = None;
             if let (Some(produced), Some(target)) = (
@@ -247,7 +256,7 @@ pub fn validate_migration_lens_between(
                     .iter()
                     .find(|candidate| candidate.name == column.name)
                     .and_then(|target| target.enum_variants.as_ref()),
-            ) && produced.iter().all(|variant| target.contains(variant))
+            ) && target.starts_with(produced)
             {
                 column.enum_variants = Some(target.clone());
             }
@@ -270,17 +279,8 @@ pub fn validate_migration_lens_between(
                     (Some(_), None) => Some(format!("{name:?} is left over")),
                     (None, Some(_)) => Some(format!("{name:?} is missing")),
                     (Some(produced), Some(target)) if produced != target => Some(
-                        if let Some(missing) = missing_enum_variants(produced, target) {
-                            format!(
-                                "{name:?} no longer declares enum variant{} {}; adding enum \
-                                 variants is supported, renaming or removing them is not yet",
-                                if missing.len() == 1 { "" } else { "s" },
-                                missing
-                                    .iter()
-                                    .map(|variant| format!("{variant:?}"))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )
+                        if let Some(problem) = enum_variants_problem(produced, target) {
+                            format!("{name:?} {problem}")
                         } else if optional(produced) != optional(target) {
                             format!(
                                 "{name:?} comes out {} but is {}",

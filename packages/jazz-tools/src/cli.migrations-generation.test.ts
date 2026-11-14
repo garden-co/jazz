@@ -228,10 +228,12 @@ describe("cli migrations", () => {
     );
   });
 
-  // #5056: an enum column (or an array of enums) may gain variants, declared
-  // anywhere in the list, with nothing to fill in: its rows pass unchanged.
-  // A variant missing from the new list (removed, or renamed, which reads
-  // the same) still has no migration step.
+  // #5056: an enum column (or an array of enums) may gain variants at the
+  // end of its list, with nothing to fill in: its rows pass unchanged and
+  // sort as before. A variant missing from the new list (removed, or
+  // renamed, which reads the same) still has no migration step, and moving
+  // one (a reorder, or an addition before the end) would change how rows
+  // sort and rewrite every stored value, so it is refused too.
   it("adds enum variants with a stub that needs nothing filled in, and refuses dropping one", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
@@ -269,7 +271,7 @@ export default s.definePermissions(app, ({ policy }) => [policy.tasks.allowRead.
     const first = await createCatalogueMigration({ schemaDir: root, migrationsDir });
     assert(first.status === "initial-snapshot");
 
-    await writeFile(join(root, "schema.ts"), tasks('"blocked", "todo", "done"', '"bug", "ui"'));
+    await writeFile(join(root, "schema.ts"), tasks('"todo", "done", "blocked"', '"bug", "ui"'));
     const { result: added, logs } = await captureConsoleLogs(() =>
       createCatalogueMigration({ schemaDir: root, migrationsDir, name: "add-blocked" }),
     );
@@ -289,9 +291,9 @@ export default s.definePermissions(app, ({ policy }) => [policy.tasks.allowRead.
     await validate({ schemaDir: root });
 
     for (const [status, labels, column, variant] of [
-      ['"blocked", "todo"', '"bug", "ui"', "status", "done"],
-      ['"blocked", "open", "done"', '"bug", "ui"', "status", "todo"],
-      ['"blocked", "todo", "done"', '"ui"', "labels", "bug"],
+      ['"todo", "blocked"', '"bug", "ui"', "status", "done"],
+      ['"open", "done", "blocked"', '"bug", "ui"', "status", "todo"],
+      ['"todo", "done", "blocked"', '"ui"', "labels", "bug"],
     ] as const) {
       await writeFile(join(root, "schema.ts"), tasks(status, labels));
       await expect(
@@ -300,6 +302,19 @@ export default s.definePermissions(app, ({ policy }) => [policy.tasks.allowRead.
         `Changing the enum variants of column "tasks.${column}" is not supported yet: ` +
           `it no longer declares "${variant}". A migration can add enum variants, but renaming ` +
           "or removing one is planned for a later release.",
+      );
+    }
+    for (const [status, labels, column] of [
+      ['"blocked", "todo", "done"', '"bug", "ui"', "status"],
+      ['"todo", "archived", "done", "blocked"', '"bug", "ui"', "status"],
+      ['"todo", "done", "blocked"', '"ui", "bug"', "labels"],
+    ] as const) {
+      await writeFile(join(root, "schema.ts"), tasks(status, labels));
+      await expect(
+        createCatalogueMigration({ schemaDir: root, migrationsDir, name: "drop-variant" }),
+      ).rejects.toThrow(
+        `Changing the order of the enum variants of column "tasks.${column}" is not supported: ` +
+          "add new variants at the end of the list.",
       );
     }
     expect((await readdir(migrationsDir)).filter((name) => name.includes("drop-variant"))).toEqual(

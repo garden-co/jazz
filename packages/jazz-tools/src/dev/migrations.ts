@@ -293,9 +293,10 @@ export const UNFILLED_STUB_TODO =
  * A column kept under the same name must keep its type and optionality: no
  * migration step changes them in place, so a stub for such a change could
  * never typecheck (#2163). That includes a JSON column's schema. An enum
- * column (or an array of enums) may gain variants, since the rows it holds
- * pass unchanged, but not lose one: renaming or removing a variant needs a
- * value mapping no migration step has yet. Refuse those with the supported
+ * column (or an array of enums) may gain variants at the end of its list,
+ * since the rows it holds pass unchanged and sort as before, but not lose
+ * one (renaming or removing a variant needs a value mapping no migration
+ * step has yet) or reorder them. Refuse those with the supported
  * alternative.
  */
 function refuseUnsupportedSharedColumnChanges(
@@ -317,6 +318,14 @@ function refuseUnsupportedSharedColumnChanges(
     if (columnTypeSignature(source.column_type) !== columnTypeSignature(column.column_type)) {
       if (onlyAddsEnumVariants(source.column_type, column.column_type)) continue;
       const enumChange = enumVariantChange(source.column_type, column.column_type);
+      if (enumChange && enumChange.dropped.length === 0) {
+        throw new Error(
+          `Changing the order of the enum variants of column ${JSON.stringify(name)} is not ` +
+            `supported: add new variants at the end of the list. A variant's position is its ` +
+            `sort order, so moving one would change how existing rows sort and rewrite every ` +
+            `stored value of the column.`,
+        );
+      }
       if (enumChange) {
         const dropped = enumChange.dropped.map((variant) => JSON.stringify(variant)).join(", ");
         throw new Error(
@@ -349,7 +358,12 @@ function enumVariantAdditionNotes(fromTable: WasmSchema[string], toTable: WasmSc
     const source = fromTable.columns.find((candidate) => candidate.name === column.name);
     if (!source) return [];
     const change = enumVariantChange(source.column_type, column.column_type);
-    if (!change || change.added.length === 0 || change.dropped.length > 0) return [];
+    if (
+      !change ||
+      change.added.length === 0 ||
+      !onlyAddsEnumVariants(source.column_type, column.column_type)
+    )
+      return [];
     const added = change.added.map((variant) => JSON.stringify(variant)).join(", ");
     return [
       `Column ${JSON.stringify(column.name)} gains enum variant${change.added.length === 1 ? "" : "s"} ` +

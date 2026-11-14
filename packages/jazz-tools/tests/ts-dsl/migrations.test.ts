@@ -322,17 +322,17 @@ describe("typed migration object syntax", () => {
     );
   });
 
-  // #5056: an enum (or an array of enums) gaining variants, anywhere in its
-  // list, needs no step: the migration connects the versions with a table
+  // #5056: an enum (or an array of enums) gaining variants at the end of its
+  // list needs no step: the migration connects the versions with a table
   // lens of no operations, also under a renamed table. Dropping a variant
-  // (or renaming one) does not typecheck.
+  // (or renaming one), or moving one, does not typecheck.
   it("connects a table whose enum columns gain variants with an empty lens", () => {
     const from = {
       tasks: s.table({ status: s.enum("todo", "done"), labels: s.array(s.enum("bug")) }, {}),
     };
     const to = {
       tasks: s.table(
-        { status: s.enum("blocked", "todo", "done"), labels: s.array(s.enum("bug", "ui")) },
+        { status: s.enum("todo", "done", "blocked"), labels: s.array(s.enum("bug", "ui")) },
         {},
       ),
     };
@@ -372,6 +372,18 @@ describe("typed migration object syntax", () => {
         toHash: "bbbbbbbbbbbb",
         from,
         to: { tasks: s.table({ status: s.enum("todo"), labels: s.array(s.enum("bug")) }, {}) },
+      });
+      // @ts-expect-error a new variant goes at the end of the list
+      m.defineMigration({
+        fromHash: "aaaaaaaaaaaa",
+        toHash: "bbbbbbbbbbbb",
+        from,
+        to: {
+          tasks: s.table(
+            { status: s.enum("blocked", "todo", "done"), labels: s.array(s.enum("bug")) },
+            {},
+          ),
+        },
       });
       // @ts-expect-error renaming a variant drops the old one
       m.defineMigration({

@@ -490,6 +490,8 @@ fn a_replica_tags_variants_itself_and_rows_travel_by_name() {
 /// ```
 #[test]
 fn a_session_on_an_admitted_version_writes_the_variant_it_adds() {
+    // As a migration may add one: at the end of the list.
+    let v2 = || tasks(&["todo", "doing", "done", "blocked"]);
     let dir = tempfile::tempdir().unwrap();
     let server = authority_at(v1(), &dir.path().join("server.sqlite"));
     block_on(server.admit_schema_with_lenses(v2(), &[lens(&v1(), &v2(), vec![])])).unwrap();
@@ -527,7 +529,7 @@ fn a_session_on_an_admitted_version_writes_the_variant_it_adds() {
     pump(&server, &[&alice, &bob, &carol]);
 
     // Accepted: it stays with its writer and reaches the authority and bob.
-    let both = [(2, "blocked".to_owned()), (1, "todo".to_owned())];
+    let both = [(1, "todo".to_owned()), (2, "blocked".to_owned())];
     assert_eq!(statuses(&alice, by_status()), both);
     assert_eq!(
         statuses(&server, Query::from("tasks").filter(status_is("blocked"))),

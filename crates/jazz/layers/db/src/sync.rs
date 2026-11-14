@@ -10146,29 +10146,34 @@ impl Inner {
 
     /// `view` governed by session `index`'s policies: unchanged unless the
     /// session is pinned to a bundle, whose policies then replace its own.
-    /// The stored view a session's commits apply under, its enum cells
+    /// The stored view a session's commits apply under: its enum cells
     /// checked by the variants of the version the session writes under
-    /// ([`Schema::with_enum_variants_of`]). A session without a version (a
-    /// trusted link) goes by the current schema's.
-    pub(crate) fn versioned_stored_view(&mut self, index: usize) -> Rc<Schema> {
+    /// ([`Schema::with_enum_variants_of`]), governed by its bundle's
+    /// policies when it is pinned to one. A session without a version (a
+    /// trusted link) goes by the current schema's variants. Built once per
+    /// bundle and version for each stored view: every session on them
+    /// shares it.
+    pub(crate) fn session_stored_view(&mut self, index: usize) -> Rc<Schema> {
         let stored = self.stored_view();
         let Some(version) = self.written_version(index) else {
-            return stored;
+            return self.governed_view(&stored, index);
         };
-        let Some(schema) = self.session_schema(index) else {
-            return stored;
-        };
-        let mut cache = self.version_stored_views.borrow_mut();
-        if let Some((built, from, view)) = cache.get(&version)
+        let key = (self.sessions[index].bundle, version);
+        if let Some((built, view)) = self.version_stored_views.borrow().get(&key)
             && Rc::ptr_eq(built, &stored)
-            && Rc::ptr_eq(from, &schema)
         {
             return view.clone();
         }
-        let view = stored
-            .with_enum_variants_of(&schema)
-            .map_or_else(|| stored.clone(), Rc::new);
-        cache.insert(version, (stored, schema, view.clone()));
+        let overlaid = match self.session_schema(index) {
+            Some(schema) => stored
+                .with_enum_variants_of(&schema)
+                .map_or_else(|| stored.clone(), Rc::new),
+            None => stored.clone(),
+        };
+        let view = self.governed_view(&overlaid, index);
+        self.version_stored_views
+            .borrow_mut()
+            .insert(key, (stored, view.clone()));
         view
     }
 
@@ -12491,8 +12496,7 @@ impl Db {
     /// bundle's when it is pinned.
     fn stored_db_for(&self, index: usize) -> Db {
         let mut inner = self.inner.borrow_mut();
-        let stored = inner.versioned_stored_view(index);
-        let view = inner.governed_view(&stored, index);
+        let view = inner.session_stored_view(index);
         drop(inner);
         Db {
             inner: self.inner.clone(),

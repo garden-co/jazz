@@ -6,7 +6,7 @@
 // variant must work through the backend all the same.
 //
 //   old (v1: todo, done) ──insert "todo"──► backend (v2) ──► core ──► current reads "todo"
-//   current (v2: blocked, todo, done) ──insert "blocked"──► ... ──► old reads "blocked"
+//   current (v2: todo, done, blocked) ──insert "blocked"──► ... ──► old reads "blocked"
 //   old ──insert "blocked"──✗ (not one of v1's variants)
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s, migration as m } from "../../src/index.js";
@@ -28,12 +28,12 @@ const schemaV1 = {
     {},
   ),
 };
-// `blocked` is declared first: a new variant may go anywhere in the list.
+// A new variant goes at the end of the list, so earlier rows sort as before.
 const schemaV2 = {
   tasks: s.table(
     {
       title: s.string(),
-      status: s.enum("blocked", "todo", "done"),
+      status: s.enum("todo", "done", "blocked"),
       labels: s.array(s.enum("bug", "ui")).optional(),
     },
     {},
@@ -41,12 +41,16 @@ const schemaV2 = {
 };
 const v1 = s.defineApp(schemaV1, { migrations: "none" });
 const v2 = s.defineApp(schemaV2, { migrations: "none" });
-const allowAll = <App extends typeof v1 | typeof v2>(app: App) =>
-  s.definePermissions(app, ({ policy }) => {
-    policy.tasks.allowRead.always();
-    policy.tasks.allowInsert.always();
-    policy.tasks.allowUpdate.always();
-  });
+const allowAllV1 = s.definePermissions(v1, ({ policy }) => {
+  policy.tasks.allowRead.always();
+  policy.tasks.allowInsert.always();
+  policy.tasks.allowUpdate.always();
+});
+const allowAllV2 = s.definePermissions(v2, ({ policy }) => {
+  policy.tasks.allowRead.always();
+  policy.tasks.allowInsert.always();
+  policy.tasks.allowUpdate.always();
+});
 // v2's permissions name the variant it adds.
 const onlyBlocked = s.definePermissions(v2, ({ policy }) => {
   policy.tasks.allowRead.where({ status: "blocked" });
@@ -61,7 +65,7 @@ describe("adding an enum variant in a migration", () => {
   async function start(permissionsV2: typeof onlyBlocked) {
     const core = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const deployment = { serverUrl: core.url, appId: core.appId, adminSecret: core.adminSecret };
-    const deployed = await deploy({ ...deployment, schema: v1, permissions: allowAll(v1) });
+    const deployed = await deploy({ ...deployment, schema: v1, permissions: allowAllV1 });
     const migration = m.defineMigration({
       fromHash: deployed.schema.hash,
       toHash: await computeSchemaHash(v2.wasmSchema),
@@ -96,7 +100,7 @@ describe("adding an enum variant in a migration", () => {
   });
 
   it("lets older rows read on the new schema and the new variant read on the old one", async () => {
-    await start(allowAll(v2));
+    await start(allowAllV2);
     const old = await open();
     const current = await open();
     const earlier = await old
@@ -116,14 +120,19 @@ describe("adding an enum variant in a migration", () => {
     // A client that never wrote it filters and sorts by the new variant.
     const fresh = await open();
     await expect.poll(() => fresh.all(v2.tasks.where({ status: "blocked" }))).toEqual([laterRow]);
-    // v2 declares `blocked` first, so it sorts first.
+    // v2 declares `blocked` last, so it sorts after `todo`, and before it
+    // descending.
     await expect
       .poll(async () => (await fresh.all(v2.tasks.orderBy("status", "asc"))).map((t) => t.title))
-      .toEqual(["later", "earlier"]);
+      .toEqual(["earlier", "later"]);
+    expect((await fresh.all(v2.tasks.orderBy("status", "desc"))).map((t) => t.title)).toEqual([
+      "later",
+      "earlier",
+    ]);
   });
 
   it("still checks an older client's writes against its own variants", async () => {
-    await start(allowAll(v2));
+    await start(allowAllV2);
     const old = await open();
     expect(() =>
       old.insert(v1.tasks, { title: "nope", status: "blocked" as "todo", labels: null }),
@@ -143,6 +152,12 @@ describe("adding an enum variant in a migration", () => {
     const reader = await open();
     await expect
       .poll(() => reader.all(v2.tasks))
+      .toEqual([{ id: shown.id, title: "shown", status: "blocked", labels: null }]);
+    // A client still on v1 is governed by the same bundle: the policy names
+    // a variant v1 doesn't declare, and it reads the row by that name.
+    const old = await open();
+    await expect
+      .poll(() => old.all(v1.tasks))
       .toEqual([{ id: shown.id, title: "shown", status: "blocked", labels: null }]);
   });
 });
