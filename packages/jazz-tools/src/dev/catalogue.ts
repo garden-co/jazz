@@ -7,13 +7,18 @@ import type { ColumnType as WasmColumnType, WasmSchema } from "../drivers/types.
 import type { DefinedMigration } from "../migrations.js";
 import { schemaDefinitionToAst } from "../migrations.js";
 import { toValue } from "../runtime/value-converter.js";
-import { shippedArtifact, SHIP_ARTIFACT_HINT } from "../runtime/app-artifact.js";
+import {
+  isAppPermissions,
+  shippedArtifact,
+  SHIP_ARTIFACT_HINT,
+  SHIP_PERMISSIONS_HINT,
+  type AppPermissions,
+} from "../runtime/app-artifact.js";
 import type { Lens, SqlType } from "../schema.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import {
   collectMissingExplicitPolicyDiagnostics,
   mergePermissionsIntoWasmSchema,
-  normalizePermissionsForWasm,
 } from "../schema-permissions.js";
 import { runtimeSchemaJsonReplacer } from "../drivers/schema-wire.js";
 import { schemaToWasm } from "../codegen/schema-reader.js";
@@ -371,57 +376,65 @@ export async function deployArtifacts(
 /**
  * Publish an app as its code declares it. An app that ships its
  * `jazz.app.json` (`defineApp(schema, { artifact })`) publishes exactly the
- * deployment Jazz's Rust reader takes from the file: every schema version,
- * migration and the permissions it holds. The file must be the one the code
- * declares: the schema `defineApp` built must be its current version, and
- * `permissions` must make its bundle, or it is out of date and refused. An
- * app on `{ migrations: "none" }` publishes its schema alone, with
- * `permissions`. This is what `createJazz` publishes on start, so anything
- * else that serves the app (a test server) must publish the same, or a client
- * opening the app with its lenses disagrees with the server about its history.
+ * deployment Jazz's Rust reader takes from that file and its
+ * `jazz.permissions.json` (`permissions`): every schema version, migration
+ * and the permissions the backend's file holds. The schema `defineApp` built
+ * must be the file's current version, or the file is out of date and
+ * refused. An app on `{ migrations: "none" }` publishes its schema alone,
+ * with the permissions `definePermissions` made. This is what `createJazz`
+ * publishes on start, so anything else that serves the app (a test server)
+ * must publish the same, or a client opening the app with its lenses
+ * disagrees with the server about its history.
  */
 export async function deployApp(
   options: CatalogueServerOptions & {
     app: SchemaSourceInput;
-    permissions: CompiledPermissionsMap;
+    permissions: BackendPermissions;
     allowDroppingHistory?: boolean;
   },
 ): Promise<DeployResult> {
   const declared = resolveSchemaSource(options.app);
   const schema = mergePermissionsIntoWasmSchema(declared, {});
-  await validateSchemaAndPermissions(schema, options.permissions);
-  const artifact = shippedArtifact(declared);
-  if (!artifact) {
+  const resolved = await resolveAppPermissions(options.app, options.permissions);
+  await validateSchemaAndPermissions(schema, resolved.permissions);
+  if (!resolved.deployment) {
     const targetSchemaHash = await computeSchemaHash(schema);
     const graph = await fetchMigrationGraph(options);
     return deployArtifacts(options, graph, {
       targetSchemaHash,
       schemas: [{ hash: targetSchemaHash, schema }],
       migrations: [],
-      permissions: options.permissions,
+      permissions: resolved.permissions,
     });
   }
-  const loaded = await loadArtifactDeployment(artifact, schema, options.permissions);
+  const loaded = resolved.deployment;
   const graph = await fetchMigrationGraph(options);
   const result = await deployArtifacts(options, graph, {
     targetSchemaHash: loaded.current,
     schemas: loaded.deployment.schemas.map(({ hash, schema }) => ({ hash, schema: schema.tables })),
     migrations: loaded.deployment.migrations,
-    permissions: options.permissions,
+    permissions: resolved.permissions,
     publishedPermissions: loaded.deployment.permissions,
   });
-  // The core computes the bundle id as the file's writer did; anything else
+  // The core computes the bundle id as the files' writer did; anything else
   // would pin this backend's sessions to permissions the file doesn't hold.
   if (result.bundle && result.bundle !== loaded.bundle) {
     throw new Error(
-      `The core published bundle ${result.bundle} for this app, but its jazz.app.json names bundle ${loaded.bundle}: is the core older than this jazz-tools?`,
+      `The core published bundle ${result.bundle} for this app, but its jazz.permissions.json names bundle ${loaded.bundle}: is the core older than this jazz-tools?`,
     );
   }
   return result;
 }
 
-/** What Jazz's Rust reader takes from a `jazz.app.json` (jazz-napi `loadAppArtifact`). */
-interface LoadedArtifact {
+/**
+ * What a backend serving an app is given as its permissions: the app's
+ * `jazz.permissions.json` when the app ships its `jazz.app.json`, or the map
+ * `definePermissions` makes for an app on `{ migrations: "none" }`.
+ */
+export type BackendPermissions = CompiledPermissionsMap | AppPermissions;
+
+/** What Jazz's Rust reader takes from an app's two files (jazz-napi `loadAppArtifact`). */
+export interface LoadedArtifact {
   current: string;
   bundle: string;
   deployment: {
@@ -432,38 +445,104 @@ interface LoadedArtifact {
   };
 }
 
+/** Why `permissions` can't serve `app`, if it can't: checked when `createJazz` is called. */
+export function backendPermissionsMismatch(
+  app: SchemaSourceInput,
+  permissions: BackendPermissions,
+): string | null {
+  const artifact = shippedArtifact(resolveSchemaSource(app));
+  if (artifact && !isAppPermissions(permissions)) {
+    return (
+      "an app that ships its jazz.app.json takes its permissions from jazz.permissions.json, not from definePermissions(...). " +
+      SHIP_PERMISSIONS_HINT
+    );
+  }
+  if (!artifact && isAppPermissions(permissions)) {
+    return (
+      "jazz.permissions.json is for an app that ships its jazz.app.json, but this app's defineApp was given none. " +
+      SHIP_ARTIFACT_HINT
+    );
+  }
+  return null;
+}
+
+const resolvedPermissions = new WeakMap<
+  object,
+  WeakMap<object, Promise<{ permissions: CompiledPermissionsMap; deployment?: LoadedArtifact }>>
+>();
+
 /**
- * `artifact` read and checked by Jazz's Rust reader, once it is shown to be
- * the file of the app whose schema is `schema` with `permissions`: which half
- * drifted is named, since `jazz-tools validate` regenerates the file from
- * schema.ts and permissions.ts together.
+ * The permissions a backend serving `app` enforces, as `definePermissions`
+ * makes them, and for an app that ships its `jazz.app.json`, the deployment
+ * Jazz's Rust reader takes from it and `permissions` (its
+ * `jazz.permissions.json`). Refuses permissions that can't serve the app
+ * ({@link backendPermissionsMismatch}), and a file that is out of date with
+ * schema.ts. The same app and permissions always give the same result.
  */
-async function loadArtifactDeployment(
-  artifact: unknown,
-  schema: WasmSchema,
-  permissions: CompiledPermissionsMap,
-): Promise<LoadedArtifact> {
+export function resolveAppPermissions(
+  app: SchemaSourceInput,
+  permissions: BackendPermissions,
+): Promise<{ permissions: CompiledPermissionsMap; deployment?: LoadedArtifact }> {
+  const schema = resolveSchemaSource(app);
+  let forSchema = resolvedPermissions.get(schema);
+  if (!forSchema) resolvedPermissions.set(schema, (forSchema = new WeakMap()));
+  let resolved = forSchema.get(permissions);
+  if (!resolved) {
+    resolved = resolveUncached(schema, permissions);
+    forSchema.set(permissions, resolved);
+  }
+  return resolved;
+}
+
+async function resolveUncached(
+  declared: WasmSchema,
+  permissions: BackendPermissions,
+): Promise<{ permissions: CompiledPermissionsMap; deployment?: LoadedArtifact }> {
+  const mismatch = backendPermissionsMismatch(declared, permissions);
+  if (mismatch) throw new Error(`createJazz: ${mismatch}`);
+  const artifact = shippedArtifact(declared);
+  if (!artifact || !isAppPermissions(permissions)) {
+    return { permissions: permissions as CompiledPermissionsMap };
+  }
   const napi = await import("jazz-napi");
-  const loaded = napi.loadAppArtifact(JSON.stringify(artifact)) as unknown as LoadedArtifact;
-  const tables = JSON.stringify(schema, runtimeSchemaJsonReplacer);
-  const hash = napi.schemaHash(tables);
+  const loaded = napi.loadAppArtifact(
+    JSON.stringify(artifact),
+    JSON.stringify(permissions),
+  ) as unknown as LoadedArtifact;
+  const hash = napi.schemaHash(
+    JSON.stringify(mergePermissionsIntoWasmSchema(declared, {}), runtimeSchemaJsonReplacer),
+  );
   if (hash !== loaded.current) {
     throw new Error(
       `jazz.app.json is out of date with schema.ts: the app's schema is ${hash}, but the file's current schema is ${loaded.current}. ` +
-        SHIP_ARTIFACT_HINT,
+        "Run `npx jazz-tools validate` and commit jazz.app.json and jazz.permissions.json.",
     );
   }
-  const bundle = napi.permissionsBundleId(
-    tables,
-    JSON.stringify(normalizePermissionsForWasm(permissions), runtimeSchemaJsonReplacer),
-  );
-  if (bundle !== loaded.bundle) {
-    throw new Error(
-      `jazz.app.json is out of date with permissions.ts: the permissions createJazz was given make bundle ${bundle}, but the file holds bundle ${loaded.bundle}. ` +
-        SHIP_ARTIFACT_HINT,
+  return { permissions: compiledFromEngine(loaded.deployment.permissions), deployment: loaded };
+}
+
+/**
+ * The engine's JSON for a permissions bundle as `definePermissions` makes
+ * it: the same, except that the engine writes an absent `using` or
+ * `with_check` as `null`, which is dropped. Nothing deeper changes: a `null`
+ * inside a policy is a literal.
+ */
+function compiledFromEngine(permissions: Record<string, unknown>): CompiledPermissionsMap {
+  const operation = (policy: unknown) =>
+    Object.fromEntries(
+      Object.entries((policy ?? {}) as Record<string, unknown>).filter(([, expr]) => expr !== null),
     );
-  }
-  return loaded;
+  return Object.fromEntries(
+    Object.entries(permissions).map(([table, policies]) => [
+      table,
+      Object.fromEntries(
+        Object.entries(policies as Record<string, unknown>).map(([name, policy]) => [
+          name,
+          operation(policy),
+        ]),
+      ),
+    ]),
+  ) as CompiledPermissionsMap;
 }
 
 /** Publish schemas, migrations and permissions together. */

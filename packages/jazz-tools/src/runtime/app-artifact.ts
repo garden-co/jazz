@@ -1,11 +1,13 @@
 import type { WasmSchema } from "../drivers/types.js";
 
 /**
- * An app's `jazz.app.json`: its schema versions, the migrations between them,
- * the permissions of its current version and metadata for typed code, in one
- * language-neutral file (SPEC 10.10). `jazz-tools validate` and
- * `jazz-tools migrations create` write it beside schema.ts, even while the app
- * has a single version; the app commits it and passes it to `defineApp`:
+ * An app's `jazz.app.json`: its schema versions, the migrations between them
+ * and metadata for typed code, in one language-neutral file (SPEC 10.10). It
+ * holds no permissions: those are in `jazz.permissions.json`
+ * ({@link AppPermissions}), which only backends read, so no client bundle
+ * carries them. `jazz-tools validate` and `jazz-tools migrations create`
+ * write both beside schema.ts, even while the app has a single version; the
+ * app commits them and passes this one to `defineApp`:
  *
  * ```ts
  * import artifact from "./jazz.app.json" with { type: "json" };
@@ -21,15 +23,57 @@ import type { WasmSchema } from "../drivers/types.js";
 export interface AppArtifact {
   readonly format: number;
   readonly current: string;
-  readonly bundle: string;
   readonly schemas: readonly unknown[];
   readonly migrations?: readonly unknown[];
-  readonly permissions?: unknown;
   readonly codegen?: unknown;
+}
+
+/**
+ * An app's `jazz.permissions.json`: the permissions of its current version
+ * (`schema`) and the bundle id they make (SPEC 10.10). Only backends read
+ * it: `createJazz({ app, permissions })` takes it as `permissions`,
+ *
+ * ```ts
+ * import permissions from "./jazz.permissions.json" with { type: "json" };
+ * const jazz = createJazz({ app, permissions, store });
+ * ```
+ *
+ * and publishes exactly what it holds. Like `jazz.app.json`, Jazz's Rust
+ * reader checks it, and refuses one that wasn't written with the app's file.
+ */
+export interface AppPermissions {
+  readonly format: number;
+  readonly schema: string;
+  readonly permissions?: Readonly<Record<string, unknown>>;
+  readonly bundle: string;
 }
 
 /** Where the app's `jazz.app.json` lives, beside schema.ts. */
 export const APP_ARTIFACT_FILE = "jazz.app.json";
+
+/** Where the app's `jazz.permissions.json` lives, beside schema.ts. */
+export const APP_PERMISSIONS_FILE = "jazz.permissions.json";
+
+/** How to give a backend its permissions: the fix its refusals name. */
+export const SHIP_PERMISSIONS_HINT =
+  'Pass the app\'s jazz.permissions.json: `import permissions from "./jazz.permissions.json" with { type: "json" };` ' +
+  "then `createJazz({ app, permissions, ... })`. `npx jazz-tools validate` writes it from permissions.ts beside schema.ts.";
+
+/**
+ * Whether `value` is a `jazz.permissions.json` rather than the map
+ * `definePermissions` makes. A table named `format` holds policies, never
+ * a number, so the two can't be confused.
+ */
+export function isAppPermissions(value: unknown): value is AppPermissions {
+  const candidate = value as Partial<Record<keyof AppPermissions, unknown>> | null;
+  return (
+    typeof candidate === "object" &&
+    candidate !== null &&
+    typeof candidate.format === "number" &&
+    typeof candidate.schema === "string" &&
+    typeof candidate.bundle === "string"
+  );
+}
 
 /** How to give an app its `jazz.app.json`: the fix every refusal below names. */
 export const SHIP_ARTIFACT_HINT =
@@ -91,9 +135,16 @@ function checkedArtifact(value: unknown): AppArtifact {
     candidate !== null &&
     typeof candidate.format === "number" &&
     typeof candidate.current === "string" &&
-    typeof candidate.bundle === "string" &&
     Array.isArray(candidate.schemas)
   ) {
+    if ("permissions" in candidate || "bundle" in candidate) {
+      // Clients ship this file: one that still holds the permissions would
+      // put them in every client bundle.
+      throw new Error(
+        "defineApp was given a jazz.app.json that still holds the app's permissions. " +
+          "Run `npx jazz-tools validate`: it moves them to jazz.permissions.json, which only your backend reads.",
+      );
+    }
     return candidate as AppArtifact;
   }
   if (typeof candidate === "object" && candidate !== null && "migrations" in candidate) {
@@ -109,7 +160,7 @@ function checkedArtifact(value: unknown): AppArtifact {
     );
   }
   throw new Error(
-    "defineApp's `artifact` is not a jazz.app.json (it needs `format`, `current`, `bundle` and `schemas`). " +
+    "defineApp's `artifact` is not a jazz.app.json (it needs `format`, `current` and `schemas`). " +
       SHIP_ARTIFACT_HINT,
   );
 }

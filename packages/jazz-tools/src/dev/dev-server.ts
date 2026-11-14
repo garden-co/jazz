@@ -11,7 +11,7 @@ import { JazzServer } from "jazz-napi";
 import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { shippedArtifact, shipsMigrations } from "../runtime/app-artifact.js";
-import { deployApp } from "./catalogue.js";
+import { deployApp, resolveAppPermissions, type BackendPermissions } from "./catalogue.js";
 
 export { deploy, type DeployOptions } from "./catalogue.js";
 
@@ -46,7 +46,7 @@ interface LocalJazzServerOptions {
 
 export type StartLocalJazzServerOptions = LocalJazzServerOptions &
   (
-    | { schema: SchemaSourceInput; permissions: CompiledPermissionsMap }
+    | { schema: SchemaSourceInput; permissions: BackendPermissions }
     | { schema?: undefined; permissions?: undefined }
   );
 
@@ -119,7 +119,12 @@ export async function startLocalJazzServer(
   const schema =
     declared === undefined || shipsHistory
       ? undefined
-      : encodeSchema(mergePermissionsIntoWasmSchema(declared.schema, declared.permissions));
+      : encodeSchema(
+          mergePermissionsIntoWasmSchema(
+            declared.schema,
+            (await resolveAppPermissions(declared.source, declared.permissions)).permissions,
+          ),
+        );
   const appId = options.appId ?? DEFAULT_APP_ID;
   // Ask the server to bind port 0 when callers do not require a particular
   // address. Unlike probing a candidate port first, this is atomic and remains

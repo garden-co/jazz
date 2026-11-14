@@ -33,6 +33,7 @@ import type { WasmSchema } from "../drivers/types.js";
 import type { DefinedMigration } from "../migrations.js";
 import {
   appArtifactPath,
+  appPermissionsPath,
   GENERATED_MIGRATIONS_MODULE_HEADER,
   hasRootSchema,
   importsAppArtifact,
@@ -1652,14 +1653,15 @@ function isMigrationFile(fileName: string): boolean {
 type MigrationEdge = { fromHash: string; toHash: string; migration: DefinedMigration };
 
 /**
- * The `jazz.app.json` this project builds from schema.ts, permissions.ts,
- * its snapshots and its migration files: the canonical text Jazz's Rust
- * writer renders, which refuses what a deploy or a reader would.
+ * The `jazz.app.json` and `jazz.permissions.json` this project builds from
+ * schema.ts, permissions.ts, its snapshots and its migration files: the
+ * canonical texts Jazz's Rust writer renders, which refuses what a deploy or
+ * a reader would.
  */
 async function buildAppArtifact(
   compiled: LoadedSchemaProject & { permissions: NonNullable<LoadedSchemaProject["permissions"]> },
   migrationsDir: string,
-): Promise<string> {
+): Promise<AppFiles> {
   const { current, schemas, order, edges } = await localClientMigrations(
     compiled.wasmSchema,
     migrationsDir,
@@ -1737,29 +1739,47 @@ function definitionTsOnlyColumns(
   }
 }
 
-/** Write the app's `jazz.app.json`, leaving it alone when unchanged so a watcher sees no edit. */
-async function writeAppArtifact(schemaFile: string, text: string): Promise<void> {
-  const path = appArtifactPath(schemaFile);
-  await assertNoSymlinkComponents(path, true);
-  if ((await readFile(path, "utf8").catch(() => null)) === text) return;
-  await writeFile(path, text);
+/** An app's two files, as Jazz's Rust writer renders them. */
+interface AppFiles {
+  /** `jazz.app.json`, which the app and its clients ship. */
+  app: string;
+  /** `jazz.permissions.json`, which only its backends read. */
+  permissions: string;
 }
 
-/** `validate --check`: the committed `jazz.app.json` must be what validate would write. */
+/** Each of `files` with the path it is written to, beside `schemaFile`. */
+function appFilePaths(schemaFile: string, files: AppFiles): Array<[path: string, text: string]> {
+  return [
+    [appArtifactPath(schemaFile), files.app],
+    [appPermissionsPath(schemaFile), files.permissions],
+  ];
+}
+
+/** Write the app's two files, leaving each alone when unchanged so a watcher sees no edit. */
+async function writeAppArtifact(schemaFile: string, files: AppFiles): Promise<void> {
+  for (const [path, text] of appFilePaths(schemaFile, files)) {
+    await assertNoSymlinkComponents(path, true);
+    if ((await readFile(path, "utf8").catch(() => null)) === text) continue;
+    await writeFile(path, text);
+  }
+}
+
+/** `validate --check`: the committed files must be what validate would write. */
 async function checkAppArtifact(
   schemaDir: string,
   schemaFile: string,
-  text: string,
+  files: AppFiles,
 ): Promise<void> {
-  const path = appArtifactPath(schemaFile);
-  const committed = await readFile(path, "utf8").catch(() => null);
-  if (committed === text) return;
-  const shown = relative(schemaDir, path) || path;
-  throw new Error(
-    committed === null
-      ? `${shown} is missing. Run \`jazz-tools validate\` to write it, and commit it.`
-      : `${shown} is not what schema.ts, permissions.ts and the migrations make: run \`jazz-tools validate\` and commit the jazz.app.json it writes.`,
-  );
+  for (const [path, text] of appFilePaths(schemaFile, files)) {
+    const committed = await readFile(path, "utf8").catch(() => null);
+    if (committed === text) continue;
+    const shown = relative(schemaDir, path) || path;
+    throw new Error(
+      committed === null
+        ? `${shown} is missing. Run \`jazz-tools validate\` to write it, and commit it.`
+        : `${shown} is not what schema.ts, permissions.ts and the migrations make: run \`jazz-tools validate\` and commit the jazz.app.json and jazz.permissions.json it writes.`,
+    );
+  }
 }
 
 /** The migrations/index.ts beside `schemaFile`, if jazz-tools generated it before alpha.63. */

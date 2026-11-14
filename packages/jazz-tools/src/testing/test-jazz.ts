@@ -18,7 +18,7 @@ import {
   type LocalJazzServerHandle,
   type StartLocalJazzServerOptions,
 } from "../dev/dev-server.js";
-import type { DeployResult } from "../dev/catalogue.js";
+import { resolveAppPermissions, type BackendPermissions, type DeployResult } from "../dev/catalogue.js";
 
 /** What a client needs to sync as a signed-in user, spread into its config. */
 export interface TestUserConfig {
@@ -88,7 +88,7 @@ export interface TestJazz {
   redeploy(
     next: Pick<DeployOptions, "migration" | "migrations" | "schemas"> & {
       app: SchemaSourceInput;
-      permissions: CompiledPermissionsMap;
+      permissions: BackendPermissions;
     },
   ): Promise<DeployResult>;
   /** Stop the app's Jazz, its origins and (if this started it) the core. */
@@ -97,7 +97,8 @@ export interface TestJazz {
 
 export interface StartTestJazzOptions {
   app: SchemaSourceInput;
-  permissions: CompiledPermissionsMap;
+  /** The app's `jazz.permissions.json`, or `definePermissions`' map for an app on `{ migrations: "none" }`. */
+  permissions: BackendPermissions;
   /** A running core to front; by default one is started in memory. */
   core?: LocalJazzServerHandle;
   /** Options for the core started when `core` is not given. */
@@ -152,7 +153,7 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
   // Every connection, including upgraded sync sockets, which `server.close`
   // would otherwise wait on: a redeploy or stop drops them, as a real one does.
   const sockets = new Set<Socket>();
-  const boot = (app: SchemaSourceInput, permissions: CompiledPermissionsMap) =>
+  const boot = (app: SchemaSourceInput, permissions: BackendPermissions) =>
     createTestJazz({
       ...options.jazz,
       app: app as CreateJazzOptions["app"],
@@ -262,7 +263,7 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
         appId: core.appId,
         adminSecret: core.adminSecret,
         schema: app,
-        permissions,
+        permissions: (await resolveAppPermissions(app, permissions)).permissions,
       });
       const ports = servers.map((server) => (server.address() as AddressInfo).port);
       await closeOrigins();

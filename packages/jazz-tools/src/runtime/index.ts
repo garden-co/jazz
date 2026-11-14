@@ -67,7 +67,7 @@ export {
   type TableProxy,
 } from "./db.js";
 export type { AccountDbConfig as DbConfig } from "../accounts/context.js";
-export type { AppArtifact } from "./app-artifact.js";
+export type { AppArtifact, AppPermissions } from "./app-artifact.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
 export type {
   LinkFailure,

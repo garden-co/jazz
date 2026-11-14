@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { build, type Plugin } from "esbuild";
 import { schemaToWasm } from "./codegen/schema-reader.js";
-import { APP_ARTIFACT_FILE } from "./runtime/app-artifact.js";
+import { APP_ARTIFACT_FILE, APP_PERMISSIONS_FILE } from "./runtime/app-artifact.js";
 import type { SchemaDefinition } from "./typed-app.js";
 import type { Column, OperationPolicy, Schema, SqlType, TablePolicies } from "./schema.js";
 import type {
@@ -85,17 +85,41 @@ async function bundleToTempFile(filePath: string, tempDir: string): Promise<stri
 /**
  * schema.ts imports the `jazz.app.json` that `jazz-tools validate` writes
  * from it. Compiling the schema never depends on that file: it may not exist
- * yet, or hold a merge conflict, and validate is how it is rewritten. So when
- * it is missing or isn't JSON, the bundle sees a placeholder in its place,
+ * yet, hold a merge conflict, or come from an older jazz-tools, and validate
+ * is how it is rewritten. So when it is missing or not a file `defineApp`
+ * takes ({@link hasCurrentShape}), the bundle sees a placeholder in its place,
  * which nothing compiling the schema looks at. When it is there, the bundle
  * gets it as it is, for callers that run the loaded app (the dev server,
  * tests); a stale one is refused where it is used, as any app's would be.
  */
+/**
+ * Whether `text` is a `jazz.app.json` `defineApp` takes: not a merge
+ * conflict, nor a file an older jazz-tools wrote (one that held the
+ * permissions too), which validate rewrites from the schema.
+ */
+function hasCurrentShape(text: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  const file = parsed as Record<string, unknown> | null;
+  return (
+    typeof file === "object" &&
+    file !== null &&
+    typeof file.format === "number" &&
+    typeof file.current === "string" &&
+    Array.isArray(file.schemas) &&
+    !("permissions" in file) &&
+    !("bundle" in file)
+  );
+}
+
 function ownAppArtifactPlugin(artifactPath: string): Plugin {
   const placeholder = {
     format: 1,
     current: "0".repeat(64),
-    bundle: "0".repeat(64),
     schemas: [],
     migrations: [],
   };
@@ -110,14 +134,7 @@ function ownAppArtifactPlugin(artifactPath: string): Plugin {
       build.onLoad({ filter: /.*/, namespace: "jazz-own-app-artifact" }, async () => {
         const committed = await readFile(artifactPath, "utf8").catch(() => null);
         let contents = JSON.stringify(placeholder);
-        if (committed !== null) {
-          try {
-            JSON.parse(committed);
-            contents = committed;
-          } catch {
-            // A merge conflict, say: validate rewrites it from the schema.
-          }
-        }
+        if (committed !== null && hasCurrentShape(committed)) contents = committed;
         return { contents, loader: "json" };
       });
     },
@@ -575,6 +592,11 @@ export function rootSchemaFile(schemaDir: string): string | null {
 /** The file an app's `jazz.app.json` is, beside its schema.ts. */
 export function appArtifactPath(schemaFile: string): string {
   return join(dirname(schemaFile), APP_ARTIFACT_FILE);
+}
+
+/** The file an app's `jazz.permissions.json` is, beside its schema.ts. */
+export function appPermissionsPath(schemaFile: string): string {
+  return join(dirname(schemaFile), APP_PERMISSIONS_FILE);
 }
 
 const IMPORTS_APP_ARTIFACT = /from\s+["']\.\/jazz\.app\.json["']/;
