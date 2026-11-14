@@ -1021,6 +1021,9 @@ Meaning:
   about which row an outer column is (the checked row or the enclosing
   `exists`'s), so the writer spells such a reference by its raw session path,
   `session.__jazz_outer_row.col`, which keeps the engine's policy exact.
+  This spelling is provisional: once the engine settles which row an outer
+  column at that depth names, the grammar spells it with an alias
+  (`a.col`), and files written with the raw path keep reading the same.
 - **Session values.** `session.user`, `session.claims.<path>`,
   `session.identity.subject`, `session.identity.issuer` and
   `session.authMode`; any other path is refused as a typo.
