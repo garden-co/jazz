@@ -822,7 +822,10 @@ fn a_late_cross_shard_part_is_applied_not_taken_for_a_dropped_resend() {
         unreachable!()
     };
     let part = jazz::db::shard::CommitRef::from(id);
-    let held = shard.shard().hold(part, &[]).unwrap();
+    let jazz::db::shard::Held::At(held) = shard.shard().hold(part, &[], b"presence part").unwrap()
+    else {
+        panic!("the shard should hold the part");
+    };
     shard.shard().fix(part, held).unwrap();
 
     for step in 1..3 {
@@ -900,4 +903,56 @@ fn a_write_after_a_lost_tail_is_not_taken_for_a_dropped_resend() {
         [("a".into(), "after".into())]
     );
     assert_eq!(alice.pending_upload_count(), 0);
+}
+
+/// Alice's presence commit is fixed by a shard. Later cursor updates may
+/// prune ordinary dedupe entries, but recovery must retain the fixed decision.
+/// Alice --hold/fix--> shard --accept--> decision --later write--> same decision
+#[test]
+fn latest_only_pruning_preserves_a_cross_shard_decision() {
+    use jazz::db::shard::{CommitRef, Held, Resolution};
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(&dir.path().join("server.sqlite"));
+    let alice = open_at(1, &dir.path().join("alice.sqlite"));
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let _link = block_on(alice.connect_upstream(Box::new(Pipe {
+        out: up.clone(),
+        inbound: down.clone(),
+    })));
+    server
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down,
+                inbound: up.clone(),
+            }),
+            AuthorSubject::SYSTEM,
+        )
+        .unwrap();
+    pump(&server, &[&alice]);
+    insert(&alice, "presence", row(1), "a", "0");
+    block_on(alice.tick()).unwrap();
+    let part = up
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::Commit { id, .. } => Some(CommitRef::from(id)),
+            _ => None,
+        })
+        .expect("Alice uploaded her presence commit");
+    let Held::At(held) = server.shard().hold(part, &[], b"presence part").unwrap() else {
+        panic!("the shard should hold the part");
+    };
+    server.shard().fix(part, held).unwrap();
+    pump(&server, &[&alice]);
+    assert_eq!(
+        server.shard().resolution(part).unwrap(),
+        Some(Resolution::Committed(held))
+    );
+    update(&alice, "presence", row(1), "a", "1");
+    pump(&server, &[&alice]);
+    assert_eq!(
+        server.shard().resolution(part).unwrap(),
+        Some(Resolution::Committed(held))
+    );
 }
