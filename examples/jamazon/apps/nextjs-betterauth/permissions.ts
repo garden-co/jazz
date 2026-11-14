@@ -1,8 +1,6 @@
 import { definePermissions } from "jazz-tools/permissions";
 import { app } from "./schema";
-
-/** Largest quantity of one product a cart line may hold. */
-export const MAX_LINE_QUANTITY = 20;
+import { MAX_LINE_QUANTITY } from "./src/store/limits";
 
 export default definePermissions(app, ({ policy, session, allOf, allowedTo }) => {
   // Better Auth rows are owned by the trusted auth route (backend authority).

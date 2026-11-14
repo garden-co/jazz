@@ -1,0 +1,13 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "scenarios": { "read": "true", "insert": "true", "update": "true", "delete": "true" },
+    "tasks": {
+      "read": "true",
+      "insert": "exists scenarios(id = this.scenario_id, status = 'open')",
+      "update": "exists scenarios(id = this.scenario_id, status = 'open')",
+      "delete": "exists scenarios(id = this.scenario_id, status = 'open')"
+    }
+  }
+}
