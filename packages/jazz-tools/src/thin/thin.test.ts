@@ -15,6 +15,8 @@ import {
   upgradeToLocalFirst,
 } from "./index.js";
 import { THIN_WRITE_RESEND_WINDOW_MS, ThinRuntime } from "./thin-runtime.js";
+import { inProcessWebSocketFor } from "../runtime/in-process-transport.js";
+import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
 
 /** The account manager the thin entry used to export: it signs in JavaScript. */
 const createAccountManager = (config: AccountManagerConfig) =>
@@ -69,7 +71,11 @@ async function startServer(
   return server;
 }
 
-async function thinDb(server: TestJazz, secret?: string): Promise<Db> {
+async function thinDb(
+  server: TestJazz,
+  secret?: string,
+  thin?: { WebSocket: WebSocketConstructor },
+): Promise<Db> {
   let stored: string | null = null;
   const accounts = await createAccountManager({
     appId: server.appId,
@@ -87,6 +93,7 @@ async function thinDb(server: TestJazz, secret?: string): Promise<Db> {
     appId: server.appId,
     serverUrl: server.url,
     account: secret ? accounts.restoreLocalFirst(secret) : accounts.createLocalFirst(),
+    ...(thin ? { thin } : {}),
   });
   opened.push(db);
   return db;
@@ -580,6 +587,56 @@ describe("thin client", () => {
     expect(updates).toEqual([]);
     expect(sent.slice(0, 2).map(({ op }) => op)).toEqual(["schema", "subscribe"]);
     expect(db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "stopped" });
+    stop();
+  }, 60_000);
+
+  // Dialled at createDb: the socket, prelude and hello need no schema, so the
+  // handshake runs while the app renders, and the first query's runtime
+  // takes the connection over.
+  it("dials as the Db is created, and its first live query rides that connection", async () => {
+    const server = await startServer();
+    const sockets = countingWebSocket(server.url);
+    const db = await thinDb(server, undefined, { WebSocket: sockets.WebSocket });
+    // No query yet: the connection is already on its way.
+    expect(sockets.opened).toHaveLength(1);
+    const notes: string[][] = [];
+    const stop = db.subscribe(app.notes, (rows) => notes.push(rows.map((row) => row.text)));
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    await expect.poll(() => notes.at(-1), { timeout: 10_000 }).toEqual(["first"]);
+    expect(sockets.opened).toHaveLength(1);
+    expect(sockets.opened[0]!.closed).toBe(false);
+
+    // A reconnect opens a new one, as before.
+    reconnect(db);
+    await db.insert(app.notes, { text: "second", done: false }).wait({ tier: "global" });
+    await expect
+      .poll(() => notes.at(-1)?.slice().sort(), { timeout: 10_000 })
+      .toEqual(["first", "second"]);
+    expect(sockets.opened).toHaveLength(2);
+    expect(sockets.opened[0]!.closed).toBe(true);
+    stop();
+  }, 60_000);
+
+  it("closes the connection it dialled ahead when the Db shuts down or goes offline first", async () => {
+    const server = await startServer();
+    const sockets = countingWebSocket(server.url);
+    const unused = await thinDb(server, undefined, { WebSocket: sockets.WebSocket });
+    expect(sockets.opened).toHaveLength(1);
+    opened.splice(opened.indexOf(unused), 1);
+    await unused.shutdown();
+    expect(sockets.opened[0]!.closed).toBe(true);
+
+    const offline = await thinDb(server, undefined, { WebSocket: sockets.WebSocket });
+    expect(sockets.opened).toHaveLength(2);
+    await offline.disconnect();
+    expect(sockets.opened[1]!.closed).toBe(true);
+    // Back online, the first query dials anew.
+    await offline.reconnect();
+    const notes: string[][] = [];
+    const stop = offline.subscribe(app.notes, (rows) => notes.push(rows.map((row) => row.text)));
+    await offline.insert(app.notes, { text: "back", done: false }).wait({ tier: "global" });
+    await expect.poll(() => notes.at(-1), { timeout: 10_000 }).toEqual(["back"]);
+    expect(sockets.opened).toHaveLength(3);
     stop();
   }, 60_000);
 
@@ -1311,6 +1368,29 @@ function recordSentAhead(): { carrier: WebSocketCarrier; op: string; negotiated:
     },
   );
   return sent;
+}
+
+/** A WebSocket for `url` that keeps every socket it opens. */
+function countingWebSocket(url: string): {
+  WebSocket: WebSocketConstructor;
+  opened: { closed: boolean }[];
+} {
+  const made: { closed: boolean }[] = [];
+  const Base = (inProcessWebSocketFor(url) ?? globalThis.WebSocket) as unknown as new (
+    url: string,
+  ) => { close(): void };
+  class Counting extends Base {
+    private readonly record = { closed: false };
+    constructor(target: string) {
+      super(target);
+      made.push(this.record);
+    }
+    override close(): void {
+      this.record.closed = true;
+      super.close();
+    }
+  }
+  return { WebSocket: Counting as unknown as WebSocketConstructor, opened: made };
 }
 
 function reconnect(db: Db): void {

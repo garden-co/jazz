@@ -1,4 +1,4 @@
-import type { AuthUpdate } from "../client.js";
+import type { AuthConfig, AuthUpdate } from "../client.js";
 import {
   ConnectionManager,
   type ConnectionManagerClientInput,
@@ -25,6 +25,19 @@ export class DirectConnectionManager extends ConnectionManager {
     this.foregroundNodeLease = await this.host.runtimeSource.acquireForegroundNodeLease(
       this.host.config,
     );
+    this.dialAhead();
+  }
+
+  /** Dial now, where the runtime source can without a schema (thin
+   * clients), rather than at the app's first query: the handshake then runs
+   * while the app renders. The client created later takes the connection. */
+  private dialAhead(): void {
+    const { config, runtimeSource } = this.host;
+    if (!runtimeSource.dialAhead || runtimeSource.nativeConnection) return;
+    if (!config.serverUrl || this.isExplicitlyOffline() || this.getCurrentClient()) return;
+    const auth = transportAuth(config, config);
+    if (!auth) return;
+    runtimeSource.dialAhead(config, config.serverUrl, auth);
   }
 
   override async shutdown(): Promise<void> {
@@ -75,16 +88,12 @@ export class DirectConnectionManager extends ConnectionManager {
     const { config } = this.host;
     if (this.host.runtimeSource?.nativeConnection) return;
     if (!config.serverUrl) return;
-    const auth = {
-      jwt_token: credentials.jwtToken,
-      admin_secret: config.adminSecret,
-      backend_session: credentials.cookieSession,
-    };
+    const auth = transportAuth(config, credentials);
     // A retained account opens before its provider credential arrives. The
     // server rejects a credential-less connection as a terminal failure that
     // ends every remote subscription, so dial only once a credential exists.
-    this.awaitingCredential = !auth.jwt_token && !auth.admin_secret && !auth.backend_session;
-    if (this.awaitingCredential) return;
+    this.awaitingCredential = auth === undefined;
+    if (!auth) return;
     client.connectTransport(config.serverUrl, auth);
   }
 
@@ -161,6 +170,8 @@ export class DirectConnectionManager extends ConnectionManager {
       if (this.host.runtimeSource?.nativeConnection) {
         await this.host.runtimeSource?.nativeConnection.disconnect();
       } else {
+        // Offline before the first query: the connection dialled ahead goes too.
+        this.host.runtimeSource.cancelDialAhead?.();
         await this.clientEntry?.client.disconnectTransport();
       }
       // An in-flight or failed disconnect is not permission for a
@@ -217,4 +228,21 @@ export class DirectConnectionManager extends ConnectionManager {
       this.clearClient();
     }
   }
+}
+
+/** What a client connects with: `undefined` without a credential. */
+function transportAuth(
+  config: DbForConnection["config"],
+  credentials: {
+    jwtToken?: string;
+    cookieSession?: DbForConnection["config"]["cookieSession"];
+  },
+): AuthConfig | undefined {
+  const auth = {
+    jwt_token: credentials.jwtToken,
+    admin_secret: config.adminSecret,
+    backend_session: credentials.cookieSession,
+  };
+  if (!auth.jwt_token && !auth.admin_secret && !auth.backend_session) return undefined;
+  return auth;
 }

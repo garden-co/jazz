@@ -110,6 +110,94 @@ export interface ThinRuntimeOptions {
    * admits a public session only for the account its credential is assigned to.
    */
   author?: string;
+  /** @internal The connection its source dialled for it (`ThinRuntimeSource.dialAhead`). */
+  dialed?: DialedThinCarrier;
+}
+
+interface ThinCarrierHandlers {
+  onFrame(frame: Uint8Array): void;
+  onError(error: WireError): void;
+  onTerminal(error: WireError): void;
+}
+
+/** The connection a thin runtime opens to `url` with `authJson`, as `author`. */
+function thinCarrier(
+  url: string,
+  authJson: string,
+  author: string | undefined,
+  WebSocketImpl: WebSocketConstructor | undefined,
+  handlers: ThinCarrierHandlers,
+): WebSocketCarrier {
+  return new WebSocketCarrier({
+    endpointUrl: url,
+    peerIdentity: peerIdentityForWebSocketAuth(
+      authJson,
+      author === undefined ? runtimeRandomBytes(16) : new TextEncoder().encode(author),
+    ),
+    features: FEATURE_THIN_RESULTS,
+    authJson,
+    WebSocket: WebSocketImpl,
+    onFrame: (frame) => handlers.onFrame(frame),
+    onError: (error) => handlers.onError(error),
+    onTerminal: (error) => handlers.onTerminal(error),
+  });
+}
+
+/**
+ * @internal A thin connection dialled as its `Db` is created, before the app's
+ * first query brings the schema its runtime needs: the socket, the prelude
+ * and the `Hello` need no schema, so the handshake runs while the app renders.
+ * The runtime then {@link adopt}s it, if it opens the same connection.
+ */
+export class DialedThinCarrier {
+  readonly carrier: WebSocketCarrier;
+  private handlers: ThinCarrierHandlers | undefined;
+  private ended = false;
+
+  constructor(
+    readonly url: string,
+    readonly authJson: string,
+    readonly author: string | undefined,
+    WebSocketImpl?: WebSocketConstructor,
+  ) {
+    this.carrier = thinCarrier(url, authJson, author, WebSocketImpl, {
+      onFrame: (frame) => this.handlers?.onFrame(frame),
+      onError: (error) => {
+        if (this.handlers) this.handlers.onError(error);
+        // Asked to sign in again before anyone used it: it's of no use now.
+        else if (isReauthenticateWireError(error)) this.end();
+      },
+      onTerminal: (error) => {
+        if (this.handlers) this.handlers.onTerminal(error);
+        else this.ended = true;
+      },
+    });
+  }
+
+  /** Hand the connection over, to a runtime opening `url` with `authJson`
+   * as `author`, once. Any other connection, or one that ended, is closed
+   * instead, and the runtime dials its own. */
+  adopt(
+    url: string,
+    authJson: string,
+    author: string | undefined,
+    handlers: ThinCarrierHandlers,
+  ): WebSocketCarrier | undefined {
+    if (this.handlers) return undefined;
+    if (this.ended || url !== this.url || authJson !== this.authJson || author !== this.author) {
+      this.end();
+      return undefined;
+    }
+    this.handlers = handlers;
+    return this.carrier;
+  }
+
+  /** Close it, unless a runtime took it. */
+  end(): void {
+    if (this.handlers) return;
+    this.ended = true;
+    this.carrier.close();
+  }
 }
 
 /** A request failed on the server. `code` is the engine's stable error code. */
@@ -263,6 +351,8 @@ export class ThinRuntime implements Runtime {
   private readonly reconnectDelaysMs: readonly number[];
   private author: string | undefined;
   private carrier?: WebSocketCarrier;
+  /** Dialled for this runtime and not opened yet (see {@link DialedThinCarrier}). */
+  private dialed: DialedThinCarrier | undefined;
   /** Joins the current connection's split responses. */
   private parts = new ThinAssembler();
   private url?: string;
@@ -326,6 +416,7 @@ export class ThinRuntime implements Runtime {
     this.reconnectDelaysMs = options.reconnectDelaysMs ?? DEFAULT_RECONNECT_DELAYS_MS;
     this.outageReportMs = options.outageReportMs ?? OUTAGE_REPORT_MS;
     this.author = options.author;
+    this.dialed = options.dialed;
   }
 
   // ---- connection -------------------------------------------------------
@@ -392,6 +483,8 @@ export class ThinRuntime implements Runtime {
   close(): void {
     this.closed = true;
     this.wanted = false;
+    this.dialed?.end();
+    this.dialed = undefined;
     this.stop();
     // Closed while the server refused this client's sign-in (its user's
     // access was revoked, or their session ended, and they signed out):
@@ -424,15 +517,7 @@ export class ThinRuntime implements Runtime {
     clearTimeout(this.reconnectTimer);
     this.failingSince ??= Date.now();
     this.parts.reset();
-    const carrier = new WebSocketCarrier({
-      endpointUrl: this.url,
-      peerIdentity: peerIdentityForWebSocketAuth(
-        this.authJson,
-        this.author === undefined ? runtimeRandomBytes(16) : new TextEncoder().encode(this.author),
-      ),
-      features: FEATURE_THIN_RESULTS,
-      authJson: this.authJson,
-      WebSocket: this.WebSocketImpl,
+    const handlers: ThinCarrierHandlers = {
       onFrame: (frame) => this.receive(carrier, frame),
       // The server's planned re-authentication arrives as an error on an open
       // connection, ahead of its close: handle it as the connection's end.
@@ -440,7 +525,13 @@ export class ThinRuntime implements Runtime {
         if (isReauthenticateWireError(error)) this.lost(carrier, error);
       },
       onTerminal: (error) => this.lost(carrier, error),
-    });
+    };
+    // The first connection may have been dialled as the Db was created.
+    const dialed = this.dialed;
+    this.dialed = undefined;
+    const carrier =
+      dialed?.adopt(this.url, this.authJson, this.author, handlers) ??
+      thinCarrier(this.url, this.authJson, this.author, this.WebSocketImpl, handlers);
     this.carrier = carrier;
     // Pipelined: the schema and the app's live queries go out right behind
     // the `Hello`, without waiting for the server's or for the schema's

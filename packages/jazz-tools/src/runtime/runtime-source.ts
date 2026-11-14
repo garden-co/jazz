@@ -3,7 +3,7 @@ import type { ClientMigrations } from "./client-migrations.js";
 import type { RemoteLinkState } from "./remote-link-state.js";
 import type { LinkStatus } from "./sync-status.js";
 import type { WasmSchema } from "../drivers/types.js";
-import type { JazzClient } from "./client.js";
+import type { AuthConfig, JazzClient } from "./client.js";
 import type { DbConfig } from "./db.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import type { TextAnchors } from "./text-anchors.js";
@@ -163,6 +163,16 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
   refreshAccountToken(_token: string): boolean {
     return false;
   }
+
+  /**
+   * Open the connection to `serverUrl` with `auth` as the Db is created,
+   * before its first schema client exists, for that client to take over.
+   * Only sources whose connection needs no schema to open do this.
+   */
+  dialAhead?(config: RuntimeConfig, serverUrl: string, auth: AuthConfig): void;
+
+  /** Close a connection {@link dialAhead} opened that no client took yet. */
+  cancelDialAhead?(): void;
 
   /** Apply source-specific admission after the shared auth config is resolved. */
   admitConfig(_config: RuntimeConfig): void {}
