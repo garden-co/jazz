@@ -142,6 +142,10 @@ The session also links on its own when your backend names a user with no Jazz ac
 device account is signed in. Turn that off on shared devices with
 `linkDeviceAccountOnSignUp: false`.
 
+Linking doesn't need `acceptDeviceAccounts`, which gates only device-account sync: your backend's
+sign-in plus the device key's proof authorise the link, so it works even when your app doesn't
+accept device accounts for sync.
+
 The user must not have a Jazz account of their own yet. If they do, the app chooses whether to
 sign in to that account (`refresh()`) or migrate data explicitly; Jazz never merges accounts. See
 [Other / Custom](/docs/setup/auth/custom#guests-who-sign-up) and

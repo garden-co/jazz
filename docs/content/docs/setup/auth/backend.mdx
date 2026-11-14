@@ -48,6 +48,7 @@ export const jazz = createJazz({
 - Return `acceptDeviceAccounts(request)` (from `jazz-tools/backend`) to let a signed-out
   [device account](/docs/setup/auth/local-first) sync: that's how guests work. Device accounts are
   refused otherwise. An app with no sign-in at all passes `authenticate: acceptDeviceAccounts`.
+  This gates device-account sync only; [linking](#guests-and-linking) doesn't depend on it.
 
 Jazz asks `authenticate` on every sign-in, on every sync connection and in `jazz.forReqUser`, always
 while handling that request, so your framework's request helpers (`cookies()`, `withAuth()`,
@@ -400,6 +401,11 @@ with its key; your backend runs `authenticate` and links the new user to that ac
 your sign-up handler, right after your auth sets the session. The session also links on its own when
 it finds a signed-in user with no Jazz account yet; pass `linkDeviceAccountOnSignUp: false` in the
 config of `createJazzClient` (or `<JazzProvider config>`) on shared devices.
+
+`acceptDeviceAccounts` gates device-account sync, not linking. A link is authorised by your
+backend's sign-in (`authenticate` names the user) plus the device key's proof, so it works even
+when your app doesn't accept device accounts for sync, for example for a device account made
+offline or before you turned guests off.
 
 By default the guest's key stays an identity of the account, so the device can still sign in as the
 guest, for example offline. Set `guestKeyAfterLink: "revoke"` on `createJazz` to stop the guest key
