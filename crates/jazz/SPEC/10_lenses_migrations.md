@@ -785,6 +785,337 @@ as `now()` require a deterministic authority/origin rule before they can be
 accepted. Merge-strategy-only changes still change schema identity because they
 change future merge behavior.
 
+### 10.10 The app's files (`jazz.app.json`, `jazz.permissions.json`)
+
+An app is described by two readable JSON files beside its `schema.ts`:
+
+- `jazz.app.json`: the app's tables, the relations between them, and its
+  schema history. The app and its clients ship it, in every language.
+- `jazz.permissions.json`: the current version's permissions. Only backends
+  read it, so no client bundle carries the app's policies.
+
+The files are meant to be read by people and agents, and later written by
+them. In stage 1 (alpha.63) they are an IR: `jazz-tools validate` and
+`jazz-tools migrations create` compile the TS DSL (`schema.ts`,
+`permissions.ts`, `migrations/*.ts`) to them through the Rust writer
+(`jazz::tools::deployment::artifact::write`), and `validate --check` fails
+when the committed files differ from that output. TS apps keep running from
+their TS. Other languages read the files with `artifact::load` (backends,
+both files) and `artifact::load_client` (clients, `jazz.app.json` alone).
+Neither file carries a schema hash or bundle id: loaders compute them.
+
+**Conventions.**
+
+- Plain JSON. Unknown keys are refused at every level, except `$comment`
+  (a string, allowed in every object) and a top-level `$schema` (a JSON
+  Schema URL, ignored on load; the writer puts
+  `https://jazz.tools/schemas/jazz.app.schema.json`, resp.
+  `jazz.permissions.schema.json`, first). Repeated keys are refused.
+- Column and table names are identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
+- Object key order is significant only for `columns` (declared order, which
+  the schema hash covers) and `history` (oldest first). The writer lists
+  tables by name.
+- Tool-written text is canonical: two-space indent, keys in the order this
+  section lists them, a value on one line when its line fits in 100
+  characters and expanded otherwise, and a trailing newline. Writing the same
+  app twice gives the same bytes.
+
+#### `jazz.app.json`
+
+| Field        | Type                  | Meaning                                                                |
+| ------------ | --------------------- | ---------------------------------------------------------------------- |
+| `format`     | integer               | `1`, read first; any other value is refused.                           |
+| `tables`     | map name → Table      | The current schema: the version the app's code is written against.     |
+| `history`    | map version → Version | Optional. Earlier versions the app still ships, by name, oldest first. |
+| `migrations` | array of Migration    | Optional. Lenses between versions.                                     |
+| `slices`     | map export → [table]  | Optional. Slices `schema.ts` exports, by export name (codegen only).   |
+
+**Table** `{columns, relations?, indexes?, branchBy?, history?, tsOnly?}`:
+
+- `columns`: map name → Column, in declared order.
+- `relations`: map name → Relation, separate from columns, as in the DSL:
+  - `{"rel": "<table>", "column": "<column>"}`: this table's `column` holds
+    the id of a row of `table` (`s.rel`). The column is a reference to it.
+  - `{"reverse": "<table>", "relation": "<name>"}`: rows of `table` whose
+    forward relation `name` points here (`s.reverse`).
+- `indexes`: array; a name is a single-column index, an array of names a
+  composite index (`compositeIndex`, which may name `$createdAt` and
+  `$updatedAt`). When any single names are listed, only those columns get
+  single-column indexes (`indexOnly`); otherwise every column does.
+- `branchBy`: array of column names.
+- `history`: `"latest"` keeps only each row's newest version; absent keeps
+  full history.
+- `tsOnly`: map field → `"computed"` or `"transform"`, for `s.computed` fields
+  (not stored, not in `columns`) and `.transform` columns (stored). Engines
+  ignore it; other languages' codegen warns about each.
+
+**Column** is a type string, or an object when it needs options.
+
+- Type strings: `string`, `int`, `bigint`, `float`, `boolean`, `timestamp`,
+  `uuid`, `bytes`; a trailing `?` makes the column optional (`"string?"`).
+- Objects carry one type key and options:
+  - `{"type": "<scalar>"}`;
+  - `{"enum": ["todo", "done"]}`, or with payloads
+    `{"enum": {"open": {}, "closed": {"at": "timestamp"}}}`;
+  - `{"json": <JSON Schema>}` or `{"json": true}` for any JSON;
+  - `{"array": <Column type>}`.
+  - Options: `"optional": true`, `"default": <Value>`,
+    `"merge": "counter" | "g-set" | "text" | "markdown" | "html"`, and
+    `"references": "<table>"` for a column that references a table no
+    forward relation names (a forward relation's column references its
+    table without it; history versions, which carry no relations, use it).
+- Values are JSON in the column's type: strings for `string`, enums and
+  `uuid`, numbers for `int`/`float`, a decimal string for `bigint`, the
+  engine's integer for `timestamp` (an ISO 8601 form is not supported yet),
+  base64 for `bytes`, any JSON for `json`, arrays for `array`, objects
+  `{"<case>": {...}}` for payload enums, and `null`.
+
+**Version** `{tables, $comment?}`: an earlier schema in the same Table form
+(without relations). The writer names a version by its short schema hash,
+the first 12 hex characters (`3fa1c2d9e0b4`), as snapshot names end; a
+hand-written file may use any name.
+
+**Migration** `{from, to?, createTables?, dropTables?, renameTables?, migrate?}`,
+the readable form of `defineMigration`:
+
+- `from`, `to`: version names; `to` absent means the current `tables`.
+- `createTables` / `dropTables`: arrays of table names.
+- `renameTables`: map new name → old name.
+- `migrate`: map table → column → op:
+  - `{"add": <Column type>, "default": <Value>}` (`m.add.*`); the type
+    carries no `?`, as a lens carries no nullability, and a missing
+    `default` is `null`;
+  - `{"drop": <Column type>, "backwardsDefault": <Value>}` (`m.drop.*`);
+  - `{"renameFrom": "<old>"}` (`m.renameFrom`).
+
+Every migration must pass the lens checks a deployment runs (§10.6).
+
+#### `jazz.permissions.json`
+
+| Field    | Type                      | Meaning                                                  |
+| -------- | ------------------------- | -------------------------------------------------------- |
+| `format` | integer                   | `1`.                                                     |
+| `defs`   | map signature → Policy    | Optional. Named, parameterised expressions.              |
+| `tables` | map table → TablePolicies | Every key must be a table of `jazz.app.json`'s `tables`. |
+
+**TablePolicies** `{read?, insert?, update?, delete?}`. An absent operation
+is denied, as today.
+
+- `read`, `insert`, `delete`: a Policy. A policy with both sides (a read
+  or delete with a check, an insert with `using`), which the DSL doesn't
+  write but the engine can hold, is `{"using": Policy, "withCheck": Policy}`.
+- `update`: a Policy (the same check before and after), or
+  `{"old": Policy, "new": Policy}` (`whereOld` / `whereNew`).
+
+**Policy**, where a policy can appear:
+
+- an expression string (the grammar below);
+- `{"anyOf": [Policy, …]}` or `{"allOf": [Policy, …]}` (non-empty);
+- `{"$comment": "…", "where": Policy}`, a commented policy.
+
+There is no other form: every policy the engine holds has an expression
+string, so every policy a TS app can declare round-trips through this file
+as text.
+
+**`defs`.** A key is a signature `name($param, …)`. Its value is a Policy in
+which `$param` stands for a value. A call `name(arg, …)` passes values or
+column references, so `"isChatMember(this.id)"`. Definitions may call each
+other in any order, but never recursively (a cycle is refused), so every
+policy terminates. Files compiled from TS inline their helpers and have no
+`defs`.
+
+**Expressions.** SQL-like, with JSON's double quotes left to the file:
+string literals use single quotes, and a name that isn't a plain identifier
+(or is a keyword) is quoted with backticks, `` `order` ``.
+
+```ebnf
+expr        = disjunction ;
+disjunction = conjunction , { "or" , conjunction } ;
+conjunction = negation , { "and" , negation } ;
+negation    = "not" , negation | atom ;
+atom        = "(" , expr , ")" | "true" | "false"
+            | ( "anyOf" | "allOf" ) , "(" , [ expr , { "," , expr } ] , ")"
+            | exists | allowed | call | comparison ;
+
+comparison  = operand , ( cmp_op , operand
+                        | "in" , ( list | session )
+                        | "contains" , operand ) ;
+cmp_op      = "=" | "!=" | "<" | "<=" | ">" | ">=" ;
+operand     = column | value ;
+column      = [ ( "this" | "outer" | name ) , "." ] , ( name | magic ) ;
+magic       = ( "$createdBy" | "$updatedBy" | "$deletedBy" ) , [ "." , ( "account" | "identity" ) ]
+            | "$createdAt" | "$updatedAt" | "$deletedAt" ;
+value       = literal | "null" | session | param ;
+session     = "session" , "." , name , { "." , name } ;
+param       = "$" , ident ;
+list        = "[" , [ value , { "," , value } ] , "]" ;
+
+literal     = string | number | "true" | "false" | typed ;
+typed       = "literal" , "(" , ( string | number | "true" | "false" | "null" ) , ")"
+            | ( "int" | "bigint" | "timestamp" ) , "(" , number , ")"
+            | "double" , "(" , ( number | string ) , ")"   (* 'NaN', 'inf', '-inf' *)
+            | ( "text" | "uuid" | "bytes" | "txid" ) , "(" , string , ")"
+            | "bool" , "(" , ( "true" | "false" ) , ")"
+            | "array" , "(" , [ typed_arg , { "," , typed_arg } ] , ")"
+            | "row" , "(" , ( "uuid" , "(" , string , ")" | "null" ) , { "," , typed_arg } , ")"
+            | "enumcase" , "(" , string , { "," , typed_arg } , ")" ;
+typed_arg   = typed | "null" ;
+
+exists      = "exists" , source , [ "as" , name ] , "(" , [ conditions ] , ")" ,
+              { "." , name , "(" , [ conditions ] , ")" }
+            | "exists" , "(" , query , ")" ;
+source      = name ;
+conditions  = expr , { "," , expr } ;
+allowed     = "allowedTo." , ( "read" | "insert" | "update" | "delete" ) , "(" ,
+              ( name | "via" , [ name , "." ] , name ) ,
+              [ "," , "maxDepth" , ":" , integer ] , ")" ;
+call        = ident , "(" , [ operand , { "," , operand } ] , ")" ;
+
+(* The relation IR, inside `exists ( … )`. *)
+query       = "from" , from_source , { clause } ;
+from_source = name , [ "as" , name ] | "(" , query , ")" | union | recursive ;
+clause      = [ "left" ] , "join" , from_source ,
+                [ "on" , colref , "=" , colref , { "and" , colref , "=" , colref } ]
+            | "where" , predicate
+            | "select" , ( key , "as" , name , { "," , key , "as" , name } | "(" , ")" )
+            | "distinct" , "on" , "(" , [ key , { "," , key } ] , ")"
+            | "order" , "by" , ( colref , [ "asc" | "desc" ] ,
+                                 { "," , colref , [ "asc" | "desc" ] } | "(" , ")" )
+            | "limit" , integer | "offset" , integer ;
+union       = "union" , "(" , [ name , ":" , query , { "," , name , ":" , query } ] , ")" ;
+recursive   = "recursive" , "(" , "seed" , ":" , query , "," , "step" , ":" , query , "," ,
+              "frontier" , ":" , key , "," , "dedupe" , ":" , "(" , [ key , { "," , key } ] , ")" ,
+              "," , "maxDepth" , ":" , ( integer | "fixpoint" ) , ")" ;
+key         = colref | "id" , "(" , ( "row" | "outer" | "frontier" ) , ")" ;
+colref      = [ name , "." ] , name ;
+
+predicate   = p_or ;
+p_or        = p_and , { "or" , p_and } ;
+p_and       = p_not , { "and" , p_not } ;
+p_not       = "not" , p_not | p_atom ;
+p_atom      = "(" , predicate , ")" | "true" | "false"
+            | ( "anyOf" | "allOf" ) , "(" , [ predicate , { "," , predicate } ] , ")"
+            | colref , ( cmp_op , value_ref | "=" , "null" | "!=" , "null"
+                       | "in" , "[" , [ value_ref , { "," , value_ref } ] , "]"
+                       | "contains" , value_ref
+                       | "is" , name , "(" , predicate , ")" ) ;
+value_ref   = r_literal | session | "param" , "." , name
+            | ( "outer" | "frontier" ) , "." , colref
+            | "id" , "(" , ( "row" | "outer" | "frontier" ) , ")" ;
+r_literal   = string | number | "true" | "false" | typed | "json" , "(" , string , ")" ;
+
+name        = ident | "`" , { char - "`" | "``" } , "`" ;
+ident       = letter , { letter | digit | "_" } ;
+string      = "'" , { char - "'" | "''" } , "'" ;
+number      = [ "-" ] , digit , { digit } , [ "." , digit , { digit } ] ;
+```
+
+Meaning:
+
+- **Scopes.** At the top of a policy, a bare column (or `this.col`, or
+  `<table>.col`) names a column of the row being checked. Inside
+  `exists t(…)` (or `exists t as a(…)`), a bare column (or `a.col`) names a
+  column of `t`, and the checked row is a value: `this.col`, `outer.col` or
+  `<table>.col`. In an `exists` inside another `exists`, a condition names
+  only its own row's columns: the engine refuses an outer-row reference
+  there, and the TS DSL never builds one. The writer refuses such a policy
+  with the engine's message ("not supported in policies yet: an `exists`
+  inside another `exists` can't refer to the checked row's columns"),
+  naming its JSON path, as it refuses an outer-row reference outside any
+  `exists`. `session.__jazz_outer_row…` is not a session value: the reader
+  refuses it.
+- **Session values.** `session.user`, `session.claims.<path>`,
+  `session.identity.subject`, `session.identity.issuer` and
+  `session.authMode`; any other path is refused as a typo.
+- **Comparisons.** A comparison compares a column with a value, a column
+  with another column (`ownerId = authorId` inside one table is refused, as
+  the engine has no such policy; a column of the enclosing row is a value:
+  `id = this.chatId`), or a session claim with a literal. `col = null` and
+  `col != null` test for null (`not col = null` is the engine's
+  `Not(IsNull)`, kept apart from `col != null`), and `col = literal(null)`
+  compares with a null value. `col in [v, …]` and `col in session.claims.teams`
+  test membership; `col contains v` tests text or an array column.
+- **Literals.** A plain literal takes the type of the column it is compared
+  with; one that can't (e.g. `'x'` for an `int`, a non-UUID for a `uuid`) is
+  refused. Compared with a session claim, `'…'` is text, `1` an int, `1.5` a
+  float. A typed literal (`int(5)`, `text('5')`, `uuid('…')`,
+  `timestamp(1700000000000000)`, `bytes('0aff')`, `array(int(1), int(2))`,
+  `row(null, text('a'))`, `enumcase('closed', timestamp(5))`) is exactly that
+  value, whatever it is compared with; the writer uses one only where a plain
+  literal would read back as another value.
+- **`exists`.** `exists t(c₁, c₂, …)` holds when some row of `t` satisfies
+  every condition (the engine's `Exists`; one condition is that condition, no
+  conditions is `true`, and `allOf(c)` keeps a one-item `And`).
+  `exists t(…).rel(…)` hops along `t`'s relation `rel` to the rows it leads to,
+  filtered by that hop's conditions (`hopTo`); it is the relation
+  `from t join <target> as __hop_0 on … where … select __hop_0.id as id`
+  TS builds, and the writer prints a relation of exactly that shape in this
+  form, so the `__hop_<i>` names never appear in a file TS wrote. A hop's conditions
+  compare its table's columns with values and with the checked row's
+  (`this.col`).
+  `exists ( query )` is any relation (`ExistsRel`).
+- **Relations.** A query reads like SQL, each clause wrapping what comes
+  before it in order: `from t as a` is `TableScan`, `join` and `left join` are
+  `Join` (an absent `on` joins every pair), `where` is `Filter`, `select` is
+  `Project`, `distinct on` is `Distinct`, `order by` is `OrderBy` (`asc` is
+  the default), `limit`/`offset` are `Limit`/`Offset`, `union(label: q, …)` is
+  `Union` and `recursive(seed: …, step: …, frontier: …, dedupe: (…), maxDepth:
+n | fixpoint)` is `Gather`. In a predicate, a column is `scope.col` or
+  `col`; `outer.col` and `frontier.col` are the outer and frontier rows'
+  columns, `id(row)`, `id(outer)` and `id(frontier)` their row ids,
+  `param.name` a query parameter, `session.…` a session value, `col is
+case(p)` an enum case whose payload satisfies `p` (`EnumMatch`), and
+  `json('…')` a literal JSON value the relation IR holds as is.
+- **Inheritance.** `allowedTo.op(rel)` holds when the row relation `rel`
+  leads to allows `op`. `allowedTo.op(via col)` names the forward column
+  itself and `allowedTo.op(via t.col)` the rows of `t` pointing here, for a
+  link no relation names. `maxDepth` bounds recursive chains.
+- `anyOf(…)` and `allOf(…)` inside an expression are `Or`/`And` of any
+  number of items; the writer uses them only for fewer than two.
+- Nesting deeper than 64 levels is refused.
+- `and` binds tighter than `or`; `not` tighter than both. The writer adds
+  parentheses wherever a nested `and`/`or` must stay its own node.
+
+Policies map one to one onto the engine's PolicyExpr (§7): comparisons to
+`Cmp`/`SessionCmp`/`IsNull`/`IsNotNull`/`In`/`InList`/`SessionInList`/
+`Contains`/`SessionContains`, `exists` to `Exists`/`ExistsRel`, `allowedTo` to
+`Inherits`/`InheritsReferencing`, `anyOf`/`or` to `Or`, `allOf`/`and` and
+condition lists to `And`, `not` to `Not`. The checked row inside `exists`
+(`this.col`, `c.col`, `outer.col`) is the session path
+`["__jazz_outer_row", col]` the TS DSL compiles it to. The writer prints top-level `Or`/`And` as `anyOf`/`allOf`
+objects and every other policy as one string: the shortest spelling that
+reads back as exactly the same policy, and otherwise the explicit spelling
+(typed literals, `literal(null)`, `exists ( from … )`, `via`), which always
+does.
+No policy is refused for its shape: only what a deployment would refuse.
+
+**Errors.** Every refusal names the file, the JSON path and, inside an
+expression, the exact span, with a suggestion and a correct example:
+
+```text
+jazz.permissions.json: tables.chatMembers.read.anyOf[1]:
+  exists chatMembers(chatId = this.chatId, userID = session.user)
+                                           ^^^^^^
+  unknown column `userID` in chatMembers; did you mean `userId`?
+  Grammar: https://jazz.tools/docs/reference/app-files#expressions
+```
+
+Names are suggested by edit distance among the columns, tables, relations,
+operations, keys or defs in scope; syntax errors (`==`, `"…"` strings, a
+missing `and`) add a correct example (`e.g. …`).
+
+**Loading.** `artifact::load(app, permissions)` checks both files: every
+reference resolves, every policy compiles against the current schema as a
+deployment compiles it, every migration passes its lens checks. It computes
+each schema hash and the bundle id. `artifact::load_client(app)` checks the
+schemas and migrations alone. `write` runs the same checks, so it never
+emits files `load` would refuse, and it reads its output back: if the files
+don't reproduce the engine input exactly (schema hashes, lenses,
+permissions), it refuses with "not supported … yet" rather than write files
+that would publish something else.
+
+Fixtures: `crates/jazz/fixtures/app-artifact/`.
+
 ### Active schema and local schema
 
 The authority's **active schema** selects one structural schema and one explicit
