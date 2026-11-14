@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defineShippedApp } from "../testing/app-artifact.js";
+import { appPermissions, defineShippedApp } from "../testing/app-artifact.js";
 import { schema as s } from "../index.js";
 import { Db } from "../runtime/db.js";
 import { earlyDb, earlyDbMethodKind, MAX_EARLY_WRITES } from "./early-db.js";
@@ -179,7 +179,9 @@ describe("createJazz, opened on first use", () => {
         .insert(app.todos, { title: "bob's", owner: bob! })
         .wait({ tier: "global" });
     await expect(insertAsBob(asBob(sqlite({ path }), permissions))).resolves.toBeTruthy();
-    await expect(insertAsBob(asBob(sqlite({ path }), noInserts))).rejects.toThrow();
+    await expect(
+      insertAsBob(asBob(sqlite({ path }), await appPermissions(app, noInserts))),
+    ).rejects.toThrow();
     await expect(insertAsBob(asBob(sqlite({ path }), permissions))).resolves.toBeTruthy();
 
     // Settings that would need another core are refused while it is open.
@@ -245,17 +247,12 @@ describe("createJazz, opened on first use", () => {
   it("keeps the backend's session across a reload, and lets writes in flight finish", async () => {
     const path = await tempDir();
     const request = new Request("http://app.test/api");
-    // The rules the app's jazz.app.json holds, rebuilt as a reload rebuilds them.
-    const rules = () =>
-      s.definePermissions(app, ({ policy, session }) => {
-        policy.todos.allowRead.where({ owner: session.user });
-        policy.todos.allowInsert.where({ owner: session.user });
-        policy.todos.allowUpdate.never();
-        policy.todos.allowDelete.never();
-      });
+    // The app's jazz.permissions.json, imported again as a reload imports it:
+    // an equal object, not the same one.
+    const reimported = () => structuredClone(permissions);
     const jazz = createJazz({
       app,
-      permissions: rules(),
+      permissions: reimported(),
       store: sqlite({ path }),
       authenticate: as("a"),
     });
@@ -266,16 +263,17 @@ describe("createJazz, opened on first use", () => {
     const inFlight = jazz.db.insert(app.todos, { title: "in flight", owner });
 
     // A hot reload rebuilds equal permissions: the same bundle, the same session.
-    createJazz({ app, permissions: rules(), store: sqlite({ path }), authenticate: as("a") });
+    createJazz({ app, permissions: reimported(), store: sqlite({ path }), authenticate: as("a") });
     await jazz.ready();
     await inFlight.wait({ tier: "global" });
     await userDb.insert(app.todos, { title: "same bundle", owner: user }).wait({ tier: "global" });
 
-    // Changed permissions (and so a regenerated jazz.app.json) publish
-    // another bundle: what the old session had in flight, and a db a request
-    // still holds, still finish.
+    // Changed permissions (a regenerated jazz.permissions.json, for the same
+    // jazz.app.json) publish another bundle: what the old session had in
+    // flight, and a db a request still holds, still finish.
     const pending = jazz.db.insert(app.todos, { title: "across bundles", owner });
-    const { app: changedApp, permissions: changed } = await defineShippedApp(definition, (app) =>
+    const changed = await appPermissions(
+      app,
       s.definePermissions(app, ({ policy, session }) => {
         policy.todos.allowRead.where({ owner: session.user });
         policy.todos.allowInsert.where({ owner: session.user });
@@ -283,7 +281,7 @@ describe("createJazz, opened on first use", () => {
       }),
     );
     createJazz({
-      app: changedApp,
+      app,
       permissions: changed,
       store: sqlite({ path }),
       authenticate: as("a"),

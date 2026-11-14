@@ -5,7 +5,6 @@ import type { AppArtifact } from "./app-artifact.js";
 const artifact: AppArtifact = {
   format: 1,
   current: "a".repeat(64),
-  bundle: "b".repeat(64),
   schemas: [{ hash: "a".repeat(64), tables: {} }],
   migrations: [],
 };
@@ -98,5 +97,30 @@ describe("an app's shipped jazz.app.json", () => {
     expect(shipsMigrations(undefined)).toBe(false);
     expect(shipsMigrations(artifact)).toBe(false);
     expect(shipsMigrations({ ...artifact, migrations: [{}] })).toBe(true);
+  });
+
+  it("refuses a jazz.app.json that still holds the app's permissions", async () => {
+    // Clients ship this file: one with the permissions in it would carry
+    // them into every client bundle.
+    const { shipArtifact } = await freshCopy();
+    for (const single of [
+      { ...artifact, permissions: {} },
+      { ...artifact, bundle: "b".repeat(64) },
+    ]) {
+      expect(messageOf(() => shipArtifact(todos(), { artifact: single as never }))).toMatch(
+        /still holds the app's permissions\. Run `npx jazz-tools validate`: it moves them to jazz\.permissions\.json/,
+      );
+    }
+  });
+
+  it("tells a jazz.permissions.json apart from a definePermissions map", async () => {
+    const { isAppPermissions } = await freshCopy();
+    const file = { format: 1, schema: "a".repeat(64), permissions: {}, bundle: "b".repeat(64) };
+    expect(isAppPermissions(file)).toBe(true);
+    // A map whose tables happen to be named like the file's fields holds
+    // policies there, never a number and strings.
+    expect(isAppPermissions({ format: { select: {} }, schema: { select: {} } })).toBe(false);
+    expect(isAppPermissions({})).toBe(false);
+    expect(isAppPermissions(null)).toBe(false);
   });
 });

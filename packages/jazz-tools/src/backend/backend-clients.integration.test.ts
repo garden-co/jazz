@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { exportJWK, generateKeyPair, SignJWT, type JWTPayload } from "jose";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { defineShippedApp } from "../testing/app-artifact.js";
+import { appArtifact, appPermissions } from "../testing/app-artifact.js";
 import { schema as s } from "../index.js";
 import {
   createJazz,
@@ -23,18 +23,17 @@ import {
   encodeWireClientHello,
 } from "../runtime/native-runtime/websocket.js";
 
-const { app, permissions } = await defineShippedApp(
-  {
-    todos: s.table({ title: s.string(), owner: s.uuid() }, {}),
-  },
-  (app) =>
-    s.definePermissions(app, ({ policy, session }) => {
-      policy.todos.allowRead.where({ owner: session.user });
-      policy.todos.allowInsert.where({ owner: session.user });
-      policy.todos.allowUpdate.never();
-      policy.todos.allowDelete.never();
-    }),
-);
+const definition = { todos: s.table({ title: s.string(), owner: s.uuid() }, {}) };
+const app = s.defineApp(definition, { artifact: await appArtifact(definition) });
+/** What permissions.ts makes: clients take it. */
+const rules = s.definePermissions(app, ({ policy, session }) => {
+  policy.todos.allowRead.where({ owner: session.user });
+  policy.todos.allowInsert.where({ owner: session.user });
+  policy.todos.allowUpdate.never();
+  policy.todos.allowDelete.never();
+});
+/** The app's jazz.permissions.json: its backend takes it. */
+const permissions = await appPermissions(app, rules);
 
 const AUDIENCE = "https://app.example.test";
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -212,7 +211,7 @@ describe("scoped backend clients", () => {
     const session = await createJazzClient({
       appId,
       app,
-      permissions,
+      permissions: rules,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       // A fresh token for every request and socket.
@@ -272,7 +271,7 @@ describe("trusted backend clients", () => {
     const session = await createJazzClient({
       appId,
       app,
-      permissions,
+      permissions: rules,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       // The token alone decides: this one opens as a trusted machine.
@@ -313,7 +312,7 @@ describe("trusted backend clients", () => {
     const base = {
       appId,
       app,
-      permissions,
+      permissions: rules,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" as const },
     };
@@ -381,7 +380,7 @@ describe("trusted backend clients", () => {
     const session = await createJazzClient({
       appId,
       app,
-      permissions,
+      permissions: rules,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       credential: () => sign({ sub: "ops" }),
@@ -425,7 +424,7 @@ describe("trusted backend clients", () => {
     const session = await createJazzClient({
       appId,
       app,
-      permissions,
+      permissions: rules,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       credential: () => sign({ sub: "ops" }),
@@ -489,7 +488,7 @@ describe("trusted backend clients", () => {
     const worker = await createJazzClient({
       appId,
       app,
-      permissions,
+      permissions: rules,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       credential: () => sign({ sub: "worker" }),
@@ -535,7 +534,7 @@ describe("trusted backend clients", () => {
     const session = await createJazzClient({
       appId,
       app,
-      permissions,
+      permissions: rules,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       credential: () => sign({ sub: "ops" }),
@@ -585,7 +584,7 @@ describe("a backend client's close()", () => {
     const session = await createJazzClient({
       appId,
       app,
-      permissions,
+      permissions: rules,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       credential: () => sign({ sub: "importer" }),
@@ -603,7 +602,7 @@ describe("a backend client's close()", () => {
     const session = await createJazzClient({
       appId,
       app,
-      permissions,
+      permissions: rules,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       initial: "device",
@@ -625,7 +624,7 @@ describe("a backend client's close()", () => {
     const session = await createJazzClient({
       appId,
       app,
-      permissions,
+      permissions: rules,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       initial: "device",
@@ -649,7 +648,7 @@ describe("a backend client's close()", () => {
     const session = await createJazzClient({
       appId,
       app,
-      permissions,
+      permissions: rules,
       serverUrl: `${origin}/jazz`,
       driver: { type: "persistent", dataPath },
       initial: "device",

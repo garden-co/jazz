@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { defineMigration, schema as s } from "../index.js";
 import { deploy, startLocalJazzServer, startTestJazz, type TestJazz } from "../testing/index.js";
-import { appArtifact } from "../testing/app-artifact.js";
+import { appArtifact, appPermissions } from "../testing/app-artifact.js";
 import { createJazzClient } from "./index.js";
 
 const before = { entries: s.table({ text: s.string() }, {}) };
@@ -23,12 +23,11 @@ const newPermissions = s.definePermissions(newDraft, ({ policy }) => {
   policy.controls.allowRead.always();
 });
 const oldApp = s.defineApp(before, {
-  artifact: await appArtifact(before, { permissions: oldPermissions }),
+  artifact: await appArtifact(before),
 });
 const newApp = s.defineApp(after, {
   artifact: await appArtifact(before, {
     steps: [{ to: after, migration }],
-    permissions: newPermissions,
   }),
 });
 
@@ -47,7 +46,7 @@ describe("offline persistent schema bootstrap", () => {
       let server = await startLocalJazzServer({
         ...settings,
         schema: oldApp,
-        permissions: oldPermissions,
+        permissions: await appPermissions(oldApp, oldPermissions),
       });
       type Session = Awaited<ReturnType<typeof createJazzClient>>;
       const sessions = new Set<Session>();
@@ -63,7 +62,7 @@ describe("offline persistent schema bootstrap", () => {
         await front?.stop();
         front = await startTestJazz({
           app: frontApp,
-          permissions: frontPermissions,
+          permissions: await appPermissions(frontApp, frontPermissions),
           core: server,
           port,
         });

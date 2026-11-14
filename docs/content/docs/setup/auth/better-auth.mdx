@@ -12,7 +12,7 @@ backend as Jazz, so `authenticate` asks it directly who the request's session co
 import { betterAuth } from "better-auth";
 import { createJazz, sqlite } from "jazz-tools/backend";
 import { app } from "./schema";
-import permissions from "./permissions";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const auth = betterAuth({
   // database: your own, or Jazz itself (see "Store Better Auth's tables in Jazz" below)
@@ -237,7 +237,7 @@ import { betterAuth } from "better-auth";
 import { createJazz, sqlite } from "jazz-tools/backend";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { app } from "./schema";
-import permissions from "./permissions";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 import { authOptions } from "./auth-options";
 
 export const jazz = createJazz({

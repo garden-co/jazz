@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type Server as HttpServer } from "node:http";
 import type { Jazz } from "jazz-tools/backend";
 import { app as schema } from "../schema.ts";
-import permissions from "../permissions.ts";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 import { findUser, createUser, type User } from "./users.ts";
 
 // This is a workaround to resolve correctly NAPI modules in the monorepo

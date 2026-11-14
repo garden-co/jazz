@@ -8,7 +8,14 @@ import { ANONYMOUS_JWT_ISSUER, LOCAL_FIRST_JWT_ISSUER } from "../runtime/client-
 import type { Session } from "../runtime/context.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
-import { deployApp } from "../dev/catalogue.js";
+import { deployApp, resolveAppPermissions } from "../dev/catalogue.js";
+import {
+  isAppPermissions,
+  shippedArtifact,
+  type AppPermissions,
+} from "../runtime/app-artifact.js";
+import { resolveSchemaSource } from "../schema-source.js";
+import { appPermissions } from "./app-artifact.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../dev/dev-server.js";
 
 type PolicyTestAppSchema = { wasmSchema: WasmSchema };
@@ -271,15 +278,25 @@ export class PolicyTestApp {
  * This will start a local Jazz server and push the schema catalogue to it.
  * @returns a {@link PolicyTestApp} instance that can be used to seed the database and validate policy checks.
  * @param app - The Jazz app created with `defineApp(...)`
- * @param permissions - The permissions created with `definePermissions(...)`
+ * @param permissions - The permissions created with `definePermissions(...)`, the rules
+ *   under test (permissions.ts). For an app that ships its jazz.app.json the test app
+ *   publishes them as validate would write them to its jazz.permissions.json; that file
+ *   itself is taken too.
  * @param expectFn - The `expect` function to use for assertions (e.g. `expect` from `vitest`)
  */
 export async function createPolicyTestApp(
   app: PolicyTestAppSchema,
-  permissions: CompiledPermissions,
+  permissions: CompiledPermissions | AppPermissions,
   expectFn: ExpectLike,
   options: PolicyTestAppOptions = {},
 ): Promise<PolicyTestApp> {
+  // A backend serving an app that ships its jazz.app.json takes its
+  // jazz.permissions.json: the rules under test, as validate writes them.
+  const published =
+    shippedArtifact(resolveSchemaSource(app)) && !isAppPermissions(permissions)
+      ? await appPermissions(app, permissions)
+      : permissions;
+  const rules = (await resolveAppPermissions(app, published)).permissions;
   const backendSecret = `backend-secret`;
   const adminSecret = `admin-secret`;
   const server = await startLocalJazzServer({
@@ -294,13 +311,13 @@ export async function createPolicyTestApp(
     serverUrl: server.url,
     adminSecret,
     app,
-    permissions,
+    permissions: published,
   });
 
   const jazzContext = createJazzContext({
     appId: server.appId,
     app,
-    permissions,
+    permissions: rules,
     driver: { type: "memory" },
     serverUrl: server.url,
     backendSecret:

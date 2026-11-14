@@ -125,9 +125,9 @@ When you change your schema on a shared app, prepare any required migration and 
 `s.defineApp(schema, { artifact })` converts your schema definition into a typed `app` object.
 This is what you pass to queries, mutations, and subscriptions throughout your application code.
 
-`artifact` is `jazz.app.json` beside your `schema.ts`. `jazz-tools` writes that file on every
-`validate`, `migrations create` and `deploy`, even while your app has a single schema version, so
-the import always looks the same:
+`artifact` is `jazz.app.json` beside your `schema.ts`. `jazz-tools` writes that file, and
+`jazz.permissions.json` beside it, on every `validate`, `migrations create` and `deploy`, even while
+your app has a single schema version, so the import always looks the same:
 
 ```ts title="schema.ts"
 import artifact from "./jazz.app.json" with { type: "json" };
@@ -136,11 +136,14 @@ import artifact from "./jazz.app.json" with { type: "json" };
 For a new app, run `npx jazz-tools validate` once to create it. TypeScript needs
 `"resolveJsonModule": true` in `tsconfig.json` for the import.
 
-The file holds every schema version of your app, the migrations between them and the permissions of
-the current version. Clients use it to lay out storage exactly like the server does and to read data
-written under older versions; your main backend publishes it when it starts. Commit the file with
-your schema, and run `npx jazz-tools validate --check` in CI to catch one that's out of date. Keep formatters off
-it (add it to `.prettierignore` or your formatter's ignore file): the check compares bytes. `{ migrations: "none" }` is only for an app that runs on a `memory()`
+`jazz.app.json` holds every schema version of your app and the migrations between them. Clients use
+it to lay out storage exactly like the server does and to read data written under older versions.
+The permissions of the current version are in `jazz.permissions.json`, which only your backend
+imports (`createJazz({ app, permissions })`), so client bundles never carry them; `schema.ts`
+imports only `jazz.app.json`. Your main backend publishes both when it starts. Commit both files
+with your schema, and run `npx jazz-tools validate --check` in CI to catch one that's out of date.
+Keep formatters off them (add both to `.prettierignore` or your formatter's ignore file): the check
+compares bytes. `{ migrations: "none" }` is only for an app that runs on a `memory()`
 store, such as one defined inside a test: `createJazz` refuses it with `sqlite()`, `vercel()` or
 `remote()`, whose data would outlive the app's first schema change.
 

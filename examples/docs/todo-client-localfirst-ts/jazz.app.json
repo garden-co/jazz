@@ -1,5 +1,4 @@
 {
-  "bundle": "a6984df9529f16f3c1f18f74fd5b92971a1d6fb5960c6b97989d38429c5d3e66",
   "codegen": {
     "slices": {},
     "tables": {
@@ -38,45 +37,6 @@
   "current": "ce91503ae647cad6ea4a0866d256fea3f92dd38d34df7ad6e2ac8c3bfb0c09e9",
   "format": 1,
   "migrations": [],
-  "permissions": {
-    "projects": {
-      "insert": {
-        "with_check": {
-          "type": "True"
-        }
-      },
-      "select": {
-        "using": {
-          "type": "True"
-        }
-      }
-    },
-    "todos": {
-      "delete": {
-        "using": {
-          "type": "True"
-        }
-      },
-      "insert": {
-        "with_check": {
-          "type": "True"
-        }
-      },
-      "select": {
-        "using": {
-          "type": "True"
-        }
-      },
-      "update": {
-        "using": {
-          "type": "True"
-        },
-        "with_check": {
-          "type": "True"
-        }
-      }
-    }
-  },
   "schemas": [
     {
       "hash": "ce91503ae647cad6ea4a0866d256fea3f92dd38d34df7ad6e2ac8c3bfb0c09e9",

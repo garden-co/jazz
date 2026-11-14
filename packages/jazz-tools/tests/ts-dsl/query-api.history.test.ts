@@ -6,7 +6,7 @@ import { computeSchemaHash } from "../../src/dev/catalogue.js";
 import { deploy, startLocalJazzServer, startTestJazz } from "../../src/testing/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { localAccountConfig } from "../../src/runtime/testing/account-fixtures.js";
-import { appArtifact } from "../../src/testing/app-artifact.js";
+import { appArtifact, appPermissions } from "../../src/testing/app-artifact.js";
 import { shipArtifact } from "../../src/runtime/app-artifact.js";
 import type { Db, QueryBuilder } from "../../src/runtime/db.js";
 
@@ -30,7 +30,7 @@ describe("TS Query API history", () => {
     subscriptions = [];
     server = await startTestJazz({
       app: app,
-      permissions: permissions,
+      permissions: await appPermissions(app, permissions),
       coreOptions: { inMemory: true },
     });
     db = await createDb({
@@ -759,12 +759,11 @@ describe("TS Query API history schema migrations", () => {
     });
     await deploy({ ...deployment, schema: v2, permissions: permissionsV2, migration });
     // Clients reach the core through the app's backend, which runs the latest deploy.
-    server = await startTestJazz({ app: v2, permissions: permissionsV2, core });
+    server = await startTestJazz({ app: v2, permissions: await appPermissions(v2, permissionsV2), core });
     // v2 ships the migration in its jazz.app.json, as `validate` would write it.
     shipArtifact(v2.wasmSchema, {
       artifact: await appArtifact(v1, {
         steps: [{ to: v2, migration }],
-        permissions: permissionsV2,
       }),
     });
     writer = await createDb({
@@ -882,7 +881,7 @@ describe("TS Query API upstream history", () => {
   beforeEach(async () => {
     server = await startTestJazz({
       app: app,
-      permissions: permissions,
+      permissions: await appPermissions(app, permissions),
       coreOptions: { inMemory: true },
     });
     writer = await createDb({
@@ -1054,7 +1053,7 @@ describe("TS Query API branch history", () => {
   beforeEach(async () => {
     server = await startTestJazz({
       app: branches,
-      permissions: branchPermissions,
+      permissions: await appPermissions(branches, branchPermissions),
       coreOptions: { inMemory: true },
     });
     writer = await createDb({
@@ -1213,7 +1212,7 @@ describe("TS Query API private draft branch history", () => {
   beforeEach(async () => {
     server = await startTestJazz({
       app: drafts,
-      permissions: draftPermissions,
+      permissions: await appPermissions(drafts, draftPermissions),
       coreOptions: { inMemory: true },
     });
     owner = await createDb({
@@ -1313,7 +1312,7 @@ describe("TS Query API branch history with relational read policies", () => {
   beforeEach(async () => {
     server = await startTestJazz({
       app: projectsApp,
-      permissions: projectPermissions,
+      permissions: await appPermissions(projectsApp, projectPermissions),
       coreOptions: {
         inMemory: true,
       },

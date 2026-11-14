@@ -5,7 +5,7 @@ import { definePermissions } from "../permissions/index.js";
 import { PersistedWriteRejectedError } from "./client.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { appArtifact } from "../testing/app-artifact.js";
+import { appArtifact, appPermissions } from "../testing/app-artifact.js";
 import { startTestJazz } from "../testing/index.js";
 
 it("inserts an ordinary parent and child atomically after adding a table", async () => {
@@ -35,17 +35,16 @@ it("inserts an ordinary parent and child atomically after adding a table", async
     },
   );
   const oldApp = s.defineApp(before, {
-    artifact: await appArtifact(before, { permissions: oldPermissions }),
+    artifact: await appArtifact(before),
   });
   const newApp = s.defineApp(after, {
     artifact: await appArtifact(before, {
       steps: [{ to: after, migration }],
-      permissions: newPermissions,
     }),
   });
   const server = await startTestJazz({
     app: oldApp,
-    permissions: oldPermissions,
+    permissions: await appPermissions(oldApp, oldPermissions),
     coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
@@ -55,7 +54,7 @@ it("inserts an ordinary parent and child atomically after adding a table", async
     await db.insert(oldApp.projects, { title: "Existing project" }).wait({ tier: "global" });
     await db.shutdown();
     db = undefined;
-    await server.redeploy({ app: newApp, permissions: newPermissions, migration });
+    await server.redeploy({ app: newApp, permissions: await appPermissions(newApp, newPermissions), migration });
     db = await createDb(account);
     await db.all(newApp.projects, { tier: "remote" });
     const tx = db.beginSerializableTransaction();
@@ -84,7 +83,7 @@ it.each(["local", "global"] as const)(
     });
     const server = await startTestJazz({
       app: app,
-      permissions: permissions,
+      permissions: await appPermissions(app, permissions),
       coreOptions: { inMemory: true },
     });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
@@ -131,7 +130,7 @@ it("does not reject a filtered transaction read when an unrelated row is inserte
   });
   const server = await startTestJazz({
     app: app,
-    permissions: permissions,
+    permissions: await appPermissions(app, permissions),
     coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;

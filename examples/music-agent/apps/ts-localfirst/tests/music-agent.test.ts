@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "vitest";
 import { createJazzClient, type Db } from "jazz-tools";
-import permissions from "../permissions.js";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 import { startTestJazz, type TestJazz } from "jazz-tools/testing";
 import { app } from "../schema.js";
 import { memoryAccountStore } from "../../../../testing/accounts.js";

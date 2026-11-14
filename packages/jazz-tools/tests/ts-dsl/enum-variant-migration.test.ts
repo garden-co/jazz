@@ -14,7 +14,7 @@ import { computeSchemaHash } from "../../src/dev/catalogue.js";
 import { deploy, startLocalJazzServer, startTestJazz } from "../../src/testing/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { localAccountConfig } from "../../src/runtime/testing/account-fixtures.js";
-import { appArtifact } from "../../src/testing/app-artifact.js";
+import { appArtifact, appPermissions } from "../../src/testing/app-artifact.js";
 import { shipArtifact } from "../../src/runtime/app-artifact.js";
 import type { Db } from "../../src/runtime/db.js";
 
@@ -77,10 +77,9 @@ describe("adding an enum variant in a migration", () => {
     shipArtifact(v2.wasmSchema, {
       artifact: await appArtifact(v1, {
         steps: [{ to: v2, migration }],
-        permissions: permissionsV2,
       }),
     });
-    server = await startTestJazz({ app: v2, permissions: permissionsV2, core });
+    server = await startTestJazz({ app: v2, permissions: await appPermissions(v2, permissionsV2), core });
   }
 
   async function open() {

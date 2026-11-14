@@ -8,8 +8,8 @@ import {
 import type { JazzServerInfo } from "./testing-server.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
-import type { AppArtifact } from "../../src/runtime/app-artifact.js";
-import type { DeployResult } from "../../src/dev/catalogue.js";
+import type { AppArtifact, AppPermissions } from "../../src/runtime/app-artifact.js";
+import type { BackendPermissions, DeployResult } from "../../src/dev/catalogue.js";
 
 export interface JazzServerBrowserCommands {
   jazzServerInfo(appId?: string): Promise<JazzServerInfo>;
@@ -20,7 +20,7 @@ export interface JazzServerBrowserCommands {
       schema: WasmSchema;
       /** What the app ships (`defineApp(schema, { artifact })`): a command drops the schema's own record of it. */
       artifact?: AppArtifact;
-      permissions: CompiledPermissionsMap;
+      permissions: BackendPermissions;
       pageOrigin: string;
     },
   ): Promise<string>;
@@ -77,7 +77,7 @@ export interface JazzDeployAppBrowserCommands {
     adminSecret: string;
     schema: WasmSchema;
     artifact?: AppArtifact;
-    permissions: CompiledPermissionsMap;
+    permissions: BackendPermissions;
   }): Promise<DeployResult>;
 }
 
@@ -94,7 +94,7 @@ export interface JazzAppArtifactBrowserCommands {
     versions: WasmSchema[],
     migrations: unknown[][],
     permissions?: CompiledPermissionsMap,
-  ): Promise<AppArtifact>;
+  ): Promise<{ artifact: AppArtifact; permissions: AppPermissions }>;
 }
 
 export function jazzAppArtifactBrowserCommands(): JazzAppArtifactBrowserCommands {

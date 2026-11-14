@@ -23,7 +23,7 @@ import {
   type JazzServerInfo,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import { app } from "../../schema.js";
-import permissions from "../../permissions.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
 import { schema as betterAuthSchema } from "../../schema-better-auth/schema.js";
 
 /** A test user's client: its Db, and how to close it. */

@@ -12,8 +12,8 @@ import {
   type CompiledPermissionsMap,
 } from "../../src/schema-permissions.js";
 import { runtimeSchemaJsonReplacer } from "../../src/drivers/schema-wire.js";
-import { deploy, deployApp, type DeployResult } from "../../src/dev/catalogue.js";
-import { shipArtifact, type AppArtifact } from "../../src/runtime/app-artifact.js";
+import { deploy, deployApp, type BackendPermissions, type DeployResult } from "../../src/dev/catalogue.js";
+import { shipArtifact, type AppArtifact, type AppPermissions } from "../../src/runtime/app-artifact.js";
 import {
   createTransportControl,
   type TransportControl,
@@ -127,7 +127,7 @@ export async function jazzDeployApp(options: {
   adminSecret: string;
   schema: WasmSchema;
   artifact?: AppArtifact;
-  permissions: CompiledPermissionsMap;
+  permissions: BackendPermissions;
 }): Promise<DeployResult> {
   const { schema, artifact, ...rest } = options;
   shipArtifact(schema, artifact ? { artifact } : { migrations: "none" });
@@ -137,14 +137,15 @@ export async function jazzDeployApp(options: {
 /**
  * The `jazz.app.json` of an app that went along `versions` (oldest first),
  * each joined to the next by `migrations[i]` (lenses as `serializeForwardLenses`
- * makes them), with `permissions` for its last version: written by Jazz's Rust
- * writer here in Node, since a browser has no jazz-napi.
+ * makes them), and the jazz.permissions.json `permissions` make for its last
+ * version: written by Jazz's Rust writer here in Node, since a browser has no
+ * jazz-napi. A backend serving the app takes the permissions file.
  */
 export async function jazzAppArtifact(
   versions: WasmSchema[],
   migrations: unknown[][],
   permissions: CompiledPermissionsMap = {},
-): Promise<AppArtifact> {
+): Promise<{ artifact: AppArtifact; permissions: AppPermissions }> {
   const { schemaHash, writeAppArtifact } = await import("jazz-napi");
   const tables = versions.map((version) => mergePermissionsIntoWasmSchema(version, {}));
   const hashes = tables.map((version) =>
@@ -160,7 +161,8 @@ export async function jazzAppArtifact(
     })),
     permissions: normalizePermissionsForWasm(permissions),
   };
-  return JSON.parse(writeAppArtifact(JSON.stringify(input, runtimeSchemaJsonReplacer)));
+  const written = writeAppArtifact(JSON.stringify(input, runtimeSchemaJsonReplacer));
+  return { artifact: JSON.parse(written.app), permissions: JSON.parse(written.permissions) };
 }
 
 /**
@@ -174,7 +176,7 @@ export async function jazzAppFront(
   app: {
     schema: WasmSchema;
     artifact?: AppArtifact;
-    permissions: CompiledPermissionsMap;
+    permissions: BackendPermissions;
     pageOrigin: string;
   },
 ): Promise<string> {

@@ -70,7 +70,7 @@ import { admin } from "better-auth/plugins";
 import { createJazz, perBranch, vercel } from "jazz-tools/backend";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { app } from "./schema";
-import permissions from "./permissions";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,

@@ -1,5 +1,4 @@
 {
-  "bundle": "2048b270ec4bf1e42797fbf2beeda89cc4e17a038c5e546d8de94e525bab6731",
   "codegen": {
     "slices": {},
     "tables": {
@@ -138,102 +137,6 @@
   "current": "d0aec10beaedfd257eb7aa1c93de2de414723fd694ed8ff5ab7aa6229d14b7a9",
   "format": 1,
   "migrations": [],
-  "permissions": {
-    "people": {
-      "select": {
-        "using": {
-          "rel": {
-            "columns": [
-              {
-                "alias": "id",
-                "expr": {
-                  "column": {
-                    "column": "id",
-                    "scope": "__hop_0"
-                  },
-                  "type": "Column"
-                }
-              }
-            ],
-            "input": {
-              "join_kind": "Inner",
-              "left": {
-                "table": "people",
-                "type": "TableScan"
-              },
-              "on": [
-                {
-                  "left": {
-                    "column": "id",
-                    "scope": "people"
-                  },
-                  "right": {
-                    "column": "person_ids",
-                    "scope": "__hop_0"
-                  }
-                }
-              ],
-              "right": {
-                "alias": "__hop_0",
-                "table": "records",
-                "type": "TableScan"
-              },
-              "type": "Join"
-            },
-            "type": "Project"
-          },
-          "type": "ExistsRel"
-        }
-      }
-    },
-    "records": {
-      "select": {
-        "using": {
-          "rel": {
-            "columns": [
-              {
-                "alias": "id",
-                "expr": {
-                  "column": {
-                    "column": "id",
-                    "scope": "__hop_0"
-                  },
-                  "type": "Column"
-                }
-              }
-            ],
-            "input": {
-              "join_kind": "Inner",
-              "left": {
-                "table": "records",
-                "type": "TableScan"
-              },
-              "on": [
-                {
-                  "left": {
-                    "column": "person_ids",
-                    "scope": "records"
-                  },
-                  "right": {
-                    "column": "id",
-                    "scope": "__hop_0"
-                  }
-                }
-              ],
-              "right": {
-                "alias": "__hop_0",
-                "table": "people",
-                "type": "TableScan"
-              },
-              "type": "Join"
-            },
-            "type": "Project"
-          },
-          "type": "ExistsRel"
-        }
-      }
-    }
-  },
   "schemas": [
     {
       "hash": "d0aec10beaedfd257eb7aa1c93de2de414723fd694ed8ff5ab7aa6229d14b7a9",

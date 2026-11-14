@@ -26,6 +26,7 @@ import {
 } from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import { app } from "../../schema.js";
 import permissions from "../../permissions.js";
+import permissionsFile from "../../jazz.permissions.json" with { type: "json" };
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "../../constants.js";
 
 /** A test user's client: its Db, and how to close it. */
@@ -42,7 +43,7 @@ type Role = "admin" | "member";
 beforeAll(async () => {
   const core = await getJazzServerInfo(__APP_ID__);
   await deploy({ ...core, schema: app, permissions });
-  server = await startJazzApp(core, { schema: app, permissions });
+  server = await startJazzApp(core, { schema: app, permissions: permissionsFile });
 });
 
 afterEach(async () => {

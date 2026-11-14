@@ -11,7 +11,7 @@ import {
   startJazzApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server";
 import { memoryAccountStore } from "../../../../../testing/accounts";
-import permissions from "../../permissions";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
 import { app } from "../../schema";
 import { BandChatPreview } from "../../src/BandChat";
 

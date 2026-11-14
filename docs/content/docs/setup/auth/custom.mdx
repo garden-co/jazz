@@ -11,7 +11,7 @@ the same: a function that reads your session and returns a user id.
 ```ts title="jazz.server.ts"
 import { createJazz, remote } from "jazz-tools/backend";
 import { app } from "./schema";
-import permissions from "./permissions";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 import { getUser } from "./your-auth";
 
 export const jazz = createJazz({

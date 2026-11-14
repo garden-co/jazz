@@ -17,7 +17,7 @@ backend already knows who is signed in, so it tells Jazz:
 import { createJazz, sqlite } from "jazz-tools/backend";
 import { auth } from "./auth"; // your Better Auth instance
 import { app } from "./schema";
-import permissions from "./permissions";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,

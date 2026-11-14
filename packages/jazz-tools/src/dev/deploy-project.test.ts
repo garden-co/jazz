@@ -175,7 +175,7 @@ it("writes the deployed schemas and migrations for the app's clients", async () 
   ]);
 });
 
-it("writes jazz.app.json for an app with a single schema version", async () => {
+it("writes jazz.app.json and jazz.permissions.json for an app with a single schema version", async () => {
   const root = await singleVersionProject();
   await validateProject({ schemaDir: root });
   const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
@@ -183,11 +183,22 @@ it("writes jazz.app.json for an app with a single schema version", async () => {
   const hash = await computeSchemaHash(app.wasmSchema);
   expect(written).toMatchObject({ format: 1, current: hash, migrations: [] });
   expect(written.schemas.map((schema) => schema.hash)).toEqual([hash]);
-  // Unchanged, validating again leaves the file as it was.
-  const path = join(root, "jazz.app.json");
-  const text = await readFile(path, "utf8");
+  // Clients ship jazz.app.json: the permissions are in the backend's file.
+  expect(Object.keys(written).sort()).toEqual([
+    "codegen",
+    "current",
+    "format",
+    "migrations",
+    "schemas",
+  ]);
+  const permissions = JSON.parse(await readFile(join(root, "jazz.permissions.json"), "utf8"));
+  expect(permissions).toMatchObject({ format: 1, schema: hash, permissions: {} });
+  expect(permissions.bundle).toMatch(/^[0-9a-f]{64}$/);
+  // Unchanged, validating again leaves both files as they were.
+  const paths = [join(root, "jazz.app.json"), join(root, "jazz.permissions.json")];
+  const texts = await Promise.all(paths.map((path) => readFile(path, "utf8")));
   await validateProject({ schemaDir: root });
-  expect(await readFile(path, "utf8")).toBe(text);
+  expect(await Promise.all(paths.map((path) => readFile(path, "utf8")))).toEqual(texts);
   await validateProject({ schemaDir: root, check: true });
 });
 
@@ -202,6 +213,7 @@ it("writes jazz.app.json for an app that does not import it", async () => {
   await writeFile(join(root, "permissions.ts"), `export default {};`);
   await validateProject({ schemaDir: root });
   expect(existsSync(join(root, "jazz.app.json"))).toBe(true);
+  expect(existsSync(join(root, "jazz.permissions.json"))).toBe(true);
   expect(existsSync(join(root, "migrations", "index.ts"))).toBe(false);
 });
 
@@ -218,7 +230,7 @@ async function singleVersionProject(): Promise<string> {
   return root;
 }
 
-it("validate --check refuses a missing or stale jazz.app.json, and writes nothing", async () => {
+it("validate --check refuses a missing or stale jazz.app.json or jazz.permissions.json, and writes nothing", async () => {
   const root = await singleVersionProject();
   const path = join(root, "jazz.app.json");
   await expect(validateProject({ schemaDir: root, check: true })).rejects.toThrow(
@@ -232,16 +244,47 @@ it("validate --check refuses a missing or stale jazz.app.json, and writes nothin
   await expect(validateProject({ schemaDir: root, check: true })).rejects.toThrow(
     "jazz.app.json is not what schema.ts, permissions.ts and the migrations make",
   );
-  // A permissions change makes the committed file stale too.
   await writeFile(path, text);
   await validateProject({ schemaDir: root, check: true });
+  // The backend's file is checked as the app's is.
+  const permissionsPath = join(root, "jazz.permissions.json");
+  const permissionsText = await readFile(permissionsPath, "utf8");
+  await rm(permissionsPath);
+  await expect(validateProject({ schemaDir: root, check: true })).rejects.toThrow(
+    "jazz.permissions.json is missing. Run `jazz-tools validate` to write it, and commit it.",
+  );
+  await writeFile(permissionsPath, permissionsText);
+  // A permissions change makes jazz.permissions.json stale, and only it:
+  // clients' jazz.app.json holds no permissions.
   await writeFile(
     join(root, "permissions.ts"),
     `export default { notes: { select: { using: { type: "True" } } } };`,
   );
   await expect(validateProject({ schemaDir: root, check: true })).rejects.toThrow(
-    "is not what schema.ts, permissions.ts and the migrations make",
+    "jazz.permissions.json is not what schema.ts, permissions.ts and the migrations make",
   );
+  expect(await readFile(path, "utf8")).toBe(text);
+  expect(await readFile(permissionsPath, "utf8")).toBe(permissionsText);
+  await validateProject({ schemaDir: root });
+  expect(await readFile(path, "utf8")).toBe(text);
+  expect(await readFile(permissionsPath, "utf8")).not.toBe(permissionsText);
+});
+
+it("rewrites a jazz.app.json from before the permissions moved out of it", async () => {
+  const root = await singleVersionProject();
+  await validateProject({ schemaDir: root });
+  const path = join(root, "jazz.app.json");
+  const text = await readFile(path, "utf8");
+  const permissions = JSON.parse(await readFile(join(root, "jazz.permissions.json"), "utf8"));
+  // The single file an earlier build of this release wrote: the app's file
+  // with the permissions and their bundle in it. schema.ts imports it, and
+  // defineApp refuses it, yet validate still loads the schema and rewrites it.
+  const single = { ...JSON.parse(text), bundle: permissions.bundle, permissions: {} };
+  await writeFile(path, JSON.stringify(single, null, 2));
+  await expect(validateProject({ schemaDir: root, check: true })).rejects.toThrow(
+    "jazz.app.json is not what schema.ts, permissions.ts and the migrations make",
+  );
+  await validateProject({ schemaDir: root });
   expect(await readFile(path, "utf8")).toBe(text);
 });
 

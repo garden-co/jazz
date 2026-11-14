@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { anyOf, definePermissions } from "../permissions/index.js";
 import { schema as s, migration as m } from "../index.js";
-import { appArtifact } from "./app-artifact.js";
+import { appArtifact, appPermissions } from "./app-artifact.js";
 import {
   createPolicyTestApp,
   deploy,
@@ -440,7 +440,6 @@ describe("createPolicyTestApp", () => {
     const app = s.defineApp(notesV2, {
       artifact: await appArtifact(notesV1, {
         steps: [{ to: notesV2, migration }],
-        permissions: permissions,
       }),
     });
     const policyTestApp = await createPolicyTestApp(app, permissions, expect);
@@ -491,7 +490,6 @@ describe("createPolicyTestApp", () => {
     const app = s.defineApp(after, {
       artifact: await appArtifact(before, {
         steps: [{ to: after, migration }],
-        permissions: permissions,
       }),
     });
     const policyTestApp = await createPolicyTestApp(app, permissions, expect);
@@ -994,14 +992,19 @@ describe("startLocalJazzServer with an app that ships a migration", () => {
     const app = s.defineApp(notesV2, {
       artifact: await appArtifact(notesV1, {
         steps: [{ to: notesV2, migration }],
-        permissions: permissions,
       }),
     });
-    const server = await startLocalJazzServer({ inMemory: true, schema: app, permissions });
+    // The app's jazz.permissions.json, which a backend serving it takes.
+    const backendPermissions = await appPermissions(app, permissions);
+    const server = await startLocalJazzServer({
+      inMemory: true,
+      schema: app,
+      permissions: backendPermissions,
+    });
     const { createJazz, remote } = await import("../backend/index.js");
     const jazz = createJazz({
       app,
-      permissions,
+      permissions: backendPermissions,
       store: remote({ url: server.url, appId: server.appId, secret: server.adminSecret }),
     });
     try {

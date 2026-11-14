@@ -19,7 +19,7 @@ import {
   loginAtJazzAppUser,
   startJazzApp,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
-import permissions from "../../permissions.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
 import { app } from "../../schema.js";
 import {
   purchase,

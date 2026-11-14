@@ -40,7 +40,10 @@ describe("what a client's app object carries", () => {
     for (const policyKey of ["permissions", "bundle", "using", "with_check", "select"]) {
       expect(keys.has(policyKey), policyKey).toBe(false);
     }
-    expect(keysOf(app.wasmSchema).has("policies")).toBe(false);
+    // The client's schema has no policies either: a table's are empty.
+    for (const table of Object.values(app.wasmSchema)) {
+      expect(Object.keys(table.policies ?? {})).toEqual([]);
+    }
   });
 
   it("while the backend's jazz.permissions.json holds them, for the same version", () => {

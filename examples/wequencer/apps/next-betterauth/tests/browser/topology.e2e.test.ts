@@ -24,7 +24,7 @@ import {
   loginAtJazzAppUser,
   startJazzApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
-import permissions from "../../permissions.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
 import { app, type Step } from "../../schema.js";
 
 const ctx = new TestCleanup();

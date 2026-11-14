@@ -32,8 +32,12 @@ export const app = s.defineApp(
 ```
 
 `jazz.app.json` is generated: `jazz-tools validate`, `migrations create` and
-`deploy` write it beside schema.ts, even while an app has a single version.
-Commit it, and keep formatters off it: `validate --check` compares it byte for byte.
+`deploy` write it beside schema.ts, even while an app has a single version,
+together with `jazz.permissions.json`, which holds the compiled permissions.
+`schema.ts` imports only `jazz.app.json`; your backend passes
+`jazz.permissions.json` to `createJazz({ app, permissions })`, so client bundles
+never carry your permissions. Commit both, and keep formatters off them:
+`validate --check` compares them byte for byte.
 
 Use `db.insert`, `db.all` and `db.subscribeAll` for writes and queries.
 React, Vue and Solid expose reactive reads through `useAll` / `useOne` in their

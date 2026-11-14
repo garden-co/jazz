@@ -12,8 +12,7 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { createJazz, fromJWT, remote, sqlite, type Db } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
-import permissions from "../permissions.js";
-
+import permissions from "../jazz.permissions.json" with { type: "json" };
 // ============================================================================
 // Types
 // ============================================================================

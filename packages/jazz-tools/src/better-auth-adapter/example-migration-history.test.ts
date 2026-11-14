@@ -120,7 +120,7 @@ function writtenFrom(from: WasmSchema, to: WasmSchema, toHash: string, migration
         schemas: [{ tables: from }, { tables: to }],
         migrations: [migration],
       }),
-    ),
+    ).app,
   ) as { schemas: unknown[]; migrations: unknown[] };
 }
 function migrationAt(directory: string) {

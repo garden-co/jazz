@@ -11,7 +11,7 @@ import { createJazz, sqlite, type Jazz } from "../backend/create-jazz.js";
 import { jazzAdapter } from "./index.js";
 import { computeSchemaHash } from "../schema-hash.js";
 import { loadDefinedMigration } from "../dev/catalogue-project.js";
-import { appArtifact } from "../testing/app-artifact.js";
+import { appArtifact, appPermissions } from "../testing/app-artifact.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { legacyDefinition, currentDefinition } from "./fixtures/issuer-upgrade-schema.js";
 
@@ -48,19 +48,21 @@ it("upgrades an existing issuer-era account through createJazz and signs in afte
   // The example's own history: its snapshots and its issuer-removal migration.
   const migration = await loadDefinedMigration(join(directory, "remove-better-auth-issuer.ts"));
   const oldApp = s.defineApp(legacyDefinition, {
-    artifact: await appArtifact({ wasmSchema: oldSchema }, { permissions }),
+    artifact: await appArtifact({ wasmSchema: oldSchema }),
   });
   const newApp = s.defineApp(currentDefinition, {
     artifact: await appArtifact(
       { wasmSchema: oldSchema },
       {
         steps: [{ to: { wasmSchema: newSchema }, migration }],
-        permissions,
       },
     ),
   });
   expect(await computeSchemaHash(oldApp.wasmSchema)).toBe(predecessor);
   expect(await computeSchemaHash(newApp.wasmSchema)).toBe(current);
+  // Each version's jazz.permissions.json, which its backend takes.
+  const oldPermissions = await appPermissions(oldApp, permissions);
+  const newPermissions = await appPermissions(newApp, permissions);
   const path = await mkdtemp(join(tmpdir(), "jazz-better-auth-upgrade-"));
   const store = sqlite({ path });
   let jazz: Jazz | undefined;
@@ -68,7 +70,7 @@ it("upgrades an existing issuer-era account through createJazz and signs in afte
     // Seed an actual predecessor store, with real persistent user/account rows.
     // The password fixture uses Better Auth's supported scrypt representation;
     // this is not a claim that the old Better Auth package was executed here.
-    jazz = await createJazz({ app: oldApp, permissions, store });
+    jazz = await createJazz({ app: oldApp, permissions: oldPermissions, store });
     const password = "existing-upgrade-fixture-password";
     const digest = await hashPassword(password);
     const user = jazz.db.insert(oldApp.better_auth_user, {
@@ -95,7 +97,7 @@ it("upgrades an existing issuer-era account through createJazz and signs in afte
     jazz = undefined;
 
     // Normal createJazz startup publishes the connected shipped bundle.
-    jazz = await createJazz({ app: newApp, permissions, store });
+    jazz = await createJazz({ app: newApp, permissions: newPermissions, store });
     expect(
       await jazz.db.one(newApp.better_auth_account.where({ id: expectedAccount })),
     ).toMatchObject({
@@ -111,14 +113,14 @@ it("upgrades an existing issuer-era account through createJazz and signs in afte
     // Both handles use this same current runtime/library, not a package downgrade.
     await jazz.close();
     jazz = undefined;
-    jazz = await createJazz({ app: oldApp, permissions, store });
+    jazz = await createJazz({ app: oldApp, permissions: oldPermissions, store });
     // The backwards projection retains a previously stored issuer verbatim.
     expect(
       await jazz.db.one(oldApp.better_auth_account.where({ id: expectedAccount })),
     ).toMatchObject({ issuer: "fixture:legacy-credential" });
     await jazz.close();
     jazz = undefined;
-    jazz = await createJazz({ app: newApp, permissions, store });
+    jazz = await createJazz({ app: newApp, permissions: newPermissions, store });
     const db = jazz.db;
     const auth = betterAuth({
       baseURL: "http://localhost:3000",
@@ -137,7 +139,7 @@ it("upgrades an existing issuer-era account through createJazz and signs in afte
     });
     await jazz.close();
     jazz = undefined;
-    jazz = await createJazz({ app: oldApp, permissions, store });
+    jazz = await createJazz({ app: oldApp, permissions: oldPermissions, store });
     const newAccount = await jazz.db.one(
       oldApp.better_auth_account.where({ userId: added.user.id }),
     );
@@ -148,7 +150,7 @@ it("upgrades an existing issuer-era account through createJazz and signs in afte
     });
     await jazz.close();
     jazz = undefined;
-    jazz = await createJazz({ app: newApp, permissions, store });
+    jazz = await createJazz({ app: newApp, permissions: newPermissions, store });
     expect(
       await jazz.db.one(newApp.better_auth_account.where({ id: expectedAccount })),
     ).toMatchObject({ password: digest });

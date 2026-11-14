@@ -326,7 +326,8 @@ export const cataloguePermissionsV2 = s.definePermissions(catalogueDraftV2, ({ p
 
 // Both versions ship the family's jazz.app.json, with its lens; the browser
 // has no jazz-napi, so the runner's Node side writes it.
-const catalogueArtifact = await jazzAppArtifactBrowserCommands().jazzAppArtifact(
+const { artifact: catalogueArtifact, permissions: catalogueFileV2 } =
+  await jazzAppArtifactBrowserCommands().jazzAppArtifact(
   [catalogueDraftV1.wasmSchema, catalogueDraftV2.wasmSchema],
   [
     serializeForwardLenses(
@@ -480,7 +481,7 @@ export async function publishCatalogueSchemaFamily(scope: string): Promise<JazzS
   // jazz.app.json, as the app's createJazz does.
   return startJazzApp(testingServer, {
     schema: catalogueAppV2.wasmSchema,
-    permissions: cataloguePermissionsV2,
+    permissions: catalogueFileV2,
   });
 }
 

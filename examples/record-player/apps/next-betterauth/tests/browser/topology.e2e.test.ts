@@ -21,6 +21,7 @@ import {
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import { betterAuthPermissions, betterAuthSchema } from "../../auth-schema.js";
 import permissions from "../../permissions.js";
+import permissionsFile from "../../jazz.permissions.json" with { type: "json" };
 import { app } from "../../schema.js";
 import {
   ALBUM_TRACK_LIMIT,
@@ -239,9 +240,9 @@ describe("RecordPlayer authenticated playlist topology", () => {
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
       app: app,
-      permissions,
+      permissions: permissionsFile,
     });
-    const server = await startJazzApp(core, { schema: app, permissions });
+    const server = await startJazzApp(core, { schema: app, permissions: permissionsFile });
     const [ownerToken, recipientToken, secondRecipientToken] = await Promise.all([
       jazzAppUserUrl(server, "record-player-recipient-owner"),
       jazzAppUserUrl(server, "record-player-recipient-editor"),
@@ -305,9 +306,9 @@ describe("RecordPlayer authenticated playlist topology", () => {
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
       app: app,
-      permissions,
+      permissions: permissionsFile,
     });
-    const server = await startJazzApp(core, { schema: app, permissions });
+    const server = await startJazzApp(core, { schema: app, permissions: permissionsFile });
     const [ownerToken, recipientToken] = await Promise.all([
       jazzAppUserUrl(server, "record-player-acceptance-owner"),
       jazzAppUserUrl(server, "record-player-acceptance-recipient"),
@@ -352,9 +353,9 @@ describe("RecordPlayer authenticated playlist topology", () => {
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
       app: app,
-      permissions,
+      permissions: permissionsFile,
     });
-    const server = await startJazzApp(core, { schema: app, permissions });
+    const server = await startJazzApp(core, { schema: app, permissions: permissionsFile });
     const token = await jazzAppUserUrl(server, "record-player-owner-settlement");
     const db = await openClient(server, "owner-settlement", token);
     const errors: unknown[] = [];
@@ -652,9 +653,9 @@ describe("RecordPlayer authenticated playlist topology", () => {
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
       app: app,
-      permissions,
+      permissions: permissionsFile,
     });
-    const server = await startJazzApp(core, { schema: app, permissions });
+    const server = await startJazzApp(core, { schema: app, permissions: permissionsFile });
     const [ownerAToken, ownerBToken, recipientToken] = await Promise.all([
       jazzAppUserUrl(server, "record-player-transfer-owner-a"),
       jazzAppUserUrl(server, "record-player-transfer-owner-b"),
@@ -822,9 +823,9 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 serverUrl: core.serverUrl,
                 adminSecret: core.adminSecret,
                 app: app,
-                permissions,
+                permissions: permissionsFile,
               });
-              server = await startJazzApp(core, { schema: app, permissions });
+              server = await startJazzApp(core, { schema: app, permissions: permissionsFile });
               console.info("[record-player-topology] sign users in");
               const [ownerToken, issuedEditorToken, listenerToken] = await Promise.all([
                 jazzAppUserUrl(server, "record-player-owner"),
@@ -1597,9 +1598,9 @@ describe("RecordPlayer after a streamed upload", () => {
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
       app: app,
-      permissions,
+      permissions: permissionsFile,
     });
-    const server = await startJazzApp(core, { schema: app, permissions });
+    const server = await startJazzApp(core, { schema: app, permissions: permissionsFile });
     const [uploaderToken, listenerToken] = await Promise.all([
       jazzAppUserUrl(server, "record-player-reload-uploader"),
       jazzAppUserUrl(server, "record-player-reload-listener"),

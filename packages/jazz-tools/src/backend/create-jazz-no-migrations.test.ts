@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
-import { appArtifact } from "../testing/app-artifact.js";
+import { appArtifact, appPermissions } from "../testing/app-artifact.js";
 import { createJazz, memory, remote, sqlite, vercel } from "./create-jazz.js";
 
 const definition = { notes: s.table({ body: s.string() }, {}) };
@@ -98,11 +98,12 @@ describe('createJazz with an app on { migrations: "none" }', () => {
   it("allows a sqlite() store once the app ships its jazz.app.json", async () => {
     const dir = await tempDir();
     const shipped = s.defineApp(definition, {
-      artifact: await appArtifact(definition, { permissions }),
+      artifact: await appArtifact(definition),
     });
     const jazz = createJazz({
       app: shipped,
-      permissions,
+      // An app that ships its jazz.app.json takes its jazz.permissions.json.
+      permissions: await appPermissions(shipped, permissions),
       store: sqlite({ path: join(dir, "store") }),
     });
     await jazz.close();

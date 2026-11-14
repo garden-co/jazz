@@ -94,7 +94,7 @@ describe("cli migrations", () => {
     );
     expect(unchangedValidate).toContain(
       "schema.ts matches its latest snapshot, so no migration is needed. " +
-        "Changes to permissions.ts never need one: they go into jazz.app.json, which your backend publishes when it starts.",
+        "Changes to permissions.ts never need one: they go into jazz.permissions.json, which your backend publishes when it starts.",
     );
 
     await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithTodoNotes()));
@@ -115,6 +115,13 @@ describe("cli migrations", () => {
     const bundled = JSON.parse(await index());
     expect(bundled.current).toBe(second.toHash);
     expect(bundled.migrations).toMatchObject([{ from: first.hash, to: second.toHash }]);
+    // And the backend's jazz.permissions.json moved to the new version with it.
+    const permissionsFile = JSON.parse(
+      await readFile(join(root, "jazz.permissions.json"), "utf8"),
+    );
+    expect(permissionsFile).toMatchObject({ format: 1, schema: second.toHash });
+    expect(bundled).not.toHaveProperty("permissions");
+    expect(bundled).not.toHaveProperty("bundle");
     await validate({ schemaDir: root, check: true });
     expect(fetchMock).not.toHaveBeenCalled();
   });

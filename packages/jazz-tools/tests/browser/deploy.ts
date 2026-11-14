@@ -1,6 +1,6 @@
 import { jazzDeployAppBrowserCommands, jazzDeployBrowserCommands } from "./browser-commands.js";
 import { shippedArtifact } from "../../src/runtime/app-artifact.js";
-import type { DeployResult } from "../../src/dev/catalogue.js";
+import type { BackendPermissions, DeployResult } from "../../src/dev/catalogue.js";
 import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../../src/schema-source.js";
 
@@ -35,7 +35,8 @@ export async function deployApp(options: {
   serverUrl: string;
   adminSecret: string;
   app: SchemaSourceInput;
-  permissions: CompiledPermissionsMap;
+  /** The app's jazz.permissions.json, or definePermissions' map on `{ migrations: "none" }`. */
+  permissions: BackendPermissions;
 }): Promise<DeployResult> {
   const schema = resolveSchemaSource(options.app);
   return jazzDeployAppBrowserCommands().jazzDeployApp({

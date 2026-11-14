@@ -34,7 +34,7 @@ it("reads rows written before the app renamed a column, from a server with schem
       permissions: allowAfter,
     }),
   });
-  const backend = await startTestJazz({ app: beforeApp, permissions: allowBefore });
+  const backend = await startTestJazz({ app: beforeApp, permissions: await appPermissions(beforeApp, allowBefore)});
   try {
     let written: { id: string; title: string } | undefined;
     await withNativeRelayFixture(
@@ -48,7 +48,7 @@ it("reads rows written before the app renamed a column, from a server with schem
       },
       { appId: backend.appId, upstream: { backend, userId: "native-alice" } },
     );
-    await backend.redeploy({ app: afterApp, permissions: allowAfter, migration: rename });
+    await backend.redeploy({ app: afterApp, permissions: await appPermissions(afterApp, allowAfter), migration: rename });
 
     await withNativeRelayFixture(
       afterApp,

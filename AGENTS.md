@@ -40,8 +40,10 @@ layers, WASM + NAPI + React Native bindings.
   means a migration is missing. Run `npx jazz-tools migrations create` before
   the first change to a schema a store already holds, and ship the app's
   `jazz.app.json` with `defineApp(schema, { artifact })`
-  (`import artifact from "./jazz.app.json" with { type: "json" }`). Regenerate
-  it with `npx jazz-tools validate` and commit it; never hand-edit or format it.
+  (`import artifact from "./jazz.app.json" with { type: "json" }`), and give
+  backends its `jazz.permissions.json` as `createJazz({ app, permissions })`.
+  Regenerate both with `npx jazz-tools validate` (also after editing
+  `permissions.ts`) and commit them; never hand-edit or format them.
 - **Backlog.** Follow-ups go in GitHub Issues, not in specs or docs.
 - **Changesets.** Name only published packages. Rust-facing notes go under
   `jazz-tools` (the crates ship at its version); private `@jazz/rust` makes

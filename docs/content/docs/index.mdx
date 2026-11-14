@@ -41,7 +41,7 @@ Jazz runs inside your backend: no separate database server and no deploy step. T
 import { Hono } from "hono";
 import { createJazz, sqlite } from "jazz-tools/backend";
 import { app } from "./schema";
-import permissions from "./permissions";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 const jazz = createJazz({
   app,
