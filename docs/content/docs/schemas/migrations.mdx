@@ -63,9 +63,11 @@ In practice, this lets you:
 6. **Deploy your main backend**&hairsp;—&hairsp;restart it locally, or deploy it as usual. When it
    starts, `createJazz` sends the schema, permissions and migrations your code imports to its store
    as one bundle. There is no separate deploy or push command. If the bundle has no migration path
-   from the schema already in the store, `jazz.ready()` (and so the backend's first request)
-   rejects with an error naming the missing migration, which usually crashes the process at
-   startup. First deployments and permission-only changes need no migration.
+   from the schema already in the store, the store refuses it with an error naming the missing
+   migration: `jazz.ready()` rejects with it, and Jazz's routes answer 503 and log it. In
+   development (`NODE_ENV=development`) the 503 carries the error too, so the browser console shows
+   it. Call `await jazz.ready()` at startup if you want a refused bundle to stop the process. First
+   deployments and permission-only changes need no migration.
 
    With several instances, roll out to one first and check it starts before replacing the rest,
    and keep the previous version ready to roll back to.
@@ -190,9 +192,37 @@ export default m.defineMigration({
 After editing a stub, run `jazz-tools validate` (and your type checker): it rejects a migration that
 doesn't cover every change, while a stub with a `TODO` left in it can still pass type checks.
 
+### Adding enum variants
+
+An enum column, or an array of enums, can gain variants at the end of its list. Rows written
+under the older schema hold only variants the new one still declares, so they read unchanged and
+sort as before, and the migration needs no step. A variant's position in the list is its sort
+order, so adding one elsewhere, or reordering the list, is refused. `jazz-tools migrations create` writes a stub with
+nothing to fill in, noting which column gains which variants:
+
+```ts title="migrations/20261113-add-blocked-status.ts"
+import { migration as m } from "jazz-tools";
+
+export default m.defineMigration({
+  migrate: {
+    tasks: {
+      // Column "status" gains enum variant "blocked": existing rows are unchanged, so it needs no step.
+    },
+  },
+  // fromHash, toHash, from and to as generated
+});
+```
+
+Clients still on the older schema read a row holding the new variant with its name as it is (here
+`"blocked"`), even though their own types don't list it, so handle unknown values where they read
+the column. Their own writes are still checked against the variants their schema declares: an
+older client can't write `"blocked"`.
+
 ### Changes that aren't supported yet
 
-- **Changing a column's type, or the variants of an enum.** The CLI refuses them. Adding a column
+- **Renaming, removing or reordering enum variants.** The CLI refuses a variant missing from the
+  new list, or one that moved, and so does a deploy. Adding variants at the end works, as above.
+- **Changing a column's type.** The CLI refuses it. Adding a column
   under a new name and dropping the old one works, but it does not carry values over: every row
   gets the new column's default, with no warning. There is no value-mapping step yet.
 - **Making an optional column required.** There's no step for it yet, and adding a required column

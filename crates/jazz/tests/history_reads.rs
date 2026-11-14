@@ -957,3 +957,62 @@ fn history_aggregates_summarize_every_version() {
         "{message}"
     );
 }
+
+/// R19: Alice edits a note offline, Bob then edits it from the same
+/// version online and the server accepts his edit, and only then does
+/// Alice's edit reach the server. The last write the server accepts wins a
+/// plain column (SPEC 4, `INV-HIST-8`), so the note ends on Alice's
+/// edit, everywhere. Its `$acceptedAt` is the server's time when it
+/// accepted it, after Bob's, so history ordered by `$acceptedAt` ends with
+/// the current row.
+#[test]
+fn an_offline_edit_synced_later_wins_and_is_accepted_last() {
+    let synced = Synced::new();
+    let note = row(1);
+    insert(&synced.server, note, "first");
+    let alice_notes = synced.alice.prepare_query(&Query::from("notes")).unwrap();
+    let _alice_notes = block_on(synced.alice.subscribe(&alice_notes, ReadOpts::default())).unwrap();
+    synced.pump();
+
+    // Alice is offline: her client is not ticked, so her edit stays pending.
+    let offline = update(&synced.alice, note, "alice offline");
+    let online = update(&synced.bob, note, "bob online");
+    for _ in 0..4 {
+        block_on(synced.bob.tick()).unwrap();
+        block_on(synced.server.tick()).unwrap();
+    }
+    let current_at = |db: &Db| {
+        titles(&read(
+            db,
+            &Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(note.0)))),
+            local_only(),
+        ))
+    };
+    assert_eq!(current_at(&synced.server), ["bob online"]);
+
+    // Alice reconnects.
+    synced.pump();
+    synced.pump();
+    for db in [&synced.server, &synced.alice, &synced.bob] {
+        assert_eq!(current_at(db), ["alice offline"], "the later arrival wins");
+    }
+    let versions = read(&synced.server, &history_of(note), ReadOpts::default());
+    assert_eq!(titles(&versions), ["first", "bob online", "alice offline"]);
+    assert_eq!(
+        versions.iter().map(transaction_id).collect::<Vec<_>>()[1..],
+        [(online, BOB_NODE), (offline, ALICE_NODE)]
+    );
+    let times: Vec<u64> = versions.iter().map(accepted_at).collect();
+    assert!(
+        times[1] < times[2],
+        "Alice's edit is stamped when the server accepted it, after Bob's: {times:?}"
+    );
+    let newest_first = read(
+        &synced.server,
+        &Query::from("history.notes")
+            .filter(eq(col("id"), lit(Value::Uuid(note.0))))
+            .order_by("$acceptedAt", OrderDirection::Desc),
+        ReadOpts::default(),
+    );
+    assert_eq!(titles(&newest_first)[0], "alice offline");
+}

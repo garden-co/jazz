@@ -315,6 +315,27 @@ pub struct View {
     pub base_cut: Option<Cut>,
 }
 
+/// How to read one cell of one row ([`Ctx::compile_cell`]).
+#[derive(Clone, Debug)]
+pub struct CellRead {
+    pub sql: String,
+    pub params: Vec<Sql>,
+    /// The parameter holding the row's id.
+    pub id_param: usize,
+    pub ty: ValueType,
+    pub tags: Option<crate::values::ColumnTags>,
+}
+
+/// The most columns a batched relation statement returns: Durable Object
+/// SQLite's `SQLITE_LIMIT_COLUMN` (see `durable_object_limits.rs`).
+pub(crate) const BATCH_COLUMNS_MAX: usize = 100;
+
+/// Whose children [`Ctx::children`] reads: one parent's, or a batch's.
+enum Parents<'p> {
+    One(&'p Value),
+    Batch { parents: Sql, blobs: bool },
+}
+
 /// A compiled root query.
 #[derive(Clone)]
 pub struct Compiled {
@@ -1454,28 +1475,91 @@ impl<'a> Ctx<'a> {
     }
 
     /// One array relation for one parent row.
+    /// The rows `array` relates to `parent`, with the index of the bound
+    /// parameter that carries `parent` (`None` when it is not bound: NaN
+    /// reads as SQL `NULL`). Only that parameter depends on `parent`, so
+    /// another parent of the same shape (scalar, or an array of references)
+    /// reuses the SQL with it rebound.
     pub fn compile_children(
-        mut self,
+        self,
         array: &ArraySubquery,
         parent: &Value,
-    ) -> Result<Compiled, Error> {
-        let child = self.table(&array.table)?;
-        let projection = projection(child, array.select.as_deref())?;
-        let alias = "t";
+    ) -> Result<(Compiled, Option<usize>), Error> {
         let elements = match parent {
             Value::Nullable(Some(inner)) => matches!(**inner, Value::Array(_)),
             value => matches!(value, Value::Array(_)),
         };
-        let parent = match self.value_term(parent)? {
-            Term::Bound(sql, _) => sql,
-            _ => "NULL".to_owned(),
+        self.children(array, elements, Parents::One(parent))
+    }
+
+    /// One array relation for many parents at once: the rows `array`
+    /// relates to each value of `parents`, a JSON array bound as one
+    /// parameter (see [`json_list`]; `blobs` when its items are hex
+    /// blobs). Each row carries, after its writer, the index in `parents`
+    /// of the parent it belongs to. Rows come grouped by parent in that
+    /// order, and each parent's rows are exactly, and in the same order,
+    /// what [`Ctx::compile_children`] reads for it: the same filters,
+    /// policy, order (ties broken by id) and, per parent, offset and limit.
+    /// `elements`: every parent is an array of references. Returns the
+    /// index of the parameter holding `parents`, the only one that depends
+    /// on them.
+    ///
+    /// `None` when the batched statement would return more columns than
+    /// [`BATCH_COLUMNS_MAX`] where the per-parent one fits: it adds the
+    /// parent's index, and a page its row number.
+    pub fn compile_children_batch(
+        self,
+        array: &ArraySubquery,
+        elements: bool,
+        parents: Sql,
+        blobs: bool,
+    ) -> Result<Option<(Compiled, usize)>, Error> {
+        let child = self.schema.table(&array.table)?;
+        let paged = array.limit.is_some() || array.offset > 0;
+        // id, _clock, _state, the projection, _writer, the parent's index
+        // and, paged, the row number.
+        let width = projection(child, array.select.as_deref())?.len() + 5 + usize::from(paged);
+        if width > BATCH_COLUMNS_MAX {
+            return Ok(None);
+        }
+        let (compiled, at) = self.children(array, elements, Parents::Batch { parents, blobs })?;
+        Ok(Some((compiled, at.expect("a batch binds its parents"))))
+    }
+
+    fn children(
+        mut self,
+        array: &ArraySubquery,
+        elements: bool,
+        parents: Parents<'_>,
+    ) -> Result<(Compiled, Option<usize>), Error> {
+        let child = self.table(&array.table)?;
+        let projection = projection(child, array.select.as_deref())?;
+        let alias = "t";
+        let parent_param = self.params.len();
+        // `parent`: the SQL a child row is correlated with. A batch reads
+        // its parents from `json_each` (`_p`), one row per parent, keyed by
+        // its index.
+        let (parent, parent_param, batch) = match parents {
+            Parents::One(value) => match self.value_term(value)? {
+                Term::Bound(sql, _) => (sql, Some(parent_param), None),
+                _ => ("NULL".to_owned(), None, None),
+            },
+            Parents::Batch { parents, blobs } => {
+                let mark = self.bind(parents);
+                let value = if blobs && !elements {
+                    "unhex(_p.value)"
+                } else {
+                    "_p.value"
+                };
+                (value.to_owned(), Some(parent_param), Some(mark))
+            }
         };
         // A forward array relation reads one child per array element, in
         // the array's order and with its duplicates.
-        let (from, correlated) = if elements {
-            ("JOIN", array_element_id("r"))
+        let correlated = if elements {
+            array_element_id("r")
         } else {
-            ("", parent.clone())
+            parent.clone()
         };
         let mut wheres = vec![
             format!("({alias}._state & {STATE_DELETED}) = 0"),
@@ -1491,31 +1575,90 @@ impl<'a> Ctx<'a> {
         let order = self.order_sql(child, alias, &array.order_by)?;
         let columns = projection
             .iter()
-            .map(|(name, ..)| Ok(format!(", {}", column_sql(child, alias, name)?)))
-            .collect::<Result<String, Error>>()?;
-        let limit = self.bind(Sql::Integer(array.limit.map_or(-1, |l| l as i64)));
-        let offset = self.bind(Sql::Integer(array.offset as i64));
-        let source = self.source(child)?;
-        let source = if elements {
-            format!("json_each({parent}) AS r {from} {source}")
-        } else {
-            source
-        };
+            .map(|(name, ..)| column_sql(child, alias, name))
+            .collect::<Result<Vec<String>, Error>>()?;
         let order = if elements && array.order_by.is_empty() {
             "r.key".to_owned()
         } else {
             order
         };
-        let statement = |order: &str| {
-            format!(
-                "SELECT {alias}.id, {alias}._clock, {alias}._state{columns}, {alias}._writer FROM {source} \
-                 AS {alias} WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
-                and(&wheres),
-            )
+        let sql = match batch {
+            None => {
+                let limit = self.bind(Sql::Integer(array.limit.map_or(-1, |l| l as i64)));
+                let offset = self.bind(Sql::Integer(array.offset as i64));
+                let source = self.source(child)?;
+                let source = if elements {
+                    format!("json_each({parent}) AS r JOIN {source}")
+                } else {
+                    source
+                };
+                let columns: String = columns.iter().map(|c| format!(", {c}")).collect();
+                format!(
+                    "SELECT {alias}.id, {alias}._clock, {alias}._state{columns}, {alias}._writer FROM {source} \
+                     AS {alias} WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
+                    and(&wheres),
+                )
+            }
+            Some(mark) => {
+                let paged = array.limit.is_some() || array.offset > 0;
+                let mut keep = Vec::new();
+                if array.offset > 0 {
+                    keep.push(format!(
+                        "_n > {}",
+                        self.bind(Sql::Integer(array.offset as i64))
+                    ));
+                }
+                if let Some(limit) = array.limit {
+                    let last = (array.offset as i64).saturating_add(limit as i64);
+                    keep.push(format!("_n <= {}", self.bind(Sql::Integer(last))));
+                }
+                let source = self.source(child)?;
+                let source = if elements {
+                    format!("json_each({mark}) AS _p JOIN json_each(_p.value) AS r JOIN {source}")
+                } else {
+                    format!("json_each({mark}) AS _p JOIN {source}")
+                };
+                let mut cells = vec![
+                    format!("{alias}.id"),
+                    format!("{alias}._clock"),
+                    format!("{alias}._state"),
+                ];
+                cells.extend(columns);
+                cells.push(format!("{alias}._writer"));
+                cells.push("_p.key".to_owned());
+                if paged {
+                    // Each parent's own page: its rows numbered in the
+                    // relation's order, the page kept.
+                    let named = cells
+                        .iter()
+                        .enumerate()
+                        .map(|(i, cell)| format!("{cell} AS _c{i}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let outer = (0..cells.len())
+                        .map(|i| format!("_c{i}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let key = format!("_c{}", cells.len() - 1);
+                    format!(
+                        "SELECT {outer} FROM (SELECT {named}, ROW_NUMBER() OVER (PARTITION BY _p.key \
+                         ORDER BY {order}) AS _n FROM {source} AS {alias} WHERE {}) WHERE {} \
+                         ORDER BY {key}, _n",
+                        and(&wheres),
+                        keep.join(" AND "),
+                    )
+                } else {
+                    format!(
+                        "SELECT {} FROM {source} AS {alias} WHERE {} ORDER BY _p.key, {order}",
+                        cells.join(", "),
+                        and(&wheres),
+                    )
+                }
+            }
         };
         let schema = self.schema;
         let mut compiled = Compiled {
-            sql: statement(&order),
+            sql,
             params: self.params,
             projection,
             tables: self.tables,
@@ -1529,37 +1672,70 @@ impl<'a> Ctx<'a> {
         if !array.partial.is_empty() {
             compiled.partial = partial_projection(schema, &array.table, &array.partial, &compiled)?;
         }
-        Ok(compiled)
+        Ok((compiled, parent_param))
+    }
+
+    /// The cell `column` of each row of `table` whose id is in `ids` (a
+    /// JSON array of hex ids, [`json_ids`]), read as [`Ctx::compile_cell`]
+    /// reads one: through the same view and cut, with no policy or
+    /// deletion filter. Each row is (id, cell). Returns the index of the
+    /// parameter holding `ids`, the only one that depends on them.
+    pub fn compile_cells(
+        mut self,
+        table: &str,
+        column: &str,
+        ids: Sql,
+    ) -> Result<(CellRead, usize), Error> {
+        let table = self.table(table)?;
+        let column = table
+            .column(column)
+            .ok_or_else(|| unsupported("unknown correlation column"))?;
+        let at = self.params.len();
+        let ids = self.bind(ids);
+        let source = self.source(table)?;
+        let sql = format!(
+            "SELECT t.id, t.{} FROM {source} AS t WHERE t.id IN (SELECT unhex(value) FROM json_each({ids}))",
+            quote(&column.stored)
+        );
+        Ok((
+            CellRead {
+                sql,
+                params: self.params,
+                id_param: at,
+                ty: column.ty.clone(),
+                tags: column.tags.clone(),
+            },
+            at,
+        ))
     }
 
     /// One cell of row `id` of `table`, read through the same view and cut
-    /// as the rows it came from: a relation's parent value. The SQL, its
-    /// params and the cell's type.
+    /// as the rows it came from: a relation's parent value. Only the bound
+    /// `id` (at [`CellRead::id_param`]) depends on the row.
     pub fn compile_cell(
         mut self,
         table: &str,
         column: &str,
         id: RowUuid,
-    ) -> Result<
-        (
-            String,
-            Vec<Sql>,
-            ValueType,
-            Option<crate::values::ColumnTags>,
-        ),
-        Error,
-    > {
+    ) -> Result<CellRead, Error> {
         let table = self.table(table)?;
         let column = table
             .column(column)
             .ok_or_else(|| unsupported("unknown correlation column"))?;
         let source = self.source(table)?;
+        let id_param = self.params.len();
         let id = self.bind(Sql::Blob(id.0.as_bytes().to_vec()));
         let sql = format!(
             "SELECT t.{} FROM {source} AS t WHERE t.id = {id}",
             quote(&column.stored)
         );
-        Ok((sql, self.params, column.ty.clone(), column.tags.clone()))
+        Ok(CellRead {
+            sql,
+            params: self.params,
+            id_param,
+            ty: column.ty.clone(),
+            tags: column.tags.clone(),
+        })
     }
 
     /// A junction traversal from the row of `table` at `alias`: some live

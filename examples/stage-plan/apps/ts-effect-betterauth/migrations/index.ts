@@ -662,7 +662,679 @@ export const migrations: ClientMigrations = {
           }
         }
       }
+    },
+    {
+      "hash": "f2c0deb18cb27616ed641ba2a2f620fb74ed606a7f21237863bb479533299ee7",
+      "schema": {
+        "tables": {
+          "better_auth_user": {
+            "columns": [
+              {
+                "name": "name",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              },
+              {
+                "name": "email",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              },
+              {
+                "name": "emailVerified",
+                "column_type": {
+                  "type": "Boolean"
+                },
+                "nullable": false
+              },
+              {
+                "name": "image",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": true
+              },
+              {
+                "name": "createdAt",
+                "column_type": {
+                  "type": "Timestamp"
+                },
+                "nullable": false
+              },
+              {
+                "name": "updatedAt",
+                "column_type": {
+                  "type": "Timestamp"
+                },
+                "nullable": false
+              }
+            ],
+            "relations": {
+              "better_auth_sessionViaUser": {
+                "kind": "reverse",
+                "table": "better_auth_session",
+                "relation": "user"
+              },
+              "better_auth_accountViaUser": {
+                "kind": "reverse",
+                "table": "better_auth_account",
+                "relation": "user"
+              }
+            }
+          },
+          "better_auth_session": {
+            "columns": [
+              {
+                "name": "expiresAt",
+                "column_type": {
+                  "type": "Timestamp"
+                },
+                "nullable": false
+              },
+              {
+                "name": "token",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              },
+              {
+                "name": "createdAt",
+                "column_type": {
+                  "type": "Timestamp"
+                },
+                "nullable": false
+              },
+              {
+                "name": "updatedAt",
+                "column_type": {
+                  "type": "Timestamp"
+                },
+                "nullable": false
+              },
+              {
+                "name": "ipAddress",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": true
+              },
+              {
+                "name": "userAgent",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": true
+              },
+              {
+                "name": "userId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "better_auth_user"
+              }
+            ],
+            "relations": {
+              "user": {
+                "kind": "forward",
+                "table": "better_auth_user",
+                "column": "userId"
+              }
+            }
+          },
+          "better_auth_account": {
+            "columns": [
+              {
+                "name": "accountId",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              },
+              {
+                "name": "providerId",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              },
+              {
+                "name": "userId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "better_auth_user"
+              },
+              {
+                "name": "password",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": true
+              },
+              {
+                "name": "createdAt",
+                "column_type": {
+                  "type": "Timestamp"
+                },
+                "nullable": false
+              },
+              {
+                "name": "updatedAt",
+                "column_type": {
+                  "type": "Timestamp"
+                },
+                "nullable": false
+              }
+            ],
+            "relations": {
+              "user": {
+                "kind": "forward",
+                "table": "better_auth_user",
+                "column": "userId"
+              }
+            }
+          },
+          "better_auth_verification": {
+            "columns": [
+              {
+                "name": "identifier",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              },
+              {
+                "name": "value",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              },
+              {
+                "name": "expiresAt",
+                "column_type": {
+                  "type": "Timestamp"
+                },
+                "nullable": false
+              },
+              {
+                "name": "createdAt",
+                "column_type": {
+                  "type": "Timestamp"
+                },
+                "nullable": false
+              },
+              {
+                "name": "updatedAt",
+                "column_type": {
+                  "type": "Timestamp"
+                },
+                "nullable": false
+              }
+            ],
+            "relations": {}
+          },
+          "better_auth_jwks": {
+            "columns": [
+              {
+                "name": "publicKey",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              },
+              {
+                "name": "privateKey",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              },
+              {
+                "name": "createdAt",
+                "column_type": {
+                  "type": "Timestamp"
+                },
+                "nullable": false
+              },
+              {
+                "name": "expiresAt",
+                "column_type": {
+                  "type": "Timestamp"
+                },
+                "nullable": true
+              },
+              {
+                "name": "alg",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": true
+              },
+              {
+                "name": "crv",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": true
+              }
+            ],
+            "relations": {}
+          },
+          "crew": {
+            "columns": [
+              {
+                "name": "account",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false
+              },
+              {
+                "name": "name",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              }
+            ],
+            "relations": {
+              "memberships": {
+                "kind": "reverse",
+                "table": "showCrew",
+                "relation": "crew"
+              },
+              "assignedTasks": {
+                "kind": "reverse",
+                "table": "tasks",
+                "relation": "assignee"
+              }
+            }
+          },
+          "shows": {
+            "columns": [
+              {
+                "name": "name",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              },
+              {
+                "name": "venue",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              },
+              {
+                "name": "date",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              },
+              {
+                "name": "doors",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              },
+              {
+                "name": "chiefAccount",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false
+              }
+            ],
+            "relations": {
+              "crew": {
+                "kind": "reverse",
+                "table": "showCrew",
+                "relation": "show"
+              },
+              "tasks": {
+                "kind": "reverse",
+                "table": "tasks",
+                "relation": "show"
+              },
+              "activity": {
+                "kind": "reverse",
+                "table": "activity",
+                "relation": "show"
+              },
+              "invites": {
+                "kind": "reverse",
+                "table": "showInvites",
+                "relation": "show"
+              }
+            }
+          },
+          "showCrew": {
+            "columns": [
+              {
+                "name": "showId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "shows"
+              },
+              {
+                "name": "crewId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "crew"
+              },
+              {
+                "name": "account",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false
+              },
+              {
+                "name": "role",
+                "column_type": {
+                  "type": "Enum",
+                  "variants": [
+                    "chief",
+                    "crew"
+                  ]
+                },
+                "nullable": false
+              },
+              {
+                "name": "inviteCode",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": true
+              }
+            ],
+            "relations": {
+              "show": {
+                "kind": "forward",
+                "table": "shows",
+                "column": "showId"
+              },
+              "crew": {
+                "kind": "forward",
+                "table": "crew",
+                "column": "crewId"
+              }
+            }
+          },
+          "showInvites": {
+            "columns": [
+              {
+                "name": "showId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "shows"
+              },
+              {
+                "name": "code",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              }
+            ],
+            "relations": {
+              "show": {
+                "kind": "forward",
+                "table": "shows",
+                "column": "showId"
+              }
+            }
+          },
+          "tasks": {
+            "columns": [
+              {
+                "name": "showId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "shows"
+              },
+              {
+                "name": "title",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              },
+              {
+                "name": "status",
+                "column_type": {
+                  "type": "Enum",
+                  "variants": [
+                    "todo",
+                    "doing",
+                    "done",
+                    "blocked"
+                  ]
+                },
+                "nullable": false
+              },
+              {
+                "name": "assigneeId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": true,
+                "references": "crew"
+              },
+              {
+                "name": "notes",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": true
+              },
+              {
+                "name": "rank",
+                "column_type": {
+                  "type": "Double"
+                },
+                "nullable": false
+              }
+            ],
+            "relations": {
+              "show": {
+                "kind": "forward",
+                "table": "shows",
+                "column": "showId"
+              },
+              "assignee": {
+                "kind": "forward",
+                "table": "crew",
+                "column": "assigneeId"
+              },
+              "comments": {
+                "kind": "reverse",
+                "table": "comments",
+                "relation": "task"
+              },
+              "activity": {
+                "kind": "reverse",
+                "table": "activity",
+                "relation": "task"
+              }
+            }
+          },
+          "comments": {
+            "columns": [
+              {
+                "name": "taskId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "tasks"
+              },
+              {
+                "name": "authorId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "crew"
+              },
+              {
+                "name": "body",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              }
+            ],
+            "relations": {
+              "task": {
+                "kind": "forward",
+                "table": "tasks",
+                "column": "taskId"
+              },
+              "author": {
+                "kind": "forward",
+                "table": "crew",
+                "column": "authorId"
+              }
+            }
+          },
+          "activity": {
+            "columns": [
+              {
+                "name": "showId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "shows"
+              },
+              {
+                "name": "taskId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "tasks"
+              },
+              {
+                "name": "actorId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "crew"
+              },
+              {
+                "name": "kind",
+                "column_type": {
+                  "type": "Enum",
+                  "variants": [
+                    "created",
+                    "moved",
+                    "assigned",
+                    "renamed",
+                    "commented",
+                    "deleted"
+                  ]
+                },
+                "nullable": false
+              },
+              {
+                "name": "detail",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": true
+              }
+            ],
+            "relations": {
+              "show": {
+                "kind": "forward",
+                "table": "shows",
+                "column": "showId"
+              },
+              "task": {
+                "kind": "forward",
+                "table": "tasks",
+                "column": "taskId"
+              },
+              "actor": {
+                "kind": "forward",
+                "table": "crew",
+                "column": "actorId"
+              }
+            }
+          },
+          "checklistItems": {
+            "columns": [
+              {
+                "name": "title",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              },
+              {
+                "name": "done",
+                "column_type": {
+                  "type": "Boolean"
+                },
+                "nullable": false
+              },
+              {
+                "name": "ownerAccount",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false
+              }
+            ],
+            "relations": {}
+          }
+        }
+      }
     }
   ],
-  "migrations": []
+  "migrations": [
+    {
+      "fromHash": "c338db39787fc104e3d44141878b8c54365c95970079a08c3ddf24e17e00d499",
+      "toHash": "f2c0deb18cb27616ed641ba2a2f620fb74ed606a7f21237863bb479533299ee7",
+      "forward": [
+        {
+          "table": "better_auth_account",
+          "operations": [
+            {
+              "type": "drop",
+              "column": "issuer",
+              "column_type": {
+                "type": "Text"
+              },
+              "value": {
+                "type": "Text",
+                "value": ""
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
 };

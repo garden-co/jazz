@@ -39,7 +39,6 @@ export const schema = {
 
   better_auth_account: s.table(
     {
-      issuer: s.string(),
       accountId: s.string(),
       providerId: s.string(),
       userId: s.uuid(),
@@ -73,6 +72,8 @@ export const schema = {
       privateKey: s.string(),
       createdAt: s.timestamp(),
       expiresAt: s.timestamp().optional(),
+      alg: s.string().optional(),
+      crv: s.string().optional(),
     },
     {},
   ),

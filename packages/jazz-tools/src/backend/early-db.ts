@@ -38,7 +38,7 @@ const WAITS = new Set([
   "reconnect",
   "upgradeToLocalFirst",
   "deleteClientStorage",
-  "wipeClientStorage",
+  "storePendingUploads",
   "logout",
   "shutdown",
 ]);

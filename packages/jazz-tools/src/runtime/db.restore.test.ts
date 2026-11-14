@@ -19,7 +19,7 @@ it.each(["standalone", "transaction"])(
     const server = await startTestJazz({
       app: app,
       permissions: permissions,
-      coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+      coreOptions: { inMemory: true },
     });
     let db: Db | undefined;
     try {

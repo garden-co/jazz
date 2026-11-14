@@ -31,7 +31,9 @@ Install Homebrew LLVM with `brew install llvm`. The WASM build script selects
 `PATH` changes are needed. Apple's archive tools cannot bundle SQLite's WASM
 object files. This selection applies only to WASM builds, leaving native builds
 unchanged. Explicit `AR_wasm32-unknown-unknown` and `AR_wasm32_unknown_unknown`
-environment overrides take precedence.
+environment overrides take precedence. Without Homebrew's LLVM, `rustup component add llvm-tools`
+installs an `llvm-ar` too; point `AR_wasm32_unknown_unknown` at it (it lives under
+`$(rustc --print sysroot)/lib/rustlib/<host>/bin/`).
 
 ## API documentation
 

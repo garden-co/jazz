@@ -55,6 +55,8 @@ mod explain_read_clauses;
 mod fanout_correlation;
 #[path = "../fanout_differential.rs"]
 mod fanout_differential;
+#[path = "../fanout_policy_pins.rs"]
+mod fanout_policy_pins;
 #[path = "../flat_joins.rs"]
 mod flat_joins;
 #[path = "../gather_policy_double_ref.rs"]
@@ -95,6 +97,8 @@ mod maybe_conflicting;
 mod mirrored_lens_defaults;
 #[path = "../mutation_admission.rs"]
 mod mutation_admission;
+#[path = "../nested_relation_reuse.rs"]
+mod nested_relation_reuse;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
 #[path = "../parameterized_subscription_routing.rs"]
@@ -221,6 +225,8 @@ mod sync_write_only;
 mod text_merge;
 #[path = "../text_splices.rs"]
 mod text_splices;
+#[path = "../thin_origin_entry_ages.rs"]
+mod thin_origin_entry_ages;
 #[path = "../thin_origin_writes.rs"]
 mod thin_origin_writes;
 #[path = "../transaction_commit_kind.rs"]

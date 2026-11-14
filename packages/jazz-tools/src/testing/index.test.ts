@@ -463,6 +463,36 @@ describe("createPolicyTestApp", () => {
     }
   }, 10_000);
 
+  // tobiaslins's reproduction from #4771: a local-first session on an app
+  // whose bundle ships two schema versions (a table added in between). It
+  // timed out waiting for query coverage until createPolicyTestApp
+  // published the app's history as createJazz does.
+  it("answers a local-first session on an app that ships two schema versions", async () => {
+    const before = { notes: s.table({ text: s.string() }, {}) };
+    const after = { ...before, tags: s.table({ label: s.string() }, {}) };
+    const migration = m.defineMigration({
+      from: before,
+      to: after,
+      createTables: { tags: true },
+    });
+    const app = s.defineApp(after, {
+      migrations: await appMigrations(before, { to: after, migration }),
+    });
+    const permissions = definePermissions(app, ({ policy }) => {
+      policy.notes.allowRead.always();
+      policy.tags.allowRead.always();
+    });
+    const policyTestApp = await createPolicyTestApp(app, permissions, expect);
+
+    try {
+      const alice = policyTestApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
+      await expect(alice.all(app.notes)).resolves.toEqual([]);
+      await expect(alice.all(app.tags)).resolves.toEqual([]);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+
   it("rejects a seed callback that returns the inserted row instead of the write", async () => {
     const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
 
@@ -924,4 +954,70 @@ describe("policies that correlate optional and required columns", () => {
       await policyTestApp.shutdown();
     }
   }, 20_000);
+});
+
+describe("startLocalJazzServer with an app that ships a migration", () => {
+  // Started with an app's schema, the test server used to take the app's
+  // current version as its first: the app's own createJazz then failed to
+  // publish its migration chain ("deployment cannot replace the runtime
+  // genesis schema"), and clients opening with its lenses refused queries.
+  it("serves the app's createJazz and its migration chain", async () => {
+    const notesV1 = { notes: s.table({ title: s.string() }, {}) };
+    const notesV2 = { notes: s.table({ title: s.string(), body: s.string().optional() }, {}) };
+    const v1Hash = await computeSchemaHash(s.defineApp(notesV1, { migrations: "none" }).wasmSchema);
+    const migration = m.defineMigration({
+      fromHash: v1Hash,
+      toHash: await computeSchemaHash(s.defineApp(notesV2, { migrations: "none" }).wasmSchema),
+      from: notesV1,
+      to: notesV2,
+      migrate: { notes: { body: m.add.string({ default: null }) } },
+    });
+    const app = s.defineApp(notesV2, {
+      migrations: await appMigrations(notesV1, { to: notesV2, migration }),
+    });
+    const permissions = definePermissions(app, ({ policy }) => {
+      policy.notes.allowRead.always();
+      policy.notes.allowInsert.always();
+    });
+    const server = await startLocalJazzServer({ inMemory: true, schema: app, permissions });
+    const { createJazz, remote } = await import("../backend/index.js");
+    const jazz = createJazz({
+      app,
+      permissions,
+      store: remote({ url: server.url, appId: server.appId, secret: server.adminSecret }),
+    });
+    try {
+      await jazz.ready();
+      const note = await jazz.db
+        .insert(app.notes, { title: "first", body: "hello" })
+        .wait({ tier: "global" });
+      await expect(jazz.db.all(app.notes, { tier: "remote" })).resolves.toEqual([
+        expect.objectContaining({ id: note.id, title: "first", body: "hello" }),
+      ]);
+    } finally {
+      await jazz.close();
+      await server.stop();
+    }
+  }, 20_000);
+
+  it("refuses a trusted workload for such an app instead of starting a server that would refuse it", async () => {
+    const v1 = { notes: s.table({ title: s.string() }, {}) };
+    const v2 = { notes: s.table({ title: s.string(), body: s.string().optional() }, {}) };
+    const migration = m.defineMigration({
+      fromHash: await computeSchemaHash(s.defineApp(v1, { migrations: "none" }).wasmSchema),
+      toHash: await computeSchemaHash(s.defineApp(v2, { migrations: "none" }).wasmSchema),
+      from: v1,
+      to: v2,
+      migrate: { notes: { body: m.add.string({ default: null }) } },
+    });
+    const app = s.defineApp(v2, { migrations: await appMigrations(v1, { to: v2, migration }) });
+    await expect(
+      startLocalJazzServer({
+        inMemory: true,
+        schema: app,
+        permissions: {},
+        trustedWorkload: { issuer: "https://workload.example", audience: "jazz", subject: "ci" },
+      }),
+    ).rejects.toThrow(/ships migrations is not supported with trustedWorkload yet/);
+  });
 });

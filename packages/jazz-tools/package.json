@@ -151,6 +151,10 @@
       "react-native": "./dist/expo/polyfills.js",
       "default": "./dist/expo/polyfills.js"
     },
+    "./expo/metro": {
+      "types": "./dist/expo/metro.d.ts",
+      "default": "./dist/expo/metro.js"
+    },
     "./passphrase": {
       "types": "./dist/passphrase.d.ts",
       "default": "./dist/passphrase.js"
@@ -175,7 +179,7 @@
     "build:runtime": "node scripts/clean-dist.mjs && node scripts/ensure-native-inputs.mjs && tsc && node scripts/bundle-broker-worker.mjs && node scripts/bundle-e2ee-crypto.mjs && node scripts/verify-runtime-sourcemaps.mjs",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
     "build:solid": "vite build --config vite.config.solid.ts --mode solid-dom && vite build --config vite.config.solid.ts --mode solid-ssr && tsc --project tsconfig.solid.json --emitDeclarationOnly",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && tsc --project tests/browser/tsconfig.transport-control.json",
     "test": "pnpm test:classic-api || status=1; pnpm test:vite-prebundle || status=1; pnpm test:stage-inspector-overlay || status=1; pnpm test:browser:contract || status=1; pnpm test:node || status=1; pnpm test:react || status=1; pnpm test:svelte || status=1; pnpm test:solid || status=1; pnpm typecheck:react-native || status=1; exit ${status:-0}",
     "test:stage-inspector-overlay": "node --test scripts/stage-inspector-overlay.test.mjs",
     "test:classic-api": "node --test scripts/classic-api.test.mjs",
@@ -223,7 +227,7 @@
     "whatwg-url-without-unicode": "8.0.0-3"
   },
   "devDependencies": {
-    "@better-auth/test-utils": "^1.7.1",
+    "@better-auth/test-utils": "^1.7.22",
     "@sveltejs/package": "^2.0.0",
     "@sveltejs/vite-plugin-svelte": "catalog:default",
     "@testing-library/react": "^16.3.2",
@@ -235,7 +239,7 @@
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
     "@vue/server-renderer": "^3.5.22",
-    "better-auth": "1.7.1",
+    "better-auth": "1.7.22",
     "effect": "4.0.0-rc.118",
     "fake-indexeddb": "^5.0.2",
     "jsdom": "^26.0.0",
@@ -263,7 +267,7 @@
   "peerDependencies": {
     "@vercel/functions": ">=3.10.0",
     "@vercel/sandbox": ">=3.9.0",
-    "better-auth": "1.7.1",
+    "better-auth": "~1.7.22",
     "effect": "^4.0.0-rc.118",
     "expo": ">=54",
     "expo-crypto": ">=14.0.0",

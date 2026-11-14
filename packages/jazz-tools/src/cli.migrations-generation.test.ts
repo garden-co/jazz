@@ -87,13 +87,22 @@ describe("cli migrations", () => {
     expect(await fileExists(first.snapshotPath)).toBe(true);
     const index = () => readFile(join(migrationsDir, "index.ts"), "utf8");
     expect(await index()).toContain(first.hash);
+    // Unchanged schema: validate says what it found, and that permissions
+    // never need a migration (#4773).
+    const { logs: unchangedValidate } = await captureConsoleLogs(() =>
+      validate({ schemaDir: root }),
+    );
+    expect(unchangedValidate).toContain(
+      "schema.ts matches its latest snapshot, so no migration is needed. " +
+        "Changes to permissions.ts never need one: your backend publishes them when it starts.",
+    );
 
     await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithTodoNotes()));
     const { logs: changedValidate } = await captureConsoleLogs(() => validate({ schemaDir: root }));
     expect(changedValidate.join("\n")).toContain("changed since the latest snapshot");
-    expect(changedValidate).not.toContain(
-      "Permission-only changes do not create schema hashes or require migrations.",
-    );
+    // After a schema change, nothing about permissions reads as a diagnosis
+    // of it (#4773).
+    expect(changedValidate.join("\n")).not.toMatch(/Permission-only|Changes to permissions\.ts/);
 
     const second = await createCatalogueMigration({
       schemaDir: root,
@@ -218,6 +227,100 @@ describe("cli migrations", () => {
       /The migrations in migrations would not deploy: .*table "todos".*"body" comes out optional but is required/,
     );
   });
+
+  // #5056: an enum column (or an array of enums) may gain variants at the
+  // end of its list, with nothing to fill in: its rows pass unchanged and
+  // sort as before. A variant missing from the new list (removed, or
+  // renamed, which reads the same) still has no migration step, and moving
+  // one (a reorder, or an addition before the end) would change how rows
+  // sort and rewrite every stored value, so it is refused too.
+  it("adds enum variants with a stub that needs nothing filled in, and refuses dropping one", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const tasks = (status: string, labels: string) => `
+import { schema as s } from ${JSON.stringify(fileURLToPath(new URL("./index.ts", import.meta.url)))};
+import { migrations } from "./migrations/index.ts";
+
+const schema = {
+  tasks: s.table({
+    title: s.string(),
+    status: s.enum(${status}),
+    labels: s.array(s.enum(${labels})).optional(),
+  }, {}),
+};
+
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+`;
+    await writeFile(join(root, "schema.ts"), tasks('"todo", "done"', '"bug"'));
+    await writeFile(
+      join(root, "permissions.ts"),
+      `import { schema as s } from ${JSON.stringify(fileURLToPath(new URL("./index.ts", import.meta.url)))};
+import { app } from "./schema.ts";
+
+export default s.definePermissions(app, ({ policy }) => [policy.tasks.allowRead.always()]);
+`,
+    );
+    await mkdir(join(root, "node_modules"), { recursive: true });
+    await symlink(
+      fileURLToPath(new URL("..", import.meta.url)),
+      join(root, "node_modules", "jazz-tools"),
+      "dir",
+    );
+    vi.stubGlobal("fetch", vi.fn());
+    const first = await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    assert(first.status === "initial-snapshot");
+
+    await writeFile(join(root, "schema.ts"), tasks('"todo", "done", "blocked"', '"bug", "ui"'));
+    const { result: added, logs } = await captureConsoleLogs(() =>
+      createCatalogueMigration({ schemaDir: root, migrationsDir, name: "add-blocked" }),
+    );
+    assert(added.status === "generated");
+    expect(added.unfilledSteps).toBe(0);
+    const stub = await readFile(added.filePath, "utf8");
+    expect(stub).toContain(
+      '// Column "status" gains enum variant "blocked": existing rows are unchanged, so it needs no step.',
+    );
+    expect(stub).toContain(
+      '// Column "labels" gains enum variant "ui": existing rows are unchanged, so it needs no step.',
+    );
+    expect(stub).not.toContain("TODO");
+    expect(logs.join("\n")).not.toContain("Fill in migrate");
+    await typecheckGeneratedMigration(added.filePath);
+    // validate runs the checks a deploy runs on the migrations bundle.
+    await validate({ schemaDir: root });
+
+    for (const [status, labels, column, variant] of [
+      ['"todo", "blocked"', '"bug", "ui"', "status", "done"],
+      ['"open", "done", "blocked"', '"bug", "ui"', "status", "todo"],
+      ['"todo", "done", "blocked"', '"ui"', "labels", "bug"],
+    ] as const) {
+      await writeFile(join(root, "schema.ts"), tasks(status, labels));
+      await expect(
+        createCatalogueMigration({ schemaDir: root, migrationsDir, name: "drop-variant" }),
+      ).rejects.toThrow(
+        `Changing the enum variants of column "tasks.${column}" is not supported yet: ` +
+          `it no longer declares "${variant}". A migration can add enum variants, but renaming ` +
+          "or removing one is planned for a later release.",
+      );
+    }
+    for (const [status, labels, column] of [
+      ['"blocked", "todo", "done"', '"bug", "ui"', "status"],
+      ['"todo", "archived", "done", "blocked"', '"bug", "ui"', "status"],
+      ['"todo", "done", "blocked"', '"ui", "bug"', "labels"],
+    ] as const) {
+      await writeFile(join(root, "schema.ts"), tasks(status, labels));
+      await expect(
+        createCatalogueMigration({ schemaDir: root, migrationsDir, name: "drop-variant" }),
+      ).rejects.toThrow(
+        `Changing the order of the enum variants of column "tasks.${column}" is not supported: ` +
+          "add new variants at the end of the list.",
+      );
+    }
+    expect((await readdir(migrationsDir)).filter((name) => name.includes("drop-variant"))).toEqual(
+      [],
+    );
+  }, 60_000);
 
   it.each([false, true])(
     "uses the active server schema on first run (unchanged=%s)",
@@ -596,9 +699,9 @@ describe("cli migrations", () => {
       to: { type: "Json", schema: { type: "object", required: ["state"] } },
     },
     {
-      change: "the enum variants of",
-      from: { type: "Enum", variants: ["done", "todo"] },
-      to: { type: "Enum", variants: ["done", "doing", "todo"] },
+      change: "the type of",
+      from: { type: "Text" },
+      to: { type: "Integer" },
     },
   ])(
     "refuses changing $change a kept column, which no migration step can do",
@@ -721,10 +824,9 @@ describe("cli migrations", () => {
         (name) => /^\d{8}T\d{6}-/.test(name) && name.endsWith(`-${fromShortHash}.json`),
       ),
     ).toBe(true);
-    expect(logs).toContain("Migration stubs are only for schema changes.");
-    expect(logs).toContain(
-      "Permission-only changes do not create schema hashes or require migrations.",
-    );
+    // A stub is for a schema change: its output says nothing about
+    // permissions (#4773).
+    expect(logs.join("\n")).not.toMatch(/Permission-only|Changes to permissions\.ts/);
   });
 
   it("renders createTables and dropTables when inferring table add/drop steps", async () => {

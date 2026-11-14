@@ -37,7 +37,7 @@ after the first load:
       ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts
     </include>
 
-    The background upgrade to the local-first client keeps the same `Db`: its live queries, listeners and writes carry on. `db.isLocalFirst()` tells whether it has happened yet, and `await db.upgradeToLocalFirst(loader)` waits for it. If the app took the `Db` offline with `disconnect()`, it stays offline. In the browser, a local-first `Db` is offline for every tab of the app, so at the upgrade that also takes the app's other local-first tabs offline. Signing in, signing out and switching accounts do give the session a new `Db`. The old one then ends its live queries with a `DbReplacedError` (from `"jazz-tools"`) and throws it on writes. Follow the session to pick up the new one, and read `session.db` again for each write (it throws while no one is signed in):
+    The background upgrade to the local-first client keeps the same `Db`: its live queries, listeners and writes carry on. `db.isLocalFirst()` tells whether it has happened yet, the session snapshot's `localFirst` field says the same and changes when the upgrade happens (to show "offline support ready", or notice the app is still thin), and `await db.upgradeToLocalFirst(loader)` waits for it. If the app took the `Db` offline with `disconnect()`, it stays offline. In the browser, a local-first `Db` is offline for every tab of the app, so at the upgrade that also takes the app's other local-first tabs offline. Signing in, signing out and switching accounts do give the session a new `Db`. The old one then ends its live queries with a `DbReplacedError` (from `"jazz-tools"`) and throws it on writes. Follow the session to pick up the new one, and read `session.db` again for each write (it throws while no one is signed in):
 
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/main.ts#follow-session-ts
@@ -148,14 +148,14 @@ its data when the visitor signs up later.
 
 ### Bundler config
 
-There is no Jazz plugin to add. In development, run your app as usual: `createJazz` in your
+There is no Jazz plugin to add for Vite or Next.js. In development, run your app as usual: `createJazz` in your
 [main backend](/docs/how-jazz-works#how-a-backend-talks-to-jazz) is the dev server, and it publishes your schema, permissions
 and migrations every time it starts.
 
 The local-first client loads Jazz's Wasm in the browser, and your backend loads Jazz's native module
 (`jazz-napi`) on the server. If your bundler touches either, tell it to leave them alone:
 
-<Tabs groupId="jazz-bundler" items={["Vite", "Next.js"]} persist updateAnchor>
+<Tabs groupId="jazz-bundler" items={["Vite", "Next.js", "Expo"]} persist updateAnchor>
   <Tab value="Vite">
     ```ts title="vite.config.ts"
     import { defineConfig } from "vite";
@@ -194,9 +194,24 @@ The local-first client loads Jazz's Wasm in the browser, and your backend loads 
     ```
 
   </Tab>
+  <Tab value="Expo">
+    ```js title="metro.config.js"
+    const { getDefaultConfig } = require("expo/metro-config");
+    const { withJazz } = require("jazz-tools/expo/metro");
+
+    // Metro doesn't find Jazz's Wasm and worker on its own.
+    module.exports = withJazz(getDefaultConfig(__dirname));
+    ```
+
+    This is for the web target of an Expo app. After adding it, start Metro with
+    `npx expo start --clear`. Don't set `runtimeSources.brokerWorkerUrl` there:
+    the worker is the chunk Metro builds.
+
+  </Tab>
 </Tabs>
 
-The [thin client](/docs/setup/web-client/thin-client) has no Wasm, so it needs no Vite line. A
+The [thin client](/docs/setup/web-client/thin-client) has no Wasm, so it needs no Vite line or
+Metro config. A
 Next.js app that imports `jazz-tools/backend` still needs `serverExternalPackages`.
 
 ### Wasm loading

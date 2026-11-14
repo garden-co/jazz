@@ -117,6 +117,7 @@ import {
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
   policyClaimsForAdmittedWebSocket,
+  webSocketAuthNamesPrincipal,
   type WebSocketConstructor,
   type WebSocketNegotiation,
   type WireError,
@@ -272,6 +273,11 @@ type NativeDb = {
   /** How many local commits still wait for the server's verdict. */
   /** This store's uploads; see {@link UploadStatus}. */
   uploadStatus?(): UploadStatus;
+  /**
+   * A React Native foreground's scope store, deleted by its native relay
+   * (see `NativeForegroundDb.deleteNativeStore`), with the writes it dropped.
+   */
+  deleteNativeStore?(): { pendingUploads: number };
   nativeConnectionStatus?(): {
     configured: boolean;
     explicitlyOffline: boolean;
@@ -417,7 +423,7 @@ type NativeDb = {
    * recovered (`null`); ticks keep running.
    */
   onUpstreamFailure?(
-    callback: (failure: { reason: string; retrying: boolean } | null) => void,
+    callback: (failure: { reason: string; retrying: boolean; code?: string | null } | null) => void,
   ): void;
   setNonDurableClient?(): void;
   /** Exact wire features compiled into the native artifact backing this DB. */
@@ -881,7 +887,21 @@ function openMemoryDb(
 export type SlowQueryLogOptions = {
   appId?: string;
   thresholdMs?: number;
+  /**
+   * What `console.warn` shows. `"full"` (the default, for servers' logs): the
+   * whole report line, with the query plan and SQL. `"summary"` (browsers,
+   * whose console end users see): the line without its plan and SQL, which
+   * go to `console.debug` (DevTools' "Verbose" level) instead.
+   */
+  consoleDetail?: "full" | "summary";
 };
+
+/** @internal Split a slow-query report line into its summary and its plan and SQL. */
+export function slowQuerySummary(line: string): string {
+  // `SlowQuery::line` ends every line with ". Plan: <plan>. SQL: <sql>".
+  const plan = line.indexOf(". Plan: ");
+  return plan === -1 ? line : line.slice(0, plan);
+}
 
 export class NativeRuntimeAdapter implements Runtime {
   private readonly auxiliaryReceiveDeadlines = new Map<Transport, AuxiliaryReceiveDeadline>();
@@ -891,6 +911,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly schemaBytes: Uint8Array;
   private readonly configBytes: Uint8Array;
   private readonly peerIdentity: Uint8Array;
+  /** The principal of the first admitted credential naming one; see `assertCredentialKeepsPrincipal`. */
+  private upstreamPrincipal: Uint8Array | null = null;
   private readonly selfSignedClientProof: NativeSelfSignedClientProof | undefined;
   private readonly scopeIsolatedRelay: boolean;
   private readonly schemaHash: string;
@@ -914,6 +936,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly ownerRuntime: NativeRuntimeAdapter;
   /** The app named in slow-query reports (owner runtime only). */
   private slowQueryApp: string | undefined;
+  private slowQueryConsoleDetail: SlowQueryLogOptions["consoleDetail"];
   get preparationOwner(): object {
     return this.ownerRuntime;
   }
@@ -1168,6 +1191,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     if (opts?.owner) return;
     this.slowQueryApp = opts?.slowQueryLog?.appId;
+    this.slowQueryConsoleDetail = opts?.slowQueryLog?.consoleDetail;
     const threshold = opts?.slowQueryLog?.thresholdMs;
     if (threshold !== undefined) {
       if (!Number.isFinite(threshold) || threshold < 0) {
@@ -1198,8 +1222,13 @@ export class NativeRuntimeAdapter implements Runtime {
         this.nativeAuthRefusalRenewable = false;
         return this.clearRemoteServerTransportError();
       }
+      // A refusal keeps the core's code, as `Transport.upstreamRefusal` does
+      // on napi and wasm: a changed authority is an AuthorityChangedError.
+      const error = failure.code
+        ? upstreamRefusalError({ code: failure.code, message: failure.reason })!
+        : new Error(failure.reason);
       this.handleServerTransportError(
-        new Error(failure.reason),
+        error,
         this.serverConnectionGeneration,
         failure.retrying || this.nativeAuthRefusalRenewable,
       );
@@ -1580,7 +1609,10 @@ export class NativeRuntimeAdapter implements Runtime {
       // The relay reports a failure only once its link machine published
       // an outage, or stopped.
       if (this.serverTransportError) {
-        return this.serverTransportErrorRetrying ? offlineLink("network") : offlineLink("stopped");
+        if (this.serverTransportErrorRetrying) return offlineLink("network");
+        return isAuthorityChangedError(this.serverTransportError)
+          ? offlineLink("authority-changed", false)
+          : offlineLink("stopped");
       }
       return CONNECTING;
     }
@@ -1588,6 +1620,26 @@ export class NativeRuntimeAdapter implements Runtime {
       return offlineLink("authority-changed", false);
     }
     return linkStatusFromUpstream(this.linkStatus);
+  }
+
+  /**
+   * Delete this runtime's local store, where its native host can (React
+   * Native's relay): `deleteClientStorage()`. The runtime is closed with it;
+   * the account stays, and the next client opens a fresh store.
+   */
+  canClearClientStorage(): boolean {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.canClearClientStorage();
+    return typeof this.db?.deleteNativeStore === "function";
+  }
+
+  async clearClientStorage(): Promise<{ pendingUploads: number }> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.clearClientStorage();
+    if (!this.db?.deleteNativeStore) {
+      throw new Error("Runtime does not support client storage reset.");
+    }
+    const deleted = this.db.deleteNativeStore();
+    this.closed = true;
+    return deleted;
   }
 
   /** This client's uploads: pending, since when, and the server's refusals. */
@@ -2704,6 +2756,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return;
     }
     const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
+    this.assertCredentialKeepsPrincipal(normalizedAuthJson);
     // Validate synchronously before retiring the current transport. Callers
     // historically observe an incompatible native binding at connect() time.
     this.nativeWireFeatures();
@@ -3060,6 +3113,7 @@ export class NativeRuntimeAdapter implements Runtime {
         const firstPump = this.pumpServerTransport();
         firstPump.catch((error) => this.handleServerTransportError(error, generation));
         this.pumpSubscriptions();
+        this.pinUpstreamPrincipal(normalizedAuthJson);
         this.stepLink({ type: "admitted", attempt: id });
         // Waiters resume once the new link's first pump pass has run, or has
         // yielded to a core tick that other work holds.
@@ -3149,11 +3203,49 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) return this.ownerRuntime.updateAuth(authJson);
     this.nativeAuthRefusalRenewable = false;
     if (this.db?.rejectAuthUpdate) return this.db.rejectAuthUpdate();
+    const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
+    this.assertCredentialKeepsPrincipal(normalizedAuthJson);
     if (!this.serverEndpointUrl) return;
-    this.serverAuthJson = normalizeBackendWebSocketAuth(authJson);
+    this.serverAuthJson = normalizedAuthJson;
     // A live link is replaced so the server sees the new credential; a link
     // waiting for one connects with it.
     this.stepLink({ type: "credentialUpdated" });
+  }
+
+  /**
+   * The upstream principal is fixed once the server admits a credential that
+   * names one. A later credential, from a refresh or a reconnect, that names
+   * another principal is refused (`identity_mismatch`): the store, and in a
+   * browser worker every tab it serves, syncs as that principal, so a
+   * credential for someone else would link its replica upstream as them
+   * (#4476). A renewed credential for the same principal passes, and so does
+   * one that names no principal (signing out to `{}`). A credential the
+   * server refuses pins nothing.
+   */
+  assertCredentialKeepsPrincipal(authJson: string): void {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.assertCredentialKeepsPrincipal(authJson);
+    if (!this.upstreamPrincipal) return;
+    const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
+    if (!webSocketAuthNamesPrincipal(normalizedAuthJson)) return;
+    let identity: Uint8Array | null;
+    try {
+      identity = peerIdentityForWebSocketAuth(normalizedAuthJson, this.peerIdentity);
+    } catch {
+      // It refuses a credential for another user than the store's account.
+      identity = null;
+    }
+    if (!identity || !sameBytes(identity, this.upstreamPrincipal)) {
+      throw identityMismatchError(
+        "a credential refresh must keep the principal this store connects upstream as",
+      );
+    }
+  }
+
+  /** Pin the principal of a credential the server just admitted. */
+  private pinUpstreamPrincipal(normalizedAuthJson: string): void {
+    if (this.upstreamPrincipal || !webSocketAuthNamesPrincipal(normalizedAuthJson)) return;
+    this.upstreamPrincipal = peerIdentityForWebSocketAuth(normalizedAuthJson, this.peerIdentity);
   }
 
   onAuthFailure(callback: (reason: string) => void): void {
@@ -4101,11 +4193,23 @@ export class NativeRuntimeAdapter implements Runtime {
   /**
    * Write the slow-query report due now with `console.warn`: each line is a
    * query shape that held the database for at least the threshold, with its
-   * plan and the index that would likely make it fast.
+   * plan and the index that would likely make it fast. With the `"summary"`
+   * console detail, the plan and SQL go to `console.debug` instead.
    */
   private reportSlowQueries(): void {
-    for (const line of this.db.takeSlowQueryReport?.(this.ownerRuntime.slowQueryApp) ?? []) {
-      console.warn(`[jazz] ${line}`);
+    const owner = this.ownerRuntime;
+    for (const line of this.db.takeSlowQueryReport?.(owner.slowQueryApp) ?? []) {
+      if (owner.slowQueryConsoleDetail !== "summary") {
+        console.warn(`[jazz] ${line}`);
+        continue;
+      }
+      const summary = slowQuerySummary(line);
+      if (summary === line) {
+        console.warn(`[jazz] ${line}`);
+        continue;
+      }
+      console.warn(`[jazz] ${summary}. Plan and SQL are logged at the debug ("Verbose") level.`);
+      console.debug(`[jazz] ${line}`);
     }
   }
 
@@ -5017,8 +5121,17 @@ function updatedAtMsFromWriteContext(writeContext?: string | null): number | und
   return parsed.updated_at;
 }
 
+/**
+ * The explicit `$updatedAt` a write names (a backfill or import), or
+ * `null` for an ordinary write. An ordinary write carries no time: the
+ * replica's clock stamps it while it is pending, and the authority's clock
+ * stamps it when it accepts it, so `$updatedAt` and `$acceptedAt` are the
+ * acceptance time, not the device clock at authoring (an offline edit
+ * synced later is stamped when it syncs), and a device with a fast clock
+ * is not refused for writing in the future.
+ */
 export function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
-  return updatedAtMsFromWriteContext(writeContext) ?? Date.now();
+  return updatedAtMsFromWriteContext(writeContext) ?? null;
 }
 
 function txStateMessage(
@@ -5721,11 +5834,13 @@ function errorMessage(error: unknown): string {
 }
 
 /** The refusal the engine gives a peer of another identity, with its reason. */
-function identityMismatchError(): Error {
-  return Object.assign(
-    new Error("a store configured as one user serves only its own identity's peers"),
-    { code: "protocol", reason: "identity_mismatch" satisfies NativeCoreErrorReason },
-  );
+function identityMismatchError(
+  message = "a store configured as one user serves only its own identity's peers",
+): Error {
+  return Object.assign(new Error(message), {
+    code: "protocol",
+    reason: "identity_mismatch" satisfies NativeCoreErrorReason,
+  });
 }
 
 function contextualError(context: string, error: unknown): Error {

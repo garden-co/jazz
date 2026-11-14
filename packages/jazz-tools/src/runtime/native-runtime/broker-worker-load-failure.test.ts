@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { METRO_WORKER_START_HINT } from "../metro-setup-error.js";
 import {
   BrowserWorkerScriptLoadError,
   describeBrokerWorkerLoadFailure,
@@ -78,5 +79,13 @@ describe("describeBrokerWorkerLoadFailure", () => {
         new Response("export {}", { headers: { "content-type": "text/javascript" } }),
     });
     expect(error.message).toContain("jazz-broker-worker.js did not load. Serve");
+  });
+
+  // Under Expo's Metro the worker is Metro's chunk, and import.meta.url is
+  // null: the dist/worker advice for other bundlers doesn't apply.
+  it("points a Metro app at withJazz and its cache, not at dist/worker", async () => {
+    const error = await describeBrokerWorkerLoadFailure({ moduleUrl: null, metro: true });
+    expect(error.message).toContain(METRO_WORKER_START_HINT.trim());
+    expect(error.message).not.toContain("dist/worker");
   });
 });

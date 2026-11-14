@@ -35,7 +35,6 @@ describe("offline persistent schema bootstrap", () => {
         dataDir: join(directory, "server"),
         adminSecret: randomUUID(),
         backendSecret: randomUUID(),
-        allowLocalFirstAuth: true,
       };
       let server = await startLocalJazzServer({
         ...settings,

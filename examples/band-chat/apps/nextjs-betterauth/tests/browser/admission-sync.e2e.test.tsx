@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createJazzClient, type Db, type JazzClientConfig } from "jazz-tools";
-import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
+import { deployApp } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
 import {
   TestCleanup,
   uniqueDbName,
@@ -42,11 +42,11 @@ interface Live<T> {
 describe("BandChat admission with open subscriptions", () => {
   it("keeps room history and the room list live for an admitted guest", async () => {
     const core = await getJazzServerInfo(uniqueDbName("band-chat-admission"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: app,
+      app: app,
       permissions,
     });
     const server = await startJazzApp(core, { schema: app, permissions });

@@ -2267,7 +2267,6 @@ mod tests {
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
                 backend_secret: Some("backend-secret".to_owned()),
-                allow_local_first_auth: true,
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)

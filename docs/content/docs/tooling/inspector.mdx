@@ -65,8 +65,9 @@ Besides the data grid, it has:
 - **Linked queries**: follow a query from a session or an agent's answer.
 
 Links into the Inspector carry their place in the URL fragment (`#q`, `#table`, `#row`, `#as`, `#claims`), and
-hold no credential, so you can paste them into a chat or an issue. A link viewing as a user with claims
-carries those claims, so treat it like them before pasting it somewhere public. The page can't be framed by other
+hold no credential, so you can paste them into a chat or an issue. Claims you view as with go into the
+fragment too, and so into the browser's history and every link you copy: use claims that describe the
+user (a role, a team), never real secrets such as tokens or passwords. The page can't be framed by other
 sites.
 
 ## Agents

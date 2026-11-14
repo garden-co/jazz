@@ -476,6 +476,100 @@ fn a_replica_tags_variants_itself_and_rows_travel_by_name() {
     assert_eq!(statuses(&server, by_status()), declared);
 }
 
+/// A deploy admits a version without making it current: the authority's
+/// own schema stays the first one. A session on a version that adds a
+/// variant still writes it, since its commits are checked by its own
+/// version's variants, and reads and filters by it; a session on the
+/// older version reads the row by the new name, and may not write it.
+///
+/// ```
+/// authority (current v1, admits v2)
+///   ▲ alice (v2) ──insert "blocked"──► accepted ──► bob (v1) reads "blocked"
+///   ▲ carol (v2) ──subscribe status = "blocked"──► the row
+///   ✗ bob (v1) ──insert "blocked"
+/// ```
+#[test]
+fn a_session_on_an_admitted_version_writes_the_variant_it_adds() {
+    // As a migration may add one: at the end of the list.
+    let v2 = || tasks(&["todo", "doing", "done", "blocked"]);
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    block_on(server.admit_schema_with_lenses(v2(), &[lens(&v1(), &v2(), vec![])])).unwrap();
+    assert_eq!(server.current_schema().version_id(), v1().version_id());
+    let on_v2 = |node: u8, file: &str| {
+        block_on(Db::open_at(
+            config(v2(), node).with_migrations(vec![v1()], vec![lens(&v1(), &v2(), vec![])]),
+            &dir.path().join(file),
+            FileOptions::default(),
+        ))
+        .unwrap()
+    };
+    let alice = on_v2(1, "alice.sqlite");
+    let bob = open_at(v1(), 2, &dir.path().join("bob.sqlite"));
+    let carol = on_v2(3, "carol.sqlite");
+    let _links = [
+        link(&alice, &server),
+        link(&bob, &server),
+        link(&carol, &server),
+    ];
+    let everything = |db: &Db| {
+        let q = db.prepare_query(&Query::from("tasks")).unwrap();
+        block_on(db.subscribe(&q, ReadOpts::default())).unwrap()
+    };
+    let _alice = everything(&alice);
+    let _bob = everything(&bob);
+    let blocked = carol
+        .prepare_query(&Query::from("tasks").filter(status_is("blocked")))
+        .unwrap();
+    let _carol = block_on(carol.subscribe(&blocked, ReadOpts::default())).unwrap();
+    pump(&server, &[&alice, &bob, &carol]);
+
+    insert(&bob, 1, "todo");
+    insert(&alice, 2, "blocked");
+    pump(&server, &[&alice, &bob, &carol]);
+
+    // Accepted: it stays with its writer and reaches the authority and bob.
+    let both = [(1, "todo".to_owned()), (2, "blocked".to_owned())];
+    assert_eq!(statuses(&alice, by_status()), both);
+    assert_eq!(
+        statuses(&server, Query::from("tasks").filter(status_is("blocked"))),
+        [(2, "blocked".to_owned())]
+    );
+    // Bob, on v1, reads the new variant by its name.
+    assert_eq!(
+        statuses(&bob, Query::from("tasks").filter(status_is("todo"))),
+        [(1, "todo".to_owned())]
+    );
+    assert_eq!(ids(&bob, Query::from("tasks")), [1, 2]);
+    assert_eq!(
+        column(
+            &bob,
+            Query::from("tasks").filter(Predicate::Eq(
+                Operand::Column("title".into()),
+                Operand::Literal(name("task 2")),
+            )),
+            "status"
+        ),
+        [(2, Some(name("blocked")))]
+    );
+    // Carol's subscription, evaluated upstream, filters by the new variant.
+    assert_eq!(
+        statuses(&carol, Query::from("tasks").filter(status_is("blocked"))),
+        [(2, "blocked".to_owned())]
+    );
+    // Bob's own writes are still checked by v1's variants.
+    let refused = try_insert(
+        &bob,
+        3,
+        &[("title", name("t")), ("status", name("blocked"))],
+    )
+    .unwrap_err();
+    assert!(
+        refused.to_string().contains("not one of its variants"),
+        "{refused}"
+    );
+}
+
 /// An import of rows another store kept (alpha.59 keeps a variant a later
 /// schema removed) writes a variant it names as an earlier version's
 /// rather than refusing it; it reads back, and sorts after the declared

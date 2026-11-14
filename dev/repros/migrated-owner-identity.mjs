@@ -55,7 +55,6 @@ const settings = {
   adminSecret: randomUUID(),
   backendSecret: randomUUID(),
   dataDir,
-  allowLocalFirstAuth: true,
 };
 const server = await startLocalJazzServer({ ...settings, schema: oldApp });
 const vite = await createServer({

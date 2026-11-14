@@ -476,14 +476,29 @@ fn tick_events_command_and_response_have_pinned_bytes() {
             sequence: 2,
             reason: "tls".to_owned(),
             retrying: true,
+            code: None,
         }),
     };
     assert_eq!(
         postcard::to_allocvec(&response).unwrap(),
         vec![
-            26, 2, b'[', b']', 1, 0xac, 0x02, 2, b'n', b'o', 1, 2, 3, b't', b'l', b's', 1
+            26, 2, b'[', b']', 1, 0xac, 0x02, 2, b'n', b'o', 1, 2, 3, b't', b'l', b's', 1, 0
         ]
     );
+    // ABI 6: a refusal's failure ends with its error code.
+    let response = ForegroundDbCommandResponse::TickEvents {
+        events_json: "[]".to_owned(),
+        auth_rejection: None,
+        upstream_failure: Some(NativeUpstreamFailure {
+            sequence: 3,
+            reason: "no".to_owned(),
+            retrying: false,
+            code: Some("authority_changed".to_owned()),
+        }),
+    };
+    let mut expected = vec![26, 2, b'[', b']', 0, 1, 3, 2, b'n', b'o', 0, 1, 17];
+    expected.extend_from_slice(b"authority_changed");
+    assert_eq!(postcard::to_allocvec(&response).unwrap(), expected);
     let response = ForegroundDbCommandResponse::TickEvents {
         events_json: "[]".to_owned(),
         auth_rejection: None,
@@ -637,8 +652,8 @@ fn an_attached_schema_with_malformed_migrations_is_refused() {
 /// anything.
 ///
 /// Lower-level than the other receipts: a scripted connector carries no
-/// server, so the test records the refusal on the connection's wire, as the
-/// relay owner's drive does on `Link::upstream_refusal()`; the host test
+/// server, so the test hands the relay owner a refusal, as its drive does
+/// with `Link::upstream_refusal()`; the host test
 /// `a_relay_attached_without_the_apps_migrations_stops_its_refused_upstream`
 /// covers the owner's half against a real refusing server.
 ///
@@ -669,9 +684,14 @@ fn a_refused_upstream_stops_the_worker_and_is_reported() {
         .relay
         .clone();
     relay
-        .wire()
-        .unwrap()
-        .refuse("native relay upstream refused: not supported yet".to_owned());
+        .run(|worker| {
+            worker.refuse_upstream(&jazz::db::Error::new(
+                jazz::db::ErrorCode::AuthorityChanged,
+                "the upstream serves another authority history",
+            ));
+            Ok(())
+        })
+        .unwrap();
 
     wait_for(&host, "the worker stops", |host| {
         host.private_scope_workers[&scope].terminally_stopped()
@@ -686,6 +706,11 @@ fn a_refused_upstream_stops_the_worker_and_is_reported() {
     let failure = failure.expect("the refusal is reported");
     assert!(!failure.retrying, "a refusal is not retried: {failure:?}");
     assert!(failure.reason.contains("refused"), "{failure:?}");
+    assert_eq!(
+        failure.code.as_deref(),
+        Some("authority_changed"),
+        "the refusal's code reaches alice, as napi and wasm report it"
+    );
     assert_eq!(
         connector.bearers().len(),
         1,

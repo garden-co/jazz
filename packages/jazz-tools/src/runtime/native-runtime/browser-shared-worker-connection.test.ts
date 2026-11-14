@@ -1335,7 +1335,8 @@ describe("broker worker that never starts", () => {
 describe("broker SharedWorker under the Vite dev server's pre-bundle", () => {
   it("constructs the worker where the dev server resolves the package, for lease and runtime alike", async () => {
     vi.resetModules();
-    vi.doMock("../browser-worker-assets.js", () => ({
+    vi.doMock("../browser-worker-assets.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../browser-worker-assets.js")>()),
       browserRuntimeModuleUrl: () =>
         "http://localhost:5173/node_modules/.vite/deps/chunk-7ATA2QW3.js?v=7d09ffa4",
       bundledBrowserWorkerUrl: () =>

@@ -33,6 +33,13 @@
      current bundle sizes.
    - Which frontend framework? React, Vue, Svelte, Solid, Effect or plain TypeScript.
      Default: thin client, React.
+   - `<JazzProvider>` gives you the thin client. For local-first, pass
+     `config={{ serverUrl: "/jazz", client: () => import("jazz-tools/local-first"), localFirst: "now" }}`.
+     Without `localFirst: "now"`, the app starts thin and becomes local-first in the background.
+   - With the thin client, writes aren't optimistic: they show after one round trip to your
+     backend, so a controlled checkbox or toggle flips a moment after the click. For controls like
+     that, show the clicked state at once (local UI state until the write lands), or use the
+     local-first client with `localFirst: "now"`, whose writes show instantly.
 
 ## Design the data
 
@@ -44,6 +51,10 @@
    - For existing apps migrating from another data store, the existing data should constrain this
      enough.
    - Write permission tests next to the policies: /docs/tooling/testing
+   - Before the first change to a schema the app has already run with data, run
+     `npx jazz-tools migrations create`, and keep `defineApp(schema, { migrations })` importing
+     `./migrations` (/docs/schemas/migrations). Never delete or move the store to get past a schema
+     error: it means a migration is missing, and the user's data is in that store.
    - In either case, use these Jazz features instead of modeling them yourself:
      - Built-in metadata columns like `$createdBy`, `$createdAt`, `$updatedBy` and `$updatedAt`:
        /docs/reading/metadata
