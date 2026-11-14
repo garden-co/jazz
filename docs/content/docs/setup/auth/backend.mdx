@@ -8,6 +8,9 @@ To authenticate users with Jazz, sign in your users with your auth library as us
 expires and any claims, which your permission policies can use. In the browser, `JazzProvider` asks your backend who is
 signed in; after your own sign-in or sign-out, call `refresh()` on the session.
 
+Using [Better Auth](/docs/setup/auth/better-auth)? Jazz can be its database too, so you don't need
+a separate PostgreSQL or other database for it.
+
 ## Your backend decides
 
 When Jazz runs inside your [main backend](/docs/how-jazz-works#how-a-backend-talks-to-jazz), auth is one function. Your
@@ -15,7 +18,7 @@ backend already knows who is signed in, so it tells Jazz:
 
 ```ts title="jazz.server.ts"
 import { createJazz, sqlite } from "jazz-tools/backend";
-import { auth } from "./auth"; // your Better Auth instance
+import { auth } from "./auth"; // your Better Auth instance, which can keep its tables in Jazz too
 import { app } from "./schema";
 import permissions from "./permissions";
 
@@ -254,6 +257,13 @@ const session = await createJazzClient({
   bearer: () => loadSavedToken(), // your app's session token, or null when signed out
 });
 ```
+
+Outside a browser, the session keeps who is signed in in memory, for as long as the process runs:
+a client your backend signs in through `bearer` asks it again on each start. A device account
+needs its key kept somewhere: there, pass `createJazzClient` a `store` (an `AccountStore` from
+`jazz-tools/client`, with `read` and an atomic `update`), such as a file. Without one,
+`initial: "device"`, `createDeviceAccount()` and the other device-account operations reject with
+`DeviceAccountNeedsStoreError`.
 
 After your own sign-in or sign-out, call `session.refresh()` so Jazz asks your backend again.
 Sync connections carry the token only to your app's own origin.

@@ -87,7 +87,7 @@ of `{ "type": "module" }`, and import them from there in both the app and the ba
 
 A bare React Native host uses the same direct dependency and New Architecture, with an OS-protected
 account store. The [canonical Expo
-scaffold](https://github.com/garden-co/jazz/tree/v2.0.0-alpha.61/examples/todo-client-localfirst-expo)
+scaffold](https://github.com/garden-co/jazz/tree/v%jazz.version%/examples/todo-client-localfirst-expo)
 shows the complete lifecycle and platform configuration. The alpha has not yet proven two physical JSI
 runtimes attached to one relay.
 
@@ -174,8 +174,8 @@ only.
 
 Test your schema, permissions and backend logic in Node against your app's backend, as in
 [Testing](/docs/tooling/testing#testing-with-your-apps-backend). A Node client stands in for the
-device: give `createJazzClient` from `jazz-tools/client` a `store` to keep its account in (the
-testing page shows an in-memory one), since outside the browser and the app there is no default.
+device: `createJazzClient` from `jazz-tools/client` keeps its account in memory by default there,
+and needs a `store` only for a device account (the testing page shows an in-memory one).
 Use `bearer: () => testJazz.bearer(userId)` to sign in the way the app does. The React Native UI
 itself needs an emulator or a device.
 

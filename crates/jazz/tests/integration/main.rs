@@ -25,10 +25,14 @@ mod branch_view_sync;
 mod branch_views;
 #[path = "../bundle_permissions.rs"]
 mod bundle_permissions;
+#[path = "../callback_transaction_cancellation.rs"]
+mod callback_transaction_cancellation;
 #[path = "../catalogue_rows.rs"]
 mod catalogue_rows;
 #[path = "../claims_change.rs"]
 mod claims_change;
+#[path = "../claims_registry_refresh.rs"]
+mod claims_registry_refresh;
 #[path = "../column_defaults.rs"]
 mod column_defaults;
 #[path = "../commit_atomicity_frames.rs"]

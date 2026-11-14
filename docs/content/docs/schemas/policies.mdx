@@ -74,6 +74,21 @@ Use `.never()` when an operation should be impossible. It is equivalent to
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-never-ts
 </include>
 
+#### Tables only your backend writes
+
+A table your users read but only your backend writes (an audit log, imported data, counters a job
+keeps) needs no write grants: your backend isn't checked when it acts as the system (see
+[System-authored rows](/docs/setup/auth/backend#system-authored-rows)). `npx jazz-tools validate`
+warns about each operation without a policy, so say it's on purpose with `.never()` rather than
+adding an allow rule to silence the warning:
+
+```ts title="permissions.ts"
+policy.auditLog.allowRead.where({ ownerId: session.user });
+policy.auditLog.allowInsert.never();
+policy.auditLog.allowUpdate.never();
+policy.auditLog.allowDelete.never();
+```
+
 ## Composing policies
 
 ### Combining conditions (`allOf` / `anyOf`)

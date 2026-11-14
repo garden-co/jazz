@@ -181,7 +181,7 @@ describe("a host without cookies signing in with the app's bearer", () => {
         bearer: () => "token-alice",
       }),
     ).rejects.toThrow(
-      /not supported on React Native: use createAccountManager from jazz-tools\/react-native/,
+      /not supported on React Native: use createJazzClient from jazz-tools\/react-native/,
     );
   });
 });

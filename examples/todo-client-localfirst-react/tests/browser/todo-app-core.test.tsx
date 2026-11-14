@@ -82,7 +82,7 @@ async function addTodoAndWaitForLocalDurability(el: HTMLDivElement, title: strin
   });
 }
 
-function TodosEdgeReadinessProbe({ onSettled }: { onSettled: (error: Error | null) => void }) {
+function TodosRemoteReadinessProbe({ onSettled }: { onSettled: (error: Error | null) => void }) {
   const db = useDb();
   useEffect(() => {
     // A remote read of the same relation establishes the causal frontier that
@@ -106,9 +106,9 @@ describe("React Todo App core browser canary", () => {
     /** The device account's store: mounts sharing one are the same user. */
     store?: AccountStore;
     driver?: DbConfig["driver"];
-    onEdgeSettled?: (error: Error | null) => void;
+    onRemoteSettled?: (error: Error | null) => void;
   }): Promise<HTMLDivElement> {
-    const { onEdgeSettled, store = memoryAccountStore(), ...dbConfig } = config;
+    const { onRemoteSettled, store = memoryAccountStore(), ...dbConfig } = config;
     const appId = dbConfig.appId ?? "test-app";
     const el = document.createElement("div");
     document.body.appendChild(el);
@@ -118,7 +118,7 @@ describe("React Todo App core browser canary", () => {
     await act(async () => {
       r.render(
         <App config={{ appId, ...dbConfig, store, client: loadLocalFirst, localFirst: "now" }}>
-          {onEdgeSettled && <TodosEdgeReadinessProbe onSettled={onEdgeSettled} />}
+          {onRemoteSettled && <TodosRemoteReadinessProbe onSettled={onRemoteSettled} />}
         </App>,
       );
     });
@@ -163,33 +163,33 @@ describe("React Todo App core browser canary", () => {
   it("syncs two persistent IndexedDB app instances through the app's backend", async () => {
     const writerDbName = uniqueDbName("core-writer");
     const readerDbName = uniqueDbName("core-reader");
-    let writerEdgeResult: Error | null | undefined;
-    let readerEdgeResult: Error | null | undefined;
+    let writerRemoteResult: Error | null | undefined;
+    let readerRemoteResult: Error | null | undefined;
 
     const writer = await mountApp({
       appId: SCOPE,
       driver: { type: "persistent", dbName: writerDbName },
       serverUrl: SERVER_URL,
-      onEdgeSettled: (error) => {
-        writerEdgeResult = error;
+      onRemoteSettled: (error) => {
+        writerRemoteResult = error;
       },
     });
     const reader = await mountApp({
       appId: SCOPE,
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
-      onEdgeSettled: (error) => {
-        readerEdgeResult = error;
+      onRemoteSettled: (error) => {
+        readerRemoteResult = error;
       },
     });
 
     await waitFor(
-      () => writerEdgeResult !== undefined && readerEdgeResult !== undefined,
+      () => writerRemoteResult !== undefined && readerRemoteResult !== undefined,
       15000,
-      "both todo subscriptions should establish edge coverage before the online write",
+      "both todo subscriptions should complete a remote read before the online write",
     );
-    if (writerEdgeResult) throw writerEdgeResult;
-    if (readerEdgeResult) throw readerEdgeResult;
+    if (writerRemoteResult) throw writerRemoteResult;
+    if (readerRemoteResult) throw readerRemoteResult;
 
     await addTodo(writer, "Core writer todo");
     await waitFor(
@@ -277,16 +277,16 @@ describe("React Todo App core browser canary", () => {
     const readerStore = memoryAccountStore();
     const onlineTitle = "Core reconnect online todo";
     const offlineTitle = "Core reconnect offline todo";
-    let writerEdgeResult: Error | null | undefined;
-    let readerEdgeResult: Error | null | undefined;
+    let writerRemoteResult: Error | null | undefined;
+    let readerRemoteResult: Error | null | undefined;
 
     const writer = await mountApp({
       appId: SCOPE,
       driver: { type: "persistent", dbName: writerDbName },
       serverUrl: SERVER_URL,
       store: writerStore,
-      onEdgeSettled: (error) => {
-        writerEdgeResult = error;
+      onRemoteSettled: (error) => {
+        writerRemoteResult = error;
       },
     });
     const reader = await mountApp({
@@ -294,18 +294,18 @@ describe("React Todo App core browser canary", () => {
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
       store: readerStore,
-      onEdgeSettled: (error) => {
-        readerEdgeResult = error;
+      onRemoteSettled: (error) => {
+        readerRemoteResult = error;
       },
     });
 
     await waitFor(
-      () => writerEdgeResult !== undefined && readerEdgeResult !== undefined,
+      () => writerRemoteResult !== undefined && readerRemoteResult !== undefined,
       15000,
-      "both todo subscriptions should establish edge coverage before the online write",
+      "both todo subscriptions should complete a remote read before the online write",
     );
-    if (writerEdgeResult) throw writerEdgeResult;
-    if (readerEdgeResult) throw readerEdgeResult;
+    if (writerRemoteResult) throw writerRemoteResult;
+    if (readerRemoteResult) throw readerRemoteResult;
 
     await addTodo(writer, onlineTitle);
     await waitFor(
@@ -323,22 +323,22 @@ describe("React Todo App core browser canary", () => {
       "writer should render the locally durable todo while reader is offline",
     );
 
-    let edgeResult: Error | null | undefined;
+    let remoteResult: Error | null | undefined;
     const reconnectedReader = await mountApp({
       appId: SCOPE,
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
       store: readerStore,
-      onEdgeSettled: (error) => {
-        edgeResult = error;
+      onRemoteSettled: (error) => {
+        remoteResult = error;
       },
     });
     await waitFor(
-      () => edgeResult !== undefined,
+      () => remoteResult !== undefined,
       15000,
-      "reopened reader should establish todo edge coverage before catch-up",
+      "reopened reader should complete a remote todo read before catch-up",
     );
-    if (edgeResult) throw edgeResult;
+    if (remoteResult) throw remoteResult;
 
     // The prior online row is already in this reader's IndexedDB store. Check that
     // local rehydration separately, so a later failure is unambiguously the
