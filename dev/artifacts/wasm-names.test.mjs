@@ -114,8 +114,15 @@ test("accepts a module whose SQLite has no omitted extensions", () => {
   assert.doesNotThrow(() => assertNoOmittedSqliteExtensions(module));
 });
 
-test("rejects a module that still links FTS5, R-Tree or session code", () => {
-  for (const name of ["sqlite3Fts5Init", "fts5WriteInit", "rtreeInit", "sqlite3session_create"]) {
+test("rejects a module that still links FTS5, R-Tree, session, dbstat or sqlite_stmt code", () => {
+  for (const name of [
+    "sqlite3Fts5Init",
+    "fts5WriteInit",
+    "rtreeInit",
+    "sqlite3session_create",
+    "statConnect",
+    "stmtBestIndex",
+  ]) {
     const module = moduleWithNames(["sqlite3_open_v2", name]);
     assert.throws(() => assertNoOmittedSqliteExtensions(module), /omitted SQLite extensions/);
   }

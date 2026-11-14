@@ -17,4 +17,5 @@ dev/benchmarks/**/*.html
 **/migrations/index.ts
 
 # Pristine upstream copy; jazz.patch must record every change to it.
-vendor/sqlite-wasm-rs/Cargo.toml
+vendor/sqlite-wasm-rs/**
+!vendor/sqlite-wasm-rs/JAZZ_PATCH.md

@@ -7,6 +7,9 @@ The MIT license is preserved in LICENSE. The library source, build script, shim,
 SQLite amalgamation (`sqlite3/`), Cargo manifest, README and license are copied.
 The SQLite3 Multiple Ciphers amalgamation (`sqlite3mc/`, 14 MB) is omitted, so
 the `sqlite3mc` feature fails with a `compile_error!`. Jazz doesn't enable it.
+The crates.io metadata files `.cargo_vcs_info.json`, `Cargo.toml.orig` and
+`Cargo.lock` are also omitted. Every copied file is byte-identical to the
+archive, except `build.rs` as `jazz.patch` records.
 
 `jazz.patch` records every change to copied upstream files. To reproduce, unpack
 the crates.io 0.5.5 archive and run `patch -p1 < jazz.patch` at its root.
@@ -55,7 +58,7 @@ Before a Jazz feature uses one of these, re-enable it in `build.rs` and
 `dev/artifacts/build.mjs` checks every release WASM build with
 `assertNoOmittedSqliteExtensions` (`dev/artifacts/wasm-names.mjs`), which
 fails the build if the name section still holds FTS5, R-Tree, session,
-`sqlite_dbpage` or `bytecode()` functions. Its unit tests are in
+`dbstat`, `sqlite_dbpage`, `sqlite_stmt` or `bytecode()` functions. Its unit tests are in
 `dev/artifacts/wasm-names.test.mjs`.
 
 ## Removal

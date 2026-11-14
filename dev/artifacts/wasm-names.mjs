@@ -147,8 +147,10 @@ export function functionNames(module) {
 
 // SQLite extensions the browser build compiles out
 // (vendor/sqlite-wasm-rs/JAZZ_PATCH.md), by their C function-name prefixes.
+// dbstat and sqlite_stmt use generic prefixes (ANALYZE has `statInit`), so
+// they match exact names.
 const OMITTED_SQLITE_EXTENSION =
-  /^(sqlite3Fts5|fts5|sqlite3Rtree|rtree|sqlite3session|sqlite3changeset|sqlite3changegroup|sqlite3rebaser|dbpage|bytecodevtab)/;
+  /^(sqlite3Fts5|fts5|sqlite3Rtree|rtree|sqlite3session|sqlite3changeset|sqlite3changegroup|sqlite3rebaser|dbpage|bytecodevtab)|^(statConnect|statBestIndex|stmtConnect|stmtBestIndex)$/;
 
 /**
  * Throw when `module` still links a SQLite extension the browser build

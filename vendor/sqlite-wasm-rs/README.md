@@ -45,21 +45,21 @@ sqlite-wasm-vfs = "0.2"
 
 The following vfs have been implemented:
 
-- [`memory`](./crates/rsqlite-vfs/src/memvfs.rs): as the default vfs, no additional conditions are required, store the database in memory.
-- [`sahpool`](./crates/sqlite-wasm-vfs/src/sahpool.rs): ported from sqlite-wasm, store the database in opfs.
-- [`relaxed-idb`](./crates/sqlite-wasm-vfs/src/relaxed_idb.rs): store the database in blocks in indexed db.
+* [`memory`](./crates/rsqlite-vfs/src/memvfs.rs): as the default vfs, no additional conditions are required, store the database in memory.
+* [`sahpool`](./crates/sqlite-wasm-vfs/src/sahpool.rs): ported from sqlite-wasm, store the database in opfs.
+* [`relaxed-idb`](./crates/sqlite-wasm-vfs/src/relaxed_idb.rs): store the database in blocks in indexed db.
 
 ### VFS Comparison
 
-|                             | MemoryVFS | SyncAccessHandlePoolVFS | RelaxedIdbVFS |
-| --------------------------- | --------- | ----------------------- | ------------- |
-| Storage                     | RAM       | OPFS                    | IndexedDB     |
-| Contexts                    | All       | Dedicated Worker        | All           |
-| Multiple connections        | :x:       | :x:                     | :x:           |
-| Full durability             | ✅        | ✅                      | :x:           |
-| Relaxed durability          | :x:       | :x:                     | ✅            |
-| Multi-database transactions | ✅        | ✅                      | ✅            |
-| No COOP/COEP requirements   | ✅        | ✅                      | ✅            |
+||MemoryVFS|SyncAccessHandlePoolVFS|RelaxedIdbVFS|
+|-|-|-|-|
+|Storage|RAM|OPFS|IndexedDB|
+|Contexts|All|Dedicated Worker|All|
+|Multiple connections|:x:|:x:|:x:|
+|Full durability|✅|✅|:x:|
+|Relaxed durability|:x:|:x:|✅|
+|Multi-database transactions|✅|✅|✅|
+|No COOP/COEP requirements|✅|✅|✅|
 
 ### How to implement a VFS
 
@@ -69,8 +69,8 @@ Here is an example showing how to use `sqlite-wasm-rs` to implement a simple in-
 
 This library is not thread-safe:
 
-- `JsValue` is not cross-threaded, see <https://github.com/rustwasm/wasm-bindgen/pull/955> for details.
-- sqlite is compiled with `-DSQLITE_THREADSAFE=0`.
+* `JsValue` is not cross-threaded, see <https://github.com/rustwasm/wasm-bindgen/pull/955> for details.
+* sqlite is compiled with `-DSQLITE_THREADSAFE=0`.
 
 ## Use prebuild libsqlite3.a
 
@@ -84,17 +84,17 @@ The minimal officially supported rustc version is 1.81.0.
 
 ## Extensions
 
-| Extension                             | About                                                |
-| ------------------------------------- | ---------------------------------------------------- |
-| [sqlite-vec](./extensions/sqlite-vec) | A vector search SQLite extension that runs anywhere! |
+|Extension|About|
+|-|-|
+|[sqlite-vec](./extensions/sqlite-vec)|A vector search SQLite extension that runs anywhere!|
 
 Contributions are welcome!
 
 ## Related Project
 
-- [`diesel`](https://github.com/diesel-rs/diesel): A safe, extensible ORM and Query Builder for Rust.
-- [`rusqlite`](https://github.com/rusqlite/rusqlite): Ergonomic bindings to SQLite for Rust.
-- [`sqlite-wasm`](https://github.com/sqlite/sqlite-wasm): SQLite Wasm conveniently wrapped as an ES Module.
-- [`sqlite-web-rs`](https://github.com/xmtp/sqlite-web-rs): A SQLite WebAssembly backend for Diesel.
-- [`wa-sqlite`](https://github.com/rhashimoto/wa-sqlite): WebAssembly SQLite with support for browser storage extensions.
-- [`SQLite3MultipleCiphers`](https://github.com/utelle/SQLite3MultipleCiphers): SQLite3 encryption extension with support for multiple ciphers.
+* [`diesel`](https://github.com/diesel-rs/diesel): A safe, extensible ORM and Query Builder for Rust.
+* [`rusqlite`](https://github.com/rusqlite/rusqlite): Ergonomic bindings to SQLite for Rust.
+* [`sqlite-wasm`](https://github.com/sqlite/sqlite-wasm): SQLite Wasm conveniently wrapped as an ES Module.
+* [`sqlite-web-rs`](https://github.com/xmtp/sqlite-web-rs): A SQLite WebAssembly backend for Diesel.
+* [`wa-sqlite`](https://github.com/rhashimoto/wa-sqlite): WebAssembly SQLite with support for browser storage extensions.
+* [`SQLite3MultipleCiphers`](https://github.com/utelle/SQLite3MultipleCiphers): SQLite3 encryption extension with support for multiple ciphers.
