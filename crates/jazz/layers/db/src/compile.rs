@@ -1531,9 +1531,8 @@ impl<'a> Ctx<'a> {
         }
         // id, _clock, _state, the projection, _writer, the parent's index
         // and, for a page of an array of references, the row number.
-        let width = projection(child, array.select.as_deref())?.len()
-            + 5
-            + usize::from(paged && elements);
+        let width =
+            projection(child, array.select.as_deref())?.len() + 5 + usize::from(paged && elements);
         if width > BATCH_COLUMNS_MAX {
             return Ok(None);
         }
