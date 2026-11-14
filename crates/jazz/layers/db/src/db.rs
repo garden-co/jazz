@@ -1096,6 +1096,20 @@ pub fn set_relation_batch_for_test(batch: bool) {
     RELATION_BATCH.with(|cell| cell.set(batch));
 }
 
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static VM_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Tests only: the SQLite virtual-machine steps this thread's query
+/// statements have run since the last call, then zero. Steps grow with the
+/// rows a statement visits, so a test can bound a read's work by the rows
+/// it returns rather than by the rows the store holds.
+#[cfg(any(test, feature = "testing"))]
+pub fn take_vm_steps_for_test() -> u64 {
+    VM_STEPS.with(|cell| cell.replace(0))
+}
+
 /// The application tables a store holds, by their stored columns.
 fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> {
     let names: Vec<String> = conn
@@ -5027,6 +5041,8 @@ impl Inner {
         // Cached statements keep counting across runs: start this one at 0.
         statement.reset_status(rusqlite::StatementStatus::FullscanStep);
         statement.reset_status(rusqlite::StatementStatus::Sort);
+        #[cfg(any(test, feature = "testing"))]
+        statement.reset_status(rusqlite::StatementStatus::VmStep);
         let names: Arc<str> = Arc::from(table);
         let types: Arc<[ValueType]> = compiled
             .projection
@@ -5151,6 +5167,11 @@ impl Inner {
         drop(rows);
         run.scanned += statement.reset_status(rusqlite::StatementStatus::FullscanStep) as u64;
         run.sorted |= statement.reset_status(rusqlite::StatementStatus::Sort) > 0;
+        #[cfg(any(test, feature = "testing"))]
+        {
+            let steps = statement.reset_status(rusqlite::StatementStatus::VmStep) as u64;
+            VM_STEPS.with(|cell| cell.set(cell.get() + steps));
+        }
         if blocked {
             return Err(crate::large::missing());
         }

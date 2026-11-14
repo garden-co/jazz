@@ -465,6 +465,37 @@ describe("typed app prototype", () => {
     expect(indexed.wasmSchema.documents?.composite_indexes).toEqual([["ownerId", "updatedAt"]]);
   });
 
+  it("lets a composite index use the provenance timestamps", () => {
+    const chat = s.defineApp(
+      {
+        messages: s
+          .table({ roomId: s.uuid(), text: s.string() }, {})
+          .compositeIndex(["roomId", "$createdAt"])
+          .compositeIndex(["roomId", "$updatedAt"]),
+      },
+      { migrations: "none" },
+    );
+    expect(chat.wasmSchema.messages?.composite_indexes).toEqual([
+      ["roomId", "$createdAt"],
+      ["roomId", "$updatedAt"],
+    ]);
+  });
+
+  it("rejects composite index columns that are neither declared nor provenance timestamps", () => {
+    const table = s.table({ roomId: s.uuid(), text: s.string() }, {});
+    // @ts-expect-error `$createdBy` is metadata, not an indexable timestamp.
+    expect(() => table.compositeIndex(["roomId", "$createdBy"])).toThrow(
+      /distinct declared columns or provenance timestamps/,
+    );
+    // @ts-expect-error not a column of this table.
+    expect(() => table.compositeIndex(["roomId", "sentAt"])).toThrow(
+      /distinct declared columns or provenance timestamps/,
+    );
+    expect(() => table.compositeIndex(["$createdAt", "$createdAt"])).toThrow(
+      /distinct declared columns or provenance timestamps/,
+    );
+  });
+
   it("serializes gather seeded from the current relation", () => {
     const directParents = graphApp.team_edges
       .where({ child_team: "team-a" })

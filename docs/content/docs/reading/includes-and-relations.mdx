@@ -95,6 +95,10 @@ The object form is schema-aware: byte ranges are for `bytes`, text ranges are
 for `string`, and `{ at }` is for `json`. Selecting a field by name continues
 to return the complete primitive.
 
+Names and partial selections mix in one `select`, in any order, for example
+`select("title", { content: { from: 0, to: 1_048_576 } })`. A column is selected either whole or in
+part, not both: naming a column and also giving it a range, or giving it two ranges, throws.
+
 Partial object selections currently apply to the root query only. An included
 relation may select complete fields by name, but rejects object-form partial
 selections until Jazz can carry terminal-specific demand through relation

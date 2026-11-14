@@ -87,7 +87,8 @@ Writes need a token that allows them, and change real data.
 
 A value whose JSON would be over 32 KB is summarized in rows, so the row is still listed:
 `{ "$large": { "kind": "bytes" | "text" | "json", "size": …, "preview": "…" } }`. `size` counts
-bytes, UTF-16 units or JSON characters, and `preview` is the first 200. Fetch the value with
+bytes, UTF-16 units or JSON characters, and `preview` is the first 200 characters (of the base64,
+for bytes). Fetch the value with
 `get <table> <id> --column <column>`, which answers `{ value, size }`. For a bytes or text column,
 add `--from` and `--to` (exclusive, required with `--from`) to read only that part from the store;
 the answer is `{ value, from, to }`. A part is at most 512 KB of bytes or 256K characters, and a
@@ -154,6 +155,9 @@ claude mcp add jazz -- npx jazz-tools inspect mcp --app https://my-app.com
 
 `request_access`'s `ttlSeconds` follows the same limits as `login --ttl`: at least a minute, at most
 `maxTokenTtlSeconds`.
+
+In MCP tools, `as` is a user ID (`"alice"`) or `{ "userId": "alice", "claims": { … } }`. Claims can
+also go in `claims` next to a plain `as`, but not in both places; any other shape is refused.
 
 An agent starts with `whoami`. If that fails with `unauthorized`, it calls `request_access` and gives
 the URL to a person. Once they approve in their browser, the token goes to the MCP server, which

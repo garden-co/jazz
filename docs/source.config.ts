@@ -5,6 +5,7 @@ import { parseCodeBlockAttributes, rehypeCodeDefaultOptions } from "fumadocs-cor
 import { rehypeCodeMeta } from "./lib/rehype-code-meta";
 import { remarkPartialComponents } from "./lib/remark-partial-components";
 import { remarkBundleSizes } from "./lib/bundle-sizes/remark";
+import { remarkJazzVersion } from "./lib/jazz-version/remark";
 
 type ParseMetaString = NonNullable<typeof rehypeCodeDefaultOptions.parseMetaString>;
 
@@ -83,7 +84,12 @@ export const presentationDecks = defineCollections({
 export default defineConfig({
   mdxOptions: {
     rehypeCodeOptions: false,
-    remarkPlugins: (plugins) => [...plugins, remarkPartialComponents, remarkBundleSizes],
+    remarkPlugins: (plugins) => [
+      ...plugins,
+      remarkPartialComponents,
+      remarkBundleSizes,
+      remarkJazzVersion,
+    ],
     rehypePlugins: (plugins) => [...plugins, rehypeCodeMeta],
   },
 });
