@@ -2,6 +2,7 @@
 //! current stored state under the same serialization boundary as the eventual
 //! commit. A prepared value is not a concurrency token or a publication receipt.
 
+pub mod artifact;
 mod compatible;
 pub use compatible::schemas_are_compatible;
 mod migration_validation;
