@@ -12,7 +12,7 @@ export const METRO_SETUP_ERROR =
  * worker, whatever the app's config.
  */
 export const METRO_WORKER_API_ERROR =
-  "Jazz's local-first client on Expo web needs Expo's require.unstable_resolveWorker, which this Expo version's Metro does not provide: use expo/metro-config from an Expo SDK that has it (SDK 54 does), or the thin client.";
+  "Jazz's local-first client on Expo web needs Expo's Metro to build its worker (require.unstable_resolveWorker), and this bundle's Metro did not: bundle with getDefaultConfig from expo/metro-config wrapped in withJazz from jazz-tools/expo/metro (Expo SDK 54 and later), restart Metro with --clear, or use the thin client.";
 
 /**
  * Why Metro's broker worker chunk did not start: the app's Metro config, or a
