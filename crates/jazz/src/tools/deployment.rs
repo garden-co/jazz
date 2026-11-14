@@ -2,6 +2,7 @@
 //! current stored state under the same serialization boundary as the eventual
 //! commit. A prepared value is not a concurrency token or a publication receipt.
 
+pub mod artifact;
 mod compatible;
 pub use compatible::schemas_are_compatible;
 mod migration_validation;
@@ -307,6 +308,14 @@ pub fn prepare_deployment(
             })?;
         table.policies = policies;
     }
+    // What a deployment may not introduce, though a store already holding
+    // it still opens (see `check_deployable_policies`).
+    jazz_model::model::public_schema_convert::check_deployable_policies(&target).map_err(
+        |error| DeploymentError::InvalidPermissions {
+            schema: request.target_schema_hash,
+            reason: error.to_string(),
+        },
+    )?;
     let active_schema =
         JazzSchema::new(&target).map_err(|error| DeploymentError::InvalidPermissions {
             schema: request.target_schema_hash,

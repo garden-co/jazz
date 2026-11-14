@@ -38,8 +38,14 @@ import {
   encodeStreamRecord,
 } from "../runtime/native-runtime/http-stream-socket.js";
 import { resolveSchemaSource } from "../schema-source.js";
-import { shipsNoMigrations } from "../runtime/client-migrations.js";
-import type { CompiledPermissionsMap } from "../schema-permissions.js";
+import { shippedMigrations, shipsNoMigrations } from "../runtime/client-migrations.js";
+import { checkRunningApp } from "../dev/app-files.js";
+import { computeSchemaHash } from "../schema-hash.js";
+import {
+  mergePermissionsIntoWasmSchema,
+  type CompiledPermissionsMap,
+} from "../schema-permissions.js";
+import type { WasmSchema } from "../drivers/types.js";
 import { deployApp } from "../dev/catalogue.js";
 import { DeploymentError } from "../dev/catalogue-api.js";
 import type { Session } from "../runtime/context.js";
@@ -1535,8 +1541,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   const memoryTokenSecret = newTokenSecret();
 
   /** Publish `next`'s bundle: what it is pinned by. Publishing one already published changes nothing. */
-  const publish = (next: CreateJazzOptions) =>
-    applyBundle(core.serverUrl, { ...next, appId, adminSecret: core.adminSecret });
+  const publish = async (next: CreateJazzOptions) => {
+    if (!testHarnessOptions.has(next)) await checkCommittedAppFiles(next);
+    return applyBundle(core.serverUrl, { ...next, appId, adminSecret: core.adminSecret });
+  };
 
   /** Publish `next`'s bundle and open the backend's own session on it. */
   async function backendSession(
@@ -3545,7 +3553,51 @@ export function createJazz(options: CreateJazzOptions): Jazz {
  */
 export function createTestJazz(options: CreateJazzOptions): Jazz {
   jazzSettings(options);
+  // A test's app is defined in code: the project's committed files describe
+  // another, so there is nothing to compare it with.
+  testHarnessOptions.add(options);
   return openFacade(options);
+}
+
+/** The options of `createTestJazz` calls, which skip {@link checkCommittedAppFiles}. */
+const testHarnessOptions = new WeakSet<CreateJazzOptions>();
+
+/**
+ * Refuse to start when the project's committed jazz.app.json or
+ * jazz.permissions.json no longer match the app's TS, naming which, as
+ * `validate --check` would: an edited schema.ts or permissions.ts that
+ * wasn't regenerated. Files absent (an app that never ran validate), an app
+ * on `{ migrations: "none" }`, or an app the files can't express yet start
+ * as before.
+ */
+async function checkCommittedAppFiles(options: CreateJazzOptions): Promise<void> {
+  let declared;
+  try {
+    declared = resolveSchemaSource(options.app);
+  } catch {
+    // Not an app: publishing it says so.
+    return;
+  }
+  if (shipsNoMigrations(declared)) return;
+  const schema = mergePermissionsIntoWasmSchema(declared, {});
+  const current = await computeSchemaHash(schema);
+  const shipped = shippedMigrations(declared);
+  const versions = new Map<string, WasmSchema>();
+  for (const version of shipped?.schemas ?? []) {
+    versions.set(version.hash, (version.schema as { tables: WasmSchema }).tables);
+  }
+  versions.delete(current);
+  await checkRunningApp({
+    current,
+    schemas: [...versions.values(), schema],
+    migrations: (shipped?.migrations ?? []).map((edge) => ({
+      fromHash: edge.fromHash,
+      toHash: edge.toHash,
+      forward: edge.forward,
+    })),
+    permissions: options.permissions,
+    wasmSchema: declared,
+  });
 }
 
 /**

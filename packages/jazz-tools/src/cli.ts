@@ -62,7 +62,8 @@ const MIGRATE_ALPHA59_MOVED =
  */
 const SCHEMA_UNCHANGED_NOTE =
   "schema.ts matches its latest snapshot, so no migration is needed. " +
-  "Changes to permissions.ts never need one: your backend publishes them when it starts.";
+  "Changes to permissions.ts never need one, but run `jazz-tools validate` after them and commit the " +
+  "jazz.permissions.json it writes: with the files committed, your backend refuses to start on an out-of-date one.";
 
 function parseArgs(args: string[]): { command: string; options: BuildOptions } {
   const command = args[0] || "";
