@@ -228,8 +228,10 @@ it("reads offline when a reconnect after a live link is accepted but never answe
   const { port } = proxy.address() as { port: number };
   let db: Db | undefined;
   try {
-    db = await createDb(await localAccountConfig(server.appId, `http://127.0.0.1:${port}`));
-    await db.insert(app.notes, { title: "online" }).wait({ tier: "global" });
+    db = await createDb(
+      await localAccountConfig(server.appId, `http://127.0.0.1:${port}${upstream.pathname}`),
+    );
+    await db.insert(app.notes, { title: "online" }).wait({ tier: "global", timeoutMs: 15_000 });
     expect(db.getSyncStatus().link).toEqual({ state: "connected" });
 
     answering = false;
@@ -238,7 +240,8 @@ it("reads offline when a reconnect after a live link is accepted but never answe
     let settled = false;
     const pending = db
       .insert(app.notes, { title: "during the hang" })
-      .wait({ tier: "global" })
+      // Far past the outage window: only the server answering settles it.
+      .wait({ tier: "global", timeoutMs: 90_000 })
       .then((row) => {
         settled = true;
         return row;
@@ -263,7 +266,7 @@ it("reads offline when a reconnect after a live link is accepted but never answe
     proxy.close();
     await server.stop();
   }
-}, 120_000);
+}, 150_000);
 
 it("is local-only and synced without a server", async () => {
   const db = await createDb(await localAccountConfig("sync-status-local"));
