@@ -1,0 +1,43 @@
+--- a/build.rs
++++ b/build.rs
+@@ -1,5 +1,8 @@
+ // SQLite compile flags tuned for WASM: no threads/dlopen, keep common extensions.
+-const FULL_FEATURED: [&str; 23] = [
++// Jazz: drops extensions Jazz never uses (FTS5, R-Tree, session/preupdate,
++// diagnostic virtual tables, sqlite_offset(), unlock-notify, column metadata).
++// See JAZZ_PATCH.md.
++const FULL_FEATURED: [&str; 12] = [
+     "-DSQLITE_OS_OTHER",
+     "-DSQLITE_USE_URI",
+     // SQLite is configured for a single-threaded environment, as WebAssembly is single-threaded by default.
+@@ -12,20 +15,9 @@
+     "-DSQLITE_OMIT_LOAD_EXTENSION",
+     // In a single-threaded context, a shared cache is unnecessary.
+     "-DSQLITE_OMIT_SHARED_CACHE",
+-    "-DSQLITE_ENABLE_UNLOCK_NOTIFY",
+     "-DSQLITE_ENABLE_API_ARMOR",
+-    "-DSQLITE_ENABLE_BYTECODE_VTAB",
+-    "-DSQLITE_ENABLE_DBPAGE_VTAB",
+-    "-DSQLITE_ENABLE_DBSTAT_VTAB",
+-    "-DSQLITE_ENABLE_FTS5",
+     "-DSQLITE_ENABLE_MATH_FUNCTIONS",
+-    "-DSQLITE_ENABLE_OFFSET_SQL_FUNC",
+-    "-DSQLITE_ENABLE_PREUPDATE_HOOK",
+-    "-DSQLITE_ENABLE_RTREE",
+-    "-DSQLITE_ENABLE_SESSION",
+-    "-DSQLITE_ENABLE_STMTVTAB",
+     "-DSQLITE_ENABLE_UNKNOWN_SQL_FUNCTION",
+-    "-DSQLITE_ENABLE_COLUMN_METADATA",
+ ];
+ 
+ #[cfg(feature = "sqlite3mc")]
+@@ -33,6 +25,9 @@
+ 
+ const UPDATE_BINDGEN_ENV: &str = "SQLITE_WASM_RS_UPDATE_BINDGEN";
+ 
++#[cfg(feature = "sqlite3mc")]
++compile_error!("Jazz's vendored sqlite-wasm-rs omits the sqlite3mc sources; see JAZZ_PATCH.md");
++
+ fn main() {
+     println!("cargo::rerun-if-env-changed={UPDATE_BINDGEN_ENV}");
+     println!("cargo::rerun-if-changed=shim");
