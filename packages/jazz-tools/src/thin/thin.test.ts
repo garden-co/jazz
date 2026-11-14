@@ -113,6 +113,47 @@ describe("self-signed tokens", () => {
 });
 
 describe("thin client", () => {
+  it("signs in on the next load with the token the last one minted, without signing again", async () => {
+    const server = await startServer();
+    let stored: string | null = null;
+    const store = {
+      async read() {
+        return stored;
+      },
+      async update(transform: (current: string | null) => string) {
+        stored = transform(stored);
+      },
+    };
+    const open = async () => {
+      const mintToken = vi.fn(mintLocalFirstTokenInJs);
+      const accounts = await createAccountManagerWithMinter(
+        { appId: server.appId, serverUrl: server.url, store },
+        mintToken,
+      );
+      const db = await createClient({
+        appId: server.appId,
+        serverUrl: server.url,
+        account: accounts.getLoggedIn() ?? accounts.createLocalFirst(),
+      });
+      opened.push(db);
+      return { db, mintToken };
+    };
+    const first = await open();
+    const note = first.db.insert(app.notes, { text: "first load", done: false });
+    await note.wait({ tier: "global" });
+    expect(first.mintToken).toHaveBeenCalledOnce();
+    await expect.poll(() => JSON.parse(stored!).tokens).toBeDefined();
+    await first.db.shutdown();
+
+    // The reload: the server takes the stored token and names the same user.
+    const second = await open();
+    expect((await second.db.all(app.notes)).map((row) => row.text)).toEqual(["first load"]);
+    await second.db
+      .insert(app.notes, { text: "second load", done: false })
+      .wait({ tier: "global" });
+    expect(second.mintToken).not.toHaveBeenCalled();
+  }, 60_000);
+
   it("reads, writes and subscribes through the server under its own policies", async () => {
     const server = await startServer();
     const alice = await thinDb(server);
