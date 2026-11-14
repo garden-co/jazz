@@ -1,5 +1,25 @@
 # jazz-tools
 
+## 2.0.0-alpha.63
+
+### Patch Changes
+
+- cb1ed6d: Roll back callback transactions when their future is cancelled or their callback
+  panics, releasing the SQLite writer lock and preventing cancelled writes from
+  leaking into subsequent transactions.
+- e8dc3a1: `compositeIndex` in TypeScript schemas now accepts the provenance timestamps `$createdAt` and `$updatedAt`, as the Rust schema builder already does, so a list's newest page (`where({ roomId }).orderBy("$createdAt", "desc").limit(n)`) is served from an index instead of sorting the whole list: `s.table({...}).compositeIndex(["roomId", "$createdAt"])`.
+- 26d4824: Live queries now refresh when the executing user's registered claims change, even if the prepared query carries claims for a different user. Matching explicit claims, including an explicitly empty scope, remain fixed.
+- 3af9bab: The Inspector's IN / NOT IN filter splits Text, Enum and other non-JSON values on every comma again, so a stray quote or bracket (`O"Neil, Smith`) no longer stops the split. JSON and array values still split only on commas outside strings and brackets.
+- 50de7ab: The Inspector overlay's Subscriptions page no longer says "No active subscriptions" when it simply can't see them. A page's Db records subscriptions only from the moment the Inspector is mounted (or from the start with `devMode: true` in its client config), so the page now says which ones it lists, and that listing earlier ones is not supported yet. An empty result from the filters says so separately.
+- 4fc8f35: Fix a 2.0.0-alpha.62 slowdown in nested includes with a limit or offset, such as a room list with each room's newest message. Each parent's page is now read from the relation's index and stops at the page's end, instead of reading every child of every parent and keeping the first few. BandChat's room list over 100 rooms opens in about 4 ms again, down from about 600 ms.
+- 74e06c0: `createJazzClient` from `jazz-tools/client` works on Node, Deno, Bun and CLIs without a `store`: where there is no browser storage (localStorage with Web Locks), the session keeps its selection in memory for the process, which is all a user your backend names (`bearer`) needs, so `createJazzClient({ serverUrl, bearer })` no longer throws "createAccountManager requires an AccountStore outside the browser". A device account on such a host (`initial: "device"`, `createDeviceAccount()`, `restoreDeviceAccount()`, `reopenDeviceAccount()`, `serverUrl: null`) still needs a `store` to keep its key, and is refused with a `DeviceAccountNeedsStoreError` naming that option. Store errors on browsers without localStorage or Web Locks, and on bare React Native, now name the `store` option of `createJazzClient`.
+- 7ddf57f: Missing-policy warnings from `jazz-tools validate` and deploys now say what the missing grant denies, that your backend isn't checked when it acts as the system (so a table only your backend writes is fine), and how to declare that on purpose with `.never()` instead of adding an allow rule to silence the warning. The Declarative Permissions page gains a short section on tables only your backend writes.
+- 4663f48: Svelte: `JazzProvider` no longer remounts the app when the session republishes its snapshot with the same client. The in-place local-first upgrade (`client: () => import("jazz-tools/local-first")` without `localFirst: "now"`) publishes one, and the remount reset component state such as a half-typed form (#5459).
+- Updated dependencies [687f9b8]
+- Updated dependencies [9e594cc]
+  - jazz-rn@2.0.0-alpha.63
+  - jazz-wasm@2.0.0-alpha.63
+
 ## 2.0.0-alpha.62
 
 ### Minor Changes
