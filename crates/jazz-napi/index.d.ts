@@ -472,25 +472,18 @@ export type JsonValue =
   any
 
 /**
- * Read and check a `jazz.app.json` as a backend does. Returns its
- * `current` schema hash, its `bundle` id, and the deployment it publishes
- * in the form `POST .../admin/bundles` takes (`targetSchemaHash`,
+ * Read and check an app's `jazz.app.json` (`app`) and
+ * `jazz.permissions.json` (`permissions`) as a backend does. Returns the
+ * current schema hash, the bundle id, and the deployment the backend
+ * publishes in the form `POST .../admin/bundles` takes (`targetSchemaHash`,
  * `schemas`, `migrations`, `permissions`).
  */
-export declare function loadAppArtifact(json: string): JsonValue
+export declare function loadAppArtifact(app: string, permissions: string): JsonValue
 
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
 
 /** Exact build/ABI fingerprint for the generated native artifact. */
 export declare function nativeArtifactFingerprint(): string
-
-/**
- * The permissions bundle id a store computes when `permissions` (JSON, as
- * a deployment sends them) are published for the schema `tables`, as
- * `jazz.app.json`'s `bundle` is computed: so `createJazz` can tell whether
- * the file is the one its code declares.
- */
-export declare function permissionsBundleId(tables: string, permissions: string): string
 
 /** Where `anchor` lands in `text`: `{ position, confidence, ambiguous }`. */
 export declare function resolveTextAnchor(anchor: JsonValue, text: string, version?: number | undefined | null): JsonValue
@@ -614,8 +607,17 @@ export interface VerifyTokenResult {
 }
 
 /**
- * Build the canonical `jazz.app.json` text from what `jazz-tools validate`
- * compiled (an [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput)
- * as JSON): the file's only writer, which refuses what a reader would.
+ * Build the canonical `jazz.app.json` and `jazz.permissions.json` texts
+ * from what `jazz-tools validate` compiled (an
+ * [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput) as
+ * JSON): the files' only writer, which refuses what a reader would.
  */
-export declare function writeAppArtifact(input: string): string
+export declare function writeAppArtifact(input: string): WrittenAppFiles
+
+/** An app's two files, as [`write_app_artifact`] renders them. */
+export interface WrittenAppFiles {
+  /** `jazz.app.json`, which the app and its clients ship. */
+  app: string
+  /** `jazz.permissions.json`, which only its backends read. */
+  permissions: string
+}

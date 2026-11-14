@@ -296,8 +296,16 @@ fn shared_todos() -> ArtifactInput {
     }
 }
 
-fn fixture_path(name: &str) -> String {
-    format!("{FIXTURES}/{name}.json")
+/// `file` of the fixture app `name`: each app's files sit in their own
+/// directory, as they sit beside an app's schema.ts.
+fn fixture_path(name: &str, file: &str) -> String {
+    format!("{FIXTURES}/{name}/{file}")
+}
+
+/// `input`'s two files, loaded as a backend loads them.
+fn loaded(input: ArtifactInput) -> LoadedApp {
+    let written = write(input).unwrap();
+    load(written.app.as_bytes(), written.permissions.as_bytes()).unwrap()
 }
 
 /// The fixtures every language's codegen tests read. `JAZZ_UPDATE_FIXTURES=1`
@@ -308,27 +316,51 @@ fn the_writer_reproduces_each_fixture_byte_for_byte() {
         ("todo-server", todo_server()),
         ("shared-todos", shared_todos()),
     ] {
-        let text = write(input).unwrap_or_else(|error| panic!("{name}: {error}"));
-        let path = fixture_path(name);
-        if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
-            std::fs::create_dir_all(FIXTURES).unwrap();
-            std::fs::write(&path, &text).unwrap();
+        let written = write(input).unwrap_or_else(|error| panic!("{name}: {error}"));
+        for (file, text) in [
+            (APP_FILE, &written.app),
+            (PERMISSIONS_FILE, &written.permissions),
+        ] {
+            let path = fixture_path(name, file);
+            if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
+                std::fs::create_dir_all(format!("{FIXTURES}/{name}")).unwrap();
+                std::fs::write(&path, text).unwrap();
+            }
+            let committed = std::fs::read_to_string(&path)
+                .unwrap_or_else(|_| panic!("{path} is missing; run with JAZZ_UPDATE_FIXTURES=1"));
+            assert_eq!(*text, committed, "{name}/{file} differs from its fixture");
         }
-        let committed = std::fs::read_to_string(&path)
-            .unwrap_or_else(|_| panic!("{path} is missing; run with JAZZ_UPDATE_FIXTURES=1"));
-        assert_eq!(text, committed, "{name} differs from its fixture");
     }
 }
 
 #[test]
-fn a_written_file_loads_and_renders_back_to_itself() {
+fn written_files_load_and_render_back_to_themselves() {
     for input in [todo_server(), shared_todos()] {
-        let text = write(input).unwrap();
-        let loaded = load(text.as_bytes()).unwrap();
-        let reparsed: AppArtifact = serde_json::from_str(&text).unwrap();
-        assert_eq!(render(&reparsed), text);
-        assert_eq!(loaded.bundle().to_hex(), reparsed.bundle);
+        let written = write(input).unwrap();
+        let loaded = load(written.app.as_bytes(), written.permissions.as_bytes()).unwrap();
+        let app: AppArtifact = serde_json::from_str(&written.app).unwrap();
+        let permissions: PermissionsArtifact = serde_json::from_str(&written.permissions).unwrap();
+        assert_eq!(render(&app), written.app);
+        assert_eq!(render(&permissions), written.permissions);
+        assert_eq!(loaded.bundle().to_hex(), permissions.bundle);
+        assert_eq!(permissions.schema, app.current);
     }
+}
+
+#[test]
+fn the_app_file_holds_no_permissions() {
+    let written = write(shared_todos()).unwrap();
+    let app: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    let keys: Vec<_> = app.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(
+        keys,
+        ["codegen", "current", "format", "migrations", "schemas"]
+    );
+    assert!(
+        !written.app.contains("ExistsRel"),
+        "a policy in jazz.app.json"
+    );
+    assert!(written.permissions.contains("ExistsRel"));
 }
 
 #[test]
@@ -338,7 +370,7 @@ fn the_bundle_is_the_one_a_store_publishes_for_the_same_schema() {
     for (name, policies) in &input.permissions {
         target.get_mut(name).unwrap().policies = policies.clone();
     }
-    let loaded = load(write(input).unwrap().as_bytes()).unwrap();
+    let loaded = loaded(input);
     let config = crate::db::DbConfig::new(
         JazzSchema::new(&target).unwrap(),
         crate::db::DbIdentity {
@@ -355,13 +387,12 @@ fn the_bundle_is_the_one_a_store_publishes_for_the_same_schema() {
 fn policies_and_relation_expressions_survive_the_file_form() {
     let input = shared_todos();
     let permissions = input.permissions.clone();
-    let loaded = load(write(input).unwrap().as_bytes()).unwrap();
-    assert_eq!(loaded.permissions(), &permissions);
+    assert_eq!(loaded(input).permissions(), &permissions);
 }
 
 #[test]
 fn a_loaded_file_feeds_clients_and_a_deployment() {
-    let loaded = load(write(shared_todos()).unwrap().as_bytes()).unwrap();
+    let loaded = loaded(shared_todos());
     let migrations = loaded.client_migrations();
     assert_eq!(migrations.schemas.len(), 2);
     assert_eq!(migrations.lenses.len(), 1);
@@ -379,8 +410,9 @@ fn a_loaded_file_feeds_clients_and_a_deployment() {
 }
 
 #[test]
-fn the_file_uses_one_tagging_convention() {
-    let text = write(shared_todos()).unwrap();
+fn the_files_use_one_tagging_convention() {
+    let written = write(shared_todos()).unwrap();
+    let text = format!("{}{}", written.app, written.permissions);
     // Relation IR inside a policy is internally tagged, like everything else.
     assert!(text.contains("\"type\": \"ExistsRel\""));
     assert!(text.contains("\"type\": \"Filter\""));
@@ -404,18 +436,39 @@ fn the_file_uses_one_tagging_convention() {
 // Refusals
 // ---------------------------------------------------------------------------
 
+/// `shared-todos`, loaded after `edit` changed its `jazz.app.json`.
 fn edited(edit: impl FnOnce(&mut serde_json::Value)) -> Result<LoadedApp, ArtifactError> {
-    let mut value: serde_json::Value =
-        serde_json::from_str(&write(shared_todos()).unwrap()).unwrap();
+    let written = write(shared_todos()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&written.app).unwrap();
     edit(&mut value);
-    load(&serde_json::to_vec(&value).unwrap())
+    load(
+        &serde_json::to_vec(&value).unwrap(),
+        written.permissions.as_bytes(),
+    )
 }
 
+/// The refusal of [`edited`], which must be about `jazz.app.json`.
 fn refused(edit: impl FnOnce(&mut serde_json::Value)) -> String {
-    edited(edit)
-        .expect_err("the edit must be refused")
-        .message()
-        .to_string()
+    let error = edited(edit).expect_err("the edit must be refused");
+    assert_eq!(error.file(), APP_FILE, "{error}");
+    error.message().to_string()
+}
+
+/// `shared-todos`, loaded after `edit` changed its `jazz.permissions.json`.
+fn edited_permissions(
+    edit: impl FnOnce(&mut serde_json::Value),
+) -> Result<LoadedApp, ArtifactError> {
+    let written = write(shared_todos()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&written.permissions).unwrap();
+    edit(&mut value);
+    load(written.app.as_bytes(), &serde_json::to_vec(&value).unwrap())
+}
+
+/// The refusal of [`edited_permissions`], which must be about that file.
+fn permissions_refused(edit: impl FnOnce(&mut serde_json::Value)) -> String {
+    let error = edited_permissions(edit).expect_err("the edit must be refused");
+    assert_eq!(error.file(), PERMISSIONS_FILE, "{error}");
+    error.message().to_string()
 }
 
 #[test]
@@ -434,6 +487,8 @@ fn an_unknown_format_is_refused_before_anything_else() {
             .unwrap())
         .contains("no `format`")
     );
+    let error = permissions_refused(|v| v["format"] = 2.into());
+    assert!(error.contains("format 2 is not supported"), "{error}");
 }
 
 #[test]
@@ -443,11 +498,35 @@ fn unknown_fields_are_refused_at_every_level() {
         |v| v["schemas"][0]["tables"]["todos"]["policies"] = serde_json::json!({}),
         |v| v["schemas"][0]["tables"]["todos"]["columns"][0]["sparse"] = true.into(),
         |v| v["codegen"]["tables"]["todos"]["relations"]["shares"]["kind"] = "reverse".into(),
-        |v| v["permissions"]["todos"]["select"]["using"]["exprs"][1]["rel"]["extra"] = 1.into(),
+        // A single file from before the permissions moved out of it.
+        |v| v["permissions"] = serde_json::json!({}),
+        |v| v["bundle"] = "0".repeat(64).into(),
     ] {
         let error = refused(edit);
         assert!(error.contains("unknown field"), "{error}");
     }
+    for edit in [
+        (|v: &mut serde_json::Value| v["extra"] = true.into()) as fn(&mut serde_json::Value),
+        |v| v["permissions"]["todos"]["select"]["using"]["exprs"][1]["rel"]["extra"] = 1.into(),
+    ] {
+        let error = permissions_refused(edit);
+        assert!(error.contains("unknown field"), "{error}");
+    }
+}
+
+#[test]
+fn the_permissions_must_be_for_the_apps_current_schema() {
+    let first = write(todo_server()).unwrap();
+    let error = permissions_refused(|v| v["schema"] = "0".repeat(64).into());
+    assert!(error.contains("were not written together"), "{error}");
+    // Another app's permissions file, however well-formed, is refused.
+    let written = write(shared_todos()).unwrap();
+    let error = load(written.app.as_bytes(), first.permissions.as_bytes()).unwrap_err();
+    assert_eq!(error.file(), PERMISSIONS_FILE);
+    assert!(
+        error.message().contains("were not written together"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -479,7 +558,7 @@ fn a_lens_that_does_not_reproduce_its_target_is_refused() {
 
 #[test]
 fn the_bundle_must_match_the_current_permissions() {
-    let error = refused(|v| {
+    let error = permissions_refused(|v| {
         v["permissions"]["shares"]["select"]["using"] = serde_json::json!({"type": "False"})
     });
     assert!(error.contains("`bundle` is"), "{error}");
@@ -487,10 +566,11 @@ fn the_bundle_must_match_the_current_permissions() {
 
 #[test]
 fn permissions_must_compile_against_the_current_schema() {
-    let error = refused(|v| v["permissions"]["gone"] = serde_json::json!({}));
+    let error = permissions_refused(|v| v["permissions"]["gone"] = serde_json::json!({}));
     assert!(error.contains("permissions.gone"), "{error}");
-    let error =
-        refused(|v| v["permissions"]["todos"]["insert"]["with_check"]["column"] = "nope".into());
+    let error = permissions_refused(|v| {
+        v["permissions"]["todos"]["insert"]["with_check"]["column"] = "nope".into()
+    });
     assert!(error.starts_with("permissions:"), "{error}");
 }
 
@@ -1008,7 +1088,7 @@ fn fieldless_variants_refuse_extra_keys_too() {
             serde_json::json!({"type": "Text", "schema": {}})
     });
     assert!(error.contains("unknown field"), "{error}");
-    let error = refused(|v| {
+    let error = permissions_refused(|v| {
         v["permissions"]["shares"]["select"]["using"] =
             serde_json::json!({"type": "True", "column": "x"})
     });
@@ -1029,7 +1109,8 @@ fn a_format_that_is_not_the_integer_is_named() {
 
 #[test]
 fn malformed_files_are_refused_not_panicked_on() {
-    let text = write(shared_todos()).unwrap();
+    let written = write(shared_todos()).unwrap();
+    let (text, permissions) = (&written.app, &written.permissions);
     for input in [
         b"".as_slice(),
         b"not json",
@@ -1037,17 +1118,24 @@ fn malformed_files_are_refused_not_panicked_on() {
         b"[]",
         b"{\"format\": 1}",
     ] {
-        assert!(load(input).is_err());
+        assert!(load(input, permissions.as_bytes()).is_err());
+        assert!(load(text.as_bytes(), input).is_err());
     }
     for edit in [
         (|v: &mut serde_json::Value| v["schemas"] = "x".into()) as fn(&mut serde_json::Value),
         |v| v["schemas"][0]["tables"]["todos"]["columns"] = 1.into(),
         |v| v["schemas"][0]["tables"]["todos"]["columns"][0]["nullable"] = "no".into(),
         |v| v["migrations"][0]["forward"][0]["operations"][0]["type"] = "Explode".into(),
-        |v| v["bundle"] = "not hex".into(),
         |v| v["current"] = 7.into(),
     ] {
         assert!(edited(edit).is_err());
+    }
+    for edit in [
+        (|v: &mut serde_json::Value| v["bundle"] = "not hex".into()) as fn(&mut serde_json::Value),
+        |v| v["schema"] = 7.into(),
+        |v| v["permissions"] = "x".into(),
+    ] {
+        assert!(edited_permissions(edit).is_err());
     }
     // Deep nesting is refused by the JSON parser's depth limit, before any
     // recursive conversion runs.
@@ -1055,13 +1143,13 @@ fn malformed_files_are_refused_not_panicked_on() {
     for _ in 0..10_000 {
         deep = format!(r#"{{"type": "Not", "expr": {deep}}}"#);
     }
-    let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(permissions).unwrap();
     value["permissions"]["shares"]["select"]["using"] = serde_json::json!("PLACEHOLDER");
     let file = serde_json::to_string(&value)
         .unwrap()
         .replace("\"PLACEHOLDER\"", &deep);
     assert!(
-        load(file.as_bytes())
+        load(text.as_bytes(), file.as_bytes())
             .unwrap_err()
             .message()
             .contains("not JSON")
@@ -1074,35 +1162,38 @@ fn malformed_files_are_refused_not_panicked_on() {
 
 #[test]
 fn a_file_both_readers_accept_gives_clients_the_same_migrations() {
-    let written = [todo_server(), shared_todos()].map(|input| write(input).unwrap());
-    let fixtures = ["todo-server", "shared-todos"]
-        .map(|name| std::fs::read_to_string(fixture_path(name)).unwrap());
-    for text in written.iter().chain(&fixtures) {
-        let full = load(text.as_bytes()).unwrap().client_migrations();
-        let client = load_client(text.as_bytes()).unwrap();
+    let written = [todo_server(), shared_todos()]
+        .map(|input| write(input).unwrap())
+        .map(|written| (written.app, written.permissions));
+    let fixtures = ["todo-server", "shared-todos"].map(|name| {
+        let read = |file| std::fs::read_to_string(fixture_path(name, file)).unwrap();
+        (read(APP_FILE), read(PERMISSIONS_FILE))
+    });
+    for (app, permissions) in written.iter().chain(&fixtures) {
+        let full = load(app.as_bytes(), permissions.as_bytes())
+            .unwrap()
+            .client_migrations();
+        let client = load_client(app.as_bytes()).unwrap();
         assert_eq!(client.schemas, full.schemas);
         assert_eq!(client.lenses, full.lenses);
     }
 }
 
 #[test]
-fn a_client_skips_permissions_and_codegen_unread() {
+fn a_client_skips_codegen_unread() {
     let mut value: serde_json::Value =
-        serde_json::from_str(&write(shared_todos()).unwrap()).unwrap();
-    // Neither is a client's to judge: a backend's `load` refuses both.
-    value["permissions"] = serde_json::json!({"no_such_table": {"select": "anything"}});
+        serde_json::from_str(&write(shared_todos()).unwrap().app).unwrap();
+    // Not a client's to judge: a backend's `load` refuses it.
     value["codegen"] = serde_json::json!({"whatever": [1, 2, 3]});
     let client = load_client(&serde_json::to_vec(&value).unwrap()).unwrap();
     assert_eq!(client.schemas.len(), 2);
-    for absent in ["permissions", "codegen"] {
-        value.as_object_mut().unwrap().remove(absent);
-    }
+    value.as_object_mut().unwrap().remove("codegen");
     load_client(&serde_json::to_vec(&value).unwrap()).unwrap();
 }
 
 fn client_refused(edit: impl FnOnce(&mut serde_json::Value)) -> String {
     let mut value: serde_json::Value =
-        serde_json::from_str(&write(shared_todos()).unwrap()).unwrap();
+        serde_json::from_str(&write(shared_todos()).unwrap().app).unwrap();
     edit(&mut value);
     load_client(&serde_json::to_vec(&value).unwrap())
         .expect_err("the edit must be refused")
@@ -1129,8 +1220,9 @@ fn a_client_refuses_what_it_cannot_trust() {
     let error = client_refused(|v| v["current"] = "00".repeat(32).into());
     assert!(error.contains("is not among `schemas`"), "{error}");
 
-    let error = client_refused(|v| v["bundle"] = "nope".into());
-    assert!(error.contains("`bundle`"), "{error}");
+    // A single file from before the permissions moved out of it.
+    let error = client_refused(|v| v["permissions"] = serde_json::json!({}));
+    assert!(error.contains("unknown field `permissions`"), "{error}");
 
     // The versions and migrations are checked as `load` checks them.
     let error = client_refused(|v| v["migrations"][0]["to"] = "00".repeat(32).into());

@@ -1,17 +1,17 @@
-//! `jazz.app.json`: an app's schema versions, migrations, permissions and
-//! codegen metadata in one language-neutral file.
+//! An app's two language-neutral files: `jazz.app.json` (its schema
+//! versions, migrations and codegen metadata, which the app and its clients
+//! ship) and `jazz.permissions.json` (the current version's permissions and
+//! their bundle id, which only backends read, so no client bundle carries
+//! the app's policies).
 //!
 //! `jazz-tools validate` compiles `schema.ts`, `migrations/` and
-//! `permissions.ts` and hands the result to [`write`], which is the only
-//! writer of the file. Every runtime reads it with [`load`], the only reader.
-//! A backend publishes [`LoadedApp::deployment_request`] at startup and pins
-//! its sessions to [`LoadedApp::bundle`]; clients open along
-//! [`LoadedApp::client_migrations`] and never look at the permissions. A
-//! client build (WASM, React Native) reads the file with [`load_client`]
-//! instead, which skips the permissions and codegen unread, so it carries
-//! none of the policy code.
+//! `permissions.ts` and hands the result to [`write`], the files' only
+//! writer. A backend reads both with [`load`], publishes
+//! [`LoadedApp::deployment_request`] at startup and pins its sessions to
+//! [`LoadedApp::bundle`]. A client reads `jazz.app.json` alone with
+//! [`load_client`] and opens along its schema versions and lenses.
 //!
-//! The file's JSON is its own: every type below mirrors an engine type
+//! The files' JSON is their own: every type below mirrors an engine type
 //! field for field, so the engine's wire and catalogue encodings stay as
 //! they are while the file follows one convention throughout. Fields are
 //! snake_case, sum types carry an internal `"type"` tag with PascalCase
@@ -45,22 +45,43 @@ use super::published::{
 };
 use super::{DeploymentRequest, structural};
 
-/// The `format` this version of Jazz reads and writes.
+/// The `format` of both files this version of Jazz reads and writes.
 pub const FORMAT: u32 = 1;
 
-/// Why a `jazz.app.json` was refused. Every message names the field.
+/// The app's file: schema versions, migrations and codegen metadata.
+pub const APP_FILE: &str = "jazz.app.json";
+/// The backend's file: the current version's permissions and their bundle.
+pub const PERMISSIONS_FILE: &str = "jazz.permissions.json";
+
+/// Why a `jazz.app.json` or `jazz.permissions.json` was refused. Every
+/// message names the file and the field.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("jazz.app.json: {0}")]
-pub struct ArtifactError(String);
+#[error("{file}: {message}")]
+pub struct ArtifactError {
+    file: &'static str,
+    message: String,
+}
 
 impl ArtifactError {
     fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self::in_file(APP_FILE, message)
+    }
+
+    fn in_file(file: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            file,
+            message: message.into(),
+        }
+    }
+
+    /// The file refused: [`APP_FILE`] or [`PERMISSIONS_FILE`].
+    pub fn file(&self) -> &'static str {
+        self.file
     }
 
     /// The refusal, without the file prefix.
     pub fn message(&self) -> &str {
-        &self.0
+        &self.message
     }
 }
 
@@ -78,19 +99,32 @@ pub struct AppArtifact {
     pub format: u32,
     /// Hash of the schema version the app's code is written against.
     pub current: String,
-    /// Id of the permissions bundle `current` and `permissions` make.
-    pub bundle: String,
     /// Every schema version the app still ships, oldest first.
     pub schemas: Vec<ArtifactSchema>,
     #[serde(default)]
     pub migrations: Vec<ArtifactMigration>,
-    /// Permissions for `current`, by table.
-    #[serde(default)]
-    pub permissions: BTreeMap<String, ArtifactTablePolicies>,
     /// Authoring metadata for typed code in each language. It never
     /// affects a schema hash or a bundle id.
     #[serde(default)]
     pub codegen: Codegen,
+}
+
+/// `jazz.permissions.json` as it is on disk: what only a backend reads.
+/// Clients ship `jazz.app.json` alone, so they never carry the app's
+/// policies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionsArtifact {
+    /// Major version of this format; readers refuse others.
+    pub format: u32,
+    /// Hash of the schema the permissions were compiled for: the `current`
+    /// of the `jazz.app.json` written with them.
+    pub schema: String,
+    /// Permissions for `schema`, by table.
+    #[serde(default)]
+    pub permissions: BTreeMap<String, ArtifactTablePolicies>,
+    /// Id of the permissions bundle `schema` and `permissions` make.
+    pub bundle: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -653,47 +687,55 @@ impl LoadedApp {
     }
 }
 
-/// Read and check a `jazz.app.json`.
-pub fn load(json: &[u8]) -> Result<LoadedApp, ArtifactError> {
-    let artifact: AppArtifact = serde_json::from_value(read_format(json)?)
-        .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
-    check(artifact, BundleCheck::Verify)
+/// Read and check an app's two files, as a backend does: `app` is its
+/// `jazz.app.json` and `permissions` its `jazz.permissions.json`, which
+/// must have been written together (its `schema` is the app's `current`).
+pub fn load(app: &[u8], permissions: &[u8]) -> Result<LoadedApp, ArtifactError> {
+    let artifact: AppArtifact = parse(APP_FILE, app)?;
+    let permissions: PermissionsArtifact = parse(PERMISSIONS_FILE, permissions)?;
+    check(artifact, permissions, BundleCheck::Verify)
+}
+
+/// `json` as the file `file`, once its `format` is one this version reads.
+fn parse<T: serde::de::DeserializeOwned>(
+    file: &'static str,
+    json: &[u8],
+) -> Result<T, ArtifactError> {
+    serde_json::from_value(read_format(file, json)?)
+        .map_err(|error| ArtifactError::in_file(file, format!("{error}; {REGENERATE}")))
 }
 
 /// The file as JSON, once its `format` is one this version reads. The
 /// format comes first, so a file from a newer Jazz is refused for what it is
 /// rather than for the fields this version doesn't know.
-fn read_format(json: &[u8]) -> Result<serde_json::Value, ArtifactError> {
-    let raw: serde_json::Value = serde_json::from_slice(json)
-        .map_err(|error| ArtifactError::new(format!("not JSON: {error}")))?;
+fn read_format(file: &'static str, json: &[u8]) -> Result<serde_json::Value, ArtifactError> {
+    let refuse = |message: String| ArtifactError::in_file(file, message);
+    let raw: serde_json::Value =
+        serde_json::from_slice(json).map_err(|error| refuse(format!("not JSON: {error}")))?;
     match raw.get("format").and_then(serde_json::Value::as_u64) {
         Some(format) if format == u64::from(FORMAT) => Ok(raw),
-        Some(format) => Err(ArtifactError::new(format!(
+        Some(format) => Err(refuse(format!(
             "format {format} is not supported by this version of Jazz, which reads format {FORMAT}"
         ))),
-        None if raw.get("format").is_none() => Err(ArtifactError::new("no `format`")),
-        None => Err(ArtifactError::new(format!(
+        None if raw.get("format").is_none() => Err(refuse("no `format`".into())),
+        None => Err(refuse(format!(
             "`format` must be the integer {FORMAT}, not {}",
             raw["format"]
         ))),
     }
 }
 
-/// `jazz.app.json` as a client reads it: its permissions and codegen are
-/// skipped unread, so a client build carries no policy or relation code.
+/// `jazz.app.json` as a client reads it: its codegen section is skipped
+/// unread, so a client build carries no relation code.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClientArtifact {
     #[allow(dead_code)]
     format: u32,
     current: String,
-    bundle: String,
     schemas: Vec<ArtifactSchema>,
     #[serde(default)]
     migrations: Vec<ArtifactMigration>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    permissions: serde::de::IgnoredAny,
     #[serde(default)]
     #[allow(dead_code)]
     codegen: serde::de::IgnoredAny,
@@ -702,18 +744,14 @@ struct ClientArtifact {
 /// Read a `jazz.app.json` for a client: the schema versions and lenses it
 /// opens along. It runs [`load`]'s checks of the versions and migrations
 /// ([`check_history`]) and lowers every lens as [`load`] does, refusing one
-/// that doesn't lower. It skips what a client never uses (compiling the
-/// permissions, the `bundle` id they make, the codegen section's
-/// references) and the deployment's review of each lens, which the writer
-/// ran and every backend runs again before it publishes: carrying that
-/// review would grow a client build by about half again what this reader
-/// costs.
+/// that doesn't lower. It skips what a client never uses (the codegen
+/// section's references) and the deployment's review of each lens, which
+/// the writer ran and every backend runs again before it publishes:
+/// carrying that review would grow a client build by about half again what
+/// this reader costs. The permissions are in `jazz.permissions.json`, which
+/// a client never has.
 pub fn load_client(json: &[u8]) -> Result<crate::db::Migrations, ArtifactError> {
-    let artifact: ClientArtifact = serde_json::from_value(read_format(json)?)
-        .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
-    if BundleId::from_hex(&artifact.bundle).is_none() {
-        return Err(ArtifactError::new("`bundle` is not a 64-character hex id"));
-    }
+    let artifact: ClientArtifact = parse(APP_FILE, json)?;
     let history = check_history(&artifact.current, &artifact.schemas, &artifact.migrations)?;
     let (schemas, lenses) = lower_client_migrations(history.bundle())
         .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
@@ -846,7 +884,11 @@ fn check_history(
     })
 }
 
-fn check(artifact: AppArtifact, bundle_check: BundleCheck) -> Result<LoadedApp, ArtifactError> {
+fn check(
+    artifact: AppArtifact,
+    permission_file: PermissionsArtifact,
+    bundle_check: BundleCheck,
+) -> Result<LoadedApp, ArtifactError> {
     let history = check_history(&artifact.current, &artifact.schemas, &artifact.migrations)?;
     // Lenses, as a deployment and `jazz-tools validate` check them. Where a
     // migration sits in the whole history is the store's to judge: its
@@ -854,26 +896,33 @@ fn check(artifact: AppArtifact, bundle_check: BundleCheck) -> Result<LoadedApp, 
     check_decoded_client_migrations(history.bundle(), history.current)
         .map_err(|error| ArtifactError::new(format!("migrations: {error}")))?;
     let current_schema = history.current_schema();
+    check_codegen(&artifact.codegen, current_schema)?;
 
+    let refuse = |message: String| ArtifactError::in_file(PERMISSIONS_FILE, message);
+    let schema = parse_schema_hash(&permission_file.schema)
+        .map_err(|error| refuse(format!("schema: {error}")))?;
+    if schema != history.current {
+        return Err(refuse(format!(
+            "`schema` is {schema} but {APP_FILE}'s current schema is {}: the two files were not written together; {REGENERATE}",
+            history.current
+        )));
+    }
     let mut permissions = Permissions::new();
-    for (table, policies) in &artifact.permissions {
+    for (table, policies) in &permission_file.permissions {
         let name = TableName::from(table.as_str());
         if !current_schema.contains_key(&name) {
-            return Err(ArtifactError::new(format!(
+            return Err(refuse(format!(
                 "permissions.{table}: the current schema has no table {table}"
             )));
         }
         permissions.insert(name, table_policies_from_artifact(policies));
     }
-
-    check_codegen(&artifact.codegen, current_schema)?;
-
     let bundle = compute_bundle(current_schema, &permissions)?;
     if bundle_check == BundleCheck::Verify {
-        let claimed = BundleId::from_hex(&artifact.bundle)
-            .ok_or_else(|| ArtifactError::new("`bundle` is not a 64-character hex id"))?;
+        let claimed = BundleId::from_hex(&permission_file.bundle)
+            .ok_or_else(|| refuse("`bundle` is not a 64-character hex id".into()))?;
         if claimed != bundle {
-            return Err(ArtifactError::new(format!(
+            return Err(refuse(format!(
                 "`bundle` is {claimed} but the current schema and permissions make {bundle}; {REGENERATE}"
             )));
         }
@@ -890,21 +939,6 @@ fn hash_field(path: &str, text: &str) -> Result<SchemaHash, ArtifactError> {
     parse_schema_hash(text).map_err(|error| ArtifactError::new(format!("{path}: {error}")))
 }
 
-/// The bundle id a store computes when `permissions` are published for
-/// `current` (a policy-free schema), as [`LoadedApp::bundle`] is computed:
-/// so a backend can tell whether the file is the one its code declares.
-pub fn bundle_of(current: &Schema, permissions: &Permissions) -> Result<BundleId, ArtifactError> {
-    if let Some(table) = permissions
-        .keys()
-        .find(|table| !current.contains_key(table))
-    {
-        return Err(ArtifactError::new(format!(
-            "permissions.{table}: the current schema has no table {table}"
-        )));
-    }
-    compute_bundle(&structural(current.clone()), permissions)
-}
-
 /// The bundle id the server computes when this backend publishes: the
 /// permissions are compiled against the current schema (refusing those
 /// that don't compile), then hashed as the catalogue hashes them.
@@ -916,13 +950,14 @@ fn compute_bundle(current: &Schema, permissions: &Permissions) -> Result<BundleI
             .expect("checked against the current schema")
             .policies = policies.clone();
     }
-    let compiled = JazzSchema::new(&target)
-        .map_err(|error| ArtifactError::new(format!("permissions: {error}")))?;
+    let refuse = |error: String| ArtifactError::in_file(PERMISSIONS_FILE, error);
+    let compiled =
+        JazzSchema::new(&target).map_err(|error| refuse(format!("permissions: {error}")))?;
     bundle_id(
         &SchemaHash::compute(&structural(compiled.public_schema().clone())),
         &permissions_of(compiled.public_schema()),
     )
-    .map_err(|error| ArtifactError::new(format!("permissions: {error}")))
+    .map_err(|error| refuse(format!("permissions: {error}")))
 }
 
 fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactError> {
@@ -1019,10 +1054,20 @@ pub struct ArtifactInput {
     pub codegen: Codegen,
 }
 
-/// Build, check and render a `jazz.app.json`: the file's only writer.
-/// The text is canonical, so a committed file can be compared byte for byte
-/// with a fresh build.
-pub fn write(input: ArtifactInput) -> Result<String, ArtifactError> {
+/// The two files [`write`] renders, as canonical text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrittenApp {
+    /// `jazz.app.json`, which the app and its clients ship.
+    pub app: String,
+    /// `jazz.permissions.json`, which only backends read.
+    pub permissions: String,
+}
+
+/// Build, check and render an app's `jazz.app.json` and
+/// `jazz.permissions.json`: the files' only writer. The texts are
+/// canonical, so committed files can be compared byte for byte with a fresh
+/// build.
+pub fn write(input: ArtifactInput) -> Result<WrittenApp, ArtifactError> {
     let schemas = input
         .schemas
         .into_iter()
@@ -1043,34 +1088,49 @@ pub fn write(input: ArtifactInput) -> Result<String, ArtifactError> {
         .map(|(table, policies)| {
             Ok((
                 table.as_str().to_string(),
-                table_policies_to_artifact(policies)
-                    .map_err(|error| ArtifactError::new(format!("permissions.{table}: {error}")))?,
+                table_policies_to_artifact(policies).map_err(|error| {
+                    ArtifactError::in_file(
+                        PERMISSIONS_FILE,
+                        format!("permissions.{table}: {error}"),
+                    )
+                })?,
             ))
         })
         .collect::<Result<BTreeMap<_, _>, ArtifactError>>()?;
-    let mut artifact = AppArtifact {
+    let artifact = AppArtifact {
         format: FORMAT,
-        current: input.current,
-        bundle: String::new(),
+        current: input.current.clone(),
         schemas,
         migrations: input
             .migrations
             .iter()
             .map(migration_to_artifact)
             .collect::<Result<_, _>>()?,
-        permissions,
         codegen: input.codegen,
     };
-    // Check the file as a reader will, computing its bundle id on the way.
-    artifact.bundle = check(artifact.clone(), BundleCheck::Compute)?
-        .bundle
-        .to_hex();
-    Ok(render(&artifact))
+    let mut permission_file = PermissionsArtifact {
+        format: FORMAT,
+        schema: input.current,
+        permissions,
+        bundle: String::new(),
+    };
+    // Check the files as a reader will, computing the bundle id on the way.
+    permission_file.bundle = check(
+        artifact.clone(),
+        permission_file.clone(),
+        BundleCheck::Compute,
+    )?
+    .bundle
+    .to_hex();
+    Ok(WrittenApp {
+        app: render(&artifact),
+        permissions: render(&permission_file),
+    })
 }
 
-/// The canonical text of `artifact`: object keys sorted, arrays in their
+/// The canonical text of either file: object keys sorted, arrays in their
 /// order, two-space indent, trailing newline.
-pub fn render(artifact: &AppArtifact) -> String {
+pub fn render<T: Serialize>(artifact: &T) -> String {
     fn sorted(value: serde_json::Value) -> serde_json::Value {
         match value {
             serde_json::Value::Object(map) => {

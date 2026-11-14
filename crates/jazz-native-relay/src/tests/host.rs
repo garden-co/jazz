@@ -974,8 +974,9 @@ fn renamed_label_bundle() -> serde_json::Value {
             }],
         }],
     });
-    let text =
-        jazz::tools::deployment::artifact::write(serde_json::from_value(input).unwrap()).unwrap();
+    let text = jazz::tools::deployment::artifact::write(serde_json::from_value(input).unwrap())
+        .unwrap()
+        .app;
     serde_json::from_str(&text).unwrap()
 }
 

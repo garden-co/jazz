@@ -113,16 +113,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         schema.len()
     );
 
-    // The app's schema versions and lenses, from the jazz.app.json
-    // `jazz-tools validate` writes beside schema.ts, so this client stores
-    // each version as the server does.
-    let app = jazz::tools::deployment::artifact::load(&std::fs::read(format!(
-        "{schema_root}/jazz.app.json"
-    ))?)?;
+    // The app's schema versions and lenses, from the jazz.app.json and
+    // jazz.permissions.json `jazz-tools validate` writes beside schema.ts, so
+    // this client stores each version as the server does.
+    let read = |file: &str| std::fs::read(format!("{schema_root}/{file}"));
+    let app = jazz::tools::deployment::artifact::load(
+        &read(jazz::tools::deployment::artifact::APP_FILE)?,
+        &read(jazz::tools::deployment::artifact::PERMISSIONS_FILE)?,
+    )?;
     if jazz::tools::SchemaHash::compute(&schema) != app.current_hash() {
         return Err(format!(
             "jazz.app.json is not for this schema.ts (its current schema is {}): \
-             run `npx jazz-tools validate` and commit jazz.app.json",
+             run `npx jazz-tools validate` and commit jazz.app.json and jazz.permissions.json",
             app.current_hash()
         )
         .into());

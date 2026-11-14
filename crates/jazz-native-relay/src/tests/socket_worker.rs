@@ -557,9 +557,12 @@ fn an_attached_schema_stores_columns_where_its_shipped_migrations_put_them() {
             }],
         }],
     });
-    let bundle: serde_json::Value =
-        serde_json::from_str(&artifact::write(serde_json::from_value(input).unwrap()).unwrap())
-            .unwrap();
+    let bundle: serde_json::Value = serde_json::from_str(
+        &artifact::write(serde_json::from_value(input).unwrap())
+            .unwrap()
+            .app,
+    )
+    .unwrap();
     let head_schema = JazzSchema::new(&head).unwrap();
     let stored_column = |path: &std::path::Path| -> String {
         rusqlite::Connection::open(path)

@@ -92,24 +92,40 @@ pub fn validate_schema(schema: Uint8Array) -> js::Result<()> {
     Ok(())
 }
 
-/// Build the canonical `jazz.app.json` text from what `jazz-tools validate`
-/// compiled (an [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput)
-/// as JSON): the file's only writer, which refuses what a reader would.
+/// An app's two files, as [`write_app_artifact`] renders them.
+#[napi(object)]
+pub struct WrittenAppFiles {
+    /// `jazz.app.json`, which the app and its clients ship.
+    pub app: String,
+    /// `jazz.permissions.json`, which only its backends read.
+    pub permissions: String,
+}
+
+/// Build the canonical `jazz.app.json` and `jazz.permissions.json` texts
+/// from what `jazz-tools validate` compiled (an
+/// [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput) as
+/// JSON): the files' only writer, which refuses what a reader would.
 #[napi(js_name = "writeAppArtifact")]
-pub fn write_app_artifact(input: String) -> napi::Result<String> {
+pub fn write_app_artifact(input: String) -> napi::Result<WrittenAppFiles> {
     use jazz::tools::deployment::artifact;
     let input: artifact::ArtifactInput = serde_json::from_str(&input)
         .map_err(|error| napi::Error::from_reason(format!("jazz.app.json input: {error}")))?;
-    artifact::write(input).map_err(|error| napi::Error::from_reason(error.to_string()))
+    let written =
+        artifact::write(input).map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    Ok(WrittenAppFiles {
+        app: written.app,
+        permissions: written.permissions,
+    })
 }
 
-/// Read and check a `jazz.app.json` as a backend does. Returns its
-/// `current` schema hash, its `bundle` id, and the deployment it publishes
-/// in the form `POST .../admin/bundles` takes (`targetSchemaHash`,
+/// Read and check an app's `jazz.app.json` (`app`) and
+/// `jazz.permissions.json` (`permissions`) as a backend does. Returns the
+/// current schema hash, the bundle id, and the deployment the backend
+/// publishes in the form `POST .../admin/bundles` takes (`targetSchemaHash`,
 /// `schemas`, `migrations`, `permissions`).
 #[napi(js_name = "loadAppArtifact")]
-pub fn load_app_artifact(json: String) -> napi::Result<JsonValue> {
-    let loaded = jazz::tools::deployment::artifact::load(json.as_bytes())
+pub fn load_app_artifact(app: String, permissions: String) -> napi::Result<JsonValue> {
+    let loaded = jazz::tools::deployment::artifact::load(app.as_bytes(), permissions.as_bytes())
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
     let current = loaded.current_hash().to_string();
     let schemas = loaded
@@ -137,19 +153,6 @@ pub fn load_app_artifact(json: String) -> napi::Result<JsonValue> {
 #[napi(js_name = "schemaHash")]
 pub fn schema_hash(tables: String) -> napi::Result<String> {
     Ok(jazz::tools::SchemaHash::compute(&structural_schema(&tables)?).to_string())
-}
-
-/// The permissions bundle id a store computes when `permissions` (JSON, as
-/// a deployment sends them) are published for the schema `tables`, as
-/// `jazz.app.json`'s `bundle` is computed: so `createJazz` can tell whether
-/// the file is the one its code declares.
-#[napi(js_name = "permissionsBundleId")]
-pub fn permissions_bundle_id(tables: String, permissions: String) -> napi::Result<String> {
-    let permissions: jazz::catalogue::Permissions = serde_json::from_str(&permissions)
-        .map_err(|error| napi::Error::from_reason(format!("permissions: {error}")))?;
-    jazz::tools::deployment::artifact::bundle_of(&structural_schema(&tables)?, &permissions)
-        .map(|bundle| bundle.to_hex())
-        .map_err(|error| napi::Error::from_reason(error.to_string()))
 }
 
 /// A schema from its tables as JSON, without its embedded policies.

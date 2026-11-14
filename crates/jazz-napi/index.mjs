@@ -33,7 +33,6 @@ export const {
   mintLocalFirstToken,
   verifyLocalFirstIdentityProof,
   nativeArtifactFingerprint,
-  permissionsBundleId,
   resolveTextAnchor,
   resolveTextRange,
   schemaHash,
