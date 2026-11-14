@@ -334,7 +334,7 @@ it("publishes generated default-bearing relation migrations and preserves them a
     });
     front = await startTestJazz({
       app: beforeApp,
-      permissions: await appPermissions(beforeApp, permissionsBefore),
+      permissions: permissionsBefore,
       core: server,
     });
     oldDb = await createDb(await localAccountConfig(appId, front.url));

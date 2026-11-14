@@ -87,7 +87,7 @@ it.each(["local", "global"] as const)(
     });
     const server = await startTestJazz({
       app: app,
-      permissions: await appPermissions(app, permissions),
+      permissions: permissions,
       coreOptions: { inMemory: true },
     });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
@@ -134,7 +134,7 @@ it("does not reject a filtered transaction read when an unrelated row is inserte
   });
   const server = await startTestJazz({
     app: app,
-    permissions: await appPermissions(app, permissions),
+    permissions: permissions,
     coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;

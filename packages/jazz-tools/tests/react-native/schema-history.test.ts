@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { schema as s } from "../../src/schema-namespace.js";
 import { migration as m } from "../../src/migration-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
-import { appArtifact, startTestJazz } from "../../src/testing/index.js";
+import { appArtifact, appPermissions, startTestJazz } from "../../src/testing/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
 // A React Native client opens its native store along the migrations the app
@@ -26,12 +26,11 @@ it("reads rows written before the app renamed a column, from a server with schem
     ({ policy }) => [policy.notes.allowRead.always(), policy.notes.allowInsert.always()],
   );
   const beforeApp = s.defineApp(before, {
-    artifact: await appArtifact(before, { permissions: allowBefore }),
+    artifact: await appArtifact(before),
   });
   const afterApp = s.defineApp(after, {
     artifact: await appArtifact(before, {
       steps: [{ to: after, migration: rename }],
-      permissions: allowAfter,
     }),
   });
   const backend = await startTestJazz({
