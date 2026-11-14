@@ -10,6 +10,7 @@ use crate::tools::public_schema::{OperationPolicy, PolicyExpr, Schema, TableName
 use super::CodegenRelation;
 use super::expr::{self, Context, Def, DefBody, Defs};
 use super::json::Json;
+use super::structured;
 
 /// A refusal at a JSON path of the permissions file.
 pub type Refusal = (String, String);
@@ -87,22 +88,36 @@ pub fn read(
             let op_path = format!("{path}.{op}");
             match op.as_str() {
                 "$comment" => {}
-                "read" => {
-                    policies.select = OperationPolicy {
-                        using: Some(compile(policy, &op_path, &context, table)?),
-                        with_check: None,
-                    }
-                }
-                "insert" => {
-                    policies.insert = OperationPolicy {
-                        using: None,
-                        with_check: Some(compile(policy, &op_path, &context, table)?),
-                    }
-                }
-                "delete" => {
-                    policies.delete = OperationPolicy {
-                        using: Some(compile(policy, &op_path, &context, table)?),
-                        with_check: None,
+                "read" | "insert" | "delete" => {
+                    let side = |key: &str| -> Result<Option<PolicyExpr>, Refusal> {
+                        policy
+                            .get(key)
+                            .map(|p| compile(p, &format!("{op_path}.{key}"), &context, table))
+                            .transpose()
+                    };
+                    let operation = if is_two_sided(policy) {
+                        OperationPolicy {
+                            using: side("using")?,
+                            with_check: side("withCheck")?,
+                        }
+                    } else {
+                        let expr = Some(compile(policy, &op_path, &context, table)?);
+                        if op == "insert" {
+                            OperationPolicy {
+                                using: None,
+                                with_check: expr,
+                            }
+                        } else {
+                            OperationPolicy {
+                                using: expr,
+                                with_check: None,
+                            }
+                        }
+                    };
+                    match op.as_str() {
+                        "read" => policies.select = operation,
+                        "insert" => policies.insert = operation,
+                        _ => policies.delete = operation,
                     }
                 }
                 "update" => {
@@ -161,7 +176,25 @@ pub fn read(
     Ok(permissions)
 }
 
+/// Whether an operation's value is `{"using": …, "withCheck": …}`: both
+/// sides of a read, insert or delete policy, which the DSL never writes but
+/// the engine can hold.
+fn is_two_sided(value: &Json) -> bool {
+    value.as_object().is_some_and(|entries| {
+        !entries.is_empty()
+            && entries
+                .iter()
+                .all(|(k, _)| matches!(k.as_str(), "using" | "withCheck" | "$comment"))
+            && entries.iter().any(|(k, _)| k != "$comment")
+    })
+}
+
 fn read_body(value: &Json, path: &str) -> Result<DefBody, Refusal> {
+    if structured::is_structured(value) {
+        return structured::read(value)
+            .map(DefBody::Fixed)
+            .map_err(|e| refuse(path, e));
+    }
     match value {
         Json::String(source) => {
             let ast = expr::parse(source).map_err(|e| refuse(path, e.render(source)))?;
@@ -221,6 +254,9 @@ fn compile(
             let ast = expr::parse(source).map_err(|e| refuse(path, e.render(source)))?;
             expr::compile(&ast, context, table).map_err(|e| refuse(path, e.render(source)))
         }
+        Json::Object(_) if structured::is_structured(value) => {
+            structured::read(value).map_err(|e| refuse(path, e))
+        }
         Json::Object(_) => {
             let body = read_body(value, path)?;
             compile_body(&body, path, context, table)
@@ -242,6 +278,7 @@ fn compile_body(
         DefBody::Expr(ast, source) => {
             expr::compile(ast, context, table).map_err(|e| refuse(path, e.render(source)))
         }
+        DefBody::Fixed(expr) => Ok(expr.clone()),
         DefBody::AnyOf(items) => Ok(PolicyExpr::Or(
             items
                 .iter()
@@ -280,24 +317,34 @@ pub fn write(
         let at = |op: &str, e: String| format!("tables.{name}.{op}: {e}");
         let mut ops = Vec::new();
         let print = |e: &PolicyExpr| policy_json(e, &context, name);
-        if let Some(using) = &policies.select.using {
-            ops.push(("read".to_string(), print(using).map_err(|e| at("read", e))?));
-        }
-        if policies.select.with_check.is_some() {
-            return Err(at("read", expr::unsupported("a read policy with a check")));
-        }
-        if let Some(check) = &policies.insert.with_check {
-            ops.push((
-                "insert".to_string(),
-                print(check).map_err(|e| at("insert", e))?,
-            ));
-        }
-        if policies.insert.using.is_some() {
-            return Err(at(
-                "insert",
-                expr::unsupported("an insert policy with `using`"),
-            ));
-        }
+        let one_sided = |op: &str,
+                         policy: &crate::tools::public_schema::OperationPolicy,
+                         usual_using: bool,
+                         ops: &mut Vec<(String, Json)>|
+         -> Result<(), String> {
+            match (&policy.using, &policy.with_check) {
+                (None, None) => {}
+                (Some(e), None) if usual_using => {
+                    ops.push((op.to_string(), print(e).map_err(|e| at(op, e))?))
+                }
+                (None, Some(e)) if !usual_using => {
+                    ops.push((op.to_string(), print(e).map_err(|e| at(op, e))?))
+                }
+                (using, check) => {
+                    let mut sides = Vec::new();
+                    if let Some(e) = using {
+                        sides.push(("using".to_string(), print(e).map_err(|e| at(op, e))?));
+                    }
+                    if let Some(e) = check {
+                        sides.push(("withCheck".to_string(), print(e).map_err(|e| at(op, e))?));
+                    }
+                    ops.push((op.to_string(), Json::Object(sides)));
+                }
+            }
+            Ok(())
+        };
+        one_sided("read", &policies.select, true, &mut ops)?;
+        one_sided("insert", &policies.insert, false, &mut ops)?;
         match (&policies.update.using, &policies.update.with_check) {
             (None, None) => {}
             (Some(old), Some(new)) if old == new => {
@@ -323,18 +370,7 @@ pub fn write(
                 ops.push(("update".to_string(), Json::Object(parts)));
             }
         }
-        if let Some(using) = &policies.delete.using {
-            ops.push((
-                "delete".to_string(),
-                print(using).map_err(|e| at("delete", e))?,
-            ));
-        }
-        if policies.delete.with_check.is_some() {
-            return Err(at(
-                "delete",
-                expr::unsupported("a delete policy with a check"),
-            ));
-        }
+        one_sided("delete", &policies.delete, true, &mut ops)?;
         tables.push((name.to_string(), Json::Object(ops)));
     }
     Ok(Json::Object(vec![
@@ -365,6 +401,19 @@ fn policy_json(expr: &PolicyExpr, context: &Context<'_>, table: &str) -> Result<
                     .collect::<Result<_, _>>()?,
             ),
         )])),
-        other => Ok(Json::String(expr::print(other, context, table)?)),
+        other => Ok(leaf_json(other, context, table)),
     }
+}
+
+/// A leaf as an expression string when the string compiles back to exactly
+/// `expr`; otherwise in its structured form, which always does. So every
+/// policy the engine holds round-trips through the file.
+fn leaf_json(expr: &PolicyExpr, context: &Context<'_>, table: &str) -> Json {
+    if let Ok(text) = expr::print(expr, context, table)
+        && let Ok(ast) = expr::parse(&text)
+        && expr::compile(&ast, context, table).as_ref() == Ok(expr)
+    {
+        return Json::String(text);
+    }
+    structured::write(expr)
 }

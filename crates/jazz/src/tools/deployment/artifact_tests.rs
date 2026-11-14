@@ -1,9 +1,17 @@
 use super::*;
+use crate::query::{
+    OrderDirection, RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr,
+    RelationJoinCondition, RelationJoinKind, RelationKeyRef, RelationOrderBy, RelationPredicate,
+    RelationProjectColumn, RelationProjectExpr, RelationRowIdRef, RelationUnionArm,
+    RelationValueRef,
+};
 use crate::tools::deployment::{DeploymentCatalogue, prepare_deployment};
+use crate::tools::public_schema::Value;
 use crate::tools::public_schema::{
     CmpOp, ColumnDescriptor, ColumnType, EnumCaseDescriptor, HistoryRetention, Operation,
     OperationPolicy, PolicyExpr, PolicyValue, RowDescriptor, SchemaBuilder, TableName,
 };
+use std::collections::BTreeSet;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/app-artifact");
 
@@ -726,24 +734,6 @@ fn relations_must_name_real_columns() {
 
 #[test]
 fn what_the_files_cant_say_is_refused_by_name() {
-    let mut input = shared_todos();
-    input
-        .permissions
-        .get_mut(&TableName::from("todos"))
-        .unwrap()
-        .select = OperationPolicy::using(PolicyExpr::ExistsRel {
-        rel: crate::query::RelationExpr::TableScan {
-            table: "shares".into(),
-            alias: None,
-        },
-    });
-    let error = write(input).unwrap_err().to_string();
-    assert!(
-        error.contains("not supported in jazz.permissions.json yet"),
-        "{error}"
-    );
-    assert!(error.contains("tables.todos.read"), "{error}");
-
     let mut input = todo_server();
     input.schemas[0]
         .get_mut(&TableName::from("todos"))
@@ -820,4 +810,444 @@ fn a_file_both_readers_accept_gives_clients_the_same_migrations() {
         assert_eq!(client.schemas, full.schemas);
         assert_eq!(client.lenses, full.lenses);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Parity: every policy the engine holds round-trips through the file
+// ---------------------------------------------------------------------------
+
+fn every_policy_variant() -> PolicyExpr {
+    let path = || vec!["claims".to_string(), "team".to_string()];
+    let column = |name: &str| RelationColumnRef {
+        scope: Some("t".into()),
+        column: name.into(),
+    };
+    let scan = |table: &str| RelationExpr::TableScan {
+        table: table.into(),
+        alias: Some("t".into()),
+    };
+    let predicate = RelationPredicate::Or(vec![
+        RelationPredicate::Cmp {
+            left: column("a"),
+            op: RelationCmpOp::Ge,
+            right: RelationValueRef::Literal(serde_json::json!({"type": "Integer", "value": 3})),
+        },
+        RelationPredicate::IsNull {
+            column: column("b"),
+        },
+        RelationPredicate::IsNotNull {
+            column: column("c"),
+        },
+        RelationPredicate::In {
+            left: column("d"),
+            values: vec![
+                RelationValueRef::Param("p".into()),
+                RelationValueRef::SessionRef(path()),
+                RelationValueRef::OuterColumn(column("e")),
+                RelationValueRef::FrontierColumn(column("f")),
+                RelationValueRef::RowId(RelationRowIdRef::Current),
+                RelationValueRef::RowId(RelationRowIdRef::Outer),
+                RelationValueRef::RowId(RelationRowIdRef::Frontier),
+            ],
+        },
+        RelationPredicate::Contains {
+            left: column("g"),
+            right: RelationValueRef::Literal(serde_json::json!("bare")),
+        },
+        RelationPredicate::EnumMatch {
+            column: column("h"),
+            case: "done".into(),
+            payload: Box::new(RelationPredicate::True),
+        },
+        RelationPredicate::And(vec![RelationPredicate::Not(Box::new(
+            RelationPredicate::False,
+        ))]),
+    ]);
+    let key = RelationKeyRef::Column(column("id"));
+    let rel = RelationExpr::Limit {
+        input: Box::new(RelationExpr::Offset {
+            input: Box::new(RelationExpr::OrderBy {
+                input: Box::new(RelationExpr::Distinct {
+                    input: Box::new(RelationExpr::Project {
+                        input: Box::new(RelationExpr::Join {
+                            left: Box::new(RelationExpr::Filter {
+                                input: Box::new(scan("a")),
+                                predicate,
+                            }),
+                            right: Box::new(RelationExpr::Union {
+                                inputs: vec![
+                                    RelationUnionArm {
+                                        label: "arm".into(),
+                                        input: RelationExpr::Gather {
+                                            seed: Box::new(scan("b")),
+                                            step: Box::new(scan("c")),
+                                            frontier_key: RelationKeyRef::RowId(
+                                                RelationRowIdRef::Frontier,
+                                            ),
+                                            bound: RecursionBound::MaxDepth(4),
+                                            dedupe_key: vec![key.clone()],
+                                        },
+                                    },
+                                    RelationUnionArm {
+                                        label: "fixpoint".into(),
+                                        input: RelationExpr::Gather {
+                                            seed: Box::new(scan("b")),
+                                            step: Box::new(scan("c")),
+                                            frontier_key: key.clone(),
+                                            bound: RecursionBound::Fixpoint,
+                                            dedupe_key: vec![],
+                                        },
+                                    },
+                                ],
+                            }),
+                            on: vec![RelationJoinCondition {
+                                left: column("x"),
+                                right: column("y"),
+                            }],
+                            join_kind: RelationJoinKind::Left,
+                        }),
+                        columns: vec![
+                            RelationProjectColumn {
+                                alias: "c".into(),
+                                expr: RelationProjectExpr::Column(column("c")),
+                            },
+                            RelationProjectColumn {
+                                alias: "id".into(),
+                                expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
+                            },
+                        ],
+                    }),
+                    key: vec![key],
+                }),
+                terms: vec![
+                    RelationOrderBy {
+                        column: column("c"),
+                        direction: OrderDirection::Desc,
+                    },
+                    RelationOrderBy {
+                        column: column("id"),
+                        direction: OrderDirection::Asc,
+                    },
+                ],
+            }),
+            offset: 2,
+        }),
+        limit: 10,
+    };
+    let inner_join = PolicyExpr::ExistsRel {
+        rel: RelationExpr::Join {
+            left: Box::new(scan("a")),
+            right: Box::new(scan("b")),
+            on: vec![],
+            join_kind: RelationJoinKind::Inner,
+        },
+    };
+    PolicyExpr::Or(vec![
+        PolicyExpr::Cmp {
+            column: "a".into(),
+            op: CmpOp::Le,
+            value: PolicyValue::Literal(Value::Integer(3)),
+        },
+        PolicyExpr::SessionCmp {
+            path: path(),
+            op: CmpOp::Ne,
+            value: Value::Text("x".into()),
+        },
+        PolicyExpr::IsNull { column: "b".into() },
+        PolicyExpr::SessionIsNull { path: path() },
+        PolicyExpr::IsNotNull { column: "c".into() },
+        PolicyExpr::SessionIsNotNull { path: path() },
+        PolicyExpr::Contains {
+            column: "d".into(),
+            value: PolicyValue::SessionRef(path()),
+        },
+        PolicyExpr::SessionContains {
+            path: path(),
+            value: Value::Text("y".into()),
+        },
+        PolicyExpr::In {
+            column: "e".into(),
+            session_path: path(),
+        },
+        PolicyExpr::InList {
+            column: "f".into(),
+            values: vec![
+                PolicyValue::Literal(Value::BigInt(1 << 40)),
+                PolicyValue::SessionRef(path()),
+            ],
+        },
+        PolicyExpr::SessionInList {
+            path: path(),
+            values: vec![Value::Boolean(true), Value::Null],
+        },
+        PolicyExpr::Exists {
+            table: "shares".into(),
+            condition: Box::new(PolicyExpr::True),
+        },
+        PolicyExpr::ExistsRel { rel },
+        inner_join,
+        PolicyExpr::Inherits {
+            operation: Operation::Update,
+            via_column: "parent".into(),
+            max_depth: Some(3),
+        },
+        PolicyExpr::InheritsReferencing {
+            operation: Operation::Delete,
+            source_table: "shares".into(),
+            via_column: "todo".into(),
+            max_depth: None,
+        },
+        PolicyExpr::And(vec![PolicyExpr::Not(Box::new(PolicyExpr::False))]),
+    ])
+}
+
+/// Names of the variants `expr` uses, collected exhaustively.
+fn policy_variants(expr: &PolicyExpr, seen: &mut BTreeSet<&'static str>) {
+    fn rel(expr: &RelationExpr, seen: &mut BTreeSet<&'static str>) {
+        let name = match expr {
+            RelationExpr::TableScan { .. } => "TableScan",
+            RelationExpr::Filter { input, predicate } => {
+                rel(input, seen);
+                pred(predicate, seen);
+                "Filter"
+            }
+            RelationExpr::Union { inputs } => {
+                inputs.iter().for_each(|arm| rel(&arm.input, seen));
+                "Union"
+            }
+            RelationExpr::Join {
+                left,
+                right,
+                join_kind,
+                ..
+            } => {
+                rel(left, seen);
+                rel(right, seen);
+                match join_kind {
+                    RelationJoinKind::Inner => seen.insert("Join.Inner"),
+                    RelationJoinKind::Left => seen.insert("Join.Left"),
+                };
+                "Join"
+            }
+            RelationExpr::Project { input, columns } => {
+                rel(input, seen);
+                for column in columns {
+                    match column.expr {
+                        RelationProjectExpr::Column(_) => seen.insert("Project.Column"),
+                        RelationProjectExpr::RowId(_) => seen.insert("Project.RowId"),
+                    };
+                }
+                "Project"
+            }
+            RelationExpr::Gather {
+                seed, step, bound, ..
+            } => {
+                rel(seed, seen);
+                rel(step, seen);
+                match bound {
+                    RecursionBound::Fixpoint => seen.insert("Gather.Fixpoint"),
+                    RecursionBound::MaxDepth(_) => seen.insert("Gather.MaxDepth"),
+                };
+                "Gather"
+            }
+            RelationExpr::Distinct { input, .. } => {
+                rel(input, seen);
+                "Distinct"
+            }
+            RelationExpr::OrderBy { input, .. } => {
+                rel(input, seen);
+                "OrderBy"
+            }
+            RelationExpr::Offset { input, .. } => {
+                rel(input, seen);
+                "Offset"
+            }
+            RelationExpr::Limit { input, .. } => {
+                rel(input, seen);
+                "Limit"
+            }
+        };
+        seen.insert(name);
+    }
+    fn value(value: &RelationValueRef, seen: &mut BTreeSet<&'static str>) {
+        let name = match value {
+            RelationValueRef::Literal(_) => "Value.Literal",
+            RelationValueRef::Param(_) => "Value.Param",
+            RelationValueRef::SessionRef(_) => "Value.SessionRef",
+            RelationValueRef::OuterColumn(_) => "Value.OuterColumn",
+            RelationValueRef::FrontierColumn(_) => "Value.FrontierColumn",
+            RelationValueRef::RowId(row) => match row {
+                RelationRowIdRef::Current => "Value.RowId.Current",
+                RelationRowIdRef::Outer => "Value.RowId.Outer",
+                RelationRowIdRef::Frontier => "Value.RowId.Frontier",
+            },
+        };
+        seen.insert(name);
+    }
+    fn pred(predicate: &RelationPredicate, seen: &mut BTreeSet<&'static str>) {
+        let name = match predicate {
+            RelationPredicate::Cmp { right, .. } => {
+                value(right, seen);
+                "Pred.Cmp"
+            }
+            RelationPredicate::IsNull { .. } => "Pred.IsNull",
+            RelationPredicate::IsNotNull { .. } => "Pred.IsNotNull",
+            RelationPredicate::In { values, .. } => {
+                values.iter().for_each(|v| value(v, seen));
+                "Pred.In"
+            }
+            RelationPredicate::Contains { right, .. } => {
+                value(right, seen);
+                "Pred.Contains"
+            }
+            RelationPredicate::EnumMatch { payload, .. } => {
+                pred(payload, seen);
+                "Pred.EnumMatch"
+            }
+            RelationPredicate::And(all) => {
+                all.iter().for_each(|p| pred(p, seen));
+                "Pred.And"
+            }
+            RelationPredicate::Or(all) => {
+                all.iter().for_each(|p| pred(p, seen));
+                "Pred.Or"
+            }
+            RelationPredicate::Not(inner) => {
+                pred(inner, seen);
+                "Pred.Not"
+            }
+            RelationPredicate::True => "Pred.True",
+            RelationPredicate::False => "Pred.False",
+        };
+        seen.insert(name);
+    }
+    let name = match expr {
+        PolicyExpr::Cmp { .. } => "Cmp",
+        PolicyExpr::SessionCmp { .. } => "SessionCmp",
+        PolicyExpr::IsNull { .. } => "IsNull",
+        PolicyExpr::SessionIsNull { .. } => "SessionIsNull",
+        PolicyExpr::IsNotNull { .. } => "IsNotNull",
+        PolicyExpr::SessionIsNotNull { .. } => "SessionIsNotNull",
+        PolicyExpr::Contains { .. } => "Contains",
+        PolicyExpr::SessionContains { .. } => "SessionContains",
+        PolicyExpr::In { .. } => "In",
+        PolicyExpr::InList { .. } => "InList",
+        PolicyExpr::SessionInList { .. } => "SessionInList",
+        PolicyExpr::Exists { condition, .. } => {
+            policy_variants(condition, seen);
+            "Exists"
+        }
+        PolicyExpr::ExistsRel { rel: r } => {
+            rel(r, seen);
+            "ExistsRel"
+        }
+        PolicyExpr::Inherits { .. } => "Inherits",
+        PolicyExpr::InheritsReferencing { .. } => "InheritsReferencing",
+        PolicyExpr::And(all) => {
+            all.iter().for_each(|e| policy_variants(e, seen));
+            "And"
+        }
+        PolicyExpr::Or(all) => {
+            all.iter().for_each(|e| policy_variants(e, seen));
+            "Or"
+        }
+        PolicyExpr::Not(inner) => {
+            policy_variants(inner, seen);
+            "Not"
+        }
+        PolicyExpr::True => "True",
+        PolicyExpr::False => "False",
+    };
+    seen.insert(name);
+}
+
+/// `expr` as `todos`' policy on every operation, through
+/// jazz.permissions.json's text and back.
+fn through_the_permissions_file(expr: &PolicyExpr) -> TablePolicies {
+    let input = shared_todos();
+    let current = loaded(shared_todos()).current_schema().clone();
+    let relations = input.codegen.relations();
+    let mut permissions = crate::catalogue::Permissions::new();
+    let policies = TablePolicies {
+        select: OperationPolicy::using(expr.clone()),
+        insert: OperationPolicy::with_check(expr.clone()),
+        update: OperationPolicy::using_and_check(PolicyExpr::True, expr.clone()),
+        delete: OperationPolicy {
+            using: Some(expr.clone()),
+            with_check: Some(PolicyExpr::False),
+        },
+    };
+    permissions.insert(TableName::from("todos"), policies.clone());
+    let file = permissions_file::write(&permissions, &current, &relations).unwrap();
+    let text = json::print(&file);
+    let reread = json::parse(text.as_bytes()).unwrap();
+    let read = permissions_file::read(&reread, &current, &relations)
+        .unwrap_or_else(|e| panic!("{e:?}\n{text}"));
+    assert_eq!(read[&TableName::from("todos")], policies, "{text}");
+    policies
+}
+
+#[test]
+fn every_policy_and_relation_variant_round_trips_through_the_file() {
+    let expr = every_policy_variant();
+    let mut seen = BTreeSet::new();
+    policy_variants(&expr, &mut seen);
+    // 20 policy variants, 10 relation variants (+2 join kinds, 2 projections,
+    // 2 bounds), 11 predicates, 8 value refs.
+    assert_eq!(seen.len(), 20 + 10 + 6 + 11 + 8, "{seen:?}");
+    through_the_permissions_file(&expr);
+    // And each top-level alternative on its own, so a leaf the grammar spells
+    // is checked as a string too.
+    if let PolicyExpr::And(items) | PolicyExpr::Or(items) = &expr {
+        for item in items {
+            through_the_permissions_file(item);
+        }
+    }
+}
+
+#[test]
+fn relation_hops_and_nested_exists_round_trip() {
+    use crate::query::{RelationExpr, RelationPredicate, RelationValueRef};
+    // `policy.files.where({ id: file.id }).hopTo("folder").where({ owner_id: me })`,
+    // as epic-drop writes it: a relation the grammar can't spell, written
+    // structurally.
+    let hop = PolicyExpr::ExistsRel {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::TableScan {
+                table: "shares".into(),
+                alias: Some("s".into()),
+            }),
+            predicate: RelationPredicate::Cmp {
+                left: crate::query::RelationColumnRef {
+                    scope: Some("s".into()),
+                    column: "todo".into(),
+                },
+                op: crate::query::RelationCmpOp::Eq,
+                right: RelationValueRef::SessionRef(vec!["user".into()]),
+            },
+        },
+    };
+    let policies = through_the_permissions_file(&hop);
+    assert_eq!(policies.select.using, Some(hop));
+    // A column compared with another column, and `exists` inside `exists`.
+    let nested = PolicyExpr::Exists {
+        table: "shares".into(),
+        condition: Box::new(PolicyExpr::Exists {
+            table: "todos".into(),
+            condition: Box::new(PolicyExpr::True),
+        }),
+    };
+    through_the_permissions_file(&nested);
+}
+
+#[test]
+fn readable_leaves_stay_strings() {
+    // A policy the grammar spells exactly is written as a string, not structured.
+    let input = shared_todos();
+    let written = write(input).unwrap();
+    assert!(
+        !written.permissions.contains("\"type\": \"Cmp\""),
+        "{}",
+        written.permissions
+    );
 }

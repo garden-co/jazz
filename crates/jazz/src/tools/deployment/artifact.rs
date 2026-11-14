@@ -19,6 +19,7 @@ mod app_file;
 pub mod expr;
 pub mod json;
 mod permissions_file;
+mod structured;
 
 use std::collections::BTreeMap;
 
