@@ -56,9 +56,9 @@ once the new deployment has woken it, promoting the old deployment again doesn't
 To try an upgrade first, deploy it to a preview branch: with the per-branch setup, that preview gets
 a core of its own, separate from production's (a dry run with its own data, not a copy).
 
-## Upgrading from alpha.62
+## Upgrading from alpha.63
 
-Alpha.63 describes an app in two generated files beside `schema.ts`, which replace the generated
+Alpha.64 describes an app in two generated files beside `schema.ts`, which replace the generated
 `migrations/index.ts`:
 
 - `jazz.app.json` holds its schema versions, the migrations between them and metadata for typed
@@ -130,7 +130,7 @@ schema isn't the file's current version), or when the two files weren't written 
 `npx jazz-tools validate` and commit both files.
 
 React Native: the native relay ABI is now 7, so the JavaScript bundle and the native build must both
-come from alpha.63.
+come from alpha.64.
 
 ## Upgrading from alpha.61
 

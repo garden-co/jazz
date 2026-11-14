@@ -70,7 +70,7 @@ describe("an app's shipped jazz.app.json", () => {
     }
   });
 
-  it("refuses the alpha.62 { migrations } shape, saying how to move to jazz.app.json", async () => {
+  it("refuses the alpha.63 { migrations } shape, saying how to move to jazz.app.json", async () => {
     const { shipArtifact } = await freshCopy();
     const legacy = { schemas: [], migrations: [] };
     for (const options of [{ migrations: legacy }, { artifact: { migrations: legacy } }]) {

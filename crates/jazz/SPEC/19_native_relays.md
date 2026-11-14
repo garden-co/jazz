@@ -233,7 +233,7 @@ splices (`updated_splices`, SPEC 18). ABI 5 (alpha.61) attaches the app's
 migrations beside its schema's tables (see "Trusted platform admission
 codec"). ABI 6 (alpha.62) ends a tick's upstream failure with the
 refusal's stable error code, when the relay's database refused its
-upstream. ABI 7 (alpha.63) attaches the app's `jazz.app.json` as `app`
+upstream. ABI 7 (alpha.64) attaches the app's `jazz.app.json` as `app`
 instead of its migrations. The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
 the current version.
 

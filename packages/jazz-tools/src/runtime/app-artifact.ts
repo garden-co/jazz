@@ -112,7 +112,7 @@ export function shipArtifact(schema: WasmSchema, options: ShippedApp | undefined
   }
   if (given?.migrations !== undefined) {
     throw new Error(
-      "defineApp no longer takes `{ migrations }`: since alpha.63 an app ships its jazz.app.json instead of migrations/index.ts. " +
+      "defineApp no longer takes `{ migrations }`: since alpha.64 an app ships its jazz.app.json instead of migrations/index.ts. " +
         SHIP_ARTIFACT_HINT +
         ' `{ migrations: "none" }` stays for an app that only ever runs on memory(), such as a test\'s.',
     );
@@ -149,7 +149,7 @@ function checkedArtifact(value: unknown): AppArtifact {
   }
   if (typeof candidate === "object" && candidate !== null && "migrations" in candidate) {
     throw new Error(
-      "defineApp was given a migrations/index.ts module as its artifact: since alpha.63 an app ships its jazz.app.json instead. " +
+      "defineApp was given a migrations/index.ts module as its artifact: since alpha.64 an app ships its jazz.app.json instead. " +
         SHIP_ARTIFACT_HINT,
     );
   }
