@@ -2544,27 +2544,28 @@ describe("createJazz", () => {
    * Alice's browser on the HTTP stream of a backend whose authenticate
    * counts the asks for stream sends, and a raw send into her session.
    */
-  async function streamSendsOf(options: { streamAuthReuseSeconds?: number } = {}) {
+  async function streamSendsOf(
+    options: { streamAuthReuseSeconds?: number } = {},
+    store: Parameters<typeof createJazz>[0]["store"] = memory(),
+  ) {
     const signedOut = new Set<string>();
     const sends: string[] = [];
     const state = { expiresIn: 3600, gate: undefined as Promise<void> | undefined };
-    const jazz = await createJazz({
-      app,
-      permissions,
-      store: memory(),
-      ...options,
-      authenticate: async (request) => {
-        const url = new URL(request.url);
-        if (request.method === "POST" && /\/stream\/[^/]+$/.test(url.pathname)) {
-          sends.push(request.headers.get("x-test-user") ?? "");
-          if (request.headers.get("x-slow")) await state.gate;
-        }
-        const userId = request.headers.get("x-test-user");
-        return userId && !signedOut.has(userId)
-          ? { userId, expiresAt: Date.now() / 1000 + state.expiresIn }
-          : null;
-      },
-    }).ready();
+    const authenticate = async (request: Request) => {
+      const url = new URL(request.url);
+      if (request.method === "POST" && /\/stream\/[^/]+$/.test(url.pathname)) {
+        sends.push(request.headers.get("x-test-user") ?? "");
+        if (request.headers.get("x-slow")) await state.gate;
+      }
+      const userId = request.headers.get("x-test-user");
+      return userId && !signedOut.has(userId)
+        ? { userId, expiresAt: Date.now() / 1000 + state.expiresIn }
+        : null;
+    };
+    /** `createJazz` for this store: the first call, or a hot reload's. */
+    const configure = (more: { streamAuthReuseSeconds?: number }) =>
+      createJazz({ app, permissions, store, ...more, authenticate });
+    const jazz = await configure(options).ready();
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: false });
     const previous = (globalThis as { location?: unknown }).location;
@@ -2585,7 +2586,7 @@ describe("createJazz", () => {
     const posts = requestPaths.filter((path) => path === sessionPath).length;
     const send = (headers: Record<string, string>) =>
       statusOf(`${origin}${sessionPath}`, "POST", { "x-jazz-stream-key": key, ...headers });
-    return { jazz, signedOut, sends, state, posts, send, asked: () => sends.length };
+    return { jazz, configure, signedOut, sends, state, posts, send, asked: () => sends.length };
   }
 
   /** Move both clocks `ms` ahead until the returned function is called. */
@@ -2702,6 +2703,26 @@ describe("createJazz", () => {
         }),
       ).toThrow(/streamAuthReuseSeconds must be a number/);
     }
+  }, 60_000);
+
+  it("reads streamAuthReuseSeconds anew on a hot reload, for open stream sessions too", async () => {
+    // One Jazz per sqlite directory: a later createJazz for it is a reload.
+    const dir = await mkdtemp(join(tmpdir(), "jazz-stream-reuse-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const { configure, send, asked } = await streamSendsOf({}, sqlite({ path: dir }));
+    expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    let n = asked();
+    expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    expect(asked()).toBe(n);
+    // A dev server's hot reload: a later createJazz for the same store.
+    await configure({ streamAuthReuseSeconds: 0 }).ready();
+    for (let i = 0; i < 2; i++) expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    expect(asked()).toBe(n + 2);
+    await configure({}).ready();
+    expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    n = asked();
+    expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    expect(asked()).toBe(n);
   }, 60_000);
 
   it("lets a client end its stream session once signed out, and calls one already ended done", async () => {
