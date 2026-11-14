@@ -399,6 +399,11 @@ function withoutCredentials(request: Request): Request {
  * writes before it links to them. Jazz then asks `authenticate` about the
  * request without its cookies and `Authorization` header, so the device
  * account is let in as it would be on its own.
+ *
+ * This gates device accounts' sync only. Linking one to a user who signs up
+ * (`linkDeviceAccount()`) is authorised by your sign-in (`authenticate`
+ * naming that user) plus the device key's proof of a one-time challenge, so
+ * it works even when your app doesn't accept device accounts for sync.
  */
 export function acceptDeviceAccounts(_request: Request): LocalFirstGuest {
   return LOCAL_FIRST_GUEST;
