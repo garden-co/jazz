@@ -49,7 +49,21 @@ function createConsumerProject() {
   mkdirSync(join(root, "src"));
   writeFileSync(
     join(root, "src/main.js"),
-    'import * as localFirst from "jazz-tools/local-first";\nconsole.log(localFirst);\n',
+    `import * as localFirst from "jazz-tools/local-first";
+import { schema as s } from "jazz-tools";
+import { createJazzClient } from "jazz-tools/client";
+
+// The local-first client on this device only, as an app's first run opens
+// it: no backend, IndexedDB through the broker SharedWorker.
+const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+window.__jazzResult = (async () => {
+  const session = await createJazzClient({ serverUrl: null, client: async () => localFirst });
+  const db = session.getSnapshot().client.db;
+  await db.insert(app.todos, { title: "written under vite dev" }).wait({ tier: "local" });
+  const rows = await db.all(app.todos);
+  return { localFirst: db.isLocalFirst(), titles: rows.map((row) => row.title) };
+})().catch((error) => ({ error: String(error?.name) + ": " + String(error?.message) }));
+`,
   );
   const modules = join(root, "node_modules");
   const installed = join(modules, "jazz-tools");
@@ -83,6 +97,26 @@ async function freePort() {
   return port;
 }
 
+/** Every chunk of the pre-bundle reachable from `entryUrl`, with its source. */
+async function prebundleChunks(entryUrl) {
+  const chunks = new Map();
+  const pending = [entryUrl];
+  while (pending.length > 0) {
+    const url = pending.pop();
+    if (chunks.has(url)) continue;
+    const response = await fetch(url);
+    assert.equal(response.status, 200, `pre-bundle chunk ${url}`);
+    const source = await response.text();
+    chunks.set(url, source);
+    for (const [, path] of source.matchAll(
+      /["'](\/node_modules\/\.vite\/deps\/[^"'?]+\.js(?:\?[^"']*)?)["']/g,
+    )) {
+      pending.push(new URL(path, url).href);
+    }
+  }
+  return chunks;
+}
+
 const viteMajors = [
   // The workspace's own Vite 8, whose optimizer already rewrites the literal;
   // pre-bundled Jazz takes the dev-server path there too.
@@ -100,7 +134,13 @@ for (const { name, specifier, literalBreaks } of viteMajors) {
       configFile: false,
       logLevel: "silent",
       // An explicit IPv4 loopback: `localhost` may bind only ::1.
-      server: { host: "127.0.0.1", port: await freePort(), strictPort: true },
+      server: {
+        host: "127.0.0.1",
+        port: await freePort(),
+        strictPort: true,
+        // jazz-wasm and jazz-tools' dependencies are links into the workspace.
+        fs: { strict: false },
+      },
       // The documented config: Jazz's Wasm is excluded, jazz-tools is not.
       optimizeDeps: { exclude: ["jazz-wasm"] },
     });
@@ -119,35 +159,38 @@ for (const { name, specifier, literalBreaks } of viteMajors) {
     )?.[1];
     assert.ok(chunkPath, `Vite ${version} did not pre-bundle jazz-tools/local-first`);
     const chunkUrl = new URL(chunkPath, origin).href;
-    const chunk = await fetch(chunkUrl);
-    assert.equal(chunk.status, 200);
-    const chunkSource = await chunk.text();
-    assert.match(
-      chunkSource,
-      /jazz-tools\/_worker\/broker/,
-      "pre-bundle lacks the dev-server worker path",
+    const chunks = await prebundleChunks(chunkUrl);
+    const withWorkerPath = [...chunks].find(([, source]) =>
+      /jazz-tools\/_worker\/broker/.test(source),
     );
+    assert.ok(withWorkerPath, "pre-bundle lacks the dev-server worker path");
 
     // What Vite 7 made of the worker literal in the pre-bundle: a file that
-    // doesn't exist (the bug this guards against). Vite 8 places the literal
-    // in another chunk, so it is only checked where it is known to break.
+    // doesn't exist (the bug this guards against). Vite 8 resolves it.
     if (literalBreaks) {
-      const literalPath = chunkSource.match(
-        /new\s+URL\(\s*(?:\/\*[^*]*\*\/\s*)?["']([^"']*jazz-broker-worker[^"']*)["']\s*,\s*import\.meta\.url/,
-      )?.[1];
-      assert.ok(literalPath, "pre-bundle lacks the worker literal");
-      const literal = await fetch(new URL(literalPath, chunkUrl));
+      let literalUrl;
+      for (const [url, source] of chunks) {
+        const path = source.match(
+          /new\s+URL\(\s*(?:\/\*[^*]*\*\/\s*)?["']([^"']*jazz-broker-worker[^"']*)["']\s*,\s*import\.meta\.url/,
+        )?.[1];
+        if (path) literalUrl = new URL(path, url).href;
+      }
+      assert.ok(literalUrl, "pre-bundle lacks the worker literal");
+      const literal = await fetch(literalUrl);
       const body = await literal.text();
       assert.ok(
         literal.status !== 200 || !/installJazzBrokerWorker/.test(body),
-        `Vite ${version} now resolves the worker literal (${literalPath}); this test no longer reproduces the bug`,
+        `Vite ${version} now resolves the worker literal (${literalUrl}); this test no longer reproduces the bug`,
       );
     }
 
     // Every module of the pre-bundle shares the chunk directory, so this is
     // the module URL Jazz sees at runtime.
-    const workerUrl = vitePrebundledBrokerWorkerUrl(chunkUrl);
-    assert.equal(workerUrl, new URL("@id/jazz-tools/_worker/broker", origin).href);
+    const workerUrl = vitePrebundledBrokerWorkerUrl(withWorkerPath[0]);
+    assert.equal(
+      workerUrl,
+      new URL("@id/jazz-tools/_worker/broker?worker_file&type=module", origin).href,
+    );
 
     // The export is a dev-only entry whose one import is the bundled worker.
     // The dev server serves it either as is, importing the worker, or with
@@ -156,17 +199,49 @@ for (const { name, specifier, literalBreaks } of viteMajors) {
     assert.equal(entry.status, 200, `Vite ${version} did not serve ${workerUrl}`);
     assert.match(entry.headers.get("content-type") ?? "", /javascript/);
     let source = await entry.text();
+    let workerModuleUrl = workerUrl;
     assert.doesNotMatch(source, /<!doctype html>/i);
     if (!/installJazzBrokerWorker/.test(source)) {
       const bundled = [...source.matchAll(/^\s*import\s+["']([^"']+)["']/gm)]
         .map((match) => match[1])
         .find((specifier) => /jazz-broker-worker\.js/.test(specifier));
       assert.ok(bundled, `the worker entry neither contains nor imports the worker:\n${source}`);
-      const worker = await fetch(new URL(bundled, workerUrl));
+      workerModuleUrl = new URL(bundled, workerUrl).href;
+      const worker = await fetch(workerModuleUrl);
       assert.equal(worker.status, 200);
       assert.match(worker.headers.get("content-type") ?? "", /javascript/);
       source = await worker.text();
     }
     assert.match(source, /installJazzBrokerWorker/);
+
+    // The worker loads its WASM through wasm-bindgen's own
+    // `new URL("jazz_wasm_bg.wasm", import.meta.url)`. Had the dev server
+    // pre-bundled the worker too, that URL would point into .vite/deps and
+    // answer index.html: the worker would start and every write would fail.
+    const wasmPath = source.match(
+      /new\s+URL\(\s*(?:\/\*[^*]*\*\/\s*)?["']([^"']*jazz_wasm_bg\.wasm[^"']*)["']\s*,\s*(?:["']{2}\s*\+\s*)?import\.meta\.url/,
+    )?.[1];
+    assert.ok(wasmPath, "the worker names no WASM URL");
+    const wasm = await fetch(new URL(wasmPath, workerModuleUrl));
+    assert.equal(
+      wasm.status,
+      200,
+      `Vite ${version} did not serve the worker's WASM at ${wasmPath}`,
+    );
+    const wasmBytes = new Uint8Array(await wasm.arrayBuffer());
+    assert.deepEqual(
+      [...wasmBytes.subarray(0, 4)],
+      [0x00, 0x61, 0x73, 0x6d],
+      `the worker's WASM at ${wasmPath} is not WebAssembly`,
+    );
+
+    // And end to end, in a browser: open the local-first client, write, read.
+    const { chromium } = require("playwright");
+    const browser = await chromium.launch();
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    await page.goto(origin);
+    const result = await page.evaluate(() => window.__jazzResult);
+    assert.deepEqual(result, { localFirst: true, titles: ["written under vite dev"] });
   });
 }
