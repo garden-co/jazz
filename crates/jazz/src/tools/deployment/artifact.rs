@@ -6,7 +6,10 @@
 //! writer of the file. Every runtime reads it with [`load`], the only reader.
 //! A backend publishes [`LoadedApp::deployment_request`] at startup and pins
 //! its sessions to [`LoadedApp::bundle`]; clients open along
-//! [`LoadedApp::client_migrations`] and never look at the permissions.
+//! [`LoadedApp::client_migrations`] and never look at the permissions. A
+//! client build (WASM, React Native) reads the file with [`load_client`]
+//! instead, which skips the permissions and codegen unread, so it carries
+//! none of the policy code.
 //!
 //! The file's JSON is its own: every type below mirrors an engine type
 //! field for field, so the engine's wire and catalogue encodings stay as
@@ -571,28 +574,20 @@ pub enum TsOnlyColumn {
 /// A `jazz.app.json` that passed every check.
 #[derive(Debug, Clone)]
 pub struct LoadedApp {
-    current: SchemaHash,
+    history: History,
     bundle: BundleId,
-    /// Oldest first, policy-free.
-    schemas: Vec<(SchemaHash, Schema)>,
-    migrations: Vec<PublishMigrationRequest>,
     permissions: Permissions,
     codegen: Codegen,
 }
 
 impl LoadedApp {
     pub fn current_hash(&self) -> SchemaHash {
-        self.current
+        self.history.current
     }
 
     /// The current schema, without permissions.
     pub fn current_schema(&self) -> &Schema {
-        &self
-            .schemas
-            .iter()
-            .find(|(hash, _)| *hash == self.current)
-            .expect("checked on load")
-            .1
+        self.history.current_schema()
     }
 
     /// The permissions bundle a backend serving this app pins its sessions to.
@@ -608,24 +603,34 @@ impl LoadedApp {
         &self.codegen
     }
 
-    /// The schema versions and lenses a client opens along.
+    /// Every version the file ships, oldest first, policy-free.
+    pub fn schemas(&self) -> &[(SchemaHash, Schema)] {
+        &self.history.schemas
+    }
+
+    /// The migrations, in the form a deployment publishes them.
+    pub fn migrations(&self) -> &[PublishMigrationRequest] {
+        &self.history.migrations
+    }
+
+    /// The schema versions and lenses a client opens along: what
+    /// [`load_client`] gives for the same file.
     pub fn client_migrations(&self) -> crate::db::Migrations {
-        let (schemas, lenses) =
-            lower_client_migrations(self.client_bundle()).expect("checked on load");
-        crate::db::Migrations { schemas, lenses }
+        self.history.client_migrations()
     }
 
     /// What a backend publishes at startup.
     pub fn deployment_request(&self, allow_dropping_history: bool) -> DeploymentRequest {
-        let schemas = self.schemas.clone();
+        let schemas = self.history.schemas.clone();
+        let schema = |hash: &str| {
+            let hash = parse_schema_hash(hash).expect("checked on load");
+            &schemas.iter().find(|(h, _)| *h == hash).unwrap().1
+        };
         let migrations = self
+            .history
             .migrations
             .iter()
             .map(|migration| {
-                let schema = |hash: &str| {
-                    let hash = parse_schema_hash(hash).expect("checked on load");
-                    &self.schemas.iter().find(|(h, _)| *h == hash).unwrap().1
-                };
                 lower_migration(
                     migration.clone(),
                     schema(&migration.from_hash),
@@ -635,8 +640,8 @@ impl LoadedApp {
             })
             .collect();
         DeploymentRequest {
-            target_schema_hash: self.current,
-            schemas,
+            target_schema_hash: self.history.current,
+            schemas: schemas.clone(),
             migrations,
             permissions: self
                 .permissions
@@ -646,8 +651,118 @@ impl LoadedApp {
             allow_dropping_history,
         }
     }
+}
 
-    fn client_bundle(&self) -> ClientMigrations {
+/// Read and check a `jazz.app.json`.
+pub fn load(json: &[u8]) -> Result<LoadedApp, ArtifactError> {
+    let artifact: AppArtifact = serde_json::from_value(read_format(json)?)
+        .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
+    check(artifact, BundleCheck::Verify)
+}
+
+/// The file as JSON, once its `format` is one this version reads. The
+/// format comes first, so a file from a newer Jazz is refused for what it is
+/// rather than for the fields this version doesn't know.
+fn read_format(json: &[u8]) -> Result<serde_json::Value, ArtifactError> {
+    let raw: serde_json::Value = serde_json::from_slice(json)
+        .map_err(|error| ArtifactError::new(format!("not JSON: {error}")))?;
+    match raw.get("format").and_then(serde_json::Value::as_u64) {
+        Some(format) if format == u64::from(FORMAT) => Ok(raw),
+        Some(format) => Err(ArtifactError::new(format!(
+            "format {format} is not supported by this version of Jazz, which reads format {FORMAT}"
+        ))),
+        None if raw.get("format").is_none() => Err(ArtifactError::new("no `format`")),
+        None => Err(ArtifactError::new(format!(
+            "`format` must be the integer {FORMAT}, not {}",
+            raw["format"]
+        ))),
+    }
+}
+
+/// `jazz.app.json` as a client reads it: its permissions and codegen are
+/// skipped unread, so a client build carries no policy or relation code.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientArtifact {
+    #[allow(dead_code)]
+    format: u32,
+    current: String,
+    bundle: String,
+    schemas: Vec<ArtifactSchema>,
+    #[serde(default)]
+    migrations: Vec<ArtifactMigration>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    permissions: serde::de::IgnoredAny,
+    #[serde(default)]
+    #[allow(dead_code)]
+    codegen: serde::de::IgnoredAny,
+}
+
+/// Read a `jazz.app.json` for a client: the schema versions and lenses it
+/// opens along. It runs [`load`]'s checks of the versions and migrations
+/// ([`check_history`]) and lowers every lens as [`load`] does, refusing one
+/// that doesn't lower. It skips what a client never uses (compiling the
+/// permissions, the `bundle` id they make, the codegen section's
+/// references) and the deployment's review of each lens, which the writer
+/// ran and every backend runs again before it publishes: carrying that
+/// review would grow a client build by about half again what this reader
+/// costs.
+pub fn load_client(json: &[u8]) -> Result<crate::db::Migrations, ArtifactError> {
+    let artifact: ClientArtifact = serde_json::from_value(read_format(json)?)
+        .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
+    if BundleId::from_hex(&artifact.bundle).is_none() {
+        return Err(ArtifactError::new("`bundle` is not a 64-character hex id"));
+    }
+    let history = check_history(&artifact.current, &artifact.schemas, &artifact.migrations)?;
+    let (schemas, lenses) = lower_client_migrations(history.bundle())
+        .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
+    Ok(crate::db::Migrations { schemas, lenses })
+}
+
+/// What a binding's open configuration ships (a `jazz.app.json`, see
+/// [`load_client`]), lowered for a store; none ships nothing.
+pub fn client_migrations(app: Option<&[u8]>) -> Result<crate::db::Migrations, String> {
+    match app {
+        None => Ok(crate::db::Migrations::default()),
+        Some(json) => load_client(json).map_err(|error| error.to_string()),
+    }
+}
+
+/// `config` opening along what `app` (a `jazz.app.json`) ships.
+pub fn with_client_migrations(
+    config: crate::db::DbConfig,
+    app: Option<&[u8]>,
+) -> Result<crate::db::DbConfig, String> {
+    match app {
+        None => Ok(config),
+        Some(_) => {
+            let migrations = client_migrations(app)?;
+            Ok(config.with_migrations(migrations.schemas, migrations.lenses))
+        }
+    }
+}
+
+/// Whether [`check`] compares the file's `bundle` with the computed id, or
+/// leaves it to the writer to fill in.
+#[derive(PartialEq)]
+enum BundleCheck {
+    Verify,
+    Compute,
+}
+
+/// What [`load`] and [`load_client`] both check of a file: its schema
+/// versions and the migrations between them.
+#[derive(Debug, Clone)]
+struct History {
+    current: SchemaHash,
+    /// Oldest first, policy-free.
+    schemas: Vec<(SchemaHash, Schema)>,
+    migrations: Vec<PublishMigrationRequest>,
+}
+
+impl History {
+    fn bundle(&self) -> ClientMigrations {
         ClientMigrations {
             schemas: self
                 .schemas
@@ -660,47 +775,35 @@ impl LoadedApp {
             migrations: self.migrations.to_vec(),
         }
     }
-}
 
-/// Read and check a `jazz.app.json`.
-pub fn load(json: &[u8]) -> Result<LoadedApp, ArtifactError> {
-    // The format first, so a file from a newer Jazz is refused for what it
-    // is rather than for the fields this version doesn't know.
-    let raw: serde_json::Value = serde_json::from_slice(json)
-        .map_err(|error| ArtifactError::new(format!("not JSON: {error}")))?;
-    match raw.get("format").and_then(serde_json::Value::as_u64) {
-        Some(format) if format == u64::from(FORMAT) => {}
-        Some(format) => {
-            return Err(ArtifactError::new(format!(
-                "format {format} is not supported by this version of Jazz, which reads format {FORMAT}"
-            )));
-        }
-        None if raw.get("format").is_none() => return Err(ArtifactError::new("no `format`")),
-        None => {
-            return Err(ArtifactError::new(format!(
-                "`format` must be the integer {FORMAT}, not {}",
-                raw["format"]
-            )));
-        }
+    fn current_schema(&self) -> &Schema {
+        &self
+            .schemas
+            .iter()
+            .find(|(hash, _)| *hash == self.current)
+            .expect("checked by check_history")
+            .1
     }
-    let artifact: AppArtifact = serde_json::from_value(raw)
-        .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
-    check(artifact, BundleCheck::Verify)
+
+    /// The schema versions and lenses a client opens along, once [`check`]
+    /// reviewed the lenses.
+    fn client_migrations(&self) -> crate::db::Migrations {
+        let (schemas, lenses) = lower_client_migrations(self.bundle()).expect("checked on load");
+        crate::db::Migrations { schemas, lenses }
+    }
 }
 
-/// Whether [`check`] compares the file's `bundle` with the computed id, or
-/// leaves it to the writer to fill in.
-#[derive(PartialEq)]
-enum BundleCheck {
-    Verify,
-    Compute,
-}
-
-fn check(artifact: AppArtifact, bundle_check: BundleCheck) -> Result<LoadedApp, ArtifactError> {
-    let current = hash_field("current", &artifact.current)?;
+/// Each schema must match its hash and appear once, and `current` and every
+/// migration endpoint must be among them.
+fn check_history(
+    current: &str,
+    entries: &[ArtifactSchema],
+    artifact_migrations: &[ArtifactMigration],
+) -> Result<History, ArtifactError> {
+    let current = hash_field("current", current)?;
 
     let mut schemas = Vec::new();
-    for (index, entry) in artifact.schemas.iter().enumerate() {
+    for (index, entry) in entries.iter().enumerate() {
         let claimed = hash_field(&format!("schemas[{index}].hash"), &entry.hash)?;
         let schema = schema_from_artifact(&entry.tables);
         let actual = SchemaHash::compute(&schema);
@@ -716,18 +819,14 @@ fn check(artifact: AppArtifact, bundle_check: BundleCheck) -> Result<LoadedApp, 
         }
         schemas.push((actual, schema));
     }
-    let Some(current_schema) = schemas
-        .iter()
-        .find(|(hash, _)| *hash == current)
-        .map(|(_, schema)| schema.clone())
-    else {
+    if !schemas.iter().any(|(hash, _)| *hash == current) {
         return Err(ArtifactError::new(format!(
             "current schema {current} is not among `schemas`"
         )));
-    };
+    }
 
     let mut migrations = Vec::new();
-    for (index, migration) in artifact.migrations.iter().enumerate() {
+    for (index, migration) in artifact_migrations.iter().enumerate() {
         for (field, hash) in [("from", &migration.from), ("to", &migration.to)] {
             let path = format!("migrations[{index}].{field}");
             let hash = hash_field(&path, hash)?;
@@ -740,6 +839,22 @@ fn check(artifact: AppArtifact, bundle_check: BundleCheck) -> Result<LoadedApp, 
         migrations.push(migration_from_artifact(migration));
     }
 
+    Ok(History {
+        current,
+        schemas,
+        migrations,
+    })
+}
+
+fn check(artifact: AppArtifact, bundle_check: BundleCheck) -> Result<LoadedApp, ArtifactError> {
+    let history = check_history(&artifact.current, &artifact.schemas, &artifact.migrations)?;
+    // Lenses, as a deployment and `jazz-tools validate` check them. Where a
+    // migration sits in the whole history is the store's to judge: its
+    // catalogue may hold versions this file no longer ships.
+    check_decoded_client_migrations(history.bundle(), history.current)
+        .map_err(|error| ArtifactError::new(format!("migrations: {error}")))?;
+    let current_schema = history.current_schema();
+
     let mut permissions = Permissions::new();
     for (table, policies) in &artifact.permissions {
         let name = TableName::from(table.as_str());
@@ -751,39 +866,43 @@ fn check(artifact: AppArtifact, bundle_check: BundleCheck) -> Result<LoadedApp, 
         permissions.insert(name, table_policies_from_artifact(policies));
     }
 
-    check_codegen(&artifact.codegen, &current_schema)?;
+    check_codegen(&artifact.codegen, current_schema)?;
 
-    let loaded = LoadedApp {
-        current,
-        bundle: BundleId([0; 32]),
-        schemas,
-        migrations,
+    let bundle = compute_bundle(current_schema, &permissions)?;
+    if bundle_check == BundleCheck::Verify {
+        let claimed = BundleId::from_hex(&artifact.bundle)
+            .ok_or_else(|| ArtifactError::new("`bundle` is not a 64-character hex id"))?;
+        if claimed != bundle {
+            return Err(ArtifactError::new(format!(
+                "`bundle` is {claimed} but the current schema and permissions make {bundle}; {REGENERATE}"
+            )));
+        }
+    }
+    Ok(LoadedApp {
+        history,
+        bundle,
         permissions,
         codegen: artifact.codegen,
-    };
-
-    // Lenses, as a deployment and `jazz-tools validate` check them. Where a
-    // migration sits in the whole history is the store's to judge: its
-    // catalogue may hold versions this file no longer ships.
-    check_decoded_client_migrations(loaded.client_bundle(), current)
-        .map_err(|error| ArtifactError::new(format!("migrations: {error}")))?;
-
-    let bundle = compute_bundle(&current_schema, &loaded.permissions)?;
-    if bundle_check == BundleCheck::Compute {
-        return Ok(LoadedApp { bundle, ..loaded });
-    }
-    let claimed = BundleId::from_hex(&artifact.bundle)
-        .ok_or_else(|| ArtifactError::new("`bundle` is not a 64-character hex id"))?;
-    if claimed != bundle {
-        return Err(ArtifactError::new(format!(
-            "`bundle` is {claimed} but the current schema and permissions make {bundle}; {REGENERATE}"
-        )));
-    }
-    Ok(LoadedApp { bundle, ..loaded })
+    })
 }
 
 fn hash_field(path: &str, text: &str) -> Result<SchemaHash, ArtifactError> {
     parse_schema_hash(text).map_err(|error| ArtifactError::new(format!("{path}: {error}")))
+}
+
+/// The bundle id a store computes when `permissions` are published for
+/// `current` (a policy-free schema), as [`LoadedApp::bundle`] is computed:
+/// so a backend can tell whether the file is the one its code declares.
+pub fn bundle_of(current: &Schema, permissions: &Permissions) -> Result<BundleId, ArtifactError> {
+    if let Some(table) = permissions
+        .keys()
+        .find(|table| !current.contains_key(table))
+    {
+        return Err(ArtifactError::new(format!(
+            "permissions.{table}: the current schema has no table {table}"
+        )));
+    }
+    compute_bundle(&structural(current.clone()), permissions)
 }
 
 /// The bundle id the server computes when this backend publishes: the

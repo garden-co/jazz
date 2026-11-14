@@ -1067,3 +1067,92 @@ fn malformed_files_are_refused_not_panicked_on() {
             .contains("not JSON")
     );
 }
+
+// ---------------------------------------------------------------------------
+// The client reader
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_file_both_readers_accept_gives_clients_the_same_migrations() {
+    let written = [todo_server(), shared_todos()].map(|input| write(input).unwrap());
+    let fixtures = ["todo-server", "shared-todos"]
+        .map(|name| std::fs::read_to_string(fixture_path(name)).unwrap());
+    for text in written.iter().chain(&fixtures) {
+        let full = load(text.as_bytes()).unwrap().client_migrations();
+        let client = load_client(text.as_bytes()).unwrap();
+        assert_eq!(client.schemas, full.schemas);
+        assert_eq!(client.lenses, full.lenses);
+    }
+}
+
+#[test]
+fn a_client_skips_permissions_and_codegen_unread() {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&write(shared_todos()).unwrap()).unwrap();
+    // Neither is a client's to judge: a backend's `load` refuses both.
+    value["permissions"] = serde_json::json!({"no_such_table": {"select": "anything"}});
+    value["codegen"] = serde_json::json!({"whatever": [1, 2, 3]});
+    let client = load_client(&serde_json::to_vec(&value).unwrap()).unwrap();
+    assert_eq!(client.schemas.len(), 2);
+    for absent in ["permissions", "codegen"] {
+        value.as_object_mut().unwrap().remove(absent);
+    }
+    load_client(&serde_json::to_vec(&value).unwrap()).unwrap();
+}
+
+fn client_refused(edit: impl FnOnce(&mut serde_json::Value)) -> String {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&write(shared_todos()).unwrap()).unwrap();
+    edit(&mut value);
+    load_client(&serde_json::to_vec(&value).unwrap())
+        .expect_err("the edit must be refused")
+        .message()
+        .to_string()
+}
+
+#[test]
+fn a_client_refuses_what_it_cannot_trust() {
+    let error = client_refused(|v| v["format"] = 2.into());
+    assert!(error.contains("format 2 is not supported"), "{error}");
+
+    let error = client_refused(|v| v["extra"] = true.into());
+    assert!(error.contains("unknown field `extra`"), "{error}");
+    let error = client_refused(|v| v["schemas"][0]["tables"]["todos"]["extra"] = true.into());
+    assert!(error.contains("unknown field `extra`"), "{error}");
+
+    let error = client_refused(|v| {
+        v["schemas"][0]["tables"]["todos"]["columns"][0]["name"] = "renamed".into()
+    });
+    assert!(error.contains("but the schema hashes to"), "{error}");
+    assert!(error.contains("jazz-tools validate"), "{error}");
+
+    let error = client_refused(|v| v["current"] = "00".repeat(32).into());
+    assert!(error.contains("is not among `schemas`"), "{error}");
+
+    let error = client_refused(|v| v["bundle"] = "nope".into());
+    assert!(error.contains("`bundle`"), "{error}");
+
+    // The versions and migrations are checked as `load` checks them.
+    let error = client_refused(|v| v["migrations"][0]["to"] = "00".repeat(32).into());
+    assert!(error.contains("is not among `schemas`"), "{error}");
+    let error = client_refused(|v| {
+        let first = v["schemas"][0].clone();
+        v["schemas"].as_array_mut().unwrap().push(first);
+    });
+    assert!(error.contains("repeats schema"), "{error}");
+}
+
+#[test]
+fn a_client_refuses_what_a_backend_refuses_of_the_history() {
+    // Every edit `load` refuses of the versions and migrations' endpoints,
+    // `load_client` refuses with the same message. (The deployment's review
+    // of each lens is the writer's and the backend's.)
+    let edits: Vec<Box<dyn Fn(&mut serde_json::Value)>> = vec![
+        Box::new(|v| v["current"] = "zz".into()),
+        Box::new(|v| v["schemas"][1]["hash"] = "00".repeat(32).into()),
+        Box::new(|v| v["migrations"][0]["from"] = "00".repeat(32).into()),
+    ];
+    for edit in edits {
+        assert_eq!(client_refused(&edit), refused(&edit));
+    }
+}

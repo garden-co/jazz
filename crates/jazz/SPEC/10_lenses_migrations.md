@@ -675,10 +675,10 @@ schema version.
   keeps from its source (untouched or renamed) keeps the source's stored
   one.
 - The app's lenses make the names agree. An app ships its schema versions
-  and the lenses between them (`DbConfig::with_migrations`; the JSON a
-  deployment publishes, which `jazz-tools validate` and `deploy` write to
-  `migrations/index.ts` beside `schema.ts`, and which TypeScript apps pass
-  to `defineApp`). A store opening, or viewing, a version it has not
+  and the lenses between them (`DbConfig::with_migrations`; the `schemas`
+  and `migrations` of its `jazz.app.json`, §10.10, which `jazz-tools validate`
+  and `deploy` write beside `schema.ts`, which TypeScript apps pass to
+  `defineApp`, and which clients read with `artifact::load_client`). A store opening, or viewing, a version it has not
   admitted first admits the versions on a lens path to it, starting at one
   it admitted or at the app's first version, as the authority admitted
   them. Of several lenses into a version, every store, the authority
@@ -794,9 +794,12 @@ TypeScript and hands the result to the Rust writer
 (`jazz::tools::deployment::artifact::write`), the file's only writer. Every
 runtime reads it with `artifact::load`, its only reader. A backend publishes
 the file's deployment at startup and pins its sessions to its `bundle`.
-Clients open along its schemas and migrations and ignore its permissions.
+Clients open along its schemas and migrations and ignore its permissions:
+they read it with `artifact::load_client`, which skips `permissions` and
+`codegen` unread but still refuses unknown top-level fields.
 
 **Conventions.**
+
 - Fields are snake_case.
 - Every sum type is an object with an internal `"type"` tag naming a
   PascalCase variant, e.g. `{"type": "Cmp", ...}`. A variant without fields
@@ -816,20 +819,21 @@ twice gives identical bytes.
 
 **Top level.**
 
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `format` | integer | `1`. Read before anything else; any other value, or a non-integer, is refused. |
-| `current` | schema hash (64 hex) | The schema version the app's code is written against. MUST be one of `schemas`. |
-| `bundle` | bundle id (64 hex) | `bundle_id(current, permissions)`, computed as a store computes it when this deployment is published (§7, catalogue bundles). |
-| `schemas` | array of Schema | Every version the app ships, oldest first. Hashes are unique. |
-| `migrations` | array of Migration | Default `[]`. Each endpoint MUST be one of `schemas`. |
-| `permissions` | map table → TablePolicies | Default `{}`. For `current` only. Every key MUST be a table of `current`. |
-| `codegen` | Codegen | Default empty. Never affects a hash or bundle id. |
+| Field         | Type                      | Meaning                                                                                                                       |
+| ------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `format`      | integer                   | `1`. Read before anything else; any other value, or a non-integer, is refused.                                                |
+| `current`     | schema hash (64 hex)      | The schema version the app's code is written against. MUST be one of `schemas`.                                               |
+| `bundle`      | bundle id (64 hex)        | `bundle_id(current, permissions)`, computed as a store computes it when this deployment is published (§7, catalogue bundles). |
+| `schemas`     | array of Schema           | Every version the app ships, oldest first. Hashes are unique.                                                                 |
+| `migrations`  | array of Migration        | Default `[]`. Each endpoint MUST be one of `schemas`.                                                                         |
+| `permissions` | map table → TablePolicies | Default `{}`. For `current` only. Every key MUST be a table of `current`.                                                     |
+| `codegen`     | Codegen                   | Default empty. Never affects a hash or bundle id.                                                                             |
 
 **Schema** `{hash, tables}`. `hash` MUST equal `SchemaHash::compute` of
 `tables`. `tables` is a map from table name to Table.
 
 **Table.**
+
 - `columns`: array of Column, in declared order.
 - Optional `indexed_columns`: array of names.
 - Optional `composite_indexes`: array of arrays of names.
@@ -838,6 +842,7 @@ twice gives identical bytes.
 - Tables carry no policies and no relations.
 
 **Column.**
+
 - `name`, `column_type`, `nullable` (bool).
 - Optional `references`: table name.
 - Optional `default`: Value.
@@ -845,6 +850,7 @@ twice gives identical bytes.
   `"Html"`.
 
 **ColumnType** variants:
+
 - `Integer`, `BigInt`, `Double`, `Boolean`, `Text`, `Timestamp`, `Uuid`,
   `TransactionId`, `Bytea`;
 - `Enum {variants: [string]}`;
@@ -858,6 +864,7 @@ refuses them.
 
 **Migration** `{from, to, forward: [TableLens]}`. `from` and `to` are schema
 hashes. A TableLens is `{table, added?, removed?, renamed_from?, operations?}`:
+
 - `added` and `removed` default to `false`, and `operations` to `[]`.
 - An added or removed table has no other changes.
 - Operations are `Introduce {column, column_type, default}`,
@@ -870,6 +877,7 @@ hashes. A TableLens is `{table, added?, removed?, renamed_from?, operations?}`:
 `{using?, with_check?}`, and each of those is a PolicyExpr.
 
 **PolicyExpr** variants:
+
 - comparisons: `Cmp {column, op, value: PolicyValue}` and
   `SessionCmp {path, op, value: Value}`, where `op` is `Eq`, `Ne`, `Lt`, `Le`,
   `Gt` or `Ge`;
@@ -888,6 +896,7 @@ permissions MUST compile against `current`, as a deployment compiles them
 (§7).
 
 **RelationExpr** variants:
+
 - `TableScan {table, alias?}`;
 - `Filter {input, predicate}`;
 - `Union {inputs: [{label, input}]}`;
@@ -900,6 +909,7 @@ permissions MUST compile against `current`, as a deployment compiles them
 - `Offset {input, offset}` and `Limit {input, limit}`.
 
 Supporting types:
+
 - A ColumnRef is `{scope?, column}`.
 - A KeyRef is `Column {column: ColumnRef}` or
   `RowId {row: "Current"|"Outer"|"Frontier"}`.
@@ -918,6 +928,7 @@ the file.
 
 **Codegen.** `codegen` is `{tables?, slices?}`. `tables` maps a table of
 `current` to `{relations?, ts_only?}`:
+
 - `relations` maps a name to `Forward {table, column}` or
   `Reverse {table, relation}`. A forward relation's `column` MUST be a column
   of its own table. A reverse relation's `relation` MUST name a forward

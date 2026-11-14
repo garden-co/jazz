@@ -92,13 +92,77 @@ pub fn validate_schema(schema: Uint8Array) -> js::Result<()> {
     Ok(())
 }
 
-/// Check an app's shipped migrations (the `ClientMigrations` JSON) leading
-/// to the schema hash `target` as a deployment to a new authority would,
-/// without opening a database. `jazz-tools validate` runs it.
-#[napi(js_name = "checkClientMigrations")]
-pub fn check_client_migrations(migrations: String, target: String) -> napi::Result<()> {
-    jazz::tools::deployment::published::check_client_migrations(migrations.as_bytes(), &target)
-        .map_err(napi::Error::from_reason)
+/// Build the canonical `jazz.app.json` text from what `jazz-tools validate`
+/// compiled (an [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput)
+/// as JSON): the file's only writer, which refuses what a reader would.
+#[napi(js_name = "writeAppArtifact")]
+pub fn write_app_artifact(input: String) -> napi::Result<String> {
+    use jazz::tools::deployment::artifact;
+    let input: artifact::ArtifactInput = serde_json::from_str(&input)
+        .map_err(|error| napi::Error::from_reason(format!("jazz.app.json input: {error}")))?;
+    artifact::write(input).map_err(|error| napi::Error::from_reason(error.to_string()))
+}
+
+/// Read and check a `jazz.app.json` as a backend does. Returns its
+/// `current` schema hash, its `bundle` id, and the deployment it publishes
+/// in the form `POST .../admin/bundles` takes (`targetSchemaHash`,
+/// `schemas`, `migrations`, `permissions`).
+#[napi(js_name = "loadAppArtifact")]
+pub fn load_app_artifact(json: String) -> napi::Result<JsonValue> {
+    let loaded = jazz::tools::deployment::artifact::load(json.as_bytes())
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    let current = loaded.current_hash().to_string();
+    let schemas = loaded
+        .schemas()
+        .iter()
+        .map(|(hash, schema)| serde_json::json!({ "hash": hash.to_string(), "schema": schema }))
+        .collect::<Vec<_>>();
+    let to_json = |value: serde_json::Result<JsonValue>| {
+        value.map_err(|error| napi::Error::from_reason(format!("jazz.app.json: {error}")))
+    };
+    Ok(serde_json::json!({
+        "current": current,
+        "bundle": loaded.bundle().to_hex(),
+        "deployment": {
+            "targetSchemaHash": current,
+            "schemas": schemas,
+            "migrations": to_json(serde_json::to_value(loaded.migrations()))?,
+            "permissions": to_json(serde_json::to_value(loaded.permissions()))?,
+        },
+    }))
+}
+
+/// The structural hash of a schema (its tables as JSON), as every store and
+/// `jazz.app.json` compute it. Embedded policies don't count.
+#[napi(js_name = "schemaHash")]
+pub fn schema_hash(tables: String) -> napi::Result<String> {
+    Ok(jazz::tools::SchemaHash::compute(&structural_schema(&tables)?).to_string())
+}
+
+/// The permissions bundle id a store computes when `permissions` (JSON, as
+/// a deployment sends them) are published for the schema `tables`, as
+/// `jazz.app.json`'s `bundle` is computed: so `createJazz` can tell whether
+/// the file is the one its code declares.
+#[napi(js_name = "permissionsBundleId")]
+pub fn permissions_bundle_id(tables: String, permissions: String) -> napi::Result<String> {
+    let permissions: jazz::catalogue::Permissions = serde_json::from_str(&permissions)
+        .map_err(|error| napi::Error::from_reason(format!("permissions: {error}")))?;
+    jazz::tools::deployment::artifact::bundle_of(&structural_schema(&tables)?, &permissions)
+        .map(|bundle| bundle.to_hex())
+        .map_err(|error| napi::Error::from_reason(error.to_string()))
+}
+
+/// A schema from its tables as JSON, without its embedded policies.
+fn structural_schema(tables: &str) -> napi::Result<jazz::tools::Schema> {
+    let tables: serde_json::Value = serde_json::from_str(tables)
+        .map_err(|error| napi::Error::from_reason(format!("schema: {error}")))?;
+    let mut schema: jazz::tools::Schema =
+        serde_json::from_value(serde_json::json!({ "tables": tables }))
+            .map_err(|error| napi::Error::from_reason(format!("schema: {error}")))?;
+    for table in schema.values_mut() {
+        table.policies = Default::default();
+    }
+    Ok(schema)
 }
 
 /// Exact build/ABI fingerprint for the generated native artifact.
@@ -1401,7 +1465,7 @@ impl NapiDb {
         let (schema, mut config) = binding_host::decode_open(schema, config).map_err(host_error)?;
         let (identity, trusted) =
             binding_host::open_identity(&mut config, how).map_err(host_error)?;
-        let db_config = jazz::tools::deployment::published::with_client_migrations(
+        let db_config = jazz::tools::deployment::artifact::with_client_migrations(
             binding_host::db_config(schema, &config, identity),
             config.migrations.as_deref(),
         )
@@ -1923,7 +1987,7 @@ impl NapiDb {
     }
 
     /// Register and return a typed view backed by this same runtime owner,
-    /// of an app shipping `migrations` (its bundle as JSON).
+    /// of an app shipping `migrations` (its `jazz.app.json`).
     #[napi(js_name = "registerSchema")]
     pub fn register_schema(
         &self,
@@ -1932,7 +1996,7 @@ impl NapiDb {
     ) -> js::Result<Self> {
         let inner = self.open_inner()?;
         let migrations =
-            jazz::tools::deployment::published::lowered_client_migrations(migrations.as_deref())
+            jazz::tools::deployment::artifact::client_migrations(migrations.as_deref())
                 .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
         let binding = inner
             .binding

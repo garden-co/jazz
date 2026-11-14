@@ -1259,7 +1259,7 @@ impl WasmDb {
         let (schema, mut config) = binding_host::decode_open(schema, config).map_err(host_error)?;
         let (identity, trusted) =
             binding_host::open_identity(&mut config, how).map_err(host_error)?;
-        let db_config = jazz::tools::deployment::published::with_client_migrations(
+        let db_config = jazz::tools::deployment::artifact::with_client_migrations(
             binding_host::db_config(schema, &config, identity),
             config.migrations.as_deref(),
         )
@@ -1353,7 +1353,7 @@ impl WasmDb {
         // Every SQLite store keeps full history, so `history_complete`
         // needs nothing extra.
         let spec = browser::StoreSpec::from_js(&storage, &database)?;
-        let db_config = jazz::tools::deployment::published::with_client_migrations(
+        let db_config = jazz::tools::deployment::artifact::with_client_migrations(
             binding_host::db_config(schema, &config, identity),
             config.migrations.as_deref(),
         )
@@ -1407,7 +1407,7 @@ impl WasmDb {
     }
 
     /// Register a typed schema view backed by this same runtime owner, of
-    /// an app shipping `migrations` (its bundle as JSON).
+    /// an app shipping `migrations` (its `jazz.app.json`).
     #[wasm_bindgen(js_name = registerSchema)]
     pub fn register_schema(
         &self,
@@ -1416,7 +1416,7 @@ impl WasmDb {
     ) -> Result<WasmDb, JsValue> {
         let inner = self.open_inner()?;
         let migrations =
-            jazz::tools::deployment::published::lowered_client_migrations(migrations.as_deref())
+            jazz::tools::deployment::artifact::client_migrations(migrations.as_deref())
                 .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
         let binding = inner
             .binding

@@ -101,7 +101,7 @@ impl Fixture {
     }
 
     /// Admit a scope of the app with `schema` that ships `migrations`
-    /// (`ClientMigrations` JSON), attached beside its tables.
+    /// (its `jazz.app.json`), attached beside its tables.
     fn admit_app(
         &self,
         sqlite_path: &std::path::Path,
@@ -905,9 +905,8 @@ fn a_relay_refuses_a_client_of_another_identity() {
 /// A server of the app in `bundle`, at its head through the lens, holding
 /// one row "from the server". Returns it and the head schema.
 fn server_with_history(bundle: &serde_json::Value) -> (jazz::binding_host::Binding, JazzSchema) {
-    let (schemas, lenses) =
-        jazz::tools::deployment::published::client_migrations(bundle.to_string().as_bytes())
-            .unwrap();
+    let jazz::db::Migrations { schemas, lenses } =
+        jazz::tools::deployment::artifact::load_client(bundle.to_string().as_bytes()).unwrap();
     let head = JazzSchema::new(&todos_with("title")).unwrap();
     let server_identity = DbIdentity {
         node: NodeUuid::from_bytes([0xee; 16]),
@@ -930,11 +929,11 @@ fn server_with_history(bundle: &serde_json::Value) -> (jazz::binding_host::Bindi
 }
 
 /// The schema JSON a session attaches: `schema`'s tables, and beside them
-/// the `migrations` the app ships, if any.
+/// the `jazz.app.json` the app ships (`app`), if any.
 fn app_json(schema: &JazzSchema, migrations: Option<&serde_json::Value>) -> String {
     let mut app = serde_json::to_value(schema.public_schema()).unwrap();
     if let Some(bundle) = migrations {
-        app["migrations"] = bundle.clone();
+        app["app"] = bundle.clone();
     }
     app.to_string()
 }
@@ -958,16 +957,14 @@ fn todos_with(column: &str) -> jazz::tools::Schema {
         .build()
 }
 
-/// The `ClientMigrations` bundle of an app that started at `todos(label)`
-/// and renamed `label` to `title`, as `jazz-tools` generates it.
+/// The `jazz.app.json` of an app that started at `todos(label)` and
+/// renamed `label` to `title`, as `jazz-tools validate` writes it.
 fn renamed_label_bundle() -> serde_json::Value {
     let (v1, v2) = (todos_with("label"), todos_with("title"));
     let hash = |schema: &jazz::tools::Schema| jazz::tools::SchemaHash::compute(schema).to_string();
-    serde_json::json!({
-        "schemas": [
-            {"hash": hash(&v1), "schema": v1},
-            {"hash": hash(&v2), "schema": v2},
-        ],
+    let input = serde_json::json!({
+        "current": hash(&v2),
+        "schemas": [v1, v2],
         "migrations": [{
             "fromHash": hash(&v1),
             "toHash": hash(&v2),
@@ -976,7 +973,10 @@ fn renamed_label_bundle() -> serde_json::Value {
                 "operations": [{"type": "rename", "column": "label", "value": "title"}],
             }],
         }],
-    })
+    });
+    let text =
+        jazz::tools::deployment::artifact::write(serde_json::from_value(input).unwrap()).unwrap();
+    serde_json::from_str(&text).unwrap()
 }
 
 /// A relay opens its store, and each foreground's, along the app's schema
@@ -1155,9 +1155,8 @@ fn a_relay_attached_without_the_apps_migrations_stops_its_refused_upstream() {
 fn a_store_opened_without_migrations_is_rebuilt_when_nothing_is_pending() {
     let bundle = renamed_label_bundle();
     let (server, head) = server_with_history(&bundle);
-    let (schemas, lenses) =
-        jazz::tools::deployment::published::client_migrations(bundle.to_string().as_bytes())
-            .unwrap();
+    let jazz::db::Migrations { schemas, lenses } =
+        jazz::tools::deployment::artifact::load_client(bundle.to_string().as_bytes()).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let author = AuthorSubject::for_test_bytes([0x4b; 16]);
     let identity = |byte: u8| DbIdentity {
@@ -1261,9 +1260,8 @@ fn a_store_opened_without_migrations_is_rebuilt_when_nothing_is_pending() {
 fn a_store_opened_without_migrations_with_unsynced_writes_is_left_for_the_app() {
     let bundle = renamed_label_bundle();
     let (server, head) = server_with_history(&bundle);
-    let (schemas, lenses) =
-        jazz::tools::deployment::published::client_migrations(bundle.to_string().as_bytes())
-            .unwrap();
+    let jazz::db::Migrations { schemas, lenses } =
+        jazz::tools::deployment::artifact::load_client(bundle.to_string().as_bytes()).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let author = AuthorSubject::for_test_bytes([0x4c; 16]);
     let identity = |byte: u8| DbIdentity {

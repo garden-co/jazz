@@ -81,7 +81,7 @@ pub fn prepare_catalogue_change(
         return Err(format!(
             "deployment cannot omit a runtime schema: the store already holds schema {}, which the \
              app's migrations don't include. The app ships no migration from it, as with \
-             `defineApp(schema, {{ migrations: \"none\" }})` or a migrations/index.ts that misses \
+             `defineApp(schema, {{ migrations: \"none\" }})` or a jazz.app.json that misses \
              it. Snapshot that version and migrate from it: `npx jazz-tools migrations create` \
              (see https://jazz.tools/docs/schemas/migrations)",
             stored_hash(omitted)
