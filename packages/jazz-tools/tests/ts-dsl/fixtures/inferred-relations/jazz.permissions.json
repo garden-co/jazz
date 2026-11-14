@@ -2,11 +2,7 @@
   "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
   "format": 1,
   "tables": {
-    "people": {
-      "read": "exists (from people join records as __hop_0 on people.id = __hop_0.person_ids select __hop_0.id as id)"
-    },
-    "records": {
-      "read": "exists (from records join people as __hop_0 on records.person_ids = __hop_0.id select __hop_0.id as id)"
-    }
+    "people": { "read": "exists people().recordsViaPeople()" },
+    "records": { "read": "exists records().people()" }
   }
 }

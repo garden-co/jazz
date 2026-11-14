@@ -18,7 +18,7 @@
                 {
                   "allOf": [
                     "exists folders(id = this.folder_id, owner_id = session.user)",
-                    "exists (from files join folders as __hop_0 on files.folder_id = __hop_0.id where files.id = outer.id and __hop_0.owner_id = session.user select __hop_0.id as id)"
+                    "exists files(id = this.id).folder(owner_id = session.user)"
                   ]
                 }
               ]
