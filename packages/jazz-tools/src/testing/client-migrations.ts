@@ -1,7 +1,7 @@
 import { computeSchemaHash, serializeForwardLenses } from "../dev/catalogue.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { ClientMigrations } from "../runtime/client-migrations.js";
-import { defineApp, type SchemaDefinition } from "../typed-app.js";
+import { defineApp, type App, type Schema, type SchemaDefinition } from "../typed-app.js";
 
 /** A schema version: an app, or the definition one is made from. */
 type SchemaVersion = { wasmSchema: WasmSchema } | SchemaDefinition;
@@ -43,4 +43,18 @@ export async function appMigrations(
       forward: serializeForwardLenses(step.migration.forward),
     })),
   };
+}
+
+/**
+ * `s.defineApp(definition, { migrations })` with the single version an app
+ * starts with, for tests that open an app defined in code on a store that
+ * keeps its data (`sqlite()`, `vercel()`, `remote()`), where `createJazz`
+ * refuses `{ migrations: "none" }`.
+ */
+export async function defineShippedApp<const TSchema extends SchemaDefinition>(
+  definition: TSchema,
+): Promise<App<Schema<TSchema>>> {
+  return defineApp(definition as never, {
+    migrations: await appMigrations(definition),
+  }) as unknown as App<Schema<TSchema>>;
 }

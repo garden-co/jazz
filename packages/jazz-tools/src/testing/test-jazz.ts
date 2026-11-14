@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import {
   acceptDeviceAccounts,
-  createJazz,
+  createTestJazz,
   remote,
   type CreateJazzOptions,
   type Jazz,
@@ -153,7 +153,7 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
   // would otherwise wait on: a redeploy or stop drops them, as a real one does.
   const sockets = new Set<Socket>();
   const boot = (app: SchemaSourceInput, permissions: CompiledPermissionsMap) =>
-    createJazz({
+    createTestJazz({
       ...options.jazz,
       app: app as CreateJazzOptions["app"],
       permissions,

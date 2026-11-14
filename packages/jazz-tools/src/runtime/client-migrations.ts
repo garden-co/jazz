@@ -33,6 +33,14 @@ export interface ClientMigrations {
  */
 const SHIPPED = Symbol.for("jazz-tools.shippedMigrations");
 
+/**
+ * Where the app's schema records that `defineApp` was given
+ * `{ migrations: "none" }`, read across copies of jazz-tools like
+ * {@link SHIPPED}. It tells such an app apart from a schema that never went
+ * through `defineApp`, so `createJazz` can refuse it on a persistent store.
+ */
+const NONE = Symbol.for("jazz-tools.noMigrations");
+
 /** Record that the app defining `schema` ships `migrations`. */
 export function shipMigrations(
   schema: WasmSchema,
@@ -40,10 +48,18 @@ export function shipMigrations(
 ): void {
   if (migrations === undefined) {
     throw new Error(
-      'defineApp needs the app\'s migrations: `s.defineApp(schema, { migrations })` with `import { migrations } from "./migrations"`, or `{ migrations: "none" }` for an app that is never deployed',
+      'defineApp needs the app\'s migrations: `s.defineApp(schema, { migrations })` with `import { migrations } from "./migrations"`, or `{ migrations: "none" }` for an app that only ever runs on memory(), such as a test\'s',
     );
   }
-  if (migrations === "none") return;
+  if (migrations === "none") {
+    Object.defineProperty(schema, NONE, {
+      value: true,
+      enumerable: false,
+      configurable: true,
+      writable: false,
+    });
+    return;
+  }
   Object.defineProperty(schema, SHIPPED, {
     value: migrations,
     enumerable: false,
@@ -55,4 +71,9 @@ export function shipMigrations(
 /** The migrations the app defining `schema` ships, if it ships any. */
 export function shippedMigrations(schema: WasmSchema): ClientMigrations | undefined {
   return (schema as { [SHIPPED]?: ClientMigrations })[SHIPPED];
+}
+
+/** Whether the app defining `schema` passed `{ migrations: "none" }` to `defineApp`. */
+export function shipsNoMigrations(schema: WasmSchema): boolean {
+  return (schema as { [NONE]?: true })[NONE] === true;
 }

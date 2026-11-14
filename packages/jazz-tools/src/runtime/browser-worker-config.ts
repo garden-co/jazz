@@ -34,11 +34,48 @@ export function resolveBrowserWorkerUrl(runtimeSources?: RuntimeSourcesConfig): 
     );
   }
   // Keep this literal statically analyzable so bundlers emit the worker asset.
-  const bundledUrl = bundledBrowserWorkerUrl();
+  const bundledUrl =
+    vitePrebundledBrokerWorkerUrl(browserRuntimeModuleUrl()) ?? bundledBrowserWorkerUrl();
   return versionRuntimeAssetUrl(
     resolveConfiguredUrl(bundledUrl, typeof location !== "undefined" ? location.href : undefined),
     runtimeSources,
   );
+}
+
+/**
+ * The path of a module the Vite dev server pre-bundled: `<base>node_modules/.vite/deps/<chunk>.js`.
+ * The cache directory may nest the deps (`.vite/vitest/<hash>/deps`) or suffix
+ * them per environment (`deps_ssr`); anything else is not Vite's pre-bundle.
+ */
+const VITE_PREBUNDLED_MODULE_PATH =
+  /^(.*?\/)node_modules\/\.vite\/(?:.*\/)?deps(?:_[^/]*)?\/[^/]+$/;
+
+/** The package export the Vite dev server resolves to the broker worker entry. */
+export const BROKER_WORKER_EXPORT = "jazz-tools/_worker/broker";
+
+/**
+ * Where the Vite dev server serves the broker worker when Jazz runs from its
+ * dependency pre-bundle, or undefined anywhere else.
+ *
+ * Pre-bundling moves Jazz's code into one chunk under `.vite/deps`, so the
+ * worker literal `new URL("../../worker/jazz-broker-worker.js", import.meta.url)`
+ * no longer sits next to the worker file. Vite 6 and 7 resolve it against the
+ * chunk, to a path that doesn't exist (the dev server answers it with
+ * index.html); only Vite 8 rewrites it. The dev server itself can resolve the
+ * package, wherever the package manager put it: `<base>@id/<bare id>` asks it
+ * to, through jazz-tools' own `exports`. This covers every Vite version, and
+ * nothing outside the dev server's pre-bundle takes this path.
+ */
+export function vitePrebundledBrokerWorkerUrl(moduleUrl: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(moduleUrl);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+  const match = VITE_PREBUNDLED_MODULE_PATH.exec(url.pathname);
+  return match ? `${url.origin}${match[1]}@id/${BROKER_WORKER_EXPORT}` : undefined;
 }
 
 /**
