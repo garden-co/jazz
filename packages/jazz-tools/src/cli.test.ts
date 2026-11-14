@@ -373,13 +373,19 @@ describe("cli validate", () => {
 
     const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
 
-    const warnings = logs.filter((line) => line.includes("no policy declarations"));
+    const warnings = logs.filter((line) => line.includes("has no policies in permissions.ts"));
     expect(warnings).toHaveLength(2);
     expect(warnings).toContain(
-      'Warning: table "projects" has no policy declarations in permissions.ts; the server denies reads, inserts, updates, and deletes without explicit grants.',
+      `Warning: table "projects" has no policies in permissions.ts, so users can't read, insert, update or delete its rows. ` +
+        "Your backend isn't checked when it acts as the system, so if only it uses this table, that's fine: " +
+        "declare `.never()` for each operation (`policy.projects.allowRead.never()`, …) to say so and silence this warning. " +
+        "Don't add allow rules just to silence it.",
     );
     expect(warnings).toContain(
-      'Warning: table "todos" has no policy declarations in permissions.ts; the server denies reads, inserts, updates, and deletes without explicit grants.',
+      `Warning: table "todos" has no policies in permissions.ts, so users can't read, insert, update or delete its rows. ` +
+        "Your backend isn't checked when it acts as the system, so if only it uses this table, that's fine: " +
+        "declare `.never()` for each operation (`policy.todos.allowRead.never()`, …) to say so and silence this warning. " +
+        "Don't add allow rules just to silence it.",
     );
   });
 
@@ -392,9 +398,18 @@ describe("cli validate", () => {
 
     const warnings = logs.filter((line) => line.includes('table "todos"'));
     expect(warnings).toEqual([
-      'Warning: table "todos" has a policy set but no explicit insert policy in permissions.ts; inserts will be denied.',
-      'Warning: table "todos" has a policy set but no explicit update policy in permissions.ts; updates will be denied.',
-      'Warning: table "todos" has a policy set but no explicit delete policy in permissions.ts; deletes will be denied.',
+      `Warning: table "todos" has no insert policy in permissions.ts, so users can't insert its rows. ` +
+        "Your backend isn't checked when it acts as the system, so if only it should insert them, that's fine: " +
+        "declare `policy.todos.allowInsert.never()` to say so and silence this warning. " +
+        "Don't add an allow rule just to silence it.",
+      `Warning: table "todos" has no update policy in permissions.ts, so users can't update its rows. ` +
+        "Your backend isn't checked when it acts as the system, so if only it should update them, that's fine: " +
+        "declare `policy.todos.allowUpdate.never()` to say so and silence this warning. " +
+        "Don't add an allow rule just to silence it.",
+      `Warning: table "todos" has no delete policy in permissions.ts, so users can't delete its rows. ` +
+        "Your backend isn't checked when it acts as the system, so if only it should delete them, that's fine: " +
+        "declare `policy.todos.allowDelete.never()` to say so and silence this warning. " +
+        "Don't add an allow rule just to silence it.",
     ]);
   });
 
@@ -405,7 +420,7 @@ describe("cli validate", () => {
 
     const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
 
-    expect(logs.filter((line) => line.includes("has no explicit"))).toEqual([]);
+    expect(logs.filter((line) => line.startsWith("Warning: table"))).toEqual([]);
   });
 
   it("still warns when delete is omitted but update is explicit", async () => {
@@ -415,9 +430,12 @@ describe("cli validate", () => {
 
     const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
 
-    const warnings = logs.filter((line) => line.includes("policy set but no explicit"));
+    const warnings = logs.filter((line) => line.includes("policy in permissions.ts"));
     expect(warnings).toEqual([
-      'Warning: table "todos" has a policy set but no explicit delete policy in permissions.ts; deletes will be denied.',
+      `Warning: table "todos" has no delete policy in permissions.ts, so users can't delete its rows. ` +
+        "Your backend isn't checked when it acts as the system, so if only it should delete them, that's fine: " +
+        "declare `policy.todos.allowDelete.never()` to say so and silence this warning. " +
+        "Don't add an allow rule just to silence it.",
     ]);
   });
 
