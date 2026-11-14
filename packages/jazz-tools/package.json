@@ -17,6 +17,17 @@
     "README.md"
   ],
   "type": "module",
+  "sideEffects": [
+    "./bin/**",
+    "./dist/cli.js",
+    "./dist/e2ee/sodium-browser.js",
+    "./dist/expo/polyfills.js",
+    "./dist/react-native/abort-signal.js",
+    "./dist/solid/**",
+    "./dist/svelte/**",
+    "./dist/worker/**",
+    "**/*.css"
+  ],
   "main": "dist/index.js",
   "browser": {
     "./dist/runtime/native-runtime/node-foreground-node-lease.js": "./dist/runtime/native-runtime/node-foreground-node-lease.browser.js"
