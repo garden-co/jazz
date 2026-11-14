@@ -2540,6 +2540,103 @@ describe("createJazz", () => {
     expect((await jazz.db.all(app.todos.where({ id: later.id }))).length).toBe(1);
   }, 60_000);
 
+  it("asks authenticate once per stream session while a send's credentials stay the same", async () => {
+    // A save is several sends in a row: each used to re-run the app's
+    // authenticate (a session lookup). Now a send reuses the session's last
+    // answer while its headers match, for at most a minute and never past
+    // that answer's expiresAt; anything else asks again.
+    const signedOut = new Set<string>();
+    const sends: string[] = [];
+    let expiresIn = 3600;
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        const url = new URL(request.url);
+        if (request.method === "POST" && /\/stream\/[^/]+$/.test(url.pathname)) {
+          sends.push(request.headers.get("x-test-user") ?? "");
+        }
+        const userId = request.headers.get("x-test-user");
+        return userId && !signedOut.has(userId)
+          ? { userId, expiresAt: Date.now() / 1000 + expiresIn }
+          : null;
+      },
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: false });
+    const previous = (globalThis as { location?: unknown }).location;
+    (globalThis as { location?: unknown }).location = {
+      host: new URL(origin).host,
+      href: `${origin}/`,
+    };
+    cleanups.push(async () => {
+      (globalThis as { location?: unknown }).location = previous;
+    });
+    const alice = await userSession(jazz.appId, origin, "alice");
+    const owner = alice.session!.user!;
+    for (const title of ["one", "two", "three", "four"]) {
+      await alice.db.insert(app.todos, { title, owner }).wait({ tier: "global" });
+    }
+    const sessionPath = requestPaths.find((path) => /\/stream\/[^/]+$/.test(path))!;
+    const key = streamKeys.get(sessionPath)!;
+    const posts = requestPaths.filter((path) => path === sessionPath).length;
+    expect(posts).toBeGreaterThan(1);
+    // Once admitted, its sends reuse the answer.
+    expect(sends.length).toBeLessThanOrEqual(1);
+
+    const send = (headers: Record<string, string>) =>
+      statusOf(`${origin}${sessionPath}`, "POST", { "x-jazz-stream-key": key, ...headers });
+    const asked = () => sends.length;
+    // This client's headers differ from the browser's (user-agent, accept):
+    // its first send asks; the same headers again don't.
+    expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    const before = asked();
+    expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    expect(asked()).toBe(before);
+    // A changed credential asks again, and another user's never passes.
+    expect(await send({ "x-test-user": "bob" })).toBe(403);
+    expect(asked()).toBe(before + 1);
+    expect(await send({ "x-test-user": "alice", cookie: "other=1" })).toBeLessThan(300);
+    expect(asked()).toBe(before + 2);
+    expect(await send({ "x-test-user": "alice", cookie: "other=1" })).toBeLessThan(300);
+    expect(asked()).toBe(before + 2);
+
+    const later = (ms: number) => {
+      const now = Date.now();
+      const spy = vi.spyOn(Date, "now").mockReturnValue(now + ms);
+      return () => spy.mockRestore();
+    };
+    // An answer past its expiresAt is asked again, even within the minute.
+    expiresIn = 5;
+    expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    expect(asked()).toBe(before + 3);
+    let restore = later(6_000);
+    try {
+      expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    } finally {
+      restore();
+    }
+    expect(asked()).toBe(before + 4);
+    expiresIn = 3600;
+
+    // Signed out elsewhere with this cookie still held: cut off once the
+    // reused answer is a minute old...
+    signedOut.add("alice");
+    restore = later(61_000);
+    try {
+      expect(await send({ "x-test-user": "alice" })).toBe(403);
+    } finally {
+      restore();
+    }
+    // ...and at once with revokeUser, cached answer or not.
+    signedOut.delete("alice");
+    expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    signedOut.add("alice");
+    expect(await jazz.revokeUser("alice")).toBe(1);
+    expect(await send({ "x-test-user": "alice" })).toBe(410);
+  }, 60_000);
+
   it("lets a client end its stream session once signed out, and calls one already ended done", async () => {
     // #5187: a client ends its stream as it signs out, when the app's
     // sign-in is already gone. That was a 403, and a DELETE that arrived

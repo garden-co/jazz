@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { verifyChallenge } from "../local-first-auth/server.js";
 import { serverSigningKey } from "./signing-key.js";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
@@ -628,6 +628,38 @@ export interface CreateJazzOptions {
   inspector?: InspectorOptions;
 }
 
+/**
+ * How long a stream session reuses `authenticate`'s answer for sends with
+ * unchanged credentials, at most (and never past the answer's `expiresAt`).
+ */
+const STREAM_AUTH_REUSE_MS = 60_000;
+
+/**
+ * Request headers that differ from send to send without saying who sent it:
+ * set per request by proxies, hosts and tracing, or describing the body.
+ * Every other header counts as a credential, since an app's `authenticate`
+ * may read any of them: a changed one asks `authenticate` again.
+ */
+const PER_REQUEST_HEADER =
+  /^(content-length|content-type|content-encoding|transfer-encoding|date|forwarded|via|traceparent|tracestate|baggage|sentry-trace|x-request-id|x-correlation-id|x-real-ip|true-client-ip|x-amzn-trace-id|x-cloud-trace-context|x-jazz-stream-key|x-forwarded-.*|x-vercel-.*|x-matched-path|x-invoke-.*|x-middleware-.*|x-b3-.*|cf-.*|fly-.*|x-envoy-.*)$/;
+
+/** A digest of what an app's `authenticate` may read off a stream send. */
+function streamCredentials(request: Request): string {
+  const hash = createHash("sha256");
+  const names: string[] = [];
+  request.headers.forEach((_, name) => {
+    if (!PER_REQUEST_HEADER.test(name)) names.push(name);
+  });
+  for (const name of names.sort()) {
+    hash
+      .update(name)
+      .update("\0")
+      .update(request.headers.get(name) ?? "")
+      .update("\0");
+  }
+  return hash.digest("base64url");
+}
+
 /** A WebSocket as the `ws` package (and Vercel's `upgradeWebSocket`) hands it over. */
 export interface WsLikeSocket {
   send(data: Uint8Array): void;
@@ -722,7 +754,10 @@ export interface Jazz {
    * their `expiresAt`. A session still signing in when you call it (its
    * `authenticate` may have read the cookie you just ended) is refused too
    * if it signs in as `userId`. Sessions served by other instances end at
-   * their `expiresAt`. Returns how many open sessions it ended.
+   * their `expiresAt`; an HTTP stream session there also asks
+   * `authenticate` again on a send at least once a minute, so it ends
+   * within a minute if `authenticate` no longer names the user. Returns how
+   * many open sessions it ended.
    */
   revokeUser(userId: string): Promise<number>;
   /**
@@ -2604,7 +2639,13 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   // from the client that opened them.
   const streams = new Map<
     string,
-    { session: ClientSession; key: Buffer; end(code: number, reason: string): void }
+    {
+      session: ClientSession;
+      key: Buffer;
+      end(code: number, reason: string): void;
+      /** The last `authenticate` answer for a send, while it may be reused (see `ownStream`). */
+      checked?: { credentials: string; until: number };
+    }
   >();
   // Sockets accepted for clients, so close() can end them.
   const clientSockets = new Set<WsLikeSocket>();
@@ -2714,8 +2755,29 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         return new Response("not this backend client", { status: 403 });
       }
     } else if (socket.userId !== undefined) {
+      // A send carrying the same credentials as one `authenticate` admitted
+      // lately is the same user: an app save is several sends in a row, and
+      // asking the app's auth (a session lookup) on each was most of their
+      // server time. Any change to what `authenticate` may read asks it
+      // again; so does an answer past its `expiresAt`, or older than
+      // STREAM_AUTH_REUSE_MS, so a sign-out elsewhere that kept this cookie
+      // (or a ban) reaches the stream within that long, as before only on
+      // its next send. `revokeUser` ends the session at once either way.
+      const credentials = streamCredentials(request);
+      const checked = entry.checked;
+      if (checked && checked.until > Date.now() && checked.credentials === credentials) {
+        return socket;
+      }
+      entry.checked = undefined;
       const user = await authenticate(request);
       if (user?.userId !== socket.userId) return new Response("not signed in", { status: 403 });
+      // The session may have ended (revoked, expired) while `authenticate` ran.
+      if (streams.get(id) === entry) {
+        entry.checked = {
+          credentials,
+          until: Math.min(user.expiresAt * 1000, Date.now() + STREAM_AUTH_REUSE_MS),
+        };
+      }
     }
     return socket;
   }
