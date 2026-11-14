@@ -56,14 +56,21 @@ describe("MCP `as`", () => {
       ["inspector_link", { query, as: { userId: "mona" } }],
     ]);
     expect(results.every((result) => !result.isError)).toBe(true);
-    expect(bodies.map((body) => [body.op, body.as])).toEqual([
-      ["query", "mona"],
-      ["query", { userId: "mona", claims: { role: "manager" } }],
-      ["get", { userId: "mona", claims: { role: "manager" } }],
-      ["write", "mona"],
-      ["explain", { userId: "mona", claims: { role: "manager" } }],
-      ["link", "mona"],
-    ]);
+    // The server answers calls concurrently, so requests reach the backend
+    // in any order: compare them as a set.
+    const sent = bodies.map((body) => JSON.stringify([body.op, body.as])).sort();
+    expect(sent).toEqual(
+      [
+        ["query", "mona"],
+        ["query", { userId: "mona", claims: { role: "manager" } }],
+        ["get", { userId: "mona", claims: { role: "manager" } }],
+        ["write", "mona"],
+        ["explain", { userId: "mona", claims: { role: "manager" } }],
+        ["link", "mona"],
+      ]
+        .map((entry) => JSON.stringify(entry))
+        .sort(),
+    );
   });
 
   it("refuses any other `as` instead of running with the backend's authority", async () => {
