@@ -1,4 +1,4 @@
-import { columnTypeSignature } from "./runtime/schema-metadata.js";
+import { columnTypeSignature, onlyAddsEnumVariants } from "./runtime/schema-metadata.js";
 import { structuralValuesEqual } from "./runtime/structural-values.js";
 import { sqlTypeToWasm } from "./codegen/schema-reader.js";
 import { toValue } from "./runtime/value-converter.js";
@@ -195,6 +195,23 @@ type BuildersEqual<
     : false
   : false;
 
+/**
+ * Whether `TRight` is the enum `TLeft` (or an array of it) with variants
+ * appended to its list: rows of `TLeft` pass unchanged and sort as before.
+ */
+type SqlTypeAddsEnumVariants<TLeft, TRight> = TLeft extends {
+  kind: "ENUM";
+  variants: infer TLeftVariants extends readonly string[];
+}
+  ? TRight extends { kind: "ENUM"; variants: readonly [...TLeftVariants, ...string[]] }
+    ? true
+    : false
+  : TLeft extends { kind: "ARRAY"; element: infer TLeftElement }
+    ? TRight extends { kind: "ARRAY"; element: infer TRightElement }
+      ? SqlTypeAddsEnumVariants<TLeftElement, TRightElement>
+      : false
+    : false;
+
 type SharedBuildersCompatible<
   TLeft extends AnyTypedColumnBuilder,
   TRight extends AnyTypedColumnBuilder,
@@ -202,19 +219,28 @@ type SharedBuildersCompatible<
 > =
   BuildersEqual<TLeft, TRight, TRenameTables> extends true
     ? true
-    : ColumnBuilderReferences<TLeft> extends undefined
-      ? [ColumnBuilderSqlType<TLeft>, ColumnBuilderOptional<TLeft>] extends [
-          ColumnBuilderSqlType<TRight>,
-          ColumnBuilderOptional<TRight>,
-        ]
-        ? [ColumnBuilderSqlType<TRight>, ColumnBuilderOptional<TRight>] extends [
-            ColumnBuilderSqlType<TLeft>,
-            ColumnBuilderOptional<TLeft>,
-          ]
+    : [
+          SqlTypeAddsEnumVariants<ColumnBuilderSqlType<TLeft>, ColumnBuilderSqlType<TRight>>,
+          ColumnBuilderReferences<TLeft>,
+        ] extends [true, undefined]
+      ? [ColumnBuilderOptional<TLeft>] extends [ColumnBuilderOptional<TRight>]
+        ? [ColumnBuilderOptional<TRight>] extends [ColumnBuilderOptional<TLeft>]
           ? true
           : false
         : false
-      : false;
+      : ColumnBuilderReferences<TLeft> extends undefined
+        ? [ColumnBuilderSqlType<TLeft>, ColumnBuilderOptional<TLeft>] extends [
+            ColumnBuilderSqlType<TRight>,
+            ColumnBuilderOptional<TRight>,
+          ]
+          ? [ColumnBuilderSqlType<TRight>, ColumnBuilderOptional<TRight>] extends [
+              ColumnBuilderSqlType<TLeft>,
+              ColumnBuilderOptional<TLeft>,
+            ]
+            ? true
+            : false
+          : false
+        : false;
 
 type AddOperationForBuilder<TBuilder extends AnyTypedColumnBuilder> = AddOp<
   ColumnBuilderSqlType<TBuilder>,
@@ -475,7 +501,7 @@ type UnsupportedSharedColumnChanges<
       : {
           readonly table: TTable;
           readonly column: TColumn;
-          readonly problem: "Columns with the same name must keep the same type, optionality, and ref target";
+          readonly problem: "Columns with the same name must keep the same type, optionality, and ref target (an enum may only gain variants at the end)";
         };
   }[CommonColumnName<TTo, TTable, SourceColumnName<TFrom, TTo, TRenameTables, TTable>>];
 }[MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>];
@@ -664,14 +690,36 @@ function buildMarkedTableSet(
   return set;
 }
 
+/**
+ * Whether `target` keeps `source`'s column but adds enum variants to it (or
+ * to the enums of an array): rows written under `source` pass unchanged, so
+ * the column needs no step.
+ */
+function columnAddsEnumVariants(
+  source: AnyTypedColumnBuilder,
+  target: AnyTypedColumnBuilder,
+): boolean {
+  const from = source._build("__migration_shape__"),
+    to = target._build("__migration_shape__");
+  const fromType = sqlTypeToWasm(from.sqlType),
+    toType = sqlTypeToWasm(to.sqlType);
+  return (
+    from.nullable === to.nullable &&
+    columnTypeSignature(fromType) !== columnTypeSignature(toType) &&
+    onlyAddsEnumVariants(fromType, toType)
+  );
+}
+
 function columnShapeSignature(
   builder: AnyTypedColumnBuilder,
   omitReference = false,
   tableRenames?: ReadonlyMap<string, string>,
+  // Compare against this builder's type instead (a column gaining enum variants).
+  typeOf: AnyTypedColumnBuilder = builder,
 ): string {
   const column = builder._build("__migration_shape__");
   return JSON.stringify({
-    sqlType: columnTypeSignature(sqlTypeToWasm(column.sqlType)),
+    sqlType: columnTypeSignature(sqlTypeToWasm(typeOf._build("__migration_shape__").sqlType)),
     nullable: column.nullable,
     references:
       omitReference || !column.references
@@ -755,6 +803,7 @@ function tableMatchesAfterApplyingColumnOperations(
         omitReference,
         // Added columns already use the destination witness's reference names.
         tableOps[columnName]?._type === "add" ? tableRenames : undefined,
+        columnAddsEnumVariants(sourceBuilder, targetBuilder) ? targetBuilder : sourceBuilder,
       ) !== columnShapeSignature(targetBuilder, omitReference, tableRenames)
     ) {
       return false;
@@ -835,6 +884,9 @@ function buildForwardLenses<
   const sourceTables = unwrapSchemaTables(fromDefinition);
   const targetTables = unwrapSchemaTables(toDefinition);
   const referenceAdditionTables = new Set<string>();
+  // Tables whose kept columns gain enum variants get a lens with no steps,
+  // so the migration connects the two versions.
+  const enumAdditionTables = new Set<string>();
   for (const [targetName, targetColumns] of Object.entries(targetTables)) {
     const sourceName = renameTableMap.get(targetName) ?? targetName;
     const sourceColumns = sourceTables[sourceName];
@@ -851,6 +903,7 @@ function buildForwardLenses<
       if (!sourceBuilder) continue;
       const source = sourceBuilder._build(sourceColumn);
       const target = targetBuilder._build(columnName);
+      if (columnAddsEnumVariants(sourceBuilder, targetBuilder)) enumAdditionTables.add(targetName);
       const targetReference = target.references
         ? (renameTableMap.get(target.references) ?? target.references)
         : target.references;
@@ -880,6 +933,7 @@ function buildForwardLenses<
   if (
     !migrate &&
     referenceAdditionTables.size === 0 &&
+    enumAdditionTables.size === 0 &&
     renameTableMap.size === 0 &&
     addedTableSet.size === 0 &&
     removedTableSet.size === 0
@@ -895,6 +949,7 @@ function buildForwardLenses<
       ...Object.keys(renameTables ?? {}),
       ...Object.keys(migrate ?? {}),
       ...referenceAdditionTables,
+      ...enumAdditionTables,
     ]),
   ];
   for (const tableName of orderedTableNames) {
@@ -1033,7 +1088,8 @@ function buildForwardLenses<
       removed ||
       renamedFrom ||
       operations.length > 0 ||
-      referenceAdditionTables.has(tableName)
+      referenceAdditionTables.has(tableName) ||
+      enumAdditionTables.has(tableName)
     ) {
       forward.push({
         table: tableName,
