@@ -15,16 +15,30 @@ import {
   type InspectEnv,
   type PendingApproval,
 } from "./client.js";
-import { DEFAULT_ROW_LIMIT, InspectError, MAX_ROW_LIMIT, type InspectRequest } from "./protocol.js";
+import {
+  DEFAULT_ROW_LIMIT,
+  InspectError,
+  MAX_ROW_LIMIT,
+  type InspectAs,
+  type InspectRequest,
+} from "./protocol.js";
 import { WHERE_OPERATORS } from "../where-operators.js";
 
 const SERVER_INFO = { name: "jazz-inspect", version: "1" };
 const LATEST_PROTOCOL = "2025-06-18";
 
 const AS = {
-  type: "string",
   description:
-    "Run under this user's permissions (the app's user id), to see what they see. Omit to use the backend's authority (every row).",
+    'Run under this user\'s permissions, to see what they see: the app\'s user id, or { "userId": …, "claims": {…} }. Omit to use the backend\'s authority (every row). Anything else is refused.',
+  oneOf: [
+    { type: "string", minLength: 1 },
+    {
+      type: "object",
+      properties: { userId: { type: "string", minLength: 1 }, claims: { type: "object" } },
+      required: ["userId"],
+      additionalProperties: false,
+    },
+  ],
 };
 const CLAIMS = {
   type: "object",
@@ -260,6 +274,54 @@ export const MCP_TOOLS: Tool[] = [
 
 type Json = Record<string, unknown>;
 
+/**
+ * A tool's `as` (and `claims`) as the API takes it. `as` is a user id, or
+ * `{ userId, claims? }` as the HTTP API spells it; anything else is refused.
+ * Never dropped: a call that names a user must not run with the backend's
+ * authority instead.
+ */
+export function asArgument(args: Json): { as?: InspectAs } {
+  const { as, claims } = args;
+  const refuse = (message: string) => new InspectError("bad_request", message);
+  if (as === undefined) {
+    if (claims !== undefined) throw refuse("claims goes with as (the user they belong to)");
+    return {};
+  }
+  if (typeof as === "string") {
+    if (!as.trim()) throw refuse("as must name a user id");
+    // Claims go to the backend as given: it refuses ones that aren't an object.
+    return {
+      as: claims === undefined ? as : { userId: as, claims: claims as Record<string, unknown> },
+    };
+  }
+  if (as && typeof as === "object" && !Array.isArray(as)) {
+    const { userId, claims: inner, ...rest } = as as Record<string, unknown>;
+    const unknown = Object.keys(rest);
+    if (unknown.length) {
+      throw refuse(
+        `as has unknown field(s) ${unknown.join(", ")}: give a user id, or { userId, claims }`,
+      );
+    }
+    if (typeof userId !== "string" || !userId.trim()) {
+      throw refuse("as.userId must name a user id");
+    }
+    if (inner !== undefined && claims !== undefined) {
+      throw refuse("give the claims once: in as, or next to it");
+    }
+    const given = inner ?? claims;
+    return {
+      as: given === undefined ? userId : { userId, claims: given as Record<string, unknown> },
+    };
+  }
+  throw refuse("as must be a user id, or { userId, claims }");
+}
+
+function requireAs(as: { as?: InspectAs }): InspectAs {
+  if (as.as === undefined)
+    throw new InspectError("bad_request", "explain needs as: the user to explain for");
+  return as.as;
+}
+
 /** Serve MCP on `input`/`output` (stdio by default) until `input` ends. */
 export async function runMcpServer(options: {
   app?: string;
@@ -282,19 +344,7 @@ export async function runMcpServer(options: {
     });
 
   async function callTool(name: string, args: Json): Promise<unknown> {
-    if (args.claims !== undefined && typeof args.as !== "string") {
-      throw new InspectError("bad_request", "claims goes with as (the user they belong to)");
-    }
-    // Claims go to the backend as given: it refuses ones that aren't an object.
-    const as =
-      typeof args.as === "string"
-        ? {
-            as:
-              args.claims === undefined
-                ? args.as
-                : { userId: args.as, claims: args.claims as Record<string, unknown> },
-          }
-        : {};
+    const as = asArgument(args);
     switch (name) {
       case "whoami":
         return call({ op: "whoami" });
@@ -344,7 +394,7 @@ export async function runMcpServer(options: {
         return call({
           op: "explain",
           query: args.query as never,
-          as: as.as ?? String(args.as),
+          as: requireAs(as),
         });
       case "inspector_link":
         return call({
