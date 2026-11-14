@@ -1,0 +1,2177 @@
+{
+  "bundle": "3ba12a4754b7bd1c9fd15bd9d7585b0886109ef872ff74578dd9341bf7a60a64",
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "activity": {
+        "relations": {
+          "actor": {
+            "column": "actorId",
+            "table": "crew",
+            "type": "Forward"
+          },
+          "show": {
+            "column": "showId",
+            "table": "shows",
+            "type": "Forward"
+          },
+          "task": {
+            "column": "taskId",
+            "table": "tasks",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "comments": {
+        "relations": {
+          "author": {
+            "column": "authorId",
+            "table": "crew",
+            "type": "Forward"
+          },
+          "task": {
+            "column": "taskId",
+            "table": "tasks",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "crew": {
+        "relations": {
+          "assignedTasks": {
+            "relation": "assignee",
+            "table": "tasks",
+            "type": "Reverse"
+          },
+          "memberships": {
+            "relation": "crew",
+            "table": "showCrew",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "showCrew": {
+        "relations": {
+          "crew": {
+            "column": "crewId",
+            "table": "crew",
+            "type": "Forward"
+          },
+          "show": {
+            "column": "showId",
+            "table": "shows",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "showInvites": {
+        "relations": {
+          "show": {
+            "column": "showId",
+            "table": "shows",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "shows": {
+        "relations": {
+          "activity": {
+            "relation": "show",
+            "table": "activity",
+            "type": "Reverse"
+          },
+          "crew": {
+            "relation": "show",
+            "table": "showCrew",
+            "type": "Reverse"
+          },
+          "invites": {
+            "relation": "show",
+            "table": "showInvites",
+            "type": "Reverse"
+          },
+          "tasks": {
+            "relation": "show",
+            "table": "tasks",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "tasks": {
+        "relations": {
+          "activity": {
+            "relation": "task",
+            "table": "activity",
+            "type": "Reverse"
+          },
+          "assignee": {
+            "column": "assigneeId",
+            "table": "crew",
+            "type": "Forward"
+          },
+          "comments": {
+            "relation": "task",
+            "table": "comments",
+            "type": "Reverse"
+          },
+          "show": {
+            "column": "showId",
+            "table": "shows",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "eee271fbb284b62bb48730800515e17806d793d113c3d408e646fe68db0a8c8e",
+  "format": 1,
+  "migrations": [],
+  "permissions": {
+    "activity": {
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "showId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "showId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "showCrew",
+                  "type": "Exists"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "showId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "chiefAccount",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "shows",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "actorId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "crew",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "showId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "showId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "showCrew",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "showId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "chiefAccount",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "shows",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      }
+    },
+    "checklistItems": {
+      "delete": {
+        "using": {
+          "column": "ownerAccount",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "insert": {
+        "with_check": {
+          "column": "ownerAccount",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "select": {
+        "using": {
+          "column": "ownerAccount",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "update": {
+        "using": {
+          "column": "ownerAccount",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        },
+        "with_check": {
+          "column": "ownerAccount",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      }
+    },
+    "comments": {
+      "delete": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "authorId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "account",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "crew",
+          "type": "Exists"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "operation": "Select",
+              "type": "Inherits",
+              "via_column": "taskId"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "authorId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "crew",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "taskId"
+        }
+      }
+    },
+    "crew": {
+      "insert": {
+        "with_check": {
+          "column": "account",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "column": "account",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        },
+        "with_check": {
+          "column": "account",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      }
+    },
+    "showCrew": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "column": "account",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "showId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "chiefAccount",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "shows",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "exprs": [
+                    {
+                      "column": "account",
+                      "op": "Eq",
+                      "type": "Cmp",
+                      "value": {
+                        "path": [
+                          "user"
+                        ],
+                        "type": "SessionRef"
+                      }
+                    },
+                    {
+                      "column": "role",
+                      "op": "Eq",
+                      "type": "Cmp",
+                      "value": {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "chief"
+                        }
+                      }
+                    }
+                  ],
+                  "type": "And"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "showId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "chiefAccount",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "shows",
+                  "type": "Exists"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "crewId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "crew",
+                  "type": "Exists"
+                }
+              ],
+              "type": "And"
+            },
+            {
+              "exprs": [
+                {
+                  "exprs": [
+                    {
+                      "column": "account",
+                      "op": "Eq",
+                      "type": "Cmp",
+                      "value": {
+                        "path": [
+                          "user"
+                        ],
+                        "type": "SessionRef"
+                      }
+                    },
+                    {
+                      "column": "role",
+                      "op": "Eq",
+                      "type": "Cmp",
+                      "value": {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "crew"
+                        }
+                      }
+                    }
+                  ],
+                  "type": "And"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "crewId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "crew",
+                  "type": "Exists"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "showId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "showId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "code",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "inviteCode"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "showInvites",
+                  "type": "Exists"
+                }
+              ],
+              "type": "And"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "select": {
+        "using": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "showId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "showId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "showCrew",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "showId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "chiefAccount",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "shows",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "update": {
+        "using": {
+          "column": "account",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "column": "account",
+                  "op": "Eq",
+                  "type": "Cmp",
+                  "value": {
+                    "path": [
+                      "user"
+                    ],
+                    "type": "SessionRef"
+                  }
+                },
+                {
+                  "column": "inviteCode",
+                  "type": "IsNull"
+                }
+              ],
+              "type": "And"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "crewId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "crew",
+              "type": "Exists"
+            },
+            {
+              "exprs": [
+                {
+                  "exprs": [
+                    {
+                      "column": "role",
+                      "op": "Eq",
+                      "type": "Cmp",
+                      "value": {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "crew"
+                        }
+                      }
+                    },
+                    {
+                      "condition": {
+                        "exprs": [
+                          {
+                            "column": "id",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "__jazz_outer_row",
+                                "id"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          },
+                          {
+                            "column": "showId",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "__jazz_outer_row",
+                                "showId"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          },
+                          {
+                            "column": "role",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "type": "Literal",
+                              "value": {
+                                "type": "Text",
+                                "value": "crew"
+                              }
+                            }
+                          }
+                        ],
+                        "type": "And"
+                      },
+                      "table": "showCrew",
+                      "type": "Exists"
+                    }
+                  ],
+                  "type": "And"
+                },
+                {
+                  "exprs": [
+                    {
+                      "column": "role",
+                      "op": "Eq",
+                      "type": "Cmp",
+                      "value": {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "chief"
+                        }
+                      }
+                    },
+                    {
+                      "condition": {
+                        "exprs": [
+                          {
+                            "column": "id",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "__jazz_outer_row",
+                                "showId"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          },
+                          {
+                            "column": "chiefAccount",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "user"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          }
+                        ],
+                        "type": "And"
+                      },
+                      "table": "shows",
+                      "type": "Exists"
+                    },
+                    {
+                      "condition": {
+                        "exprs": [
+                          {
+                            "column": "id",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "__jazz_outer_row",
+                                "id"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          },
+                          {
+                            "column": "showId",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "__jazz_outer_row",
+                                "showId"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          }
+                        ],
+                        "type": "And"
+                      },
+                      "table": "showCrew",
+                      "type": "Exists"
+                    }
+                  ],
+                  "type": "And"
+                }
+              ],
+              "type": "Or"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "showInvites": {
+      "delete": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "showId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "chiefAccount",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "shows",
+          "type": "Exists"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "showId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "chiefAccount",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "shows",
+          "type": "Exists"
+        }
+      },
+      "select": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "showId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "chiefAccount",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "shows",
+          "type": "Exists"
+        }
+      },
+      "update": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "showId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "chiefAccount",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "shows",
+          "type": "Exists"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "showId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "chiefAccount",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "shows",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "showId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "showId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "showInvites",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "shows": {
+      "delete": {
+        "using": {
+          "column": "chiefAccount",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "insert": {
+        "with_check": {
+          "column": "chiefAccount",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "select": {
+        "using": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "showId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "showCrew",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "chiefAccount",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "shows",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "update": {
+        "using": {
+          "column": "chiefAccount",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        },
+        "with_check": {
+          "column": "chiefAccount",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      }
+    },
+    "tasks": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "showId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "chiefAccount",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "shows",
+              "type": "Exists"
+            },
+            {
+              "exprs": [
+                {
+                  "column": "$createdBy.account",
+                  "op": "Eq",
+                  "type": "Cmp",
+                  "value": {
+                    "path": [
+                      "user"
+                    ],
+                    "type": "SessionRef"
+                  }
+                },
+                {
+                  "exprs": [
+                    {
+                      "condition": {
+                        "exprs": [
+                          {
+                            "column": "showId",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "__jazz_outer_row",
+                                "showId"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          },
+                          {
+                            "column": "account",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "user"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          }
+                        ],
+                        "type": "And"
+                      },
+                      "table": "showCrew",
+                      "type": "Exists"
+                    },
+                    {
+                      "condition": {
+                        "exprs": [
+                          {
+                            "column": "id",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "__jazz_outer_row",
+                                "showId"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          },
+                          {
+                            "column": "chiefAccount",
+                            "op": "Eq",
+                            "type": "Cmp",
+                            "value": {
+                              "path": [
+                                "user"
+                              ],
+                              "type": "SessionRef"
+                            }
+                          }
+                        ],
+                        "type": "And"
+                      },
+                      "table": "shows",
+                      "type": "Exists"
+                    }
+                  ],
+                  "type": "Or"
+                }
+              ],
+              "type": "And"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "showId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "showId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "showCrew",
+                  "type": "Exists"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "showId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "chiefAccount",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "shows",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "exprs": [
+                {
+                  "column": "assigneeId",
+                  "type": "IsNull"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "showId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "showId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "crewId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "assigneeId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "showCrew",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "showId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "showId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "showCrew",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "showId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "chiefAccount",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "shows",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "update": {
+        "using": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "showId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "showId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "showCrew",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "showId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "chiefAccount",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "shows",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "showId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "showId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "showCrew",
+                  "type": "Exists"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "showId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "chiefAccount",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "shows",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "exprs": [
+                {
+                  "column": "assigneeId",
+                  "type": "IsNull"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "showId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "showId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "crewId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "assigneeId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "showCrew",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    }
+  },
+  "schemas": [
+    {
+      "hash": "eee271fbb284b62bb48730800515e17806d793d113c3d408e646fe68db0a8c8e",
+      "tables": {
+        "activity": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "showId",
+              "nullable": false,
+              "references": "shows"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "taskId",
+              "nullable": false,
+              "references": "tasks"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "actorId",
+              "nullable": false,
+              "references": "crew"
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "created",
+                  "moved",
+                  "assigned",
+                  "renamed",
+                  "commented",
+                  "deleted"
+                ]
+              },
+              "name": "kind",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "detail",
+              "nullable": true
+            }
+          ]
+        },
+        "checklistItems": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "done",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "ownerAccount",
+              "nullable": false
+            }
+          ]
+        },
+        "comments": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "taskId",
+              "nullable": false,
+              "references": "tasks"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "authorId",
+              "nullable": false,
+              "references": "crew"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "body",
+              "nullable": false
+            }
+          ]
+        },
+        "crew": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "account",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            }
+          ]
+        },
+        "showCrew": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "showId",
+              "nullable": false,
+              "references": "shows"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "crewId",
+              "nullable": false,
+              "references": "crew"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "account",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "chief",
+                  "crew"
+                ]
+              },
+              "name": "role",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "inviteCode",
+              "nullable": true
+            }
+          ]
+        },
+        "showInvites": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "showId",
+              "nullable": false,
+              "references": "shows"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "code",
+              "nullable": false
+            }
+          ]
+        },
+        "shows": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "venue",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "date",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "doors",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "chiefAccount",
+              "nullable": false
+            }
+          ]
+        },
+        "tasks": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "showId",
+              "nullable": false,
+              "references": "shows"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "todo",
+                  "doing",
+                  "done",
+                  "blocked"
+                ]
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "assigneeId",
+              "nullable": true,
+              "references": "crew"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "merge_strategy": "Text",
+              "name": "notes",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "rank",
+              "nullable": false
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

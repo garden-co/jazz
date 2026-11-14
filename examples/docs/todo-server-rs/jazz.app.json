@@ -1,0 +1,146 @@
+{
+  "bundle": "b0e7c3029eb1bdac15b26c40593eff8b6a36f3569838d8425e12db6d1942ba7c",
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "projects": {
+        "relations": {
+          "todos": {
+            "relation": "projectRelation",
+            "table": "todos",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "todos": {
+        "relations": {
+          "children": {
+            "relation": "parentRelation",
+            "table": "todos",
+            "type": "Reverse"
+          },
+          "parentRelation": {
+            "column": "parent",
+            "table": "todos",
+            "type": "Forward"
+          },
+          "projectRelation": {
+            "column": "project",
+            "table": "projects",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "f01997b29114f22266ddcbd328b3aba89b2e6ff16d60255068d6774dc4bd208f",
+  "format": 1,
+  "migrations": [],
+  "permissions": {
+    "projects": {
+      "insert": {
+        "with_check": {
+          "type": "True"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      }
+    },
+    "todos": {
+      "delete": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "True"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "True"
+        },
+        "with_check": {
+          "type": "True"
+        }
+      }
+    }
+  },
+  "schemas": [
+    {
+      "hash": "f01997b29114f22266ddcbd328b3aba89b2e6ff16d60255068d6774dc4bd208f",
+      "tables": {
+        "projects": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            }
+          ]
+        },
+        "todos": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "done",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "priority",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "description",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "parent",
+              "nullable": true,
+              "references": "todos"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "project",
+              "nullable": true,
+              "references": "projects"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

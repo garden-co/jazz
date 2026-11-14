@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { schema as s, migration as m } from "../index.js";
-import { wasmSchemasEqual, structuralSchemaHash } from "./schema-utils.js";
+import { wasmSchemasEqual } from "./schema-utils.js";
+import { computeSchemaHash } from "../schema-hash.js";
 import { renderMigrationStub, UNFILLED_STUB_TODO } from "./migrations.js";
 
 describe("migration stub generation", () => {
@@ -297,7 +298,7 @@ describe("migration stub generation", () => {
       [s.defineApp(migration.to, { migrations: "none" }).wasmSchema, to],
     ]) {
       expect(wasmSchemasEqual(actual!, expected!)).toBe(true);
-      expect(structuralSchemaHash(actual!)).toBe(structuralSchemaHash(expected!));
+      expect(await computeSchemaHash(actual!)).toBe(await computeSchemaHash(expected!));
       expect(actual).toEqual(expected);
     }
     expect(migration.forward).toEqual([{ table: "records", operations: [] }]);

@@ -2,7 +2,7 @@ import { createAccountManager } from "../../src/accounts/create-account-manager.
 import type { AccountStore } from "../../src/accounts/persistence.js";
 import type { AccountHandle } from "../../src/accounts/state.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../../src/schema-source.js";
-import { shippedMigrations } from "../../src/runtime/client-migrations.js";
+import { shippedArtifact } from "../../src/runtime/app-artifact.js";
 import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
 import {
   jazzServerBrowserCommands,
@@ -45,9 +45,9 @@ export async function startJazzApp(
   const schema = resolveSchemaSource(app.schema);
   const serverUrl = await jazzServerBrowserCommands().jazzAppFront(coreUrl, {
     schema,
-    // The command serializes the schema without the migrations the app
-    // ships; the backend must publish them, as the app's createJazz does.
-    migrations: shippedMigrations(schema),
+    // The command serializes the schema without the jazz.app.json the app
+    // ships; the backend must publish it, as the app's createJazz does.
+    artifact: shippedArtifact(schema),
     permissions: app.permissions,
     pageOrigin: location.origin,
   });

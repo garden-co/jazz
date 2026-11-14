@@ -9,11 +9,11 @@ Every Jazz app is defined first by its database schema and permission policies. 
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
+import artifact from "./jazz.app.json" with { type: "json" };
 
 export const app = s.defineApp(
   { todos: s.table({ title: s.string(), done: s.boolean() }, {}) },
-  { migrations },
+  { artifact },
 );
 ```
 

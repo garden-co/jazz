@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "vitest";
 import { createJazzClient, type Db } from "jazz-tools";
-import { definePermissions } from "jazz-tools/permissions";
+import permissions from "../permissions.js";
 import { startTestJazz, type TestJazz } from "jazz-tools/testing";
 import { app } from "../schema.js";
 import { memoryAccountStore } from "../../../../testing/accounts.js";
@@ -98,18 +98,6 @@ describe.each(stores)("MusicAgent on the %s store", (_name, openStore) => {
 
 describe("MusicAgent across synced Jazz clients", () => {
   test("a reader sees an assistant turn grow append by append", async () => {
-    const permissions = definePermissions(app, ({ policy }) => {
-      for (const table of [
-        policy.conversations,
-        policy.turns,
-        policy.tool_calls,
-        policy.attachments,
-      ]) {
-        table.allowRead.always();
-        table.allowInsert.always();
-        table.allowUpdate.always();
-      }
-    });
     // Guests sync through the app's backend: a core admits only its backend.
     server = await startTestJazz({ app, permissions });
     const writerDb = await openDb(server.url);

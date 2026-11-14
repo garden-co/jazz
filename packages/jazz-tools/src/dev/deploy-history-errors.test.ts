@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { migration as m, schema as s } from "../index.js";
 import { definePermissions } from "../permissions/index.js";
 import { computeSchemaHash } from "../schema-hash.js";
-import { appMigrations } from "../testing/client-migrations.js";
+import { appArtifact } from "../testing/app-artifact.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "./dev-server.js";
 import { deployApp } from "./catalogue.js";
 
@@ -68,7 +68,7 @@ describe("a deploy whose migrations don't match the store's history", () => {
       migrate: { notes: { body: m.add.string({ default: null }) } },
     });
     const migrated = s.defineApp(v2, {
-      migrations: await appMigrations(v1, { to: v2, migration }),
+      artifact: await appArtifact(v1, { steps: [{ to: v2, migration }], permissions: readV2 }),
     });
     await expect(deploy(migrated, readV2)).rejects.toThrow(
       `this store's history starts at schema ${await short(appV2)}, but the app's migrations start at ${await short(appV1)}`,

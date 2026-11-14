@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { deploy } from "../../src/dev/catalogue.js";
+import { deploy } from "./deploy.js";
 import { openBrowserSessionCore as createJazzClient } from "../../src/session/create-jazz-session.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
 import { resolveDefaultPersistentDbName } from "../../src/runtime/db.js";

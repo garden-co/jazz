@@ -48,6 +48,49 @@ can't talk to a newer backend.
 Back up before you upgrade. Releases don't migrate a data directory back to an older format, so
 rolling back means restoring the backup.
 
+## Upgrading from alpha.62
+
+Alpha.63 ships an app's schema versions, migrations and permissions in one file, `jazz.app.json`,
+beside `schema.ts`. It replaces the generated `migrations/index.ts`. Data needs no changes.
+
+1. **Import the file in `schema.ts`** and pass it to `defineApp` (or `defineSliceableApp`):
+
+   ```ts title="schema.ts"
+   import artifact from "./jazz.app.json" with { type: "json" };
+
+   export const app = s.defineApp(schema, { artifact });
+   ```
+
+   An app that still passes `{ migrations }` throws an error that says what to change.
+   `{ migrations: "none" }` stays for apps that only run on `memory()`, such as tests.
+
+2. **Run `npx jazz-tools validate`.** It writes `jazz.app.json` and removes the
+   `migrations/index.ts` that earlier versions generated. `migrations create` and `deploy` keep the
+   file up to date from now on. `migrations/snapshots/` and your migration files stay: they are the
+   history the file is built from.
+
+3. **Commit `jazz.app.json`.** To catch a file that's out of date, add
+   `npx jazz-tools validate --check` to CI: it fails when the committed file differs from what
+   `schema.ts`, `permissions.ts` and your migrations make, or is missing. The file is compared byte
+   for byte, so keep formatters off it: add `jazz.app.json` to `.prettierignore`, Biome's
+   `files.ignore`, or your formatter's ignore file (the old module carried `prettier-ignore`
+   comments, which JSON can't).
+
+4. **Let TypeScript import JSON.** Set `"resolveJsonModule": true` in `tsconfig.json`, with `module`
+   set to `esnext`, `nodenext` or `preserve` (or `moduleResolution: "bundler"`).
+
+5. **Tests that build apps in code** move from `appMigrations` to `appArtifact` in
+   `jazz-tools/testing`: `s.defineApp(after, { artifact: await appArtifact(before, { steps: [{ to: after, migration }], permissions }) })`.
+   A backend (`createJazz`, `startTestJazz`) needs the artifact built with the permissions you give it.
+
+`createJazz` now publishes exactly what the file holds and pins its sessions to the file's
+permissions bundle. It refuses to start when the file is out of date: when your schema isn't the
+file's current version ("out of date with schema.ts"), or when the permissions you pass don't match
+the file's ("out of date with permissions.ts"). Run `npx jazz-tools validate` and commit the file.
+
+React Native: the native relay ABI is now 7, so the JavaScript bundle and the native build must both
+come from alpha.63.
+
 ## Upgrading from alpha.61
 
 - **`createJazz` refuses `{ migrations: "none" }` with a store that keeps its data.** An app

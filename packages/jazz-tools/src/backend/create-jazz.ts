@@ -38,7 +38,7 @@ import {
   encodeStreamRecord,
 } from "../runtime/native-runtime/http-stream-socket.js";
 import { resolveSchemaSource } from "../schema-source.js";
-import { shipsNoMigrations } from "../runtime/client-migrations.js";
+import { shipsNoMigrations } from "../runtime/app-artifact.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import { deployApp } from "../dev/catalogue.js";
 import { DeploymentError } from "../dev/catalogue-api.js";
@@ -3556,8 +3556,8 @@ export function noMigrationsOnPersistentStoreMessage(kind: string): string {
   return (
     `createJazz: defineApp(schema, { migrations: "none" }) ships no schema history, so this ${kind}() store ` +
     "could not follow your first schema change. " +
-    'Add `import { migrations } from "./migrations"` to schema.ts, pass `{ migrations }` to defineApp, ' +
-    "then run `npx jazz-tools migrations create`: it records schema.ts as the app's first version in migrations/index.ts. " +
+    "Run `npx jazz-tools validate`: it writes jazz.app.json beside schema.ts, with schema.ts as the app's first version. " +
+    'Commit it, add `import artifact from "./jazz.app.json" with { type: "json" };` to schema.ts and pass `{ artifact }` to defineApp. ' +
     '"none" is only for memory() stores and tests. See https://jazz.tools/docs/schemas/migrations'
   );
 }

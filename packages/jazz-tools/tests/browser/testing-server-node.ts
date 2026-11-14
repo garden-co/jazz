@@ -6,8 +6,14 @@ import {
   type TestJazz,
 } from "../../src/testing/index.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
-import { shipMigrations, type ClientMigrations } from "../../src/runtime/client-migrations.js";
+import {
+  mergePermissionsIntoWasmSchema,
+  normalizePermissionsForWasm,
+  type CompiledPermissionsMap,
+} from "../../src/schema-permissions.js";
+import { runtimeSchemaJsonReplacer } from "../../src/drivers/schema-wire.js";
+import { deploy, type DeployResult } from "../../src/dev/catalogue.js";
+import { shipArtifact, type AppArtifact } from "../../src/runtime/app-artifact.js";
 import {
   createTransportControl,
   type TransportControl,
@@ -94,6 +100,50 @@ export async function stopJazzServerByUrl(serverUrl: string): Promise<void> {
 }
 
 /**
+ * `deploy` (dev/catalogue.ts) of `schema` with `permissions`, run here in
+ * Node: it hashes schemas with Jazz's Rust hash, through jazz-napi, which a
+ * browser doesn't have.
+ */
+export async function jazzDeploy(options: {
+  appId: string;
+  serverUrl: string;
+  adminSecret: string;
+  schema: WasmSchema;
+  permissions: CompiledPermissionsMap;
+}): Promise<DeployResult> {
+  return deploy(options);
+}
+
+/**
+ * The `jazz.app.json` of an app that went along `versions` (oldest first),
+ * each joined to the next by `migrations[i]` (lenses as `serializeForwardLenses`
+ * makes them), with `permissions` for its last version: written by Jazz's Rust
+ * writer here in Node, since a browser has no jazz-napi.
+ */
+export async function jazzAppArtifact(
+  versions: WasmSchema[],
+  migrations: unknown[][],
+  permissions: CompiledPermissionsMap = {},
+): Promise<AppArtifact> {
+  const { schemaHash, writeAppArtifact } = await import("jazz-napi");
+  const tables = versions.map((version) => mergePermissionsIntoWasmSchema(version, {}));
+  const hashes = tables.map((version) =>
+    schemaHash(JSON.stringify(version, runtimeSchemaJsonReplacer)),
+  );
+  const input = {
+    current: hashes[hashes.length - 1],
+    schemas: tables.map((version) => ({ tables: version })),
+    migrations: migrations.map((forward, i) => ({
+      fromHash: hashes[i],
+      toHash: hashes[i + 1],
+      forward,
+    })),
+    permissions: normalizePermissionsForWasm(permissions),
+  };
+  return JSON.parse(writeAppArtifact(JSON.stringify(input, runtimeSchemaJsonReplacer)));
+}
+
+/**
  * Run the app's backend for what a test just deployed to the core at
  * `coreUrl`: createJazz with that schema and permissions, as the app's
  * deployment does. A later call (a redeploy) restarts it on the same origin.
@@ -103,14 +153,14 @@ export async function jazzAppFront(
   coreUrl: string,
   app: {
     schema: WasmSchema;
-    migrations?: ClientMigrations;
+    artifact?: AppArtifact;
     permissions: CompiledPermissionsMap;
     pageOrigin: string;
   },
 ): Promise<string> {
-  // Restore what the command's serialization dropped: the migrations the
-  // app ships, which its createJazz publishes with the schema.
-  if (app.migrations) shipMigrations(app.schema, app.migrations);
+  // Restore what the command's serialization dropped: the jazz.app.json the
+  // app ships, which its createJazz publishes.
+  if (app.artifact) shipArtifact(app.schema, { artifact: app.artifact });
   const found = await startedFor(coreUrl);
   if (!found) throw new Error(`No Jazz test server is running at ${coreUrl}`);
   const started = found[1];

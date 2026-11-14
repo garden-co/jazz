@@ -1,0 +1,186 @@
+{
+  "bundle": "789c235f8a567672a22c59cd8a4c9edf9c4228da4c22bb205a7707e6992f403d",
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "projects": {
+        "relations": {
+          "todosViaProject": {
+            "relation": "project",
+            "table": "todos",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "todos": {
+        "relations": {
+          "parent": {
+            "column": "parentId",
+            "table": "todos",
+            "type": "Forward"
+          },
+          "project": {
+            "column": "projectId",
+            "table": "projects",
+            "type": "Forward"
+          },
+          "todosViaParent": {
+            "relation": "parent",
+            "table": "todos",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "47de365ee426116c99016cbf3ce31e22e568a18d72dd9c0d22ba1ce3a3c6bc62",
+  "format": 1,
+  "migrations": [],
+  "permissions": {
+    "projects": {
+      "insert": {
+        "with_check": {
+          "type": "True"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      }
+    },
+    "todos": {
+      "delete": {
+        "using": {
+          "column": "owner_id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "insert": {
+        "with_check": {
+          "column": "owner_id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "select": {
+        "using": {
+          "column": "owner_id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "update": {
+        "using": {
+          "column": "owner_id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        },
+        "with_check": {
+          "column": "owner_id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      }
+    }
+  },
+  "schemas": [
+    {
+      "hash": "47de365ee426116c99016cbf3ce31e22e568a18d72dd9c0d22ba1ce3a3c6bc62",
+      "tables": {
+        "projects": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            }
+          ]
+        },
+        "todos": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "done",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "description",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "parentId",
+              "nullable": true,
+              "references": "todos"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "projectId",
+              "nullable": true,
+              "references": "projects"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "owner_id",
+              "nullable": false
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

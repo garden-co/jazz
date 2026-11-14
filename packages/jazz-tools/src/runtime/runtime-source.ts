@@ -1,5 +1,5 @@
 import { mintLocalFirstTokenFromSeed } from "./local-first-token.js";
-import type { ClientMigrations } from "./client-migrations.js";
+import type { AppArtifact } from "./app-artifact.js";
 import type { RemoteLinkState } from "./remote-link-state.js";
 import type { LinkStatus } from "./sync-status.js";
 import type { WasmSchema } from "../drivers/types.js";
@@ -18,8 +18,8 @@ export interface RuntimeTokenOptions {
 export interface RuntimeClientContext<RuntimeConfig extends DbConfig = DbConfig> {
   config: RuntimeConfig;
   schema: WasmSchema;
-  /** The migrations the app defining `schema` ships (see {@link ClientMigrations}). */
-  migrations?: ClientMigrations;
+  /** The `jazz.app.json` the app defining `schema` ships (see {@link AppArtifact}). */
+  artifact?: AppArtifact;
   onAuthFailure: (reason: AuthFailureReason) => void;
   /**
    * Browser-only identity leased by the durable SharedWorker before the

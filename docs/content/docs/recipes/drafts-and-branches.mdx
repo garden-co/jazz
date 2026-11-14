@@ -28,7 +28,7 @@ The smallest useful model adds a normal string column to the table and lists it 
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
+import artifact from "./jazz.app.json" with { type: "json" };
 
 const schema = {
   documents: s
@@ -43,7 +43,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+export const app: s.App<AppSchema> = s.defineApp(schema, { artifact });
 ```
 
 `branch` is still an ordinary application column. `branchBy` additionally tells Jazz to keep each

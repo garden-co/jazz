@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import { schema as s, generateAuthSecret } from "../../src/index.js";
 import { createBrowserTestDb } from "./support.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { deploy } from "./deploy.js";
 import { getJazzServerInfo, startJazzApp, stopJazzServer } from "./testing-server.js";
 
 const app = s.defineApp(

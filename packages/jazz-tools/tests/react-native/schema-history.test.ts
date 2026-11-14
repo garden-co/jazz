@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { schema as s } from "../../src/schema-namespace.js";
 import { migration as m } from "../../src/migration-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
-import { appMigrations, startTestJazz } from "../../src/testing/index.js";
+import { appArtifact, startTestJazz } from "../../src/testing/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
 // A React Native client opens its native store along the migrations the app
@@ -17,18 +17,23 @@ it("reads rows written before the app renamed a column, from a server with schem
     to: after,
     migrate: { notes: { body: m.renameFrom("title") } },
   });
-  const beforeApp = s.defineApp(before, { migrations: await appMigrations(before) });
-  const afterApp = s.defineApp(after, {
-    migrations: await appMigrations(before, { to: after, migration: rename }),
+  const allowBefore = s.definePermissions(
+    s.defineApp(before, { migrations: "none" }),
+    ({ policy }) => [policy.notes.allowRead.always(), policy.notes.allowInsert.always()],
+  );
+  const allowAfter = s.definePermissions(
+    s.defineApp(after, { migrations: "none" }),
+    ({ policy }) => [policy.notes.allowRead.always(), policy.notes.allowInsert.always()],
+  );
+  const beforeApp = s.defineApp(before, {
+    artifact: await appArtifact(before, { permissions: allowBefore }),
   });
-  const allowBefore = s.definePermissions(beforeApp, ({ policy }) => [
-    policy.notes.allowRead.always(),
-    policy.notes.allowInsert.always(),
-  ]);
-  const allowAfter = s.definePermissions(afterApp, ({ policy }) => [
-    policy.notes.allowRead.always(),
-    policy.notes.allowInsert.always(),
-  ]);
+  const afterApp = s.defineApp(after, {
+    artifact: await appArtifact(before, {
+      steps: [{ to: after, migration: rename }],
+      permissions: allowAfter,
+    }),
+  });
   const backend = await startTestJazz({ app: beforeApp, permissions: allowBefore });
   try {
     let written: { id: string; title: string } | undefined;

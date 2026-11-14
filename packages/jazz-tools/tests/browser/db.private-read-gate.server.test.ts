@@ -8,7 +8,7 @@ import {
   type QueryBuilder,
   type RowOf,
 } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { deploy } from "./deploy.js";
 import { openJazzClient } from "../../src/web/create-jazz-client.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { getSubscriptionStore } from "../../src/subscription-store-internal.js";

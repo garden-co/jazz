@@ -27,7 +27,7 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import { hasExternalProvenanceNameAllowance, isComputedColumn } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { ColumnType, WasmSchema } from "./drivers/types.js";
-import { shipMigrations, type ClientMigrations } from "./runtime/client-migrations.js";
+import { shipArtifact, type ShippedApp } from "./runtime/app-artifact.js";
 import {
   magicColumnType,
   type ProvenanceMagicColumn,
@@ -185,8 +185,9 @@ export class DefinedTable<
  *   }),
  * });
  * type AppSchema = s.Schema<typeof schema>;
- * // The module `jazz-tools` generates beside schema.ts.
- * export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+ * // The file `jazz-tools validate` writes beside schema.ts:
+ * // import artifact from "./jazz.app.json" with { type: "json" };
+ * export const app: s.App<AppSchema> = s.defineApp(schema, { artifact });
  * ```
  */
 declare const tableRelationsBrand: unique symbol;
@@ -2155,6 +2156,55 @@ function columnTransformsForSchema(
   return registry;
 }
 
+/**
+ * The columns of each table whose values only TypeScript computes, for
+ * `jazz.app.json`'s codegen section: `s.computed` fields (not stored) and
+ * `.transform` columns (stored, transformed in TypeScript). Other languages
+ * see the stored column of a transform and nothing of a computed field.
+ */
+export type TsOnlyColumns = Record<
+  string,
+  Array<{ type: "Computed" | "Transform"; column: string }>
+>;
+
+export function tsOnlyColumns(definition: SchemaDefinition): TsOnlyColumns {
+  const columns: TsOnlyColumns = {};
+  for (const [tableName, transforms] of Object.entries(
+    columnTransformsForSchema(definition) ?? {},
+  )) {
+    columns[tableName] = Object.entries(transforms ?? {}).map(([column, transform]) => ({
+      type: transform.computed ? "Computed" : "Transform",
+      column,
+    }));
+  }
+  return columns;
+}
+
+/** Where `defineApp` records {@link tsOnlyColumns}, read across copies of jazz-tools. */
+const TS_ONLY = Symbol.for("jazz-tools.tsOnlyColumns");
+/** Where a slice records which app it is of and its tables. */
+const SLICE = Symbol.for("jazz-tools.slice");
+
+function recordTsOnlyColumns(wasmSchema: WasmSchema, definition: SchemaDefinition): void {
+  Object.defineProperty(wasmSchema, TS_ONLY, {
+    value: tsOnlyColumns(definition),
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+/** The TS-only columns of the app `defineApp` made `wasmSchema` for, if it did. */
+export function recordedTsOnlyColumns(wasmSchema: WasmSchema): TsOnlyColumns | undefined {
+  return (wasmSchema as { [TS_ONLY]?: TsOnlyColumns })[TS_ONLY];
+}
+
+/** The tables of `value`, if it is a slice of the app whose schema is `wasmSchema`. */
+export function sliceTables(value: unknown, wasmSchema: WasmSchema): string[] | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const slice = (value as { [SLICE]?: { of: WasmSchema; tables: string[] } })[SLICE];
+  return slice?.of === wasmSchema ? [...slice.tables] : undefined;
+}
+
 export function definitionToSchema<TSchema extends SchemaDefinition>(
   definition: TSchema,
 ): SchemaAst {
@@ -2206,24 +2256,25 @@ export function defineSchema<const TSchema extends SchemaDefinition>(
  *   }),
  * });
  * type AppSchema = s.Schema<typeof schema>;
- * // The module `jazz-tools` generates beside schema.ts.
- * export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+ * // The file `jazz-tools validate` writes beside schema.ts:
+ * // import artifact from "./jazz.app.json" with { type: "json" };
+ * export const app: s.App<AppSchema> = s.defineApp(schema, { artifact });
  * ```
  */
 /**
- * What an app's clients ship besides its schema.
+ * What an app ships besides its schema.
+ *
+ * - `{ artifact }`: the app's `jazz.app.json`, which `jazz-tools validate`
+ *   writes beside schema.ts, even while the app has a single version:
+ *   `import artifact from "./jazz.app.json" with { type: "json" };`. Its
+ *   schema versions and migrations are what clients open along; a backend
+ *   publishes it as its deployment.
+ * - `{ migrations: "none" }`: for an app defined in code that has no other
+ *   versions and runs on a `memory()` store, such as a test's. `createJazz`
+ *   refuses it with `sqlite()`, `vercel()` or `remote()`, which would keep its
+ *   data past its first schema change.
  */
-export interface DefineAppOptions {
-  /**
-   * The app's schema versions and migrations, from the module `jazz-tools`
-   * generates beside schema.ts (`import { migrations } from "./migrations"`),
-   * even while the app has a single version. `"none"` is for an app defined
-   * in code that has no other versions and runs on a `memory()` store, such
-   * as a test's: `createJazz` refuses it with `sqlite()`, `vercel()` or
-   * `remote()`, which would keep its data past its first schema change.
-   */
-  migrations: ClientMigrations | "none";
-}
+export type DefineAppOptions = ShippedApp;
 
 export function defineApp<const TSchema extends Schema<any>>(
   definition: TSchema,
@@ -2243,7 +2294,8 @@ export function defineApp(
   const normalizedDefinition = definition as unknown as SchemaDefinition;
   const schema = definitionToSchema(normalizedDefinition);
   const wasmSchema = schemaToWasm(schema);
-  shipMigrations(wasmSchema, options?.migrations);
+  shipArtifact(wasmSchema, options);
+  recordTsOnlyColumns(wasmSchema, normalizedDefinition);
   return createAppForTables(
     Object.keys(normalizedDefinition),
     wasmSchema,
@@ -2261,7 +2313,7 @@ export function defineApp(
  *
  * @example
  * ```typescript
- * const app = s.defineSliceableApp(schema, { migrations });
+ * const app = s.defineSliceableApp(schema, { artifact });
  * export const orgApp = app.slice("teams", "projects", "members");
  * ```
  */
@@ -2283,7 +2335,8 @@ export function defineSliceableApp(
   const normalizedDefinition = definition as unknown as SchemaDefinition;
   const schema = definitionToSchema(normalizedDefinition);
   const wasmSchema = schemaToWasm(schema);
-  shipMigrations(wasmSchema, options?.migrations);
+  shipArtifact(wasmSchema, options);
+  recordTsOnlyColumns(wasmSchema, normalizedDefinition);
 
   return {
     wasmSchema,
@@ -2299,7 +2352,12 @@ export function defineSliceableApp(
         }
       }
 
-      return createAppForTables(tableNames, wasmSchema, normalizedDefinition);
+      const slice = createAppForTables(tableNames, wasmSchema, normalizedDefinition);
+      Object.defineProperty(slice, SLICE, {
+        value: Object.freeze({ of: wasmSchema, tables: Object.freeze([...tableNames]) }),
+        enumerable: false,
+      });
+      return slice;
     },
   } as SliceableApp<Schema<SchemaDefinition>>;
 }

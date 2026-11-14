@@ -5,7 +5,7 @@ import { definePermissions } from "../permissions/index.js";
 import { PersistedWriteRejectedError } from "./client.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { appMigrations } from "../testing/client-migrations.js";
+import { appArtifact } from "../testing/app-artifact.js";
 import { startTestJazz } from "../testing/index.js";
 
 it("inserts an ordinary parent and child atomically after adding a table", async () => {
@@ -18,19 +18,30 @@ it("inserts an ordinary parent and child atomically after adding a table", async
     ),
   };
   const migration = m.defineMigration({ from: before, to: after, createTables: { notes: true } });
-  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+  const oldPermissions = definePermissions(
+    s.defineApp(before, { migrations: "none" }),
+    ({ policy }) => {
+      policy.projects.allowRead.always();
+      policy.projects.allowInsert.always();
+    },
+  );
+  const newPermissions = definePermissions(
+    s.defineApp(after, { migrations: "none" }),
+    ({ policy }) => {
+      policy.projects.allowRead.always();
+      policy.projects.allowInsert.always();
+      policy.notes.allowRead.always();
+      policy.notes.allowInsert.always();
+    },
+  );
+  const oldApp = s.defineApp(before, {
+    artifact: await appArtifact(before, { permissions: oldPermissions }),
+  });
   const newApp = s.defineApp(after, {
-    migrations: await appMigrations(before, { to: after, migration }),
-  });
-  const oldPermissions = definePermissions(oldApp, ({ policy }) => {
-    policy.projects.allowRead.always();
-    policy.projects.allowInsert.always();
-  });
-  const newPermissions = definePermissions(newApp, ({ policy }) => {
-    policy.projects.allowRead.always();
-    policy.projects.allowInsert.always();
-    policy.notes.allowRead.always();
-    policy.notes.allowInsert.always();
+    artifact: await appArtifact(before, {
+      steps: [{ to: after, migration }],
+      permissions: newPermissions,
+    }),
   });
   const server = await startTestJazz({
     app: oldApp,

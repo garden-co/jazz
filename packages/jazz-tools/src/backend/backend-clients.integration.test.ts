@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { exportJWK, generateKeyPair, SignJWT, type JWTPayload } from "jose";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { defineShippedApp } from "../testing/client-migrations.js";
+import { defineShippedApp } from "../testing/app-artifact.js";
 import { schema as s } from "../index.js";
 import {
   createJazz,
@@ -23,15 +23,18 @@ import {
   encodeWireClientHello,
 } from "../runtime/native-runtime/websocket.js";
 
-const app = await defineShippedApp({
-  todos: s.table({ title: s.string(), owner: s.uuid() }, {}),
-});
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user });
-  policy.todos.allowInsert.where({ owner: session.user });
-  policy.todos.allowUpdate.never();
-  policy.todos.allowDelete.never();
-});
+const { app, permissions } = await defineShippedApp(
+  {
+    todos: s.table({ title: s.string(), owner: s.uuid() }, {}),
+  },
+  (app) =>
+    s.definePermissions(app, ({ policy, session }) => {
+      policy.todos.allowRead.where({ owner: session.user });
+      policy.todos.allowInsert.where({ owner: session.user });
+      policy.todos.allowUpdate.never();
+      policy.todos.allowDelete.never();
+    }),
+);
 
 const AUDIENCE = "https://app.example.test";
 const cleanups: Array<() => Promise<unknown>> = [];

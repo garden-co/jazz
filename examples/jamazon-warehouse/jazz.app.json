@@ -1,0 +1,3974 @@
+{
+  "bundle": "a640c7a879dc3ace9ac71d72a46c1986c1d05a48da7d66010082e046c3042a8b",
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "better_auth_account": {
+        "relations": {
+          "user": {
+            "column": "userId",
+            "table": "better_auth_user",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "better_auth_session": {
+        "relations": {
+          "user": {
+            "column": "userId",
+            "table": "better_auth_user",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "better_auth_user": {
+        "relations": {
+          "better_auth_accountViaUser": {
+            "relation": "user",
+            "table": "better_auth_account",
+            "type": "Reverse"
+          },
+          "better_auth_sessionViaUser": {
+            "relation": "user",
+            "table": "better_auth_session",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "customers": {
+        "relations": {
+          "district": {
+            "column": "district_id",
+            "table": "districts",
+            "type": "Forward"
+          },
+          "ordersViaCustomer": {
+            "relation": "customer",
+            "table": "orders",
+            "type": "Reverse"
+          },
+          "paymentsViaCustomer": {
+            "relation": "customer",
+            "table": "payments",
+            "type": "Reverse"
+          },
+          "warehouse": {
+            "column": "warehouse_id",
+            "table": "warehouses",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "deliveries": {
+        "relations": {
+          "district": {
+            "column": "district_id",
+            "table": "districts",
+            "type": "Forward"
+          },
+          "order": {
+            "column": "order_id",
+            "table": "orders",
+            "type": "Forward"
+          },
+          "warehouse": {
+            "column": "warehouse_id",
+            "table": "warehouses",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "districts": {
+        "relations": {
+          "customersViaDistrict": {
+            "relation": "district",
+            "table": "customers",
+            "type": "Reverse"
+          },
+          "deliveriesViaDistrict": {
+            "relation": "district",
+            "table": "deliveries",
+            "type": "Reverse"
+          },
+          "ordersViaDistrict": {
+            "relation": "district",
+            "table": "orders",
+            "type": "Reverse"
+          },
+          "warehouse": {
+            "column": "warehouse_id",
+            "table": "warehouses",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "items": {
+        "relations": {
+          "order_linesViaItem": {
+            "relation": "item",
+            "table": "order_lines",
+            "type": "Reverse"
+          },
+          "stockViaItem": {
+            "relation": "item",
+            "table": "stock",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "order_lines": {
+        "relations": {
+          "item": {
+            "column": "item_id",
+            "table": "items",
+            "type": "Forward"
+          },
+          "order": {
+            "column": "order_id",
+            "table": "orders",
+            "type": "Forward"
+          },
+          "warehouse": {
+            "column": "warehouse_id",
+            "table": "warehouses",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "orders": {
+        "relations": {
+          "customer": {
+            "column": "customer_id",
+            "table": "customers",
+            "type": "Forward"
+          },
+          "deliveriesViaOrder": {
+            "relation": "order",
+            "table": "deliveries",
+            "type": "Reverse"
+          },
+          "district": {
+            "column": "district_id",
+            "table": "districts",
+            "type": "Forward"
+          },
+          "order_linesViaOrder": {
+            "relation": "order",
+            "table": "order_lines",
+            "type": "Reverse"
+          },
+          "paymentsViaOrder": {
+            "relation": "order",
+            "table": "payments",
+            "type": "Reverse"
+          },
+          "warehouse": {
+            "column": "warehouse_id",
+            "table": "warehouses",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "payments": {
+        "relations": {
+          "customer": {
+            "column": "customer_id",
+            "table": "customers",
+            "type": "Forward"
+          },
+          "order": {
+            "column": "order_id",
+            "table": "orders",
+            "type": "Forward"
+          },
+          "warehouse": {
+            "column": "warehouse_id",
+            "table": "warehouses",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "stock": {
+        "relations": {
+          "item": {
+            "column": "item_id",
+            "table": "items",
+            "type": "Forward"
+          },
+          "warehouse": {
+            "column": "warehouse_id",
+            "table": "warehouses",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "warehouse_operators": {
+        "relations": {
+          "warehouse": {
+            "column": "warehouse_id",
+            "table": "warehouses",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "warehouses": {
+        "relations": {
+          "customersViaWarehouse": {
+            "relation": "warehouse",
+            "table": "customers",
+            "type": "Reverse"
+          },
+          "deliveriesViaWarehouse": {
+            "relation": "warehouse",
+            "table": "deliveries",
+            "type": "Reverse"
+          },
+          "districtsViaWarehouse": {
+            "relation": "warehouse",
+            "table": "districts",
+            "type": "Reverse"
+          },
+          "operatorsViaWarehouse": {
+            "relation": "warehouse",
+            "table": "warehouse_operators",
+            "type": "Reverse"
+          },
+          "order_linesViaWarehouse": {
+            "relation": "warehouse",
+            "table": "order_lines",
+            "type": "Reverse"
+          },
+          "ordersViaWarehouse": {
+            "relation": "warehouse",
+            "table": "orders",
+            "type": "Reverse"
+          },
+          "paymentsViaWarehouse": {
+            "relation": "warehouse",
+            "table": "payments",
+            "type": "Reverse"
+          },
+          "stockViaWarehouse": {
+            "relation": "warehouse",
+            "table": "stock",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "36b03f261e65be21093aa294715b621b753dbc531e003f1487436c1946f174f9",
+  "format": 1,
+  "migrations": [
+    {
+      "forward": [
+        {
+          "operations": [
+            {
+              "column": "issuer",
+              "column_type": {
+                "type": "Text"
+              },
+              "default": {
+                "type": "Text",
+                "value": ""
+              },
+              "type": "Drop"
+            }
+          ],
+          "table": "better_auth_account"
+        }
+      ],
+      "from": "7ce960ad34dc4f77c92e07727acc3113ccf803934671a1fe2f46cf736d2641ce",
+      "to": "36b03f261e65be21093aa294715b621b753dbc531e003f1487436c1946f174f9"
+    }
+  ],
+  "permissions": {
+    "better_auth_account": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_jwks": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_session": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_user": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_verification": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "customers": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "warehouse_id"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "warehouse_operators",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "operation": "Update",
+                  "type": "Inherits",
+                  "via_column": "warehouse_id"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "warehouse_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "warehouse_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "warehouse_operators",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "district_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "districts",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "warehouse_id"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "warehouse_operators",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "operation": "Update",
+                  "type": "Inherits",
+                  "via_column": "warehouse_id"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "warehouse_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "warehouse_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "warehouse_operators",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "district_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "districts",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "deliveries": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "warehouse_id"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "warehouse_operators",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "operation": "Update",
+                  "type": "Inherits",
+                  "via_column": "warehouse_id"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "warehouse_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "warehouse_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "warehouse_operators",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "order_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "district_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "district_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "orders",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "warehouse_id"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "warehouse_operators",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "operation": "Update",
+                  "type": "Inherits",
+                  "via_column": "warehouse_id"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "warehouse_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "warehouse_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "warehouse_operators",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "order_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "district_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "district_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "orders",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "districts": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "warehouse_id"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "warehouse_operators",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "warehouse_id"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "warehouse_operators",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "warehouse_id"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "warehouse_operators",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "warehouse_id"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "warehouse_operators",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      }
+    },
+    "items": {
+      "delete": {
+        "using": {
+          "column": "operator_id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "insert": {
+        "with_check": {
+          "column": "operator_id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "column": "operator_id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        },
+        "with_check": {
+          "column": "operator_id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      }
+    },
+    "order_lines": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "warehouse_id"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "warehouse_operators",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "operation": "Update",
+                  "type": "Inherits",
+                  "via_column": "warehouse_id"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "warehouse_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "warehouse_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "warehouse_operators",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "order_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "orders",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "item_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "item_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "stock",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "warehouse_id"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "warehouse_operators",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "operation": "Update",
+                  "type": "Inherits",
+                  "via_column": "warehouse_id"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "warehouse_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "warehouse_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "warehouse_operators",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "order_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "orders",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "item_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "item_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "stock",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "orders": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "warehouse_id"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "warehouse_operators",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "operation": "Update",
+                  "type": "Inherits",
+                  "via_column": "warehouse_id"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "warehouse_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "warehouse_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "warehouse_operators",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "district_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "districts",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "customer_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "district_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "district_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "customers",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "warehouse_id"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "warehouse_operators",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "operation": "Update",
+                  "type": "Inherits",
+                  "via_column": "warehouse_id"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "warehouse_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "warehouse_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "warehouse_operators",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "district_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "districts",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "customer_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "district_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "district_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "customers",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "payments": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "warehouse_id"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "warehouse_operators",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "operation": "Update",
+                  "type": "Inherits",
+                  "via_column": "warehouse_id"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "warehouse_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "warehouse_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "warehouse_operators",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "customer_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "customers",
+              "type": "Exists"
+            },
+            {
+              "exprs": [
+                {
+                  "column": "order_id",
+                  "type": "IsNull"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "order_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "warehouse_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "warehouse_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "customer_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "customer_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "orders",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "warehouse_id"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "warehouse_operators",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "operation": "Update",
+                  "type": "Inherits",
+                  "via_column": "warehouse_id"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "warehouse_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "warehouse_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "warehouse_operators",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "customer_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "customers",
+              "type": "Exists"
+            },
+            {
+              "exprs": [
+                {
+                  "column": "order_id",
+                  "type": "IsNull"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "order_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "warehouse_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "warehouse_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "customer_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "customer_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "orders",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "stock": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "warehouse_id"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "warehouse_operators",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "operation": "Update",
+                  "type": "Inherits",
+                  "via_column": "warehouse_id"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "warehouse_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "warehouse_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "warehouse_operators",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "condition": {
+                "column": "id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "item_id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              "table": "items",
+              "type": "Exists"
+            },
+            {
+              "exprs": [
+                {
+                  "column": "on_hand",
+                  "op": "Ge",
+                  "type": "Cmp",
+                  "value": {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Integer",
+                      "value": 0
+                    }
+                  }
+                },
+                {
+                  "column": "reorder_level",
+                  "op": "Ge",
+                  "type": "Cmp",
+                  "value": {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Integer",
+                      "value": 0
+                    }
+                  }
+                },
+                {
+                  "column": "reorder_level",
+                  "op": "Le",
+                  "type": "Cmp",
+                  "value": {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Integer",
+                      "value": 100
+                    }
+                  }
+                }
+              ],
+              "type": "And"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "warehouse_id"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "warehouse_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "warehouse_operators",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "operation": "Update",
+                  "type": "Inherits",
+                  "via_column": "warehouse_id"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "warehouse_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "warehouse_id"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "account_id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "user"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "warehouse_operators",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            },
+            {
+              "condition": {
+                "column": "id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "item_id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              "table": "items",
+              "type": "Exists"
+            },
+            {
+              "exprs": [
+                {
+                  "column": "on_hand",
+                  "op": "Ge",
+                  "type": "Cmp",
+                  "value": {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Integer",
+                      "value": 0
+                    }
+                  }
+                },
+                {
+                  "column": "reorder_level",
+                  "op": "Ge",
+                  "type": "Cmp",
+                  "value": {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Integer",
+                      "value": 0
+                    }
+                  }
+                },
+                {
+                  "column": "reorder_level",
+                  "op": "Le",
+                  "type": "Cmp",
+                  "value": {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Integer",
+                      "value": 100
+                    }
+                  }
+                }
+              ],
+              "type": "And"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "warehouse_operators": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "warehouse_id"
+            },
+            {
+              "column": "account_id",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "operation": "Update",
+          "type": "Inherits",
+          "via_column": "warehouse_id"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "warehouses": {
+      "insert": {
+        "with_check": {
+          "column": "operator_id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "column": "operator_id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "column": "operator_id",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "warehouse_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "account_id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "operator_id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "warehouse_operators",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      }
+    }
+  },
+  "schemas": [
+    {
+      "hash": "7ce960ad34dc4f77c92e07727acc3113ccf803934671a1fe2f46cf736d2641ce",
+      "tables": {
+        "better_auth_account": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "issuer",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "accountId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "providerId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "password",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_jwks": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "publicKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "privateKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "alg",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "crv",
+              "nullable": true
+            }
+          ]
+        },
+        "better_auth_session": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "token",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "ipAddress",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "userAgent",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            }
+          ]
+        },
+        "better_auth_user": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "email",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "emailVerified",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "image",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_verification": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "identifier",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "value",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "customers": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "warehouse_id",
+              "nullable": false,
+              "references": "warehouses"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "district_id",
+              "nullable": false,
+              "references": "districts"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "balance_cents",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "warehouse_id",
+            "district_id",
+            "name"
+          ]
+        },
+        "deliveries": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "warehouse_id",
+              "nullable": false,
+              "references": "warehouses"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "district_id",
+              "nullable": false,
+              "references": "districts"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "order_id",
+              "nullable": false,
+              "references": "orders"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "status",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "warehouse_id",
+            "order_id"
+          ]
+        },
+        "districts": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "warehouse_id",
+              "nullable": false,
+              "references": "warehouses"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "next_order_number",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "warehouse_id",
+            "name"
+          ]
+        },
+        "items": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "sku",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "unit_price_cents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "operator_id",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "operator_id"
+          ]
+        },
+        "order_lines": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "warehouse_id",
+              "nullable": false,
+              "references": "warehouses"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "order_id",
+              "nullable": false,
+              "references": "orders"
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "line_number",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "item_id",
+              "nullable": false,
+              "references": "items"
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "quantity",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "amount_cents",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "warehouse_id",
+            "order_id"
+          ]
+        },
+        "orders": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "warehouse_id",
+              "nullable": false,
+              "references": "warehouses"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "district_id",
+              "nullable": false,
+              "references": "districts"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "customer_id",
+              "nullable": false,
+              "references": "customers"
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "order_number",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "total_cents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "idempotency_key",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "reserved_lines",
+              "nullable": true
+            }
+          ],
+          "indexed_columns": [
+            "warehouse_id",
+            "district_id",
+            "customer_id",
+            "status",
+            "order_number",
+            "idempotency_key"
+          ]
+        },
+        "payments": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "warehouse_id",
+              "nullable": false,
+              "references": "warehouses"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "customer_id",
+              "nullable": false,
+              "references": "customers"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "order_id",
+              "nullable": true,
+              "references": "orders"
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "amount_cents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "idempotency_key",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "warehouse_id",
+            "order_id",
+            "idempotency_key"
+          ]
+        },
+        "stock": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "warehouse_id",
+              "nullable": false,
+              "references": "warehouses"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "item_id",
+              "nullable": false,
+              "references": "items"
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "on_hand",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "reorder_level",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "warehouse_id",
+            "item_id",
+            "on_hand"
+          ]
+        },
+        "warehouse_operators": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "warehouse_id",
+              "nullable": false,
+              "references": "warehouses"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "account_id",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "warehouse_id",
+            "account_id"
+          ]
+        },
+        "warehouses": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "region",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "operator_id",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "operator_id"
+          ]
+        }
+      }
+    },
+    {
+      "hash": "36b03f261e65be21093aa294715b621b753dbc531e003f1487436c1946f174f9",
+      "tables": {
+        "better_auth_account": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "accountId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "providerId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "password",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_jwks": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "publicKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "privateKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "alg",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "crv",
+              "nullable": true
+            }
+          ]
+        },
+        "better_auth_session": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "token",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "ipAddress",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "userAgent",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            }
+          ]
+        },
+        "better_auth_user": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "email",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "emailVerified",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "image",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_verification": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "identifier",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "value",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "customers": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "warehouse_id",
+              "nullable": false,
+              "references": "warehouses"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "district_id",
+              "nullable": false,
+              "references": "districts"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "balance_cents",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "warehouse_id",
+            "district_id",
+            "name"
+          ]
+        },
+        "deliveries": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "warehouse_id",
+              "nullable": false,
+              "references": "warehouses"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "district_id",
+              "nullable": false,
+              "references": "districts"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "order_id",
+              "nullable": false,
+              "references": "orders"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "status",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "warehouse_id",
+            "order_id"
+          ]
+        },
+        "districts": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "warehouse_id",
+              "nullable": false,
+              "references": "warehouses"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "next_order_number",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "warehouse_id",
+            "name"
+          ]
+        },
+        "items": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "sku",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "unit_price_cents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "operator_id",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "operator_id"
+          ]
+        },
+        "order_lines": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "warehouse_id",
+              "nullable": false,
+              "references": "warehouses"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "order_id",
+              "nullable": false,
+              "references": "orders"
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "line_number",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "item_id",
+              "nullable": false,
+              "references": "items"
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "quantity",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "amount_cents",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "warehouse_id",
+            "order_id"
+          ]
+        },
+        "orders": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "warehouse_id",
+              "nullable": false,
+              "references": "warehouses"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "district_id",
+              "nullable": false,
+              "references": "districts"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "customer_id",
+              "nullable": false,
+              "references": "customers"
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "order_number",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "total_cents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "idempotency_key",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "reserved_lines",
+              "nullable": true
+            }
+          ],
+          "indexed_columns": [
+            "warehouse_id",
+            "district_id",
+            "customer_id",
+            "status",
+            "order_number",
+            "idempotency_key"
+          ]
+        },
+        "payments": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "warehouse_id",
+              "nullable": false,
+              "references": "warehouses"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "customer_id",
+              "nullable": false,
+              "references": "customers"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "order_id",
+              "nullable": true,
+              "references": "orders"
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "amount_cents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "idempotency_key",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "warehouse_id",
+            "order_id",
+            "idempotency_key"
+          ]
+        },
+        "stock": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "warehouse_id",
+              "nullable": false,
+              "references": "warehouses"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "item_id",
+              "nullable": false,
+              "references": "items"
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "on_hand",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "reorder_level",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "warehouse_id",
+            "item_id",
+            "on_hand"
+          ]
+        },
+        "warehouse_operators": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "warehouse_id",
+              "nullable": false,
+              "references": "warehouses"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "account_id",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "warehouse_id",
+            "account_id"
+          ]
+        },
+        "warehouses": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "region",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "operator_id",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "operator_id"
+          ]
+        }
+      }
+    }
+  ]
+}

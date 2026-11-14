@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defineShippedApp } from "../testing/client-migrations.js";
+import { defineShippedApp } from "../testing/app-artifact.js";
 import { schema as s } from "../index.js";
 import { Db } from "../runtime/db.js";
 import { earlyDb, earlyDbMethodKind, MAX_EARLY_WRITES } from "./early-db.js";
@@ -14,13 +14,16 @@ import { createJazz, memory, sqlite, type Jazz } from "./index.js";
 // `createJazz` at a module's top level: it opens nothing until first use,
 // and a later call for the same store (a hot reload) reuses its core.
 
-const app = await defineShippedApp({ todos: s.table({ title: s.string(), owner: s.uuid() }, {}) });
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user });
-  policy.todos.allowInsert.where({ owner: session.user });
-  policy.todos.allowUpdate.never();
-  policy.todos.allowDelete.never();
-});
+const { app, permissions } = await defineShippedApp(
+  { todos: s.table({ title: s.string(), owner: s.uuid() }, {}) },
+  (app) =>
+    s.definePermissions(app, ({ policy, session }) => {
+      policy.todos.allowRead.where({ owner: session.user });
+      policy.todos.allowInsert.where({ owner: session.user });
+      policy.todos.allowUpdate.never();
+      policy.todos.allowDelete.never();
+    }),
+);
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {

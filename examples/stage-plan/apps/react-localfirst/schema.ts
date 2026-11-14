@@ -1,5 +1,5 @@
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
+import artifact from "./jazz.app.json" with { type: "json" };
 
 /**
  * StagePlan: a crew preparing shows.
@@ -138,7 +138,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+export const app: s.App<AppSchema> = s.defineApp(schema, { artifact });
 
 export type Crew = s.RowOf<typeof app.crew>;
 export type Show = s.RowOf<typeof app.shows>;

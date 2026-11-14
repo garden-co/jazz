@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { JazzServer } from "jazz-napi";
 import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
-import { shippedMigrations } from "../runtime/client-migrations.js";
+import { shippedArtifact, shipsMigrations } from "../runtime/app-artifact.js";
 import { deployApp } from "./catalogue.js";
 
 export { deploy, type DeployOptions } from "./catalogue.js";
@@ -110,15 +110,14 @@ export async function startLocalJazzServer(
   // its current schema, the server would take that as the app's first
   // version, and refuse the app's own deployment and clients opening with
   // its lenses.
-  const shipsMigrations =
-    declared !== undefined && (shippedMigrations(declared.schema)?.migrations.length ?? 0) > 0;
-  if (shipsMigrations && options.trustedWorkload !== undefined) {
+  const shipsHistory = declared !== undefined && shipsMigrations(shippedArtifact(declared.schema));
+  if (shipsHistory && options.trustedWorkload !== undefined) {
     throw new Error(
       "startLocalJazzServer: an app that ships migrations is not supported with trustedWorkload yet; start without schema and deploy the app with its admin secret.",
     );
   }
   const schema =
-    declared === undefined || shipsMigrations
+    declared === undefined || shipsHistory
       ? undefined
       : encodeSchema(mergePermissionsIntoWasmSchema(declared.schema, declared.permissions));
   const appId = options.appId ?? DEFAULT_APP_ID;
@@ -166,7 +165,7 @@ export async function startLocalJazzServer(
     console.log(`[jazz-server] started on ${server.url}`);
   }
 
-  if (shipsMigrations && declared) {
+  if (shipsHistory && declared) {
     try {
       await deployApp({
         appId: server.appId,

@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from "vitest";
 import { generateAuthSecret, schema, ReadTier } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { deploy } from "./deploy.js";
 import { TestCleanup, createBrowserTestDb, uniqueDbName, waitForCondition } from "./support.js";
 import { openBrowserSessionCore as createJazzClient } from "../../src/session/create-jazz-session.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";

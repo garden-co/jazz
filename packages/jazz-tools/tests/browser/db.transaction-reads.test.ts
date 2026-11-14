@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { schema, type Db, type RowOf } from "../../src/index.js";
 import { createBrowserTestDb as createDb, uniqueDbName } from "./support.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { deploy } from "./deploy.js";
 import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
 
 const app = schema.defineApp(

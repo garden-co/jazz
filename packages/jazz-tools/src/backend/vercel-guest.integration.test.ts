@@ -8,7 +8,7 @@ import {
 import { connect, type AddressInfo } from "node:net";
 import { Readable } from "node:stream";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { defineShippedApp } from "../testing/client-migrations.js";
+import { defineShippedApp } from "../testing/app-artifact.js";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { generateSecret, signToken } from "../local-first-auth/index.js";
@@ -28,13 +28,16 @@ vi.mock("ws", () => {
   });
 });
 
-const app = await defineShippedApp({ todos: s.table({ title: s.string(), owner: s.uuid() }, {}) });
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user });
-  policy.todos.allowInsert.where({ owner: session.user });
-  policy.todos.allowUpdate.never();
-  policy.todos.allowDelete.never();
-});
+const { app, permissions } = await defineShippedApp(
+  { todos: s.table({ title: s.string(), owner: s.uuid() }, {}) },
+  (app) =>
+    s.definePermissions(app, ({ policy, session }) => {
+      policy.todos.allowRead.where({ owner: session.user });
+      policy.todos.allowInsert.where({ owner: session.user });
+      policy.todos.allowUpdate.never();
+      policy.todos.allowDelete.never();
+    }),
+);
 
 /** The app's auth: the user named in a header, else a local-first guest. */
 function authenticate(request: Request) {

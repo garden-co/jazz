@@ -43,11 +43,11 @@ In practice, this lets you:
    This creates an initial snapshot of your schema in `migrations/snapshots/`. No migration file is created yet because there is no previous schema to diff against.
 
    If `schema.ts` still passes `{ migrations: "none" }` to `defineApp`, switch it to
-   `{ migrations }` now, as in [Shipping migrations with your app](#shipping-migrations-with-your-app).
+   `{ artifact }` now, as in [Shipping migrations with your app](#shipping-migrations-with-your-app).
 
 2. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
 3. **Validate locally**&hairsp;—&hairsp;run `npx jazz-tools validate` after each schema change. It
-   regenerates `migrations/index.ts` and surfaces any policy diagnostics without publishing. Your
+   regenerates `jazz.app.json` and surfaces any policy diagnostics without publishing. Your
    main backend runs the same checks when it starts, so `validate` is also a fast check before you
    deploy, or in CI.
 4. **Create a migration stub for the updated schema**&hairsp;—&hairsp;run:
@@ -61,8 +61,9 @@ In practice, this lets you:
 
 5. **Review and customise**&hairsp;—&hairsp;the migration, if needed (see below).
 6. **Deploy your main backend**&hairsp;—&hairsp;restart it locally, or deploy it as usual. When it
-   starts, `createJazz` sends the schema, permissions and migrations your code imports to its store
-   as one bundle. There is no separate deploy or push command. If the bundle has no migration path
+   starts, `createJazz` sends the schemas, migrations and permissions in your `jazz.app.json` to
+   its store as one bundle. It refuses to start if the file is out of date with `schema.ts` or with
+   the permissions you pass it: run `validate` and commit the file. There is no separate deploy or push command. If the bundle has no migration path
    from the schema already in the store, the store refuses it with an error naming the missing
    migration: `jazz.ready()` rejects with it, and Jazz's routes answer 503 and log it. In
    development (`NODE_ENV=development`) the 503 carries the error too, so the browser console shows
@@ -84,22 +85,26 @@ The `jazz-tools` CLI only scaffolds and checks migrations (`migrations create`, 
 
 ### Shipping migrations with your app
 
-`validate` and `migrations create` also regenerate `migrations/index.ts`. It bundles every schema version and
-every lens, and your app passes it to `defineApp`. They only write it once `schema.ts` imports it,
-so if your app still has `{ migrations: "none" }`, make this change first; the next `validate`
-creates the file:
+`validate`, `migrations create` and `deploy` also regenerate `jazz.app.json` beside `schema.ts`. It
+holds every schema version, every lens and the current permissions, and your app passes it to
+`defineApp`. If your app still has `{ migrations: "none" }`, make this change; the next `validate`
+creates the file if it's missing:
 
 ```ts title="schema.ts"
-import { migrations } from "./migrations";
+import artifact from "./jazz.app.json" with { type: "json" };
 
-export const app = s.defineApp(schema, { migrations });
+export const app = s.defineApp(schema, { artifact });
 ```
 
-Commit it with your schema. It changes with every migration, so merging two branches that each
-added one always conflicts there: take either side, then run `validate` to regenerate it. Clients use it to read and write data from any version, including
-before they first sync, so a client never has to rename or reshape stored data later. A client
-whose schema version is missing from the bundle refuses to open with an error telling you to
-regenerate it.
+Commit it with your schema, and keep `migrations/snapshots/` and the migration files: they are the
+history the file is built from. `npx jazz-tools validate --check` fails when the committed file
+isn't what a fresh build would write, so CI catches a forgotten regenerate. Since it compares bytes,
+add `jazz.app.json` to your formatter's ignore file (`.prettierignore`, Biome's `files.ignore`):
+a formatter that rewraps it breaks the check. The file changes with
+every migration, so merging two branches that each added one always conflicts there: take either
+side, then run `validate` to regenerate it. Clients use it to read and write data from any version,
+including before they first sync, so a client never has to rename or reshape stored data later.
+A Rust app reads the same file with `jazz::tools::deployment::artifact::load`.
 
 Index changes (`indexOnly`, `compositeIndex`) don't need a migration either: they change how
 rows are found, not the rows, so the backend deploys them as they are.

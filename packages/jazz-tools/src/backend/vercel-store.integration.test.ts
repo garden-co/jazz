@@ -5,7 +5,7 @@ import { createServer as createNetServer, type AddressInfo, type Socket } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defineShippedApp } from "../testing/client-migrations.js";
+import { defineShippedApp } from "../testing/app-artifact.js";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { fetchFor } from "../runtime/in-process-transport.js";
@@ -23,13 +23,16 @@ import {
   type SandboxSdk,
 } from "./vercel-store.js";
 
-const app = await defineShippedApp({ notes: s.table({ text: s.string() }, {}) });
-const permissions = s.definePermissions(app, ({ policy }) => {
-  policy.notes.allowRead.always();
-  policy.notes.allowInsert.always();
-  policy.notes.allowUpdate.never();
-  policy.notes.allowDelete.never();
-});
+const { app, permissions } = await defineShippedApp(
+  { notes: s.table({ text: s.string() }, {}) },
+  (app) =>
+    s.definePermissions(app, ({ policy }) => {
+      policy.notes.allowRead.always();
+      policy.notes.allowInsert.always();
+      policy.notes.allowUpdate.never();
+      policy.notes.allowDelete.never();
+    }),
+);
 
 // The cores earlier versions created by default, production's and one per
 // preview branch (see vercel-namespace.test.ts).

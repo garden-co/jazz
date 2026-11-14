@@ -4,7 +4,7 @@ import { migration as m } from "../migration-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
-import { appMigrations } from "../testing/client-migrations.js";
+import { appArtifact } from "../testing/app-artifact.js";
 import { startTestJazz } from "../testing/index.js";
 
 it("accepts a serializable read of an unchanged table after migration", async () => {
@@ -16,19 +16,34 @@ it("accepts a serializable read of an unchanged table after migration", async ()
     to: after,
     migrate: { notes: { body: m.renameFrom("title") } },
   });
-  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
-  const newApp = s.defineApp(after, {
-    migrations: await appMigrations(before, { to: after, migration }),
-  });
-  const permissions = (app: typeof oldApp | typeof newApp) =>
-    definePermissions(app, ({ policy }) => {
+  const oldPermissions = definePermissions(
+    s.defineApp(before, { migrations: "none" }),
+    ({ policy }) => {
       policy.projects.allowRead.always();
       policy.projects.allowInsert.always();
       policy.notes.allowRead.always();
-    });
+    },
+  );
+  const newPermissions = definePermissions(
+    s.defineApp(after, { migrations: "none" }),
+    ({ policy }) => {
+      policy.projects.allowRead.always();
+      policy.projects.allowInsert.always();
+      policy.notes.allowRead.always();
+    },
+  );
+  const oldApp = s.defineApp(before, {
+    artifact: await appArtifact(before, { permissions: oldPermissions }),
+  });
+  const newApp = s.defineApp(after, {
+    artifact: await appArtifact(before, {
+      steps: [{ to: after, migration }],
+      permissions: newPermissions,
+    }),
+  });
   const server = await startTestJazz({
     app: oldApp,
-    permissions: permissions(oldApp),
+    permissions: oldPermissions,
     coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
@@ -38,7 +53,7 @@ it("accepts a serializable read of an unchanged table after migration", async ()
     const project = await db.insert(oldApp.projects, { title: "Project" }).wait({ tier: "global" });
     await db.shutdown();
     db = undefined;
-    await server.redeploy({ app: newApp, permissions: permissions(newApp), migration });
+    await server.redeploy({ app: newApp, permissions: newPermissions, migration });
     db = await createDb(account);
     const query = newApp.projects.where({ id: project.id });
     expect(await db.one(query, { tier: "remote" })).toEqual(project);
@@ -59,17 +74,28 @@ it("preserves serializable conflict detection after renaming the queried table",
     to: after,
     renameTables: { initiatives: m.renameTableFrom("projects") },
   });
-  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+  const oldPermissions = definePermissions(
+    s.defineApp(before, { migrations: "none" }),
+    ({ policy }) => {
+      policy.projects.allowRead.always();
+      policy.projects.allowInsert.always();
+    },
+  );
+  const newPermissions = definePermissions(
+    s.defineApp(after, { migrations: "none" }),
+    ({ policy }) => {
+      policy.initiatives.allowRead.always();
+      policy.initiatives.allowInsert.always();
+    },
+  );
+  const oldApp = s.defineApp(before, {
+    artifact: await appArtifact(before, { permissions: oldPermissions }),
+  });
   const newApp = s.defineApp(after, {
-    migrations: await appMigrations(before, { to: after, migration }),
-  });
-  const oldPermissions = definePermissions(oldApp, ({ policy }) => {
-    policy.projects.allowRead.always();
-    policy.projects.allowInsert.always();
-  });
-  const newPermissions = definePermissions(newApp, ({ policy }) => {
-    policy.initiatives.allowRead.always();
-    policy.initiatives.allowInsert.always();
+    artifact: await appArtifact(before, {
+      steps: [{ to: after, migration }],
+      permissions: newPermissions,
+    }),
   });
   const server = await startTestJazz({
     app: oldApp,

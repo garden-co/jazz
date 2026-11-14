@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { afterEach, expect, it, vi } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { computeSchemaHash } from "./catalogue.js";
@@ -38,7 +38,7 @@ async function fixture(commonjs = false) {
   await writeFile(join(root, "package.json"), JSON.stringify({ type: "module" }));
   await writeFile(
     join(root, "schema.ts"),
-    `import { schema as s } from ${JSON.stringify(indexPath)}; import { migrations } from "./migrations"; export const app = s.defineApp({notes:s.table({body:s.string()}, {})}, { migrations });`,
+    `import { schema as s } from ${JSON.stringify(indexPath)}; import artifact from "./jazz.app.json" with { type: "json" }; export const app = s.defineApp({notes:s.table({body:s.string()}, {})}, { artifact });`,
   );
   await writeFile(join(root, "permissions.ts"), `export default {};`);
   await writeFile(
@@ -136,63 +136,62 @@ it("keeps concurrent migration bundles isolated across module realms", async () 
     vi.resetModules();
   }
 });
-/** The `migrations` an app imports from its generated module. */
-async function importMigrations(migrationsDir: string) {
-  const module = await import(pathToFileURL(join(migrationsDir, "index.ts")).href);
-  return module.migrations;
+/** The jazz.app.json validate writes beside schema.ts (the migrations directory's parent). */
+async function readArtifact(migrationsDir: string): Promise<{
+  format: number;
+  current: string;
+  bundle: string;
+  schemas: Array<{ hash: string; tables: Record<string, unknown> }>;
+  migrations: Array<{ from: string; to: string; forward: unknown[] }>;
+  codegen: { tables: Record<string, unknown>; slices: Record<string, string[]> };
+}> {
+  return JSON.parse(await readFile(join(migrationsDir, "..", "jazz.app.json"), "utf8"));
 }
 it("writes the deployed schemas and migrations for the app's clients", async () => {
   const { root, migrationsDir } = await fixture();
   await deploy({ ...options, schemaDir: root });
-  const bundle = await importMigrations(migrationsDir);
+  const bundle = await readArtifact(migrationsDir);
+  expect(bundle.format).toBe(1);
   const before = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   const after = s.defineApp({ notes: s.table({ body: s.string() }, {}) }, { migrations: "none" });
   const [fromHash, toHash] = await Promise.all([
     computeSchemaHash(before.wasmSchema),
     computeSchemaHash(after.wasmSchema),
   ]);
-  expect(bundle.schemas.map(({ hash }: { hash: string }) => hash).sort()).toEqual(
-    [fromHash, toHash].sort(),
-  );
+  // Oldest first.
+  expect(bundle.schemas.map(({ hash }) => hash)).toEqual([fromHash, toHash]);
+  expect(bundle.current).toBe(toHash);
   expect(bundle.migrations).toEqual([
     {
-      fromHash,
-      toHash,
+      from: fromHash,
+      to: toHash,
       forward: [
         expect.objectContaining({
           table: "notes",
-          operations: [{ type: "rename", column: "title", value: "body" }],
+          operations: [{ type: "Rename", from: "title", to: "body" }],
         }),
       ],
     },
   ]);
 });
 
-it("writes the migrations module for an app with a single schema version", async () => {
-  const root = await mkdtemp(join(tmpdir(), "jazz-validate-project-"));
-  roots.push(root);
-  await writeFile(join(root, "package.json"), JSON.stringify({ type: "module" }));
-  await writeFile(
-    join(root, "schema.ts"),
-    `import { schema as s } from ${JSON.stringify(indexPath)}; import { migrations } from "./migrations"; export const app = s.defineApp({notes:s.table({title:s.string()}, {})}, { migrations });`,
-  );
-  await writeFile(join(root, "permissions.ts"), `export default {};`);
+it("writes jazz.app.json for an app with a single schema version", async () => {
+  const root = await singleVersionProject();
   await validateProject({ schemaDir: root });
   const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
-  expect(await importMigrations(join(root, "migrations"))).toEqual({
-    schemas: [
-      { hash: await computeSchemaHash(app.wasmSchema), schema: { tables: app.wasmSchema } },
-    ],
-    migrations: [],
-  });
-  // Unchanged, validating again leaves the module as it was.
-  const path = join(root, "migrations", "index.ts");
-  const written = await readFile(path, "utf8");
+  const written = await readArtifact(join(root, "migrations"));
+  const hash = await computeSchemaHash(app.wasmSchema);
+  expect(written).toMatchObject({ format: 1, current: hash, migrations: [] });
+  expect(written.schemas.map((schema) => schema.hash)).toEqual([hash]);
+  // Unchanged, validating again leaves the file as it was.
+  const path = join(root, "jazz.app.json");
+  const text = await readFile(path, "utf8");
   await validateProject({ schemaDir: root });
-  expect(await readFile(path, "utf8")).toBe(written);
+  expect(await readFile(path, "utf8")).toBe(text);
+  await validateProject({ schemaDir: root, check: true });
 });
 
-it("leaves an app that does not import its migrations module without one", async () => {
+it("writes jazz.app.json for an app that does not import it", async () => {
   const root = await mkdtemp(join(tmpdir(), "jazz-validate-project-"));
   roots.push(root);
   await writeFile(join(root, "package.json"), JSON.stringify({ type: "module" }));
@@ -202,7 +201,130 @@ it("leaves an app that does not import its migrations module without one", async
   );
   await writeFile(join(root, "permissions.ts"), `export default {};`);
   await validateProject({ schemaDir: root });
+  expect(existsSync(join(root, "jazz.app.json"))).toBe(true);
   expect(existsSync(join(root, "migrations", "index.ts"))).toBe(false);
+});
+
+/** A project with one schema version, whose schema.ts ships its jazz.app.json. */
+async function singleVersionProject(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "jazz-validate-project-"));
+  roots.push(root);
+  await writeFile(join(root, "package.json"), JSON.stringify({ type: "module" }));
+  await writeFile(
+    join(root, "schema.ts"),
+    `import { schema as s } from ${JSON.stringify(indexPath)}; import artifact from "./jazz.app.json" with { type: "json" }; export const app = s.defineApp({notes:s.table({title:s.string()}, {})}, { artifact });`,
+  );
+  await writeFile(join(root, "permissions.ts"), `export default {};`);
+  return root;
+}
+
+it("validate --check refuses a missing or stale jazz.app.json, and writes nothing", async () => {
+  const root = await singleVersionProject();
+  const path = join(root, "jazz.app.json");
+  await expect(validateProject({ schemaDir: root, check: true })).rejects.toThrow(
+    "jazz.app.json is missing. Run `jazz-tools validate` to write it, and commit it.",
+  );
+  expect(existsSync(path)).toBe(false);
+  await validateProject({ schemaDir: root });
+  const text = await readFile(path, "utf8");
+  // Byte for byte: even reformatting the same JSON is stale.
+  await writeFile(path, JSON.stringify(JSON.parse(text)));
+  await expect(validateProject({ schemaDir: root, check: true })).rejects.toThrow(
+    "jazz.app.json is not what schema.ts, permissions.ts and the migrations make",
+  );
+  // A permissions change makes the committed file stale too.
+  await writeFile(path, text);
+  await validateProject({ schemaDir: root, check: true });
+  await writeFile(
+    join(root, "permissions.ts"),
+    `export default { notes: { select: { using: { type: "True" } } } };`,
+  );
+  await expect(validateProject({ schemaDir: root, check: true })).rejects.toThrow(
+    "is not what schema.ts, permissions.ts and the migrations make",
+  );
+  expect(await readFile(path, "utf8")).toBe(text);
+});
+
+it("removes the migrations/index.ts an older jazz-tools generated; --check refuses it", async () => {
+  const root = await singleVersionProject();
+  const legacy = join(root, "migrations", "index.ts");
+  await mkdir(join(root, "migrations"), { recursive: true });
+  const generated = [
+    "// Generated by jazz-tools from schema.ts and its migrations. Do not edit:",
+    "// `jazz-tools validate` and `jazz-tools migrations create` rewrite it.",
+    'import type { ClientMigrations } from "jazz-tools";',
+    'export const migrations: ClientMigrations = {"schemas":[],"migrations":[]};',
+    "",
+  ].join("\n");
+  await writeFile(legacy, generated);
+  // Written first, so --check sees the generated module and not a missing file.
+  await validateProject({ schemaDir: root });
+  expect(existsSync(legacy)).toBe(false);
+  await writeFile(legacy, generated);
+  await expect(validateProject({ schemaDir: root, check: true })).rejects.toThrow(
+    "was generated by jazz-tools before alpha.63",
+  );
+  const { warnings } = await validateProject({ schemaDir: root });
+  expect(existsSync(legacy)).toBe(false);
+  expect(warnings).toContain(
+    "Removed migrations/index.ts, which jazz-tools generated before alpha.63: jazz.app.json replaces it.",
+  );
+  await validateProject({ schemaDir: root, check: true });
+});
+
+it("keeps a hand-written migrations/index.ts", async () => {
+  const root = await singleVersionProject();
+  const own = join(root, "migrations", "index.ts");
+  await mkdir(join(root, "migrations"), { recursive: true });
+  await writeFile(own, "export const mine = 1;\n");
+  await validateProject({ schemaDir: root });
+  expect(await readFile(own, "utf8")).toBe("export const mine = 1;\n");
+});
+
+it("records relations, TypeScript-only columns and exported slices in codegen", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jazz-validate-codegen-"));
+  roots.push(root);
+  await writeFile(join(root, "package.json"), JSON.stringify({ type: "module" }));
+  await writeFile(
+    join(root, "schema.ts"),
+    `import { schema as s } from ${JSON.stringify(indexPath)};
+import artifact from "./jazz.app.json" with { type: "json" };
+const schema = {
+  projects: s.table({ name: s.string() }, {
+    todos: s.reverse("todos", "project"),
+    shout: s.computed(({ name }) => name.toUpperCase()),
+  }),
+  todos: s.table(
+    {
+      title: s.string().transform({ from: (title) => title.trim(), to: (title) => title }),
+      projectId: s.uuid(),
+    },
+    { project: s.rel("projects", "projectId") },
+  ),
+  notes: s.table({ body: s.string() }, {}),
+};
+const app = s.defineSliceableApp(schema, { artifact });
+export const planning = app.slice("projects", "todos");
+export const notesOnly = app.slice("notes");
+export { app };
+`,
+  );
+  await writeFile(join(root, "permissions.ts"), `export default {};`);
+  await validateProject({ schemaDir: root });
+  const { codegen } = await readArtifact(join(root, "migrations"));
+  expect(codegen).toEqual({
+    tables: {
+      projects: {
+        relations: { todos: { type: "Reverse", table: "todos", relation: "project" } },
+        ts_only: [{ type: "Computed", column: "shout" }],
+      },
+      todos: {
+        relations: { project: { type: "Forward", table: "projects", column: "projectId" } },
+        ts_only: [{ type: "Transform", column: "title" }],
+      },
+    },
+    slices: { notesOnly: ["notes"], planning: ["projects", "todos"] },
+  });
 });
 
 /** The fixture as an alpha.59 project left it: its snapshot and migration
@@ -256,7 +378,7 @@ it("moves migrations written with pre-SHA-256 schema hashes to legacy/", async (
       warning.includes(`Renamed snapshot ${legacySnapshot} to ${snapshot}`),
     ),
   ).toBe(true);
-  expect((await importMigrations(migrationsDir)).migrations).toEqual([]);
+  expect((await readArtifact(migrationsDir)).migrations).toEqual([]);
   // Validating again finds nothing more to move (the retirement's
   // `migrations create` reminder comes with the moves).
   expect((await validateProject({ schemaDir: root })).warnings).toEqual(
@@ -312,7 +434,7 @@ it("keeps a current migration beside a legacy one", async () => {
   await validateProject({ schemaDir: root });
   expect(existsSync(file)).toBe(true);
   expect(existsSync(join(migrationsDir, "legacy", legacyName))).toBe(true);
-  expect((await importMigrations(migrationsDir)).migrations).toHaveLength(1);
+  expect((await readArtifact(migrationsDir)).migrations).toHaveLength(1);
 });
 
 it("moves a migration whose only stale end is its target", async () => {
@@ -372,9 +494,7 @@ it("refuses to overwrite a different file in legacy/, and drops an identical cop
 it("checks without moving or renaming anything, failing while legacy files remain", async () => {
   const { root, migrationsDir, legacyName, legacySnapshot, snapshot, snapshots } =
     await legacyFixture();
-  // Loading schema.ts writes an empty migrations module if there is none.
-  const listing = async () =>
-    (await readdir(migrationsDir, { recursive: true })).filter((n) => n !== "index.ts").sort();
+  const listing = async () => (await readdir(migrationsDir, { recursive: true })).sort();
   const before = await listing();
   await expect(validateProject({ schemaDir: root, check: true })).rejects.toThrow(
     `move ${legacyName} to legacy/; rename snapshot ${legacySnapshot} to ${snapshot}`,
@@ -432,7 +552,7 @@ it("moves the snapshots only legacy migrations led from to legacy/snapshots/", a
   expect(warnings.some((warning) => warning.startsWith(`Moved snapshot ${legacySnapshot}`))).toBe(
     true,
   );
-  expect((await importMigrations(migrationsDir)).schemas).toHaveLength(1);
+  expect((await readArtifact(migrationsDir)).schemas).toHaveLength(1);
   expect(warnings.find((warning) => warning.startsWith(`Moved ${legacyName}`))).toContain(
     "The app runs on schema.ts as it is",
   );

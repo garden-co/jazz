@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from "vitest";
-import { deploy } from "../../src/dev/catalogue.js";
+import { deploy } from "./deploy.js";
 import { createJazzClient } from "../../src/session/create-jazz-session.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
 import { isThinDb } from "../../src/runtime/local-first-upgrade.js";

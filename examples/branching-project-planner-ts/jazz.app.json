@@ -1,0 +1,287 @@
+{
+  "bundle": "8bfbdc0eebb205a43de72d0a0dd627e01f1e561428adaa3aa77a858868991985",
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "scenarios": {
+        "relations": {
+          "base_scenario": {
+            "column": "base_scenario_id",
+            "table": "scenarios",
+            "type": "Forward"
+          },
+          "scenariosViaBase_scenario": {
+            "relation": "base_scenario",
+            "table": "scenarios",
+            "type": "Reverse"
+          },
+          "tasksViaScenario": {
+            "relation": "scenario",
+            "table": "tasks",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "tasks": {
+        "relations": {
+          "scenario": {
+            "column": "scenario_id",
+            "table": "scenarios",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "abdfc2124f3969743e0af7adecced972d005a1de444bb94f37592ff4b5740f6d",
+  "format": 1,
+  "migrations": [],
+  "permissions": {
+    "scenarios": {
+      "delete": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "True"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "True"
+        },
+        "with_check": {
+          "type": "True"
+        }
+      }
+    },
+    "tasks": {
+      "delete": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "scenario_id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "status",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "type": "Literal",
+                  "value": {
+                    "type": "Text",
+                    "value": "open"
+                  }
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "scenarios",
+          "type": "Exists"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "scenario_id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "status",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "type": "Literal",
+                  "value": {
+                    "type": "Text",
+                    "value": "open"
+                  }
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "scenarios",
+          "type": "Exists"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "scenario_id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "status",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "type": "Literal",
+                  "value": {
+                    "type": "Text",
+                    "value": "open"
+                  }
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "scenarios",
+          "type": "Exists"
+        },
+        "with_check": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "scenario_id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "status",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "type": "Literal",
+                  "value": {
+                    "type": "Text",
+                    "value": "open"
+                  }
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "scenarios",
+          "type": "Exists"
+        }
+      }
+    }
+  },
+  "schemas": [
+    {
+      "hash": "abdfc2124f3969743e0af7adecced972d005a1de444bb94f37592ff4b5740f6d",
+      "tables": {
+        "scenarios": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "base_scenario_id",
+              "nullable": true,
+              "references": "scenarios"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "base_snapshot_ref",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "open",
+                  "approved",
+                  "archived"
+                ]
+              },
+              "name": "status",
+              "nullable": false
+            }
+          ]
+        },
+        "tasks": {
+          "branch_by": [
+            "scenario_id"
+          ],
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "scenario_id",
+              "nullable": false,
+              "references": "scenarios"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "estimate",
+              "nullable": false
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

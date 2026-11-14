@@ -1,0 +1,62 @@
+{
+  "bundle": "8eb1d8bed42b75775b9d75a24d0ddc077f6ec4f4027d013139697697b634a344",
+  "codegen": {
+    "slices": {},
+    "tables": {}
+  },
+  "current": "0a458c0de89c376d9c4ba504f853340705ffe05de9233494417f11c61ad26c3f",
+  "format": 1,
+  "migrations": [],
+  "permissions": {
+    "todos": {
+      "delete": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "True"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "True"
+        },
+        "with_check": {
+          "type": "True"
+        }
+      }
+    }
+  },
+  "schemas": [
+    {
+      "hash": "0a458c0de89c376d9c4ba504f853340705ffe05de9233494417f11c61ad26c3f",
+      "tables": {
+        "todos": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "done",
+              "nullable": false
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

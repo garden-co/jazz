@@ -9,8 +9,9 @@ import { hashPassword } from "better-auth/crypto";
 import { schema as s } from "../schema-namespace.js";
 import { createJazz, sqlite, type Jazz } from "../backend/create-jazz.js";
 import { jazzAdapter } from "./index.js";
-import { structuralSchemaHash } from "../dev/schema-utils.js";
-import type { ClientMigrations } from "../runtime/client-migrations.js";
+import { computeSchemaHash } from "../schema-hash.js";
+import { loadDefinedMigration } from "../dev/catalogue-project.js";
+import { appArtifact } from "../testing/app-artifact.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { legacyDefinition, currentDefinition } from "./fixtures/issuer-upgrade-schema.js";
 
@@ -19,36 +20,17 @@ const directory = join(root, "examples/auth-betterauth-chat/migrations");
 const predecessor = "8acd8a85eef5015347cfc6ee0024ea14148aebb59869345c4d53a8e390bc6b88";
 const current = "c95f3dba180615f83246729f0dceceab4b384ad00a92f30c59964f725524d822";
 
-function loadBundle(): ClientMigrations {
-  const source = readFileSync(join(directory, "index.ts"), "utf8");
-  return JSON.parse(
-    source.slice(
-      source.indexOf("{", source.indexOf("export const migrations")),
-      source.lastIndexOf(";"),
-    ),
-  );
-}
-
 it("upgrades an existing issuer-era account through createJazz and signs in after SQLite reopening", async () => {
-  const bundle = loadBundle();
   const oldSchema: WasmSchema = JSON.parse(
     readFileSync(join(directory, "snapshots", predecessor.slice(0, 12) + ".json"), "utf8"),
   );
   const newSchema: WasmSchema = JSON.parse(
     readFileSync(join(directory, "snapshots", current.slice(0, 12) + ".json"), "utf8"),
   );
-  expect(structuralSchemaHash(oldSchema)).toBe(predecessor);
-  expect(structuralSchemaHash(newSchema)).toBe(current);
-  const oldApp = s.defineApp(legacyDefinition, {
-    migrations: {
-      schemas: bundle.schemas.filter((version) => version.hash === predecessor),
-      migrations: [],
-    },
-  });
-  const newApp = s.defineApp(currentDefinition, { migrations: bundle });
-  expect(structuralSchemaHash(oldApp.wasmSchema)).toBe(predecessor);
-  expect(structuralSchemaHash(newApp.wasmSchema)).toBe(current);
-  const permissions = s.definePermissions(oldApp, ({ policy }) => {
+  expect(await computeSchemaHash(oldSchema)).toBe(predecessor);
+  expect(await computeSchemaHash(newSchema)).toBe(current);
+  const draft = s.defineApp(legacyDefinition, { migrations: "none" });
+  const permissions = s.definePermissions(draft, ({ policy }) => {
     for (const name of [
       "better_auth_user",
       "better_auth_session",
@@ -63,6 +45,19 @@ it("upgrades an existing issuer-era account through createJazz and signs in afte
       policy[name].allowDelete.never();
     }
   });
+  // The example's own history: its snapshots and its issuer-removal migration.
+  const migration = await loadDefinedMigration(join(directory, "remove-better-auth-issuer.ts"));
+  const oldApp = s.defineApp(legacyDefinition, {
+    artifact: await appArtifact(oldSchema, { permissions }),
+  });
+  const newApp = s.defineApp(currentDefinition, {
+    artifact: await appArtifact(oldSchema, {
+      steps: [{ to: newSchema, migration }],
+      permissions,
+    }),
+  });
+  expect(await computeSchemaHash(oldApp.wasmSchema)).toBe(predecessor);
+  expect(await computeSchemaHash(newApp.wasmSchema)).toBe(current);
   const path = await mkdtemp(join(tmpdir(), "jazz-better-auth-upgrade-"));
   const store = sqlite({ path });
   let jazz: Jazz | undefined;

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { anyOf, definePermissions } from "../permissions/index.js";
 import { schema as s, migration as m } from "../index.js";
-import { appMigrations } from "./client-migrations.js";
+import { appArtifact } from "./app-artifact.js";
 import {
   createPolicyTestApp,
   deploy,
@@ -430,12 +430,18 @@ describe("createPolicyTestApp", () => {
       to: notesV2,
       migrate: { notes: { body: m.add.string({ default: null }) } },
     });
+    const permissions = definePermissions(
+      s.defineApp(notesV2, { migrations: "none" }),
+      ({ policy, session }) => {
+        policy.notes.allowRead.where({ owner_id: session.user });
+        policy.notes.allowInsert.where({ owner_id: session.user });
+      },
+    );
     const app = s.defineApp(notesV2, {
-      migrations: await appMigrations(notesV1, { to: notesV2, migration }),
-    });
-    const permissions = definePermissions(app, ({ policy, session }) => {
-      policy.notes.allowRead.where({ owner_id: session.user });
-      policy.notes.allowInsert.where({ owner_id: session.user });
+      artifact: await appArtifact(notesV1, {
+        steps: [{ to: notesV2, migration }],
+        permissions: permissions,
+      }),
     });
     const policyTestApp = await createPolicyTestApp(app, permissions, expect);
 
@@ -475,12 +481,18 @@ describe("createPolicyTestApp", () => {
       to: after,
       createTables: { tags: true },
     });
+    const permissions = definePermissions(
+      s.defineApp(after, { migrations: "none" }),
+      ({ policy }) => {
+        policy.notes.allowRead.always();
+        policy.tags.allowRead.always();
+      },
+    );
     const app = s.defineApp(after, {
-      migrations: await appMigrations(before, { to: after, migration }),
-    });
-    const permissions = definePermissions(app, ({ policy }) => {
-      policy.notes.allowRead.always();
-      policy.tags.allowRead.always();
+      artifact: await appArtifact(before, {
+        steps: [{ to: after, migration }],
+        permissions: permissions,
+      }),
     });
     const policyTestApp = await createPolicyTestApp(app, permissions, expect);
 
@@ -972,12 +984,18 @@ describe("startLocalJazzServer with an app that ships a migration", () => {
       to: notesV2,
       migrate: { notes: { body: m.add.string({ default: null }) } },
     });
+    const permissions = definePermissions(
+      s.defineApp(notesV2, { migrations: "none" }),
+      ({ policy }) => {
+        policy.notes.allowRead.always();
+        policy.notes.allowInsert.always();
+      },
+    );
     const app = s.defineApp(notesV2, {
-      migrations: await appMigrations(notesV1, { to: notesV2, migration }),
-    });
-    const permissions = definePermissions(app, ({ policy }) => {
-      policy.notes.allowRead.always();
-      policy.notes.allowInsert.always();
+      artifact: await appArtifact(notesV1, {
+        steps: [{ to: notesV2, migration }],
+        permissions: permissions,
+      }),
     });
     const server = await startLocalJazzServer({ inMemory: true, schema: app, permissions });
     const { createJazz, remote } = await import("../backend/index.js");
@@ -1010,7 +1028,9 @@ describe("startLocalJazzServer with an app that ships a migration", () => {
       to: v2,
       migrate: { notes: { body: m.add.string({ default: null }) } },
     });
-    const app = s.defineApp(v2, { migrations: await appMigrations(v1, { to: v2, migration }) });
+    const app = s.defineApp(v2, {
+      artifact: await appArtifact(v1, { steps: [{ to: v2, migration }] }),
+    });
     await expect(
       startLocalJazzServer({
         inMemory: true,

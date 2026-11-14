@@ -1,0 +1,2303 @@
+{
+  "bundle": "1510a226ded18fedf8466c6e139f94231c238d584fd8994c0a9e7a43b64f0a17",
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "better_auth_account": {
+        "relations": {
+          "user": {
+            "column": "userId",
+            "table": "better_auth_user",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "better_auth_session": {
+        "relations": {
+          "user": {
+            "column": "userId",
+            "table": "better_auth_user",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "better_auth_user": {
+        "relations": {
+          "better_auth_accountViaUser": {
+            "relation": "user",
+            "table": "better_auth_account",
+            "type": "Reverse"
+          },
+          "better_auth_sessionViaUser": {
+            "relation": "user",
+            "table": "better_auth_session",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "cartLines": {
+        "relations": {
+          "cart": {
+            "column": "cartId",
+            "table": "carts",
+            "type": "Forward"
+          },
+          "product": {
+            "column": "productId",
+            "table": "products",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "carts": {
+        "relations": {
+          "cartLinesViaCart": {
+            "relation": "cart",
+            "table": "cartLines",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "categories": {
+        "relations": {
+          "productsViaCategory": {
+            "relation": "category",
+            "table": "products",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "orderEvents": {
+        "relations": {
+          "order": {
+            "column": "orderId",
+            "table": "orders",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "orderLines": {
+        "relations": {
+          "order": {
+            "column": "orderId",
+            "table": "orders",
+            "type": "Forward"
+          },
+          "product": {
+            "column": "productId",
+            "table": "products",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "orders": {
+        "relations": {
+          "orderEventsViaOrder": {
+            "relation": "order",
+            "table": "orderEvents",
+            "type": "Reverse"
+          },
+          "orderLinesViaOrder": {
+            "relation": "order",
+            "table": "orderLines",
+            "type": "Reverse"
+          },
+          "paymentsViaOrder": {
+            "relation": "order",
+            "table": "payments",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "payments": {
+        "relations": {
+          "order": {
+            "column": "orderId",
+            "table": "orders",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "products": {
+        "relations": {
+          "cartLinesViaProduct": {
+            "relation": "product",
+            "table": "cartLines",
+            "type": "Reverse"
+          },
+          "category": {
+            "column": "categoryId",
+            "table": "categories",
+            "type": "Forward"
+          },
+          "orderLinesViaProduct": {
+            "relation": "product",
+            "table": "orderLines",
+            "type": "Reverse"
+          },
+          "stockViaProduct": {
+            "relation": "product",
+            "table": "stock",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "stock": {
+        "relations": {
+          "product": {
+            "column": "productId",
+            "table": "products",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "f7318f0be5fcbf2065324e4f545c96323edfa4e007186fb89eabff519ca370d8",
+  "format": 1,
+  "migrations": [
+    {
+      "forward": [
+        {
+          "operations": [
+            {
+              "column": "issuer",
+              "column_type": {
+                "type": "Text"
+              },
+              "default": {
+                "type": "Text",
+                "value": ""
+              },
+              "type": "Drop"
+            }
+          ],
+          "table": "better_auth_account"
+        }
+      ],
+      "from": "5806d5c6e98c33ae41c6ba5b3da6cca0ca72d69467521c5381c1babe56adf6b0",
+      "to": "f7318f0be5fcbf2065324e4f545c96323edfa4e007186fb89eabff519ca370d8"
+    }
+  ],
+  "permissions": {
+    "better_auth_account": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_jwks": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_session": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_user": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_verification": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "cartLines": {
+      "delete": {
+        "using": {
+          "operation": "Update",
+          "type": "Inherits",
+          "via_column": "cartId"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "cartId"
+            },
+            {
+              "exprs": [
+                {
+                  "column": "quantity",
+                  "op": "Ge",
+                  "type": "Cmp",
+                  "value": {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Integer",
+                      "value": 0
+                    }
+                  }
+                },
+                {
+                  "column": "quantity",
+                  "op": "Le",
+                  "type": "Cmp",
+                  "value": {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Integer",
+                      "value": 20
+                    }
+                  }
+                }
+              ],
+              "type": "And"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "cartId"
+        }
+      },
+      "update": {
+        "using": {
+          "operation": "Update",
+          "type": "Inherits",
+          "via_column": "cartId"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "cartId"
+            },
+            {
+              "exprs": [
+                {
+                  "column": "quantity",
+                  "op": "Ge",
+                  "type": "Cmp",
+                  "value": {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Integer",
+                      "value": 0
+                    }
+                  }
+                },
+                {
+                  "column": "quantity",
+                  "op": "Le",
+                  "type": "Cmp",
+                  "value": {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Integer",
+                      "value": 20
+                    }
+                  }
+                }
+              ],
+              "type": "And"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "carts": {
+      "delete": {
+        "using": {
+          "column": "shopper",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "insert": {
+        "with_check": {
+          "column": "shopper",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "select": {
+        "using": {
+          "column": "shopper",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "update": {
+        "using": {
+          "column": "shopper",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        },
+        "with_check": {
+          "column": "shopper",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      }
+    },
+    "categories": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "orderEvents": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "orderId"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "orderLines": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "orderId"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "orders": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "column": "shopper",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "payments": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "orderId"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "products": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "stock": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    }
+  },
+  "schemas": [
+    {
+      "hash": "5806d5c6e98c33ae41c6ba5b3da6cca0ca72d69467521c5381c1babe56adf6b0",
+      "tables": {
+        "better_auth_account": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "issuer",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "accountId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "providerId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "password",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_jwks": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "publicKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "privateKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "alg",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "crv",
+              "nullable": true
+            }
+          ]
+        },
+        "better_auth_session": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "token",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "ipAddress",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "userAgent",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            }
+          ]
+        },
+        "better_auth_user": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "email",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "emailVerified",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "image",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_verification": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "identifier",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "value",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "cartLines": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "cartId",
+              "nullable": false,
+              "references": "carts"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "productId",
+              "nullable": false,
+              "references": "products"
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "quantity",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "cartId"
+          ]
+        },
+        "carts": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "shopper",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "standard",
+                  "express"
+                ]
+              },
+              "default": {
+                "type": "Text",
+                "value": "standard"
+              },
+              "name": "shippingMethod",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipName",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipLine1",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipLine2",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipCity",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipPostcode",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipCountry",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "checkoutKey",
+              "nullable": true
+            }
+          ],
+          "indexed_columns": [
+            "shopper"
+          ]
+        },
+        "categories": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "slug",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "blurb",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "position",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "slug",
+            "position"
+          ]
+        },
+        "orderEvents": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "orderId",
+              "nullable": false,
+              "references": "orders"
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "placed",
+                  "paid",
+                  "payment_failed",
+                  "shipped"
+                ]
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "note",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "at",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "orderId",
+            "at"
+          ]
+        },
+        "orderLines": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "orderId",
+              "nullable": false,
+              "references": "orders"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "productId",
+              "nullable": false,
+              "references": "products"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "productName",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "unitPriceCents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "quantity",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "orderId"
+          ]
+        },
+        "orders": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "shopper",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "code",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "placed",
+                  "paid",
+                  "payment_failed",
+                  "shipped"
+                ]
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "idempotencyKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "subtotalCents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "shippingCents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "totalCents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "standard",
+                  "express"
+                ]
+              },
+              "name": "shippingMethod",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipName",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipLine1",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipLine2",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipCity",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipPostcode",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipCountry",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "placedAt",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "shopper",
+            "status",
+            "placedAt"
+          ]
+        },
+        "payments": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "orderId",
+              "nullable": false,
+              "references": "orders"
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "sandbox",
+                  "stripe"
+                ]
+              },
+              "name": "provider",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "providerRef",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "clientSecret",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "requires_payment",
+                  "succeeded",
+                  "failed"
+                ]
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "amountCents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "failureReason",
+              "nullable": true
+            }
+          ],
+          "indexed_columns": [
+            "orderId"
+          ]
+        },
+        "products": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "sku",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "slug",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "brand",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "categoryId",
+              "nullable": false,
+              "references": "categories"
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "priceCents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "summary",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "description",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Json"
+              },
+              "name": "specs",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "gray",
+                  "blue",
+                  "cyan",
+                  "green",
+                  "orange",
+                  "pink",
+                  "purple",
+                  "red",
+                  "teal",
+                  "yellow"
+                ]
+              },
+              "name": "hue",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "guitar",
+                  "bass",
+                  "keys",
+                  "synth",
+                  "drum",
+                  "cymbal",
+                  "mic",
+                  "headphones",
+                  "amp",
+                  "pedal",
+                  "cable",
+                  "strings",
+                  "picks"
+                ]
+              },
+              "name": "art",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "searchText",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "position",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "slug",
+            "categoryId",
+            "position"
+          ]
+        },
+        "stock": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "productId",
+              "nullable": false,
+              "references": "products"
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "onHand",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "productId"
+          ]
+        }
+      }
+    },
+    {
+      "hash": "f7318f0be5fcbf2065324e4f545c96323edfa4e007186fb89eabff519ca370d8",
+      "tables": {
+        "better_auth_account": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "accountId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "providerId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "password",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_jwks": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "publicKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "privateKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "alg",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "crv",
+              "nullable": true
+            }
+          ]
+        },
+        "better_auth_session": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "token",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "ipAddress",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "userAgent",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            }
+          ]
+        },
+        "better_auth_user": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "email",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "emailVerified",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "image",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_verification": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "identifier",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "value",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "cartLines": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "cartId",
+              "nullable": false,
+              "references": "carts"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "productId",
+              "nullable": false,
+              "references": "products"
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "quantity",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "cartId"
+          ]
+        },
+        "carts": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "shopper",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "standard",
+                  "express"
+                ]
+              },
+              "default": {
+                "type": "Text",
+                "value": "standard"
+              },
+              "name": "shippingMethod",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipName",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipLine1",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipLine2",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipCity",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipPostcode",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipCountry",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "checkoutKey",
+              "nullable": true
+            }
+          ],
+          "indexed_columns": [
+            "shopper"
+          ]
+        },
+        "categories": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "slug",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "blurb",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "position",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "slug",
+            "position"
+          ]
+        },
+        "orderEvents": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "orderId",
+              "nullable": false,
+              "references": "orders"
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "placed",
+                  "paid",
+                  "payment_failed",
+                  "shipped"
+                ]
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "note",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "at",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "orderId",
+            "at"
+          ]
+        },
+        "orderLines": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "orderId",
+              "nullable": false,
+              "references": "orders"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "productId",
+              "nullable": false,
+              "references": "products"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "productName",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "unitPriceCents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "quantity",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "orderId"
+          ]
+        },
+        "orders": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "shopper",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "code",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "placed",
+                  "paid",
+                  "payment_failed",
+                  "shipped"
+                ]
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "idempotencyKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "subtotalCents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "shippingCents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "totalCents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "standard",
+                  "express"
+                ]
+              },
+              "name": "shippingMethod",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipName",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipLine1",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipLine2",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipCity",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipPostcode",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "shipCountry",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "placedAt",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "shopper",
+            "status",
+            "placedAt"
+          ]
+        },
+        "payments": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "orderId",
+              "nullable": false,
+              "references": "orders"
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "sandbox",
+                  "stripe"
+                ]
+              },
+              "name": "provider",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "providerRef",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "clientSecret",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "requires_payment",
+                  "succeeded",
+                  "failed"
+                ]
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "amountCents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "failureReason",
+              "nullable": true
+            }
+          ],
+          "indexed_columns": [
+            "orderId"
+          ]
+        },
+        "products": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "sku",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "slug",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "brand",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "categoryId",
+              "nullable": false,
+              "references": "categories"
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "priceCents",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "summary",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "description",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Json"
+              },
+              "name": "specs",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "gray",
+                  "blue",
+                  "cyan",
+                  "green",
+                  "orange",
+                  "pink",
+                  "purple",
+                  "red",
+                  "teal",
+                  "yellow"
+                ]
+              },
+              "name": "hue",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "guitar",
+                  "bass",
+                  "keys",
+                  "synth",
+                  "drum",
+                  "cymbal",
+                  "mic",
+                  "headphones",
+                  "amp",
+                  "pedal",
+                  "cable",
+                  "strings",
+                  "picks"
+                ]
+              },
+              "name": "art",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "searchText",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "position",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "slug",
+            "categoryId",
+            "position"
+          ]
+        },
+        "stock": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "productId",
+              "nullable": false,
+              "references": "products"
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "onHand",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "productId"
+          ]
+        }
+      }
+    }
+  ]
+}

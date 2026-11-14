@@ -7,13 +7,15 @@ import type { ColumnType as WasmColumnType, WasmSchema } from "../drivers/types.
 import type { DefinedMigration } from "../migrations.js";
 import { schemaDefinitionToAst } from "../migrations.js";
 import { toValue } from "../runtime/value-converter.js";
-import { shippedMigrations } from "../runtime/client-migrations.js";
+import { shippedArtifact, SHIP_ARTIFACT_HINT } from "../runtime/app-artifact.js";
 import type { Lens, SqlType } from "../schema.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import {
   collectMissingExplicitPolicyDiagnostics,
   mergePermissionsIntoWasmSchema,
+  normalizePermissionsForWasm,
 } from "../schema-permissions.js";
+import { runtimeSchemaJsonReplacer } from "../drivers/schema-wire.js";
 import { schemaToWasm } from "../codegen/schema-reader.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { computeSchemaHash } from "../schema-hash.js";
@@ -367,9 +369,14 @@ export async function deployArtifacts(
 }
 
 /**
- * Publish an app as its code declares it: the schema `defineApp` built, every
- * schema version and migration it ships (`defineApp(schema, { migrations })`)
- * and `permissions`. This is what `createJazz` publishes on start, so anything
+ * Publish an app as its code declares it. An app that ships its
+ * `jazz.app.json` (`defineApp(schema, { artifact })`) publishes exactly the
+ * deployment Jazz's Rust reader takes from the file: every schema version,
+ * migration and the permissions it holds. The file must be the one the code
+ * declares: the schema `defineApp` built must be its current version, and
+ * `permissions` must make its bundle, or it is out of date and refused. An
+ * app on `{ migrations: "none" }` publishes its schema alone, with
+ * `permissions`. This is what `createJazz` publishes on start, so anything
  * else that serves the app (a test server) must publish the same, or a client
  * opening the app with its lenses disagrees with the server about its history.
  */
@@ -383,24 +390,80 @@ export async function deployApp(
   const declared = resolveSchemaSource(options.app);
   const schema = mergePermissionsIntoWasmSchema(declared, {});
   await validateSchemaAndPermissions(schema, options.permissions);
-  const targetSchemaHash = await computeSchemaHash(schema);
-  const shipped = shippedMigrations(declared);
-  const schemas = new Map<string, WasmSchema>();
-  for (const version of shipped?.schemas ?? []) {
-    schemas.set(version.hash, (version.schema as { tables: WasmSchema }).tables);
+  const artifact = shippedArtifact(declared);
+  if (!artifact) {
+    const targetSchemaHash = await computeSchemaHash(schema);
+    const graph = await fetchMigrationGraph(options);
+    return deployArtifacts(options, graph, {
+      targetSchemaHash,
+      schemas: [{ hash: targetSchemaHash, schema }],
+      migrations: [],
+      permissions: options.permissions,
+    });
   }
-  schemas.set(targetSchemaHash, schema);
+  const loaded = await loadArtifactDeployment(artifact, schema, options.permissions);
   const graph = await fetchMigrationGraph(options);
-  return deployArtifacts(options, graph, {
-    targetSchemaHash,
-    schemas: [...schemas].map(([hash, schema]) => ({ hash, schema })),
-    migrations: (shipped?.migrations ?? []).map((edge) => ({
-      fromHash: edge.fromHash,
-      toHash: edge.toHash,
-      forward: edge.forward as PublishedTableLens[],
-    })),
+  const result = await deployArtifacts(options, graph, {
+    targetSchemaHash: loaded.current,
+    schemas: loaded.deployment.schemas.map(({ hash, schema }) => ({ hash, schema: schema.tables })),
+    migrations: loaded.deployment.migrations,
     permissions: options.permissions,
+    publishedPermissions: loaded.deployment.permissions,
   });
+  // The core computes the bundle id as the file's writer did; anything else
+  // would pin this backend's sessions to permissions the file doesn't hold.
+  if (result.bundle && result.bundle !== loaded.bundle) {
+    throw new Error(
+      `The core published bundle ${result.bundle} for this app, but its jazz.app.json names bundle ${loaded.bundle}: is the core older than this jazz-tools?`,
+    );
+  }
+  return result;
+}
+
+/** What Jazz's Rust reader takes from a `jazz.app.json` (jazz-napi `loadAppArtifact`). */
+interface LoadedArtifact {
+  current: string;
+  bundle: string;
+  deployment: {
+    targetSchemaHash: string;
+    schemas: Array<{ hash: string; schema: { tables: WasmSchema } }>;
+    migrations: Array<{ fromHash: string; toHash: string; forward: PublishedTableLens[] }>;
+    permissions: Record<string, unknown>;
+  };
+}
+
+/**
+ * `artifact` read and checked by Jazz's Rust reader, once it is shown to be
+ * the file of the app whose schema is `schema` with `permissions`: which half
+ * drifted is named, since `jazz-tools validate` regenerates the file from
+ * schema.ts and permissions.ts together.
+ */
+async function loadArtifactDeployment(
+  artifact: unknown,
+  schema: WasmSchema,
+  permissions: CompiledPermissionsMap,
+): Promise<LoadedArtifact> {
+  const napi = await import("jazz-napi");
+  const loaded = napi.loadAppArtifact(JSON.stringify(artifact)) as unknown as LoadedArtifact;
+  const tables = JSON.stringify(schema, runtimeSchemaJsonReplacer);
+  const hash = napi.schemaHash(tables);
+  if (hash !== loaded.current) {
+    throw new Error(
+      `jazz.app.json is out of date with schema.ts: the app's schema is ${hash}, but the file's current schema is ${loaded.current}. ` +
+        SHIP_ARTIFACT_HINT,
+    );
+  }
+  const bundle = napi.permissionsBundleId(
+    tables,
+    JSON.stringify(normalizePermissionsForWasm(permissions), runtimeSchemaJsonReplacer),
+  );
+  if (bundle !== loaded.bundle) {
+    throw new Error(
+      `jazz.app.json is out of date with permissions.ts: the permissions createJazz was given make bundle ${bundle}, but the file holds bundle ${loaded.bundle}. ` +
+        SHIP_ARTIFACT_HINT,
+    );
+  }
+  return loaded;
 }
 
 /** Publish schemas, migrations and permissions together. */

@@ -1,0 +1,2990 @@
+{
+  "bundle": "07a6264856422e3ba58aed169a18a0ed786f6080245b163cf8f6da31b0ab5987",
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "assets": {
+        "relations": {
+          "canvas": {
+            "column": "canvasId",
+            "table": "canvases",
+            "type": "Forward"
+          },
+          "shapesViaAsset": {
+            "relation": "asset",
+            "table": "shapes",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "better_auth_account": {
+        "relations": {
+          "user": {
+            "column": "userId",
+            "table": "better_auth_user",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "better_auth_session": {
+        "relations": {
+          "user": {
+            "column": "userId",
+            "table": "better_auth_user",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "better_auth_user": {
+        "relations": {
+          "better_auth_accountViaUser": {
+            "relation": "user",
+            "table": "better_auth_account",
+            "type": "Reverse"
+          },
+          "better_auth_sessionViaUser": {
+            "relation": "user",
+            "table": "better_auth_session",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "canvasInvites": {
+        "relations": {
+          "canvas": {
+            "column": "canvasId",
+            "table": "canvases",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "canvasMembers": {
+        "relations": {
+          "canvas": {
+            "column": "canvasId",
+            "table": "canvases",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "canvases": {
+        "relations": {
+          "assetsViaCanvas": {
+            "relation": "canvas",
+            "table": "assets",
+            "type": "Reverse"
+          },
+          "canvasInvitesViaCanvas": {
+            "relation": "canvas",
+            "table": "canvasInvites",
+            "type": "Reverse"
+          },
+          "canvasMembersViaCanvas": {
+            "relation": "canvas",
+            "table": "canvasMembers",
+            "type": "Reverse"
+          },
+          "checkpointsViaCanvas": {
+            "relation": "canvas",
+            "table": "checkpoints",
+            "type": "Reverse"
+          },
+          "cursorsViaCanvas": {
+            "relation": "canvas",
+            "table": "cursors",
+            "type": "Reverse"
+          },
+          "layersViaCanvas": {
+            "relation": "canvas",
+            "table": "layers",
+            "type": "Reverse"
+          },
+          "shapesViaCanvas": {
+            "relation": "canvas",
+            "table": "shapes",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "checkpoints": {
+        "relations": {
+          "canvas": {
+            "column": "canvasId",
+            "table": "canvases",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "cursors": {
+        "relations": {
+          "canvas": {
+            "column": "canvasId",
+            "table": "canvases",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "layers": {
+        "relations": {
+          "canvas": {
+            "column": "canvasId",
+            "table": "canvases",
+            "type": "Forward"
+          },
+          "shapesViaLayer": {
+            "relation": "layer",
+            "table": "shapes",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "shapes": {
+        "relations": {
+          "asset": {
+            "column": "assetId",
+            "table": "assets",
+            "type": "Forward"
+          },
+          "canvas": {
+            "column": "canvasId",
+            "table": "canvases",
+            "type": "Forward"
+          },
+          "layer": {
+            "column": "layerId",
+            "table": "layers",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "c2c80e4c3ecf667af8dd57d937fd72d5b6198e85d36753987ba3047838fb9fd9",
+  "format": 1,
+  "migrations": [
+    {
+      "forward": [
+        {
+          "operations": [
+            {
+              "column": "issuer",
+              "column_type": {
+                "type": "Text"
+              },
+              "default": {
+                "type": "Text",
+                "value": ""
+              },
+              "type": "Drop"
+            }
+          ],
+          "table": "better_auth_account"
+        }
+      ],
+      "from": "55a9ac8b000f23198f161d0e64ea96e10fc608de6c8edabad0925d39c472badc",
+      "to": "c2c80e4c3ecf667af8dd57d937fd72d5b6198e85d36753987ba3047838fb9fd9"
+    }
+  ],
+  "permissions": {
+    "assets": {
+      "delete": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "canvasId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "canvasId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "role",
+                "type": "InList",
+                "values": [
+                  {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Text",
+                      "value": "editor"
+                    }
+                  },
+                  {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Text",
+                      "value": "admin"
+                    }
+                  }
+                ]
+              }
+            ],
+            "type": "And"
+          },
+          "table": "canvasMembers",
+          "type": "Exists"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "canvasId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "canvasId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "role",
+                "type": "InList",
+                "values": [
+                  {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Text",
+                      "value": "editor"
+                    }
+                  },
+                  {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Text",
+                      "value": "admin"
+                    }
+                  }
+                ]
+              }
+            ],
+            "type": "And"
+          },
+          "table": "canvasMembers",
+          "type": "Exists"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "canvasId"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_account": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_jwks": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_session": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_user": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_verification": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "canvasInvites": {
+      "delete": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "canvasId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "canvasId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "role",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "type": "Literal",
+                  "value": {
+                    "type": "Text",
+                    "value": "admin"
+                  }
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "canvasMembers",
+          "type": "Exists"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "canvasId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "canvasId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "role",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "type": "Literal",
+                  "value": {
+                    "type": "Text",
+                    "value": "admin"
+                  }
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "canvasMembers",
+          "type": "Exists"
+        }
+      },
+      "select": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "canvasId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "canvasId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "role",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "type": "Literal",
+                  "value": {
+                    "type": "Text",
+                    "value": "admin"
+                  }
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "canvasMembers",
+          "type": "Exists"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "canvasMembers": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "operation": "Update",
+              "type": "Inherits",
+              "via_column": "canvasId"
+            },
+            {
+              "column": "memberAuthor",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "operation": "Update",
+          "type": "Inherits",
+          "via_column": "canvasId"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "canvasId"
+        }
+      },
+      "update": {
+        "using": {
+          "operation": "Update",
+          "type": "Inherits",
+          "via_column": "canvasId"
+        },
+        "with_check": {
+          "operation": "Update",
+          "type": "Inherits",
+          "via_column": "canvasId"
+        }
+      }
+    },
+    "canvases": {
+      "delete": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "canvasId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "role",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "type": "Literal",
+                  "value": {
+                    "type": "Text",
+                    "value": "admin"
+                  }
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "canvasMembers",
+          "type": "Exists"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "canvasId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "canvasMembers",
+          "type": "Exists"
+        }
+      },
+      "update": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "canvasId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "role",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "type": "Literal",
+                  "value": {
+                    "type": "Text",
+                    "value": "admin"
+                  }
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "canvasMembers",
+          "type": "Exists"
+        },
+        "with_check": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "canvasId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "id"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "role",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "type": "Literal",
+                  "value": {
+                    "type": "Text",
+                    "value": "admin"
+                  }
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "canvasMembers",
+          "type": "Exists"
+        }
+      }
+    },
+    "checkpoints": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "canvasId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "canvasId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "role",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "type": "Literal",
+                  "value": {
+                    "type": "Text",
+                    "value": "admin"
+                  }
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "canvasMembers",
+          "type": "Exists"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "canvasId"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "cursors": {
+      "delete": {
+        "using": {
+          "column": "author",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "column": "author",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "canvasId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "canvasId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "memberAuthor",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "canvasMembers",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "canvasId"
+        }
+      },
+      "update": {
+        "using": {
+          "column": "author",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "column": "author",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "canvasId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "canvasId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "memberAuthor",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "canvasMembers",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "layers": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "canvasId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "canvasId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "memberAuthor",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "role",
+                    "type": "InList",
+                    "values": [
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "editor"
+                        }
+                      },
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "admin"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "canvasMembers",
+              "type": "Exists"
+            },
+            {
+              "column": "locked",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "type": "Literal",
+                "value": {
+                  "type": "Boolean",
+                  "value": false
+                }
+              }
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "canvasId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "canvasId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "role",
+                "type": "InList",
+                "values": [
+                  {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Text",
+                      "value": "editor"
+                    }
+                  },
+                  {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Text",
+                      "value": "admin"
+                    }
+                  }
+                ]
+              }
+            ],
+            "type": "And"
+          },
+          "table": "canvasMembers",
+          "type": "Exists"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "canvasId"
+        }
+      },
+      "update": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "canvasId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "canvasId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "role",
+                "type": "InList",
+                "values": [
+                  {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Text",
+                      "value": "editor"
+                    }
+                  },
+                  {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Text",
+                      "value": "admin"
+                    }
+                  }
+                ]
+              }
+            ],
+            "type": "And"
+          },
+          "table": "canvasMembers",
+          "type": "Exists"
+        },
+        "with_check": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "canvasId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "canvasId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "role",
+                "type": "InList",
+                "values": [
+                  {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Text",
+                      "value": "editor"
+                    }
+                  },
+                  {
+                    "type": "Literal",
+                    "value": {
+                      "type": "Text",
+                      "value": "admin"
+                    }
+                  }
+                ]
+              }
+            ],
+            "type": "And"
+          },
+          "table": "canvasMembers",
+          "type": "Exists"
+        }
+      }
+    },
+    "shapes": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "layerId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "canvasId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "canvasId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "locked",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "type": "Literal",
+                      "value": {
+                        "type": "Boolean",
+                        "value": false
+                      }
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "layers",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "canvasId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "canvasId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "memberAuthor",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "role",
+                    "type": "InList",
+                    "values": [
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "editor"
+                        }
+                      },
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "admin"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "canvasMembers",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "layerId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "canvasId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "canvasId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "locked",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "type": "Literal",
+                      "value": {
+                        "type": "Boolean",
+                        "value": false
+                      }
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "layers",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "canvasId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "canvasId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "memberAuthor",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "role",
+                    "type": "InList",
+                    "values": [
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "editor"
+                        }
+                      },
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "admin"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "canvasMembers",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "canvasId"
+        }
+      },
+      "update": {
+        "using": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "layerId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "canvasId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "canvasId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "locked",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "type": "Literal",
+                      "value": {
+                        "type": "Boolean",
+                        "value": false
+                      }
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "layers",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "canvasId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "canvasId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "memberAuthor",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "role",
+                    "type": "InList",
+                    "values": [
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "editor"
+                        }
+                      },
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "admin"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "canvasMembers",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "layerId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "canvasId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "canvasId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "locked",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "type": "Literal",
+                      "value": {
+                        "type": "Boolean",
+                        "value": false
+                      }
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "layers",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "canvasId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "canvasId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "memberAuthor",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "role",
+                    "type": "InList",
+                    "values": [
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "editor"
+                        }
+                      },
+                      {
+                        "type": "Literal",
+                        "value": {
+                          "type": "Text",
+                          "value": "admin"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "canvasMembers",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    }
+  },
+  "schemas": [
+    {
+      "hash": "55a9ac8b000f23198f161d0e64ea96e10fc608de6c8edabad0925d39c472badc",
+      "tables": {
+        "assets": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "canvasId",
+              "nullable": false,
+              "references": "canvases"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "mimeType",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "byteLength",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "width",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "height",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Bytea"
+              },
+              "name": "bytes",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "canvasId",
+            "name"
+          ]
+        },
+        "better_auth_account": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "issuer",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "accountId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "providerId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "password",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_jwks": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "publicKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "privateKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "alg",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "crv",
+              "nullable": true
+            }
+          ]
+        },
+        "better_auth_session": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "token",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "ipAddress",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "userAgent",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            }
+          ]
+        },
+        "better_auth_user": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "email",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "emailVerified",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "image",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_verification": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "identifier",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "value",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "canvasInvites": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "canvasId",
+              "nullable": false,
+              "references": "canvases"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "token",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "viewer",
+                  "editor"
+                ]
+              },
+              "name": "role",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "default": {
+                "type": "Boolean",
+                "value": false
+              },
+              "name": "singleUse",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "canvasId",
+            "token"
+          ]
+        },
+        "canvasMembers": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "canvasId",
+              "nullable": false,
+              "references": "canvases"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "memberAuthor",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "viewer",
+                  "editor",
+                  "admin"
+                ]
+              },
+              "name": "role",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "canvasId",
+            "memberAuthor"
+          ]
+        },
+        "canvases": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "width",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "height",
+              "nullable": false
+            }
+          ]
+        },
+        "checkpoints": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "canvasId",
+              "nullable": false,
+              "references": "canvases"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "label",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Json"
+              },
+              "name": "snapshot",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "canvasId"
+          ]
+        },
+        "cursors": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "canvasId",
+              "nullable": false,
+              "references": "canvases"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "author",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "x",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "y",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "color",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "default": {
+                "type": "Text",
+                "value": ""
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "default": {
+                "type": "Boolean",
+                "value": true
+              },
+              "name": "active",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "canvasId",
+            "author"
+          ]
+        },
+        "layers": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "canvasId",
+              "nullable": false,
+              "references": "canvases"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "zIndex",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "visible",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "default": {
+                "type": "Boolean",
+                "value": false
+              },
+              "name": "locked",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "canvasId",
+            "zIndex"
+          ]
+        },
+        "shapes": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "canvasId",
+              "nullable": false,
+              "references": "canvases"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "layerId",
+              "nullable": false,
+              "references": "layers"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "assetId",
+              "nullable": true,
+              "references": "assets"
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "rect",
+                  "ellipse",
+                  "text",
+                  "image"
+                ]
+              },
+              "name": "kind",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "x",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "y",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "width",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "height",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "rotation",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "zIndex",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "text",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "fill",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "canvasId",
+            "layerId",
+            "zIndex"
+          ]
+        }
+      }
+    },
+    {
+      "hash": "c2c80e4c3ecf667af8dd57d937fd72d5b6198e85d36753987ba3047838fb9fd9",
+      "tables": {
+        "assets": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "canvasId",
+              "nullable": false,
+              "references": "canvases"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "mimeType",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "byteLength",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "width",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "height",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Bytea"
+              },
+              "name": "bytes",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "canvasId",
+            "name"
+          ]
+        },
+        "better_auth_account": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "accountId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "providerId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "password",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_jwks": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "publicKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "privateKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "alg",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "crv",
+              "nullable": true
+            }
+          ]
+        },
+        "better_auth_session": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "token",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "ipAddress",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "userAgent",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            }
+          ]
+        },
+        "better_auth_user": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "email",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "emailVerified",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "image",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_verification": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "identifier",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "value",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "canvasInvites": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "canvasId",
+              "nullable": false,
+              "references": "canvases"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "token",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "viewer",
+                  "editor"
+                ]
+              },
+              "name": "role",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "default": {
+                "type": "Boolean",
+                "value": false
+              },
+              "name": "singleUse",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "canvasId",
+            "token"
+          ]
+        },
+        "canvasMembers": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "canvasId",
+              "nullable": false,
+              "references": "canvases"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "memberAuthor",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "viewer",
+                  "editor",
+                  "admin"
+                ]
+              },
+              "name": "role",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "canvasId",
+            "memberAuthor"
+          ]
+        },
+        "canvases": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "width",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "height",
+              "nullable": false
+            }
+          ]
+        },
+        "checkpoints": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "canvasId",
+              "nullable": false,
+              "references": "canvases"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "label",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Json"
+              },
+              "name": "snapshot",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "canvasId"
+          ]
+        },
+        "cursors": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "canvasId",
+              "nullable": false,
+              "references": "canvases"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "author",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "x",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "y",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "color",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "default": {
+                "type": "Text",
+                "value": ""
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "default": {
+                "type": "Boolean",
+                "value": true
+              },
+              "name": "active",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "canvasId",
+            "author"
+          ]
+        },
+        "layers": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "canvasId",
+              "nullable": false,
+              "references": "canvases"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "zIndex",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "visible",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "default": {
+                "type": "Boolean",
+                "value": false
+              },
+              "name": "locked",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "canvasId",
+            "zIndex"
+          ]
+        },
+        "shapes": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "canvasId",
+              "nullable": false,
+              "references": "canvases"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "layerId",
+              "nullable": false,
+              "references": "layers"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "assetId",
+              "nullable": true,
+              "references": "assets"
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "rect",
+                  "ellipse",
+                  "text",
+                  "image"
+                ]
+              },
+              "name": "kind",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "x",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "y",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "width",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "height",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "rotation",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "zIndex",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "text",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "fill",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "canvasId",
+            "layerId",
+            "zIndex"
+          ]
+        }
+      }
+    }
+  ]
+}
