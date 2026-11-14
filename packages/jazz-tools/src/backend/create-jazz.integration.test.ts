@@ -2584,8 +2584,41 @@ describe("createJazz", () => {
     const sessionPath = requestPaths.find((path) => /\/stream\/[^/]+$/.test(path))!;
     const key = streamKeys.get(sessionPath)!;
     const posts = requestPaths.filter((path) => path === sessionPath).length;
-    const send = (headers: Record<string, string>) =>
-      statusOf(`${origin}${sessionPath}`, "POST", { "x-jazz-stream-key": key, ...headers });
+    // Hold the browser's own sends from here on: one landing between two of
+    // the test's would be refused as concurrent (409), and its headers would
+    // ask authenticate anew. They go out when the test ends.
+    const browserFetch = globalThis.fetch;
+    const held: Array<() => void> = [];
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      if (request.method !== "POST" || new URL(request.url).pathname !== sessionPath) {
+        return browserFetch(request);
+      }
+      return new Promise<Response>((resolve, reject) =>
+        held.push(() => browserFetch(request).then(resolve, reject)),
+      );
+    }) as typeof fetch;
+    cleanups.push(async () => {
+      globalThis.fetch = browserFetch;
+      for (const release of held.splice(0)) release();
+    });
+    // ...and let a send already under way finish.
+    const sendsSoFar = () => requestPaths.filter((path) => path === sessionPath).length;
+    for (let seen = -1; seen !== sendsSoFar(); ) {
+      seen = sendsSoFar();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    const send = async (headers: Record<string, string>) => {
+      const post = () =>
+        statusOf(`${origin}${sessionPath}`, "POST", { "x-jazz-stream-key": key, ...headers });
+      // A browser send that reached the server before the hold, still
+      // streaming its body, can still refuse one of ours as concurrent.
+      for (let attempt = 0; ; attempt++) {
+        const status = await post();
+        if (status !== 409 || attempt === 20) return status;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    };
     return { jazz, configure, signedOut, sends, state, posts, send, asked: () => sends.length };
   }
 
