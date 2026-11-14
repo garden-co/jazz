@@ -1,13 +1,14 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import {
   createServer,
   request as httpRequest,
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import type { AddressInfo } from "node:net";
+import { connect, type AddressInfo } from "node:net";
 import { Readable } from "node:stream";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { defineShippedApp } from "../testing/client-migrations.js";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { generateSecret, signToken } from "../local-first-auth/index.js";
@@ -17,19 +18,17 @@ import type { SandboxHandle, SandboxSdk } from "./vercel-store.js";
 // Adopter finding E4 (alpha.61): on Vercel without `ws`, local-first guests
 // (`initial: "device"`) never synced over the HTTP stream, and their sign-up
 // then failed to link with a `link_refused` that blamed the user. The
-// vercel() store's core ran with serveCore's default, which admits no
-// local-first identity. These tests run the core with the options the
-// Sandbox start script gives it, behind two function instances that share it.
+// vercel() store's core ran with serveCore's default, which admitted no
+// local-first identity (cores have no such switch since #5248). These tests
+// run the core with the options the Sandbox start script gives it, behind two
+// function instances that share it.
 vi.mock("ws", () => {
   throw Object.assign(new Error("Cannot find package 'ws' imported from jazz-tools"), {
     code: "ERR_MODULE_NOT_FOUND",
   });
 });
 
-const app = s.defineApp(
-  { todos: s.table({ title: s.string(), owner: s.uuid() }, {}) },
-  { migrations: "none" },
-);
+const app = await defineShippedApp({ todos: s.table({ title: s.string(), owner: s.uuid() }, {}) });
 const permissions = s.definePermissions(app, ({ policy, session }) => {
   policy.todos.allowRead.where({ owner: session.user });
   policy.todos.allowInsert.where({ owner: session.user });
@@ -97,11 +96,107 @@ function oidcToken(issuer: string): string {
 }
 
 /**
- * One Sandbox, shared by every function instance. Its start runs the core
- * with the options the start script passes `serveCore`, and serveCore's
- * defaults for what it leaves out (local-first auth: off).
+ * A core an older jazz-tools started with local-first auth off, in front of
+ * the core at `target` (since #5248 no core can be started that way, but an
+ * older remote one, or a Jazz Cloud app with it off, still answers like
+ * this): a guest's session is refused in the core's first message, and a
+ * backend founding a guest's account gets 403 `local_first_auth_disabled`.
+ * Everything else reaches `target`.
  */
-function fakeSandbox(appId: string, issuer: string, override: Record<string, unknown> = {}) {
+async function guestsOffCore(target: string): Promise<string> {
+  const upstream = new URL(target);
+  // Upgraded sockets leave the server's books: closed by hand.
+  const piped = new Set<{ destroy(): void }>();
+  const server = createServer((req, res) => {
+    void (async () => {
+      if (req.url?.endsWith("/admin/accounts/found-local-first")) {
+        req.resume();
+        res.writeHead(403, { "content-type": "text/plain" }).end("local_first_auth_disabled");
+        return;
+      }
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(req.headers)) {
+        if (typeof value === "string" && name !== "host") headers.set(name, value);
+      }
+      const response = await fetch(`${target}${req.url}`, {
+        method: req.method,
+        headers,
+        ...(chunks.length ? { body: Buffer.concat(chunks) } : {}),
+      });
+      const replyHeaders: Record<string, string> = {};
+      response.headers.forEach((value, name) => {
+        if (!["content-encoding", "content-length", "transfer-encoding"].includes(name))
+          replyHeaders[name] = value;
+      });
+      res.writeHead(response.status, replyHeaders).end(Buffer.from(await response.arrayBuffer()));
+    })().catch((error: unknown) => {
+      res.statusCode = 502;
+      res.end(String(error));
+    });
+  });
+  server.on("upgrade", (req: IncomingMessage, socket, head: Buffer) => {
+    socket.on("error", () => socket.destroy());
+    piped.add(socket);
+    if (req.headers["x-jazz-backend-access"] === undefined) {
+      // A guest's own session (it rides on session access): accepted, then
+      // refused in the core's first message.
+      const accept = createHash("sha1")
+        .update(`${req.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+        .digest("base64");
+      const message = Buffer.from(
+        JSON.stringify({
+          error: "unauthenticated",
+          code: "disabled",
+          message: "Local-first auth is not enabled for this app",
+        }),
+      );
+      if (message.length >= 126) throw new Error("one-byte frame length only");
+      socket.end(
+        Buffer.concat([
+          Buffer.from(
+            `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
+          ),
+          Buffer.from([0x82, message.length]),
+          message,
+          // Close, 1008 (policy violation).
+          Buffer.from([0x88, 0x02, 0x03, 0xf0]),
+        ]),
+      );
+      return;
+    }
+    const core = connect(Number(upstream.port), upstream.hostname, () => {
+      const lines = [`${req.method} ${req.url} HTTP/1.1`];
+      for (let i = 0; i < req.rawHeaders.length; i += 2) {
+        lines.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
+      }
+      core.write(`${lines.join("\r\n")}\r\n\r\n`);
+      core.write(head);
+      socket.pipe(core).pipe(socket);
+    });
+    piped.add(core);
+    core.on("error", () => socket.destroy());
+    socket.on("close", () => core.destroy());
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  cleanups.push(
+    () =>
+      new Promise((resolve) => {
+        for (const socket of piped) socket.destroy();
+        server.closeAllConnections();
+        server.close(resolve);
+      }),
+  );
+  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+/**
+ * One Sandbox, shared by every function instance. Its start runs the core
+ * with the options the start script passes `serveCore`; with `guestsOff`,
+ * behind a stand-in for an older core that refuses guests.
+ */
+function fakeSandbox(appId: string, issuer: string, guestsOff = false) {
   const files = new Map<string, Buffer>([["/data/app-id", Buffer.from(`${appId}\n`)]]);
   const state = { exists: false, drive: false, running: undefined as string | undefined };
   let core: Promise<{ url: string }> | undefined;
@@ -118,17 +213,16 @@ function fakeSandbox(appId: string, issuer: string, override: Record<string, unk
       const script = files.get(/exec bash (\S+)/.exec(args.at(-1)!)![1]!)!.toString();
       const version = /^version='(.*)'$/m.exec(script)![1]!;
       const options = JSON.parse(/"\$app_id" '(.*)'$/m.exec(script)![1]!) as {
-        allowLocalFirstAuth?: boolean;
+        trustedWorkload: { issuer: string; audience: string; subject: string };
       };
+      expect(options.trustedWorkload).toEqual({ issuer, audience: AUDIENCE, subject: SUBJECT });
       core ??= startLocalJazzServer({
         appId,
         inMemory: true,
-        trustedWorkload: { issuer, audience: AUDIENCE, subject: SUBJECT },
-        allowLocalFirstAuth: options.allowLocalFirstAuth ?? false,
-        ...override,
-      }).then((started) => {
+        trustedWorkload: options.trustedWorkload,
+      }).then(async (started) => {
         cleanups.push(() => started.stop());
-        return started;
+        return { url: guestsOff ? await guestsOffCore(started.url) : started.url };
       });
       coreUrl = (await core).url;
       state.running = version;
@@ -193,19 +287,23 @@ function watchCoreSockets() {
 
 /** Two function instances of one deployment: two createJazz, one Sandbox core. */
 async function deployment(
-  override?: Record<string, unknown>,
+  guestsOff = false,
   auth: (request: Request) => ReturnType<typeof authenticate> | null = authenticate,
 ) {
   const coreSockets = watchCoreSockets();
   const appId = randomUUID();
   const issuer = await startIssuer();
-  const { sdk, coreUrl } = fakeSandbox(appId, issuer, override);
+  const { sdk, coreUrl } = fakeSandbox(appId, issuer, guestsOff);
   const instance = async () => {
     const jazz = await createJazz({
       app,
       permissions,
       authenticate: auth,
-      store: vercel({ sdk, backendCredential: () => oidcToken(issuer) }),
+      store: vercel({
+        namespace: ({ environment }) => environment,
+        sdk,
+        backendCredential: () => oidcToken(issuer),
+      }),
     }).ready();
     cleanups.push(() => jazz.close());
     return jazz;
@@ -364,7 +462,7 @@ it("syncs a local-first guest over the HTTP stream through two instances, and ke
 it("says a core that admits no guests refuses them, not that the user has an account", async () => {
   const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
   // A core an older jazz-tools started: local-first auth off.
-  const { appId, instances } = await deployment({ allowLocalFirstAuth: false });
+  const { appId, instances } = await deployment(true);
   const { origin } = await route(instances);
 
   const session = await guestOf(appId, origin);
@@ -388,7 +486,7 @@ it("says a core that admits no guests refuses them, not that the user has an acc
 
 it("logs it on the server when the core refuses a guest's sync session", async () => {
   const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
-  const { appId, instances } = await deployment({ allowLocalFirstAuth: false });
+  const { appId, instances } = await deployment(true);
   const { origin } = await route(instances);
 
   const session = await guestOf(appId, origin);

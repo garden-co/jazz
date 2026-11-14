@@ -1,13 +1,18 @@
-import { startLocalJazzServer } from "jazz-tools/testing";
+import { appMigrations, startLocalJazzServer } from "jazz-tools/testing";
 import { deploy } from "jazz-tools/dev";
+import { defineApp } from "jazz-tools";
 import {
   ADMIN_SECRET,
   APP_ID,
   SEEDED_TODO_COUNT,
   TEST_PORT,
 } from "../tests/browser/test-constants.js";
-import { app, permissions } from "../tests/browser/schema.ts";
+import { permissions, todoSchema } from "../tests/browser/schema.ts";
 import { createJazz, remote, type Jazz } from "jazz-tools/backend";
+
+// The browser tests' app ships no migrations (`{ migrations: "none" }`), which
+// createJazz refuses with remote(): the backend runs it with its one version.
+const app = defineApp(todoSchema, { migrations: await appMigrations(todoSchema) });
 
 const SEED_BATCH_SIZE = 50;
 /** "First seeded todo" and "Second seeded todo", which tests look for by name. */

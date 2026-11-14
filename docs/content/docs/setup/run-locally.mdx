@@ -50,13 +50,17 @@ export const jazz = createJazz({
   app,
   permissions,
   store: sqlite({ path: "./data/jazz" }),
-  authenticate: async (request) => /* your session */ null,
+  // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
+  authenticate: async (request) => null,
 });
 ```
 
-Edit `schema.ts` or `permissions.ts` and restart the dev server: Jazz applies them on start. Don't
-count on hot reload for these: Turbopack usually recovers, but webpack builds can get stuck on the
-old schema. See
+Edit `permissions.ts` and restart the dev server: Jazz applies it on start. Changing `schema.ts`
+once the store holds data needs a migration first: run `npx jazz-tools migrations create` before
+the first schema change, then again after each one (see [Migrations](/docs/schemas/migrations)). A
+store that refuses the app after a schema change is missing a migration; don't delete it. Don't
+count on hot reload for either file: Turbopack usually recovers, but webpack builds can get stuck on
+the old schema. See
 [Your Own Server](/docs/setup/deployment/own-server) for mounting it in Next.js, Hono or Express.
 
 ## How we test this page

@@ -1,5 +1,9 @@
 import { clientScope } from "./client-scope.js";
-import { browserRuntimeModuleUrl, bundledBrowserWorkerUrl } from "./browser-worker-assets.js";
+import {
+  browserRuntimeModuleUrl,
+  bundledBrowserWorkerUrl,
+  bundledWasmUrl,
+} from "./browser-worker-assets.js";
 import type { RuntimeSourcesConfig } from "./context.js";
 import type { DbConfig } from "./db.js";
 import { resolveClientInternalSessionSync } from "./client-session.js";
@@ -30,11 +34,48 @@ export function resolveBrowserWorkerUrl(runtimeSources?: RuntimeSourcesConfig): 
     );
   }
   // Keep this literal statically analyzable so bundlers emit the worker asset.
-  const bundledUrl = bundledBrowserWorkerUrl();
+  const bundledUrl =
+    vitePrebundledBrokerWorkerUrl(browserRuntimeModuleUrl()) ?? bundledBrowserWorkerUrl();
   return versionRuntimeAssetUrl(
     resolveConfiguredUrl(bundledUrl, typeof location !== "undefined" ? location.href : undefined),
     runtimeSources,
   );
+}
+
+/**
+ * The path of a module the Vite dev server pre-bundled: `<base>node_modules/.vite/deps/<chunk>.js`.
+ * The cache directory may nest the deps (`.vite/vitest/<hash>/deps`) or suffix
+ * them per environment (`deps_ssr`); anything else is not Vite's pre-bundle.
+ */
+const VITE_PREBUNDLED_MODULE_PATH =
+  /^(.*?\/)node_modules\/\.vite\/(?:.*\/)?deps(?:_[^/]*)?\/[^/]+$/;
+
+/** The package export the Vite dev server resolves to the broker worker entry. */
+export const BROKER_WORKER_EXPORT = "jazz-tools/_worker/broker";
+
+/**
+ * Where the Vite dev server serves the broker worker when Jazz runs from its
+ * dependency pre-bundle, or undefined anywhere else.
+ *
+ * Pre-bundling moves Jazz's code into one chunk under `.vite/deps`, so the
+ * worker literal `new URL("../../worker/jazz-broker-worker.js", import.meta.url)`
+ * no longer sits next to the worker file. Vite 6 and 7 resolve it against the
+ * chunk, to a path that doesn't exist (the dev server answers it with
+ * index.html); only Vite 8 rewrites it. The dev server itself can resolve the
+ * package, wherever the package manager put it: `<base>@id/<bare id>` asks it
+ * to, through jazz-tools' own `exports`. This covers every Vite version, and
+ * nothing outside the dev server's pre-bundle takes this path.
+ */
+export function vitePrebundledBrokerWorkerUrl(moduleUrl: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(moduleUrl);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+  const match = VITE_PREBUNDLED_MODULE_PATH.exec(url.pathname);
+  return match ? `${url.origin}${match[1]}@id/${BROKER_WORKER_EXPORT}` : undefined;
 }
 
 /**
@@ -49,10 +90,12 @@ export function resolveBrowserWorkerUrl(runtimeSources?: RuntimeSourcesConfig): 
 export function resolveBrowserWorkerRuntimeSources(
   runtimeSources?: RuntimeSourcesConfig,
 ): RuntimeSourcesConfig | undefined {
-  if (!runtimeSources) return runtimeSources;
+  if (!runtimeSources) return withBundledWasmUrl(runtimeSources);
 
   if (
-    (runtimeSources.baseUrl || runtimeSources.wasmUrl || runtimeSources.brokerWorkerUrl) &&
+    (runtimeSources.baseUrl ||
+      (runtimeSources.wasmUrl && !isBundledWasmUrl(runtimeSources.wasmUrl)) ||
+      runtimeSources.brokerWorkerUrl) &&
     !runtimeSources.wasmVersion
   ) {
     throw new Error(
@@ -70,8 +113,25 @@ export function resolveBrowserWorkerRuntimeSources(
     typeof location !== "undefined" ? location.href : undefined,
     runtimeSources,
   );
-  if (!wasmUrl) return runtimeSources;
+  if (!wasmUrl) return withBundledWasmUrl(runtimeSources);
   return { ...runtimeSources, wasmUrl };
+}
+
+/**
+ * Hand the worker the bundler's URL for the binary when the bundler has one
+ * (Metro). The worker is a separate chunk that cannot name the asset itself.
+ * The bundler owns this URL and changes it with the bytes, so it carries no
+ * `wasmVersion`.
+ */
+function withBundledWasmUrl(
+  runtimeSources: RuntimeSourcesConfig | undefined,
+): RuntimeSourcesConfig | undefined {
+  const wasmUrl = bundledWasmUrl();
+  return wasmUrl ? { ...runtimeSources, wasmUrl } : runtimeSources;
+}
+
+function isBundledWasmUrl(wasmUrl: string): boolean {
+  return wasmUrl === bundledWasmUrl();
 }
 
 /**

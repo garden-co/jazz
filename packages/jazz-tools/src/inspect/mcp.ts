@@ -15,7 +15,8 @@ import {
   type InspectEnv,
   type PendingApproval,
 } from "./client.js";
-import { InspectError, type InspectRequest } from "./protocol.js";
+import { DEFAULT_ROW_LIMIT, InspectError, MAX_ROW_LIMIT, type InspectRequest } from "./protocol.js";
+import { WHERE_OPERATORS } from "../where-operators.js";
 
 const SERVER_INFO = { name: "jazz-inspect", version: "1" };
 const LATEST_PROTOCOL = "2025-06-18";
@@ -33,16 +34,89 @@ const CLAIMS = {
 const QUERY = {
   type: "object",
   description:
-    'A query: {"table":"todos","where":{"done":false,"title":{"contains":"milk"}},"orderBy":[["title","asc"]],"limit":20}. select defaults to every column; add provenance columns like "$createdBy" or "$updatedAt". Query history.<table> for row history.',
+    'A query: {"table":"todos","where":{"done":false,"title":{"contains":"milk"}},"orderBy":[["title","asc"]],"limit":20}. Query history.<table> for a row\'s versions.',
   properties: {
-    table: { type: "string" },
-    where: { type: "object" },
-    select: { type: "array", items: { type: "string" } },
-    orderBy: { type: "array", items: { type: "array" } },
-    limit: { type: "number" },
-    offset: { type: "number" },
+    table: {
+      type: "string",
+      description: 'A table from schema, or "history.<table>" for its row history.',
+    },
+    where: {
+      type: "object",
+      description: `Column → value (equals), or column → { operator: operand } with operators ${WHERE_OPERATORS.join(", ")} (which apply depends on the column's type; in/notIn take an array, isNull a boolean). Several columns must all match. Values are JSON: timestamps as ISO strings, 64-bit integers as strings, bytes as { "$bytes": "<base64>" }.`,
+      additionalProperties: true,
+    },
+    select: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        'Columns to answer with. Default: every column ("*"). Add provenance columns "$createdBy", "$createdAt", "$updatedBy" or "$updatedAt".',
+    },
+    orderBy: {
+      type: "array",
+      description: 'Sort keys, first one first: [["title","asc"], ["$createdAt","desc"]].',
+      items: {
+        type: "array",
+        prefixItems: [{ type: "string" }, { type: "string", enum: ["asc", "desc"] }],
+        minItems: 2,
+        maxItems: 2,
+      },
+    },
+    limit: {
+      type: "integer",
+      minimum: 1,
+      maximum: MAX_ROW_LIMIT,
+      description: `Rows to answer with: default ${DEFAULT_ROW_LIMIT}, at most ${MAX_ROW_LIMIT}. The answer says truncated when more matched.`,
+    },
+    offset: { type: "integer", minimum: 0, description: "Rows to skip, for paging." },
   },
   required: ["table"],
+  additionalProperties: false,
+};
+
+const VALUES = {
+  type: "object",
+  description:
+    'Column → value, as JSON (timestamps as ISO strings, 64-bit integers as strings, bytes as { "$bytes": "<base64>" }).',
+  additionalProperties: true,
+};
+const WRITE_OP = {
+  oneOf: [
+    {
+      type: "object",
+      description: "Insert a row; id is optional (a new one is made).",
+      properties: {
+        kind: { const: "insert" },
+        table: { type: "string" },
+        values: VALUES,
+        id: { type: "string" },
+      },
+      required: ["kind", "table", "values"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      description: "Change some columns of a row.",
+      properties: {
+        kind: { const: "update" },
+        table: { type: "string" },
+        id: { type: "string" },
+        values: VALUES,
+      },
+      required: ["kind", "table", "id", "values"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      description: "Delete a row.",
+      properties: {
+        kind: { const: "delete" },
+        table: { type: "string" },
+        id: { type: "string" },
+      },
+      required: ["kind", "table", "id"],
+      additionalProperties: false,
+    },
+  ],
 };
 
 interface Tool {
@@ -102,10 +176,23 @@ export const MCP_TOOLS: Tool[] = [
   },
   {
     name: "get",
-    description: "One row by id, with who created and last changed it.",
+    description:
+      'One row by id, with who created and last changed it. A value too large to list shows as {"$large": {kind, size, preview}}: pass column to get that value (from/to for part of a bytes or text value).',
     inputSchema: {
       type: "object",
-      properties: { table: { type: "string" }, id: { type: "string" }, as: AS, claims: CLAIMS },
+      properties: {
+        table: { type: "string" },
+        id: { type: "string" },
+        column: { type: "string", description: "Answer only this column's value, whole." },
+        from: {
+          type: "integer",
+          minimum: 0,
+          description: "With column: where to start (bytes for bytes, UTF-16 code units for text).",
+        },
+        to: { type: "integer", minimum: 0, description: "With column: where to stop (exclusive)." },
+        as: AS,
+        claims: CLAIMS,
+      },
       required: ["table", "id"],
     },
   },
@@ -128,8 +215,10 @@ export const MCP_TOOLS: Tool[] = [
         ops: {
           type: "array",
           description:
-            'e.g. [{"kind":"update","table":"todos","id":"…","values":{"done":true}}, {"kind":"insert","table":"todos","values":{…}}, {"kind":"delete","table":"todos","id":"…"}]',
-          items: { type: "object" },
+            'Between 1 and 1000 writes, each with kind insert, update or delete: [{"kind":"update","table":"todos","id":"…","values":{"done":true}}, {"kind":"insert","table":"todos","values":{…}}, {"kind":"delete","table":"todos","id":"…"}]',
+          items: WRITE_OP,
+          minItems: 1,
+          maxItems: 1000,
         },
         as: AS,
         claims: CLAIMS,
@@ -145,7 +234,7 @@ export const MCP_TOOLS: Tool[] = [
   {
     name: "explain",
     description:
-      "Which policy allowed or denied each row of a query for a user (not supported yet).",
+      "Why a user can or can't read each row of a query: every row the query matches (with the backend's authority), whether the user may read it, and which clauses of the table's read policy allowed it. Clauses are the arms of the policy's top-level or, numbered from 0 and rendered as text. Pass the user's claims if the policy reads them.",
     inputSchema: {
       type: "object",
       properties: { query: QUERY, as: AS, claims: CLAIMS },
@@ -189,6 +278,7 @@ export async function runMcpServer(options: {
     callInspector(endpoint, request, {
       token: (await store.get(endpoint))?.token,
       fetch: options.fetch,
+      withoutToken: "call request_access to ask a person for one",
     });
 
   async function callTool(name: string, args: Json): Promise<unknown> {
@@ -235,6 +325,9 @@ export async function runMcpServer(options: {
           op: "get",
           table: String(args.table),
           id: String(args.id),
+          ...(typeof args.column === "string" ? { column: args.column } : {}),
+          ...(typeof args.from === "number" ? { from: args.from } : {}),
+          ...(typeof args.to === "number" ? { to: args.to } : {}),
           ...as,
         });
       case "history":

@@ -7,6 +7,17 @@ import type { Db } from "./db.js";
  */
 export interface LocalFirstModule {
   createClient(config: AccountDbConfig): Promise<Db>;
+  /**
+   * @internal Delete a signed-out account's browser store without opening
+   * it (`clearOnSignOut`, #5250). `jazz-tools/local-first` provides it; a
+   * loader that gives only `createClient` gets Jazz's own, loaded on demand.
+   */
+  deleteLocalFirstStore?(
+    config: Omit<AccountDbConfig, "account"> & {
+      accountId: string;
+      accountRegistryAuthority: string;
+    },
+  ): Promise<"deleted" | "held">;
 }
 
 /**

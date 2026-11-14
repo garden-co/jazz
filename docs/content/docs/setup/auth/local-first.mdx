@@ -70,8 +70,25 @@ import { RecoveryPhrase } from "jazz-tools/passphrase";
 const phrase = RecoveryPhrase.fromSecret(session.exportDeviceKey());
 ```
 
-You can only export the key while the session is signed in as the device account. Signing out
-doesn't delete the key from the device, so the account can still be restored later.
+Export the key while the session is signed in as the device account, or while it's signed out:
+it then exports the device account that signed in most recently. It throws a
+`NoKeptDeviceAccountError` when the device keeps none.
+
+### Signing out of a device account
+
+A device account is how an app lets people start as guests, and a local-first friendly way to sign
+in at all: its key lives on the device. Signing out keeps that key and the account's local data:
+
+- The session stays signed out, across reloads too, until someone signs in. With
+  `initial: "device"`, Jazz creates a new device account only on a device that keeps none and where
+  no one signed out.
+- `await session.reopenDeviceAccount()` signs in again as the kept device account, with its account
+  id and its data. If the device keeps several, it reopens the one that signed in most recently. It
+  rejects with a `NoKeptDeviceAccountError` when the device keeps none.
+- `createDeviceAccount()` always starts a new device account.
+- With `clearOnSignOut`, signing out forgets the key and wipes the account's local data, so
+  nothing on the device can reopen it. Keep the key (`exportDeviceKey()`) first if the person
+  should be able to come back.
 
 ### Recovery passphrase
 
@@ -124,6 +141,10 @@ ownership remains valid, and earlier rows keep the identity that authored them.
 The session also links on its own when your backend names a user with no Jazz account yet while a
 device account is signed in. Turn that off on shared devices with
 `linkDeviceAccountOnSignUp: false`.
+
+Linking doesn't need `acceptDeviceAccounts`, which gates only device-account sync: your backend's
+sign-in plus the device key's proof authorise the link, so it works even when your app doesn't
+accept device accounts for sync.
 
 The user must not have a Jazz account of their own yet. If they do, the app chooses whether to
 sign in to that account (`refresh()`) or migrate data explicitly; Jazz never merges accounts. See

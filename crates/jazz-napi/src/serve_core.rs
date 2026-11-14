@@ -19,7 +19,6 @@ struct ServeCoreOptions {
     trusted_workload: Option<ServeCoreWorkload>,
     backend_secret: Option<String>,
     admin_secret: Option<String>,
-    allow_local_first_auth: Option<bool>,
     shutdown_timeout_secs: Option<u64>,
     max_connections: Option<usize>,
     memory_limit_bytes: Option<u64>,
@@ -149,7 +148,7 @@ impl ServedCore {
 /// budget, so a second call fails until the first core has stopped.
 #[napi(
     js_name = "serveCore",
-    ts_args_type = "options: { appId: string; port: number; dataDir: string; blobs: { kind: \"sqlite\" } | { kind: \"files\"; dir?: string } | { kind: \"s3\"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: \"vercel-blob\"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; allowLocalFirstAuth?: boolean; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }"
+    ts_args_type = "options: { appId: string; port: number; dataDir: string; blobs: { kind: \"sqlite\" } | { kind: \"files\"; dir?: string } | { kind: \"s3\"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: \"vercel-blob\"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }"
 )]
 pub fn serve_core(options: JsonValue) -> Result<ServedCore> {
     let options: ServeCoreOptions = serde_json::from_value(options)
@@ -175,19 +174,12 @@ pub fn serve_core(options: JsonValue) -> Result<ServedCore> {
         .map_err(Error::from_reason)?;
     let serving = ServingCore::claim()?;
     let auth_config = jazz_server::AuthConfig {
-        allow_local_first_auth: options.allow_local_first_auth.unwrap_or(false),
         backend_secret: options.backend_secret,
         admin_secret: options.admin_secret,
         trusted_workload,
         ..Default::default()
     };
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("jazz=info".parse().expect("static directive"))
-                .add_directive("jazz_tools=info".parse().expect("static directive")),
-        )
-        .try_init();
+    crate::init_server_logs("info");
     let (stop, stop_requested) = tokio::sync::watch::channel(false);
     let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
     napi::bindgen_prelude::spawn(async move {
@@ -209,6 +201,8 @@ pub fn serve_core(options: JsonValue) -> Result<ServedCore> {
                 max_websocket_connections: options
                     .max_connections
                     .unwrap_or(jazz_server::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS),
+                max_websocket_connections_per_user:
+                    jazz_server::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS_PER_IDENTITY,
                 memory_limit_bytes: options
                     .memory_limit_bytes
                     .or_else(jazz_server::resources::detect_memory_limit_bytes),

@@ -72,9 +72,12 @@ describe("vercel() core download", () => {
 describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
   let root: string;
   const children: ChildProcess[] = [];
+  /** What the start scripts wrote to stderr (which the Sandbox appends to /data/server.log). */
+  let stderr = "";
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "jazz-start-"));
+    stderr = "";
     mkdirSync(join(root, "data/bin"), { recursive: true });
     mkdirSync(join(root, "tmp"));
     mkdirSync(join(root, "fakebin"));
@@ -132,10 +135,11 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     const script = join(root, `start-${Math.random()}.sh`);
     writeFileSync(script, startScript(version, tarballUrl, workload, blobs, root));
     const child = spawn("bash", [script], {
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
       detached: true,
       env: { ...process.env, PATH: `${join(root, "fakebin")}:${process.env.PATH}` },
     });
+    child.stderr!.on("data", (chunk) => (stderr += chunk));
     children.push(child);
     const exited = new Promise<number>((resolve) =>
       child.on("exit", (code) => resolve(code ?? -1)),
@@ -203,7 +207,6 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
           dataDir: `${root}/data/store`,
           blobs: { kind: "sqlite" },
           trustedWorkload: trust,
-          allowLocalFirstAuth: true,
         },
       },
     ]);
@@ -314,6 +317,19 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     writeFileSync(join(root, "tmp/jazz.version"), "0.9.0\n");
     expect(await start("1.0.0")).toBe("running");
     expect(alive(String(bystander.pid))).toBe(true);
+  });
+
+  it("says nothing about a pid file that is missing or names a process that is gone", async () => {
+    installFake("1.0.0");
+    // A Drive's first start: no pid file yet.
+    expect(await start("1.0.0")).toBe("running");
+    // A start after the Sandbox stopped: the pid file outlived its process.
+    const gone = spawnSync("true").pid;
+    spawnSync("kill", ["-9", read("tmp/jazz.pid")!]);
+    writeFileSync(join(root, "tmp/jazz.pid"), `${gone}\n`);
+    expect(await start("1.0.0")).toBe("running");
+    expect(stderr).not.toContain("cmdline");
+    expect(stderr).toBe("");
   });
 
   it("runs one server when several instances start at once", async () => {

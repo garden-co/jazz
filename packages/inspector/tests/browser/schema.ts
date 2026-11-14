@@ -1,15 +1,15 @@
 import { schema as s, defineApp, definePermissions, type Schema, type App } from "jazz-tools";
 
-const schema = {
+export const todoSchema = {
   todos: {
     title: s.string(),
     done: s.boolean(),
   },
 };
 
-type AppSchema = Schema<typeof schema>;
+type AppSchema = Schema<typeof todoSchema>;
 
-export const app: App<AppSchema> = defineApp(schema, { migrations: "none" });
+export const app: App<AppSchema> = defineApp(todoSchema, { migrations: "none" });
 
 // Embedded Inspector hosts are ordinary sessions and must be able to read.
 export const permissions = definePermissions(app, ({ policy }) => {

@@ -2009,6 +2009,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "tracing",
  "uuid",
  "web-time",
 ]
@@ -2190,6 +2191,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 
@@ -2214,6 +2216,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
  "url",
 ]
 

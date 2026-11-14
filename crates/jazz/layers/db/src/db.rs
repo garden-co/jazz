@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
+use std::task::{Poll, Waker};
 
 use crate::ids::{AuthorSubject, GlobalPhysicalColumnId, GlobalPhysicalTableId, RowUuid};
 use crate::protocol::{
@@ -32,6 +33,8 @@ use crate::tools::{CmpOp, PolicyExpr};
 #[path = "fanout.rs"]
 mod fanout;
 pub use fanout::FanoutStats;
+#[cfg(any(test, feature = "testing"))]
+pub use fanout::{set_correlation_filter_for_test, set_policy_pins_for_test};
 #[path = "large_ops.rs"]
 mod large_ops;
 pub(crate) use large_ops::byte_splices;
@@ -41,7 +44,7 @@ pub use large_ops::{
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
-pub use sync::origin_node;
+pub use sync::{ORIGIN_ENTRY_RETENTION_MS, origin_node};
 
 #[path = "shard.rs"]
 pub mod shard;
@@ -534,6 +537,14 @@ struct Inner {
     /// Errors the next ticks fail with, for tests of a tick driver.
     #[cfg(any(test, feature = "testing"))]
     failing_ticks: VecDeque<ErrorCode>,
+    /// Staged writes replayed into a transaction overlay so far: what tests
+    /// of staging cost count.
+    #[cfg(any(test, feature = "testing"))]
+    overlay_replays: usize,
+    /// Times a write check copied the evidence set it shares with its
+    /// batch: what tests of staging cost count.
+    #[cfg(any(test, feature = "testing"))]
+    evidence_copies: std::cell::Cell<usize>,
     /// Large-value chunks: the cache the collation and decoders read.
     chunks: Arc<crate::large::Chunks>,
     /// Nodes a large-value edit consolidated, stored when the edited cell
@@ -617,6 +628,19 @@ struct Inner {
     /// Views governed by a bundle's policies (see `Inner::governed_view`),
     /// by bundle, with the view each was built from.
     bundle_views: RefCell<HashMap<crate::catalogue::BundleId, (Rc<Schema>, Rc<Schema>)>>,
+    /// The stored views sessions' commits apply under (see
+    /// `Inner::session_stored_view`), by bundle and written version, with
+    /// the stored view each was built from.
+    #[allow(clippy::type_complexity)]
+    version_stored_views: RefCell<
+        HashMap<
+            (
+                Option<crate::catalogue::BundleId>,
+                crate::ids::SchemaVersionId,
+            ),
+            (Rc<Schema>, Rc<Schema>),
+        >,
+    >,
     /// Open transaction batches, by id.
     batches: HashMap<OpenTransactionId, Batch>,
     identity: DbIdentity,
@@ -696,6 +720,9 @@ struct Inner {
     pub(crate) as_written_mismatches: u64,
     /// Pending commits a rebase replayed (see `Db::rebase`).
     pub(crate) replayed_commits: u64,
+    /// Echoes a serving pass examined to match its images (see
+    /// `Db::echo_probes`).
+    pub(crate) echo_probes: u64,
     /// The global authority: what it settles is durable at `Global`.
     authority: bool,
     /// Every session but SYSTEM's must be pinned to a published bundle
@@ -832,9 +859,12 @@ pub(crate) enum Who {
 
 /// How long a LocalFirst read's first load waits for a relay's upstream
 /// (`firstLoadRemoteWaitMs`), as a non-durable foreground tells its relay.
+/// A zero wait is `FirstLoad::Deliver`: no wait at all.
 pub(crate) fn first_load_wait(tier: ReadTier, first_load: &FirstLoad) -> Option<u64> {
     match (tier, first_load) {
-        (ReadTier::LocalFirst, FirstLoad::WaitForRemote { timeout_ms }) => Some(*timeout_ms),
+        (ReadTier::LocalFirst, FirstLoad::WaitForRemote { timeout_ms }) if *timeout_ms > 0 => {
+            Some(*timeout_ms)
+        }
         _ => None,
     }
 }
@@ -885,6 +915,186 @@ impl Stamp {
 }
 
 const STATEMENT_CACHE_CAPACITY: usize = 512;
+
+/// Rows whose parent cells one batched statement reads
+/// ([`Inner::relation_parents`]): their ids bind as one JSON array of
+/// about 35 bytes each, well under Durable Object SQLite's 2 MiB string.
+const BATCH_IDS: usize = 4096;
+
+/// At most how many bytes of parent values one batched relation statement
+/// binds ([`Inner::relation_level`]), as one JSON array: well under
+/// Durable Object SQLite's 2 MiB string.
+const BATCH_BYTES: usize = 256 * 1024;
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static BATCH_LIMITS: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((BATCH_IDS, BATCH_BYTES)) };
+}
+
+/// [`BATCH_IDS`] and [`BATCH_BYTES`], or smaller in tests that cross them.
+fn batch_limits() -> (usize, usize) {
+    #[cfg(any(test, feature = "testing"))]
+    {
+        BATCH_LIMITS.with(std::cell::Cell::get)
+    }
+    #[cfg(not(any(test, feature = "testing")))]
+    {
+        (BATCH_IDS, BATCH_BYTES)
+    }
+}
+
+/// Tests only: split batched relation reads at `ids` rows per parent-cell
+/// read and `bytes` of bound parent values per children read, on this
+/// thread; `None` restores the defaults.
+#[cfg(any(test, feature = "testing"))]
+pub fn set_relation_batch_limits_for_test(limits: Option<(usize, usize)>) {
+    BATCH_LIMITS.with(|cell| cell.set(limits.unwrap_or((BATCH_IDS, BATCH_BYTES))));
+}
+
+/// The length of `value` as an item of [`crate::compile::json_list`]'s
+/// array; `None` when it has no exact JSON form.
+fn json_item_len(value: &Sql) -> Option<usize> {
+    match value {
+        Sql::Null => Some(4),
+        Sql::Blob(bytes) => Some(2 * bytes.len() + 2),
+        Sql::Integer(n) => Some(n.to_string().len()),
+        Sql::Text(text) => serde_json::to_string(std::str::from_utf8(text).ok()?)
+            .ok()
+            .map(|json| json.len()),
+        Sql::Real(_) => None,
+    }
+}
+
+/// One read's nesting of its relations (`Inner::node`), shared by every row
+/// it nests: one read, as one identity, through one view and cut. Its
+/// relations' rows depend only on the relation and the parent value, so
+/// the run builds each relation's SQL (and each parent-cell read) once and
+/// rebinds only the parent, and reads each (relation, parent value) once
+/// where values repeat (relations keyed by a parent's column).
+///
+/// It lives for one call and dies with it, so nothing it holds outlives the
+/// read: relations are keyed by address, valid while the run borrows the
+/// query that owns them.
+struct RelationRun<'q> {
+    prepared: &'q PreparedQuery,
+    read: &'q ReadSpec,
+    sessions: (Option<Session>, Session),
+    /// Whether to reuse at all (always, outside tests that compare with the
+    /// uncached path).
+    reuse: bool,
+    /// Per relation and parent shape (an array of references or a scalar):
+    /// its compiled children and the parameter holding the parent.
+    sql: HashMap<(*const crate::query::ArraySubquery, bool), (Compiled, usize)>,
+    /// Per relation: the read of its parent cell.
+    cells: HashMap<*const crate::query::ArraySubquery, crate::compile::CellRead>,
+    /// Per relation keyed by a parent's column, parent shape and bound
+    /// parent value: its children.
+    children:
+        HashMap<(*const crate::query::ArraySubquery, bool, Option<ParentKey>), Vec<ResultNode>>,
+    /// Whether to nest a level's rows with one statement per relation
+    /// ([`Inner::nest_level`]) rather than per row (always, outside tests
+    /// that compare the two).
+    /// Each relation is then read once per run, so there is nothing to
+    /// cache for it.
+    batch: bool,
+}
+
+impl<'q> RelationRun<'q> {
+    fn new(
+        inner: &Inner,
+        prepared: &'q PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &'q ReadSpec,
+    ) -> Self {
+        Self {
+            prepared,
+            read,
+            sessions: inner.read_sessions(prepared, identity),
+            reuse: relation_reuse(),
+            sql: HashMap::new(),
+            cells: HashMap::new(),
+            children: HashMap::new(),
+            batch: relation_batch(),
+        }
+    }
+
+    fn ctx<'a>(&'a self, inner: &'a Inner) -> Ctx<'a> {
+        let (policy, claims) = &self.sessions;
+        inner.read_ctx(self.prepared, policy.as_ref(), claims, self.read)
+    }
+}
+
+/// A bound parent value as a map key: equal keys bind equal SQL values.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ParentKey {
+    Null,
+    Integer(i64),
+    Real(u64),
+    Text(Vec<u8>),
+    Blob(Vec<u8>),
+}
+
+impl ParentKey {
+    fn of(value: &Sql) -> Self {
+        match value {
+            Sql::Null => Self::Null,
+            Sql::Integer(v) => Self::Integer(*v),
+            Sql::Real(v) => Self::Real(v.to_bits()),
+            Sql::Text(v) => Self::Text(v.clone()),
+            Sql::Blob(v) => Self::Blob(v.clone()),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static RELATION_REUSE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Whether relation nesting reuses SQL and rows within a read.
+fn relation_reuse() -> bool {
+    #[cfg(any(test, feature = "testing"))]
+    {
+        RELATION_REUSE.with(std::cell::Cell::get)
+    }
+    #[cfg(not(any(test, feature = "testing")))]
+    {
+        true
+    }
+}
+
+/// Tests only: nest relations without reusing SQL or rows within a read
+/// (`false`), on this thread, to compare with the reusing path.
+#[cfg(any(test, feature = "testing"))]
+pub fn set_relation_reuse_for_test(reuse: bool) {
+    RELATION_REUSE.with(|cell| cell.set(reuse));
+}
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static RELATION_BATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Whether relation nesting reads a level's rows with one statement per
+/// relation.
+fn relation_batch() -> bool {
+    #[cfg(any(test, feature = "testing"))]
+    {
+        RELATION_BATCH.with(std::cell::Cell::get)
+    }
+    #[cfg(not(any(test, feature = "testing")))]
+    {
+        true
+    }
+}
+
+/// Tests only: nest relations one parent row at a time (`false`), on this
+/// thread, to compare with the batched path.
+#[cfg(any(test, feature = "testing"))]
+pub fn set_relation_batch_for_test(batch: bool) {
+    RELATION_BATCH.with(|cell| cell.set(batch));
+}
 
 /// The application tables a store holds, by their stored columns.
 fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> {
@@ -1415,6 +1625,9 @@ impl Db {
         conn: Connection,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
+        // Before the first statement is prepared: the flag is read at
+        // prepare time.
+        crate::host::stable_plans(&conn)?;
         // A schema this store has not admitted is reached along the lenses
         // the app ships: from a version it admitted, else from the first
         // version, each admitted as the authority admits it.
@@ -1621,6 +1834,10 @@ impl Db {
                 kept_variants: BTreeMap::new(),
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),
+                #[cfg(any(test, feature = "testing"))]
+                overlay_replays: 0,
+                #[cfg(any(test, feature = "testing"))]
+                evidence_copies: std::cell::Cell::new(0),
                 chunks,
                 pending_nodes: Vec::new(),
                 merging: false,
@@ -1652,6 +1869,7 @@ impl Db {
                 views: BTreeMap::new(),
                 bundles: HashMap::new(),
                 bundle_views: RefCell::default(),
+                version_stored_views: RefCell::default(),
                 batches: HashMap::new(),
                 system_node: config.system_node.unwrap_or(config.identity.node),
                 identity: config.identity,
@@ -1688,6 +1906,7 @@ impl Db {
                 reopenable: path.is_some(),
                 as_written_mismatches: 0,
                 replayed_commits: 0,
+                echo_probes: 0,
                 authority: false,
                 pins_required: false,
                 upstream_rejections: None,
@@ -1937,18 +2156,72 @@ impl Db {
     /// The shared state, set up to run under this handle's schema.
     fn inner(&self) -> std::cell::RefMut<'_, Inner> {
         let mut inner = self.inner.borrow_mut();
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        inner.schema = self.execution_schema(&inner);
         inner
+    }
+
+    /// Retained current-governed views keep their names, but not an old owner
+    /// policy. Exact registered views and published bundle pins stay fixed.
+    fn execution_schema(&self, inner: &Inner) -> Rc<Schema> {
+        let Some(view) = &self.view else {
+            return inner.owner.clone();
+        };
+        match &view.policies_from {
+            Some(policies) if policies.bundle.is_none() => {
+                if Rc::ptr_eq(policies, &inner.owner) {
+                    view.clone()
+                } else {
+                    Rc::new((**view).clone().with_policies_of(inner.owner.clone()))
+                }
+            }
+            _ => view.clone(),
+        }
+    }
+
+    /// Keep prepared names while selecting policy from the executing handle.
+    fn execution_query<'a>(
+        &self,
+        prepared: &'a PreparedQuery,
+    ) -> std::borrow::Cow<'a, PreparedQuery> {
+        // A peek: choosing policies must not settle an open transaction's
+        // overlay; `inner()` would, on every identity read in the batch.
+        let inner = self.inner.staging();
+        let schema = self.execution_schema(&inner);
+        let names = prepared.schema.as_ref().unwrap_or(&inner.owner);
+        let governing = schema.policies_from.as_ref().unwrap_or(&schema);
+        let prior = names.policies_from.as_ref().unwrap_or(names);
+        if Rc::ptr_eq(prior, governing) {
+            return std::borrow::Cow::Borrowed(prepared);
+        }
+        std::borrow::Cow::Owned(PreparedQuery {
+            schema: Some(Rc::new(
+                (**names).clone().with_policies_of(governing.clone()),
+            )),
+            ..prepared.clone()
+        })
     }
 
     pub fn table(&self, table: impl Into<String>) -> Query {
         Query::from(table)
     }
 
-    pub fn set_identity_claims(&self, identity: AuthorSubject, claims: BTreeMap<String, Value>) {
+    /// Bind `claims` to `identity`; returns whether they changed.
+    pub fn set_identity_claims(
+        &self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> bool {
+        // A peek: a host repeats an identity's claims before each of its
+        // writes, and the store gate would undo an open transaction's
+        // cached overlay, so its next stage would replay every write it
+        // staged so far.
+        if self.inner.staging().claims.get(&identity) == Some(&claims) {
+            return false;
+        }
         let mut inner = self.inner();
         inner.claims.insert(identity, claims);
         inner.refresh_identity(identity);
+        true
     }
 
     pub async fn tick(&self) -> Result<(), Error> {
@@ -2543,6 +2816,87 @@ impl Db {
         Ok((compiled.sql.clone(), plan.join(" | ")))
     }
 
+    /// Diagnostics for the Inspector's `explain`: for each of `rows` of
+    /// `table` (current, not deleted), which of its read policy's clauses
+    /// hold for `author` with `claims` (as bound to an identity: see
+    /// [`crate::binding_args::policy_claims`]). The clauses are the arms of the
+    /// policy's top-level `Or` (one clause when it is not an `Or`); none when
+    /// the table has no read policy, which denies every row. The policy is
+    /// the one reads are judged by (an older schema's rows by the current
+    /// schema's policies). Answers the number of clauses and, for each row
+    /// found (current, not deleted), whether each holds. Branched tables are
+    /// not supported yet.
+    #[doc(hidden)]
+    pub fn explain_read_clauses(
+        &self,
+        table: &str,
+        rows: &[RowUuid],
+        author: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> Result<(usize, Vec<(RowUuid, Vec<bool>)>), Error> {
+        let inner = self.inner();
+        let table = inner.schema.table(table)?;
+        if !table.branch_by.is_empty() {
+            return Err(unsupported("explain for a table with branches"));
+        }
+        // As `Ctx::under_policy_schema` judges reads: by the schema whose
+        // policies govern this table's rows.
+        let governing = match inner.schema.policies_from.as_deref() {
+            None => Some(table),
+            Some(current) => current.by_stored(&table.stored),
+        };
+        let clauses: Vec<PolicyExpr> = match governing.and_then(|t| t.policy(Operation::Select)) {
+            None => Vec::new(),
+            Some(PolicyExpr::Or(exprs)) => exprs.clone(),
+            Some(policy) => vec![policy.clone()],
+        };
+        if rows.is_empty() {
+            return Ok((clauses.len(), Vec::new()));
+        }
+        let session = Session::for_author(author, claims);
+        let binding = BTreeMap::new();
+        let none = Session::default();
+        let mut ctx = Ctx::new(&inner.schema, None, &none, &binding);
+        let mut columns = Vec::with_capacity(clauses.len());
+        for clause in &clauses {
+            let condition = ctx.policy_clause(Some(clause), table, "a", &session)?;
+            columns.push(format!(", COALESCE({condition}, 0)"));
+        }
+        let source = ctx.source(table)?;
+        let mut params = ctx.params;
+        let mut ids = Vec::with_capacity(rows.len());
+        for row in rows {
+            params.push(Sql::Blob(row.0.as_bytes().to_vec()));
+            ids.push(format!("?{}", params.len()));
+        }
+        let sql = format!(
+            "SELECT a.id{} FROM {source} AS a WHERE a.id IN ({}) AND (a._state & {STATE_DELETED}) = 0",
+            columns.concat(),
+            ids.join(", "),
+        );
+        let mut statement = inner.conn.prepare(&sql).map_err(storage)?;
+        let count = clauses.len();
+        let found = statement
+            .query_map(params_from_iter(params.iter()), |r| {
+                let id: Vec<u8> = r.get(0)?;
+                let mut holds = Vec::with_capacity(count);
+                for index in 0..count {
+                    holds.push(r.get::<_, i64>(index + 1)? != 0);
+                }
+                Ok((id, holds))
+            })
+            .map_err(storage)?;
+        let mut answer = Vec::new();
+        for row in found {
+            let (id, holds) = row.map_err(storage)?;
+            let id: [u8; 16] = id
+                .try_into()
+                .map_err(|_| crate::values::query_error("a row id is not 16 bytes"))?;
+            answer.push((RowUuid::from_bytes(id), holds));
+        }
+        Ok((count, answer))
+    }
+
     /// Text merges that ran past [`jazz_text::MERGE_WORK_BUDGET`] since the
     /// last call, so the incoming write stood as sent and the held value's
     /// concurrent edits left the current text (history keeps them), and
@@ -2696,8 +3050,9 @@ impl Db {
         opts: ReadOpts,
         identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let prepared = self.execution_query(prepared);
         let inner = self.inner();
-        inner.run(prepared, Some(identity), &ReadSpec::of(&opts, &inner)?)
+        inner.run(&prepared, Some(identity), &ReadSpec::of(&opts, &inner)?)
     }
 
     pub async fn all_result_tree(
@@ -2708,17 +3063,13 @@ impl Db {
         let inner = self.inner();
         let read = ReadSpec::of(&opts, &inner)?;
         let roots = inner.run(prepared, None, &read)?;
-        let mut tree = Vec::with_capacity(roots.len());
-        for row in roots {
-            tree.push(inner.node(
-                prepared,
-                None,
-                &read,
-                &prepared.query.table,
-                &prepared.query.array_subqueries,
-                row,
-            )?);
-        }
+        let mut run = RelationRun::new(&inner, prepared, None, &read);
+        let tree = inner.nest(
+            &mut run,
+            &prepared.query.table,
+            &prepared.query.array_subqueries,
+            roots,
+        )?;
         Ok(ResultTree { roots: tree })
     }
 
@@ -2743,8 +3094,9 @@ impl Db {
 
     /// On a client a subscription also attaches remotely (unless
     /// LocalOnly); its opening is withheld while it waits for the server
-    /// (the Remote tier, or `FirstLoad::WaitForRemote` while the link could
-    /// answer), and its deltas report whether the server answered.
+    /// (the Remote tier, or `FirstLoad::WaitForRemote` with a non-zero wait
+    /// while the link could answer), and its deltas report whether the
+    /// server answered.
     fn open_subscription(
         &self,
         prepared: &PreparedQuery,
@@ -2904,6 +3256,22 @@ impl Db {
 
     pub fn fanout_stats(&self) -> fanout::FanoutStats {
         self.inner().fan.stats()
+    }
+
+    /// A one-shot read with array relations nested as a subscription nests
+    /// them, as `identity` (`None`: unchecked): the full re-run a live
+    /// result is compared with in tests.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn all_nested_for_test(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        identity: Option<AuthorSubject>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let inner = self.inner();
+        let read = ReadSpec::of(&opts, &inner)?;
+        let rows = inner.run(prepared, identity, &read)?;
+        inner.nest_relations(prepared, identity, &read, rows)
     }
 
     /// Deliver the rows written since the last dispatch to the groups they
@@ -3086,6 +3454,16 @@ impl Db {
                 {
                     inner.record_fate(node, tx, &Ok(()))?;
                     inner.record_settled(node, tx, Some(Pos::at(seq)))?;
+                    // Its entry ages out if all it wrote is latest-only,
+                    // as the commit's version declares (SPEC 8 §8.14).
+                    let prunable = {
+                        let changed = inner.changed.borrow();
+                        changed.len() > mark
+                            && changed[mark..]
+                                .iter()
+                                .all(|(stored, ..)| inner.prunes(stored))
+                    };
+                    inner.note_origin_entry(node, tx, prunable)?;
                 }
                 Ok((wrote, handle))
             });
@@ -3491,6 +3869,18 @@ impl Db {
 /// Why a replica refuses an upstream whose authority namespace is not the
 /// one it mirrors (INV-SYNC-54). Nothing on the wire tells a recreated server
 /// store from another app's, so the message names both, and the one way on.
+/// A store keeps `version` under other names than its authority, which never
+/// confirmed them: it was opened without the app's migrations.
+pub(crate) fn store_opened_without_migrations(version: &crate::ids::SchemaVersionId) -> Error {
+    Error::new(
+        ErrorCode::StoreOpenedWithoutMigrations,
+        format!(
+            "this store keeps schema version {} under other names than the server, which never confirmed them: it was opened without the app's migrations, so it took this version as the app's first. That happens when the app ships no migration into this version: `defineApp(schema, {{ migrations: \"none\" }})`, a migrations/index.ts that misses it (run `npx jazz-tools validate`), or React Native before alpha.61. Ship the app's migrations (see https://jazz.tools/docs/schemas/migrations), then rebuild this store, or reset it with deleteClientStorage(), which drops its unsynced writes",
+            uuid::Uuid::from_bytes(*version.as_bytes())
+        ),
+    )
+}
+
 pub(crate) fn authority_changed() -> Error {
     Error::new(
         ErrorCode::AuthorityChanged,
@@ -3734,9 +4124,20 @@ impl Inner {
         for (version, names, _) in &entries {
             match self.names.get(version) {
                 Some(local) if local == names => {}
+                // No authority ever confirmed this version's names here: the
+                // store minted them itself, opened without the lenses that
+                // lead to it (a client that dropped the app's migrations).
+                Some(_) if !self.names.confirmed(version) => {
+                    return Err(store_opened_without_migrations(version));
+                }
                 Some(_) => {
-                    return Err(unsupported(format!(
-                        "schema version {}, which this store stores otherwise than its upstream (it was opened without the app's lenses into it),",
+                    return Err(crate::values::query_error(format!(
+                        "this store keeps schema version {} under other names than its upstream: \
+                         the two took different histories into it, so the app's migrations \
+                         differ between them (one was opened without them, or with a \
+                         migrations/index.ts from another branch). Ship the same migrations \
+                         everywhere (`npx jazz-tools validate` regenerates migrations/index.ts; \
+                         see https://jazz.tools/docs/schemas/migrations), then reset this store",
                         uuid::Uuid::from_bytes(*version.as_bytes())
                     )));
                 }
@@ -4567,9 +4968,21 @@ impl Inner {
     }
 
     fn execute(&self, compiled: &Compiled, table: &str) -> Result<Vec<CurrentRow>, Error> {
+        self.execute_keyed(compiled, table, None)
+    }
+
+    /// [`Inner::execute`]; with `keys`, each row carries an integer after
+    /// its writer (a batched relation's parent index), pushed there in row
+    /// order.
+    fn execute_keyed(
+        &self,
+        compiled: &Compiled,
+        table: &str,
+        keys: Option<&mut Vec<i64>>,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let started = web_time::Instant::now();
         let mut run = crate::slow::Run::default();
-        let rows = self.execute_sql(&compiled.sql, compiled, table, &mut run)?;
+        let rows = self.execute_sql(&compiled.sql, compiled, table, &mut run, keys)?;
         run.elapsed = started.elapsed();
         let mut slow = self.slow.borrow_mut();
         if slow.is_slow(run.elapsed) {
@@ -4608,6 +5021,7 @@ impl Inner {
         compiled: &Compiled,
         table: &str,
         run: &mut crate::slow::Run,
+        mut keys: Option<&mut Vec<i64>>,
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut statement = self.conn.prepare_cached(sql).map_err(storage)?;
         // Cached statements keep counting across runs: start this one at 0.
@@ -4714,6 +5128,10 @@ impl Inner {
             } else {
                 None
             };
+            if let Some(keys) = keys.as_deref_mut() {
+                let at = first + compiled.projection.len() + usize::from(compiled.writer);
+                keys.push(row.get(at).map_err(storage)?);
+            }
             out.push(CurrentRow {
                 table: names.clone(),
                 id: RowUuid(
@@ -4762,20 +5180,16 @@ impl Inner {
         } else {
             read
         };
-        roots
-            .into_iter()
-            .map(|row| {
-                self.node(
-                    prepared,
-                    identity,
-                    read,
-                    &prepared.query.table,
-                    &prepared.query.array_subqueries,
-                    row,
-                )?
-                .into_nested_row()
-            })
-            .collect()
+        let mut run = RelationRun::new(self, prepared, identity, read);
+        self.nest(
+            &mut run,
+            &prepared.query.table,
+            &prepared.query.array_subqueries,
+            roots,
+        )?
+        .into_iter()
+        .map(ResultNode::into_nested_row)
+        .collect()
     }
 
     /// The versions of the rows a read returns, its relations' rows
@@ -4789,16 +5203,15 @@ impl Inner {
         let roots = self.run(prepared, identity, read)?;
         let mut out = versions(&roots);
         if !prepared.query.array_subqueries.is_empty() {
-            for row in roots {
-                let node = self.node(
-                    prepared,
-                    identity,
-                    read,
-                    &prepared.query.table,
-                    &prepared.query.array_subqueries,
-                    row,
-                )?;
-                child_versions(&node, &mut out);
+            let mut run = RelationRun::new(self, prepared, identity, read);
+            let nodes = self.nest(
+                &mut run,
+                &prepared.query.table,
+                &prepared.query.array_subqueries,
+                roots,
+            )?;
+            for node in &nodes {
+                child_versions(node, &mut out);
             }
         }
         out.into_iter()
@@ -4825,49 +5238,347 @@ impl Inner {
     /// read's view and cut, settled-only and members-only as it is.
     fn node(
         &self,
-        prepared: &PreparedQuery,
-        identity: Option<AuthorSubject>,
-        read: &ReadSpec,
+        run: &mut RelationRun<'_>,
         table: &str,
         arrays: &[crate::query::ArraySubquery],
         row: CurrentRow,
     ) -> Result<ResultNode, Error> {
         let mut relations = BTreeMap::new();
         for array in arrays {
-            let (policy, claims) = self.read_sessions(prepared, identity);
-            let ctx = || self.read_ctx(prepared, policy.as_ref(), &claims, read);
             let parent = if array.outer_column == "id" {
                 Value::Uuid(row.id.0)
             } else {
-                let (sql, params, ty, tags) =
-                    ctx().compile_cell(table, &array.outer_column, row.id)?;
-                let cell: Option<Sql> = self
-                    .conn
-                    .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
-                    .optional()
-                    .map_err(storage)?;
-                match cell {
-                    Some(cell) => cell_from_sql(&ty, tags.as_ref(), cell.as_ref(), &self.chunks)?
-                        .unwrap_or(Value::Nullable(None)),
-                    None => Value::Nullable(None),
-                }
+                self.relation_parent(run, table, array, row.id)?
             };
-            let compiled = ctx().compile_children(array, &parent)?;
-            let children = self.execute(&compiled, &array.table)?;
-            let mut nodes = Vec::with_capacity(children.len());
-            for child in children {
-                nodes.push(self.node(
-                    prepared,
-                    identity,
-                    read,
-                    &array.table,
-                    &array.nested_arrays,
-                    child,
-                )?);
-            }
+            let nodes = self.relation(run, array, &parent)?;
             relations.insert(array.column_name.clone(), ResultRelation::Array(nodes));
         }
         Ok(ResultNode { row, relations })
+    }
+
+    /// `rows` of `table`, each with `arrays` nested: a level at a time
+    /// ([`Inner::nest_level`]), or row by row ([`Inner::node`]) in tests
+    /// that compare the two.
+    fn nest(
+        &self,
+        run: &mut RelationRun<'_>,
+        table: &str,
+        arrays: &[crate::query::ArraySubquery],
+        rows: Vec<CurrentRow>,
+    ) -> Result<Vec<ResultNode>, Error> {
+        if run.batch && !arrays.is_empty() {
+            return self.nest_level(run, table, arrays, rows);
+        }
+        rows.into_iter()
+            .map(|row| self.node(run, table, arrays, row))
+            .collect()
+    }
+
+    /// One level of nesting: for each relation, its parent values for all
+    /// of `rows` in one statement (for a relation keyed by a column other
+    /// than the parent's id) and the children of all of them in another
+    /// ([`Inner::relation_level`]); the children's own relations then
+    /// nest the same way, one level down. Each row gets what
+    /// [`Inner::node`] would give it.
+    fn nest_level(
+        &self,
+        run: &mut RelationRun<'_>,
+        table: &str,
+        arrays: &[crate::query::ArraySubquery],
+        rows: Vec<CurrentRow>,
+    ) -> Result<Vec<ResultNode>, Error> {
+        let mut relations: Vec<BTreeMap<String, ResultRelation>> =
+            (0..rows.len()).map(|_| BTreeMap::new()).collect();
+        for array in arrays {
+            let parents = if array.outer_column == "id" {
+                rows.iter().map(|row| Value::Uuid(row.id.0)).collect()
+            } else {
+                self.relation_parents(run, table, array, &rows)?
+            };
+            let children = self.relation_level(run, array, &parents)?;
+            for (slot, nodes) in relations.iter_mut().zip(children) {
+                slot.insert(array.column_name.clone(), ResultRelation::Array(nodes));
+            }
+        }
+        Ok(rows
+            .into_iter()
+            .zip(relations)
+            .map(|(row, relations)| ResultNode { row, relations })
+            .collect())
+    }
+
+    /// [`Inner::relation_parent`] of each of `rows`, read in one
+    /// statement per [`BATCH_IDS`] rows.
+    fn relation_parents(
+        &self,
+        run: &mut RelationRun<'_>,
+        table: &str,
+        array: &crate::query::ArraySubquery,
+        rows: &[CurrentRow],
+    ) -> Result<Vec<Value>, Error> {
+        let mut found: HashMap<RowUuid, Value> = HashMap::with_capacity(rows.len());
+        for chunk in rows.chunks(batch_limits().0.max(1)) {
+            let ids =
+                crate::compile::json_ids(chunk.iter().map(|row| row.id.0.as_bytes().as_slice()));
+            let (cell, _) = run
+                .ctx(self)
+                .compile_cells(table, &array.outer_column, ids)?;
+            let mut statement = self.conn.prepare_cached(&cell.sql).map_err(storage)?;
+            let mut cells = statement
+                .query(params_from_iter(cell.params.iter()))
+                .map_err(storage)?;
+            while let Some(row) = cells.next().map_err(storage)? {
+                let id: Vec<u8> = row.get(0).map_err(storage)?;
+                let id = RowUuid(
+                    uuid::Uuid::from_slice(&id)
+                        .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?,
+                );
+                let value = cell_from_sql(
+                    &cell.ty,
+                    cell.tags.as_ref(),
+                    row.get_ref(1).map_err(storage)?,
+                    &self.chunks,
+                )?
+                .unwrap_or(Value::Nullable(None));
+                found.entry(id).or_insert(value);
+            }
+        }
+        Ok(rows
+            .iter()
+            .map(|row| found.get(&row.id).cloned().unwrap_or(Value::Nullable(None)))
+            .collect())
+    }
+
+    /// The children `array` relates to each of `parents`, each with its own
+    /// relations: what [`Inner::relation`] returns for each, read with one
+    /// statement for all distinct parent values (per [`BATCH_BYTES`] of
+    /// them, as bound). A parent that binds as SQL `NULL` (or not at all,
+    /// NaN) has no children, as `= NULL` matches no row. These fall back
+    /// to [`Inner::relation`]: a parent value too large to share a bound
+    /// list (over [`BATCH_BYTES`] encoded), and for the whole level,
+    /// parents with no exact shared JSON form (reals, text that is not
+    /// UTF-8, blobs mixed with other values), of mixed shapes, or children
+    /// too wide to batch (see [`crate::compile::Ctx::compile_children_batch`]).
+    fn relation_level(
+        &self,
+        run: &mut RelationRun<'_>,
+        array: &crate::query::ArraySubquery,
+        parents: &[Value],
+    ) -> Result<Vec<Vec<ResultNode>>, Error> {
+        let mut index: HashMap<ParentKey, usize> = HashMap::new();
+        // Each distinct bound value, and a parent that binds it.
+        let mut values: Vec<(Sql, &Value)> = Vec::new();
+        let mut of_parent: Vec<Option<usize>> = Vec::with_capacity(parents.len());
+        let mut shape = None;
+        let mut batchable = true;
+        for parent in parents {
+            let elements = match parent {
+                Value::Nullable(Some(inner)) => matches!(**inner, Value::Array(_)),
+                value => matches!(value, Value::Array(_)),
+            };
+            match crate::values::to_sql(parent)? {
+                None | Some(Sql::Null) => of_parent.push(None),
+                Some(sql) => {
+                    batchable &= *shape.get_or_insert(elements) == elements;
+                    let next = values.len();
+                    let at = *index.entry(ParentKey::of(&sql)).or_insert(next);
+                    if at == next {
+                        values.push((sql, parent));
+                    }
+                    of_parent.push(Some(at));
+                }
+            }
+        }
+        let elements = shape.unwrap_or(false);
+        let (_, max_bytes) = batch_limits();
+        // Chunks of distinct values, each bound as one list of at most
+        // `max_bytes` (as encoded); values alone over it read per parent.
+        let mut chunks: Vec<Vec<usize>> = Vec::new();
+        let mut alone: Vec<usize> = Vec::new();
+        if batchable {
+            let mut chunk = Vec::new();
+            let mut bytes = 2;
+            for (at, (value, _)) in values.iter().enumerate() {
+                let Some(size) = json_item_len(value) else {
+                    batchable = false;
+                    break;
+                };
+                if size + 3 > max_bytes {
+                    alone.push(at);
+                    continue;
+                }
+                if !chunk.is_empty() && bytes + size + 1 > max_bytes {
+                    chunks.push(std::mem::take(&mut chunk));
+                    bytes = 2;
+                }
+                chunk.push(at);
+                bytes += size + 1;
+            }
+            if !chunk.is_empty() {
+                chunks.push(chunk);
+            }
+        }
+        let mut rows = Vec::new();
+        let mut keys = Vec::new();
+        for (n, chunk) in chunks.iter().enumerate() {
+            if !batchable {
+                break;
+            }
+            let list: Vec<&Sql> = chunk.iter().map(|at| &values[*at].0).collect();
+            let blobs = list.iter().any(|value| matches!(value, Sql::Blob(_)));
+            let Some((_, list)) = crate::compile::json_list(&list, "?") else {
+                batchable = false;
+                break;
+            };
+            let Some((compiled, _)) = run
+                .ctx(self)
+                .compile_children_batch(array, elements, list, blobs)?
+            else {
+                // The children's width does not depend on the chunk.
+                debug_assert_eq!(n, 0);
+                batchable = false;
+                break;
+            };
+            let mut local = Vec::new();
+            rows.extend(self.execute_keyed(&compiled, &array.table, Some(&mut local))?);
+            for key in local {
+                let at = usize::try_from(key)
+                    .ok()
+                    .and_then(|key| chunk.get(key))
+                    .ok_or_else(|| Error::new(ErrorCode::Storage, "batched relation parent key"))?;
+                keys.push(*at);
+            }
+        }
+        if !batchable {
+            return parents
+                .iter()
+                .map(|parent| self.relation(run, array, parent))
+                .collect();
+        }
+        let nodes = self.nest(run, &array.table, &array.nested_arrays, rows)?;
+        let mut groups: Vec<Vec<ResultNode>> = (0..values.len()).map(|_| Vec::new()).collect();
+        for (at, node) in keys.into_iter().zip(nodes) {
+            groups[at].push(node);
+        }
+        for at in alone {
+            groups[at] = self.relation(run, array, values[at].1)?;
+        }
+        // A value shared by several parents gives each a copy; its last
+        // parent takes the original.
+        let mut uses = vec![0usize; values.len()];
+        for at in of_parent.iter().flatten() {
+            uses[*at] += 1;
+        }
+        Ok(of_parent
+            .into_iter()
+            .map(|at| match at {
+                None => Vec::new(),
+                Some(at) => {
+                    uses[at] -= 1;
+                    if uses[at] == 0 {
+                        std::mem::take(&mut groups[at])
+                    } else {
+                        groups[at].clone()
+                    }
+                }
+            })
+            .collect())
+    }
+
+    /// The value of row `id` that `array` correlates its children with
+    /// (`array.outer_column`), read through the run's view and cut.
+    fn relation_parent(
+        &self,
+        run: &mut RelationRun<'_>,
+        table: &str,
+        array: &crate::query::ArraySubquery,
+        id: RowUuid,
+    ) -> Result<Value, Error> {
+        let key = array as *const crate::query::ArraySubquery;
+        let cell = match run.reuse.then(|| run.cells.get(&key)).flatten() {
+            Some(cached) => {
+                let mut cell = cached.clone();
+                cell.params[cell.id_param] = Sql::Blob(id.0.as_bytes().to_vec());
+                cell
+            }
+            None => {
+                let cell = run.ctx(self).compile_cell(table, &array.outer_column, id)?;
+                if run.reuse {
+                    run.cells.insert(key, cell.clone());
+                }
+                cell
+            }
+        };
+        let value: Option<Sql> = self
+            .conn
+            .cached_row(&cell.sql, params_from_iter(cell.params.iter()), |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(storage)?;
+        Ok(match value {
+            Some(value) => {
+                cell_from_sql(&cell.ty, cell.tags.as_ref(), value.as_ref(), &self.chunks)?
+                    .unwrap_or(Value::Nullable(None))
+            }
+            None => Value::Nullable(None),
+        })
+    }
+
+    /// The children `array` relates to `parent`, each with its own
+    /// relations. Within one run the same relation of the same parent value
+    /// reads the same rows, so a relation keyed by a parent's column (a
+    /// forward reference, or an array of them) reads them once. One keyed
+    /// by the parent's own id meets each parent once, so it is not kept.
+    fn relation(
+        &self,
+        run: &mut RelationRun<'_>,
+        array: &crate::query::ArraySubquery,
+        parent: &Value,
+    ) -> Result<Vec<ResultNode>, Error> {
+        let key = array as *const crate::query::ArraySubquery;
+        let elements = match parent {
+            Value::Nullable(Some(inner)) => matches!(**inner, Value::Array(_)),
+            value => matches!(value, Value::Array(_)),
+        };
+        let bound = crate::values::to_sql(parent)?;
+        let memo = (key, elements, bound.as_ref().map(ParentKey::of));
+        let memoise = run.reuse && array.outer_column != "id";
+        if memoise && let Some(nodes) = run.children.get(&memo) {
+            return Ok(nodes.clone());
+        }
+        // Only the parent's own parameter differs between parents of one
+        // shape (a scalar, or an array of references).
+        let compiled = match run
+            .reuse
+            .then(|| run.sql.get(&(key, elements)))
+            .flatten()
+            .zip(bound.as_ref())
+        {
+            Some(((cached, at), bound)) => {
+                let mut compiled = cached.clone();
+                compiled.params[*at] = bound.clone();
+                compiled
+            }
+            None => {
+                let (compiled, at) = run.ctx(self).compile_children(array, parent)?;
+                if run.reuse
+                    && let Some(at) = at
+                {
+                    run.sql.insert((key, elements), (compiled.clone(), at));
+                }
+                compiled
+            }
+        };
+        let children = self.execute(&compiled, &array.table)?;
+        let mut nodes = Vec::with_capacity(children.len());
+        for child in children {
+            nodes.push(self.node(run, &array.table, &array.nested_arrays, child)?);
+        }
+        if memoise {
+            run.children.insert(memo, nodes.clone());
+        }
+        Ok(nodes)
     }
 
     // ---- write primitives ---------------------------------------------
@@ -5383,7 +6094,7 @@ impl Inner {
     /// unit could have taken away is checked again against the unit's
     /// whole post-state (see [`Inner::post_state_pass`]).
     pub(crate) fn finish_checks(&self, seq: u64) -> Result<(), Error> {
-        self.finish_checks_after(seq, BTreeMap::new())
+        self.finish_checks_after(seq, Arc::default())
     }
 
     /// [`Inner::finish_checks`] for a unit that continues writes already
@@ -5392,25 +6103,40 @@ impl Inner {
     pub(crate) fn finish_checks_after(
         &self,
         seq: u64,
-        grounded: BTreeMap<String, BTreeSet<[u8; 16]>>,
+        grounded: Arc<GroundedRows>,
     ) -> Result<(), Error> {
         let pending = self.deferred.borrow_mut().take().unwrap_or_default();
+        let trusted = std::mem::take(&mut *self.trusted_rows.borrow_mut());
+        // Nothing to ground: writes no policy checks (a backend's own, a
+        // replica's) leave only trusted rows, and merging those into the
+        // set a staged write shares with its batch would copy that set on
+        // every stage.
+        if pending.is_empty() {
+            return Ok(());
+        }
         let mut grounded = grounded;
-        for (table, rows) in std::mem::take(&mut *self.trusted_rows.borrow_mut()) {
-            grounded.entry(table).or_default().extend(rows);
+        #[cfg(any(test, feature = "testing"))]
+        if !trusted.is_empty() && Arc::strong_count(&grounded) > 1 {
+            self.evidence_copies.set(self.evidence_copies.get() + 1);
+        }
+        for (table, rows) in trusted {
+            Arc::make_mut(&mut grounded)
+                .entry(table)
+                .or_default()
+                .extend(rows);
         }
         self.ground_after(pending, seq, grounded)
     }
 
     fn ground(&self, pending: Vec<DeferredCheck>, seq: u64) -> Result<(), Error> {
-        self.ground_after(pending, seq, BTreeMap::new())
+        self.ground_after(pending, seq, Arc::default())
     }
 
     fn ground_after(
         &self,
         mut pending: Vec<DeferredCheck>,
         seq: u64,
-        mut grounded: BTreeMap<String, BTreeSet<[u8; 16]>>,
+        mut grounded: Arc<GroundedRows>,
     ) -> Result<(), Error> {
         // Each check runs under the schema its write was staged with.
         let mut live = Vec::with_capacity(pending.len());
@@ -5438,7 +6164,7 @@ impl Inner {
                 seq: self.own_pos(seq.saturating_sub(1)),
                 own: self.own_rank(seq),
                 extra: Vec::new(),
-                overlay: Some(CutOverlay::Grounded(Arc::new(grounded.clone()))),
+                overlay: Some(CutOverlay::Grounded(grounded.clone())),
             };
             let mut passed = Vec::new();
             let mut failed = Vec::new();
@@ -5455,16 +6181,23 @@ impl Inner {
             if !failed.is_empty() && passed.is_empty() {
                 return Err(write_check_denied(&failed[0]));
             }
+            drop(cut);
+            // Only a further round reads what this one grounded.
+            if failed.is_empty() {
+                rounds.extend(
+                    passed
+                        .into_iter()
+                        .map(|(check, tables)| (check, round, tables)),
+                );
+                break;
+            }
             for (check, tables) in passed {
                 let stored = check.schema.table(&check.table)?.stored.clone();
-                grounded
+                Arc::make_mut(&mut grounded)
                     .entry(stored)
                     .or_default()
                     .insert(*check.row.0.as_bytes());
                 rounds.push((check, round, tables));
-            }
-            if failed.is_empty() {
-                break;
             }
             pending = failed;
             round += 1;
@@ -8306,6 +9039,9 @@ struct Overlay {
     mark: usize,
 }
 
+/// Rows a unit's checks may take as evidence, by stored table.
+pub(crate) type GroundedRows = BTreeMap<String, BTreeSet<[u8; 16]>>;
+
 /// The store behind its one gate: every borrow first undoes a transaction
 /// handle's overlay, so nothing but that handle's next stage or read sees
 /// it.
@@ -8339,10 +9075,13 @@ impl Store {
 
 struct Batch {
     kind: BatchKind,
+    reads_state: Rc<RefCell<TransactionReads>>,
     ops: Vec<(Rc<Schema>, StagedOp)>,
     /// The rows `ops` write, by stored table: a later staged write's
-    /// evidence (see [`Db::in_overlay`]).
-    rows: BTreeMap<String, BTreeSet<[u8; 16]>>,
+    /// evidence (see [`Db::in_overlay`]). Shared with that write's check
+    /// rather than copied, so a stage costs the same however many writes
+    /// came before it.
+    rows: Arc<GroundedRows>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
@@ -8350,6 +9089,60 @@ struct Batch {
     /// Leases of the streamed values the batch's writes hold: their chunks
     /// stay until the batch commits or is dropped.
     uploads: Vec<crate::db::large_ops::UploadLease>,
+}
+
+/// Per-batch identity and admission order; an old future never observes a reused ID.
+#[derive(Default)]
+struct TransactionReads {
+    queue: VecDeque<Rc<TransactionReadTicket>>,
+    closed: bool,
+}
+
+impl TransactionReads {
+    fn take_wakers(&self) -> Vec<Waker> {
+        self.queue
+            .iter()
+            .filter_map(|ticket| ticket.waker.borrow_mut().take())
+            .collect()
+    }
+}
+
+/// Keep at most the current task's waker for each admitted read.
+#[derive(Default)]
+struct TransactionReadTicket {
+    waker: RefCell<Option<Waker>>,
+}
+
+struct TransactionRead {
+    state: Rc<RefCell<TransactionReads>>,
+    ticket: Rc<TransactionReadTicket>,
+}
+
+impl Drop for TransactionRead {
+    fn drop(&mut self) {
+        let wakers = {
+            let mut state = self.state.borrow_mut();
+            let wakers = state.take_wakers();
+            state
+                .queue
+                .retain(|ticket| !Rc::ptr_eq(ticket, &self.ticket));
+            wakers
+        };
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+}
+
+fn close_transaction_reads(state: &Rc<RefCell<TransactionReads>>) {
+    let wakers = {
+        let mut state = state.borrow_mut();
+        state.closed = true;
+        state.take_wakers()
+    };
+    for waker in wakers {
+        waker.wake();
+    }
 }
 
 #[derive(Default)]
@@ -8867,8 +9660,9 @@ impl Db {
             id,
             Batch {
                 kind,
+                reads_state: Rc::default(),
                 ops: Vec::new(),
-                rows: BTreeMap::new(),
+                rows: Arc::default(),
                 edits: LargeEdits::default(),
                 uploads: Vec::new(),
             },
@@ -8876,9 +9670,31 @@ impl Db {
         Ok(())
     }
 
-    /// A fresh row id from this database's id source.
+    /// A fresh row id from this database's id source. Drawing one leaves
+    /// an open transaction's overlay applied: a host draws one per staged
+    /// insert, and undoing the overlay would make each stage replay the
+    /// batch.
     pub fn next_row_id(&self) -> RowUuid {
-        self.inner().ids.next_row_id()
+        self.inner.staging().ids.next_row_id()
+    }
+
+    /// How many staged writes have been replayed into transaction overlays:
+    /// staging a batch write by write replays each write at most once
+    /// unless something else used the store in between.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn overlay_replays_for_test(&self) -> usize {
+        // A peek: the store gate would undo the cached overlay.
+        self.inner.staging().overlay_replays
+    }
+
+    /// How many times a staged write's check copied the evidence set it
+    /// shares with its batch (see [`Batch::rows`]).
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn evidence_copies_for_test(&self) -> usize {
+        // A peek: the store gate would undo the cached overlay.
+        self.inner.staging().evidence_copies.get()
     }
 
     /// The open transaction `id`, mergeable or serializable.
@@ -8887,21 +9703,34 @@ impl Db {
     }
 
     pub fn abandon_transaction_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
-        self.inner
+        let batch = self
+            .inner
             .borrow_mut()
             .batches
             .remove(&id)
-            .map(drop)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        close_transaction_reads(&batch.reads_state);
+        Ok(())
     }
 
     fn take_batch(&self, id: OpenTransactionId) -> Result<Batch, Error> {
         self.inner().require_mutation_admission()?;
-        self.inner
+        let batch = self
+            .inner
             .borrow_mut()
             .batches
             .remove(&id)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        // Refuse before publication, and wake futures only after releasing Inner.
+        let unfinished = !batch.reads_state.borrow().queue.is_empty();
+        close_transaction_reads(&batch.reads_state);
+        if unfinished {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "transaction has unfinished reads",
+            ));
+        }
+        Ok(batch)
     }
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
@@ -8917,7 +9746,8 @@ impl Db {
     /// same rows at the same versions now as it did at the snapshot (this
     /// catches phantoms: rows that entered or left a predicate or window).
     /// The check and the apply run under one store borrow, so nothing can
-    /// commit in between.
+    /// commit in between. An unfinished admitted read refuses and consumes the
+    /// handle before any writes are published.
     pub async fn commit_serializable_handle(
         &self,
         id: OpenTransactionId,
@@ -9144,7 +9974,7 @@ impl Db {
         read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
         let mut inner = self.inner.staging();
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        inner.schema = self.execution_schema(&inner);
         let batch = inner
             .batches
             .get(&id)
@@ -9156,13 +9986,17 @@ impl Db {
                 let mut rows = batch.rows.clone();
                 if let Some(row) = op.row() {
                     let stored = &inner.schema.table(op.table())?.stored;
-                    if let Some(set) = rows.get_mut(stored) {
+                    if rows
+                        .get(stored)
+                        .is_some_and(|set| set.contains(row.0.as_bytes()))
+                        && let Some(set) = Arc::make_mut(&mut rows).get_mut(stored)
+                    {
                         set.remove(row.0.as_bytes());
                     }
                 }
                 rows
             }
-            None => BTreeMap::new(),
+            None => Arc::default(),
         };
         let live = inner
             .overlay
@@ -9185,6 +10019,10 @@ impl Db {
         if let Some(ops) = ops {
             inner.settle_overlay();
             begin_savepoint(&inner.conn, "overlay")?;
+            #[cfg(any(test, feature = "testing"))]
+            {
+                inner.overlay_replays += ops.len();
+            }
             let mark = inner.changed.borrow().len();
             if let Err(error) = inner.apply_all_checking(&ops, ops.len(), own) {
                 inner.clear_derived();
@@ -9302,6 +10140,10 @@ impl Db {
         };
         let own = inner.seq + 1;
         begin_savepoint(&inner.conn, "overlay")?;
+        #[cfg(any(test, feature = "testing"))]
+        {
+            inner.overlay_replays += ops.len();
+        }
         let mark = inner.changed.borrow().len();
         let result = inner
             .apply_with_edits(&ops, &edits, ops.len(), own)
@@ -9324,15 +10166,14 @@ impl Db {
         self.in_overlay(id, Some(&mut op), |_, _| Ok(()))
             .map_err(|error| self.serializable_write_conflict(id, &op, error))?;
         let mut inner = self.inner.staging();
-        let schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        let schema = self.execution_schema(&inner);
         let stored = match op.row() {
             Some(row) => Some((schema.table(op.table())?.stored.clone(), row)),
             None => None,
         };
         let batch = inner.batches.get_mut(&id).expect("validated");
         if let Some((table, row)) = stored {
-            batch
-                .rows
+            Arc::make_mut(&mut batch.rows)
                 .entry(table)
                 .or_default()
                 .insert(*row.0.as_bytes());
@@ -9390,7 +10231,7 @@ impl Db {
         let marks = {
             let mut inner = self.inner.staging();
             inner.require_mutation_admission()?;
-            inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+            inner.schema = self.execution_schema(&inner);
             edits.derived.extend(chunked.derived);
             edits.pending_nodes.extend(chunked.pending_nodes);
             let batch = inner
@@ -9608,6 +10449,7 @@ impl TxRef<'_> {
     /// As [`Self::all_prepared_as`], at `tier`: a `Remote` read waits for
     /// the authority's answer, offline too. `LocalOnly` never asks the
     /// authority; `LocalFirst` can answer offline from the replica's known cut.
+    /// Reads run in first-poll order, retaining the writes staged at that poll.
     /// The first successful serializable read fixes its snapshot for later reads.
     pub async fn all_prepared_at(
         &self,
@@ -9616,17 +10458,63 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
     ) -> Result<Vec<CurrentRow>, Error> {
-        // Capture before hydration: later writes must not leak into an
-        // already admitted read, including when another read is cancelled.
-        // Peeks skip the store gate, which would undo the cached overlay.
-        let prefix = self
-            .db
-            .inner
-            .staging()
-            .batches
-            .get(&self.id)
-            .ok_or_else(|| rejected("transaction is not open"))?
-            .prefix();
+        // Capture staging before queueing: later writes must not leak into
+        // the prefix this read admitted, even when its predecessor is cancelled.
+        let (prefix, state) = {
+            let inner = self.db.inner.staging();
+            let batch = inner
+                .batches
+                .get(&self.id)
+                .ok_or_else(|| rejected("transaction is not open"))?;
+            (batch.prefix(), batch.reads_state.clone())
+        };
+        let guard = TransactionRead {
+            state,
+            ticket: Rc::default(),
+        };
+        guard
+            .state
+            .borrow_mut()
+            .queue
+            .push_back(guard.ticket.clone());
+        let reading = self.read_admitted(prepared, include_deleted, identity, tier, prefix);
+        let mut reading = std::pin::pin!(reading);
+        std::future::poll_fn(|cx| {
+            {
+                let state = guard.state.borrow();
+                if state.closed {
+                    return Poll::Ready(Err(rejected("transaction is no longer open")));
+                }
+                {
+                    let mut waker = guard.ticket.waker.borrow_mut();
+                    if waker
+                        .as_ref()
+                        .is_none_or(|prior| !prior.will_wake(cx.waker()))
+                    {
+                        *waker = Some(cx.waker().clone());
+                    }
+                }
+                if !state
+                    .queue
+                    .front()
+                    .is_some_and(|ticket| Rc::ptr_eq(ticket, &guard.ticket))
+                {
+                    return Poll::Pending;
+                }
+            }
+            reading.as_mut().poll(cx)
+        })
+        .await
+    }
+
+    async fn read_admitted(
+        &self,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+        identity: Option<AuthorSubject>,
+        tier: ReadTier,
+        prefix: BatchPrefix,
+    ) -> Result<Vec<CurrentRow>, Error> {
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
         // the replica when the link cannot answer.
@@ -9717,21 +10605,28 @@ impl TxRef<'_> {
         }
         // Relations nest inside the overlay, so they see staged rows too.
         // Offloaded leaves are fetched as for any read.
-        let rows = self
+        let (rows, prepared) = self
             .db
             .fetching_with((), |()| {
-                self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
+                // Both remote hydration and offloaded chunks may yield while
+                // owner policies change. Resolve policy at each evaluation.
+                let prepared = match identity {
+                    Some(_) => self.db.execution_query(prepared),
+                    None => std::borrow::Cow::Borrowed(prepared),
+                };
+                let rows = self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
                     let read = ReadSpec {
                         include_deleted,
                         cut,
                         ..ReadSpec::default()
                     };
-                    let roots = inner.run(prepared, identity, &read)?;
-                    inner.nest_relations(prepared, identity, &read, roots)
-                })
+                    let roots = inner.run(&prepared, identity, &read)?;
+                    inner.nest_relations(&prepared, identity, &read, roots)
+                })?;
+                Ok((rows, prepared))
             })
             .await?;
-        self.db.record_read(self.id, prepared, include_deleted)?;
+        self.db.record_read(self.id, &prepared, include_deleted)?;
         Ok(rows)
     }
 

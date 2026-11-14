@@ -1,9 +1,13 @@
 //! BandChat wall-clock suite, measured on CodSpeed's macro runner. Names are
 //! app-prefixed because the examples page matches results by exact name.
 
+use std::cell::RefCell;
+
 use jazz_example_band_chat_benchmark::announcements::AnnouncementsFixture;
+use jazz_example_band_chat_benchmark::chat_fanout::{self, Access, ChatFixture};
 use jazz_example_band_chat_benchmark::live_rooms::LiveRoomsFixture;
 use jazz_example_band_chat_benchmark::membership_room::{OpenFixture, SendFixture};
+use jazz_example_band_chat_benchmark::presence::{NestedPageFixture, PresenceFixture};
 use jazz_example_band_chat_benchmark::{FastResumeFixture, Fixture};
 
 #[global_allocator]
@@ -87,4 +91,88 @@ fn band_chat_post_announcements(bencher: divan::Bencher<'_, '_>, messages: usize
     bencher
         .with_inputs(|| AnnouncementsFixture::new(messages))
         .bench_local_refs(|fixture| fixture.post_announcements(ANNOUNCEMENTS_POSTED));
+}
+
+/// A member on the open page stamps their presence; the page (100 messages,
+/// each with its sender and its system rows, each naming three people)
+/// re-reads every relation that shows the member's profile. The stamp's own
+/// commit is a small part: the measured time is mostly that re-read.
+#[divan::bench(sample_count = 100)]
+fn band_chat_presence_on_nested_page(bencher: divan::Bencher<'_, '_>) {
+    let mut fixture = PresenceFixture::new();
+    bencher.bench_local(|| divan::black_box(fixture.stamp()));
+}
+
+/// A member opens the same page: one full read of the 100 messages and their
+/// nested relations through the read policies, with no write. Each sample
+/// opens a freshly seeded store, so no earlier result is reused.
+#[divan::bench(sample_count = 20, sample_size = 1)]
+fn band_chat_open_nested_page(bencher: divan::Bencher<'_, '_>) {
+    bencher
+        .with_inputs(NestedPageFixture::new)
+        .bench_local_refs(|fixture| fixture.open());
+}
+
+/// Members online in the fan-out cases, each with one live result open.
+const MEMBERS: usize = 100;
+const _: () = assert!(MEMBERS == chat_fanout::MEMBERS);
+
+/// One read mark while 100 members each keep their chat list open (five
+/// chats, each with its roster, open call, latest read mark of someone
+/// else and agents). A member reads to the newest message of one chat; the
+/// chat's four other members see the mark. Correlation watches (#5333) wake
+/// only the lists holding that chat.
+#[divan::bench(args = [MEMBERS], sample_count = 50)]
+fn band_chat_read_mark_chat_lists_open(bencher: divan::Bencher<'_, '_>, members: usize) {
+    let mut lists = ChatFixture::seeded(members, Access::Exists).open_chat_lists();
+    bencher.bench_local(|| divan::black_box(lists.read_mark()));
+}
+
+/// One member joins a chat while 100 chat lists are open. Read policies
+/// check membership with `chat_members.exists.where({ chatId, userId:
+/// session })`, which evidence watches (#5341) key by the session: only the
+/// joiner's list and the chat's members' lists wake. The join is undone,
+/// untimed, before each sample.
+#[divan::bench(args = [MEMBERS], sample_count = 50, sample_size = 1)]
+fn band_chat_membership_change_chat_lists_open(bencher: divan::Bencher<'_, '_>, members: usize) {
+    membership_change(bencher, members, Access::Exists);
+}
+
+/// The same join, with the membership check written as a relation-style
+/// `exists(...)` through `users`. Fan-out watches the tables that policy
+/// reads whole, so every list re-runs: this case tracks that gap.
+#[divan::bench(args = [MEMBERS], sample_count = 20, sample_size = 1)]
+fn band_chat_membership_change_relation_policy_chat_lists_open(
+    bencher: divan::Bencher<'_, '_>,
+    members: usize,
+) {
+    membership_change(bencher, members, Access::Relation);
+}
+
+fn membership_change(bencher: divan::Bencher<'_, '_>, members: usize, access: Access) {
+    let lists = RefCell::new(ChatFixture::seeded(members, access).open_chat_lists());
+    bencher
+        .with_inputs(|| lists.borrow_mut().leave())
+        .bench_local_values(|()| lists.borrow_mut().join());
+}
+
+/// One new message, a reply, while 100 members each keep a different room
+/// open; each room shows its newest 25 messages with the message each
+/// replies to (a self-relation). The room keeps its `chatId` key despite
+/// the self-relation (#5333), so only the room the message lands in wakes.
+#[divan::bench(args = [MEMBERS], sample_count = 50)]
+fn band_chat_thread_reply_to_rooms_open(bencher: divan::Bencher<'_, '_>, members: usize) {
+    let mut rooms = ChatFixture::seeded(members, Access::Exists).open_rooms(false);
+    bencher.bench_local(|| divan::black_box(rooms.new_message()));
+}
+
+/// A member types a short message while 100 rooms and 100 composers are
+/// open: 13 draft upserts, one per keystroke, each a commit that fans out
+/// to its own composer only, then the message. Measures the per-commit
+/// fan-out cost on one store; the server's per-tick pass over sessions is
+/// not in it.
+#[divan::bench(args = [MEMBERS], sample_count = 50)]
+fn band_chat_typing_drafts_rooms_open(bencher: divan::Bencher<'_, '_>, members: usize) {
+    let mut rooms = ChatFixture::seeded(members, Access::Exists).open_rooms(true);
+    bencher.bench_local(|| divan::black_box(rooms.type_and_send()));
 }

@@ -132,7 +132,15 @@ export type TokenStore = ReturnType<typeof tokenStore>;
 export async function callInspector<T = unknown>(
   endpoint: string,
   request: InspectRequest,
-  options: { token?: string | null; fetch?: typeof fetch } = {},
+  options: {
+    token?: string | null;
+    fetch?: typeof fetch;
+    /**
+     * What to do about a refusal when no token was sent: the app's hook
+     * refusing an anonymous call means the caller has no token yet.
+     */
+    withoutToken?: string;
+  } = {},
 ): Promise<T> {
   const doFetch = options.fetch ?? fetch;
   // A token reads every row it's scoped to: it never crosses a network in the clear.
@@ -175,7 +183,14 @@ export async function callInspector<T = unknown>(
   }
   if (!response.ok) {
     const error = body as Partial<InspectErrorAnswer>;
-    throw new InspectError(error.error ?? "failed", error.message ?? `HTTP ${response.status}`);
+    const message = error.message ?? `HTTP ${response.status}`;
+    if (!options.token && error.error === "unauthorized" && options.withoutToken) {
+      throw new InspectError(
+        "unauthorized",
+        `no Inspector token for ${endpoint}: ${options.withoutToken} (the backend said: ${message})`,
+      );
+    }
+    throw new InspectError(error.error ?? "failed", message);
   }
   return body as T;
 }
@@ -208,6 +223,18 @@ export async function requestApproval(
   grant: GrantRequest,
   options: { store: TokenStore; timeoutMs?: number; fetch?: typeof fetch },
 ): Promise<PendingApproval> {
+  // Refused here, not after the person has opened the approval page. The
+  // app's own maximum (a day unless it set `maxTokenTtlSeconds`) is checked
+  // on that page, which knows it.
+  if (
+    grant.ttlSeconds !== undefined &&
+    (!Number.isSafeInteger(grant.ttlSeconds) || grant.ttlSeconds < MIN_TOKEN_TTL_SECONDS)
+  ) {
+    throw new InspectError(
+      "bad_request",
+      `a token must last at least a minute (asked for ${grant.ttlSeconds} seconds)`,
+    );
+  }
   const state = randomBytes(18).toString("base64url");
   let server: Server | undefined;
   let settle!: {
@@ -302,6 +329,9 @@ export async function requestApproval(
     },
   };
 }
+
+/** The shortest an agent token may live, as the backend mints them. */
+export const MIN_TOKEN_TTL_SECONDS = 60;
 
 /** Parse a duration like `30m`, `1h`, `1d` or a number of seconds. */
 export function parseDuration(text: string): number {

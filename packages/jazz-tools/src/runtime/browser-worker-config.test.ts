@@ -1,14 +1,24 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+// The URL a bundler names for the binary; null for bundlers that leave it to
+// wasm-bindgen (browser-worker-assets.ts), set for Metro (its .metro.ts).
+const bundler = vi.hoisted(() => ({ wasmUrl: null as string | null }));
+vi.mock("./browser-worker-assets.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./browser-worker-assets.js")>()),
+  bundledWasmUrl: () => bundler.wasmUrl,
+}));
+
 import {
   createBrowserWorkerAssetScope,
   resolveBrowserWorkerUrl,
   resolveBrowserWorkerRuntimeSources,
+  vitePrebundledBrokerWorkerUrl,
 } from "./browser-worker-config.js";
 
 const originalLocation = globalThis.location;
 
 afterEach(() => {
+  bundler.wasmUrl = null;
   if (originalLocation === undefined) {
     delete (globalThis as Record<string, unknown>).location;
   } else {
@@ -104,6 +114,37 @@ describe("browser SharedWorker asset handoff", () => {
     );
   });
 
+  it("hands the worker the bundler's URL for the binary, which needs no version", () => {
+    // Metro: the worker chunk cannot name the asset, and its URL changes with its bytes.
+    (globalThis as Record<string, unknown>).location = { href: "http://localhost:8081/" };
+    bundler.wasmUrl = "http://localhost:8081/assets/jazz_wasm_bg.0f1e.wasm";
+
+    const resolved = resolveBrowserWorkerRuntimeSources(undefined);
+    expect(resolved).toEqual({ wasmUrl: bundler.wasmUrl });
+    // Resolved sources are resolved again when the worker realm is named.
+    expect(resolveBrowserWorkerRuntimeSources(resolved)).toEqual(resolved);
+    expect(createBrowserWorkerAssetScope(resolved)).toBe(createBrowserWorkerAssetScope(undefined));
+    expect(createBrowserWorkerAssetScope(undefined)).toContain(bundler.wasmUrl);
+
+    // A deployment with other bytes is another worker realm.
+    const firstScope = createBrowserWorkerAssetScope(undefined);
+    bundler.wasmUrl = "http://localhost:8081/assets/jazz_wasm_bg.9a8b.wasm";
+    expect(createBrowserWorkerAssetScope(undefined)).not.toBe(firstScope);
+  });
+
+  it("still requires a version for the app's own URL when the bundler names one", () => {
+    (globalThis as Record<string, unknown>).location = { href: "http://localhost:8081/" };
+    bundler.wasmUrl = "http://localhost:8081/assets/jazz_wasm_bg.0f1e.wasm";
+
+    expect(() => resolveBrowserWorkerRuntimeSources({ wasmUrl: "/own/jazz.wasm" })).toThrow(
+      "runtimeSources.wasmVersion",
+    );
+    expect(
+      resolveBrowserWorkerRuntimeSources({ wasmUrl: "/own/jazz.wasm", wasmVersion: "deploy-42" })
+        ?.wasmUrl,
+    ).toBe("http://localhost:8081/own/jazz.wasm?jazz-runtime-version=deploy-42");
+  });
+
   it("versions the bundled worker when only an explicit WASM URL is configured", () => {
     const workerUrl = resolveBrowserWorkerUrl({
       wasmUrl: "https://assets.test/jazz_wasm_bg.wasm",
@@ -169,5 +210,77 @@ describe("browser storage scope", () => {
     expect(keys({ serverUrl: "https://a.example/jazz" })).not.toEqual(
       keys({ serverUrl: "https://b.example/jazz" }),
     );
+  });
+});
+
+describe("broker worker URL under the Vite dev server's pre-bundle", () => {
+  it.each([
+    [
+      "the default cache directory",
+      "http://localhost:5173/node_modules/.vite/deps/chunk-7ATA2QW3.js?v=7d09ffa4",
+      "http://localhost:5173/@id/jazz-tools/_worker/broker",
+    ],
+    [
+      "a configured base",
+      "http://localhost:5173/myapp/node_modules/.vite/deps/jazz-tools_local-first.js?v=1",
+      "http://localhost:5173/myapp/@id/jazz-tools/_worker/broker",
+    ],
+    [
+      "a per-environment deps directory",
+      "https://dev.example:8443/node_modules/.vite/deps_client/chunk.js",
+      "https://dev.example:8443/@id/jazz-tools/_worker/broker",
+    ],
+    [
+      "a nested cache directory",
+      "http://localhost:63315/node_modules/.vite/vitest/da39a3ee/deps/jazz-tools.js?v=2",
+      "http://localhost:63315/@id/jazz-tools/_worker/broker",
+    ],
+  ])("asks the dev server to resolve the package from %s", (_case, moduleUrl, workerUrl) => {
+    expect(vitePrebundledBrokerWorkerUrl(moduleUrl)).toBe(workerUrl);
+  });
+
+  it.each([
+    // The package's own files: Vite dev with jazz-tools excluded, or unbundled.
+    "http://localhost:5173/node_modules/jazz-tools/dist/runtime/browser-worker-assets.js",
+    // A workspace-linked package, which Vite serves without pre-bundling.
+    "http://localhost:5173/@fs/repo/packages/jazz-tools/dist/runtime/browser-worker-assets.js",
+    // Production chunks of any bundler.
+    "https://app.example/assets/index-Wj-y1hYG.js",
+    "https://app.example/_next/static/chunks/app-pages-browser.js",
+    // Only Vite's deps directory, not a file that merely mentions it.
+    "https://app.example/node_modules/.vite/not-deps/chunk.js",
+    "https://app.example/assets/chunk.js?from=/node_modules/.vite/deps/x.js",
+  ])("leaves %s to the bundler's worker URL", (moduleUrl) => {
+    expect(vitePrebundledBrokerWorkerUrl(moduleUrl)).toBeUndefined();
+  });
+
+  it("names the pre-bundle worker URL in the worker realm's identity", async () => {
+    vi.resetModules();
+    vi.doMock("./browser-worker-assets.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("./browser-worker-assets.js")>()),
+      browserRuntimeModuleUrl: () =>
+        "http://localhost:5173/node_modules/.vite/deps/chunk-7ATA2QW3.js?v=7d09ffa4",
+      bundledBrowserWorkerUrl: () =>
+        "http://localhost:5173/node_modules/worker/jazz-broker-worker.js",
+    }));
+    try {
+      const config = await import("./browser-worker-config.js");
+      expect(config.resolveBrowserWorkerUrl()).toBe(
+        "http://localhost:5173/@id/jazz-tools/_worker/broker",
+      );
+      expect(config.resolveBrowserWorkerUrl({ wasmVersion: "build-1" })).toBe(
+        "http://localhost:5173/@id/jazz-tools/_worker/broker?jazz-runtime-version=build-1",
+      );
+      // Explicitly configured assets still win.
+      expect(
+        config.resolveBrowserWorkerUrl({
+          brokerWorkerUrl: "https://cdn.example/jazz-broker-worker.js",
+          wasmVersion: "build-1",
+        }),
+      ).toBe("https://cdn.example/jazz-broker-worker.js?jazz-runtime-version=build-1");
+    } finally {
+      vi.doUnmock("./browser-worker-assets.js");
+      vi.resetModules();
+    }
   });
 });

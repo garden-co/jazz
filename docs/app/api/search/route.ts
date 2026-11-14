@@ -10,9 +10,16 @@ import {
   type SearchHit,
 } from "@/lib/agent-search";
 import { searchEvent } from "@/lib/search-analytics";
+import { withoutIncludeRefs } from "@/lib/search-include-refs";
 import { track } from "@vercel/analytics/server";
 import { createFromSource } from "fumadocs-core/search/server";
 import { after } from "next/server";
+
+// Snippet `<include>`s leave their source path in a page's structured data;
+// index pages without those entries, so search never shows them as text.
+for (const page of source.getPages()) {
+  page.data.structuredData = withoutIncludeRefs(page.data.structuredData);
+}
 
 const server = createFromSource(source, {
   // https://docs.orama.com/docs/orama-js/supported-languages

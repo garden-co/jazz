@@ -1,0 +1,10 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "rules": {
+    // Not type-aware, and its autofix (run by the pre-commit hook) changes
+    // behaviour: `[...u8.slice(0, n)].map(f)` becomes a Uint8Array map whose
+    // results are coerced to bytes, and `for (const l of [...listeners])`
+    // stops snapshotting a Set that listeners mutate while it is iterated.
+    "unicorn/no-useless-spread": "off"
+  }
+}

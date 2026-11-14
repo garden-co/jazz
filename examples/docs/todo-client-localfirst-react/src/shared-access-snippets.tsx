@@ -58,7 +58,17 @@ s.definePermissions(app, ({ policy, anyOf, session }) => {
       $createdBy: session.user,
     }),
   );
-  policy.todoShares.allowRead.where({ user_id: session.user });
+  // The recipient sees their share, and the todo's creator sees every share of it,
+  // so they can list who has access and revoke it.
+  policy.todoShares.allowRead.where((share) =>
+    anyOf([
+      { user_id: session.user },
+      policy.todos.exists.where({
+        id: share.todoId,
+        $createdBy: session.user,
+      }),
+    ]),
+  );
   policy.todoShares.allowDelete.where((share) =>
     policy.todos.exists.where({
       id: share.todoId,
@@ -112,6 +122,24 @@ export function SharedWithMe() {
   );
 }
 // #endregion shared-query
+
+// #region shared-list
+export function SharedWith({ todoId }: { todoId: string }) {
+  const { data: shares = [], db } = useAll(app.todoShares.where({ todoId }));
+
+  return (
+    <ul>
+      {shares.map((share) => (
+        <li key={share.id}>
+          {share.user_id}
+          {share.can_edit ? " (can edit)" : " (read-only)"}
+          <button onClick={() => unshareTodo(db, share.id)}>Remove</button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+// #endregion shared-list
 
 // #region shared-revoke
 export function unshareTodo(db: ReturnType<typeof useDb>, shareId: string) {

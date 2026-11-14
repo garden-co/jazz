@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { defineShippedApp } from "../testing/client-migrations.js";
 import { schema as s } from "../index.js";
 import {
   createJazz,
@@ -25,13 +26,10 @@ import { requestApproval, tokenStore } from "../inspect/client.js";
 import { runInspectCommand } from "../inspect/cli.js";
 import { runMcpServer } from "../inspect/mcp.js";
 
-const app = s.defineApp(
-  {
-    todos: s.table({ title: s.string(), owner: s.uuid(), secretNote: s.string().optional() }, {}),
-    notes: s.table({ body: s.string() }, {}),
-  },
-  { migrations: "none" },
-);
+const app = await defineShippedApp({
+  todos: s.table({ title: s.string(), owner: s.uuid(), secretNote: s.string().optional() }, {}),
+  notes: s.table({ body: s.string() }, {}),
+});
 const permissions = s.definePermissions(app, ({ policy, session }) => {
   policy.todos.allowRead.where({ owner: session.user });
   policy.todos.allowInsert.where({ owner: session.user });
@@ -429,12 +427,15 @@ describe("Inspector reads", () => {
       status: 400,
       message: expect.stringMatching(/query.includes is not supported/),
     });
+    // explain needs a user, and a table rather than its history.
     expect(
-      await refused(api(jazz, { op: "explain", query: { table: "todos" }, as: "alice" }, STAFF)),
-    ).toMatchObject({
-      status: 501,
-      error: "not_supported",
-    });
+      await refused(api(jazz, { op: "explain", query: { table: "todos" } }, STAFF)),
+    ).toMatchObject({ status: 400, message: expect.stringMatching(/needs as/) });
+    expect(
+      await refused(
+        api(jazz, { op: "explain", query: { table: "history.todos" }, as: "alice" }, STAFF),
+      ),
+    ).toMatchObject({ status: 400 });
     expect(await refused(api(jazz, { op: "frobnicate" }, STAFF))).toMatchObject({ status: 400 });
   });
 
@@ -1198,7 +1199,12 @@ describe("jazz-tools inspect and mcp", () => {
         arguments: { query: { table: "todos" }, as: "alice" },
       },
     });
-    expect((await answer(4)).result).toMatchObject({ isError: true });
+    const explained = JSON.parse((await answer(4)).result.content[0].text);
+    expect(explained.clauses).toEqual([{ index: 0, text: "owner = session.user" }]);
+    expect(explained.rows.map((row: any) => [row.row.title, row.allowed, row.by]).sort()).toEqual([
+      ["alice's", true, [0]],
+      ["bob's", false, []],
+    ]);
     send({
       jsonrpc: "2.0",
       id: 5,
@@ -1289,6 +1295,31 @@ describe("Viewing as a user whose permissions read claims", () => {
     ).toMatchObject({ status: 400, error: "bad_request" });
   });
 
+  it("explains which clause let each row through, with and without the claims", async () => {
+    const { jazz } = await startWithClaims();
+    const query = { table: "expenses" };
+    const asWorker = await ok(api(jazz, { op: "explain", query, as: "worker" }, STAFF));
+    expect(asWorker.clauses).toEqual([
+      { index: 0, text: "owner = session.user" },
+      { index: 1, text: 'session.claims.role = "manager"' },
+    ]);
+    expect(asWorker.rows.map((row: any) => [row.allowed, row.by])).toEqual([[true, [0]]]);
+
+    // Without claims the manager clause can't hold, and the answer says why.
+    const bare = await ok(api(jazz, { op: "explain", query, as: "manager" }, STAFF));
+    expect(bare.rows.map((row: any) => [row.allowed, row.by])).toEqual([[false, []]]);
+    expect(bare.warning).toMatch(/none were given for manager/);
+    const asManager = await ok(
+      api(
+        jazz,
+        { op: "explain", query, as: { userId: "manager", claims: { role: "manager" } } },
+        STAFF,
+      ),
+    );
+    expect(asManager.rows.map((row: any) => [row.allowed, row.by])).toEqual([[true, [1]]]);
+    expect(asManager.warning).toBeUndefined();
+  });
+
   it("doesn't warn when the app's permissions read no claims", async () => {
     const { jazz } = await start();
     await seed(jazz);
@@ -1296,5 +1327,66 @@ describe("Viewing as a user whose permissions read claims", () => {
       api(jazz, { op: "query", query: { table: "todos" }, as: "alice" }, STAFF),
     );
     expect(asAlice.warning).toBeUndefined();
+  });
+});
+
+describe("Large values through the Inspector (#5202)", () => {
+  const filesApp = s.defineApp(
+    { files: s.table({ name: s.string(), data: s.bytes() }, {}) },
+    { migrations: "none" },
+  );
+  const filesPermissions = s.definePermissions(filesApp, ({ policy }) => {
+    policy.files.allowRead.always();
+  });
+
+  it("lists a row with a large value, and reads parts of it from the store", async () => {
+    const jazz = await createJazz({
+      app: filesApp,
+      permissions: filesPermissions,
+      store: memory(),
+      authenticate,
+      inspect: staffOnly,
+    });
+    cleanups.push(() => jazz.close());
+    const data = new Uint8Array(600 * 1024).map((_, index) => index % 251);
+    const { id } = await jazz.db
+      .insert(filesApp.files, { name: "photo.jpg", data })
+      .wait({ tier: "global" });
+
+    const listed = await ok(api(jazz, { op: "query", query: { table: "files" } }, STAFF));
+    expect(listed.rows).toHaveLength(1);
+    expect(listed.rows[0].data.$large).toMatchObject({ kind: "bytes", size: data.length });
+
+    const part = await ok(
+      api(jazz, { op: "get", table: "files", id, column: "data", from: 1000, to: 1010 }, STAFF),
+    );
+    expect(part.value).toEqual({
+      $bytes: Buffer.from(data.subarray(1000, 1010)).toString("base64"),
+    });
+
+    // Larger than one part: refused, not read whole.
+    expect(
+      await refused(api(jazz, { op: "get", table: "files", id, column: "data" }, STAFF)),
+    ).toMatchObject({ status: 400, message: expect.stringMatching(/ask for it in parts/) });
+    // Past the end: the store's refusal, as the caller's mistake.
+    expect(
+      await refused(
+        api(
+          jazz,
+          {
+            op: "get",
+            table: "files",
+            id,
+            column: "data",
+            from: data.length - 5,
+            to: data.length + 5,
+          },
+          STAFF,
+        ),
+      ),
+    ).toMatchObject({ status: 400, message: expect.stringMatching(/past the end of data/) });
+    expect(
+      (await ok(api(jazz, { op: "get", table: "files", id, column: "name" }, STAFF))).value,
+    ).toBe("photo.jpg");
   });
 });

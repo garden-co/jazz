@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { METRO_WORKER_START_HINT } from "../metro-setup-error.js";
 import {
   BrowserWorkerScriptLoadError,
   describeBrokerWorkerLoadFailure,
@@ -8,14 +9,17 @@ const htmlAnswer = async () =>
   new Response("<!doctype html>", { status: 200, headers: { "content-type": "text/html" } });
 
 describe("describeBrokerWorkerLoadFailure", () => {
-  it("names Vite 6/7 pre-bundling and the fix when Jazz runs from .vite/deps", async () => {
+  it("names the dev server's worker URL and the remaining fix when Jazz runs from .vite/deps", async () => {
     const error = await describeBrokerWorkerLoadFailure({
+      workerUrl: "http://localhost:5173/@id/jazz-tools/_worker/broker",
       moduleUrl: "http://localhost:5173/node_modules/.vite/deps/chunk-7ATA2QW3.js?v=7d09ffa4",
+      fetch: async () =>
+        new Response("<!doctype html>", { status: 404, headers: { "content-type": "text/html" } }),
     });
     expect(error).toBeInstanceOf(BrowserWorkerScriptLoadError);
     expect(error.name).toBe("BrowserWorkerScriptLoadError");
     expect(error.message).toBe(
-      'Jazz\'s browser worker script did not load. Vite pre-bundled jazz-tools, and Vite 6 and 7 point the worker URL of a pre-bundled package at a path that does not exist, which the dev server answers with index.html. Add "jazz-tools" to optimizeDeps.exclude in your Vite config, next to "jazz-wasm", or upgrade to Vite 8. The local-first client cannot start without it.',
+      'Jazz\'s browser worker script http://localhost:5173/@id/jazz-tools/_worker/broker did not load: the server answered with an HTML page (HTTP 404) instead of JavaScript. Jazz runs from the Vite dev server\'s dependency pre-bundle, so it asks the dev server to resolve the worker from the jazz-tools package; that needs jazz-tools to be a dependency the dev server resolves from your project. Otherwise, add "jazz-tools" to optimizeDeps.exclude in your Vite config, next to "jazz-wasm". The local-first client cannot start without it.',
     );
   });
 
@@ -23,7 +27,7 @@ describe("describeBrokerWorkerLoadFailure", () => {
     const error = await describeBrokerWorkerLoadFailure({
       moduleUrl: "http://localhost:5173/node_modules/.vite/deps_client/jazz-tools_local-first.js",
     });
-    expect(error.message).toContain("Vite pre-bundled jazz-tools");
+    expect(error.message).toContain("Vite dev server's dependency pre-bundle");
   });
 
   it("does not blame Vite for a package served from its own files", async () => {
@@ -75,5 +79,13 @@ describe("describeBrokerWorkerLoadFailure", () => {
         new Response("export {}", { headers: { "content-type": "text/javascript" } }),
     });
     expect(error.message).toContain("jazz-broker-worker.js did not load. Serve");
+  });
+
+  // Under Expo's Metro the worker is Metro's chunk, and import.meta.url is
+  // null: the dist/worker advice for other bundlers doesn't apply.
+  it("points a Metro app at withJazz and its cache, not at dist/worker", async () => {
+    const error = await describeBrokerWorkerLoadFailure({ moduleUrl: null, metro: true });
+    expect(error.message).toContain(METRO_WORKER_START_HINT.trim());
+    expect(error.message).not.toContain("dist/worker");
   });
 });

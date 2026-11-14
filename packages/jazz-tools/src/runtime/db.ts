@@ -49,6 +49,7 @@ import {
   type BranchView,
   type OpenTransactionId,
   type TxId,
+  type ExplainedRows,
   type PermissionAdvice,
   type StreamingMutationKind,
   type StreamingValueSource,
@@ -432,7 +433,7 @@ const FORWARDED_TO_SUCCESSOR = [
   "serializableTransaction",
   "upgradeToLocalFirst",
   "deleteClientStorage",
-  "wipeClientStorage",
+  "storePendingUploads",
   "logout",
   "all",
   "allInternal",
@@ -3703,6 +3704,17 @@ export class Db {
     return client.requestInsertPermissionAdvice(table._table, values, context?.writeSession);
   }
 
+  /**
+   * @internal The Inspector's `explain`: for each of `ids` of `table`, which
+   * clauses of its read policy (the arms of its top-level `Or`) hold for
+   * this Db's session. Backend only.
+   */
+  explainReadClauses<T, Init>(table: TableProxy<T, Init>, ids: string[]): ExplainedRows {
+    const session = this.getAccessContext()?.readSession;
+    if (!session) throw new Error("explain needs a Db acting as a user");
+    return this.getClient(table._schema).explainReadClauses(table._table, ids, session);
+  }
+
   /** Request authoritative permission advice for reading a row. */
   async canRead<T, Init>(table: TableProxy<T, Init>, id: string): Promise<PermissionAdvice> {
     const client = this.getClient(table._schema);
@@ -3860,13 +3872,13 @@ export class Db {
   }
 
   /**
-   * @internal {@link deleteClientStorage}, saying how many of the store's
-   * writes (any tab's) the server hadn't confirmed: the delete took them.
-   * `undefined` when the runtime can't say.
+   * @internal How many writes the server hasn't confirmed in this Db's
+   * store: every tab's in the browser, where the worker can say; otherwise
+   * this Db's own.
    */
-  async wipeClientStorage(): Promise<{ pendingUploads: number | undefined }> {
-    const deletion = await this.connection.deleteClientStorage();
-    return { pendingUploads: deletion ? deletion.pendingUploads : undefined };
+  async storePendingUploads(): Promise<number> {
+    const store = await this.connection.storePendingUploads().catch(() => undefined);
+    return store ?? this.getSyncStatus().pendingUploads;
   }
 
   /**

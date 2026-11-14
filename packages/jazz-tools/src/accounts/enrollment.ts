@@ -2,11 +2,13 @@ import { signChallenge } from "../local-first-auth/index.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import {
   AccountAuthError,
+  isWhitespaceOnlySecret,
   LINK_GUEST_KEY_MISSING_MESSAGE,
   LINK_NEEDS_GUEST_MESSAGE,
   requestBackendLinkChallenge,
   requestBackendSignIn,
   readAccountAssignment,
+  WHITESPACE_BACKEND_SECRET,
 } from "./registry-client.js";
 export { AccountAuthError } from "./registry-client.js";
 import { isReservedJazzIssuer, parseJwtPayload } from "../runtime/client-session.js";
@@ -31,7 +33,7 @@ const LINK_REFUSED_MESSAGE =
  * Linking can pass once the core does (a backend fix, then a retry).
  */
 const LINK_GUESTS_OFF_MESSAGE =
-  "local_first_auth_disabled: the backend's core admits no device accounts, so this device account can't be linked (or sync) yet. It is a backend setup problem, not this user's: the device account stays signed in on this device, with its data, and linking can be retried once the core admits device accounts (allowLocalFirstAuth).";
+  "local_first_auth_disabled: the backend's core admits no device accounts, so this device account can't be linked (or sync) yet. It is a backend setup problem, not this user's: the device account stays signed in on this device, with its data, and linking can be retried once the core admits device accounts (a core of an older jazz-tools with local-first auth off: upgrade it).";
 
 /** @internal A local-first account's self-minted token, or its refresh callback. */
 export type JWTAuth = string | { getToken(): Promise<string> };
@@ -324,6 +326,12 @@ export function createAccountManagerWithRuntime(options: {
         if (!options.backend) throw new AccountAuthError("backend_host_unavailable");
         if (typeof auth?.backendSecret !== "string" || !auth.backendSecret)
           throw new AccountAuthError("invalid_backend_secret");
+        if (isWhitespaceOnlySecret(auth.backendSecret))
+          throw new AccountAuthError(
+            "invalid_backend_secret",
+            undefined,
+            WHITESPACE_BACKEND_SECRET,
+          );
         const backendSecret = auth.backendSecret;
         const { nodeId } = await options.backend.admitBackend({ backendSecret });
         assertCurrent(started);

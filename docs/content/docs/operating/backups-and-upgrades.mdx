@@ -48,6 +48,26 @@ can't talk to a newer backend.
 Back up before you upgrade. Releases don't migrate a data directory back to an older format, so
 rolling back means restoring the backup.
 
+## Upgrading from alpha.61
+
+- **`createJazz` refuses `{ migrations: "none" }` with a store that keeps its data.** An app
+  defined with `s.defineApp(schema, { migrations: "none" })` ships no schema history, so a
+  `sqlite()`, `vercel()` or `remote()` store could not follow its first schema change and would
+  refuse the app. `createJazz` now throws for that combination when it's called, with an error that
+  says what to change. `memory()` stores, and the test helpers in `jazz-tools/testing`, still take
+  such an app. To fix it, ship your migrations: pass the module `jazz-tools` generates beside
+  `schema.ts` to `defineApp`,
+
+  ```ts title="schema.ts"
+  import { migrations } from "./migrations";
+
+  export const app = s.defineApp(schema, { migrations });
+  ```
+
+  then run `npx jazz-tools migrations create`. It records `schema.ts` as the app's first version
+  and generates `migrations/index.ts`. Commit the `migrations/` directory with your schema. See
+  [Shipping migrations with your app](/docs/schemas/migrations#shipping-migrations-with-your-app).
+
 ## Upgrading from alpha.60
 
 Alpha.61 gives a client one auth object, the **session**, and renames guest accounts to **device
@@ -77,6 +97,10 @@ in: after your own sign-in or sign-out, `refresh()` follows it.
   whose key lives on the device. See [Device Accounts](/docs/setup/auth/local-first).
 - **Errors.** A failed operation that leaves the client usable keeps the session `ready`, with
   `error` set. `status: "error"` now means there is no usable client.
+- **`window.__jazz` is Jazz's page handle**, set by every browser client: `status()`,
+  `waitForSync()` and `clearStorage()` for tests and agents. An app that set its own
+  `window.__jazz` keeps it (Jazz warns once and goes without the handle); rename yours to get the
+  handle.
 - **`<JazzProvider>` refuses the old shapes** (the config as its own props, `fallback`, a config
   with an `account`) with an error that names the new one.
 
@@ -134,6 +158,27 @@ if (secret && session.getSnapshot().user?.kind !== "device") {
 
 On Expo, read the same key with `SecureStore.getItemAsync(legacyKey)` instead of `localStorage`.
 
+### React Native devices whose store alpha.60 opened without migrations
+
+On alpha.60, a React Native app whose schema had already changed (an app that ships migrations)
+opened each device's local store without them. Those devices read nothing from your server, and
+their own writes never uploaded. Alpha.61 fixed this for new stores. From alpha.62 the device
+repairs an existing one when it can:
+
+- **No unsynced or refused writes:** the store is rebuilt from scratch on the first connection and syncs
+  everything again from your server. Nothing is lost, and the app doesn't need to do anything.
+- **Writes the server never received:** the device keeps them and stays offline: its sync status
+  shows the link `{ state: "offline", reason: "stopped" }`, and `lastError.message` names
+  `StoreOpenedWithoutMigrations`. `await db.deleteClientStorage()` resets the store, and it syncs
+  again, but **those writes are lost**, along with any the server refused that the app kept for a
+  retry: everything the user created on that device while it
+  couldn't sync. On a device that was affected from its first install, that is everything they
+  created there.
+
+The account itself is never touched: a device account's key lives in the account store (Expo
+SecureStore, or your own), not in the local store. Don't clear the app's data or reinstall to fix
+a store: on Android that also deletes SecureStore, and with it a device account.
+
 ## Upgrading from alpha.59
 
 Alpha.60 changes how Jazz runs, so an alpha.59 app needs more than a version bump:
@@ -166,12 +211,13 @@ starts:
   export const app = s.defineApp(schema, { migrations });
   ```
 
-  Don't use `{ migrations: "none" }` here: it's for an app that only ever has one version, such as
-  a test's. Then run `jazz-tools validate`. It creates `migrations/index.ts` if it's missing and moves
-  alpha.59's migrations to `migrations/legacy/`, and every snapshot except the one matching
-  `schema.ts` to `migrations/legacy/snapshots/`. The upgraded app's history starts again from its
-  current schema. If no snapshot matches `schema.ts`, validate keeps the newest one and tells you to
-  run `jazz-tools migrations create` before the app starts.
+  Don't use `{ migrations: "none" }` here: it's only for `memory()` stores and tests, and
+  `createJazz` refuses it with any other store. Then run `jazz-tools validate`. It creates
+  `migrations/index.ts` if it's missing and moves alpha.59's migrations to `migrations/legacy/`,
+  and every snapshot except the one matching `schema.ts` to `migrations/legacy/snapshots/`. The
+  upgraded app's history starts again from its current schema. If no snapshot matches `schema.ts`,
+  validate keeps the newest one and tells you to run `jazz-tools migrations create` before the app
+  starts.
 
 - **Snapshot the current schema before you change it.** Run `jazz-tools migrations create` with no
   flags while `schema.ts` still matches what you imported. Later schema changes follow

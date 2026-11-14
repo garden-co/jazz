@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
 import { makeFakeAccount } from "../react-core/test-utils.js";
+import { FIRST_ANSWER_DEADLINE_MS } from "../session/follow-user.js";
 import { openNativeSessionCore as createNativeSession } from "./create-jazz-session.js";
 import { openNativeSessionCore as createExpoSession } from "../expo/create-jazz-session.js";
 import { ownJazzSession } from "../session/jazz-session.js";
@@ -20,23 +21,34 @@ let backendUser: { issuer: string; subject: string } | null = null;
 let backendUserAnswer: Promise<void> | undefined;
 // A failing backend: `backend-user` answers this code with a 500.
 let backendFailure: string | undefined;
+// How the backend says no one is signed in: 200 with no user (alpha.62 on),
+// or 401 (alpha.61 and earlier).
+let signedOutAs: 200 | 401 = 200;
 beforeEach(() => {
   vi.resetAllMocks();
   backendUser = null;
   backendUserAnswer = undefined;
   backendFailure = undefined;
+  signedOutAs = 200;
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (url: string) => {
-      if (!String(url).endsWith("/backend-user")) return new Response("not_found", { status: 404 });
+    vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (!url.endsWith("/backend-user")) return new Response("not_found", { status: 404 });
       await backendUserAnswer;
       if (backendFailure) return new Response(backendFailure, { status: 500 });
-      if (!backendUser) return new Response("signed_out", { status: 401 });
+      if (!backendUser)
+        return signedOutAs === 401
+          ? new Response("signed_out", { status: 401 })
+          : Response.json({ user: null });
       return Response.json({ identity: backendUser, account: "account-of-alice" });
     }),
   );
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 // Each host's own options: React Native takes an account `store`, Expo keeps
 // accounts in its secure store and takes a `profile` instead. (Typed as React
 // Native's: a call through either factory type-checks against both configs.)
@@ -125,8 +137,44 @@ for (const [host, create, prepare, own] of [
       await session.close();
     });
 
+    it("asks the backend who is signed in with the app's bearer", async () => {
+      // A backend that authenticates by bearer, not cookie, answers only a
+      // request that carries it.
+      const alice = makeFakeAccount();
+      const accounts = new AccountManager({
+        createLocalFirst: () => makeFakeAccount(),
+        restoreLocalFirst: () => makeFakeAccount(),
+        loginWithBackend: async () => alice,
+        logout: vi.fn(),
+      });
+      prepare.mockResolvedValue(accounts);
+      mocks.client.mockResolvedValue({ shutdown: async () => {} });
+      backendUser = { issuer: "jazz:backend", subject: "alice" };
+      const session = await create({
+        scope: "app-1",
+        serverUrl: "https://jazz.example.com",
+        ...own,
+        bearer: async () => "bearer-of-alice",
+      });
+      const asked = vi
+        .mocked(fetch)
+        .mock.calls.map(([input]) => input)
+        .filter((input) =>
+          String(input instanceof Request ? input.url : input).endsWith("/backend-user"),
+        );
+      expect(asked).not.toHaveLength(0);
+      for (const request of asked) {
+        expect(request instanceof Request ? request.headers.get("authorization") : null).toBe(
+          "Bearer bearer-of-alice",
+        );
+      }
+      expect(session.getSnapshot().status).toBe("ready");
+      await session.close();
+    });
+
     it("opens signed out once the backend says no one is signed in, or can't be asked", async () => {
-      for (const answer of ["signed-out", "offline"] as const) {
+      for (const answer of ["signed-out", "signed-out-401", "offline"] as const) {
+        signedOutAs = answer === "signed-out-401" ? 401 : 200;
         const accounts = new AccountManager({
           createLocalFirst: () => makeFakeAccount(),
           restoreLocalFirst: () => makeFakeAccount(),
@@ -170,6 +218,42 @@ for (const [host, create, prepare, own] of [
       });
       expect(session.getSnapshot().status).toBe("ready");
       expect(session.getSnapshot().account).toBe(retained);
+      await session.close();
+    });
+
+    // A cold-starting or hung backend: startup must not sit on loading until
+    // the auth request deadline (30 s). It waits FIRST_ANSWER_DEADLINE_MS,
+    // opens signed out, and signs the user in when the answer arrives.
+    it("opens signed out once a slow backend passes the start deadline, then follows its answer", async () => {
+      const alice = makeFakeAccount();
+      const accounts = new AccountManager({
+        createLocalFirst: () => makeFakeAccount(),
+        restoreLocalFirst: () => makeFakeAccount(),
+        loginWithBackend: async () => alice,
+        logout: vi.fn(),
+      });
+      prepare.mockResolvedValue(accounts);
+      mocks.client.mockResolvedValue({ shutdown: async () => {} });
+      backendUser = { issuer: "jazz:backend", subject: "alice" };
+      let answer!: () => void;
+      backendUserAnswer = new Promise((resolve) => (answer = resolve));
+      vi.useFakeTimers();
+      let opened = false;
+      const opening = create({
+        scope: "app-1",
+        serverUrl: "https://jazz.example.com",
+        ...own,
+      }).finally(() => (opened = true));
+      await vi.advanceTimersByTimeAsync(FIRST_ANSWER_DEADLINE_MS - 1);
+      expect(opened).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(opened).toBe(true);
+      const session = await opening;
+      expect(session.getSnapshot().status).toBe("signed-out");
+      answer();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.waitFor(() => expect(session.getSnapshot().account).toBe(alice));
+      expect(session.getSnapshot().status).toBe("ready");
       await session.close();
     });
 

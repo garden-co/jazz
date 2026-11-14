@@ -1,4 +1,10 @@
 import type { BrowserWebSocket, WebSocketConstructor } from "./websocket.js";
+import {
+  forgetStreamEndpoint,
+  recallStreamEndpoint,
+  rememberStreamEndpoint,
+  streamEndpointMemoryAvailable,
+} from "./stream-endpoint-memory.js";
 
 /**
  * The HTTP stream transport: a WebSocket-shaped session over plain requests,
@@ -140,14 +146,19 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
   close(): void {
     if (this.readyState >= 2) return;
     const session = this.session;
-    this.finish(1000, "client closed");
-    if (session) {
-      void this.request(`${this.streamUrl}/${encodeURIComponent(session.id)}`, {
-        method: "DELETE",
-        credentials: "same-origin",
-        headers: { [STREAM_KEY_HEADER]: session.key },
-      }).catch(() => undefined);
-    }
+    if (!session) return this.finish(1000, "client closed");
+    // The DELETE ends the session on the backend, and only then does the
+    // response go: aborted first, it would end the session on its own,
+    // and the DELETE would find it gone (a 404 the browser logs, #5187).
+    this.finish(1000, "client closed", false);
+    void this.request(`${this.streamUrl}/${encodeURIComponent(session.id)}`, {
+      method: "DELETE",
+      credentials: "same-origin",
+      headers: { [STREAM_KEY_HEADER]: session.key },
+      signal: AbortSignal.timeout?.(SOCKET_OPEN_DEADLINE_MS),
+    })
+      .catch(() => undefined)
+      .finally(() => this.abort.abort());
   }
 
   private async run(): Promise<void> {
@@ -166,8 +177,9 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
         const { done, value } = await reader.read();
         if (done) break;
         for (const record of records.push(value)) {
-          this.receive(record.kind, record.payload);
+          // Closed by the client: what the backend still sends is not news.
           if (this.readyState >= 2) return;
+          this.receive(record.kind, record.payload);
         }
       }
       this.fail(1006, "HTTP stream ended");
@@ -241,10 +253,10 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
     this.finish(code, reason);
   }
 
-  private finish(code: number, reason: string): void {
+  private finish(code: number, reason: string, abort = true): void {
     if (this.readyState >= 2) return;
     this.readyState = 3;
-    this.abort.abort();
+    if (abort) this.abort.abort();
     this.emit("close", { code, reason });
   }
 }
@@ -298,6 +310,12 @@ const STREAM_AVAILABLE_HEADER = "x-jazz-stream";
 /** Endpoints already warned that the backend refuses this page's origin. */
 const refusedOrigins = new Set<string>();
 
+/** Header on createJazz's development 503 whose body says why its store did not open. */
+const STORE_ERROR_HEADER = "x-jazz-store-error";
+
+/** Store-open failures already logged, by endpoint and reason. */
+const reportedStoreErrors = new Set<string>();
+
 /**
  * What a plain request for a socket path says about the endpoint. A POST,
  * so the browser sends the page's Origin and the backend checks it as it
@@ -316,6 +334,16 @@ async function probeSocketPath(
       // connecting: a probe that gets no answer says nothing.
       signal: AbortSignal.timeout?.(SOCKET_OPEN_DEADLINE_MS),
     });
+    // In development a backend whose store can't open says why (see
+    // createJazz's STORE_ERROR_HEADER): log it once, as the server does.
+    if (response.status === 503 && response.headers.get(STORE_ERROR_HEADER) === "1") {
+      const why = await response.text().catch(() => "");
+      if (why && !reportedStoreErrors.has(`${url}\n${why}`)) {
+        reportedStoreErrors.add(`${url}\n${why}`);
+        console.error(`jazz: the backend at ${url} can't serve: ${why}`);
+      }
+      return "other";
+    }
     void response.body?.cancel().catch(() => undefined);
     if (response.status === 403) return "refused";
     // Not a createJazz socket path (another server, or a proxy's error).
@@ -327,7 +355,9 @@ async function probeSocketPath(
 }
 
 /** Whether a socket to `url` that just failed before opening should give way
- * to the stream ("stream"), else what the probe said about the endpoint.
+ * to the stream: "stream" when the backend says it can't upgrade sockets,
+ * "stream-in-between" when upgrades keep failing at a backend that says it
+ * does (only this process remembers that); else what the probe said.
  * Upgrades that got no answer at all (`hung`) count on their own: a backend
  * that restarts or drains refuses a socket, it doesn't leave one hanging,
  * so fewer of them in a row ({@link UPGRADE_HANGS_BEFORE_STREAM}) switch. */
@@ -335,7 +365,7 @@ async function servesStreamInstead(
   url: string,
   hung: boolean,
   request: typeof fetch,
-): Promise<"stream" | "upgrades" | "refused" | "other" | "silent"> {
+): Promise<"stream" | "stream-in-between" | "upgrades" | "refused" | "other" | "silent"> {
   const answer = await probeSocketPath(url, request);
   if (answer === "stream") return answer;
   if (answer !== "upgrades") {
@@ -364,12 +394,12 @@ async function servesStreamInstead(
     console.warn(
       `jazz: ${hangs} WebSockets in a row to ${url} got no answer in ${SOCKET_OPEN_DEADLINE_MS / 1000} s, although the backend answers and upgrades them: something in between (a proxy or dev server) doesn't pass WebSocket upgrades on. Syncing over the HTTP stream instead, for as long as this client runs.`,
     );
-    return "stream";
+    return "stream-in-between";
   }
   console.warn(
     `jazz: ${failures} WebSockets in a row to ${url} failed, although the backend answers and upgrades them: something in between (a proxy or dev server) doesn't pass WebSocket upgrades on. Syncing over the HTTP stream instead, for as long as this client runs.`,
   );
-  return "stream";
+  return "stream-in-between";
 }
 
 export type HttpStreamFallbackOptions = {
@@ -400,7 +430,12 @@ export function httpStreamFallbackWebSocket(
   const describeFailedUpgrade = options.describeFailedUpgrade;
   return class StreamFallbackSocket extends SocketEvents implements BrowserWebSocket {
     binaryType: "arraybuffer" | "blob" = "arraybuffer";
-    private inner: BrowserWebSocket;
+    /** Unset while looking up whether the backend serves the stream instead. */
+    private inner: BrowserWebSocket | undefined;
+    /** Closed before the lookup decided what to open. */
+    private closedEarly = false;
+    /** The client closed this socket (a refused stream is not its doing). */
+    private closedByClient = false;
     private settled = false;
     /** The native socket failed and we're asking whether to use the stream. */
     private probing = false;
@@ -411,26 +446,66 @@ export function httpStreamFallbackWebSocket(
 
     constructor(private readonly url: string) {
       super();
-      const stream = streamEndpoints.has(url);
-      this.inner = stream ? new HttpStreamSocket(url, request) : this.openNative();
-      if (stream) this.forward(this.inner);
+      if (streamEndpoints.has(url)) {
+        this.openStream();
+        return;
+      }
+      if (!streamEndpointMemoryAvailable()) {
+        this.inner = this.openNative();
+        return;
+      }
+      // Another page or worker may have learned that this backend can't
+      // upgrade sockets: then a socket here would only fail, loudly.
+      void recallStreamEndpoint(url).then((stream) => {
+        if (this.closedEarly) return;
+        if (stream) {
+          streamEndpoints.add(url);
+          this.openStream();
+        } else {
+          this.inner = this.openNative();
+        }
+      });
     }
 
     get readyState(): number {
+      if (!this.inner) return this.closedEarly ? 3 : 0;
       // Still connecting while the probe runs: the session hasn't failed yet.
       return this.probing ? 0 : this.inner.readyState;
     }
 
     send(data: Uint8Array | string): void {
+      if (!this.inner) throw new Error("WebSocket is not open");
       this.inner.send(data);
     }
 
     close(): void {
+      this.closedByClient = true;
       this.settled = true;
       this.probing = false;
       clearTimeout(this.openDeadline);
       this.abort.abort();
-      this.inner.close();
+      if (this.inner) return this.inner.close();
+      if (this.closedEarly) return;
+      this.closedEarly = true;
+      // Like a WebSocket's, the close event comes after close() returns.
+      queueMicrotask(() => this.emit("close", { code: 1000, reason: "" }));
+    }
+
+    private openStream(): void {
+      const stream = new HttpStreamSocket(this.url, request);
+      let opened = false;
+      stream.addEventListener("open", () => {
+        opened = true;
+      });
+      stream.addEventListener("close", () => {
+        // Refused before it opened: the next session tries a socket again.
+        if (!opened && !this.closedByClient) {
+          streamEndpoints.delete(this.url);
+          void forgetStreamEndpoint(this.url);
+        }
+      });
+      this.inner = stream;
+      this.forward(stream);
     }
 
     private openNative(): BrowserWebSocket {
@@ -448,7 +523,7 @@ export function httpStreamFallbackWebSocket(
         failure = { [kind]: event };
         this.probing = true;
         void servesStreamInstead(this.url, hung, request).then(async (answer) => {
-          const stream = answer === "stream";
+          const stream = answer === "stream" || answer === "stream-in-between";
           // A hung upgrade, or a probe with no answer, has no status to tell.
           const answered = !hung && (answer === "upgrades" || answer === "other");
           const why =
@@ -460,8 +535,10 @@ export function httpStreamFallbackWebSocket(
           this.settled = true;
           if (stream) {
             streamEndpoints.add(this.url);
-            this.inner = new HttpStreamSocket(this.url, request);
-            this.forward(this.inner);
+            // The backend's own word lasts across page loads; a proxy's
+            // doing only for this process (it may be fixed meanwhile).
+            if (answer === "stream") void rememberStreamEndpoint(this.url);
+            this.openStream();
             return;
           }
           if (why) {

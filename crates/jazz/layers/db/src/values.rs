@@ -1387,6 +1387,53 @@ impl Schema {
         self
     }
 
+    /// `self` (a [`Schema::stored_view`]) with each enum column declaring
+    /// the variants `version` declares for the same stored column, or
+    /// `None` when they already agree. The stored view takes its variants
+    /// from the current schema, but a session writes under its own
+    /// version (a deploy admits versions without making them current), so
+    /// its cells are checked against that version's variants: one that
+    /// adds a variant may write it, one that lacks it may not.
+    pub(crate) fn with_enum_variants_of(&self, version: &Schema) -> Option<Self> {
+        let differs = |view: &Self| {
+            version.tables.values().any(|table| {
+                view.tables.get(&table.stored).is_some_and(|stored| {
+                    table.columns.iter().any(|column| {
+                        column.variants.is_some()
+                            && stored
+                                .columns
+                                .iter()
+                                .find(|candidate| candidate.stored == column.stored)
+                                .is_some_and(|candidate| candidate.variants != column.variants)
+                    })
+                })
+            })
+        };
+        if !differs(self) {
+            return None;
+        }
+        let mut view = self.clone();
+        for table in version.tables.values() {
+            let Some(stored) = view.tables.get_mut(&table.stored) else {
+                continue;
+            };
+            for column in table
+                .columns
+                .iter()
+                .filter(|column| column.variants.is_some())
+            {
+                if let Some(candidate) = stored
+                    .columns
+                    .iter_mut()
+                    .find(|candidate| candidate.stored == column.stored)
+                {
+                    candidate.variants = column.variants.clone();
+                }
+            }
+        }
+        Some(view)
+    }
+
     /// `current` named by stored names, the names writes travel by: each
     /// table and column takes its stored name, and each table also holds
     /// the stored columns only other admitted versions name (`physical`'s,

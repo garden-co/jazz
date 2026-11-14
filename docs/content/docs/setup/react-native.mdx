@@ -3,7 +3,7 @@ title: React Native
 description: "Learn how to use Jazz from React Native and Expo apps."
 ---
 
-React Native and Expo are supported as an alpha through `jazz-tools/react-native` and the direct `jazz-rn` native dependency. Use a matching development or release build: Expo Go is unsupported. On the web target, `jazz-tools/react-native` and `jazz-tools/expo` throw an error that says so: for Expo web, render the [web client](/docs/setup/web-client/thin-client) from `jazz-tools/react` in a `.web.tsx` platform file, which signs in with your backend's same-origin cookie like any web app.
+React Native and Expo are supported as an alpha through `jazz-tools/react-native` and the direct `jazz-rn` native dependency. Use a matching development or release build: Expo Go is unsupported. On the web target, `jazz-tools/react-native` and `jazz-tools/expo` throw an error that says so: for Expo web, render the [web client](/docs/setup/web-client/thin-client) from `jazz-tools/react` in a `.web.tsx` platform file, which signs in with your backend's same-origin cookie like any web app. Its local-first client needs the [Expo Metro config](/docs/setup/web-client/local-first-client#bundler-config).
 
 ## Setup
 
@@ -79,6 +79,11 @@ and the `jazz-rn` native module must come from the same release, so ship it as a
 
 To reach a backend on your computer, the Android emulator uses `http://10.0.2.2:<port>` instead of
 `localhost`, and Android blocks plain `http://` unless you allow cleartext traffic for development.
+
+An Expo app's package is CommonJS, while your backend imports `schema.ts` and `permissions.ts` as ES
+modules. Keep those two files in a folder of their own (for example `jazz/`) with a `package.json`
+of `{ "type": "module" }`, and import them from there in both the app and the backend; see
+[Your Own Server](/docs/setup/deployment/own-server).
 
 A bare React Native host uses the same direct dependency and New Architecture, with an OS-protected
 account store. The [canonical Expo
@@ -174,7 +179,4 @@ testing page shows an in-memory one), since outside the browser and the app ther
 Use `bearer: () => testJazz.bearer(userId)` to sign in the way the app does. The React Native UI
 itself needs an emulator or a device.
 
-## Coming next
-
-- Expo vs bare React Native setup, step by step
-- Today React Native clients run the local-first engine on the device; a thin client follows the web thin client
+{/* TODO, coming next: Expo vs bare React Native setup, step by step; a thin client for React Native, like the web thin client (today React Native runs the local-first engine on the device) */}

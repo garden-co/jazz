@@ -195,20 +195,24 @@ export class DirectConnectionManager extends ConnectionManager {
     return transition;
   }
 
-  async deleteClientStorage(): Promise<void> {
+  async deleteClientStorage(): Promise<{ pendingUploads?: number } | void> {
     const driver = this.host.config.driver ?? { type: "persistent" };
     if (driver.type !== "persistent") {
       throw new Error("deleteClientStorage() is only available when driver.type='persistent'.");
     }
-    if (typeof window === "undefined") {
+    // A React Native relay deletes its store itself, whatever the global
+    // environment looks like.
+    const current = this.getCurrentClient();
+    if (typeof window === "undefined" && !current?.supportsClientStorageReset()) {
       console.error("deleteClientStorage() is only available in browser runtimes.");
       return;
     }
 
-    const client = this.getCurrentClient() ?? this.getClient({});
+    const client = current ?? this.getClient({});
     try {
-      await client.clearClientStorage();
+      const deleted = await client.clearClientStorage();
       await client.shutdown();
+      return deleted;
     } finally {
       this.clearClient();
     }

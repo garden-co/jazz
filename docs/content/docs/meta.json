@@ -6,6 +6,7 @@
     "how-jazz-works",
     "---Setup---",
     "setup/run-locally",
+    "setup/nextjs-better-auth",
     "setup/deployment",
     "setup/auth",
     "---Clients---",
@@ -31,6 +32,7 @@
     "reference/framework-patterns",
     "reference/examples",
     "reference/internals",
-    "reference/local-first-auth-internals"
+    "reference/local-first-auth-internals",
+    "changelog"
   ]
 }

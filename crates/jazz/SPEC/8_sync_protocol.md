@@ -617,11 +617,44 @@ that masks that row (§8.4). An eviction of a version that still exists keeps
 the session watching the row's id, since the replica may hold the row on
 another branch, and later writes that leave that version unreadable send
 nothing more, whichever of the session's reads watches the id; a version
-that becomes readable ships again while a live read keeps it watched. A row
-the reader's own accepted commit wrote and cannot read (a write-only insert)
-is reconciled at settlement: the commit's fate reports acceptance without
-creating a persistent watch. Local copies are not a redaction boundary; eviction keeps the
-replica coherent, not secret.
+that becomes readable ships again while a live read keeps it watched. The
+rows a reader's own commit wrote reconcile at its settlement, without
+creating a persistent watch: each ships as it is now if the reader may read
+it, else it is evicted. That includes a row the reader's own write moved out
+of its read scope, live read or not. A write that took no access away is
+the exception: where the reader could read the row neither just before nor
+just after each of its commits of one server tick (it may not have existed),
+the row is still at the version those commits made, and none of the
+session's live reads reads its table, the global authority's fate confirms
+each of those versions as written (a write-only insert, and a delete or
+restore after it). The replica keeps them as a cold copy until a covering
+read reconciles it.[^write-only-own-rows] A version another writer superseded it with, a row a
+live read covers, or a commit a relay accepted for its session (other than
+the writer's own store, which serves its sessions what it holds) reconciles
+as any other written row. A refused commit takes no access away: its rows
+ship again only where the reader may read them, and a cold copy of a row the
+reader lost access to otherwise stays until a covering read. Local copies are not a redaction
+boundary; eviction keeps the replica coherent, not secret.
+
+[^write-only-own-rows]:
+    Why a write-only own row stays. An insert needs no read access, but an
+    update, upsert, delete or restore acts on the writer's own prior row,
+    and its replica stages it over the accepted version it holds, founder
+    metadata (the accepted creation stamp) included. A writer that inserts
+    into a table it may not read and then queues a delete or restore, or has
+    a later edit refused and falls back to its accepted row, needs that row
+    as its base. Before this rule, the row was evicted as soon as the insert
+    was accepted, so the writer had nothing to build on. The motivating case
+    is E2EE's key and recipient tables, where a client writes rows meant for
+    other readers and may still need to delete or restore them. Each
+    condition guards one case where keeping the row would be wrong.
+    Unreadable just before and just after each commit: a write that moved a
+    readable row out of the writer's scope (an out-of-scope update) did take
+    access away, and is evicted as usual. Still at the version the writer's
+    own commits made: a row another writer superseded is not the writer's to
+    keep, and reconciles to the authority's version. No live read of the
+    writer reads its table: a live result must match what the authority
+    would send it (`INV-SYNC-14`), so a covered row reconciles as any other.
 
 `CheckAllowed { id, action, acting }` asks whether the session would be
 allowed an action now, without writing; `CheckAllowedResult { id, result }`
@@ -817,6 +850,11 @@ pending writes belong to the history it followed, so:
 - its remote reads (those open and those opened later) fail with the error,
   and so do `Global` waits on its writes still pending; `Local` waits and
   local reads are served as before, and the pending writes are kept;
+- a relay fails the `Remote` reads it relays for its sessions (live and
+  one-shot, open and opened later) the same way, with the same code, once
+  each; its sessions' local-first reads read its store, their local view,
+  as when there is no server. A read opened on a new link before its
+  `Welcome` is not failed with the last link's refusal;
 - the link reports the refusal to its host (`Db::upstream_refusal`), which
   stops it instead of retrying: a retry would be refused the same way. Only
   a new link (an explicit reconnect) tries again, so the old authority back
@@ -846,7 +884,7 @@ The responder opens a resumed read one of three ways:
 
 - **Fresh**, when it cannot resume: the store is a relay (its store may be
   cold, and its seqs are not the ones its sessions resume from), the read is
-  windowed, a flat join, an aggregate, a relation or a history read, the
+  a flat join, an aggregate, a relation or a history read, the
   session has its own claims (policies read them, and they are not part of
   what the client resumes from), `since` is past what the store serves (a
   reset store), or `since` is at or before the current schema's activation.
@@ -858,7 +896,12 @@ The responder opens a resumed read one of three ways:
   without changing. The authority evaluates the result as of `since` and ships
   every row not in it, rows that changed after `since`, rows it held then that
   have since left (as they are now, or their eviction), and supporting rows
-  whose access changed.
+  whose access changed. A window (`limit`, or the prefix through an
+  `offset` a replica asks for) resumes the same way: its own table is one
+  of its membership inputs, so any write to it takes this path, and rows
+  pushed out of the window or let into it without changing are judged
+  against the window as of `since`; its opening's `members` drop the ones
+  that left.
 
 Each ends with a `Settled` (and its `members` where §8.4 calls for one), so a
 resumed read leaves the replica with the same rows as a fresh one
@@ -1046,8 +1089,34 @@ those bytes are refused with it at once until the fetch backoff ends.
   nothing, and the next commit does not inherit its id. A write whose key
   the store already knows for the same author is not made again: it answers
   `Written` with seq 0, or the first one's refusal as uploaded through a
-  replica. In .60 the authority keeps these dedupe entries and never prunes them;
-  a bounded resend window is planned for .61 (#4961). The authority does not record its own refusal: a resend of a
+  replica. A client resends a write for at most 10 minutes after its first
+  send (the TypeScript thin client's `THIN_WRITE_RESEND_WINDOW_MS`); after
+  that the write ends with its outcome unknown. Such a client says so by
+  naming a node tagged `jzRB` (an RFC 9562 version-8 UUID), from which
+  every server derives a writer tagged `jzTB` instead of `jzTW`; an earlier
+  client names a random node, may resend any time, and its entries are
+  kept. The authority drops the
+  dedupe entry of a `jzTB` writer's commit one hour after it recorded it, on its own
+  clock (`ORIGIN_ENTRY_RETENTION_MS`), if the commit was refused or wrote
+  only latest-only tables (SPEC 4 §4.9), and the writer node's interned
+  row once the node has no entry left. Any other accepted commit's entry is
+  also its history's record (history reads name its versions by it, and
+  later writes build on it), so it is kept, as every writer's is. Entries
+  are dropped oldest first, a bounded batch per thin-writer entry the
+  authority records, so pruning costs what it drops; a store that takes no
+  more thin writes keeps what it holds. An entry is recorded no earlier
+  than the write's first send, so every resend inside the client's window
+  finds it. Known limit: a replica that holds an origin commit's upload for
+  more than an hour while the client resends the write through another
+  server could apply a latest-only write twice. Entries recorded before
+  the authority ran a build that records their ages are never dropped.
+  The window is measured on the client's wall clock and the hour on the
+  authority's: a client clock set back lengthens the window, and an
+  authority clock set forward drops entries early.
+  During a rolling upgrade, a server from before the `jzTB` writer derives
+  `jzTW` for a marked client where a newer one derives `jzTB`, so a resend
+  that crosses server versions is not deduped against the first send.
+  The authority does not record its own refusal: a resend of a
   write it refused runs again, against current state. On a replica, seq 0
   can answer a write still pending upstream. An insert with a key names its
   `rowId`; a staged write names no key. So a client resends a keyed write
