@@ -206,8 +206,9 @@ vercel({ namespace: ({ environment }) => environment });
 
 - **Per branch** isolates each pull request: a migration or test data on one branch never reaches
   another. `perBranch` gives the same core names as earlier versions, so existing preview cores
-  keep their data. A preview deployed without a Git branch (from the CLI outside a checkout, or
-  through the API) has no branch to name, and the store throws when it opens; use
+  keep their data. A preview deployed with `vercel deploy` or through the API has no
+  branch unless the Vercel project is connected to a Git repository, even when you run the CLI
+  inside a checkout. Such a preview has no branch to name, and the store throws when it opens; use
   `perBranch(branch) || "cli-previews"` to give such previews a core of their own.
 - **Shared** keeps one set of preview data that all branches see. It needs fewer cores, but the
   branches share one schema history too, so a schema change or migration deployed from one branch
