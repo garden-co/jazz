@@ -8,8 +8,9 @@
 //!
 //! Nesting also reads a level's rows a relation at a time (one statement
 //! for all of that level's parents, each parent's offset and limit applied
-//! by a window), which must again read exactly what the per-parent path
-//! does. Every comparison runs the three paths in [`MODES`].
+//! by a correlated subquery, or for an array of references by a window),
+//! which must again read exactly what the per-parent path does, with about
+//! as little work. Every comparison runs the three paths in [`MODES`].
 
 use std::collections::BTreeMap;
 
@@ -1589,5 +1590,117 @@ mod branch_views {
         }
         removed.sort();
         (shown(added), shown(updated), removed)
+    }
+}
+
+/// A paged reverse relation, batched, reads each parent's page as that
+/// parent's own statement does: from the relation's index, stopping at the
+/// page's end. A room list with each room's newest message must not read
+/// every message of every room (alpha.62 numbered them all in a window and
+/// kept one per room: the BandChat inbox went from ~15 ms to ~1.2 s).
+#[test]
+fn a_paged_relation_reads_each_parents_page_not_all_its_children() {
+    const BUSY_ROOMS: usize = 4;
+    const PER_ROOM: usize = 1_500;
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("rooms")
+                    .column("name", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("messages")
+                    .fk_column("room", "rooms")
+                    .column("body", ColumnType::Text)
+                    .column("sent_at", ColumnType::BigInt)
+                    .composite_index(["room", "sent_at"])
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x12; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    // Busy rooms, a room with two messages and an empty one.
+    let rooms = BUSY_ROOMS + 2;
+    block_on(db.transaction(async |tx| {
+        for r in 0..rooms {
+            tx.insert(
+                "rooms",
+                cells(vec![("name", Value::String(format!("room {r}")))]),
+                InsertOptions {
+                    row_id: Some(id(2, r)),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            let count = match r {
+                r if r < BUSY_ROOMS => PER_ROOM,
+                r if r == BUSY_ROOMS => 2,
+                _ => 0,
+            };
+            for k in 0..count {
+                // Equal send times in pairs: ties are broken by id.
+                tx.insert(
+                    "messages",
+                    cells(vec![
+                        ("room", uuid(id(2, r))),
+                        ("body", Value::String(format!("room {r} message {k}"))),
+                        ("sent_at", Value::I64((k / 2) as i64)),
+                    ]),
+                    InsertOptions {
+                        row_id: Some(id(4, r * PER_ROOM + k)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }))
+    .unwrap();
+    block_on(db.tick()).unwrap();
+
+    let pages = [
+        (0, Some(1)),
+        (1, Some(2)),
+        (3, Some(3)),
+        (PER_ROOM - 2, None),
+    ];
+    for (offset, limit) in pages {
+        let mut newest = ArraySubquery::new("messagesViaRoom", "messages", "room", "id")
+            .order_by("sent_at", OrderDirection::Desc)
+            .offset(offset);
+        if let Some(limit) = limit {
+            newest = newest.limit(limit);
+        }
+        let query = Query::from("rooms").array_subquery(newest);
+        let prepared = db.prepare_query(&query).unwrap();
+        let read = |mode| {
+            set_mode(mode);
+            let roots = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+            jazz::db::take_vm_steps_for_test();
+            let rows = db.nest_relations(&prepared, roots).unwrap();
+            (rows, jazz::db::take_vm_steps_for_test())
+        };
+        let (per_parent, per_parent_steps) = read((true, false));
+        let (batched, batched_steps) = read((true, true));
+        set_mode((true, true));
+        assert_eq!(batched, per_parent, "offset {offset}, limit {limit:?}");
+        assert_eq!(batched.len(), rooms);
+        // The per-parent statements seek each room's index range; the
+        // batched one must do about as little, nowhere near the 6,000
+        // messages the busy rooms hold.
+        assert!(
+            batched_steps <= 2 * per_parent_steps + 1_000,
+            "offset {offset}, limit {limit:?}: batched read took {batched_steps} SQLite steps, \
+             per parent {per_parent_steps}"
+        );
     }
 }

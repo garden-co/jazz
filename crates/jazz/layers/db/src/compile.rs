@@ -1601,17 +1601,6 @@ impl<'a> Ctx<'a> {
             }
             Some(mark) => {
                 let paged = array.limit.is_some() || array.offset > 0;
-                let mut keep = Vec::new();
-                if array.offset > 0 {
-                    keep.push(format!(
-                        "_n > {}",
-                        self.bind(Sql::Integer(array.offset as i64))
-                    ));
-                }
-                if let Some(limit) = array.limit {
-                    let last = (array.offset as i64).saturating_add(limit as i64);
-                    keep.push(format!("_n <= {}", self.bind(Sql::Integer(last))));
-                }
                 let source = self.source(child)?;
                 let source = if elements {
                     format!("json_each({mark}) AS _p JOIN json_each(_p.value) AS r JOIN {source}")
@@ -1626,9 +1615,40 @@ impl<'a> Ctx<'a> {
                 cells.extend(columns);
                 cells.push(format!("{alias}._writer"));
                 cells.push("_p.key".to_owned());
-                if paged {
-                    // Each parent's own page: its rows numbered in the
-                    // relation's order, the page kept.
+                if paged && !elements {
+                    // Each parent's own page, read as its own statement
+                    // reads it: ordered and cut by a correlated subquery,
+                    // so SQLite walks the relation's index from each
+                    // parent and stops at the page's end. Numbering every
+                    // child in a window instead reads all of each parent's
+                    // children (a room's whole history for its newest
+                    // message). A source holds one row per (id, branch), so
+                    // the outer read joins the page back by those.
+                    let limit = self.bind(Sql::Integer(array.limit.map_or(-1, |l| l as i64)));
+                    let offset = self.bind(Sql::Integer(array.offset as i64));
+                    let page_source = self.source(child)?;
+                    format!(
+                        "SELECT {} FROM {source} AS {alias} WHERE ({alias}.id, {alias}._branch) IN \
+                         (SELECT {alias}.id, {alias}._branch FROM {page_source} AS {alias} WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}) \
+                         ORDER BY _p.key, {order}",
+                        cells.join(", "),
+                        and(&wheres),
+                    )
+                } else if paged {
+                    // A forward array relation's page: its elements
+                    // numbered in the relation's order (the array bounds
+                    // them), with duplicates, the page kept.
+                    let mut keep = Vec::new();
+                    if array.offset > 0 {
+                        keep.push(format!(
+                            "_n > {}",
+                            self.bind(Sql::Integer(array.offset as i64))
+                        ));
+                    }
+                    if let Some(limit) = array.limit {
+                        let last = (array.offset as i64).saturating_add(limit as i64);
+                        keep.push(format!("_n <= {}", self.bind(Sql::Integer(last))));
+                    }
                     let named = cells
                         .iter()
                         .enumerate()
