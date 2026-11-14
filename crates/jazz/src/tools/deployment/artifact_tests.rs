@@ -616,12 +616,18 @@ fn expression_errors_point_at_the_spot_and_suggest() {
         ("owner = 'not-a-uuid'", "is not a UUID"),
         (
             "owner = name",
-            "comparing two columns is not supported in jazz.permissions.json yet",
+            "two columns of the same row can't be compared",
         ),
         (
-            "exists shares(todo = this.id).todo(name = 'x')",
-            "not supported in jazz.permissions.json yet",
+            "exists shares(todo = this.id).todoo(name = 'x')",
+            "unknown relation `todoo` on shares; did you mean `todo`?",
         ),
+        (
+            "outer.owner = session.user",
+            "`outer.` names the row enclosing an `exists`",
+        ),
+        ("name = int('x')", "`int(…)` takes a 32-bit integer"),
+        ("exists (from shares where)", "expected a column"),
         ("", "an empty expression"),
     ] {
         let error = read_policy("todos", source, serde_json::json!({})).unwrap_err();
@@ -848,6 +854,11 @@ fn every_policy_variant() -> PolicyExpr {
                 RelationValueRef::RowId(RelationRowIdRef::Current),
                 RelationValueRef::RowId(RelationRowIdRef::Outer),
                 RelationValueRef::RowId(RelationRowIdRef::Frontier),
+                RelationValueRef::Literal(serde_json::json!([1, {"a": "it's"}])),
+                RelationValueRef::Literal(serde_json::json!(null)),
+                RelationValueRef::Literal(serde_json::json!(1.5e300)),
+                RelationValueRef::Literal(serde_json::json!(-7)),
+                RelationValueRef::Literal(serde_json::json!({"type": "Null"})),
             ],
         },
         RelationPredicate::Contains {
@@ -942,23 +953,56 @@ fn every_policy_variant() -> PolicyExpr {
             join_kind: RelationJoinKind::Inner,
         },
     };
+    let uuid = || {
+        crate::tools::ObjectId::from_uuid(uuid::Uuid::from_u128(
+            0x1234_5678_9abc_def0_1234_5678_9abc_def0,
+        ))
+    };
+    let outer =
+        |column: &str| PolicyValue::SessionRef(vec!["__jazz_outer_row".into(), column.into()]);
     PolicyExpr::Or(vec![
+        // `name <= 3`: an integer against a text column, so `int(3)`.
         PolicyExpr::Cmp {
-            column: "a".into(),
+            column: "name".into(),
             op: CmpOp::Le,
             value: PolicyValue::Literal(Value::Integer(3)),
+        },
+        PolicyExpr::Cmp {
+            column: "name".into(),
+            op: CmpOp::Eq,
+            value: PolicyValue::Literal(Value::Null),
+        },
+        PolicyExpr::Cmp {
+            column: "owner".into(),
+            op: CmpOp::Eq,
+            value: PolicyValue::Literal(Value::Uuid(uuid())),
+        },
+        // An enclosing-row reference outside `exists`: only the raw path.
+        PolicyExpr::Cmp {
+            column: "owner".into(),
+            op: CmpOp::Eq,
+            value: outer("owner"),
         },
         PolicyExpr::SessionCmp {
             path: path(),
             op: CmpOp::Ne,
             value: Value::Text("x".into()),
         },
-        PolicyExpr::IsNull { column: "b".into() },
+        PolicyExpr::SessionCmp {
+            path: vec!["claims".into(), "odd path".into(), "and".into()],
+            op: CmpOp::Gt,
+            value: Value::Double(f64::NAN),
+        },
+        PolicyExpr::IsNull {
+            column: "owner".into(),
+        },
         PolicyExpr::SessionIsNull { path: path() },
-        PolicyExpr::IsNotNull { column: "c".into() },
+        PolicyExpr::IsNotNull {
+            column: "meta".into(),
+        },
         PolicyExpr::SessionIsNotNull { path: path() },
         PolicyExpr::Contains {
-            column: "d".into(),
+            column: "tags".into(),
             value: PolicyValue::SessionRef(path()),
         },
         PolicyExpr::SessionContains {
@@ -966,29 +1010,79 @@ fn every_policy_variant() -> PolicyExpr {
             value: Value::Text("y".into()),
         },
         PolicyExpr::In {
-            column: "e".into(),
+            column: "owner".into(),
             session_path: path(),
         },
         PolicyExpr::InList {
-            column: "f".into(),
+            column: "name".into(),
             values: vec![
                 PolicyValue::Literal(Value::BigInt(1 << 40)),
                 PolicyValue::SessionRef(path()),
+                PolicyValue::Literal(Value::Text("it's".into())),
             ],
         },
         PolicyExpr::SessionInList {
             path: path(),
-            values: vec![Value::Boolean(true), Value::Null],
+            values: vec![
+                Value::Boolean(true),
+                Value::Null,
+                Value::Double(-0.5),
+                Value::Timestamp(1_700_000_000_000),
+                Value::Bytea(vec![0, 255]),
+                Value::TransactionId([7; 16]),
+                Value::Array(vec![Value::Integer(1), Value::Null]),
+                Value::Row {
+                    id: Some(uuid()),
+                    values: vec![Value::Text("r".into())],
+                },
+                Value::Row {
+                    id: None,
+                    values: vec![],
+                },
+                Value::Enum {
+                    case: "done".into(),
+                    values: vec![Value::Timestamp(5)],
+                },
+            ],
         },
         PolicyExpr::Exists {
             table: "shares".into(),
             condition: Box::new(PolicyExpr::True),
         },
+        // `exists` in `exists`, each level reaching the row around it.
+        PolicyExpr::Exists {
+            table: "shares".into(),
+            condition: Box::new(PolicyExpr::And(vec![
+                PolicyExpr::Cmp {
+                    column: "todo".into(),
+                    op: CmpOp::Eq,
+                    value: outer("id"),
+                },
+                PolicyExpr::Exists {
+                    table: "todos".into(),
+                    condition: Box::new(PolicyExpr::And(vec![
+                        PolicyExpr::Cmp {
+                            column: "id".into(),
+                            op: CmpOp::Eq,
+                            value: outer("todo"),
+                        },
+                        PolicyExpr::Exists {
+                            table: "shares".into(),
+                            condition: Box::new(PolicyExpr::Cmp {
+                                column: "user".into(),
+                                op: CmpOp::Eq,
+                                value: outer("owner"),
+                            }),
+                        },
+                    ])),
+                },
+            ])),
+        },
         PolicyExpr::ExistsRel { rel },
         inner_join,
         PolicyExpr::Inherits {
             operation: Operation::Update,
-            via_column: "parent".into(),
+            via_column: "owner".into(),
             max_depth: Some(3),
         },
         PolicyExpr::InheritsReferencing {
@@ -997,7 +1091,18 @@ fn every_policy_variant() -> PolicyExpr {
             via_column: "todo".into(),
             max_depth: None,
         },
+        PolicyExpr::InheritsReferencing {
+            operation: Operation::Select,
+            source_table: "shares".into(),
+            via_column: "user".into(),
+            max_depth: Some(1),
+        },
         PolicyExpr::And(vec![PolicyExpr::Not(Box::new(PolicyExpr::False))]),
+        PolicyExpr::Or(vec![]),
+        PolicyExpr::Not(Box::new(PolicyExpr::And(vec![
+            PolicyExpr::Or(vec![PolicyExpr::True, PolicyExpr::False]),
+            PolicyExpr::Not(Box::new(PolicyExpr::Not(Box::new(PolicyExpr::True)))),
+        ]))),
     ])
 }
 
@@ -1180,11 +1285,53 @@ fn through_the_permissions_file(expr: &PolicyExpr) -> TablePolicies {
     permissions.insert(TableName::from("todos"), policies.clone());
     let file = permissions_file::write(&permissions, &current, &relations).unwrap();
     let text = json::print(&file);
+    only_strings(&file, &text);
     let reread = json::parse(text.as_bytes()).unwrap();
     let read = permissions_file::read(&reread, &current, &relations)
         .unwrap_or_else(|e| panic!("{e:?}\n{text}"));
     assert_eq!(read[&TableName::from("todos")], policies, "{text}");
     policies
+}
+
+/// Every policy in the file is a string, or anyOf / allOf / `$comment` /
+/// `{ using, withCheck }` / `{ old, new }` around strings: no structured leaf.
+fn only_strings(file: &json::Json, text: &str) {
+    fn policy(value: &json::Json, text: &str) {
+        match value {
+            json::Json::String(_) => {}
+            json::Json::Array(items) => items.iter().for_each(|i| policy(i, text)),
+            json::Json::Object(entries) => {
+                for (key, value) in entries {
+                    assert!(
+                        matches!(
+                            key.as_str(),
+                            "using" | "withCheck" | "old" | "new" | "anyOf" | "allOf" | "where"
+                        ),
+                        "a structured leaf (`{key}`) in:\n{text}"
+                    );
+                    policy(value, text);
+                }
+            }
+            other => panic!("{other:?} as a policy in:\n{text}"),
+        }
+    }
+    let json::Json::Object(top) = file else {
+        panic!("{text}")
+    };
+    for (key, tables) in top {
+        if key != "tables" {
+            continue;
+        }
+        let json::Json::Object(tables) = tables else {
+            panic!("{text}")
+        };
+        for (_, ops) in tables {
+            let json::Json::Object(ops) = ops else {
+                panic!("{text}")
+            };
+            ops.iter().for_each(|(_, p)| policy(p, text));
+        }
+    }
 }
 
 #[test]
@@ -1208,36 +1355,130 @@ fn every_policy_and_relation_variant_round_trips_through_the_file() {
 #[test]
 fn relation_hops_and_nested_exists_round_trip() {
     use crate::query::{RelationExpr, RelationPredicate, RelationValueRef};
-    // `policy.files.where({ id: file.id }).hopTo("folder").where({ owner_id: me })`,
-    // as epic-drop writes it: a relation the grammar can't spell, written
-    // structurally.
+    let col = |scope: &str, column: &str| RelationColumnRef {
+        scope: Some(scope.into()),
+        column: column.into(),
+    };
+    // `policy.shares.where({ todo: todo.id }).hopTo("todo").where({ owner: me })`,
+    // as TS (epic-drop's `files … hopTo("folder")`) builds it.
     let hop = PolicyExpr::ExistsRel {
-        rel: RelationExpr::Filter {
-            input: Box::new(RelationExpr::TableScan {
-                table: "shares".into(),
-                alias: Some("s".into()),
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::Join {
+                    left: Box::new(RelationExpr::TableScan {
+                        table: "shares".into(),
+                        alias: None,
+                    }),
+                    right: Box::new(RelationExpr::TableScan {
+                        table: "todos".into(),
+                        alias: Some("__hop_0".into()),
+                    }),
+                    on: vec![RelationJoinCondition {
+                        left: col("shares", "todo"),
+                        right: col("__hop_0", "id"),
+                    }],
+                    join_kind: RelationJoinKind::Inner,
+                }),
+                predicate: RelationPredicate::And(vec![
+                    RelationPredicate::Cmp {
+                        left: col("shares", "todo"),
+                        op: RelationCmpOp::Eq,
+                        right: RelationValueRef::OuterColumn(RelationColumnRef {
+                            scope: None,
+                            column: "id".into(),
+                        }),
+                    },
+                    RelationPredicate::Cmp {
+                        left: col("__hop_0", "owner"),
+                        op: RelationCmpOp::Eq,
+                        right: RelationValueRef::SessionRef(vec!["user".into()]),
+                    },
+                ]),
             }),
-            predicate: RelationPredicate::Cmp {
-                left: crate::query::RelationColumnRef {
-                    scope: Some("s".into()),
-                    column: "todo".into(),
-                },
-                op: crate::query::RelationCmpOp::Eq,
-                right: RelationValueRef::SessionRef(vec!["user".into()]),
-            },
+            columns: vec![RelationProjectColumn {
+                alias: "id".into(),
+                expr: RelationProjectExpr::Column(col("__hop_0", "id")),
+            }],
         },
     };
     let policies = through_the_permissions_file(&hop);
-    assert_eq!(policies.select.using, Some(hop));
-    // A column compared with another column, and `exists` inside `exists`.
-    let nested = PolicyExpr::Exists {
+    assert_eq!(policies.select.using, Some(hop.clone()));
+    let text = printed("todos", &hop);
+    assert_eq!(
+        text,
+        "exists (from shares join todos as __hop_0 on shares.todo = __hop_0.id where shares.todo = outer.id and __hop_0.owner = session.user select __hop_0.id as id)"
+    );
+    // The hop sugar compiles to the same relation.
+    assert_eq!(
+        read_policy(
+            "todos",
+            "exists shares(todo = this.id).todo(owner = session.user)",
+            serde_json::json!({})
+        )
+        .unwrap(),
+        hop
+    );
+
+    // Nested `exists` with aliases: a nested level names its own row.
+    let nested = read_policy(
+        "todos",
+        "exists shares as s(s.todo = this.id, exists todos as t(t.owner = session.user))",
+        serde_json::json!({}),
+    )
+    .unwrap();
+    assert_eq!(
+        nested,
+        PolicyExpr::Exists {
+            table: "shares".into(),
+            condition: Box::new(PolicyExpr::And(vec![
+                PolicyExpr::Cmp {
+                    column: "todo".into(),
+                    op: CmpOp::Eq,
+                    value: PolicyValue::SessionRef(vec!["__jazz_outer_row".into(), "id".into()]),
+                },
+                PolicyExpr::Exists {
+                    table: "todos".into(),
+                    condition: Box::new(PolicyExpr::Cmp {
+                        column: "owner".into(),
+                        op: CmpOp::Eq,
+                        value: PolicyValue::SessionRef(vec!["user".into()]),
+                    }),
+                },
+            ])),
+        }
+    );
+    assert_eq!(
+        printed("todos", &nested),
+        "exists shares(todo = this.id, exists todos(owner = session.user))"
+    );
+    through_the_permissions_file(&nested);
+    // Which row an outer column is, deeper in, the engine reads two ways:
+    // the file only names it by its raw path.
+    let error = read_policy(
+        "todos",
+        "exists shares as s(exists todos(id = s.todo))",
+        serde_json::json!({}),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("names only its own row's columns"),
+        "{error}"
+    );
+    let deep = PolicyExpr::Exists {
         table: "shares".into(),
         condition: Box::new(PolicyExpr::Exists {
             table: "todos".into(),
-            condition: Box::new(PolicyExpr::True),
+            condition: Box::new(PolicyExpr::Cmp {
+                column: "id".into(),
+                op: CmpOp::Eq,
+                value: PolicyValue::SessionRef(vec!["__jazz_outer_row".into(), "todo".into()]),
+            }),
         }),
     };
-    through_the_permissions_file(&nested);
+    assert_eq!(
+        printed("todos", &deep),
+        "exists shares(exists todos(id = session.__jazz_outer_row.todo))"
+    );
 }
 
 #[test]

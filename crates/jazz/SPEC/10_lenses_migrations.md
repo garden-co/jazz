@@ -951,12 +951,13 @@ param       = "$" , ident ;
 list        = "[" , [ value , { "," , value } ] , "]" ;
 
 literal     = string | number | "true" | "false" | typed ;
-typed       = "literal" , "(" , ( literal | "null" ) , ")"
-            | ( "int" | "bigint" | "double" | "timestamp" ) , "(" , number , ")"
+typed       = "literal" , "(" , ( string | number | "true" | "false" | "null" ) , ")"
+            | ( "int" | "bigint" | "timestamp" ) , "(" , number , ")"
+            | "double" , "(" , ( number | string ) , ")"   (* 'NaN', 'inf', '-inf' *)
             | ( "text" | "uuid" | "bytes" | "txid" ) , "(" , string , ")"
             | "bool" , "(" , ( "true" | "false" ) , ")"
             | "array" , "(" , [ typed_arg , { "," , typed_arg } ] , ")"
-            | "row" , "(" , ( typed | "null" ) , { "," , typed_arg } , ")"
+            | "row" , "(" , ( "uuid" , "(" , string , ")" | "null" ) , { "," , typed_arg } , ")"
             | "enumcase" , "(" , string , { "," , typed_arg } , ")" ;
 typed_arg   = typed | "null" ;
 
@@ -999,7 +1000,8 @@ p_atom      = "(" , predicate , ")" | "true" | "false"
                        | "contains" , value_ref
                        | "is" , name , "(" , predicate , ")" ) ;
 value_ref   = r_literal | session | "param" , "." , name
-            | ( "outer" | "frontier" ) , "." , colref | key ;
+            | ( "outer" | "frontier" ) , "." , colref
+            | "id" , "(" , ( "row" | "outer" | "frontier" ) , ")" ;
 r_literal   = string | number | "true" | "false" | typed | "json" , "(" , string , ")" ;
 
 name        = ident | "`" , { char - "`" | "``" } , "`" ;
@@ -1012,12 +1014,16 @@ Meaning:
 
 - **Scopes.** At the top of a policy, a bare column (or `this.col`, or
   `<table>.col`) names a column of the row being checked. Inside
-  `exists t(…)`, a bare column names a column of `t`, and the enclosing row
-  is reachable as `this.col` directly inside the first `exists`, or by the
-  enclosing level's table name or alias (`exists chats as c(…, exists
-chatMembers(chatId = c.id))`). Only the enclosing row is reachable, as the
-  engine evaluates it; naming a row further out is refused. `outer.col` is
-  the enclosing row at any depth, the form the writer falls back to.
+  `exists t(…)` (or `exists t as a(…)`), a bare column (or `a.col`) names a
+  column of `t`, and the checked row is a value: `this.col`, `outer.col` or
+  `<table>.col`. In an `exists` inside another `exists`, a condition names
+  only its own row's columns: the engine's evaluation paths disagree there
+  about which row an outer column is (the checked row or the enclosing
+  `exists`'s), so the writer spells such a reference by its raw session path,
+  `session.__jazz_outer_row.col`, which keeps the engine's policy exact.
+- **Session values.** `session.user`, `session.claims.<path>`,
+  `session.identity.subject`, `session.identity.issuer` and
+  `session.authMode`; any other path is refused as a typo.
 - **Comparisons.** A comparison compares a column with a value, a column
   with another column (`ownerId = authorId` inside one table is refused, as
   the engine has no such policy; a column of the enclosing row is a value:
@@ -1039,7 +1045,10 @@ chatMembers(chatId = c.id))`). Only the enclosing row is reachable, as the
   conditions is `true`, and `allOf(c)` keeps a one-item `And`).
   `exists t(…).rel(…)` hops along `t`'s relation `rel` to the rows it leads to,
   filtered by that hop's conditions (`hopTo`); it is the relation
-  `from t join <target> as __hop_0 on … where … select __hop_0.id as id`.
+  `from t join <target> as __hop_0 on … where … select __hop_0.id as id`
+  TS builds, and the writer prints it as that relation. A hop's conditions
+  compare its table's columns with values and with the checked row's
+  (`this.col`).
   `exists ( query )` is any relation (`ExistsRel`).
 - **Relations.** A query reads like SQL, each clause wrapping what comes
   before it in order: `from t as a` is `TableScan`, `join` and `left join` are
@@ -1067,12 +1076,13 @@ Policies map one to one onto the engine's PolicyExpr (§7): comparisons to
 `Cmp`/`SessionCmp`/`IsNull`/`IsNotNull`/`In`/`InList`/`SessionInList`/
 `Contains`/`SessionContains`, `exists` to `Exists`/`ExistsRel`, `allowedTo` to
 `Inherits`/`InheritsReferencing`, `anyOf`/`or` to `Or`, `allOf`/`and` and
-condition lists to `And`, `not` to `Not`. The enclosing row (`this.col`,
-`c.col`, `outer.col`) is the session path `["__jazz_outer_row", col]` the TS DSL
-compiles it to. The writer prints top-level `Or`/`And` as `anyOf`/`allOf`
+condition lists to `And`, `not` to `Not`. The checked row inside `exists`
+(`this.col`, `c.col`, `outer.col`) is the session path
+`["__jazz_outer_row", col]` the TS DSL compiles it to. The writer prints top-level `Or`/`And` as `anyOf`/`allOf`
 objects and every other policy as one string: the shortest spelling that
 reads back as exactly the same policy, and otherwise the explicit spelling
-(typed literals, `outer.`, `exists ( from … )`, `via`), which always does.
+(typed literals, `literal(null)`, `session.__jazz_outer_row.col`,
+`exists ( from … )`, `via`), which always does.
 No policy is refused for its shape: only what a deployment would refuse.
 
 **Errors.** Every refusal names the file, the JSON path and, inside an
