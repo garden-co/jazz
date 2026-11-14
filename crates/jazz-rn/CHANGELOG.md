@@ -1,5 +1,14 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.63
+
+### Patch Changes
+
+- 687f9b8: On iOS, React Native's sync link now follows the device's network path: when Wi-Fi goes away the link is dropped and reconnected at once, and when the network comes back it reconnects without waiting out the retry backoff. A link on cellular is kept when Wi-Fi takes over. Android is unchanged. Thanks to Xelson for this.
+- 9e594cc: React Native now gives up a link the server has gone silent on (Wi-Fi off, a suspended server, a half-open connection) after 45 s and reconnects, instead of showing a live link with nothing arriving. Thanks to Xelson for this fix.
+  - jazz-rn-ios@2.0.0-alpha.63
+  - jazz-rn-android@2.0.0-alpha.63
+
 ## 2.0.0-alpha.62
 
 ### Patch Changes
