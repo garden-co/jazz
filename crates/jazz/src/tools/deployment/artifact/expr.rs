@@ -1010,7 +1010,14 @@ impl Parser<'_> {
                 | ["identity", "issuer"]
                 | ["authMode"]
                 | ["claims", _, ..]
-        ) || (parts.len() == 2 && parts[0] == OUTER_ROW);
+        );
+        if parts.first() == Some(&OUTER_ROW) {
+            return Err(ExprError::new(
+                (start, end),
+                "`session.__jazz_outer_row` is not a session value; inside `exists`, the checked row's columns are `this.col`",
+            )
+            .example("exists shares(todoId = this.id)"));
+        }
         if !known {
             return Err(ExprError::new(
                 (start, end),
@@ -2302,9 +2309,8 @@ fn classify(operand: &Operand, context: &Context<'_>, scope: &Scope) -> Result<R
             Ref::Outer(name.clone())
         })
     };
-    // In an `exists` inside another, the engine's paths disagree about which
-    // row an outer column is (the checked row, or the enclosing `exists`'s),
-    // so the file names none there: the raw path keeps either meaning exact.
+    // In an `exists` inside another, the engine refuses an outer-row
+    // reference (and the TS DSL never builds one).
     let nested = || {
         ExprError::new(
             *span,
@@ -2840,8 +2846,11 @@ pub fn unsupported(what: &str) -> String {
 
 /// Print `expr`, a policy on `table`, as the text that reads back as exactly
 /// `expr`: the shortest spelling when it does, else the explicit one (typed
-/// literals, `session.__jazz_outer_row…`, `via`), which always does.
+/// literals, `literal(null)`, `exists (from …)`, `via`), which always does.
 pub fn print(expr: &PolicyExpr, context: &Context<'_>, table: &str) -> Result<String, String> {
+    if let Some(refusal) = outer_row_refusal(expr, 0) {
+        return Err(refusal.into());
+    }
     let mut last = String::new();
     // Shortest first (hops as `exists t(…).rel(…)`), then without hops, then
     // explicit.
@@ -2864,6 +2873,37 @@ pub fn print(expr: &PolicyExpr, context: &Context<'_>, table: &str) -> Result<St
     Err(format!(
         "the policy {expr:?} has no exact spelling ({last})"
     ))
+}
+
+/// The engine refuses an outer-row reference inside an `exists` within
+/// another; so does the writer, in the engine's words.
+pub const NESTED_OUTER_ROW: &str = "not supported in policies yet: an `exists` inside another `exists` can't refer to the checked row's columns";
+/// And one outside any `exists`.
+pub const OUTSIDE_OUTER_ROW: &str = "outer row reference outside EXISTS: only a condition of `exists` can refer to the checked row's columns";
+
+fn outer_row_refusal(expr: &PolicyExpr, depth: usize) -> Option<&'static str> {
+    let refuse = |v: &PolicyValue| match v {
+        PolicyValue::SessionRef(path)
+            if path.first().map(String::as_str) == Some(OUTER_ROW) && depth != 1 =>
+        {
+            Some(if depth == 0 {
+                OUTSIDE_OUTER_ROW
+            } else {
+                NESTED_OUTER_ROW
+            })
+        }
+        _ => None,
+    };
+    match expr {
+        PolicyExpr::Cmp { value, .. } | PolicyExpr::Contains { value, .. } => refuse(value),
+        PolicyExpr::InList { values, .. } => values.iter().find_map(refuse),
+        PolicyExpr::Exists { condition, .. } => outer_row_refusal(condition, depth + 1),
+        PolicyExpr::And(items) | PolicyExpr::Or(items) => {
+            items.iter().find_map(|i| outer_row_refusal(i, depth))
+        }
+        PolicyExpr::Not(inner) => outer_row_refusal(inner, depth),
+        _ => None,
+    }
 }
 
 struct Printer<'a, 'c> {
@@ -2982,10 +3022,7 @@ impl Printer<'_, '_> {
         match value {
             PolicyValue::Literal(v) => self.literal(v),
             PolicyValue::SessionRef(path)
-                if !self.explicit
-                    && path.len() == 2
-                    && path[0] == OUTER_ROW
-                    && levels.len() == 2 =>
+                if path.len() == 2 && path[0] == OUTER_ROW && levels.len() == 2 =>
             {
                 format!("this.{}", column_text(&path[1]))
             }

@@ -1017,13 +1017,13 @@ Meaning:
   `exists t(…)` (or `exists t as a(…)`), a bare column (or `a.col`) names a
   column of `t`, and the checked row is a value: `this.col`, `outer.col` or
   `<table>.col`. In an `exists` inside another `exists`, a condition names
-  only its own row's columns: the engine's evaluation paths disagree there
-  about which row an outer column is (the checked row or the enclosing
-  `exists`'s), so the writer spells such a reference by its raw session path,
-  `session.__jazz_outer_row.col`, which keeps the engine's policy exact.
-  This spelling is provisional: once the engine settles which row an outer
-  column at that depth names, the grammar spells it with an alias
-  (`a.col`), and files written with the raw path keep reading the same.
+  only its own row's columns: the engine refuses an outer-row reference
+  there, and the TS DSL never builds one. The writer refuses such a policy
+  with the engine's message ("not supported in policies yet: an `exists`
+  inside another `exists` can't refer to the checked row's columns"),
+  naming its JSON path, as it refuses an outer-row reference outside any
+  `exists`. `session.__jazz_outer_row…` is not a session value: the reader
+  refuses it.
 - **Session values.** `session.user`, `session.claims.<path>`,
   `session.identity.subject`, `session.identity.issuer` and
   `session.authMode`; any other path is refused as a typo.
@@ -1085,8 +1085,8 @@ condition lists to `And`, `not` to `Not`. The checked row inside `exists`
 `["__jazz_outer_row", col]` the TS DSL compiles it to. The writer prints top-level `Or`/`And` as `anyOf`/`allOf`
 objects and every other policy as one string: the shortest spelling that
 reads back as exactly the same policy, and otherwise the explicit spelling
-(typed literals, `literal(null)`, `session.__jazz_outer_row.col`,
-`exists ( from … )`, `via`), which always does.
+(typed literals, `literal(null)`, `exists ( from … )`, `via`), which always
+does.
 No policy is refused for its shape: only what a deployment would refuse.
 
 **Errors.** Every refusal names the file, the JSON path and, inside an
