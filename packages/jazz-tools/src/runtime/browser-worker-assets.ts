@@ -8,8 +8,18 @@
 export function browserRuntimeModuleUrl(): string {
   return import.meta.url;
 }
+/**
+ * Where the published worker sits relative to this module. Jazz names the
+ * worker's realm with it; these bundlers start the worker they build from the
+ * `new SharedWorker(new URL(...))` expression instead.
+ *
+ * Deliberately not `new URL(literal, import.meta.url)`: bundlers emit an
+ * asset for that form, and Vite would copy the whole unminified worker into
+ * every app's build output without ever loading it.
+ */
 export function bundledBrowserWorkerUrl(): string {
-  return new URL("../worker/jazz-broker-worker.js", import.meta.url).href;
+  const moduleUrl = import.meta.url;
+  return new URL("../worker/jazz-broker-worker.js", moduleUrl).href;
 }
 
 /**
