@@ -5,15 +5,18 @@
 
 BREAKING CHANGE: apps ship `jazz.app.json` instead of `migrations/index.ts`. `jazz-tools validate`, `migrations create` and `deploy` write it beside `schema.ts`, even while the app has one schema version. It holds the app's schema versions, the migrations between them and the current version's permissions. `migrations/index.ts` is no longer generated. `validate` removes one that an earlier version generated, and `validate --check` refuses it. `migrations/snapshots/` and the migration files stay as the history the file is built from.
 
-To upgrade, change `schema.ts` to import the file and pass it to `defineApp` (or `defineSliceableApp`):
+To upgrade, change `schema.ts` to import the file instead of `./migrations` and pass it to `defineApp` (or `defineSliceableApp`). Remove the old import first: `validate` deletes the generated `migrations/index.ts`, and a `schema.ts` that still imports it no longer loads.
 
 ```ts
+// Remove: import { migrations } from "./migrations";
 import artifact from "./jazz.app.json" with { type: "json" };
 
 export const app = s.defineApp(schema, { artifact });
 ```
 
 Then run `npx jazz-tools validate` and commit `jazz.app.json`. TypeScript needs `"resolveJsonModule": true` for the import. `validate --check` fails when the committed file differs byte for byte from a fresh build, or is missing. Keep formatters off the file by adding it to `.prettierignore` or your formatter's ignore file. Passing the old `{ migrations }` throws an error that says what to change. `{ migrations: "none" }` stays for apps that only run on `memory()`.
+
+Types: the `ClientMigrations` export is removed; the file's type is `AppArtifact`. `DefineAppOptions` is now `{ artifact: AppArtifact } | { migrations: "none" }` instead of `{ migrations: ClientMigrations | "none" }`.
 
 `createJazz` now publishes exactly the file's deployment (schemas, migrations and permissions) and pins its sessions to the file's bundle. It refuses to start when the file is out of date: when the app's schema isn't the file's current version ("out of date with schema.ts"), or when the permissions passed to `createJazz` don't make the file's bundle ("out of date with permissions.ts"). Run `validate` and commit the file.
 

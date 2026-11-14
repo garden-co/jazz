@@ -61,15 +61,19 @@ a core of its own, separate from production's (a dry run with its own data, not 
 Alpha.63 ships an app's schema versions, migrations and permissions in one file, `jazz.app.json`,
 beside `schema.ts`. It replaces the generated `migrations/index.ts`. Data needs no changes.
 
-1. **Import the file in `schema.ts`** and pass it to `defineApp` (or `defineSliceableApp`):
+1. **Replace the migrations import in `schema.ts`** with the file's, and pass it to `defineApp`
+   (or `defineSliceableApp`):
 
    ```ts title="schema.ts"
+   // Remove: import { migrations } from "./migrations";
    import artifact from "./jazz.app.json" with { type: "json" };
 
    export const app = s.defineApp(schema, { artifact });
    ```
 
-   An app that still passes `{ migrations }` throws an error that says what to change.
+   Remove the old import before the next step: `validate` deletes the generated
+   `migrations/index.ts`, and a `schema.ts` that still imports it no longer loads. An app that
+   still passes `{ migrations }` throws an error that says what to change.
    `{ migrations: "none" }` stays for apps that only run on `memory()`, such as tests.
 
 2. **Run `npx jazz-tools validate`.** It writes `jazz.app.json` and removes the
