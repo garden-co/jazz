@@ -2628,12 +2628,13 @@ describe("createJazz", () => {
     expect(asked()).toBe(before + 2);
     // So do the identity headers of proxies (oauth2-proxy, Cloudflare Access).
     let n = asked();
-    for (const headers of [
+    const identityHeaders: Record<string, string>[] = [
       { "x-forwarded-user": "alice" },
       { "x-forwarded-user": "mallory" },
       { "cf-access-jwt-assertion": "a" },
       { "cf-access-jwt-assertion": "b" },
-    ]) {
+    ];
+    for (const headers of identityHeaders) {
       expect(await send({ "x-test-user": "alice", ...headers })).toBeLessThan(300);
       expect(asked()).toBe(++n);
     }
