@@ -102,6 +102,26 @@ Use `indexOnly` when you're seeing slow writes and:
 - The column holds large or rarely-queried data (long text, serialised metadata, audit logs).
 - The table is write-heavy and the per-column index cost is showing up in your performance data.
 
+#### Composite indexes
+
+Single-column indexes serve a filter or a sort, but not both at once. A query that filters by
+one column and sorts by another, like a room's newest messages, then sorts every matching row
+before it can return the first page. Declare a composite index over both, in that order, and the
+page is read straight from the index:
+
+```ts title="schema.ts"
+const schema = {
+  messages: s
+    .table({ roomId: s.uuid(), text: s.string() }, {})
+    // app.messages.where({ roomId }).orderBy("$createdAt", "desc").limit(50)
+    .compositeIndex(["roomId", "$createdAt"]),
+};
+```
+
+A composite index takes two or more distinct declared columns, or the provenance timestamps
+`$createdAt` and `$updatedAt`, which every row carries. Adding one doesn't need a migration
+(see [Migrations](/docs/schemas/migrations)).
+
 ### Deletion
 
 The user-facing `delete` API performs a **soft delete**. The row is preserved in
