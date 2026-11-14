@@ -3550,6 +3550,14 @@ impl Db {
             let seq = inner.fresh_seq();
             inner.tx = Some((seq, BTreeSet::new()));
         }
+        // Until the unit commits or is rolled back below, dropping this
+        // future (cancellation) or unwinding out of the callback rolls it
+        // back exactly as an error would.
+        let mut guard = CallbackTransactionGuard {
+            db: self,
+            restore_seq: None,
+            armed: true,
+        };
         let mut tx = MergeableTx { db: self, identity };
         let result = callback(&mut tx).await.and_then(|value| {
             self.inner().require_mutation_admission()?;
@@ -3568,11 +3576,13 @@ impl Db {
                         // A hold or observe while the tx was open may have
                         // moved seq past the one it drew.
                         inner.seq = inner.seq.max(seq);
+                        guard.restore_seq = Some(prior);
                     }
                     Some((seq, tables))
                 }
                 Err(_) => {
-                    inner.abandon_savepoint("tx")?;
+                    guard.armed = false;
+                    inner.roll_back_callback_tx(None)?;
                     None
                 }
             }
@@ -3582,12 +3592,12 @@ impl Db {
         // The upload record joins the transaction's SQLite savepoint.
         let recorded = self.record_stored_upload(captured, seq, sync::Kind::Mergeable, None);
         if let Err(error) = recorded {
-            let mut inner = self.inner();
-            inner.seq = prior;
-            inner.abandon_savepoint("tx")?;
+            guard.armed = false;
+            self.inner().roll_back_callback_tx(Some(prior))?;
             return Err(error);
         }
         end_savepoint(&self.inner.borrow().conn, "tx", true)?;
+        guard.armed = false;
         self.notify();
         Ok((value, TxReceipt(seq)))
     }
@@ -4395,6 +4405,32 @@ fn delta(
     }
 }
 
+/// A callback may suspend at any await, and may panic. Dropping
+/// [`Db::transaction_as`]'s future there, or unwinding out of it, rolls the
+/// unit back as its error path does ([`Inner::roll_back_callback_tx`]) before
+/// another unit can start.
+struct CallbackTransactionGuard<'a> {
+    db: &'a Db,
+    /// `inner.seq` before the unit took its own seq, once it has.
+    restore_seq: Option<u64>,
+    armed: bool,
+}
+
+impl Drop for CallbackTransactionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // A RefCell still borrowed here means an unwind out of a borrow;
+        // `try_borrow_mut` keeps that a panic rather than an abort. Drop
+        // cannot return a rollback error: the helper closes mutation
+        // admission instead.
+        if let Some(mut inner) = self.db.inner.try_borrow_mut() {
+            let _ = inner.roll_back_callback_tx(self.restore_seq);
+        }
+    }
+}
+
 /// A mergeable transaction: writes join one commit, reads see them.
 pub struct MergeableTx<'a> {
     db: &'a Db,
@@ -4518,6 +4554,29 @@ impl Inner {
             ));
         }
         Ok(())
+    }
+
+    /// Roll back the open callback transaction, from its error path or its
+    /// drop guard alike: its savepoint, the uploads it captured, and whatever
+    /// a write it left mid-way (a cancelled await, a panic) derived or
+    /// stamped. Only the unit's own seq goes back (`restore_seq`, once it took
+    /// it): a floor raised while it ran (a hold, an observed peer position)
+    /// stays, or a later commit could reuse a transaction id. A rollback
+    /// SQLite cannot confirm leaves the savepoint open under any later unit,
+    /// so it closes mutation admission.
+    fn roll_back_callback_tx(&mut self, restore_seq: Option<u64>) -> Result<(), Error> {
+        self.tx = None;
+        self.capture.clear();
+        self.writer = None;
+        self.clear_derived();
+        if let Some(seq) = restore_seq {
+            self.seq = seq;
+        }
+        let rolled_back = self.abandon_savepoint("tx");
+        if rolled_back.is_err() {
+            self.mutation_admission_closed = true;
+        }
+        rolled_back
     }
 
     /// Undo everything since `SAVEPOINT name`. Its changes are forgotten
@@ -9077,6 +9136,13 @@ impl Store {
         let mut inner = self.0.borrow_mut();
         inner.settle_overlay();
         inner
+    }
+
+    /// [`Store::borrow_mut`], or `None` while the store is already borrowed.
+    fn try_borrow_mut(&self) -> Option<std::cell::RefMut<'_, Inner>> {
+        let mut inner = self.0.try_borrow_mut().ok()?;
+        inner.settle_overlay();
+        Some(inner)
     }
 
     fn borrow(&self) -> std::cell::Ref<'_, Inner> {
