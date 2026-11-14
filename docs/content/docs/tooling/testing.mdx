@@ -187,12 +187,14 @@ const testJazz: TestJazz = await startTestJazz({ app, permissions });
 ```typescript
 import { createJazzClient } from "jazz-tools/client";
 
-// A test client signs in as `userId` with a bearer token; outside a browser it keeps that in memory.
+// A test client keeps its account in memory and signs in as `userId` with a bearer token.
 async function clientAs(userId: string) {
+  let saved: string | null = null;
   const token = testJazz.bearer(userId);
   const session = await createJazzClient({
     serverUrl: testJazz.url,
     bearer: () => token,
+    store: { read: async () => saved, update: async (change) => void (saved = change(saved)) },
   });
   await session.refresh(); // ask the backend who is signed in
   return session;
@@ -307,10 +309,12 @@ import { appMigrations, startTestJazz, type TestJazz } from "jazz-tools/testing"
 import { expect, it, vi } from "vitest";
 
 async function clientAs(testJazz: TestJazz, userId: string) {
+  let saved: string | null = null;
   const token = testJazz.bearer(userId);
   const session = await createJazzClient({
     serverUrl: testJazz.url,
     bearer: () => token,
+    store: { read: async () => saved, update: async (change) => void (saved = change(saved)) },
   });
   await session.refresh(); // ask the backend who is signed in
   return session;

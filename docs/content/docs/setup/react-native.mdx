@@ -174,8 +174,8 @@ only.
 
 Test your schema, permissions and backend logic in Node against your app's backend, as in
 [Testing](/docs/tooling/testing#testing-with-your-apps-backend). A Node client stands in for the
-device: `createJazzClient` from `jazz-tools/client` keeps its account in memory by default there,
-and needs a `store` only for a device account (the testing page shows an in-memory one).
+device: give `createJazzClient` from `jazz-tools/client` a `store` to keep its account in (the
+testing page shows an in-memory one), since outside the browser and the app there is no default.
 Use `bearer: () => testJazz.bearer(userId)` to sign in the way the app does. The React Native UI
 itself needs an emulator or a device.
 
