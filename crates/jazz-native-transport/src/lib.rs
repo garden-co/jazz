@@ -38,9 +38,9 @@ const WS_CLIENT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// The client never pings. The server pings an idle link every 20 s
 /// (`WS_KEEPALIVE_PING_INTERVAL` in `jazz-server`), so the deadline sits above
-/// that, and a client ping would be one more message for a server whose
-/// writer queue is already full: it breaks the connection when it cannot
-/// queue a Pong.
+/// two keepalive intervals, tolerating one late or lost ping, and a client
+/// ping would be one more message for a server whose writer queue is already
+/// full: it breaks the connection when it cannot queue a Pong.
 #[derive(Clone, Copy, Debug)]
 struct LivenessPolicy {
     silence_deadline: Duration,
@@ -52,7 +52,7 @@ struct LivenessPolicy {
 }
 
 const WS_CLIENT_LIVENESS: LivenessPolicy = LivenessPolicy {
-    silence_deadline: Duration::from_secs(25),
+    silence_deadline: Duration::from_secs(45),
     tick: Duration::from_millis(500),
 };
 // The serving route caps client-to-server WebSocket messages at one MiB. Keep
