@@ -2300,6 +2300,8 @@ dependencies = [
  "hex",
  "hmac",
  "http",
+ "hyper",
+ "hyper-util",
  "jazz",
  "jazz-otel",
  "jsonwebtoken",
