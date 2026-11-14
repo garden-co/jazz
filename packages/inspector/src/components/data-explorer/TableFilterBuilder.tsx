@@ -98,6 +98,9 @@ function parseScalarValue(columnType: ColumnType, value: string): unknown {
   }
 }
 
+/** Column types whose IN / NOT IN values are split around their structure. */
+const STRUCTURED_LIST_TYPES = new Set<string>(["Json", "Array"]);
+
 function splitTopLevelCommaSeparated(value: string): string[] {
   const items: string[] = [];
   const nesting: string[] = [];
@@ -151,7 +154,16 @@ function parseFilterValue(
   }
 
   if (operator === "in" || operator === "notIn") {
-    const items = splitTopLevelCommaSeparated(value);
+    // Values that may hold commas themselves (JSON, arrays) split only on
+    // commas outside strings and brackets. Others split on
+    // every comma, so a stray quote or bracket in text (O"Neil) doesn't stop
+    // the splitting.
+    const items = STRUCTURED_LIST_TYPES.has(column.columnType.type)
+      ? splitTopLevelCommaSeparated(value)
+      : value
+          .split(",")
+          .map((item) => item.trim())
+          .filter((item) => item.length > 0);
     if (items.length === 0) {
       throw new Error(`The "${operator}" operator requires at least one value.`);
     }
