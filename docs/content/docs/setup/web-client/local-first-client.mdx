@@ -242,8 +242,8 @@ For browser URL overrides, also set `wasmVersion` to an immutable value that cha
 either the Wasm or broker-worker build changes (for example, your deployment's asset manifest
 version). Jazz adds that value to the asset URLs you configure and to the SharedWorker's name, so
 a rolling deployment cannot reuse a long-lived SharedWorker with bytes fetched from an older build
-at the same URL. Your asset host
-must serve these URLs with query strings intact.
+at the same URL. Without a bundler, also set `brokerWorkerUrl` or `baseUrl`, so the worker script URL
+is versioned too. Your asset host must serve these URLs with query strings intact.
 
 ### Worker failures
 
