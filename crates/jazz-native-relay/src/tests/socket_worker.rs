@@ -630,7 +630,7 @@ fn a_returning_network_path_retries_without_waiting_out_the_backoff() {
         satisfied: false,
         interfaces: 0,
     });
-    drop_link.send(()).unwrap();
+    let _ = drop_link.send(()); // the path loss may already have dropped the link
     wait_for(&host, "the link is lost", |host| !connected(host, &scope));
     thread::sleep(Duration::from_millis(200));
     assert_eq!(connector.bearers().len(), 1, "waiting out the backoff");

@@ -2013,7 +2013,7 @@ impl PathWatch {
             if !now.satisfied {
                 return "the device lost its network path".to_owned();
             }
-            if !self.taken_on.satisfied {
+            if !self.taken_on.satisfied || self.taken_on.interfaces == 0 {
                 if connecting {
                     return "the device's network path came back".to_owned();
                 }
@@ -2032,7 +2032,7 @@ impl PathWatch {
     /// path got through anyway, so the monitor was behind: the link lives on
     /// the path the device reports now, and is watched against that.
     fn admitted(&mut self) {
-        if !self.taken_on.satisfied {
+        if !self.taken_on.satisfied || self.taken_on.interfaces == 0 {
             self.taken_on = *self.path.borrow();
         }
     }
