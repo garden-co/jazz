@@ -156,12 +156,20 @@ function decodeTokens(value: unknown, roots: string[]): { tokens?: Record<string
   return Object.keys(tokens).length ? { tokens } : {};
 }
 
-/** Drop cached tokens of roots the record no longer keeps, and expired ones. */
+/**
+ * Drop cached tokens of roots the record no longer keeps, expired ones, and
+ * ones issued in the future (minted before this device's clock was set back).
+ */
 function pruneTokens(accounts: StoredAccounts, nowSeconds: number): void {
   if (!accounts.tokens) return;
   for (const [root, token] of Object.entries(accounts.tokens)) {
     const exp = parseJwtPayload(token)?.exp;
-    if (!accounts.roots.includes(root) || typeof exp !== "number" || exp <= nowSeconds)
+    if (
+      !accounts.roots.includes(root) ||
+      typeof exp !== "number" ||
+      exp <= nowSeconds ||
+      issuedAt(token) > nowSeconds + TOKEN_CLOCK_SKEW_SECONDS
+    )
       delete accounts.tokens[root];
   }
   if (Object.keys(accounts.tokens).length === 0) delete accounts.tokens;
@@ -318,10 +326,10 @@ export async function prepareAccountManager(options: {
   // Token writes have a chain of their own: a failed one is a cache miss on
   // the next load, never a selection that didn't land.
   let tokenWrites = Promise.resolve();
-  const mintToken = (root: string, audience: string): string => {
+  const mintToken = (root: string, audience: string, request?: { fresh?: boolean }): string => {
     if (audience !== options.appId) return options.mintToken(root, audience);
     const now = Date.now() / 1000;
-    const kept = tokens.get(root);
+    const kept = request?.fresh ? undefined : tokens.get(root);
     if (kept !== undefined && reusableLocalFirstToken(kept, audience, now)) return kept;
     const token = options.mintToken(root, audience);
     if (!reusableLocalFirstToken(token, audience, now)) return token;
@@ -345,7 +353,12 @@ export async function prepareAccountManager(options: {
             if (!latest.roots.includes(root)) continue;
             // Another tab's token for the same root, issued later, stays.
             const other = latest.tokens?.[root];
-            if (other !== undefined && issuedAt(other) >= issuedAt(token)) continue;
+            if (
+              other !== undefined &&
+              reusableLocalFirstToken(other, options.appId, Date.now() / 1000) &&
+              issuedAt(other) >= issuedAt(token)
+            )
+              continue;
             (latest.tokens ??= {})[root] = token;
           }
           pruneTokens(latest, Date.now() / 1000);

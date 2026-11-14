@@ -133,3 +133,35 @@ it("keeps no token for a root the store no longer keeps", async () => {
   const latest = JSON.parse(store.value!);
   expect(Object.keys(latest.tokens ?? {})).toEqual(latest.roots);
 });
+
+it("mints a fresh token for a renewal, even while the cached one could be reused", async () => {
+  // The server's clock is 40 min ahead: it calls the cached token expired
+  // although this device sees most of its hour left.
+  vi.useFakeTimers({ now: new Date("2026-11-14T12:00:00Z"), toFake: ["Date"] });
+  const store = memoryStore();
+  const first = await load(store);
+  vi.setSystemTime(new Date("2026-11-14T12:01:00Z"));
+  const renewed = await accountToken(first.handle, registry, { fresh: true });
+  expect(first.mintToken).toHaveBeenCalledTimes(2);
+  expect(renewed).not.toBe(first.token);
+  // The renewal is what the cache keeps, for this load and the next.
+  expect(await accountToken(first.handle, registry)).toBe(renewed);
+  const root = JSON.parse(store.value!).roots[0];
+  await vi.waitFor(() => expect(JSON.parse(store.value!).tokens[root]).toBe(renewed));
+});
+
+it("replaces a stored token issued in the future, minted before the clock was set back", async () => {
+  vi.useFakeTimers({ now: new Date("2026-11-14T13:00:00Z"), toFake: ["Date"] });
+  const store = memoryStore();
+  const ahead = await load(store);
+  const root = JSON.parse(store.value!).roots[0];
+
+  vi.setSystemTime(new Date("2026-11-14T12:00:00Z"));
+  const second = await load(store);
+  expect(second.mintToken).toHaveBeenCalledOnce();
+  expect(second.token).not.toBe(ahead.token);
+  // Stored, although the future token claims a later `iat`.
+  await vi.waitFor(() => expect(JSON.parse(store.value!).tokens[root]).toBe(second.token));
+  const third = await load(store);
+  expect(third.mintToken).not.toHaveBeenCalled();
+});
