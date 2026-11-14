@@ -452,6 +452,41 @@ describe("browser SharedWorker realm identity", () => {
     await lease.retire();
   });
 
+  it("starts the bundler's worker when only the WASM URL is configured", async () => {
+    const port = new DelayedLeasePort(0);
+    const started: Array<{ url: string; name: string | undefined }> = [];
+    vi.stubGlobal(
+      "SharedWorker",
+      class {
+        readonly port = port;
+        constructor(url: URL | string, options?: WorkerOptions) {
+          started.push({ url: String(url), name: options?.name });
+        }
+      },
+    );
+    const runtimeSources = {
+      wasmUrl: "https://example.com/assets/jazz_wasm_bg.wasm",
+      wasmVersion: "build-1",
+    };
+
+    const lease = await SharedBrowserForegroundNodeLease.acquire({
+      dbName: "bundled-worker-root",
+      storageOwner: "owner",
+      runtimeSources,
+    });
+
+    // The worker the bundler built from `new SharedWorker(new URL(...))`: no
+    // bundler emits the published file at a URL Jazz could version.
+    expect(started).toHaveLength(1);
+    expect(started[0]!.url).toMatch(/\/worker\/jazz-broker-worker\.js$/);
+    // Another deployment still gets its own realm: the name carries the version.
+    expect(started[0]!.name).toContain(
+      createBrowserSharedWorkerBaseName(runtimeSources, "bundled-worker-root"),
+    );
+    expect(started[0]!.name).toContain("jazz-runtime-version=build-1");
+    await lease.retire();
+  });
+
   it("does not ask a probed worker to prefetch an in-memory WASM source", async () => {
     const port = new DelayedLeasePort(0);
     vi.stubGlobal(
