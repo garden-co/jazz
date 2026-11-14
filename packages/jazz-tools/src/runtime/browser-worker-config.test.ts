@@ -218,22 +218,22 @@ describe("broker worker URL under the Vite dev server's pre-bundle", () => {
     [
       "the default cache directory",
       "http://localhost:5173/node_modules/.vite/deps/chunk-7ATA2QW3.js?v=7d09ffa4",
-      "http://localhost:5173/@id/jazz-tools/_worker/broker",
+      "http://localhost:5173/@id/jazz-tools/_worker/broker?worker_file&type=module",
     ],
     [
       "a configured base",
       "http://localhost:5173/myapp/node_modules/.vite/deps/jazz-tools_local-first.js?v=1",
-      "http://localhost:5173/myapp/@id/jazz-tools/_worker/broker",
+      "http://localhost:5173/myapp/@id/jazz-tools/_worker/broker?worker_file&type=module",
     ],
     [
       "a per-environment deps directory",
       "https://dev.example:8443/node_modules/.vite/deps_client/chunk.js",
-      "https://dev.example:8443/@id/jazz-tools/_worker/broker",
+      "https://dev.example:8443/@id/jazz-tools/_worker/broker?worker_file&type=module",
     ],
     [
       "a nested cache directory",
       "http://localhost:63315/node_modules/.vite/vitest/da39a3ee/deps/jazz-tools.js?v=2",
-      "http://localhost:63315/@id/jazz-tools/_worker/broker",
+      "http://localhost:63315/@id/jazz-tools/_worker/broker?worker_file&type=module",
     ],
   ])("asks the dev server to resolve the package from %s", (_case, moduleUrl, workerUrl) => {
     expect(vitePrebundledBrokerWorkerUrl(moduleUrl)).toBe(workerUrl);
@@ -266,10 +266,10 @@ describe("broker worker URL under the Vite dev server's pre-bundle", () => {
     try {
       const config = await import("./browser-worker-config.js");
       expect(config.resolveBrowserWorkerUrl()).toBe(
-        "http://localhost:5173/@id/jazz-tools/_worker/broker",
+        "http://localhost:5173/@id/jazz-tools/_worker/broker?worker_file&type=module",
       );
       expect(config.resolveBrowserWorkerUrl({ wasmVersion: "build-1" })).toBe(
-        "http://localhost:5173/@id/jazz-tools/_worker/broker?jazz-runtime-version=build-1",
+        "http://localhost:5173/@id/jazz-tools/_worker/broker?worker_file&type=module&jazz-runtime-version=build-1",
       );
       // Explicitly configured assets still win.
       expect(
