@@ -1,5 +1,6 @@
 import type { AccountDbConfig } from "../accounts/context.js";
 import type { Db } from "./db.js";
+import type { LocalFirstWarmUpConfig } from "./local-first-warm.js";
 
 /**
  * What `import("jazz-tools/local-first")` resolves to: the local-first
@@ -18,6 +19,12 @@ export interface LocalFirstModule {
       accountRegistryAuthority: string;
     },
   ): Promise<"deleted" | "held">;
+  /**
+   * @internal Start the page's WASM and the last root's worker before the
+   * session resolves its account. `jazz-tools/local-first` provides it; a
+   * loader without it opens as before.
+   */
+  warmUp?(config: LocalFirstWarmUpConfig): Promise<void>;
 }
 
 /**

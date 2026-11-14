@@ -15,3 +15,5 @@ export { createDb as createClient } from "../runtime/default-create-db.js";
 export type { LocalFirstLoader, LocalFirstModule } from "../runtime/local-first-upgrade.js";
 /** @internal How a `clearOnSignOut` session wipes a signed-out account's store (#5250). */
 export { deleteLocalFirstStore } from "../runtime/delete-local-first-store.js";
+/** @internal Start the account-independent local-first work early (`createJazzClient`). */
+export { warmUpLocalFirst as warmUp } from "../runtime/local-first-warm.js";

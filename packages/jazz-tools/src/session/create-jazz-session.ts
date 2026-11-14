@@ -236,6 +236,16 @@ export async function openBrowserSessionCore(
   } = { ...config, serverUrl };
   refuseUnkeptOptions(clientConfig);
   refuseLocalFirstTiming(localFirst, loadLocalFirst);
+  if (loadLocalFirst) {
+    await warmUpLocalFirstEarly(loadLocalFirst, {
+      config: { ...config, serverUrl },
+      runtimeSources: clientConfig.runtimeSources,
+      driver: clientConfig.driver,
+      localFirst,
+      // A shared device: start nothing of the last user's before the backend answers.
+      worker: !clearOnSignOut,
+    });
+  }
   const accounts = await createAccountManagerWithMinter(
     { ...config, serverUrl },
     mintLocalFirstTokenInJs,
@@ -649,6 +659,7 @@ function localFirstMemory(registry: string) {
   };
   return {
     has: (account: AccountHandle) => read().includes(account.id),
+    any: () => read().length > 0,
     remember(account: AccountHandle) {
       const ids = read();
       if (ids.includes(account.id)) return;
@@ -659,6 +670,62 @@ function localFirstMemory(registry: string) {
       }
     },
   };
+}
+
+/**
+ * How long the session lets the local-first warm-up run before it resolves
+ * its account. The account manager's first steps can hold the main thread
+ * (a token mint); a worker constructed before such a task starts its script
+ * only once the task ends, so the warm-up goes first, bounded.
+ */
+const LOCAL_FIRST_WARM_UP_BUDGET_MS = 60;
+
+/**
+ * Start the local-first client's account-independent work (the page's WASM,
+ * the last root's worker) before the account resolves, when this page will
+ * open local-first straight away: `localFirst: "now"`, or an account of this
+ * registry that upgraded before. Waits for it at most
+ * `LOCAL_FIRST_WARM_UP_BUDGET_MS`; a warm-up that fails changes nothing.
+ */
+async function warmUpLocalFirstEarly(
+  loadLocalFirst: LocalFirstLoader,
+  options: {
+    config: Parameters<typeof clientRegistryUrl>[0];
+    runtimeSources: JazzClientConfig["runtimeSources"];
+    driver: JazzClientConfig["driver"];
+    localFirst: JazzClientConfig["localFirst"];
+    worker: boolean;
+  },
+): Promise<void> {
+  const page = (globalThis as { window?: Window }).window;
+  if (!page || typeof page.document === "undefined") return;
+  let registry: string;
+  try {
+    registry = clientRegistryUrl(options.config);
+  } catch {
+    // The account manager names what is wrong with the config.
+    return;
+  }
+  if (options.localFirst !== "now" && !localFirstMemory(registry).any()) return;
+  const warming = Promise.resolve()
+    .then(loadLocalFirst)
+    .then((module) =>
+      module.warmUp?.({
+        registry,
+        runtimeSources: options.runtimeSources,
+        driver: options.driver,
+        worker: options.worker,
+      }),
+    )
+    .catch(() => undefined);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    warming,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, LOCAL_FIRST_WARM_UP_BUDGET_MS);
+    }),
+  ]);
+  clearTimeout(timer);
 }
 
 /** `localFirst`, checked: a timing the session can't honour fails by name. */

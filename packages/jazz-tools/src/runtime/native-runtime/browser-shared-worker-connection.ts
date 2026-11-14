@@ -175,6 +175,142 @@ function workerWasmPrefetch(
 }
 
 /**
+ * Where a session remembers which browser root its last local-first lease
+ * opened, per account registry, so the next page load can start that root's
+ * worker before it knows the account (`warmBrowserWorker`).
+ *
+ * Only the physical database name is kept. The worker's asset scope and WASM
+ * URL are always taken from the page's current config: a deploy or a changed
+ * `runtimeSources` names a different realm, never a stale one.
+ */
+const WORKER_ROOT_HINT_PREFIX = "jazz-local-first-worker-v1:";
+
+function workerRootHintKey(registry: string): string {
+  return `${WORKER_ROOT_HINT_PREFIX}${encodeURIComponent(registry)}`;
+}
+
+/** @internal Remember the root a lease was just acquired for under `registry`. */
+export function rememberBrowserWorkerRoot(registry: string, dbName: string): void {
+  try {
+    const key = workerRootHintKey(registry);
+    if (localStorage.getItem(key) !== dbName) localStorage.setItem(key, dbName);
+  } catch {
+    // Without storage the next load starts its worker once the account is known.
+  }
+}
+
+/** @internal The root the last lease under `registry` opened, if any. */
+export function rememberedBrowserWorkerRoot(registry: string): string | null {
+  try {
+    return localStorage.getItem(workerRootHintKey(registry));
+  } catch {
+    return null;
+  }
+}
+
+/** Forget every registry's hint naming `dbName`: its store was deleted. */
+function forgetBrowserWorkerRoot(dbName: string): void {
+  try {
+    for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+      const key = localStorage.key(index);
+      if (key?.startsWith(WORKER_ROOT_HINT_PREFIX) && localStorage.getItem(key) === dbName) {
+        localStorage.removeItem(key);
+      }
+    }
+  } catch {
+    // Nothing remembered, or nothing to remember with.
+  }
+}
+
+/** How long a warm-up probe keeps its realm reserved if no lease follows. */
+export const WARM_WORKER_HOLD_MS = 10_000;
+
+/** Open warm-up probes, by worker base name: the lease that follows releases them. */
+const warmWorkers = new Map<string, () => void>();
+
+/**
+ * @internal Start `dbName`'s broker worker before the page knows its account,
+ * and have it fetch and compile its WASM (#3 of the local-first startup
+ * profile).
+ *
+ * This sends only the probe `SharedBrowserForegroundNodeLease.acquire` sends
+ * first: the worker answers that it is alive and prefetches its WASM. A probe
+ * performs no admission, claims no owner and opens no store, so a warmed
+ * realm holds nothing of any account. The lease that follows, for the
+ * account the session actually opens, attaches to this realm when it has the
+ * same name (same root, same assets) and goes through its full admission; a
+ * root that turns out to be another account's (a switch, a sign-out) is a
+ * different realm, which idles and closes itself once this probe lets go:
+ * when that lease settles, or after `WARM_WORKER_HOLD_MS`.
+ *
+ * Resolves whether the worker answered the probe (false when it could not
+ * start, is closing, or did not answer in time); never rejects.
+ */
+export function warmBrowserWorker(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+  dbName: string,
+): Promise<boolean> {
+  const resolvedSources = resolveBrowserWorkerRuntimeSources(runtimeSources);
+  const workerName = createBrowserSharedWorkerBaseName(resolvedSources, dbName);
+  if (warmWorkers.has(workerName)) return Promise.resolve(true);
+  let worker: SharedWorker;
+  try {
+    worker = createBrokerSharedWorker(
+      resolvedSources,
+      `${workerName}:generation-${readWorkerGeneration(workerName)}`,
+    );
+  } catch {
+    return Promise.resolve(false);
+  }
+  const port = worker.port;
+  const attemptId = `warm-${crypto.randomUUID()}`;
+  return new Promise<boolean>((resolve) => {
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      clearTimeout(hold);
+      stopWatchingStart();
+      port.removeEventListener("message", onMessage);
+      if (warmWorkers.get(workerName) === release) warmWorkers.delete(workerName);
+      try {
+        // An unclaimed probe port: the worker closes it and lets the realm idle.
+        port.postMessage({ type: "cancel-foreground-node-lease" });
+        port.close();
+      } catch {
+        // Already gone.
+      }
+      resolve(false);
+    };
+    const onMessage = (event: MessageEvent<BrowserForegroundNodeLeaseAcquireResponse>) => {
+      const message = event.data;
+      if (message?.type === "foreground-node-lease-worker-alive") {
+        if (message.attemptId === attemptId) resolve(true);
+      } else if (message?.type === "foreground-node-lease-worker-closing") {
+        // A terminating realm: the lease advances the generation itself.
+        if (message.attemptId === attemptId) release();
+      }
+    };
+    const stopWatchingStart = watchBrokerWorkerStart(worker, resolvedSources, release);
+    const hold = setTimeout(release, WARM_WORKER_HOLD_MS);
+    warmWorkers.set(workerName, release);
+    port.addEventListener("message", onMessage);
+    port.start();
+    const wasmPrefetch = workerWasmPrefetch(resolvedSources);
+    port.postMessage({
+      type: "probe-foreground-node-lease-worker",
+      attemptId,
+      ...(wasmPrefetch ? { wasmPrefetch } : {}),
+    } satisfies BrowserForegroundNodeLeaseProbeRequest);
+  });
+}
+
+/** Let go of a warm-up probe for `workerName`, once a lease for it settled. */
+function releaseWarmWorker(workerName: string): void {
+  warmWorkers.get(workerName)?.();
+}
+
+/**
  * The one physical SharedWorker realm that may own a browser persistence root.
  *
  * Authentication is intentionally not a part of this name. An explicitly
@@ -208,7 +344,7 @@ export function deleteBrowserStore(
     `${workerName}:generation-${readWorkerGeneration(workerName)}`,
   );
   const port = worker.port;
-  return new Promise<"deleted" | "held">((resolve, reject) => {
+  const deleted = new Promise<"deleted" | "held">((resolve, reject) => {
     const timer = setTimeout(() => {
       finish();
       reject(new Error("Jazz's browser worker didn't answer a store delete in time"));
@@ -240,6 +376,11 @@ export function deleteBrowserStore(
       dbName,
       ...(runtimeSources ? { runtimeSources } : {}),
     } satisfies BrowserDeleteStoreRequest);
+  });
+  return deleted.then((outcome) => {
+    // A deleted store's worker is no longer worth starting early.
+    if (outcome === "deleted") forgetBrowserWorkerRoot(dbName);
+    return outcome;
   });
 }
 
@@ -275,6 +416,25 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
     const runtimeSources = resolveBrowserWorkerRuntimeSources(options.runtimeSources);
     const workerName = createBrowserSharedWorkerBaseName(runtimeSources, options.dbName);
     const cleanupKey = foregroundLeaseCleanupKey(workerName, options.storageOwner);
+    // A warm-up probe held this realm until the lease could ask for itself.
+    try {
+      return await this.acquireFromWorkerGenerations(
+        options,
+        runtimeSources,
+        workerName,
+        cleanupKey,
+      );
+    } finally {
+      releaseWarmWorker(workerName);
+    }
+  }
+
+  private static async acquireFromWorkerGenerations(
+    options: BrowserForegroundNodeLeaseOptions,
+    runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+    workerName: string,
+    cleanupKey: string,
+  ): Promise<SharedBrowserForegroundNodeLease> {
     if (pendingForegroundLeaseCleanups.has(cleanupKey)) {
       throw new Error(
         "Shared browser foreground lease cancellation cleanup is still pending for this database; wait for the previous worker admission to finish",

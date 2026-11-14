@@ -23,6 +23,7 @@ import {
 import type { NativeSelfSignedClientProof } from "./native-runtime/native-codec.js";
 import {
   SharedBrowserForegroundNodeLease,
+  rememberBrowserWorkerRoot,
   SharedBrowserWorkerConnection,
 } from "./native-runtime/browser-shared-worker-connection.js";
 import { AttachedBrowserWorkerConnection } from "./native-runtime/attached-browser-worker-connection.js";
@@ -141,7 +142,10 @@ function initialSyncFlushEvery(config: DbConfig): number {
   return value;
 }
 
-function browserWorkerRuntimeSources(config: DbConfig): DbConfig["runtimeSources"] {
+/** @internal The runtime sources a page's broker worker loads. */
+export function browserWorkerRuntimeSources(
+  config: Pick<DbConfig, "runtimeSources">,
+): DbConfig["runtimeSources"] {
   const sources = config.runtimeSources;
   if (sources?.wasmModule || sources?.wasmSource || sources?.wasmUrl || sources?.baseUrl) {
     return sources;
@@ -263,11 +267,16 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       throw new Error("Browser foreground node leases require persistent browser storage");
     }
     const dbName = resolveDefaultPersistentDbName(config);
-    return await SharedBrowserForegroundNodeLease.acquire({
+    const lease = await SharedBrowserForegroundNodeLease.acquire({
       runtimeSources: browserWorkerRuntimeSources(config),
       dbName,
       storageOwner: createBrowserStorageOwner(config),
     });
+    // The next page load starts this root's worker before its account resolves.
+    if (config.accountRegistryAuthority && !config.runtimeSources?.browserWorkerPort) {
+      rememberBrowserWorkerRoot(config.accountRegistryAuthority, dbName);
+    }
+    return lease;
   }
 
   override async acquireForegroundNodeLease(config: DbConfig) {
