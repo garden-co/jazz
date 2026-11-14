@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
-import { deploy } from "./deploy.js";
+import { deploy } from "../../src/dev/catalogue.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
   largeValueRewriteApp as app,

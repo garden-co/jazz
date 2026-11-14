@@ -5,7 +5,6 @@ import type { Db } from "jazz-tools";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import { app } from "../schema";
 import permissions from "../permissions";
-import permissionsFile from "../jazz.permissions.json" with { type: "json" };
 
 // The browser's side of the app: a user signed in with Better Auth, syncing
 // through the app's own `/jazz` route (as the browser does), and reading under
@@ -101,11 +100,7 @@ async function signIn(email: string, name: string) {
 let userId: string;
 let otherUserId: string;
 beforeAll(async () => {
-  server = await startLocalJazzServer({
-    inMemory: true,
-    schema: app,
-    permissions: permissionsFile,
-  });
+  server = await startLocalJazzServer({ inMemory: true, schema: app, permissions });
   // The app's Jazz fronts this test server with remote().
   process.env.JAZZ_SERVER_URL = server.url;
   process.env.JAZZ_ADMIN_SECRET = server.adminSecret;

@@ -13,7 +13,7 @@ import type { TestJazz } from "../../src/testing/index.js";
 import { createAccountManagerWithRuntime } from "../../src/accounts/enrollment.js";
 import { accountRegistryUrl } from "../../src/accounts/context.js";
 import { serializeSchemaSource } from "../../src/drivers/schema-wire.js";
-import { shippedArtifact } from "../../src/runtime/app-artifact.js";
+import { shippedMigrations } from "../../src/runtime/client-migrations.js";
 import { createPlatformHost, installPlatformHost } from "./native-platform.js";
 
 export interface NativeRelayFixtureOptions {
@@ -146,7 +146,7 @@ export async function createNativeRelayFixture(
       ),
       serializeSchemaSource(
         mergePermissionsIntoWasmSchema(resolveSchemaSource(app), permissions),
-        shippedArtifact(resolveSchemaSource(app)),
+        shippedMigrations(resolveSchemaSource(app)),
       ),
     );
     cleanupCapability = capability;

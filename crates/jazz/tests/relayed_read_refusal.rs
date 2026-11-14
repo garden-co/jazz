@@ -408,14 +408,16 @@ fn a_stranded_relay_refuses_the_tabs_remote_reads() {
     );
 }
 
-/// The `jazz.app.json` of an app that started at `todos(label)` and
-/// renamed `label` to `title`, as `jazz-tools validate` writes it.
+/// The `ClientMigrations` bundle of an app that started at `todos(label)`
+/// and renamed `label` to `title`, as `jazz-tools` generates it.
 fn renamed_label_bundle() -> serde_json::Value {
     let (v1, v2) = (table_with("todos", "label"), table_with("todos", "title"));
     let hash = |schema: &jazz::tools::Schema| jazz::tools::SchemaHash::compute(schema).to_string();
-    let input = serde_json::json!({
-        "current": hash(&v2),
-        "schemas": [v1, v2],
+    serde_json::json!({
+        "schemas": [
+            {"hash": hash(&v1), "schema": v1},
+            {"hash": hash(&v2), "schema": v2},
+        ],
         "migrations": [{
             "fromHash": hash(&v1),
             "toHash": hash(&v2),
@@ -424,11 +426,7 @@ fn renamed_label_bundle() -> serde_json::Value {
                 "operations": [{"type": "rename", "column": "label", "value": "title"}],
             }],
         }],
-    });
-    let text = jazz::tools::deployment::artifact::write(serde_json::from_value(input).unwrap())
-        .unwrap()
-        .app;
-    serde_json::from_str(&text).unwrap()
+    })
 }
 
 /// A relay opened from the app's head schema alone, without the migrations
@@ -444,7 +442,7 @@ fn renamed_label_bundle() -> serde_json::Value {
 /// ```
 #[test]
 fn a_relay_that_cannot_mirror_its_servers_catalogue_refuses_the_tabs_remote_reads() {
-    let jazz::db::Migrations { schemas, lenses } = jazz::tools::deployment::artifact::load_client(
+    let (schemas, lenses) = jazz::tools::deployment::published::client_migrations(
         renamed_label_bundle().to_string().as_bytes(),
     )
     .unwrap();

@@ -1,5 +1,5 @@
 import { schema as s } from "jazz-tools";
-import artifact from "./jazz.app.json" with { type: "json" };
+import { migrations } from "./migrations";
 
 const schema = {
   todos: s.table(
@@ -12,4 +12,4 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { artifact });
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });

@@ -662,10 +662,17 @@ fn parallel_paths_must_preserve_table_identity() {
 
 mod client_bundle {
     use super::*;
-    use jazz::tools::deployment::artifact::{ArtifactInput, write};
     use jazz::tools::deployment::published::{
-        PublishLensOp, PublishMigrationRequest, PublishTableLens,
+        ClientMigrations, PublishLensOp, PublishMigrationRequest, PublishTableLens,
+        PublishedSchema, check_client_migrations,
     };
+
+    fn published(schema: &Schema) -> PublishedSchema {
+        PublishedSchema {
+            hash: SchemaHash::compute(schema).to_hex(),
+            schema: schema.clone(),
+        }
+    }
 
     fn adds(from: &Schema, to: &Schema, column: &str, default: &str) -> PublishMigrationRequest {
         PublishMigrationRequest {
@@ -685,26 +692,24 @@ mod client_bundle {
         }
     }
 
-    /// `jazz-tools validate`'s check: writing the app's `jazz.app.json`.
     fn check(
         target: &Schema,
         schemas: &[&Schema],
         migrations: Vec<PublishMigrationRequest>,
     ) -> Result<(), String> {
-        write(ArtifactInput {
-            current: SchemaHash::compute(target).to_hex(),
-            schemas: schemas.iter().map(|schema| (*schema).clone()).collect(),
+        let bundle = ClientMigrations {
+            schemas: schemas.iter().map(|schema| published(schema)).collect(),
             migrations,
-            permissions: Default::default(),
-            codegen: Default::default(),
-        })
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        };
+        check_client_migrations(
+            &serde_json::to_vec(&bundle).unwrap(),
+            &SchemaHash::compute(target).to_hex(),
+        )
     }
 
     /// Validate checks what a deploy checks of the migrations alone: each
-    /// lens and the paths between two versions. Whether the history joins
-    /// into one is left to the deploy.
+    /// lens, the paths between two versions, and the bundle's own hashes.
+    /// Whether the history joins into one is left to the deploy.
     #[test]
     fn checks_the_migrations_as_a_deploy_does_apart_from_the_history_shape() {
         let (base, left, right, merged) = (
@@ -750,5 +755,18 @@ mod client_bundle {
         )
         .unwrap_err();
         assert!(refused.contains("conflicting migrations"), "{refused}");
+
+        // A schema that isn't the one its hash names is refused.
+        let mut bundle = ClientMigrations {
+            schemas: vec![published(&base), published(&left)],
+            migrations: vec![adds(&base, &left, "a", "x")],
+        };
+        bundle.schemas[1].schema = right.clone();
+        let refused = check_client_migrations(
+            &serde_json::to_vec(&bundle).unwrap(),
+            &SchemaHash::compute(&left).to_hex(),
+        )
+        .unwrap_err();
+        assert!(refused.contains("hash"), "{refused}");
     }
 }

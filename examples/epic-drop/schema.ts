@@ -1,5 +1,5 @@
 import { schema as s } from "jazz-tools";
-import artifact from "./jazz.app.json" with { type: "json" };
+import { migrations } from "./migrations";
 
 const role = () => s.enum("viewer", "editor");
 
@@ -76,7 +76,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { artifact });
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
 
 /**
  * Folder access is inherited through a bounded policy expansion, so a share

@@ -6,9 +6,9 @@ import { describe, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { legacyDefinition, currentDefinition } from "./fixtures/issuer-upgrade-schema.js";
 import { migration as m } from "../migration-namespace.js";
-import { writeAppArtifact } from "jazz-napi";
+import { structuralSchemaHash } from "../dev/schema-utils.js";
 import { assertMigrationMatchesCanonicalBundle, serializeForwardLenses } from "../dev/catalogue.js";
-import { computeSchemaHash } from "../schema-hash.js";
+import type { ClientMigrations } from "../runtime/client-migrations.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 const root = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -102,26 +102,14 @@ const examples = [
   ],
 ] as const;
 const loadJson = (path: string) => JSON.parse(readFileSync(path, "utf8"));
-/** The app's committed jazz.app.json, beside its schema.ts (the migrations directory's parent). */
-function artifactAt(directory: string): {
-  current: string;
-  schemas: Array<{ hash: string }>;
-  migrations: unknown[];
-} {
-  return loadJson(join(root, directory, "..", "jazz.app.json"));
-}
-
-/** The jazz.app.json Rust's writer makes of `from`, `to` and the migration between them. */
-function writtenFrom(from: WasmSchema, to: WasmSchema, toHash: string, migration: unknown) {
+function bundleAt(directory: string): ClientMigrations {
+  const source = readFileSync(join(root, directory, "index.ts"), "utf8");
   return JSON.parse(
-    writeAppArtifact(
-      JSON.stringify({
-        current: toHash,
-        schemas: [{ tables: from }, { tables: to }],
-        migrations: [migration],
-      }),
-    ).app,
-  ) as { schemas: unknown[]; migrations: unknown[] };
+    source.slice(
+      source.indexOf("{", source.indexOf("export const migrations")),
+      source.lastIndexOf(";"),
+    ),
+  );
 }
 function migrationAt(directory: string) {
   const source = readFileSync(join(root, directory, "remove-better-auth-issuer.ts"), "utf8");
@@ -139,28 +127,21 @@ function migrationAt(directory: string) {
 describe("shipped Better Auth issuer-removal histories", () => {
   it.each(examples)(
     "keeps the exact connected upgrade for %s",
-    async (directory, fromHash, toHash, snapshotDigest) => {
+    (directory, fromHash, toHash, snapshotDigest) => {
       const from: WasmSchema = loadJson(
         join(root, directory, "snapshots", fromHash.slice(0, 12) + ".json"),
       );
       const to: WasmSchema = loadJson(
         join(root, directory, "snapshots", toHash.slice(0, 12) + ".json"),
       );
-      expect(await computeSchemaHash(from)).toBe(fromHash);
-      expect(await computeSchemaHash(to)).toBe(toHash);
+      expect(structuralSchemaHash(from)).toBe(fromHash);
+      expect(structuralSchemaHash(to)).toBe(toHash);
       expect(createHash("sha256").update(JSON.stringify(from)).digest("hex")).toBe(snapshotDigest);
-      const artifact = artifactAt(directory);
-      expect(artifact.current).toBe(toHash);
-      expect(artifact.schemas.map((version) => version.hash)).toEqual([fromHash, toHash]);
+      const bundle = bundleAt(directory);
+      expect(bundle.schemas).toHaveLength(2);
+      expect(bundle.schemas.find((v) => v.hash === fromHash)?.schema).toEqual({ tables: from });
+      expect(bundle.schemas.find((v) => v.hash === toHash)?.schema).toEqual({ tables: to });
       const migration = migrationAt(directory);
-      // The file holds the snapshots and the migration as Rust's writer renders them.
-      const written = writtenFrom(from, to, toHash, {
-        fromHash,
-        toHash,
-        forward: serializeForwardLenses(migration.forward),
-      });
-      expect(artifact.schemas).toEqual(written.schemas);
-      expect(artifact.migrations).toEqual(written.migrations);
       expect(() =>
         assertMigrationMatchesCanonicalBundle(migration, {
           fromHash,
@@ -169,6 +150,9 @@ describe("shipped Better Auth issuer-removal histories", () => {
           toSchema: to,
         }),
       ).not.toThrow();
+      expect(bundle.migrations).toEqual([
+        { fromHash, toHash, forward: serializeForwardLenses(migration.forward) },
+      ]);
       expect(migration.forward).toEqual([
         {
           table: "better_auth_account",
@@ -192,12 +176,12 @@ describe("shipped Better Auth issuer-removal histories", () => {
     },
   );
 
-  it("compiles the frozen real example definitions to the shipped upgrade endpoints", async () => {
+  it("compiles the frozen real example definitions to the shipped upgrade endpoints", () => {
     expect(
-      await computeSchemaHash(s.defineApp(legacyDefinition, { migrations: "none" }).wasmSchema),
+      structuralSchemaHash(s.defineApp(legacyDefinition, { migrations: "none" }).wasmSchema),
     ).toBe(examples[0][1]);
     expect(
-      await computeSchemaHash(s.defineApp(currentDefinition, { migrations: "none" }).wasmSchema),
+      structuralSchemaHash(s.defineApp(currentDefinition, { migrations: "none" }).wasmSchema),
     ).toBe(examples[0][2]);
   });
 

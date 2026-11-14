@@ -233,12 +233,6 @@ export interface DeploymentArtifacts {
   schemas: Array<{ hash: string; schema: WasmSchema }>;
   migrations: Array<{ fromHash: string; toHash: string; forward: PublishedTableLens[] }>;
   permissions: CompiledPermissionsMap;
-  /**
-   * The permissions as the deployment sends them, when they come from a
-   * `jazz.app.json` (as Jazz's Rust reader gives them) rather than from
-   * `permissions`, which the caller showed make the same bundle.
-   */
-  publishedPermissions?: Record<string, unknown>;
 }
 
 export interface DeploymentRequest extends Omit<DeploymentArtifacts, "schemas"> {
@@ -289,8 +283,7 @@ export async function publishDeployment(
         targetSchemaHash: options.targetSchemaHash,
         schemas: options.schemas.map(({ hash, schema }) => ({ hash, schema: { tables: schema } })),
         migrations: options.migrations,
-        permissions:
-          options.publishedPermissions ?? normalizePermissionsForWasm(options.permissions),
+        permissions: normalizePermissionsForWasm(options.permissions),
         ...(options.allowDroppingHistory ? { allowDroppingHistory: true } : {}),
       },
       runtimeSchemaJsonReplacer,

@@ -5,7 +5,7 @@ import { definePermissions } from "../permissions/index.js";
 import { PersistedWriteRejectedError } from "./client.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { appArtifact, appPermissions } from "../testing/app-artifact.js";
+import { appMigrations } from "../testing/client-migrations.js";
 import { startTestJazz } from "../testing/index.js";
 
 it("inserts an ordinary parent and child atomically after adding a table", async () => {
@@ -18,33 +18,23 @@ it("inserts an ordinary parent and child atomically after adding a table", async
     ),
   };
   const migration = m.defineMigration({ from: before, to: after, createTables: { notes: true } });
-  const oldPermissions = definePermissions(
-    s.defineApp(before, { migrations: "none" }),
-    ({ policy }) => {
-      policy.projects.allowRead.always();
-      policy.projects.allowInsert.always();
-    },
-  );
-  const newPermissions = definePermissions(
-    s.defineApp(after, { migrations: "none" }),
-    ({ policy }) => {
-      policy.projects.allowRead.always();
-      policy.projects.allowInsert.always();
-      policy.notes.allowRead.always();
-      policy.notes.allowInsert.always();
-    },
-  );
-  const oldApp = s.defineApp(before, {
-    artifact: await appArtifact(before),
-  });
+  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
   const newApp = s.defineApp(after, {
-    artifact: await appArtifact(before, {
-      steps: [{ to: after, migration }],
-    }),
+    migrations: await appMigrations(before, { to: after, migration }),
+  });
+  const oldPermissions = definePermissions(oldApp, ({ policy }) => {
+    policy.projects.allowRead.always();
+    policy.projects.allowInsert.always();
+  });
+  const newPermissions = definePermissions(newApp, ({ policy }) => {
+    policy.projects.allowRead.always();
+    policy.projects.allowInsert.always();
+    policy.notes.allowRead.always();
+    policy.notes.allowInsert.always();
   });
   const server = await startTestJazz({
     app: oldApp,
-    permissions: await appPermissions(oldApp, oldPermissions),
+    permissions: oldPermissions,
     coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
@@ -54,11 +44,7 @@ it("inserts an ordinary parent and child atomically after adding a table", async
     await db.insert(oldApp.projects, { title: "Existing project" }).wait({ tier: "global" });
     await db.shutdown();
     db = undefined;
-    await server.redeploy({
-      app: newApp,
-      permissions: await appPermissions(newApp, newPermissions),
-      migration,
-    });
+    await server.redeploy({ app: newApp, permissions: newPermissions, migration });
     db = await createDb(account);
     await db.all(newApp.projects, { tier: "remote" });
     const tx = db.beginSerializableTransaction();

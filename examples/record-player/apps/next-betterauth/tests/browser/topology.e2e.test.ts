@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { schema as s, type Db } from "jazz-tools";
 import type { RowRefValue } from "jazz-tools/permissions";
 import { createBrowserTestDb } from "../../../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
-import { deployApp } from "../../../../../../packages/jazz-tools/tests/browser/deploy.js";
+import { deployApp } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
   uniqueDbName,
@@ -21,7 +21,6 @@ import {
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import { betterAuthPermissions, betterAuthSchema } from "../../auth-schema.js";
 import permissions from "../../permissions.js";
-import permissionsFile from "../../jazz.permissions.json" with { type: "json" };
 import { app } from "../../schema.js";
 import {
   ALBUM_TRACK_LIMIT,
@@ -240,9 +239,9 @@ describe("RecordPlayer authenticated playlist topology", () => {
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
       app: app,
-      permissions: permissionsFile,
+      permissions,
     });
-    const server = await startJazzApp(core, { schema: app, permissions: permissionsFile });
+    const server = await startJazzApp(core, { schema: app, permissions });
     const [ownerToken, recipientToken, secondRecipientToken] = await Promise.all([
       jazzAppUserUrl(server, "record-player-recipient-owner"),
       jazzAppUserUrl(server, "record-player-recipient-editor"),
@@ -306,9 +305,9 @@ describe("RecordPlayer authenticated playlist topology", () => {
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
       app: app,
-      permissions: permissionsFile,
+      permissions,
     });
-    const server = await startJazzApp(core, { schema: app, permissions: permissionsFile });
+    const server = await startJazzApp(core, { schema: app, permissions });
     const [ownerToken, recipientToken] = await Promise.all([
       jazzAppUserUrl(server, "record-player-acceptance-owner"),
       jazzAppUserUrl(server, "record-player-acceptance-recipient"),
@@ -353,9 +352,9 @@ describe("RecordPlayer authenticated playlist topology", () => {
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
       app: app,
-      permissions: permissionsFile,
+      permissions,
     });
-    const server = await startJazzApp(core, { schema: app, permissions: permissionsFile });
+    const server = await startJazzApp(core, { schema: app, permissions });
     const token = await jazzAppUserUrl(server, "record-player-owner-settlement");
     const db = await openClient(server, "owner-settlement", token);
     const errors: unknown[] = [];
@@ -653,9 +652,9 @@ describe("RecordPlayer authenticated playlist topology", () => {
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
       app: app,
-      permissions: permissionsFile,
+      permissions,
     });
-    const server = await startJazzApp(core, { schema: app, permissions: permissionsFile });
+    const server = await startJazzApp(core, { schema: app, permissions });
     const [ownerAToken, ownerBToken, recipientToken] = await Promise.all([
       jazzAppUserUrl(server, "record-player-transfer-owner-a"),
       jazzAppUserUrl(server, "record-player-transfer-owner-b"),
@@ -823,9 +822,9 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 serverUrl: core.serverUrl,
                 adminSecret: core.adminSecret,
                 app: app,
-                permissions: permissionsFile,
+                permissions,
               });
-              server = await startJazzApp(core, { schema: app, permissions: permissionsFile });
+              server = await startJazzApp(core, { schema: app, permissions });
               console.info("[record-player-topology] sign users in");
               const [ownerToken, issuedEditorToken, listenerToken] = await Promise.all([
                 jazzAppUserUrl(server, "record-player-owner"),
@@ -1598,9 +1597,9 @@ describe("RecordPlayer after a streamed upload", () => {
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
       app: app,
-      permissions: permissionsFile,
+      permissions,
     });
-    const server = await startJazzApp(core, { schema: app, permissions: permissionsFile });
+    const server = await startJazzApp(core, { schema: app, permissions });
     const [uploaderToken, listenerToken] = await Promise.all([
       jazzAppUserUrl(server, "record-player-reload-uploader"),
       jazzAppUserUrl(server, "record-player-reload-listener"),

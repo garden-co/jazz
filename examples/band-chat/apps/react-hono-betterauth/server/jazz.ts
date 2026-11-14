@@ -1,6 +1,6 @@
 import { createJazz, memory, remote, sqlite, type Jazz } from "jazz-tools/backend";
 import { app } from "../schema";
-import permissions from "../jazz.permissions.json" with { type: "json" };
+import permissions from "../permissions";
 import { assertConfiguration } from "../src/lib/config.mjs";
 
 let instance: Promise<Jazz> | undefined;

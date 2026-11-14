@@ -1,6 +1,6 @@
 import { acceptDeviceAccounts, createJazz, remote, sqlite, type Jazz } from "jazz-tools/backend";
 import { app } from "../../../schema";
-import permissions from "../../../jazz.permissions.json" with { type: "json" };
+import permissions from "../../../permissions";
 import { serverConfig } from "./config";
 
 let pending: Promise<Jazz> | undefined;

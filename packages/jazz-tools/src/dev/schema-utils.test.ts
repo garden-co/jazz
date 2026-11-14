@@ -3,8 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ColumnDescriptor, ColumnType, WasmSchema } from "../drivers/types.js";
 
 import { schema as s } from "../index.js";
-import { wasmSchemasEqual } from "./schema-utils.js";
-import { computeSchemaHash } from "../schema-hash.js";
+import { structuralSchemaHash, wasmSchemasEqual } from "./schema-utils.js";
 
 function schemaWithColumnType(columnType: ColumnType, nullable = false): WasmSchema {
   return {
@@ -67,9 +66,7 @@ type PortableColumnTypeTagsAreExhaustive = Assert<
   IsEqual<(typeof portableColumnTypeTags)[number], ColumnType["type"]>
 >;
 
-// The schema hash is Rust's alone; through jazz-napi, these Rust-produced
-// goldens check that the schema JSON TypeScript builds reaches it intact.
-describe("schema hashes, through jazz-napi", () => {
+describe("structuralSchemaHash", () => {
   const structuralHashFixture = JSON.parse(
     readFileSync(
       new URL("../testing/fixtures/structural-schema-hashes.json", import.meta.url),
@@ -77,23 +74,24 @@ describe("schema hashes, through jazz-napi", () => {
     ),
   ) as StructuralHashFixture;
 
-  it("matches Rust for every portable column type and representative nested shape", async () => {
+  it("matches Rust for every portable column type and representative nested shape", () => {
     expect(structuralHashFixture.schemaLayoutVersion).toBe(11);
     expect(
       new Set(structuralHashFixture.columnTypeCases.map((entry) => entry.columnType.type)),
     ).toEqual(new Set(portableColumnTypeTags));
 
-    const hashes: string[] = [];
-    for (const { name, columnType, nullable, hash } of structuralHashFixture.columnTypeCases) {
-      const actual = await computeSchemaHash(schemaWithColumnType(columnType, nullable));
-      expect(actual, name).toBe(hash);
-      hashes.push(actual);
-    }
+    const hashes = structuralHashFixture.columnTypeCases.map(
+      ({ name, columnType, nullable, hash }) => {
+        const actual = structuralSchemaHash(schemaWithColumnType(columnType, nullable));
+        expect(actual, name).toBe(hash);
+        return actual;
+      },
+    );
 
     expect(new Set(hashes).size).toBe(hashes.length);
   });
 
-  it("matches Rust for composite indexes, including its UTF-8 index order", async () => {
+  it("matches Rust for composite indexes, including its UTF-8 index order", () => {
     expect(structuralHashFixture.compositeIndexCases.length).toBeGreaterThanOrEqual(5);
     for (const entry of structuralHashFixture.compositeIndexCases) {
       const schema: WasmSchema = {
@@ -106,21 +104,19 @@ describe("schema hashes, through jazz-napi", () => {
           composite_indexes: entry.compositeIndexes,
         },
       };
-      expect(await computeSchemaHash(schema), entry.name).toBe(entry.hash);
+      expect(structuralSchemaHash(schema), entry.name).toBe(entry.hash);
     }
   });
 
-  it("matches Rust for history retention, hashing full history as before", async () => {
+  it("matches Rust for history retention, hashing full history as before", () => {
     const hashes = new Map<string, string>();
     for (const entry of structuralHashFixture.historyCases) {
       const schema = schemaWithColumnType({ type: "Text" });
       if (entry.history) schema.values!.history = entry.history;
-      expect(await computeSchemaHash(schema), entry.name).toBe(entry.hash);
+      expect(structuralSchemaHash(schema), entry.name).toBe(entry.hash);
       hashes.set(entry.name, entry.hash);
     }
-    expect(hashes.get("full")).toBe(
-      await computeSchemaHash(schemaWithColumnType({ type: "Text" })),
-    );
+    expect(hashes.get("full")).toBe(structuralSchemaHash(schemaWithColumnType({ type: "Text" })));
     expect(hashes.get("latest")).not.toBe(hashes.get("full"));
 
     const latest = schemaWithColumnType({ type: "Text" });
@@ -144,7 +140,7 @@ describe("schema hashes, through jazz-napi", () => {
     );
   });
 
-  it("matches Rust-produced defaults, merge strategies, JSON metadata, and branch bindings", async () => {
+  it("matches Rust-produced defaults, merge strategies, JSON metadata, and branch bindings", () => {
     expect(structuralHashFixture.defaultCases.length).toBeGreaterThanOrEqual(22);
     for (const entry of structuralHashFixture.defaultCases) {
       // This corpus intentionally consumes Rust's human-JSON carriers, including
@@ -163,7 +159,7 @@ describe("schema hashes, through jazz-napi", () => {
           ...(entry.branchBy === undefined ? {} : { branchBy: entry.branchBy }),
         },
       };
-      expect(await computeSchemaHash(schema), entry.name).toBe(entry.hash);
+      expect(structuralSchemaHash(schema), entry.name).toBe(entry.hash);
       expect(wasmSchemasEqual(schema, structuredClone(schema)), entry.name).toBe(true);
       if (entry.default !== undefined) {
         const missing = structuredClone(schema);

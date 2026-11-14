@@ -1,7 +1,8 @@
 import { betterAuth } from "better-auth";
 import { createJazz, sqlite } from "jazz-tools/backend";
 import { app } from "../../schema";
-import permissions from "../../jazz.permissions.json" with { type: "json" };
+import permissions from "../../permissions";
+
 // #region betterauth-server
 export const auth = betterAuth({
   // your database, email config, etc.

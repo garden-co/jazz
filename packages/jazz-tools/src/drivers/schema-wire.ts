@@ -1,5 +1,5 @@
 import type { WasmSchema } from "./types.js";
-import type { AppArtifact } from "../runtime/app-artifact.js";
+import type { ClientMigrations } from "../runtime/client-migrations.js";
 import { isRecord } from "../runtime/util.js";
 
 export function isWasmSchema(value: unknown): value is WasmSchema {
@@ -56,13 +56,13 @@ function sortSchemaTables(schema: WasmSchema): WasmSchema {
 
 /**
  * Serialize the developer-authored schema AST for Rust compilation, with the
- * `jazz.app.json` the app ships (`app`) if it attaches one.
+ * migrations the app ships if it attaches them.
  */
-export function serializeSchemaSource(schema: WasmSchema, artifact?: AppArtifact): string {
+export function serializeSchemaSource(schema: WasmSchema, migrations?: ClientMigrations): string {
   return JSON.stringify(
     {
       tables: sortSchemaTables(schema),
-      ...(artifact ? { app: artifact } : {}),
+      ...(migrations ? { migrations } : {}),
     },
     runtimeSchemaJsonReplacer,
   );

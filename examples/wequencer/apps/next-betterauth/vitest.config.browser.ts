@@ -6,7 +6,6 @@ import wasm from "vite-plugin-wasm";
 
 import {
   jazzServerInfo,
-  jazzDeployApp,
   jazzServerTransportControlCommands,
   jazzAppFront,
   jazzAppRequest,
@@ -39,7 +38,6 @@ export default defineConfig({
       commands: {
         jazzBrowserTopologyLog,
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
-        jazzDeployApp: async (_context, options) => jazzDeployApp(options),
         ...jazzServerTransportControlCommands(),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
         jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),

@@ -18,7 +18,7 @@ import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-sou
 import { Db, type DbConfig } from "../runtime/db.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { randomNodeUuidBytes } from "../runtime/runtime-entropy.js";
-import { shippedArtifact, type AppArtifact } from "../runtime/app-artifact.js";
+import { shippedMigrations, type ClientMigrations } from "../runtime/client-migrations.js";
 import { DbAccessContext } from "../runtime/db-access-context.js";
 import { canonicalAuthorSubject, withCanonicalUser } from "../runtime/author-id.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
@@ -215,7 +215,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   override createClient({
     config,
     schema,
-    artifact,
+    migrations,
     onAuthFailure,
   }: RuntimeClientContext<DbConfig>): JazzClient {
     this.assertOpen();
@@ -263,7 +263,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
           appId: this.config.appId,
           thresholdMs: this.config.slowQueryThresholdMs,
         },
-        artifact,
+        migrations,
       },
     );
 
@@ -715,10 +715,10 @@ export class JazzContext {
     );
   }
 
-  /** The `jazz.app.json` the app behind `source` ships (see {@link AppArtifact}). */
-  private shippedArtifact(source?: BackendSchemaInput): AppArtifact | undefined {
+  /** The migrations the app behind `source` ships (see {@link ClientMigrations}). */
+  private shippedMigrations(source?: BackendSchemaInput): ClientMigrations | undefined {
     const selected = source ?? this.defaultSchemaInput;
-    return selected ? shippedArtifact(resolveSchemaSource(selected)) : undefined;
+    return selected ? shippedMigrations(resolveSchemaSource(selected)) : undefined;
   }
 
   private resolveSchema(source?: BackendSchemaInput): WasmSchema {
@@ -776,7 +776,7 @@ export class JazzContext {
     return this.coreSource.createClient({
       config: this.buildDbConfig(),
       schema,
-      artifact: this.shippedArtifact(source),
+      migrations: this.shippedMigrations(source),
       onAuthFailure: () => {},
     });
   }
@@ -789,7 +789,7 @@ export class JazzContext {
     const client = this.coreSource.createClient({
       config: this.buildDbConfig(),
       schema,
-      artifact: this.shippedArtifact(source),
+      migrations: this.shippedMigrations(source),
       onAuthFailure: () => {},
     });
     return { client, schema };

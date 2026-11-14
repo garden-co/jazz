@@ -8,7 +8,7 @@ import {
 import { connect, type AddressInfo } from "node:net";
 import { Readable } from "node:stream";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { appArtifact, appPermissions } from "../testing/app-artifact.js";
+import { defineShippedApp } from "../testing/client-migrations.js";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { generateSecret, signToken } from "../local-first-auth/index.js";
@@ -28,17 +28,13 @@ vi.mock("ws", () => {
   });
 });
 
-const definition = { todos: s.table({ title: s.string(), owner: s.uuid() }, {}) };
-const app = s.defineApp(definition, { artifact: await appArtifact(definition) });
-/** What permissions.ts makes: clients take it. */
-const rules = s.definePermissions(app, ({ policy, session }) => {
+const app = await defineShippedApp({ todos: s.table({ title: s.string(), owner: s.uuid() }, {}) });
+const permissions = s.definePermissions(app, ({ policy, session }) => {
   policy.todos.allowRead.where({ owner: session.user });
   policy.todos.allowInsert.where({ owner: session.user });
   policy.todos.allowUpdate.never();
   policy.todos.allowDelete.never();
 });
-/** The app's jazz.permissions.json: its backend takes it. */
-const permissions = await appPermissions(app, rules);
 
 /** The app's auth: the user named in a header, else a local-first guest. */
 function authenticate(request: Request) {
@@ -408,7 +404,7 @@ async function guestOf(appId: string, origin: string) {
   const session = await createJazzClient({
     appId,
     app,
-    permissions: rules,
+    permissions,
     serverUrl: `${origin}/jazz`,
     driver: { type: "memory" },
     initial: "device",

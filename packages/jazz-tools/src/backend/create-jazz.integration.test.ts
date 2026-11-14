@@ -24,7 +24,7 @@ import { generateSecret, identityOf, signChallenge, signToken } from "../local-f
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { JazzCore } from "jazz-napi";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { appArtifact, appPermissions, defineShippedApp } from "../testing/app-artifact.js";
+import { defineShippedApp } from "../testing/client-migrations.js";
 import { decodeWebSocketFrameBatch } from "../runtime/native-runtime/websocket.js";
 import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
@@ -52,19 +52,15 @@ import {
   encodeWireClientHello,
 } from "../runtime/native-runtime/websocket.js";
 
-const todosDefinition = {
+const app = await defineShippedApp({
   todos: s.table({ title: s.string(), owner: s.uuid() }, {}),
-};
-const app = s.defineApp(todosDefinition, { artifact: await appArtifact(todosDefinition) });
-/** What permissions.ts makes: clients take it. */
-const rules = s.definePermissions(app, ({ policy, session }) => {
+});
+const permissions = s.definePermissions(app, ({ policy, session }) => {
   policy.todos.allowRead.where({ owner: session.user });
   policy.todos.allowInsert.where({ owner: session.user });
   policy.todos.allowUpdate.never();
   policy.todos.allowDelete.never();
 });
-/** The app's jazz.permissions.json: its backend takes it. */
-const permissions = await appPermissions(app, rules);
 
 const NodeWebSocket = globalThis.WebSocket;
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -190,7 +186,7 @@ async function userSession(appId: string, origin: string, userId: string) {
   const session = await createJazzClient({
     appId,
     app,
-    permissions: rules,
+    permissions,
     serverUrl: `${origin}/jazz`,
     driver: { type: "memory" },
   });
@@ -1158,7 +1154,7 @@ describe("createJazz", () => {
     const roles = new Map([["alice", "admin"]]);
     const jazz = await createJazz({
       app,
-      permissions: await appPermissions(app, byRole),
+      permissions: byRole,
       store: memory(),
       authenticate: (request) => {
         const userId = request.headers.get("x-test-user");
@@ -1552,7 +1548,7 @@ describe("createJazz", () => {
     const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
     const guestSession = await createJazzClient({
       app,
-      permissions: rules,
+      permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       initial: "device",
@@ -1599,7 +1595,7 @@ describe("createJazz", () => {
     });
     const guestSession = await createJazzClient({
       app,
-      permissions: rules,
+      permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       initial: "device",
@@ -1628,7 +1624,7 @@ describe("createJazz", () => {
     const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
     const guestSession = await createJazzClient({
       app,
-      permissions: rules,
+      permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       initial: "device",
@@ -1689,7 +1685,7 @@ describe("createJazz", () => {
     // And its sync session is let in.
     const guestSession = await createJazzClient({
       app,
-      permissions: rules,
+      permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       initial: "device",
@@ -1750,17 +1746,14 @@ describe("createJazz", () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-cjs-permissions-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const key = "jazz-tools.test.create-jazz.cjs-permissions";
-    // An app on memory() takes permissions.ts' map; one that ships its
-    // jazz.app.json takes jazz.permissions.json, which a JSON import never wraps.
-    (globalThis as Record<symbol, unknown>)[Symbol.for(key)] = rules;
+    (globalThis as Record<symbol, unknown>)[Symbol.for(key)] = permissions;
     const file = join(dir, "permissions.js");
     await writeFile(
       file,
       `"use strict";\nObject.defineProperty(exports, "__esModule", { value: true });\nexports.default = globalThis[Symbol.for(${JSON.stringify(key)})];\n`,
     );
-    const wrapped = createRequire(file)(file) as typeof rules;
-    const memoryApp = s.defineApp(todosDefinition, { migrations: "none" });
-    const jazz = createJazz({ app: memoryApp, permissions: wrapped, store: memory() });
+    const wrapped = createRequire(file)(file) as typeof permissions;
+    const jazz = createJazz({ app, permissions: wrapped, store: memory() });
     cleanups.push(() => jazz.close());
     await expect(jazz.ready()).rejects.toThrow(
       /^permissions\.ts arrived as \{ default: … \}.*\{"type": "module"\}/,
@@ -1797,7 +1790,7 @@ describe("createJazz", () => {
     signInAs(origin, "alice");
     const session = await createJazzClient({
       app,
-      permissions: rules,
+      permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
     });
@@ -1826,7 +1819,7 @@ describe("createJazz", () => {
     // Her sign-in gives her an account on the new core, and syncs.
     const again = await createJazzClient({
       app,
-      permissions: rules,
+      permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
     });
@@ -1896,7 +1889,7 @@ describe("createJazz", () => {
       const session = await createJazzClient({
         ...(scoping === "names the app" ? { appId } : {}),
         app,
-        permissions: rules,
+        permissions,
         serverUrl: `${origin}/jazz`,
         driver: { type: "memory" },
         initial: "device",
@@ -1953,7 +1946,7 @@ describe("createJazz", () => {
     const session = await createJazzClient({
       appId: jazz.appId,
       app,
-      permissions: rules,
+      permissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       initial: "device",
@@ -2804,11 +2797,10 @@ describe("createJazz", () => {
       policy.todos.allowUpdate.where({ owner: session.user });
       policy.todos.allowDelete.never();
     });
-    const editablePermissions = await appPermissions(app, editable);
     const open = () =>
       createJazz({
         app,
-        permissions: editablePermissions,
+        permissions: editable,
         store: sqlite({ path: dir }),
         authenticate,
       }).ready();
@@ -2847,16 +2839,13 @@ describe("createJazz", () => {
     const appId = randomUUID();
     const core = await startLocalJazzServer({ appId, inMemory: true });
     cleanups.push(() => core.stop());
+    const notes = await defineShippedApp({ notes: s.table({ body: s.string() }, {}) });
     // Nobody may update a note, so the core refuses every update.
-    const { app: notes, permissions: frozen } = await defineShippedApp(
-      { notes: s.table({ body: s.string() }, {}) },
-      (notes) =>
-        s.definePermissions(notes, ({ policy }) => {
-          policy.notes.allowRead.always();
-          policy.notes.allowInsert.always();
-          policy.notes.allowUpdate.never();
-        }),
-    );
+    const frozen = s.definePermissions(notes, ({ policy }) => {
+      policy.notes.allowRead.always();
+      policy.notes.allowInsert.always();
+      policy.notes.allowUpdate.never();
+    });
     const jazz = await createJazz({
       app: notes,
       permissions: frozen,
@@ -2901,21 +2890,18 @@ describe("createJazz", () => {
     const appId = randomUUID();
     const core = await startLocalJazzServer({ appId, inMemory: true });
     cleanups.push(() => core.stop());
+    const shared = await defineShippedApp({
+      readers: s.table({ user: s.uuid() }, {}),
+      editors: s.table({ user: s.uuid() }, {}),
+      notes: s.table({ body: s.string() }, {}),
+    });
     // Access to a note comes from other rows, which a fresh backend has not loaded.
-    const { app: shared, permissions: relational } = await defineShippedApp(
-      {
-        readers: s.table({ user: s.uuid() }, {}),
-        editors: s.table({ user: s.uuid() }, {}),
-        notes: s.table({ body: s.string() }, {}),
-      },
-      (shared) =>
-        s.definePermissions(shared, ({ policy, session }) => {
-          policy.readers.allowRead.where({ user: session.user });
-          policy.editors.allowRead.where({ user: session.user });
-          policy.notes.allowRead.where(() => policy.readers.exists.where({ user: session.user }));
-          policy.notes.allowUpdate.where(() => policy.editors.exists.where({ user: session.user }));
-        }),
-    );
+    const relational = s.definePermissions(shared, ({ policy, session }) => {
+      policy.readers.allowRead.where({ user: session.user });
+      policy.editors.allowRead.where({ user: session.user });
+      policy.notes.allowRead.where(() => policy.readers.exists.where({ user: session.user }));
+      policy.notes.allowUpdate.where(() => policy.editors.exists.where({ user: session.user }));
+    });
     const open = () =>
       createJazz({
         app: shared,
@@ -2977,7 +2963,7 @@ describe("createJazz", () => {
     });
     const jazz = await createJazz({
       app,
-      permissions: await appPermissions(app, owned),
+      permissions: owned,
       store: remote({ url: core.url, appId, secret: core.adminSecret }),
       authenticate,
     }).ready();
@@ -3147,7 +3133,7 @@ describe("createJazz", () => {
     const guestOrigin = await serve(jazz, { sockets: true });
     const guestSession = await createJazzClient({
       app,
-      permissions: rules,
+      permissions,
       serverUrl: `${guestOrigin}/jazz`,
       driver: { type: "memory" },
       initial: "device",
@@ -3581,12 +3567,7 @@ describe("createJazz", () => {
     // takes over the other's sessions.
     const current = await createJazz({ app, permissions, store, authenticate }).ready();
     cleanups.push(() => current.close());
-    const newer = await createJazz({
-      app,
-      permissions: await appPermissions(app, noInserts),
-      store,
-      authenticate,
-    }).ready();
+    const newer = await createJazz({ app, permissions: noInserts, store, authenticate }).ready();
     cleanups.push(() => newer.close());
     const [onCurrent, onNewer] = [
       await serve(current, { sockets: true }),
@@ -3597,7 +3578,7 @@ describe("createJazz", () => {
     const guestOf = async (origin: string) => {
       const session = await createJazzClient({
         app,
-        permissions: rules,
+        permissions,
         serverUrl: `${origin}/jazz`,
         driver: { type: "memory" },
         initial: "device",
@@ -3662,18 +3643,15 @@ describe("createJazz", () => {
     const core = await startLocalJazzServer({ appId, inMemory: true });
     cleanups.push(() => core.stop());
     const store = remote({ url: core.url, appId, secret: core.adminSecret });
-    const { app: latest, permissions: latestPermissions } = await defineShippedApp(
-      {
-        todos: s.table({ title: s.string(), owner: s.uuid() }, {}).history("latest"),
-      },
-      (latest) =>
-        s.definePermissions(latest, ({ policy, session }) => {
-          policy.todos.allowRead.where({ owner: session.user });
-          policy.todos.allowInsert.where({ owner: session.user });
-          policy.todos.allowUpdate.never();
-          policy.todos.allowDelete.never();
-        }),
-    );
+    const latest = await defineShippedApp({
+      todos: s.table({ title: s.string(), owner: s.uuid() }, {}).history("latest"),
+    });
+    const latestPermissions = s.definePermissions(latest, ({ policy, session }) => {
+      policy.todos.allowRead.where({ owner: session.user });
+      policy.todos.allowInsert.where({ owner: session.user });
+      policy.todos.allowUpdate.never();
+      policy.todos.allowDelete.never();
+    });
     const full = await createJazz({ app, permissions, store, authenticate }).ready();
     cleanups.push(() => full.close());
 

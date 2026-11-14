@@ -38,14 +38,9 @@ import {
   encodeStreamRecord,
 } from "../runtime/native-runtime/http-stream-socket.js";
 import { resolveSchemaSource } from "../schema-source.js";
-import { shipsNoMigrations } from "../runtime/app-artifact.js";
+import { shipsNoMigrations } from "../runtime/client-migrations.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
-import {
-  backendPermissionsMismatch,
-  deployApp,
-  resolveAppPermissions,
-  type BackendPermissions,
-} from "../dev/catalogue.js";
+import { deployApp } from "../dev/catalogue.js";
 import { DeploymentError } from "../dev/catalogue-api.js";
 import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
@@ -443,13 +438,7 @@ export interface AuthenticatedUser extends JazzUser {
 
 export interface CreateJazzOptions {
   app: BackendSchemaInput;
-  /**
-   * The app's permissions. For an app that ships its `jazz.app.json`, its
-   * `jazz.permissions.json`, which `jazz-tools validate` writes beside it:
-   * `import permissions from "./jazz.permissions.json" with { type: "json" }`.
-   * For an app on `{ migrations: "none" }`, what `definePermissions` makes.
-   */
-  permissions: BackendPermissions;
+  permissions: CompiledPermissionsMap;
   store: JazzStore;
   /**
    * Decide who sent `request`, with your app's own session (a cookie, a
@@ -1044,7 +1033,7 @@ async function applyBundle(
     appId: string;
     adminSecret: string;
     app: BackendSchemaInput;
-    permissions: BackendPermissions;
+    permissions: CompiledPermissionsMap;
     allowDroppingHistory?: boolean;
   },
 ): Promise<string> {
@@ -1549,20 +1538,16 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   const publish = (next: CreateJazzOptions) =>
     applyBundle(core.serverUrl, { ...next, appId, adminSecret: core.adminSecret });
 
-  /** The permissions the backend's own session runs under, as `definePermissions` makes them. */
-  let enforced: CompiledPermissionsMap = {};
-
   /** Publish `next`'s bundle and open the backend's own session on it. */
   async function backendSession(
     next: CreateJazzOptions,
     published?: string,
   ): Promise<{ session: SessionCore<JazzClient>; client: JazzClient }> {
     pin = published ?? (await publish(next));
-    enforced = (await resolveAppPermissions(next.app, next.permissions)).permissions;
     const session = await openJazzSession({
       appId,
       app: next.app,
-      permissions: enforced,
+      permissions: next.permissions,
       serverUrl: core.serverUrl,
       driver: { type: "memory" },
       initial: { backendSecret: core.backendSecret },
@@ -3407,7 +3392,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       return schemaOf.schema;
     },
     get permissions() {
-      return enforced;
+      return options.permissions;
     },
     db: () => backend.db,
     dbAs: async (user) => backendDbForSession(backend, await sessionFor(user, "inspect `as`")),
@@ -3549,7 +3534,6 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
  */
 export function createJazz(options: CreateJazzOptions): Jazz {
   jazzSettings(options);
-  refuseMismatchedPermissions(options);
   refuseNoMigrationsOnPersistentStore(options);
   return openFacade(options);
 }
@@ -3561,7 +3545,6 @@ export function createJazz(options: CreateJazzOptions): Jazz {
  */
 export function createTestJazz(options: CreateJazzOptions): Jazz {
   jazzSettings(options);
-  refuseMismatchedPermissions(options);
   return openFacade(options);
 }
 
@@ -3573,8 +3556,8 @@ export function noMigrationsOnPersistentStoreMessage(kind: string): string {
   return (
     `createJazz: defineApp(schema, { migrations: "none" }) ships no schema history, so this ${kind}() store ` +
     "could not follow your first schema change. " +
-    "Run `npx jazz-tools validate`: it writes jazz.app.json beside schema.ts, with schema.ts as the app's first version. " +
-    'Commit it, add `import artifact from "./jazz.app.json" with { type: "json" };` to schema.ts and pass `{ artifact }` to defineApp. ' +
+    'Add `import { migrations } from "./migrations"` to schema.ts, pass `{ migrations }` to defineApp, ' +
+    "then run `npx jazz-tools migrations create`: it records schema.ts as the app's first version in migrations/index.ts. " +
     '"none" is only for memory() stores and tests. See https://jazz.tools/docs/schemas/migrations'
   );
 }
@@ -3586,22 +3569,6 @@ export function noMigrationsOnPersistentStoreMessage(kind: string): string {
  * anything opens. `vercel()` is refused even outside a deployment, where it
  * runs its `local` store: it is the deployment's store that keeps the data.
  */
-/**
- * An app that ships its `jazz.app.json` takes its `jazz.permissions.json`,
- * and an app on `{ migrations: "none" }` the map `definePermissions` makes:
- * refused when `createJazz` is called, before anything opens.
- */
-function refuseMismatchedPermissions(options: CreateJazzOptions): void {
-  let mismatch;
-  try {
-    mismatch = backendPermissionsMismatch(options.app, options.permissions);
-  } catch {
-    // Not an app: opening the store says so.
-    return;
-  }
-  if (mismatch) throw new Error(`createJazz: ${mismatch}`);
-}
-
 function refuseNoMigrationsOnPersistentStore(options: CreateJazzOptions): void {
   if (options.store.kind === "memory") return;
   let schema;

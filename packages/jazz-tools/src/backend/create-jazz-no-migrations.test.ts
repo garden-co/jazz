@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
-import { appArtifact, appPermissions } from "../testing/app-artifact.js";
+import { appMigrations } from "../testing/client-migrations.js";
 import { createJazz, memory, remote, sqlite, vercel } from "./create-jazz.js";
 
 const definition = { notes: s.table({ body: s.string() }, {}) };
@@ -28,10 +28,9 @@ function expectNamesTheFix(error: unknown, kind: string): void {
   const message = (error as Error).message;
   expect(message).toContain('defineApp(schema, { migrations: "none" })');
   expect(message).toContain(`${kind}() store`);
-  expect(message).toContain("npx jazz-tools validate");
-  expect(message).toContain('import artifact from "./jazz.app.json" with { type: "json" };');
-  expect(message).toContain("pass `{ artifact }` to defineApp");
-  expect(message).not.toContain("migrations/index.ts");
+  expect(message).toContain('import { migrations } from "./migrations"');
+  expect(message).toContain("pass `{ migrations }` to defineApp");
+  expect(message).toContain("npx jazz-tools migrations create");
   expect(message).toContain('"none" is only for memory() stores and tests');
 }
 
@@ -95,15 +94,12 @@ describe('createJazz with an app on { migrations: "none" }', () => {
     await jazz.close();
   });
 
-  it("allows a sqlite() store once the app ships its jazz.app.json", async () => {
+  it("allows a sqlite() store once the app ships its migrations", async () => {
     const dir = await tempDir();
-    const shipped = s.defineApp(definition, {
-      artifact: await appArtifact(definition),
-    });
+    const shipped = s.defineApp(definition, { migrations: await appMigrations(definition) });
     const jazz = createJazz({
       app: shipped,
-      // An app that ships its jazz.app.json takes its jazz.permissions.json.
-      permissions: await appPermissions(shipped, permissions),
+      permissions,
       store: sqlite({ path: join(dir, "store") }),
     });
     await jazz.close();

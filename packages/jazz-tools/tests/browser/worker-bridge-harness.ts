@@ -26,9 +26,8 @@ import {
 } from "./testing-server.js";
 import { closeRemoteBrowserDb, waitForRemoteBrowserDbTitle } from "./remote-browser-db.js";
 import { CompiledPermissions, schema as s, migration as m } from "../../src/";
-import { serializeForwardLenses } from "../../src/dev/catalogue.js";
-import { deploy } from "./deploy.js";
-import { jazzAppArtifactBrowserCommands } from "./browser-commands.js";
+import { computeSchemaHash, deploy } from "../../src/dev/catalogue.js";
+import { appMigrations } from "../../src/testing/client-migrations.js";
 import {
   deserializeBrowserRelayError,
   type BrowserInspectorContext,
@@ -305,46 +304,34 @@ const catalogueMigrate = {
     description: m.add.string({ default: null }),
   },
 };
-// Permissions name the apps' tables, so they are defined against drafts; the
-// apps ship them in their jazz.app.json.
-const catalogueDraftV1 = s.defineApp(catalogueSchemaV1, { migrations: "none" });
-const catalogueDraftV2 = s.defineApp(catalogueSchemaV2, { migrations: "none" });
-
-export const cataloguePermissionsV1 = s.definePermissions(catalogueDraftV1, ({ policy }) => [
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-  policy.todos.allowUpdate.always(),
-  policy.todos.allowDelete.always(),
-]);
-
-export const cataloguePermissionsV2 = s.definePermissions(catalogueDraftV2, ({ policy }) => [
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-  policy.todos.allowUpdate.always(),
-  policy.todos.allowDelete.always(),
-]);
-
-// Both versions ship the family's jazz.app.json, with its lens; the browser
-// has no jazz-napi, so the runner's Node side writes it.
-const { artifact: catalogueArtifact, permissions: catalogueFileV2 } =
-  await jazzAppArtifactBrowserCommands().jazzAppArtifact(
-    [catalogueDraftV1.wasmSchema, catalogueDraftV2.wasmSchema],
-    [
-      serializeForwardLenses(
-        m.defineMigration({
-          from: catalogueSchemaV1,
-          to: catalogueSchemaV2,
-          migrate: catalogueMigrate,
-        }).forward,
-      ),
-    ],
-    cataloguePermissionsV2,
-  );
-export const catalogueAppV1 = s.defineApp(catalogueSchemaV1, { artifact: catalogueArtifact });
-export const catalogueAppV2 = s.defineApp(catalogueSchemaV2, { artifact: catalogueArtifact });
+// Both versions ship the family's lens, as the app's generated module holds it.
+const catalogueMigrations = await appMigrations(catalogueSchemaV1, {
+  to: catalogueSchemaV2,
+  migration: m.defineMigration({
+    from: catalogueSchemaV1,
+    to: catalogueSchemaV2,
+    migrate: catalogueMigrate,
+  }),
+});
+export const catalogueAppV1 = s.defineApp(catalogueSchemaV1, { migrations: catalogueMigrations });
+export const catalogueAppV2 = s.defineApp(catalogueSchemaV2, { migrations: catalogueMigrations });
 export const { todos: catalogueTodos } = catalogueAppV2;
 export type CatalogueTodo = s.RowOf<typeof catalogueTodos>;
 export const allCatalogueTodos: QueryBuilder<CatalogueTodo> = catalogueAppV2.todos;
+
+export const cataloguePermissionsV1 = s.definePermissions(catalogueAppV1, ({ policy }) => [
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.always(),
+  policy.todos.allowUpdate.always(),
+  policy.todos.allowDelete.always(),
+]);
+
+export const cataloguePermissionsV2 = s.definePermissions(catalogueAppV2, ({ policy }) => [
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.always(),
+  policy.todos.allowUpdate.always(),
+  policy.todos.allowDelete.always(),
+]);
 
 /**
  * Structurally valid JWT with a deliberately invalid signature: parses fine on
@@ -469,7 +456,7 @@ export async function publishCatalogueSchemaFamily(scope: string): Promise<JazzS
   const testingServer = await getJazzServerInfo(uniqueDbName(`worker-bridge-${scope}`));
   const { appId, serverUrl, adminSecret } = testingServer;
 
-  await deploy({
+  const v1 = await deploy({
     appId,
     serverUrl,
     adminSecret,
@@ -477,11 +464,26 @@ export async function publishCatalogueSchemaFamily(scope: string): Promise<JazzS
     permissions: cataloguePermissionsV1,
   });
 
-  // The app's backend publishes v2 and the lens from v1 with its
-  // jazz.app.json, as the app's createJazz does.
+  const migration = m.defineMigration({
+    fromHash: v1.schema.hash,
+    toHash: await computeSchemaHash(catalogueAppV2.wasmSchema),
+    from: catalogueSchemaV1,
+    to: catalogueSchemaV2,
+    migrate: catalogueMigrate,
+  });
+
+  await deploy({
+    appId,
+    serverUrl,
+    adminSecret,
+    schema: catalogueAppV2.wasmSchema,
+    permissions: cataloguePermissionsV2,
+    migration,
+  });
+
   return startJazzApp(testingServer, {
     schema: catalogueAppV2.wasmSchema,
-    permissions: catalogueFileV2,
+    permissions: cataloguePermissionsV2,
   });
 }
 

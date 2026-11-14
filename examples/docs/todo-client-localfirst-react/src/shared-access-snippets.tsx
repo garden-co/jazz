@@ -1,6 +1,6 @@
 import { schema as s } from "jazz-tools";
 import { useAll, useDb, useSession } from "jazz-tools/react";
-import artifact from "../jazz.app.json" with { type: "json" };
+import { migrations } from "../migrations";
 
 // #region shared-schema
 const schema = {
@@ -22,7 +22,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { artifact });
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
 // #endregion shared-schema
 
 // #region shared-permissions

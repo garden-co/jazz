@@ -1,9 +1,9 @@
 import { schema as s } from "jazz-tools";
+import { migrations } from "./migrations";
 
 const schema = {
   todos: s.table({ title: s.string(), done: s.boolean() }, {}),
 };
 type AppSchema = s.Schema<typeof schema>;
-// Memory only, with no server: the app never has another version to migrate.
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
 export type Todo = s.RowOf<typeof app.todos>;
