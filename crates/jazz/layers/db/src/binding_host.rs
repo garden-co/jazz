@@ -975,6 +975,21 @@ impl Binding {
         self.trusted_backend
     }
 
+    /// The authority's table identity for this schema view. An unknown table
+    /// is None; a catalogue not confirmed by the authority is NotObserved.
+    /// Learning an identity grants no permission to read its rows.
+    pub fn table_identity(&self, table: &str) -> HostResult<Option<[u8; 16]>> {
+        Ok(self.db.table_identity(table)?.map(|id| *id.0.as_bytes()))
+    }
+
+    /// The authority's stored column identity, following rename lenses.
+    pub fn column_identity(&self, table: &str, column: &str) -> HostResult<Option<[u8; 16]>> {
+        Ok(self
+            .db
+            .column_identity(table, column)?
+            .map(|id| *id.0.as_bytes()))
+    }
+
     /// A typed schema view backed by the same runtime.
     pub fn register_schema(&self, schema: &[u8]) -> HostResult<Self> {
         self.register_schema_shipping(schema, crate::db::Migrations::default())
