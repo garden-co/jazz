@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { gzipSync } from "node:zlib";
 
 const execFileAsync = promisify(execFile);
 
@@ -36,6 +37,9 @@ describe("broker worker packaging", () => {
       expect(source).not.toMatch(/\bfrom\s*["']\.\.?\//);
       expect(source).not.toMatch(/\bimport\s*\(\s*["']\.\.?\//);
       expect(source).toMatch(/onconnect/);
+      // Next.js/Turbopack serves this file byte for byte, so it ships
+      // minified: 114 KB gzip when this budget was set, 174 KB unminified.
+      expect(gzipSync(source, { level: 9 }).length).toBeLessThan(130 * 1024);
       // The cancellation-race scheduler belongs to the browser test entry,
       // not a same-origin client-visible production worker protocol.
       expect(source).not.toContain("foreground-node-lease-test-allocated");
