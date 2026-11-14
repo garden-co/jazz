@@ -63,7 +63,7 @@ describe("adding an enum variant in a migration", () => {
 
   /** v1, then v2 with the stub `migrations create` writes (no steps), deployed. */
   async function start(permissionsV2: typeof onlyBlocked) {
-    const core = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    const core = await startLocalJazzServer({ inMemory: true });
     const deployment = { serverUrl: core.url, appId: core.appId, adminSecret: core.adminSecret };
     const deployed = await deploy({ ...deployment, schema: v1, permissions: allowAllV1 });
     const migration = m.defineMigration({
