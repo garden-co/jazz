@@ -48,6 +48,7 @@ import { refuseInvalidSessionConfig } from "./config-options.js";
 import { warnWindowJazzConflict } from "../runtime/page-handle.js";
 import { accountForgotten, storedKeepsDeviceAccount } from "../accounts/persistence.js";
 import { rememberBackendUser } from "../accounts/enrollment.js";
+import { deviceAccountStoreMissing } from "../accounts/process-store.js";
 
 export type { LocalFirstLoader };
 
@@ -571,6 +572,9 @@ async function createDeviceOnlySession(config: JazzClientConfig): Promise<Browse
   const { serverUrl: _serverUrl, ...clientConfig } = rest;
   refuseUnkeptOptions(clientConfig);
   const accounts = await createAccountManagerWithMinter(config, mintLocalFirstTokenInJs);
+  // Its one account is a device account: a host with nowhere to keep its key refuses.
+  const missing = deviceAccountStoreMissing(accounts, "serverUrl: null (a device-only client)");
+  if (missing) throw missing;
   const { createClient } = await loadLocalFirst();
   return createJazzSessionOwner({
     accounts,
