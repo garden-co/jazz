@@ -27,6 +27,8 @@ export interface TestUserConfig {
   serverUrl: string;
   /** The session the app's backend vouches for on this user's sockets. */
   cookieSession: Session;
+  /** {@link StartTestJazzOptions.slowQueryThresholdMs}, when the test set one. */
+  slowQueryThresholdMs?: number;
 }
 
 export interface TestJazz {
@@ -113,6 +115,13 @@ export interface StartTestJazzOptions {
    * does by returning `acceptDeviceAccounts(request)` (default true).
    */
   guests?: boolean;
+  /**
+   * The slow-query threshold for the clients this harness configures: the
+   * user configs {@link TestJazz.as} returns carry it (default 50; `0` turns
+   * the slow-query log off). A guest's client created from {@link TestJazz.url}
+   * takes `slowQueryThresholdMs` in its own config.
+   */
+  slowQueryThresholdMs?: number;
   /** More `createJazz` options (not `app`, `permissions`, `store` or `authenticate`). */
   jazz?: Omit<CreateJazzOptions, "app" | "permissions" | "store" | "authenticate">;
 }
@@ -253,6 +262,9 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
           claims: claims ?? {},
           authMode: "external",
         },
+        ...(options.slowQueryThresholdMs === undefined
+          ? {}
+          : { slowQueryThresholdMs: options.slowQueryThresholdMs }),
       };
     },
     async redeploy({ app, permissions, ...history }) {
