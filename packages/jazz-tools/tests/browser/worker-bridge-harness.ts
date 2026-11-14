@@ -328,18 +328,18 @@ export const cataloguePermissionsV2 = s.definePermissions(catalogueDraftV2, ({ p
 // has no jazz-napi, so the runner's Node side writes it.
 const { artifact: catalogueArtifact, permissions: catalogueFileV2 } =
   await jazzAppArtifactBrowserCommands().jazzAppArtifact(
-  [catalogueDraftV1.wasmSchema, catalogueDraftV2.wasmSchema],
-  [
-    serializeForwardLenses(
-      m.defineMigration({
-        from: catalogueSchemaV1,
-        to: catalogueSchemaV2,
-        migrate: catalogueMigrate,
-      }).forward,
-    ),
-  ],
-  cataloguePermissionsV2,
-);
+    [catalogueDraftV1.wasmSchema, catalogueDraftV2.wasmSchema],
+    [
+      serializeForwardLenses(
+        m.defineMigration({
+          from: catalogueSchemaV1,
+          to: catalogueSchemaV2,
+          migrate: catalogueMigrate,
+        }).forward,
+      ),
+    ],
+    cataloguePermissionsV2,
+  );
 export const catalogueAppV1 = s.defineApp(catalogueSchemaV1, { artifact: catalogueArtifact });
 export const catalogueAppV2 = s.defineApp(catalogueSchemaV2, { artifact: catalogueArtifact });
 export const { todos: catalogueTodos } = catalogueAppV2;

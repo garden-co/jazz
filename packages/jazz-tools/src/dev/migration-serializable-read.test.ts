@@ -52,7 +52,11 @@ it("accepts a serializable read of an unchanged table after migration", async ()
     const project = await db.insert(oldApp.projects, { title: "Project" }).wait({ tier: "global" });
     await db.shutdown();
     db = undefined;
-    await server.redeploy({ app: newApp, permissions: await appPermissions(newApp, newPermissions), migration });
+    await server.redeploy({
+      app: newApp,
+      permissions: await appPermissions(newApp, newPermissions),
+      migration,
+    });
     db = await createDb(account);
     const query = newApp.projects.where({ id: project.id });
     expect(await db.one(query, { tier: "remote" })).toEqual(project);
@@ -108,7 +112,11 @@ it("preserves serializable conflict detection after renaming the queried table",
     const project = await db.insert(oldApp.projects, { title: "Project" }).wait({ tier: "global" });
     await db.shutdown();
     db = undefined;
-    await server.redeploy({ app: newApp, permissions: await appPermissions(newApp, newPermissions), migration });
+    await server.redeploy({
+      app: newApp,
+      permissions: await appPermissions(newApp, newPermissions),
+      migration,
+    });
     db = await createDb(account);
     writer = await createDb(await localAccountConfig(server.appId, server.url));
     expect(await db.all(newApp.initiatives, { tier: "remote" })).toEqual([project]);

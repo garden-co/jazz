@@ -101,7 +101,11 @@ async function signIn(email: string, name: string) {
 let userId: string;
 let otherUserId: string;
 beforeAll(async () => {
-  server = await startLocalJazzServer({ inMemory: true, schema: app, permissions: permissionsFile });
+  server = await startLocalJazzServer({
+    inMemory: true,
+    schema: app,
+    permissions: permissionsFile,
+  });
   // The app's Jazz fronts this test server with remote().
   process.env.JAZZ_SERVER_URL = server.url;
   process.env.JAZZ_ADMIN_SECRET = server.adminSecret;

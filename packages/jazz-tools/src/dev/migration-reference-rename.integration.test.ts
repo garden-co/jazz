@@ -79,7 +79,11 @@ it("preserves rows and their relationship through table and reference-column ren
     await db.shutdown();
     db = undefined;
 
-    await server.redeploy({ app: newApp, permissions: await appPermissions(newApp, newPermissions), migration });
+    await server.redeploy({
+      app: newApp,
+      permissions: await appPermissions(newApp, newPermissions),
+      migration,
+    });
     db = await createDb(account);
     expect(await db.all(newApp.people, { tier: "remote" })).toEqual([owner]);
     expect(

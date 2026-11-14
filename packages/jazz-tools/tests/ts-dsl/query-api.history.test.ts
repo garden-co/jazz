@@ -759,7 +759,11 @@ describe("TS Query API history schema migrations", () => {
     });
     await deploy({ ...deployment, schema: v2, permissions: permissionsV2, migration });
     // Clients reach the core through the app's backend, which runs the latest deploy.
-    server = await startTestJazz({ app: v2, permissions: await appPermissions(v2, permissionsV2), core });
+    server = await startTestJazz({
+      app: v2,
+      permissions: await appPermissions(v2, permissionsV2),
+      core,
+    });
     // v2 ships the migration in its jazz.app.json, as `validate` would write it.
     shipArtifact(v2.wasmSchema, {
       artifact: await appArtifact(v1, {

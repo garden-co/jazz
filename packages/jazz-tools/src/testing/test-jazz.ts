@@ -18,7 +18,11 @@ import {
   type LocalJazzServerHandle,
   type StartLocalJazzServerOptions,
 } from "../dev/dev-server.js";
-import { resolveAppPermissions, type BackendPermissions, type DeployResult } from "../dev/catalogue.js";
+import {
+  resolveAppPermissions,
+  type BackendPermissions,
+  type DeployResult,
+} from "../dev/catalogue.js";
 
 /** What a client needs to sync as a signed-in user, spread into its config. */
 export interface TestUserConfig {

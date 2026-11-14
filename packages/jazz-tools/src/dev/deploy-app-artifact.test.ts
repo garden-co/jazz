@@ -13,8 +13,9 @@ const unreachable = {
 const notesV1 = { notes: s.table({ body: s.string() }, {}) };
 const notesV2 = { notes: s.table({ body: s.string(), done: s.boolean().optional() }, {}) };
 
-function readable(app: object) {
-  return s.definePermissions(app, ({ policy }) => {
+/** Anyone may read notes: the same rules for every version of the app. */
+function readable(app: { notes: unknown }) {
+  return s.definePermissions(app as s.App<s.Schema<typeof notesV1>>, ({ policy }) => {
     policy.notes.allowRead.always();
   });
 }

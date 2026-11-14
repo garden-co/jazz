@@ -116,9 +116,7 @@ describe("cli migrations", () => {
     expect(bundled.current).toBe(second.toHash);
     expect(bundled.migrations).toMatchObject([{ from: first.hash, to: second.toHash }]);
     // And the backend's jazz.permissions.json moved to the new version with it.
-    const permissionsFile = JSON.parse(
-      await readFile(join(root, "jazz.permissions.json"), "utf8"),
-    );
+    const permissionsFile = JSON.parse(await readFile(join(root, "jazz.permissions.json"), "utf8"));
     expect(permissionsFile).toMatchObject({ format: 1, schema: second.toHash });
     expect(bundled).not.toHaveProperty("permissions");
     expect(bundled).not.toHaveProperty("bundle");

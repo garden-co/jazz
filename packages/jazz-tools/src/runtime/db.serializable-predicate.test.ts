@@ -54,7 +54,11 @@ it("inserts an ordinary parent and child atomically after adding a table", async
     await db.insert(oldApp.projects, { title: "Existing project" }).wait({ tier: "global" });
     await db.shutdown();
     db = undefined;
-    await server.redeploy({ app: newApp, permissions: await appPermissions(newApp, newPermissions), migration });
+    await server.redeploy({
+      app: newApp,
+      permissions: await appPermissions(newApp, newPermissions),
+      migration,
+    });
     db = await createDb(account);
     await db.all(newApp.projects, { tier: "remote" });
     const tx = db.beginSerializableTransaction();

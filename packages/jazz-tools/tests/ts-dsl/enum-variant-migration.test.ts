@@ -79,7 +79,11 @@ describe("adding an enum variant in a migration", () => {
         steps: [{ to: v2, migration }],
       }),
     });
-    server = await startTestJazz({ app: v2, permissions: await appPermissions(v2, permissionsV2), core });
+    server = await startTestJazz({
+      app: v2,
+      permissions: await appPermissions(v2, permissionsV2),
+      core,
+    });
   }
 
   async function open() {

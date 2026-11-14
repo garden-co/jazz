@@ -12,8 +12,17 @@ import {
   type CompiledPermissionsMap,
 } from "../../src/schema-permissions.js";
 import { runtimeSchemaJsonReplacer } from "../../src/drivers/schema-wire.js";
-import { deploy, deployApp, type BackendPermissions, type DeployResult } from "../../src/dev/catalogue.js";
-import { shipArtifact, type AppArtifact, type AppPermissions } from "../../src/runtime/app-artifact.js";
+import {
+  deploy,
+  deployApp,
+  type BackendPermissions,
+  type DeployResult,
+} from "../../src/dev/catalogue.js";
+import {
+  shipArtifact,
+  type AppArtifact,
+  type AppPermissions,
+} from "../../src/runtime/app-artifact.js";
 import {
   createTransportControl,
   type TransportControl,

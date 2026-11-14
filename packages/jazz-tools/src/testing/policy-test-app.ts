@@ -9,11 +9,7 @@ import type { Session } from "../runtime/context.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import { deployApp, resolveAppPermissions } from "../dev/catalogue.js";
-import {
-  isAppPermissions,
-  shippedArtifact,
-  type AppPermissions,
-} from "../runtime/app-artifact.js";
+import { isAppPermissions, shippedArtifact, type AppPermissions } from "../runtime/app-artifact.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import { appPermissions } from "./app-artifact.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../dev/dev-server.js";
