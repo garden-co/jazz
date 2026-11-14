@@ -1,4 +1,4 @@
-import { createServer, type Socket } from "node:net";
+import { connect, createServer, type Socket } from "node:net";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -192,6 +192,81 @@ it("reads offline when the server accepts connections but never answers", async 
     hole.close();
   }
 }, 60_000);
+
+// #3581: after a live link drops, a reconnect attempt that the server takes
+// but never answers used to keep the link "connecting" with no outage
+// published. Each attempt now ends without a hello (#5382), so the hung
+// reconnect reads offline too. A Global wait stays pending through the outage
+// (#3923) and settles once the server answers again.
+it("reads offline when a reconnect after a live link is accepted but never answered", async () => {
+  const permissions = definePermissions(app, ({ policy }) => {
+    policy.notes.allowRead.always();
+    policy.notes.allowInsert.always();
+  });
+  const server = await startTestJazz({
+    app: app,
+    permissions: permissions,
+    coreOptions: { inMemory: true },
+  });
+  const upstream = new URL(server.url);
+  // Forwards to the server until `answering` is false; then it takes each
+  // connection and never writes, like a proxy holding the upgrade.
+  let answering = true;
+  const sockets: Socket[] = [];
+  const proxy = createServer((socket) => {
+    sockets.push(socket);
+    if (!answering) return;
+    const target = connect(Number(upstream.port), upstream.hostname);
+    sockets.push(target);
+    socket.pipe(target).pipe(socket);
+    socket.on("error", () => target.destroy());
+    target.on("error", () => socket.destroy());
+    socket.on("close", () => target.destroy());
+    target.on("close", () => socket.destroy());
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+  const { port } = proxy.address() as { port: number };
+  let db: Db | undefined;
+  try {
+    db = await createDb(
+      await localAccountConfig(server.appId, `http://127.0.0.1:${port}${upstream.pathname}`),
+    );
+    await db.insert(app.notes, { title: "online" }).wait({ tier: "global", timeoutMs: 15_000 });
+    expect(db.getSyncStatus().link).toEqual({ state: "connected" });
+
+    answering = false;
+    const live = sockets.length;
+    for (const socket of sockets) socket.destroy();
+    let settled = false;
+    const pending = db
+      .insert(app.notes, { title: "during the hang" })
+      // Far past the outage window: only the server answering settles it.
+      .wait({ tier: "global", timeoutMs: 90_000 })
+      .then((row) => {
+        settled = true;
+        return row;
+      });
+
+    const offline = await statusWhere(db, (status) => status.link.state === "offline", 45_000);
+    expect(offline.link).toEqual({ state: "offline", reason: "network", retrying: true });
+    expect(offline.lastError).toMatchObject({ kind: "network" });
+    // The client did reach the proxy again: the attempts hung, not refused.
+    expect(sockets.length).toBeGreaterThan(live);
+    expect(settled).toBe(false);
+
+    answering = true;
+    for (const socket of sockets) socket.destroy();
+    expect(await pending).toEqual(expect.objectContaining({ title: "during the hang" }));
+    expect((await statusWhere(db, (status) => status.synced, 45_000)).link).toEqual({
+      state: "connected",
+    });
+  } finally {
+    await db?.shutdown();
+    for (const socket of sockets) socket.destroy();
+    proxy.close();
+    await server.stop();
+  }
+}, 150_000);
 
 it("is local-only and synced without a server", async () => {
   const db = await createDb(await localAccountConfig("sync-status-local"));
