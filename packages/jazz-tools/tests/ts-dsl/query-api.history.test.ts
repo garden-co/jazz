@@ -31,7 +31,7 @@ describe("TS Query API history", () => {
     server = await startTestJazz({
       app: app,
       permissions: permissions,
-      coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+      coreOptions: { inMemory: true },
     });
     db = await createDb({
       ...(await localAccountConfig(server.appId, server.url)),
@@ -741,7 +741,7 @@ describe("TS Query API history schema migrations", () => {
   let stop: (() => void) | undefined;
 
   beforeEach(async () => {
-    const core = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    const core = await startLocalJazzServer({ inMemory: true });
     const deployment = { serverUrl: core.url, appId: core.appId, adminSecret: core.adminSecret };
     const deployed = await deploy({ ...deployment, schema: v1, permissions: permissionsV1 });
     const migration = m.defineMigration({
@@ -878,7 +878,7 @@ describe("TS Query API upstream history", () => {
     server = await startTestJazz({
       app: app,
       permissions: permissions,
-      coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+      coreOptions: { inMemory: true },
     });
     writer = await createDb({
       ...(await localAccountConfig(server.appId, server.url)),
@@ -1050,7 +1050,7 @@ describe("TS Query API branch history", () => {
     server = await startTestJazz({
       app: branches,
       permissions: branchPermissions,
-      coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+      coreOptions: { inMemory: true },
     });
     writer = await createDb({
       ...(await localAccountConfig(server.appId, server.url)),
@@ -1209,7 +1209,7 @@ describe("TS Query API private draft branch history", () => {
     server = await startTestJazz({
       app: drafts,
       permissions: draftPermissions,
-      coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+      coreOptions: { inMemory: true },
     });
     owner = await createDb({
       ...(await localAccountConfig(server.appId, server.url)),
@@ -1310,7 +1310,6 @@ describe("TS Query API branch history with relational read policies", () => {
       app: projectsApp,
       permissions: projectPermissions,
       coreOptions: {
-        allowLocalFirstAuth: true,
         inMemory: true,
       },
     });

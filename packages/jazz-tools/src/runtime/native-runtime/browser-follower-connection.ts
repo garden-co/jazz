@@ -44,6 +44,7 @@ type BrowserFollowerPortRpcRequest =
   | { type: "flush-pending-writes" }
   | { type: "close"; releaseContext?: boolean }
   | { type: "prepare-storage-reset" }
+  | { type: "store-pending-uploads" }
   | { type: "finish-storage-reset" }
   | { type: "abort-storage-reset" }
   | { type: "reconnect"; authJson: string; sessionClaims: Record<string, unknown> };
@@ -218,6 +219,14 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     }
     await this.request({ type: "finish-storage-reset" });
     return { pendingUploads: prepared?.pendingUploads };
+  }
+
+  async storePendingUploads(): Promise<number | undefined> {
+    await this.ready();
+    const answer = (await this.request({ type: "store-pending-uploads" })) as
+      | { pendingUploads?: number }
+      | undefined;
+    return answer?.pendingUploads;
   }
 
   async openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort> {

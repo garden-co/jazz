@@ -19,7 +19,7 @@ it("waits for the server while offline and answers once it reconnects", async ()
   const server = await startTestJazz({
     app: app,
     permissions: permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
@@ -61,7 +61,7 @@ it("keeps a Global wait pending while offline unless the caller sets a timeout",
   const server = await startTestJazz({
     app: app,
     permissions: permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {

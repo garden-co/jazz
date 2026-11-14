@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "better-auth": "1.7.1",
+    "better-auth": "1.7.22",
     "jazz-napi": "workspace:*",
     "jazz-tools": "workspace:*",
     "next": "catalog:default",
@@ -33,6 +33,7 @@
     "vite": "catalog:default",
     "vite-plugin-top-level-await": "catalog:default",
     "vite-plugin-wasm": "catalog:default",
-    "vitest": "catalog:default"
+    "vitest": "catalog:default",
+    "ws": "^8.19.0"
   }
 }

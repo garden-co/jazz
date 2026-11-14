@@ -46,6 +46,11 @@ History rows include two additional columns by default:
 | `$acceptedAt`    | `Date`          | When the server accepted the version.   |
 | `$transactionId` | `TxId`          | The transaction that wrote the version. |
 
+History lists only accepted versions. An edit made offline is accepted when it syncs, so its `$acceptedAt` is that time, not when it was
+made, and ordering by `$acceptedAt` lists versions in the order the server applied them: the newest
+is the current row. A write that sets `updatedAt` explicitly (a backfill or import) is stamped with
+that time instead.
+
 The usual attribution columns (`$createdAt`, `$createdBy`, `$updatedAt`, and
 `$updatedBy`) are also available. Anyone who can read a row's history sees the author of every
 version, including `identity.subject`; see [Metadata](/docs/reading/metadata).

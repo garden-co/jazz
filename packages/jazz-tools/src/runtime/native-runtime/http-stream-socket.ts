@@ -310,6 +310,12 @@ const STREAM_AVAILABLE_HEADER = "x-jazz-stream";
 /** Endpoints already warned that the backend refuses this page's origin. */
 const refusedOrigins = new Set<string>();
 
+/** Header on createJazz's development 503 whose body says why its store did not open. */
+const STORE_ERROR_HEADER = "x-jazz-store-error";
+
+/** Store-open failures already logged, by endpoint and reason. */
+const reportedStoreErrors = new Set<string>();
+
 /**
  * What a plain request for a socket path says about the endpoint. A POST,
  * so the browser sends the page's Origin and the backend checks it as it
@@ -328,6 +334,16 @@ async function probeSocketPath(
       // connecting: a probe that gets no answer says nothing.
       signal: AbortSignal.timeout?.(SOCKET_OPEN_DEADLINE_MS),
     });
+    // In development a backend whose store can't open says why (see
+    // createJazz's STORE_ERROR_HEADER): log it once, as the server does.
+    if (response.status === 503 && response.headers.get(STORE_ERROR_HEADER) === "1") {
+      const why = await response.text().catch(() => "");
+      if (why && !reportedStoreErrors.has(`${url}\n${why}`)) {
+        reportedStoreErrors.add(`${url}\n${why}`);
+        console.error(`jazz: the backend at ${url} can't serve: ${why}`);
+      }
+      return "other";
+    }
     void response.body?.cancel().catch(() => undefined);
     if (response.status === 403) return "refused";
     // Not a createJazz socket path (another server, or a proxy's error).

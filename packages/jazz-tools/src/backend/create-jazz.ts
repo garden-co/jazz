@@ -104,7 +104,7 @@ import {
   withCheckedExpiry,
 } from "./session-expiry.js";
 import { NoJazzAccountError } from "./no-account-error.js";
-import { RequestAuthenticationError } from "./request-auth.js";
+import { isAuthenticationUnavailableError, RequestAuthenticationError } from "./request-auth.js";
 import { optionalPeerImportError } from "./optional-peer.js";
 import { closingBeforeDeadline } from "./socket-deadline.js";
 import { importWs, vercelUpgradesSockets } from "./ws-peer.js";
@@ -713,8 +713,10 @@ export interface Jazz {
    * if `authenticate` no longer names that user (or reconnects if it still
    * does). Call it from your sign-out handler or your auth provider's
    * session-revoked webhook, so a sign-out reaches open sessions before
-   * their `expiresAt`. Sessions served by other instances end at their
-   * `expiresAt`. Returns how many sessions it ended.
+   * their `expiresAt`. A session still signing in when you call it (its
+   * `authenticate` may have read the cookie you just ended) is refused too
+   * if it signs in as `userId`. Sessions served by other instances end at
+   * their `expiresAt`. Returns how many open sessions it ended.
    */
   revokeUser(userId: string): Promise<number>;
   /**
@@ -786,12 +788,16 @@ function appSecretOf(store: JazzStore, core: { adminSecret: string }): string | 
   if (store.kind === "remote" && store.secret) return store.secret;
   return core.adminSecret === STAND_IN_SECRET ? undefined : core.adminSecret;
 }
-/** The core's refusal of every local-first identity: it admits none. */
+
+/**
+ * The refusal of every local-first identity by a core that admits none: one
+ * an older jazz-tools started with local-first auth off (cores have no such
+ * switch since 2.0.0-alpha.62), or a Jazz Cloud app's with it turned off.
+ */
 const LOCAL_FIRST_AUTH_DISABLED = "local_first_auth_disabled";
 /**
- * What a core that admits no local-first identity tells a guest's session
- * (`LOCAL_FIRST_AUTH_DISABLED_MESSAGE` in jazz-server's middleware/auth.rs;
- * vercel-guest.integration.test.ts pins it against a real core).
+ * What such a core tells a guest's session (jazz-server's
+ * `LOCAL_FIRST_AUTH_DISABLED_MESSAGE` before 2.0.0-alpha.62).
  */
 const CORE_REFUSES_GUESTS = "Local-first auth is not enabled";
 // What a browser's request to a public route carries on to a remote core:
@@ -823,6 +829,12 @@ export interface CoreSocket {
    */
   sendWithRoom?(data: Uint8Array): Promise<boolean>;
   close(): void;
+  /**
+   * Resolves once the session reaches the core. A session that never does
+   * ends with its close event instead, and this stays pending. Without it,
+   * the session counts as open at once (a core in this process).
+   */
+  readonly opened?: Promise<void>;
 }
 
 /**
@@ -927,9 +939,20 @@ function inProcessWebSocket(
           this.finish(1011, error instanceof Error ? error.message : String(error));
           return;
         }
-        this.readyState = 1;
-        this.emit("open");
+        // Open only once the core's side is: a session that never reaches
+        // the core then closes without having opened, which a client (and
+        // the vercel() store's waking socket) can tell from a session that
+        // dropped.
+        const opened = this.session.opened;
+        if (!opened) return this.markOpen();
+        void opened.then(() => this.markOpen());
       });
+    }
+
+    private markOpen(): void {
+      if (this.readyState !== 0) return;
+      this.readyState = 1;
+      this.emit("open");
     }
 
     addEventListener(type: string, listener: (event?: any) => void): void {
@@ -1063,6 +1086,7 @@ export function pinnedSocket(socket: CoreSocket, bundle: () => string | undefine
       return socket.sendWithRoom ? socket.sendWithRoom(pinned) : socket.send(pinned);
     },
     close: () => socket.close(),
+    ...(socket.opened ? { opened: socket.opened } : {}),
   };
 }
 
@@ -1304,6 +1328,10 @@ function openRemoteCore(
     let ws: WebSocket | undefined;
     const queued: Uint8Array[] = [];
     let ended = false;
+    let markOpened!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      markOpened = resolve;
+    });
     const finish = (code: number, reason: string) => {
       if (ended) return;
       ended = true;
@@ -1316,6 +1344,7 @@ function openRemoteCore(
         ws.binaryType = "arraybuffer";
         ws.addEventListener("open", () => {
           for (const data of queued.splice(0)) ws!.send(data as Uint8Array<ArrayBuffer>);
+          if (!ended) markOpened();
         });
         ws.addEventListener("message", (event) => {
           const data =
@@ -1352,6 +1381,7 @@ function openRemoteCore(
         ended = true;
         ws?.close();
       },
+      opened,
     };
   }
   // This process's own clients (the backend's session) reach the core
@@ -1672,7 +1702,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     if (warnedGuestsOffOnCore) return;
     warnedGuestsOffOnCore = true;
     console.error(
-      "createJazz: the core refuses local-first guests (local_first_auth_disabled), so device accounts can't sync or link. Start the core with allowLocalFirstAuth: true. A vercel() core started by an older jazz-tools keeps refusing them until a deployment of a newer one restarts it.",
+      "createJazz: the core refuses local-first guests (local_first_auth_disabled), so device accounts can't sync or link. It runs an older jazz-tools with local-first auth off: upgrade it (a vercel() core is restarted on the newer version by the next deployment), or turn it on for a Jazz Cloud app with `jazz-tools apps auth set <appId> --allow-local-first-auth true`.",
     );
   }
 
@@ -2121,6 +2151,13 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     close(): void;
     /** End the session as refused (`jazz.revokeUser`). */
     revoke(reason: string): void;
+    /**
+     * `jazz.revokeUser(userId)` ran while this session's sign-in was still
+     * being admitted: if it admits `userId`, refuse it as revoked instead.
+     * Its `authenticate` may have read the user's cookie before the app
+     * ended their auth session.
+     */
+    revokeWhileAdmitting(userId: string): void;
     /** The user the session was admitted as, once it is. */
     readonly userId: string | undefined;
     /** Whether a trusted backend client opened it. */
@@ -2147,6 +2184,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     let ended = false;
     let userId: string | undefined;
     let trusted = false;
+    // Users `revokeUser` named while this session's admission ran.
+    let admitting = true;
+    const revokedWhileAdmitting = new Set<string>();
     // A session that never sends its prelude ends too.
     let stopExpiry: (() => void) | undefined = startTimer(() => {
       onEvent(null, { kind: "close", code: 1008, reason: "no sign-in in time" });
@@ -2212,7 +2252,19 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       end();
     };
     const admit = async (prelude: Uint8Array): Promise<boolean> => {
-      const admitted = await admitPrelude(request, prelude);
+      const admitted = await admitPrelude(request, prelude).finally(() => (admitting = false));
+      if (
+        admitted &&
+        admitted !== UNVERIFIED_CREDENTIAL &&
+        admitted.userId !== undefined &&
+        revokedWhileAdmitting.has(admitted.userId) &&
+        !ended
+      ) {
+        // Admitted on an answer `authenticate` gave before the app revoked
+        // this user: refused as the sessions `revokeUser` ended are.
+        clientSession.revoke("revokeUser");
+        return false;
+      }
       if (!admitted || admitted === UNVERIFIED_CREDENTIAL || ended) {
         // An auth failure, not a dropped link: the client stops retrying and
         // reports `offline: auth`, and its session asks the backend whether
@@ -2356,7 +2408,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
                 // `authenticate` without `expiresAt` fails the same way every
                 // time: say why, once.
                 if (error instanceof AuthenticateExpiresAtError) warnMissingExpiry(error);
-                if (isThrownByAuthenticate(error)) console.error(AUTHENTICATE_THREW_MESSAGE, error);
+                if (isAuthenticationUnavailableError(error)) console.error(error);
+                else if (isThrownByAuthenticate(error)) {
+                  console.error(AUTHENTICATE_THREW_MESSAGE, error);
+                }
                 onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
               }
               end();
@@ -2380,6 +2435,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         onEvent(null, { kind: "message", data: authFailedBatch(`session revoked: ${reason}`) });
         onEvent(null, { kind: "close", code: 1008, reason: "session revoked" });
         end();
+      },
+      revokeWhileAdmitting(revoked) {
+        if (admitting && !ended) revokedWhileAdmitting.add(revoked);
       },
       get userId() {
         return userId;
@@ -3027,6 +3085,15 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
           headers: { "Cache-Control": "no-store" },
         });
       }
+      if (isAuthenticationUnavailableError(error)) {
+        // The identity provider is down, not the app's code: the client
+        // retries and stays signed in. The reason stays in the logs.
+        console.error(error);
+        return new Response(AUTHENTICATION_UNAVAILABLE, {
+          status: 503,
+          headers: { "Retry-After": "5", "Cache-Control": "no-store" },
+        });
+      }
       if (isThrownByAuthenticate(error)) {
         // The reason (it can name the app's internals) stays in the logs.
         console.error(AUTHENTICATE_THREW_MESSAGE, error);
@@ -3400,7 +3467,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         throw new Error("revokeUser: pass the user's id, as your authenticate names it");
       let ended = 0;
       for (const { session } of [...liveSessions]) {
-        if (session.trusted || session.userId !== userId) continue;
+        if (session.trusted) continue;
+        // A session still signing in may turn out to be theirs: its
+        // `authenticate` may have read their cookie before the app ended it.
+        if (session.userId === undefined) session.revokeWhileAdmitting(userId);
+        if (session.userId !== userId) continue;
         session.revoke("revokeUser");
         ended += 1;
       }
@@ -3917,15 +3988,34 @@ const UNAVAILABLE_BODY = "Jazz is unavailable; try again shortly";
  * process, alive. (A Fetch response can't tell an HTTP/2 host, which drops
  * the header with a warning; nodeHandler leaves it off there.)
  */
-function storeUnavailable(retryAfter: number, closed: boolean): Response {
-  return new Response(UNAVAILABLE_BODY, {
+function storeUnavailable(retryAfter: number, closed: boolean, error?: unknown): Response {
+  const why = devStoreError(closed ? undefined : error);
+  return new Response(why ? `${UNAVAILABLE_BODY}: ${why}` : UNAVAILABLE_BODY, {
     status: 503,
     headers: {
       "content-type": "text/plain",
       "retry-after": String(retryAfter),
+      ...(why ? { [STORE_ERROR_HEADER]: "1" } : {}),
       ...(closed ? { connection: "close" } : {}),
     },
   });
+}
+
+/**
+ * Header on a 503 whose body says why the store did not open. Only in
+ * development (NODE_ENV "development"): there the reason (a deploy the store
+ * refused, say) otherwise shows only in the server log, while the browser
+ * sees a generic refusal and retries (#5053). The client's socket probe
+ * reads it and logs it in the browser console.
+ */
+const STORE_ERROR_HEADER = "x-jazz-store-error";
+
+/** Why the store did not open, for a 503's body in development; else undefined. */
+function devStoreError(error: unknown): string | undefined {
+  if (error === undefined || typeof process === "undefined") return undefined;
+  if (process.env.NODE_ENV !== "development") return undefined;
+  const message = error instanceof Error ? error.message : String(error);
+  return `the store did not open: ${message}`;
 }
 
 const storeUnavailableUpgrade = (retryAfter: number) =>
@@ -3947,7 +4037,7 @@ function facade(entry: Entry): Jazz {
       return await use();
     } catch (error) {
       logUnavailable(error);
-      return storeUnavailable(retryAfterSeconds(entry), entry.closing !== undefined);
+      return storeUnavailable(retryAfterSeconds(entry), entry.closing !== undefined, error);
     }
   };
   const handle = async (request: Request) => {
@@ -4048,7 +4138,9 @@ function facade(entry: Entry): Jazz {
           // HTTP/2 has no Connection header (Node warns and drops it).
           if (entry.closing && req.httpVersionMajor < 2) res.setHeader("connection", "close");
           res.setHeader("content-type", "text/plain");
-          res.end(UNAVAILABLE_BODY);
+          const why = devStoreError(entry.closing ? undefined : error);
+          if (why) res.setHeader(STORE_ERROR_HEADER, "1");
+          res.end(why ? `${UNAVAILABLE_BODY}: ${why}` : UNAVAILABLE_BODY);
         },
       );
     },
@@ -4196,6 +4288,13 @@ const UNVERIFIED_CREDENTIAL = "unverified-credential";
  * error goes to the backend's log; the response carries only this code.
  */
 const AUTHENTICATE_FAILED = "authenticate_failed";
+
+/**
+ * What a Jazz route answers (503, with Retry-After) when the app's
+ * `authenticate` could not check a credential because its identity
+ * provider is unreachable (`fromJWT`'s JWKS).
+ */
+const AUTHENTICATION_UNAVAILABLE = "authentication_unavailable";
 
 /** What the backend logs, before the error, when the app's `authenticate` threw. */
 const AUTHENTICATE_THREW_MESSAGE =

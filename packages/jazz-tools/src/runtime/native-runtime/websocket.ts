@@ -110,6 +110,8 @@ export type WebSocketCarrierOptions = {
   onError?: WebSocketErrorHandler;
   onTerminal?: WebSocketTerminalHandler;
   WebSocket?: WebSocketConstructor;
+  /** @internal Tests shorten {@link HANDSHAKE_TIMEOUT_MS}. */
+  handshakeTimeoutMs?: number;
 };
 
 export type WebSocketConstructor = new (url: string) => BrowserWebSocket;
@@ -154,6 +156,15 @@ export const FEATURE_HEARTBEAT = 1 << 11;
  * about 18 KB/s. A link slower than that is treated as gone.
  */
 export const HEARTBEAT_SILENCE_MS = 120_000;
+/**
+ * How long a connection may take from opening the socket to the server's
+ * hello. An attempt nobody answers (a proxy holding the upgrade for a
+ * backend that is down, packets dropped on the way) otherwise never ends,
+ * and the link, which reports an outage only when an attempt fails, would
+ * read "connecting" for as long as it hangs (#5225). A server that is still
+ * starting answers at once (`not_ready`), so this only bounds silence.
+ */
+export const HANDSHAKE_TIMEOUT_MS = 10_000;
 /** A silence past the limit is confirmed after this long, so that messages
  * a frozen page or a long task held back are delivered before it counts. */
 const HEARTBEAT_CONFIRM_MS = 1_000;
@@ -311,6 +322,7 @@ export class WebSocketCarrier {
   private terminated = false;
   private lastInbound = performance.now();
   private silenceTimer: ReturnType<typeof setTimeout> | undefined;
+  private handshakeTimer: ReturnType<typeof setTimeout> | undefined;
   /** Where to renew this session in place, when it rides on the app's cookie. */
   private readonly renewalUrl: string | null;
   private renewalTimer: ReturnType<typeof setTimeout> | undefined;
@@ -327,6 +339,7 @@ export class WebSocketCarrier {
     assertWireFeatures(this.localFeatures, "client wire features");
     this.socket = new WebSocketCtor(this.url);
     this.socket.binaryType = "arraybuffer";
+    this.watchHandshake(options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS);
     this.opened = new Promise<WebSocketNegotiation>((resolve, reject) => {
       this.resolveNegotiation = resolve;
       this.rejectNegotiation = reject;
@@ -426,6 +439,7 @@ export class WebSocketCarrier {
     if (this.closing) return;
     this.closing = true;
     clearTimeout(this.silenceTimer);
+    clearTimeout(this.handshakeTimer);
     clearTimeout(this.renewalTimer);
     this.reportTerminal(
       {
@@ -454,10 +468,32 @@ export class WebSocketCarrier {
     if (this.terminated) return;
     this.terminated = true;
     clearTimeout(this.silenceTimer);
+    clearTimeout(this.handshakeTimer);
     clearTimeout(this.renewalTimer);
     this.rejectNegotiation(negotiationError);
     if (notifyError) this.onError?.(error);
     if (notifyTerminal) this.onTerminal?.(error);
+  }
+
+  /**
+   * Give the attempt up when the server has not said hello within
+   * `timeoutMs`, as a dropped socket (`websocket_silent`), so the link
+   * retries and, past its reporting window, publishes the outage. The
+   * timeout is confirmed a moment later, so a hello that a frozen page held
+   * back is delivered before it counts.
+   */
+  private watchHandshake(timeoutMs: number): void {
+    this.handshakeTimer = setTimeout(() => {
+      this.handshakeTimer = setTimeout(() => {
+        if (this.negotiated || this.terminated) return;
+        this.reportTerminal({
+          code: "websocket_silent",
+          retry: "later",
+          message: `the server did not answer the connection within ${Math.round(timeoutMs / 1000)} s`,
+        });
+        this.close();
+      }, HEARTBEAT_CONFIRM_MS);
+    }, timeoutMs);
   }
 
   /**
@@ -517,6 +553,7 @@ export class WebSocketCarrier {
       if (isWireHello(frame)) {
         if (this.negotiated) continue;
         this.negotiated = true;
+        clearTimeout(this.handshakeTimer);
         const negotiation = decodeServerHello(frame, this.localFeatures);
         if ((negotiation.features & FEATURE_HEARTBEAT) !== 0) this.watchSilence();
         this.resolveNegotiation({

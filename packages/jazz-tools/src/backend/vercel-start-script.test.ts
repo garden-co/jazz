@@ -207,7 +207,6 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
           dataDir: `${root}/data/store`,
           blobs: { kind: "sqlite" },
           trustedWorkload: trust,
-          allowLocalFirstAuth: true,
         },
       },
     ]);

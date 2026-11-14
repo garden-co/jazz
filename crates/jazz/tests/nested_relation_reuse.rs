@@ -5,6 +5,11 @@
 //! subscriptions, through read policies, nested ordering on unselected
 //! columns with offsets and limits, and forward relations over arrays of
 //! references with duplicates.
+//!
+//! Nesting also reads a level's rows a relation at a time (one statement
+//! for all of that level's parents, each parent's offset and limit applied
+//! by a window), which must again read exactly what the per-parent path
+//! does. Every comparison runs the three paths in [`MODES`].
 
 use std::collections::BTreeMap;
 
@@ -14,7 +19,7 @@ use crate::common::{
 use jazz::block_on;
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, SubscriptionEvent, UpdateOptions,
-    set_relation_reuse_for_test,
+    set_relation_batch_for_test, set_relation_reuse_for_test,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, OrderDirection, Query, col, eq, lit};
@@ -239,14 +244,26 @@ fn queries() -> Vec<(&'static str, Query)> {
     ]
 }
 
-/// `read` without reuse, then with: they must agree.
+/// The nesting paths compared, as (reuse, batch): per parent without
+/// reuse, per parent with reuse, and a level at a time (the default).
+pub(crate) const MODES: [(bool, bool); 3] = [(false, false), (true, false), (true, true)];
+
+/// Nest relations on this thread as `mode` does.
+pub(crate) fn set_mode((reuse, batch): (bool, bool)) {
+    set_relation_reuse_for_test(reuse);
+    set_relation_batch_for_test(batch);
+}
+
+/// `read` in each of [`MODES`]: they must agree.
 fn agree<T: PartialEq + std::fmt::Debug>(what: &str, read: impl Fn() -> T) -> T {
-    set_relation_reuse_for_test(false);
+    set_mode(MODES[0]);
     let plain = read();
-    set_relation_reuse_for_test(true);
-    let reused = read();
-    assert_eq!(reused, plain, "{what}");
-    reused
+    for mode in &MODES[1..] {
+        set_mode(*mode);
+        assert_eq!(read(), plain, "{what}: {mode:?}");
+    }
+    set_mode((true, true));
+    plain
 }
 
 /// A one-shot read as member 0, relations nested.
@@ -333,11 +350,11 @@ fn drain(subscription: &mut jazz::db::SubscriptionStream) -> (Shown, Shown) {
 #[test]
 fn a_live_result_re_run_with_reuse_matches_one_without() {
     for (what, query) in queries() {
-        let stores = [(false, seeded()), (true, seeded())];
+        let stores = MODES.map(|mode| (mode, seeded()));
         let mut subscriptions: Vec<_> = stores
             .iter()
-            .map(|(reuse, db)| {
-                set_relation_reuse_for_test(*reuse);
+            .map(|(mode, db)| {
+                set_mode(*mode);
                 let prepared = db.prepare_query(&query).unwrap();
                 let mut subscription =
                     block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), member(0)))
@@ -346,7 +363,9 @@ fn a_live_result_re_run_with_reuse_matches_one_without() {
                 (drain(&mut subscription), subscription)
             })
             .collect();
-        assert_eq!(subscriptions[0].0, subscriptions[1].0, "{what}: opening");
+        for (mode, opened) in MODES.iter().zip(&subscriptions).skip(1) {
+            assert_eq!(subscriptions[0].0, opened.0, "{what}: opening, {mode:?}");
+        }
         assert!(
             !subscriptions[1].0.0.is_empty(),
             "{what}: the opening shows rows"
@@ -354,8 +373,8 @@ fn a_live_result_re_run_with_reuse_matches_one_without() {
         let mut updated = 0;
         for write in 0..4 {
             let mut deltas = Vec::new();
-            for ((reuse, db), (_, subscription)) in stores.iter().zip(&mut subscriptions) {
-                set_relation_reuse_for_test(*reuse);
+            for ((mode, db), (_, subscription)) in stores.iter().zip(&mut subscriptions) {
+                set_mode(*mode);
                 block_on(db.update(
                     "users",
                     id(1, write % USERS),
@@ -369,12 +388,14 @@ fn a_live_result_re_run_with_reuse_matches_one_without() {
                 block_on(db.tick()).unwrap();
                 deltas.push(drain(subscription));
             }
-            assert_eq!(deltas[0], deltas[1], "{what}: write {write}");
+            for (mode, delta) in MODES.iter().zip(&deltas).skip(1) {
+                assert_eq!(&deltas[0], delta, "{what}: write {write}, {mode:?}");
+            }
             updated += deltas[1].1.len();
         }
         assert!(updated > 0, "{what}: the writes reached the live result");
     }
-    set_relation_reuse_for_test(true);
+    set_mode((true, true));
 }
 
 mod randomized {
@@ -388,11 +409,12 @@ mod randomized {
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
+    use super::{MODES, set_mode};
     use crate::common::{compile_schema, exists, outer_eq, read_and_allow_all_writes, session_eq};
     use jazz::block_on;
     use jazz::db::{
         Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, SubscriptionEvent, SubscriptionStream,
-        UpdateOptions, set_relation_reuse_for_test,
+        UpdateOptions,
     };
     use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
     use jazz::query::{ArraySubquery, OrderDirection, Query};
@@ -639,11 +661,25 @@ mod randomized {
     /// its post's author; and people with the posts they wrote.
     fn queries(rng: &mut StdRng) -> Vec<Query> {
         let person = |name: &str| ArraySubquery::new(name, "people", "id", name);
-        let (offset, limit) = (rng.gen_range(0..2), rng.gen_range(1..4));
-        let comments = ArraySubquery::new("comments", "comments", "post", "id")
+        // Pages that may be empty (a limit of 0, an offset past the end) or
+        // unbounded, each applied per parent.
+        let offset = rng.gen_range(0..3);
+        let limit = match rng.gen_range(0..5) {
+            0 => None,
+            n => Some(n - 1),
+        };
+        let mut comments = ArraySubquery::new("comments", "comments", "post", "id")
             .order_by("rank", OrderDirection::Desc)
-            .offset(offset)
-            .limit(limit)
+            .offset(offset);
+        if let Some(limit) = limit {
+            comments = comments.limit(limit);
+        }
+        // Ranks tie often: ties break by id, in the last key's direction.
+        let ranked_mentions = ArraySubquery::new("ranked_mentions", "people", "id", "mentions")
+            .order_by("rank", OrderDirection::Desc)
+            .offset(rng.gen_range(0..2))
+            .limit(rng.gen_range(1..3));
+        let comments = comments
             .select(["author"])
             .nested(person("author"))
             .nested(ArraySubquery::new("post", "posts", "id", "post").nested(person("author")));
@@ -653,6 +689,7 @@ mod randomized {
                 .array_subquery(person("author"))
                 .array_subquery(ArraySubquery::new("team", "teams", "code", "team"))
                 .array_subquery(ArraySubquery::new("mentions", "people", "id", "mentions"))
+                .array_subquery(ranked_mentions)
                 .array_subquery(comments),
             Query::from("people").array_subquery(
                 ArraySubquery::new("posts", "posts", "author", "id")
@@ -696,13 +733,9 @@ mod randomized {
         (shown(added), shown(updated), removed)
     }
 
-    /// `read` without reuse, then with.
+    /// `read` in each of [`MODES`].
     fn agree<T: PartialEq + std::fmt::Debug>(what: &str, read: impl Fn() -> T) {
-        set_relation_reuse_for_test(false);
-        let plain = read();
-        set_relation_reuse_for_test(true);
-        let reused = read();
-        assert_eq!(reused, plain, "{what}");
+        super::agree(what, read);
     }
 
     /// Each reader's live results on two identical stores, one without
@@ -712,14 +745,14 @@ mod randomized {
         for seed in 0..SEEDS {
             let mut rng = StdRng::seed_from_u64(seed ^ 0x5eed);
             let queries = queries(&mut rng);
-            let stores = [(false, store(seed)), (true, store(seed))];
+            let stores = MODES.map(|mode| (mode, store(seed)));
             for (q, query) in queries.iter().enumerate() {
                 for n in 0..READERS {
                     let what = format!("seed {seed}, query {q}, reader {n}");
                     let mut opened: Vec<_> = stores
                         .iter()
-                        .map(|(reuse, db)| {
-                            set_relation_reuse_for_test(*reuse);
+                        .map(|(mode, db)| {
+                            set_mode(*mode);
                             let prepared = db.prepare_query(query).unwrap();
                             let mut subscription = block_on(db.subscribe_for_identity(
                                 &prepared,
@@ -731,24 +764,28 @@ mod randomized {
                             (drain(&mut subscription), subscription)
                         })
                         .collect();
-                    assert_eq!(opened[0].0, opened[1].0, "{what}: opening");
+                    for (mode, other) in MODES.iter().zip(&opened).skip(1) {
+                        assert_eq!(opened[0].0, other.0, "{what}: opening, {mode:?}");
+                    }
                     let writes = StdRng::seed_from_u64(seed * 31 + n as u64);
-                    let mut rngs = [writes.clone(), writes];
+                    let mut rngs = [writes.clone(), writes.clone(), writes];
                     for w in 0..WRITES {
                         let mut deltas = Vec::new();
-                        for (((reuse, db), (_, subscription)), rng) in
+                        for (((mode, db), (_, subscription)), rng) in
                             stores.iter().zip(&mut opened).zip(&mut rngs)
                         {
-                            set_relation_reuse_for_test(*reuse);
+                            set_mode(*mode);
                             write(db, rng);
                             deltas.push(drain(subscription));
                         }
-                        assert_eq!(deltas[0], deltas[1], "{what}: write {w}");
+                        for (mode, delta) in MODES.iter().zip(&deltas).skip(1) {
+                            assert_eq!(&deltas[0], delta, "{what}: write {w}, {mode:?}");
+                        }
                     }
                 }
             }
         }
-        set_relation_reuse_for_test(true);
+        set_mode((true, true));
     }
 
     /// One-shot reads on one store: result trees, nested rows, a snapshot
@@ -799,6 +836,758 @@ mod randomized {
                 });
             }
         }
-        set_relation_reuse_for_test(true);
+        set_mode((true, true));
+    }
+}
+
+mod batched {
+    //! Reading a level's children in one statement: each parent's page is
+    //! its own (offset and limit per parent, ties by id), parents that share
+    //! a value share its children, and parents with no exact JSON form fall
+    //! back to the per-parent path.
+
+    use std::collections::BTreeMap;
+
+    use super::{agree, cells, id, seeded};
+    use jazz::block_on;
+    use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, ReadOpts};
+    use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+    use jazz::query::{ArraySubquery, OrderDirection, Part, Query};
+    use jazz::records::Value;
+    use jazz::result_tree::{ResultNode, ResultRelation, ResultTree};
+    use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TableSchemaBuilder};
+
+    use crate::common::{compile_schema, read_and_allow_all_writes};
+
+    fn relation<'a>(node: &'a ResultNode, name: &str) -> &'a [ResultNode] {
+        match &node.relations[name] {
+            ResultRelation::Array(nodes) => nodes,
+            #[allow(unreachable_patterns)]
+            _ => panic!("expected an array relation"),
+        }
+    }
+
+    fn tree(db: &Db, query: &Query) -> ResultTree {
+        let prepared = db.prepare_query(query).unwrap();
+        agree("tree", || {
+            block_on(db.all_result_tree(&prepared, ReadOpts::default())).unwrap()
+        })
+    }
+
+    /// Each message's system rows, ordered by an unselected rank with many
+    /// ties, paged per message: exactly the rows that message alone would
+    /// page, computed here from all of them.
+    #[test]
+    fn each_parent_is_paged_by_itself_with_ties_by_id() {
+        let db = seeded();
+        let all = tree(&db, &Query::from("message_system"));
+        let mut by_message: BTreeMap<RowUuid, Vec<(i64, RowUuid)>> = BTreeMap::new();
+        for node in &all.roots {
+            let Some(Value::Uuid(message)) = node.row.cell("message") else {
+                panic!("a message");
+            };
+            let rank = match node.row.cell("rank") {
+                Some(Value::I32(rank)) => rank as i64,
+                other => panic!("a rank: {other:?}"),
+            };
+            by_message
+                .entry(RowUuid(message))
+                .or_default()
+                .push((rank, node.row.row_uuid()));
+        }
+        assert!(
+            by_message.values().any(|rows| rows.len() >= 3),
+            "some message has several system rows"
+        );
+        for (direction, offset, limit) in [
+            (OrderDirection::Asc, 0, Some(1)),
+            (OrderDirection::Asc, 1, Some(2)),
+            (OrderDirection::Desc, 1, None),
+            (OrderDirection::Desc, 0, Some(0)),
+            (OrderDirection::Desc, 5, Some(2)),
+        ] {
+            let mut system = ArraySubquery::new("system", "message_system", "message", "id")
+                .select(["kind"])
+                .order_by("rank", direction)
+                .offset(offset);
+            if let Some(limit) = limit {
+                system = system.limit(limit);
+            }
+            let read = tree(&db, &Query::from("messages").array_subquery(system));
+            for message in &read.roots {
+                let mut expected = by_message
+                    .get(&message.row.row_uuid())
+                    .cloned()
+                    .unwrap_or_default();
+                expected.sort();
+                if direction == OrderDirection::Desc {
+                    expected.reverse();
+                }
+                let expected: Vec<RowUuid> = expected
+                    .into_iter()
+                    .skip(offset)
+                    .take(limit.unwrap_or(usize::MAX))
+                    .map(|(_, row)| row)
+                    .collect();
+                let got: Vec<RowUuid> = relation(message, "system")
+                    .iter()
+                    .map(|node| node.row.row_uuid())
+                    .collect();
+                assert_eq!(
+                    got, expected,
+                    "{direction:?} offset {offset} limit {limit:?}"
+                );
+            }
+        }
+    }
+
+    /// Levels split into several statements (tiny limits here): parent
+    /// cells per few rows, children per few parent values, and values
+    /// too large to share a list (some arrays of references) read alone.
+    /// Each parent still gets exactly its own children.
+    #[test]
+    fn a_level_split_into_chunks_reads_the_same() {
+        let db = seeded();
+        for limits in [(1, 40), (3, 120), (7, 300)] {
+            jazz::db::set_relation_batch_limits_for_test(Some(limits));
+            for (what, query) in super::queries() {
+                let prepared = db.prepare_query(&query).unwrap();
+                agree(&format!("{what}, limits {limits:?}"), || {
+                    block_on(db.all_result_tree(&prepared, ReadOpts::default())).unwrap()
+                });
+                agree(&format!("{what}, limits {limits:?}, as member"), || {
+                    super::as_member(&db, &query)
+                });
+            }
+        }
+        jazz::db::set_relation_batch_limits_for_test(None);
+    }
+
+    /// Children as wide as a statement may be read per parent: the batched
+    /// statement's extra columns would pass Durable Object SQLite's limit.
+    #[test]
+    fn children_too_wide_to_batch_read_per_parent() {
+        let mut wide = TableSchemaBuilder::new("wide")
+            .column("owner", ColumnType::Uuid)
+            .column("rank", ColumnType::Integer);
+        for c in 0..WIDE {
+            wide = wide.column(&format!("c{c}"), ColumnType::Text);
+        }
+        let schema = compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("owners")
+                        .column("name", ColumnType::Text)
+                        .policies(read_and_allow_all_writes(PolicyExpr::True)),
+                )
+                .table(wide.policies(read_and_allow_all_writes(PolicyExpr::True)))
+                .build(),
+        );
+        let db = block_on(Db::open(DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x44; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        let insert = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
+            block_on(db.insert(
+                table,
+                values,
+                InsertOptions {
+                    row_id: Some(row),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        };
+        for o in 0..3 {
+            insert(
+                "owners",
+                id(9, o),
+                cells(vec![("name", Value::String(format!("owner {o}")))]),
+            );
+        }
+        for w in 0..9 {
+            let mut values = vec![
+                ("owner", Value::Uuid(id(9, w % 3).0)),
+                ("rank", Value::I32((w % 2) as i32)),
+            ];
+            let names: Vec<String> = (0..WIDE).map(|c| format!("c{c}")).collect();
+            for name in &names {
+                values.push((name.as_str(), Value::String(format!("{name} {w}"))));
+            }
+            insert("wide", id(10, w), cells(values));
+        }
+        block_on(db.tick()).unwrap();
+        // Every text column twice, and the rank.
+        let mut select: Vec<String> = (0..2 * WIDE).map(|c| format!("c{}", c % WIDE)).collect();
+        select.push("rank".to_owned());
+        let paged = ArraySubquery::new("wide", "wide", "owner", "id")
+            .select(select)
+            .order_by("rank", OrderDirection::Asc)
+            .offset(1)
+            .limit(1);
+        let read = tree(&db, &Query::from("owners").array_subquery(paged));
+        assert!(read.roots.iter().all(|o| relation(o, "wide").len() == 1));
+    }
+
+    /// Text columns of [`children_too_wide_to_batch_read_per_parent`]'s
+    /// child. A Durable Object table holds at most 100 columns, system
+    /// ones included, so a projection this wide selects columns twice:
+    /// with id, `_clock`, `_state` and `_writer`, the per-parent statement
+    /// returns 99 columns, and the batched page would return 101.
+    const WIDE: usize = 47;
+
+    /// Parents keyed by a real number have no exact JSON form, so they are
+    /// read per parent; a part of a text cell reads the same either way.
+    #[test]
+    fn reals_fall_back_and_parts_read_the_same() {
+        let schema = compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("buckets")
+                        .column("at", ColumnType::Double)
+                        .column("name", ColumnType::Text)
+                        .policies(read_and_allow_all_writes(PolicyExpr::True)),
+                )
+                .table(
+                    TableSchemaBuilder::new("points")
+                        .column("at", ColumnType::Double)
+                        .column("body", ColumnType::Text)
+                        .column("rank", ColumnType::Integer)
+                        .policies(read_and_allow_all_writes(PolicyExpr::True)),
+                )
+                .build(),
+        );
+        let db = block_on(Db::open(DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x33; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        let insert = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
+            block_on(db.insert(
+                table,
+                values,
+                InsertOptions {
+                    row_id: Some(row),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        };
+        for b in 0..4 {
+            insert(
+                "buckets",
+                id(7, b),
+                cells(vec![
+                    ("at", Value::F64(b as f64 / 2.0)),
+                    ("name", Value::String(format!("bucket {b}"))),
+                ]),
+            );
+        }
+        for p in 0..20 {
+            insert(
+                "points",
+                id(8, p),
+                cells(vec![
+                    ("at", Value::F64((p % 5) as f64 / 2.0)),
+                    (
+                        "body",
+                        Value::String(format!("point {p} {}", "x".repeat(p))),
+                    ),
+                    ("rank", Value::I32((p % 3) as i32)),
+                ]),
+            );
+        }
+        block_on(db.tick()).unwrap();
+        let points = ArraySubquery::new("points", "points", "at", "at")
+            .order_by("rank", OrderDirection::Asc)
+            .offset(1)
+            .limit(2);
+        let read = tree(&db, &Query::from("buckets").array_subquery(points.clone()));
+        assert!(read.roots.iter().all(|b| relation(b, "points").len() == 2));
+        let parts = ArraySubquery::new("points", "points", "id", "id")
+            .select(["rank"])
+            .select_part("body", Part::TextUtf8 { from: 2, to: 6 });
+        let read = tree(
+            &db,
+            &Query::from("points").array_subquery(parts.nested(points)),
+        );
+        assert_eq!(read.roots.len(), 20);
+    }
+}
+
+mod branch_views {
+    //! Nested reads through a branch view composed over a base, live or
+    //! frozen: each branched table's source is its effective rows (head
+    //! rows, tombstones masking, then base rows the head does not
+    //! override), a `UNION ALL`. Rows the head overrides, deletes, adds or
+    //! moves to another parent, a read policy on the children, ordering
+    //! with ties and per-parent pages must read the same per parent and
+    //! batched.
+
+    use super::{MODES, agree, cells, id, set_mode};
+    use jazz::block_on;
+    use jazz::db::{
+        Db, DbConfig, DbIdentity, DeleteOptions, ExactWriteTarget, InsertOptions, ReadOpts,
+        SubscriptionEvent, UpdateOptions, WriteTarget,
+    };
+    use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+    use jazz::protocol::{BranchSelector, BranchViewBase};
+    use jazz::query::{ArraySubquery, OrderDirection, Query};
+    use jazz::records::Value;
+    use jazz::tools::{
+        CmpOp, ColumnType, PolicyExpr, PolicyValue, SchemaBuilder, TableSchemaBuilder,
+    };
+
+    use crate::common::{compile_schema, read_and_allow_all_writes};
+
+    const PEOPLE: usize = 4;
+    const POSTS: usize = 6;
+    const COMMENTS: usize = 18;
+
+    fn branch(byte: u8) -> BranchSelector {
+        BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+    }
+
+    fn base() -> BranchSelector {
+        branch(0xb1)
+    }
+
+    fn head() -> BranchSelector {
+        branch(0xb2)
+    }
+
+    fn reader() -> AuthorSubject {
+        AuthorSubject::for_test_bytes([0x77; 16])
+    }
+
+    fn person(n: usize) -> Value {
+        Value::Uuid(id(1, n % PEOPLE).0)
+    }
+
+    fn post(n: usize) -> Value {
+        Value::Uuid(id(5, n % POSTS).0)
+    }
+
+    /// Posts and comments are branched; people are not. Comments are
+    /// readable only where `visible`.
+    fn store() -> Db {
+        let visible = PolicyExpr::Cmp {
+            column: "visible".to_owned(),
+            op: CmpOp::Eq,
+            value: PolicyValue::Literal(jazz::tools::Value::Boolean(true)),
+        };
+        let schema = compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("people")
+                        .column("name", ColumnType::Text)
+                        .column("rank", ColumnType::Integer)
+                        .policies(read_and_allow_all_writes(PolicyExpr::True)),
+                )
+                .table(
+                    TableSchemaBuilder::new("posts")
+                        .column("branch_id", ColumnType::Uuid)
+                        .nullable_fk_column("author", "people")
+                        .column(
+                            "mentions",
+                            ColumnType::Array {
+                                element: Box::new(ColumnType::Uuid),
+                            },
+                        )
+                        .column("rank", ColumnType::Integer)
+                        .branch_by("branch_id")
+                        .policies(read_and_allow_all_writes(PolicyExpr::True)),
+                )
+                .table(
+                    TableSchemaBuilder::new("comments")
+                        .column("branch_id", ColumnType::Uuid)
+                        .fk_column("post", "posts")
+                        .nullable_fk_column("author", "people")
+                        .column("rank", ColumnType::Integer)
+                        .column("visible", ColumnType::Boolean)
+                        .branch_by("branch_id")
+                        .policies(read_and_allow_all_writes(visible)),
+                )
+                .build(),
+        );
+        let db = block_on(Db::open(DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x55; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        let insert = |table: &str, row: RowUuid, values, target| {
+            block_on(db.insert(
+                table,
+                values,
+                InsertOptions {
+                    row_id: Some(row),
+                    target,
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        };
+        for p in 0..PEOPLE {
+            insert(
+                "people",
+                id(1, p),
+                cells(vec![
+                    ("name", Value::String(format!("person {p}"))),
+                    ("rank", Value::I32((p % 2) as i32)),
+                ]),
+                ExactWriteTarget::default(),
+            );
+        }
+        for p in 0..POSTS {
+            let mentions = (0..p % 3).map(|k| person(p + 2 * k)).collect();
+            insert(
+                "posts",
+                id(5, p),
+                cells(vec![
+                    ("author", person(p)),
+                    ("mentions", Value::Array(mentions)),
+                    ("rank", Value::I32((p % 3) as i32)),
+                ]),
+                ExactWriteTarget::Branch(base()),
+            );
+        }
+        for c in 0..COMMENTS {
+            insert(
+                "comments",
+                id(6, c),
+                cells(vec![
+                    ("post", post(c)),
+                    ("author", person(c / 2)),
+                    // Ranks tie often: ties break by id.
+                    ("rank", Value::I32((c % 2) as i32)),
+                    ("visible", Value::Bool(c % 5 != 4)),
+                ]),
+                ExactWriteTarget::Branch(base()),
+            );
+        }
+        block_on(db.tick()).unwrap();
+        db
+    }
+
+    fn in_head() -> WriteTarget {
+        WriteTarget::BranchView {
+            head: head(),
+            base: Some(BranchViewBase::Current(base())),
+        }
+    }
+
+    /// The head's own changes over the base: a post's author and
+    /// mentions, a comment moved to another post, a comment re-ranked,
+    /// one hidden, one deleted (its tombstone masks the base row), and
+    /// one comment only the head has.
+    fn edit_head(db: &Db) {
+        let update = |table: &str, row: RowUuid, values| {
+            block_on(db.update(
+                table,
+                row,
+                values,
+                UpdateOptions {
+                    target: in_head(),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        };
+        update(
+            "posts",
+            id(5, 0),
+            cells(vec![
+                ("author", person(3)),
+                (
+                    "mentions",
+                    Value::Array(vec![person(2), person(2), person(1)]),
+                ),
+            ]),
+        );
+        update("comments", id(6, 1), cells(vec![("post", post(0))]));
+        update("comments", id(6, 2), cells(vec![("rank", Value::I32(7))]));
+        update(
+            "comments",
+            id(6, 3),
+            cells(vec![("visible", Value::Bool(false))]),
+        );
+        block_on(db.delete(
+            "comments",
+            id(6, 6),
+            DeleteOptions {
+                target: in_head(),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        block_on(db.insert(
+            "comments",
+            cells(vec![
+                ("post", post(0)),
+                ("author", person(1)),
+                ("rank", Value::I32(0)),
+                ("visible", Value::Bool(true)),
+            ]),
+            InsertOptions {
+                row_id: Some(id(6, 99)),
+                target: ExactWriteTarget::Branch(head()),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        block_on(db.tick()).unwrap();
+    }
+
+    /// Posts with their author, mentions and a page of their comments
+    /// (each with its author and its post's author); people with their
+    /// posts and those posts' comments.
+    fn queries() -> Vec<(&'static str, Query)> {
+        let person = |name: &str| ArraySubquery::new(name, "people", "id", name);
+        let comments = |offset, limit: Option<usize>| {
+            let mut comments = ArraySubquery::new("comments", "comments", "post", "id")
+                .order_by("rank", OrderDirection::Desc)
+                .offset(offset)
+                .nested(person("author"))
+                .nested(ArraySubquery::new("post", "posts", "id", "post").nested(person("author")));
+            if let Some(limit) = limit {
+                comments = comments.limit(limit);
+            }
+            comments
+        };
+        vec![
+            (
+                "posts, unpaged comments",
+                Query::from("posts")
+                    .order_by("rank", OrderDirection::Asc)
+                    .array_subquery(person("author"))
+                    .array_subquery(ArraySubquery::new("mentions", "people", "id", "mentions"))
+                    .array_subquery(comments(0, None)),
+            ),
+            (
+                "posts, paged comments",
+                Query::from("posts").array_subquery(comments(1, Some(2))),
+            ),
+            (
+                "people, their posts and comments",
+                Query::from("people").array_subquery(
+                    ArraySubquery::new("posts", "posts", "author", "id")
+                        .order_by("rank", OrderDirection::Desc)
+                        .nested(comments(0, Some(3))),
+                ),
+            ),
+        ]
+    }
+
+    /// The head over a live base, the head over the base frozen before
+    /// later base writes, the base alone and the head alone.
+    fn views(db: &Db) -> Vec<(&'static str, ReadOpts)> {
+        let frozen = block_on(db.capture_snapshot()).unwrap();
+        // Base writes after the snapshot: the live base sees them, the
+        // frozen one does not.
+        for (c, rank) in [(0, 5), (7, 9)] {
+            block_on(db.update(
+                "comments",
+                id(6, c),
+                cells(vec![("rank", Value::I32(rank))]),
+                UpdateOptions {
+                    target: WriteTarget::BranchView {
+                        head: base(),
+                        base: None,
+                    },
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        }
+        block_on(db.tick()).unwrap();
+        vec![
+            (
+                "head over live base",
+                ReadOpts::default().branch_view(head(), Some(BranchViewBase::Current(base()))),
+            ),
+            (
+                "head over frozen base",
+                ReadOpts::default()
+                    .branch_view(head(), Some(BranchViewBase::snapshot(base(), frozen))),
+            ),
+            ("base", ReadOpts::default().branch_view(base(), None)),
+            ("head alone", ReadOpts::default().branch_view(head(), None)),
+        ]
+    }
+
+    #[test]
+    fn one_shot_reads_agree_through_branch_views() {
+        let db = store();
+        edit_head(&db);
+        let views = views(&db);
+        for (view, opts) in &views {
+            for (what, query) in queries() {
+                let prepared = db.prepare_query(&query).unwrap();
+                let tree = agree(&format!("{view}, {what}"), || {
+                    block_on(db.all_result_tree(&prepared, opts.clone())).unwrap()
+                });
+                if *view != "head alone" {
+                    assert!(!tree.roots.is_empty(), "{view}, {what}: rows");
+                }
+            }
+        }
+    }
+
+    /// The head's edits show through the nested reads: post 0's comments
+    /// over the live base are the moved, added and inherited ones, ordered
+    /// by rank (descending, ties by id descending), without the deleted or
+    /// hidden ones.
+    #[test]
+    fn the_head_overrides_masks_and_moves_nested_rows() {
+        let db = store();
+        edit_head(&db);
+        let opts = ReadOpts::default().branch_view(head(), Some(BranchViewBase::Current(base())));
+        let query = Query::from("posts")
+            .array_subquery(
+                ArraySubquery::new("comments", "comments", "post", "id")
+                    .order_by("rank", OrderDirection::Desc),
+            )
+            .array_subquery(ArraySubquery::new("mentions", "people", "id", "mentions"));
+        let prepared = db.prepare_query(&query).unwrap();
+        let tree = agree("post 0", || {
+            block_on(db.all_result_tree(&prepared, opts.clone())).unwrap()
+        });
+        let post0 = tree
+            .roots
+            .iter()
+            .find(|node| node.row.row_uuid() == id(5, 0))
+            .expect("post 0");
+        let ids = |name: &str| -> Vec<RowUuid> {
+            let jazz::result_tree::ResultRelation::Array(nodes) = &post0.relations[name] else {
+                panic!("an array relation");
+            };
+            nodes.iter().map(|node| node.row.row_uuid()).collect()
+        };
+        // Post 0's base comments are 0, 6 and 12; the head moves 1 here,
+        // deletes 6 and adds 99. Ranks: 1 → 1, 0 → 0, 12 → 0, 99 → 0.
+        assert_eq!(ids("comments"), [id(6, 1), id(6, 99), id(6, 12), id(6, 0)]);
+        assert_eq!(ids("mentions"), [id(1, 2), id(1, 2), id(1, 1)]);
+    }
+
+    /// Live results through a head over its base, as a reader the
+    /// comments' policy applies to, on identical stores, one per path,
+    /// through edits in the head and in the base.
+    #[test]
+    fn live_results_agree_through_branch_views() {
+        for (what, query) in queries() {
+            let stores = MODES.map(|mode| (mode, store()));
+            let opts =
+                ReadOpts::default().branch_view(head(), Some(BranchViewBase::Current(base())));
+            let mut opened: Vec<_> = stores
+                .iter()
+                .map(|(mode, db)| {
+                    set_mode(*mode);
+                    let prepared = db.prepare_query(&query).unwrap();
+                    let mut subscription =
+                        block_on(db.subscribe_for_identity(&prepared, opts.clone(), reader()))
+                            .unwrap();
+                    block_on(db.tick()).unwrap();
+                    (drain(&mut subscription), subscription)
+                })
+                .collect();
+            for (mode, other) in MODES.iter().zip(&opened).skip(1) {
+                assert_eq!(opened[0].0, other.0, "{what}: opening, {mode:?}");
+            }
+            if what == "posts, unpaged comments" {
+                // The comments' policy hides some from the reader: an
+                // unrestricted read of the same view shows more.
+                let (_, db) = &stores[0];
+                let prepared = db.prepare_query(&query).unwrap();
+                let mut all = block_on(db.subscribe(&prepared, opts.clone())).unwrap();
+                block_on(db.tick()).unwrap();
+                assert_ne!(
+                    drain(&mut all).0,
+                    opened[0].0.0,
+                    "{what}: the policy hides some"
+                );
+            }
+            for step in 0..3 {
+                let mut deltas = Vec::new();
+                for ((mode, db), (_, subscription)) in stores.iter().zip(&mut opened) {
+                    set_mode(*mode);
+                    match step {
+                        0 => edit_head(db),
+                        1 => {
+                            block_on(db.update(
+                                "comments",
+                                id(6, 12),
+                                cells(vec![("rank", Value::I32(3))]),
+                                UpdateOptions {
+                                    target: WriteTarget::BranchView {
+                                        head: base(),
+                                        base: None,
+                                    },
+                                    ..Default::default()
+                                },
+                            ))
+                            .unwrap();
+                            block_on(db.tick()).unwrap();
+                        }
+                        _ => {
+                            block_on(db.update(
+                                "people",
+                                id(1, 1),
+                                cells(vec![("rank", Value::I32(5))]),
+                                UpdateOptions::default(),
+                            ))
+                            .unwrap();
+                            block_on(db.tick()).unwrap();
+                        }
+                    }
+                    deltas.push(drain(subscription));
+                }
+                for (mode, delta) in MODES.iter().zip(&deltas).skip(1) {
+                    assert_eq!(&deltas[0], delta, "{what}: step {step}, {mode:?}");
+                }
+            }
+        }
+        set_mode((true, true));
+    }
+
+    type Shown = Vec<(RowUuid, String)>;
+
+    fn drain(subscription: &mut jazz::db::SubscriptionStream) -> (Shown, Shown, Vec<RowUuid>) {
+        let shown = |rows: Vec<jazz::db::SubscriptionOutputRow>| -> Shown {
+            let mut rows: Shown = rows
+                .into_iter()
+                .map(|row| {
+                    let cells: Vec<_> = row.row.cells().collect();
+                    (row.row.row_uuid(), format!("{cells:?}"))
+                })
+                .collect();
+            rows.sort();
+            rows
+        };
+        let (mut added, mut updated, mut removed) = (Vec::new(), Vec::new(), Vec::new());
+        while let Some(event) = subscription.try_next_event() {
+            if let SubscriptionEvent::Delta {
+                added: a,
+                updated: u,
+                removed: r,
+                ..
+            } = event
+            {
+                added.extend(a);
+                updated.extend(u);
+                removed.extend(r.into_iter().map(|row| row.row_uuid));
+            }
+        }
+        removed.sort();
+        (shown(added), shown(updated), removed)
     }
 }

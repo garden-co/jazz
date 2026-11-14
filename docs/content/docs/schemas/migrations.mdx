@@ -63,9 +63,11 @@ In practice, this lets you:
 6. **Deploy your main backend**&hairsp;—&hairsp;restart it locally, or deploy it as usual. When it
    starts, `createJazz` sends the schema, permissions and migrations your code imports to its store
    as one bundle. There is no separate deploy or push command. If the bundle has no migration path
-   from the schema already in the store, `jazz.ready()` (and so the backend's first request)
-   rejects with an error naming the missing migration, which usually crashes the process at
-   startup. First deployments and permission-only changes need no migration.
+   from the schema already in the store, the store refuses it with an error naming the missing
+   migration: `jazz.ready()` rejects with it, and Jazz's routes answer 503 and log it. In
+   development (`NODE_ENV=development`) the 503 carries the error too, so the browser console shows
+   it. Call `await jazz.ready()` at startup if you want a refused bundle to stop the process. First
+   deployments and permission-only changes need no migration.
 
    With several instances, roll out to one first and check it starts before replacing the rest,
    and keep the previous version ready to roll back to.

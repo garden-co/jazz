@@ -33,7 +33,6 @@ describe("finite concurrent local write convergence", () => {
           dataDir: join(directory, "server"),
           adminSecret: randomUUID(),
           backendSecret: randomUUID(),
-          allowLocalFirstAuth: true,
         };
         let server = await startLocalJazzServer({ ...settings, schema: app, permissions });
         // Each editor is an app's own Jazz (createJazz) in front of the core.

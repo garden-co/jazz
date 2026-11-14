@@ -8,10 +8,7 @@ import wasm from "vite-plugin-wasm";
 import {
   jazzServerInfo,
   stopJazzServerByUrl,
-  createJazzServerTransportControl,
-  blockJazzServerTransport,
-  unblockJazzServerTransport,
-  stopJazzServerTransportControl,
+  jazzServerTransportControlCommands,
   jazzAppFront,
   jazzAppRequest,
   jazzAppUser,
@@ -116,13 +113,7 @@ export default defineConfig({
       commands: {
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
         jazzServerStop: async (_context, url) => stopJazzServerByUrl(url),
-        jazzServerTransportControlCreate: async (_context, url) =>
-          createJazzServerTransportControl(url),
-        jazzServerTransportControlBlock: async (_context, url, direction: "both" | "inbound") =>
-          blockJazzServerTransport(url, direction),
-        jazzServerTransportControlUnblock: async (_context, url) => unblockJazzServerTransport(url),
-        jazzServerTransportControlStop: async (_context, url) =>
-          stopJazzServerTransportControl(url),
+        ...jazzServerTransportControlCommands(),
         posterShopOpenConnectedPeer: async ({ context, page }, input) =>
           openConnectedPeer(context, page, input),
         posterShopQueryConnectedPeer: async (_context, id) => queryConnectedPeer(id),

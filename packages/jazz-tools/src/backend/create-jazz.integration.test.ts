@@ -1325,6 +1325,103 @@ describe("createJazz", () => {
     expect(unhandled).not.toHaveBeenCalled();
   });
 
+  // The identity provider being down is not the app's bug: sign-in answers
+  // 503 with Retry-After (the client retries and stays signed in), and the
+  // log names the JWKS rather than telling the developer to fix their code.
+  it("answers 503 with Retry-After when fromJWT's JWKS is down, without blaming authenticate (#5367)", async () => {
+    const jwks: Server = createServer((_req, res) => {
+      res.statusCode = 503;
+      res.end("synthetic outage");
+    });
+    await new Promise<void>((resolve) => jwks.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => jwks.close(resolve)));
+    const jwksUrl = `http://127.0.0.1:${(jwks.address() as AddressInfo).port}/jwks.json`;
+    const { privateKey } = await generateKeyPair("ES256");
+    const issuer = "https://idp.example";
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: fromJWT({ jwksUrl, issuer, audience: "my-app" }),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+    const origin = await serve(jazz, { sockets: false });
+    const token = await new SignJWT({})
+      .setProtectedHeader({ alg: "ES256", kid: "k1" })
+      .setIssuer(issuer)
+      .setAudience("my-app")
+      .setSubject("alice")
+      .setExpirationTime("5m")
+      .sign(privateKey);
+    const headers = { authorization: `Bearer ${token}` };
+    const path = `/jazz/apps/${jazz.appId}/accounts`;
+    const { POST } = jazz.next();
+    for (const answer of [
+      await POST(new Request(`http://app.test${path}/backend-user`, { method: "POST", headers })),
+      await jazz.handle(
+        new Request(`http://app.test${path}/backend-user`, { method: "POST", headers }),
+      ),
+      await fetch(`${origin}${path}/backend-sign-in`, { method: "POST", headers }),
+    ]) {
+      expect(answer.status).toBe(503);
+      expect(answer.headers.get("retry-after")).toBe("5");
+      expect(answer.headers.get("cache-control")).toBe("no-store");
+      expect(await answer.text()).toBe("authentication_unavailable");
+    }
+    expect(errors).toHaveBeenCalledTimes(3);
+    for (const [logged] of errors.mock.calls) {
+      expect(String(logged)).not.toMatch(/your authenticate threw/);
+      expect((logged as Error).message).toContain(`JWKS ${jwksUrl} is unavailable`);
+    }
+    // The client sees a retryable 503, not a refusal.
+    await expect(
+      requestBackendUser(`${origin}${path}`, (input, init) =>
+        fetch(input, { ...init, headers: { ...init?.headers, ...headers } }),
+      ),
+    ).rejects.toMatchObject({ status: 503 });
+  });
+
+  // A JWKS URL that answers, but not with a JWKS, is the app's setup and not
+  // an outage: retrying won't fix it, so it stays a 500 naming authenticate.
+  it("answers 500 naming authenticate when fromJWT's JWKS answers with something that isn't a JWKS (#5367)", async () => {
+    const jwks: Server = createServer((_req, res) => res.end("<html>not a JWKS</html>"));
+    await new Promise<void>((resolve) => jwks.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => jwks.close(resolve)));
+    const jwksUrl = `http://127.0.0.1:${(jwks.address() as AddressInfo).port}/jwks.json`;
+    const { privateKey } = await generateKeyPair("ES256");
+    const issuer = "https://idp.example";
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: fromJWT({ jwksUrl, issuer, audience: "my-app" }),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+    const token = await new SignJWT({})
+      .setProtectedHeader({ alg: "ES256", kid: "k1" })
+      .setIssuer(issuer)
+      .setAudience("my-app")
+      .setSubject("alice")
+      .setExpirationTime("5m")
+      .sign(privateKey);
+    const answer = await jazz.handle(
+      new Request(`http://app.test/jazz/apps/${jazz.appId}/accounts/backend-user`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+      }),
+    );
+    expect(answer.status).toBe(500);
+    expect(await answer.text()).toBe("authenticate_failed");
+    expect(errors).toHaveBeenCalledTimes(1);
+    const [message, error] = errors.mock.calls[0]!;
+    expect(message).toMatch(/^createJazz: your authenticate threw/);
+    expect((error as Error).message).toBe("Unable to parse JWKS response");
+  });
+
   it("tells the browser by a stable code that authenticate returned no expiresAt, and the client names the fix", async () => {
     let answer: unknown = { userId: "alice", internal: "secret-session-detail" };
     const jazz = await createJazz({
@@ -3295,6 +3392,51 @@ describe("createJazz", () => {
     );
     await jazz.attach(createSecureHttp2Server({ allowHTTP1: true }));
   });
+
+  // #5053: in development the browser can't see the server log, so a Jazz
+  // route's 503 says why the store did not open (and only there).
+  it("says why its store did not open in a 503, in development only", async () => {
+    const appId = randomUUID();
+    const probe = createServer();
+    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+    const corePort = (probe.address() as AddressInfo).port;
+    await new Promise((resolve) => probe.close(resolve));
+    const coreUrl = `http://127.0.0.1:${corePort}`;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+    const answer = async (env: string) => {
+      vi.stubEnv("NODE_ENV", env);
+      cleanups.push(async () => vi.unstubAllEnvs());
+      const jazz = createJazz({
+        app,
+        permissions,
+        store: remote({ url: coreUrl, appId, secret: "down-admin" }),
+        authenticate,
+      });
+      cleanups.push(() => jazz.close());
+      const response = await jazz.handle(
+        new Request(`http://app.test/jazz/apps/${appId}/ws`, { method: "POST" }),
+      );
+      return {
+        status: response.status,
+        header: response.headers.get("x-jazz-store-error"),
+        body: await response.text(),
+      };
+    };
+
+    const dev = await answer("development");
+    expect(dev.status).toBe(503);
+    expect(dev.header).toBe("1");
+    expect(dev.body).toMatch(
+      /^Jazz is unavailable; try again shortly: the store did not open: .*could not reach the Jazz core/,
+    );
+    const prod = await answer("production");
+    expect(prod).toEqual({
+      status: 503,
+      header: null,
+      body: "Jazz is unavailable; try again shortly",
+    });
+  }, 30_000);
 
   it("attaches with its remote core down at start, names the core, and serves once it is up", async () => {
     const appId = randomUUID();

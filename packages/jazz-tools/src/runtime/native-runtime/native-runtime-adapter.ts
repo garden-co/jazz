@@ -887,7 +887,21 @@ function openMemoryDb(
 export type SlowQueryLogOptions = {
   appId?: string;
   thresholdMs?: number;
+  /**
+   * What `console.warn` shows. `"full"` (the default, for servers' logs): the
+   * whole report line, with the query plan and SQL. `"summary"` (browsers,
+   * whose console end users see): the line without its plan and SQL, which
+   * go to `console.debug` (DevTools' "Verbose" level) instead.
+   */
+  consoleDetail?: "full" | "summary";
 };
+
+/** @internal Split a slow-query report line into its summary and its plan and SQL. */
+export function slowQuerySummary(line: string): string {
+  // `SlowQuery::line` ends every line with ". Plan: <plan>. SQL: <sql>".
+  const plan = line.indexOf(". Plan: ");
+  return plan === -1 ? line : line.slice(0, plan);
+}
 
 export class NativeRuntimeAdapter implements Runtime {
   private readonly auxiliaryReceiveDeadlines = new Map<Transport, AuxiliaryReceiveDeadline>();
@@ -922,6 +936,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly ownerRuntime: NativeRuntimeAdapter;
   /** The app named in slow-query reports (owner runtime only). */
   private slowQueryApp: string | undefined;
+  private slowQueryConsoleDetail: SlowQueryLogOptions["consoleDetail"];
   get preparationOwner(): object {
     return this.ownerRuntime;
   }
@@ -1176,6 +1191,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     if (opts?.owner) return;
     this.slowQueryApp = opts?.slowQueryLog?.appId;
+    this.slowQueryConsoleDetail = opts?.slowQueryLog?.consoleDetail;
     const threshold = opts?.slowQueryLog?.thresholdMs;
     if (threshold !== undefined) {
       if (!Number.isFinite(threshold) || threshold < 0) {
@@ -4177,11 +4193,23 @@ export class NativeRuntimeAdapter implements Runtime {
   /**
    * Write the slow-query report due now with `console.warn`: each line is a
    * query shape that held the database for at least the threshold, with its
-   * plan and the index that would likely make it fast.
+   * plan and the index that would likely make it fast. With the `"summary"`
+   * console detail, the plan and SQL go to `console.debug` instead.
    */
   private reportSlowQueries(): void {
-    for (const line of this.db.takeSlowQueryReport?.(this.ownerRuntime.slowQueryApp) ?? []) {
-      console.warn(`[jazz] ${line}`);
+    const owner = this.ownerRuntime;
+    for (const line of this.db.takeSlowQueryReport?.(owner.slowQueryApp) ?? []) {
+      if (owner.slowQueryConsoleDetail !== "summary") {
+        console.warn(`[jazz] ${line}`);
+        continue;
+      }
+      const summary = slowQuerySummary(line);
+      if (summary === line) {
+        console.warn(`[jazz] ${line}`);
+        continue;
+      }
+      console.warn(`[jazz] ${summary}. Plan and SQL are logged at the debug ("Verbose") level.`);
+      console.debug(`[jazz] ${line}`);
     }
   }
 
@@ -5093,8 +5121,17 @@ function updatedAtMsFromWriteContext(writeContext?: string | null): number | und
   return parsed.updated_at;
 }
 
+/**
+ * The explicit `$updatedAt` a write names (a backfill or import), or
+ * `null` for an ordinary write. An ordinary write carries no time: the
+ * replica's clock stamps it while it is pending, and the authority's clock
+ * stamps it when it accepts it, so `$updatedAt` and `$acceptedAt` are the
+ * acceptance time, not the device clock at authoring (an offline edit
+ * synced later is stamped when it syncs), and a device with a fast clock
+ * is not refused for writing in the future.
+ */
 export function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
-  return updatedAtMsFromWriteContext(writeContext) ?? Date.now();
+  return updatedAtMsFromWriteContext(writeContext) ?? null;
 }
 
 function txStateMessage(
