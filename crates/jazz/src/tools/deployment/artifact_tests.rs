@@ -1,6 +1,7 @@
 use super::*;
 use crate::tools::deployment::{DeploymentCatalogue, prepare_deployment};
 use crate::tools::public_schema::{EnumCaseDescriptor, SchemaBuilder};
+use std::collections::BTreeSet;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/app-artifact");
 
@@ -552,4 +553,517 @@ fn embedded_schema_policies_are_dropped_as_a_deployment_drops_them() {
         ..Default::default()
     };
     assert_eq!(write(input).unwrap(), plain);
+}
+
+// ---------------------------------------------------------------------------
+// Every variant through the file form
+// ---------------------------------------------------------------------------
+
+/// Each engine variant the file mirrors, once. The `match`es below have no
+/// wildcard, so a variant added to the engine fails to compile here until it
+/// is added to this test (and to the mirror).
+fn every_policy_variant() -> PolicyExpr {
+    let path = || vec!["claims".to_string(), "team".to_string()];
+    let column = |name: &str| RelationColumnRef {
+        scope: Some("t".into()),
+        column: name.into(),
+    };
+    let scan = |table: &str| RelationExpr::TableScan {
+        table: table.into(),
+        alias: Some("t".into()),
+    };
+    let predicate = RelationPredicate::Or(vec![
+        RelationPredicate::Cmp {
+            left: column("a"),
+            op: RelationCmpOp::Ge,
+            right: RelationValueRef::Literal(serde_json::json!({"type": "Integer", "value": 3})),
+        },
+        RelationPredicate::IsNull {
+            column: column("b"),
+        },
+        RelationPredicate::IsNotNull {
+            column: column("c"),
+        },
+        RelationPredicate::In {
+            left: column("d"),
+            values: vec![
+                RelationValueRef::Param("p".into()),
+                RelationValueRef::SessionRef(path()),
+                RelationValueRef::OuterColumn(column("e")),
+                RelationValueRef::FrontierColumn(column("f")),
+                RelationValueRef::RowId(RelationRowIdRef::Current),
+                RelationValueRef::RowId(RelationRowIdRef::Outer),
+                RelationValueRef::RowId(RelationRowIdRef::Frontier),
+            ],
+        },
+        RelationPredicate::Contains {
+            left: column("g"),
+            right: RelationValueRef::Literal(serde_json::json!("bare")),
+        },
+        RelationPredicate::EnumMatch {
+            column: column("h"),
+            case: "done".into(),
+            payload: Box::new(RelationPredicate::True),
+        },
+        RelationPredicate::And(vec![RelationPredicate::Not(Box::new(
+            RelationPredicate::False,
+        ))]),
+    ]);
+    let key = RelationKeyRef::Column(column("id"));
+    let rel = RelationExpr::Limit {
+        input: Box::new(RelationExpr::Offset {
+            input: Box::new(RelationExpr::OrderBy {
+                input: Box::new(RelationExpr::Distinct {
+                    input: Box::new(RelationExpr::Project {
+                        input: Box::new(RelationExpr::Join {
+                            left: Box::new(RelationExpr::Filter {
+                                input: Box::new(scan("a")),
+                                predicate,
+                            }),
+                            right: Box::new(RelationExpr::Union {
+                                inputs: vec![
+                                    RelationUnionArm {
+                                        label: "arm".into(),
+                                        input: RelationExpr::Gather {
+                                            seed: Box::new(scan("b")),
+                                            step: Box::new(scan("c")),
+                                            frontier_key: RelationKeyRef::RowId(
+                                                RelationRowIdRef::Frontier,
+                                            ),
+                                            bound: RecursionBound::MaxDepth(4),
+                                            dedupe_key: vec![key.clone()],
+                                        },
+                                    },
+                                    RelationUnionArm {
+                                        label: "fixpoint".into(),
+                                        input: RelationExpr::Gather {
+                                            seed: Box::new(scan("b")),
+                                            step: Box::new(scan("c")),
+                                            frontier_key: key.clone(),
+                                            bound: RecursionBound::Fixpoint,
+                                            dedupe_key: vec![],
+                                        },
+                                    },
+                                ],
+                            }),
+                            on: vec![RelationJoinCondition {
+                                left: column("x"),
+                                right: column("y"),
+                            }],
+                            join_kind: RelationJoinKind::Left,
+                        }),
+                        columns: vec![
+                            RelationProjectColumn {
+                                alias: "c".into(),
+                                expr: RelationProjectExpr::Column(column("c")),
+                            },
+                            RelationProjectColumn {
+                                alias: "id".into(),
+                                expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
+                            },
+                        ],
+                    }),
+                    key: vec![key],
+                }),
+                terms: vec![
+                    RelationOrderBy {
+                        column: column("c"),
+                        direction: OrderDirection::Desc,
+                    },
+                    RelationOrderBy {
+                        column: column("id"),
+                        direction: OrderDirection::Asc,
+                    },
+                ],
+            }),
+            offset: 2,
+        }),
+        limit: 10,
+    };
+    let inner_join = PolicyExpr::ExistsRel {
+        rel: RelationExpr::Join {
+            left: Box::new(scan("a")),
+            right: Box::new(scan("b")),
+            on: vec![],
+            join_kind: RelationJoinKind::Inner,
+        },
+    };
+    PolicyExpr::Or(vec![
+        PolicyExpr::Cmp {
+            column: "a".into(),
+            op: CmpOp::Le,
+            value: PolicyValue::Literal(Value::Integer(3)),
+        },
+        PolicyExpr::SessionCmp {
+            path: path(),
+            op: CmpOp::Ne,
+            value: Value::Text("x".into()),
+        },
+        PolicyExpr::IsNull { column: "b".into() },
+        PolicyExpr::SessionIsNull { path: path() },
+        PolicyExpr::IsNotNull { column: "c".into() },
+        PolicyExpr::SessionIsNotNull { path: path() },
+        PolicyExpr::Contains {
+            column: "d".into(),
+            value: PolicyValue::SessionRef(path()),
+        },
+        PolicyExpr::SessionContains {
+            path: path(),
+            value: Value::Text("y".into()),
+        },
+        PolicyExpr::In {
+            column: "e".into(),
+            session_path: path(),
+        },
+        PolicyExpr::InList {
+            column: "f".into(),
+            values: vec![
+                PolicyValue::Literal(Value::BigInt(1 << 40)),
+                PolicyValue::SessionRef(path()),
+            ],
+        },
+        PolicyExpr::SessionInList {
+            path: path(),
+            values: vec![Value::Boolean(true), Value::Null],
+        },
+        PolicyExpr::Exists {
+            table: "shares".into(),
+            condition: Box::new(PolicyExpr::True),
+        },
+        PolicyExpr::ExistsRel { rel },
+        inner_join,
+        PolicyExpr::Inherits {
+            operation: Operation::Update,
+            via_column: "parent".into(),
+            max_depth: Some(3),
+        },
+        PolicyExpr::InheritsReferencing {
+            operation: Operation::Delete,
+            source_table: "shares".into(),
+            via_column: "todo".into(),
+            max_depth: None,
+        },
+        PolicyExpr::And(vec![PolicyExpr::Not(Box::new(PolicyExpr::False))]),
+    ])
+}
+
+/// Names of the variants `expr` uses, collected exhaustively.
+fn policy_variants(expr: &PolicyExpr, seen: &mut BTreeSet<&'static str>) {
+    fn rel(expr: &RelationExpr, seen: &mut BTreeSet<&'static str>) {
+        let name = match expr {
+            RelationExpr::TableScan { .. } => "TableScan",
+            RelationExpr::Filter { input, predicate } => {
+                rel(input, seen);
+                pred(predicate, seen);
+                "Filter"
+            }
+            RelationExpr::Union { inputs } => {
+                inputs.iter().for_each(|arm| rel(&arm.input, seen));
+                "Union"
+            }
+            RelationExpr::Join {
+                left,
+                right,
+                join_kind,
+                ..
+            } => {
+                rel(left, seen);
+                rel(right, seen);
+                match join_kind {
+                    RelationJoinKind::Inner => seen.insert("Join.Inner"),
+                    RelationJoinKind::Left => seen.insert("Join.Left"),
+                };
+                "Join"
+            }
+            RelationExpr::Project { input, columns } => {
+                rel(input, seen);
+                for column in columns {
+                    match column.expr {
+                        RelationProjectExpr::Column(_) => seen.insert("Project.Column"),
+                        RelationProjectExpr::RowId(_) => seen.insert("Project.RowId"),
+                    };
+                }
+                "Project"
+            }
+            RelationExpr::Gather {
+                seed, step, bound, ..
+            } => {
+                rel(seed, seen);
+                rel(step, seen);
+                match bound {
+                    RecursionBound::Fixpoint => seen.insert("Gather.Fixpoint"),
+                    RecursionBound::MaxDepth(_) => seen.insert("Gather.MaxDepth"),
+                };
+                "Gather"
+            }
+            RelationExpr::Distinct { input, .. } => {
+                rel(input, seen);
+                "Distinct"
+            }
+            RelationExpr::OrderBy { input, .. } => {
+                rel(input, seen);
+                "OrderBy"
+            }
+            RelationExpr::Offset { input, .. } => {
+                rel(input, seen);
+                "Offset"
+            }
+            RelationExpr::Limit { input, .. } => {
+                rel(input, seen);
+                "Limit"
+            }
+        };
+        seen.insert(name);
+    }
+    fn value(value: &RelationValueRef, seen: &mut BTreeSet<&'static str>) {
+        let name = match value {
+            RelationValueRef::Literal(_) => "Value.Literal",
+            RelationValueRef::Param(_) => "Value.Param",
+            RelationValueRef::SessionRef(_) => "Value.SessionRef",
+            RelationValueRef::OuterColumn(_) => "Value.OuterColumn",
+            RelationValueRef::FrontierColumn(_) => "Value.FrontierColumn",
+            RelationValueRef::RowId(row) => match row {
+                RelationRowIdRef::Current => "Value.RowId.Current",
+                RelationRowIdRef::Outer => "Value.RowId.Outer",
+                RelationRowIdRef::Frontier => "Value.RowId.Frontier",
+            },
+        };
+        seen.insert(name);
+    }
+    fn pred(predicate: &RelationPredicate, seen: &mut BTreeSet<&'static str>) {
+        let name = match predicate {
+            RelationPredicate::Cmp { right, .. } => {
+                value(right, seen);
+                "Pred.Cmp"
+            }
+            RelationPredicate::IsNull { .. } => "Pred.IsNull",
+            RelationPredicate::IsNotNull { .. } => "Pred.IsNotNull",
+            RelationPredicate::In { values, .. } => {
+                values.iter().for_each(|v| value(v, seen));
+                "Pred.In"
+            }
+            RelationPredicate::Contains { right, .. } => {
+                value(right, seen);
+                "Pred.Contains"
+            }
+            RelationPredicate::EnumMatch { payload, .. } => {
+                pred(payload, seen);
+                "Pred.EnumMatch"
+            }
+            RelationPredicate::And(all) => {
+                all.iter().for_each(|p| pred(p, seen));
+                "Pred.And"
+            }
+            RelationPredicate::Or(all) => {
+                all.iter().for_each(|p| pred(p, seen));
+                "Pred.Or"
+            }
+            RelationPredicate::Not(inner) => {
+                pred(inner, seen);
+                "Pred.Not"
+            }
+            RelationPredicate::True => "Pred.True",
+            RelationPredicate::False => "Pred.False",
+        };
+        seen.insert(name);
+    }
+    let name = match expr {
+        PolicyExpr::Cmp { .. } => "Cmp",
+        PolicyExpr::SessionCmp { .. } => "SessionCmp",
+        PolicyExpr::IsNull { .. } => "IsNull",
+        PolicyExpr::SessionIsNull { .. } => "SessionIsNull",
+        PolicyExpr::IsNotNull { .. } => "IsNotNull",
+        PolicyExpr::SessionIsNotNull { .. } => "SessionIsNotNull",
+        PolicyExpr::Contains { .. } => "Contains",
+        PolicyExpr::SessionContains { .. } => "SessionContains",
+        PolicyExpr::In { .. } => "In",
+        PolicyExpr::InList { .. } => "InList",
+        PolicyExpr::SessionInList { .. } => "SessionInList",
+        PolicyExpr::Exists { condition, .. } => {
+            policy_variants(condition, seen);
+            "Exists"
+        }
+        PolicyExpr::ExistsRel { rel: r } => {
+            rel(r, seen);
+            "ExistsRel"
+        }
+        PolicyExpr::Inherits { .. } => "Inherits",
+        PolicyExpr::InheritsReferencing { .. } => "InheritsReferencing",
+        PolicyExpr::And(all) => {
+            all.iter().for_each(|e| policy_variants(e, seen));
+            "And"
+        }
+        PolicyExpr::Or(all) => {
+            all.iter().for_each(|e| policy_variants(e, seen));
+            "Or"
+        }
+        PolicyExpr::Not(inner) => {
+            policy_variants(inner, seen);
+            "Not"
+        }
+        PolicyExpr::True => "True",
+        PolicyExpr::False => "False",
+    };
+    seen.insert(name);
+}
+
+#[test]
+fn every_policy_and_relation_variant_survives_the_file_form() {
+    let expr = every_policy_variant();
+    let mut seen = BTreeSet::new();
+    policy_variants(&expr, &mut seen);
+    // 20 policy variants, 10 relation variants (+2 join kinds, 2 projections,
+    // 2 bounds), 11 predicates, 8 value refs.
+    assert_eq!(seen.len(), 20 + 10 + 6 + 11 + 8, "{seen:?}");
+    // Through text, as a reader sees it. (These expressions only need to be
+    // well-formed, not to compile against a schema, so this exercises the
+    // mirror on its own; the fixtures cover compiling ones end to end.)
+    let file = policy_to_artifact(&expr).unwrap();
+    let text = serde_json::to_string(&file).unwrap();
+    let read: ArtifactPolicyExpr = serde_json::from_str(&text).unwrap();
+    assert_eq!(policy_from_artifact(&read), expr);
+}
+
+fn every_column_type() -> Vec<ColumnType> {
+    let field = ColumnDescriptor::new("at", ColumnType::Timestamp);
+    let types = vec![
+        ColumnType::Integer,
+        ColumnType::BigInt,
+        ColumnType::Double,
+        ColumnType::Boolean,
+        ColumnType::Text,
+        ColumnType::Timestamp,
+        ColumnType::Uuid,
+        ColumnType::TransactionId,
+        ColumnType::Bytea,
+        ColumnType::Enum {
+            variants: vec!["a".into(), "b".into()],
+        },
+        ColumnType::EnumPayload {
+            cases: vec![EnumCaseDescriptor {
+                name: "done".into(),
+                fields: vec![field.clone()],
+            }],
+        },
+        ColumnType::Json { schema: None },
+        ColumnType::Json {
+            schema: Some(serde_json::json!({"type": "array"})),
+        },
+        ColumnType::Array {
+            element: Box::new(ColumnType::Text),
+        },
+        ColumnType::Row {
+            columns: Box::new(RowDescriptor {
+                columns: vec![field],
+            }),
+        },
+    ];
+    // Exhaustive, so a new engine column type fails to compile here.
+    for column_type in &types {
+        match column_type {
+            ColumnType::Integer
+            | ColumnType::BigInt
+            | ColumnType::Double
+            | ColumnType::Boolean
+            | ColumnType::Text
+            | ColumnType::Timestamp
+            | ColumnType::Uuid
+            | ColumnType::TransactionId
+            | ColumnType::Bytea
+            | ColumnType::Enum { .. }
+            | ColumnType::EnumPayload { .. }
+            | ColumnType::Json { .. }
+            | ColumnType::Array { .. }
+            | ColumnType::Row { .. } => {}
+            // Refused by the writer: see the_writer_refuses_what_a_reader_would.
+            ColumnType::ScalarEnum { .. } | ColumnType::CatalogueEnumPayload { .. } => {
+                unreachable!()
+            }
+        }
+    }
+    types
+}
+
+#[test]
+fn every_column_type_survives_the_file_form() {
+    for column_type in every_column_type() {
+        let mut column = nullable("c", column_type);
+        column.default = Some(Value::Null);
+        column.merge_strategy = None;
+        let file = column_to_artifact(&column).unwrap();
+        let read: ArtifactColumn =
+            serde_json::from_str(&serde_json::to_string(&file).unwrap()).unwrap();
+        assert_eq!(column_from_artifact(&read), column);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Malformed input
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fieldless_variants_refuse_extra_keys_too() {
+    let error = refused(|v| {
+        v["schemas"][0]["tables"]["todos"]["columns"][0]["column_type"] =
+            serde_json::json!({"type": "Text", "schema": {}})
+    });
+    assert!(error.contains("unknown field"), "{error}");
+    let error = refused(|v| {
+        v["permissions"]["shares"]["select"]["using"] =
+            serde_json::json!({"type": "True", "column": "x"})
+    });
+    assert!(error.contains("unknown field"), "{error}");
+}
+
+#[test]
+fn a_format_that_is_not_the_integer_is_named() {
+    for format in [
+        serde_json::json!(1.0),
+        serde_json::json!("1"),
+        serde_json::json!(null),
+    ] {
+        let error = refused(|v| v["format"] = format.clone());
+        assert!(error.contains("`format` must be the integer 1"), "{error}");
+    }
+}
+
+#[test]
+fn malformed_files_are_refused_not_panicked_on() {
+    let text = write(shared_todos()).unwrap();
+    for input in [
+        b"".as_slice(),
+        b"not json",
+        &text.as_bytes()[..text.len() / 2],
+        b"[]",
+        b"{\"format\": 1}",
+    ] {
+        assert!(load(input).is_err());
+    }
+    for edit in [
+        (|v: &mut serde_json::Value| v["schemas"] = "x".into()) as fn(&mut serde_json::Value),
+        |v| v["schemas"][0]["tables"]["todos"]["columns"] = 1.into(),
+        |v| v["schemas"][0]["tables"]["todos"]["columns"][0]["nullable"] = "no".into(),
+        |v| v["migrations"][0]["forward"][0]["operations"][0]["type"] = "Explode".into(),
+        |v| v["bundle"] = "not hex".into(),
+        |v| v["current"] = 7.into(),
+    ] {
+        assert!(edited(edit).is_err());
+    }
+    // Deep nesting is refused by the JSON parser's depth limit, before any
+    // recursive conversion runs.
+    let mut deep = String::from(r#"{"type": "True"}"#);
+    for _ in 0..10_000 {
+        deep = format!(r#"{{"type": "Not", "expr": {deep}}}"#);
+    }
+    let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    value["permissions"]["shares"]["select"]["using"] = serde_json::json!("PLACEHOLDER");
+    let file = serde_json::to_string(&value)
+        .unwrap()
+        .replace("\"PLACEHOLDER\"", &deep);
+    assert!(
+        load(file.as_bytes())
+            .unwrap_err()
+            .message()
+            .contains("not JSON")
+    );
 }

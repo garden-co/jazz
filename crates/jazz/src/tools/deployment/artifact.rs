@@ -14,6 +14,9 @@
 //! snake_case, sum types carry an internal `"type"` tag with PascalCase
 //! names, and [`Value`] keeps its adjacent `{"type", "value"}` form. Unknown
 //! fields are refused everywhere.
+//! (Variants without fields are written as empty struct variants, e.g.
+//! `Text {}`, because serde ignores extra keys on internally tagged unit
+//! variants.) The format is specified field by field in SPEC §10.10.
 
 use std::collections::BTreeMap;
 
@@ -138,15 +141,15 @@ pub struct ArtifactColumn {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum ArtifactColumnType {
-    Integer,
-    BigInt,
-    Double,
-    Boolean,
-    Text,
-    Timestamp,
-    Uuid,
-    TransactionId,
-    Bytea,
+    Integer {},
+    BigInt {},
+    Double {},
+    Boolean {},
+    Text {},
+    Timestamp {},
+    Uuid {},
+    TransactionId {},
+    Bytea {},
     Enum {
         variants: Vec<String>,
     },
@@ -325,8 +328,8 @@ pub enum ArtifactPolicyExpr {
     Not {
         expr: Box<ArtifactPolicyExpr>,
     },
-    True,
-    False,
+    True {},
+    False {},
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -491,8 +494,8 @@ pub enum ArtifactPredicate {
     Not {
         expr: Box<ArtifactPredicate>,
     },
-    True,
-    False,
+    True {},
+    False {},
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -672,7 +675,13 @@ pub fn load(json: &[u8]) -> Result<LoadedApp, ArtifactError> {
                 "format {format} is not supported by this version of Jazz, which reads format {FORMAT}"
             )));
         }
-        None => return Err(ArtifactError::new("no `format`")),
+        None if raw.get("format").is_none() => return Err(ArtifactError::new("no `format`")),
+        None => {
+            return Err(ArtifactError::new(format!(
+                "`format` must be the integer {FORMAT}, not {}",
+                raw["format"]
+            )));
+        }
     }
     let artifact: AppArtifact = serde_json::from_value(raw)
         .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
@@ -1058,15 +1067,15 @@ fn column_from_artifact(column: &ArtifactColumn) -> ColumnDescriptor {
 
 fn column_type_to_artifact(column_type: &ColumnType) -> Result<ArtifactColumnType, String> {
     Ok(match column_type {
-        ColumnType::Integer => ArtifactColumnType::Integer,
-        ColumnType::BigInt => ArtifactColumnType::BigInt,
-        ColumnType::Double => ArtifactColumnType::Double,
-        ColumnType::Boolean => ArtifactColumnType::Boolean,
-        ColumnType::Text => ArtifactColumnType::Text,
-        ColumnType::Timestamp => ArtifactColumnType::Timestamp,
-        ColumnType::Uuid => ArtifactColumnType::Uuid,
-        ColumnType::TransactionId => ArtifactColumnType::TransactionId,
-        ColumnType::Bytea => ArtifactColumnType::Bytea,
+        ColumnType::Integer => ArtifactColumnType::Integer {},
+        ColumnType::BigInt => ArtifactColumnType::BigInt {},
+        ColumnType::Double => ArtifactColumnType::Double {},
+        ColumnType::Boolean => ArtifactColumnType::Boolean {},
+        ColumnType::Text => ArtifactColumnType::Text {},
+        ColumnType::Timestamp => ArtifactColumnType::Timestamp {},
+        ColumnType::Uuid => ArtifactColumnType::Uuid {},
+        ColumnType::TransactionId => ArtifactColumnType::TransactionId {},
+        ColumnType::Bytea => ArtifactColumnType::Bytea {},
         ColumnType::Enum { variants } => ArtifactColumnType::Enum {
             variants: variants.clone(),
         },
@@ -1108,15 +1117,15 @@ fn column_type_to_artifact(column_type: &ColumnType) -> Result<ArtifactColumnTyp
 
 fn column_type_from_artifact(column_type: &ArtifactColumnType) -> ColumnType {
     match column_type {
-        ArtifactColumnType::Integer => ColumnType::Integer,
-        ArtifactColumnType::BigInt => ColumnType::BigInt,
-        ArtifactColumnType::Double => ColumnType::Double,
-        ArtifactColumnType::Boolean => ColumnType::Boolean,
-        ArtifactColumnType::Text => ColumnType::Text,
-        ArtifactColumnType::Timestamp => ColumnType::Timestamp,
-        ArtifactColumnType::Uuid => ColumnType::Uuid,
-        ArtifactColumnType::TransactionId => ColumnType::TransactionId,
-        ArtifactColumnType::Bytea => ColumnType::Bytea,
+        ArtifactColumnType::Integer {} => ColumnType::Integer,
+        ArtifactColumnType::BigInt {} => ColumnType::BigInt,
+        ArtifactColumnType::Double {} => ColumnType::Double,
+        ArtifactColumnType::Boolean {} => ColumnType::Boolean,
+        ArtifactColumnType::Text {} => ColumnType::Text,
+        ArtifactColumnType::Timestamp {} => ColumnType::Timestamp,
+        ArtifactColumnType::Uuid {} => ColumnType::Uuid,
+        ArtifactColumnType::TransactionId {} => ColumnType::TransactionId,
+        ArtifactColumnType::Bytea {} => ColumnType::Bytea,
         ArtifactColumnType::Enum { variants } => ColumnType::Enum {
             variants: variants.clone(),
         },
@@ -1371,8 +1380,8 @@ fn policy_to_artifact(expr: &PolicyExpr) -> Result<ArtifactPolicyExpr, String> {
         PolicyExpr::Not(expr) => ArtifactPolicyExpr::Not {
             expr: Box::new(policy_to_artifact(expr)?),
         },
-        PolicyExpr::True => ArtifactPolicyExpr::True,
-        PolicyExpr::False => ArtifactPolicyExpr::False,
+        PolicyExpr::True => ArtifactPolicyExpr::True {},
+        PolicyExpr::False => ArtifactPolicyExpr::False {},
     })
 }
 
@@ -1454,8 +1463,8 @@ fn policy_from_artifact(expr: &ArtifactPolicyExpr) -> PolicyExpr {
         ArtifactPolicyExpr::And { exprs } => PolicyExpr::And(all(exprs)),
         ArtifactPolicyExpr::Or { exprs } => PolicyExpr::Or(all(exprs)),
         ArtifactPolicyExpr::Not { expr } => PolicyExpr::Not(Box::new(policy_from_artifact(expr))),
-        ArtifactPolicyExpr::True => PolicyExpr::True,
-        ArtifactPolicyExpr::False => PolicyExpr::False,
+        ArtifactPolicyExpr::True {} => PolicyExpr::True,
+        ArtifactPolicyExpr::False {} => PolicyExpr::False,
     }
 }
 
@@ -1781,8 +1790,8 @@ fn predicate_to_artifact(predicate: &RelationPredicate) -> ArtifactPredicate {
         RelationPredicate::Not(expr) => ArtifactPredicate::Not {
             expr: Box::new(predicate_to_artifact(expr)),
         },
-        RelationPredicate::True => ArtifactPredicate::True,
-        RelationPredicate::False => ArtifactPredicate::False,
+        RelationPredicate::True => ArtifactPredicate::True {},
+        RelationPredicate::False => ArtifactPredicate::False {},
     }
 }
 
@@ -1822,8 +1831,8 @@ fn predicate_from_artifact(predicate: &ArtifactPredicate) -> RelationPredicate {
         ArtifactPredicate::Not { expr } => {
             RelationPredicate::Not(Box::new(predicate_from_artifact(expr)))
         }
-        ArtifactPredicate::True => RelationPredicate::True,
-        ArtifactPredicate::False => RelationPredicate::False,
+        ArtifactPredicate::True {} => RelationPredicate::True,
+        ArtifactPredicate::False {} => RelationPredicate::False,
     }
 }
 

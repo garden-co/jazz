@@ -785,6 +785,158 @@ as `now()` require a deterministic authority/origin rule before they can be
 accepted. Merge-strategy-only changes still change schema identity because they
 change future merge behavior.
 
+### 10.10 The app artifact (`jazz.app.json`)
+
+`jazz.app.json` carries an app's schema versions, the migrations between
+them, the permissions of its current version, and metadata for typed code,
+in one language-neutral file. `jazz-tools validate` compiles the app's
+TypeScript and hands the result to the Rust writer
+(`jazz::tools::deployment::artifact::write`), the file's only writer. Every
+runtime reads it with `artifact::load`, its only reader. A backend publishes
+the file's deployment at startup and pins its sessions to its `bundle`.
+Clients open along its schemas and migrations and ignore its permissions.
+
+**Conventions.**
+- Fields are snake_case.
+- Every sum type is an object with an internal `"type"` tag naming a
+  PascalCase variant, e.g. `{"type": "Cmp", ...}`. A variant without fields
+  is `{"type": "<Variant>"}` and takes no other keys.
+- Plain enumerations are bare strings: `history`, `join_kind`, `direction`,
+  `row`, `op`, `operation`, `merge_strategy`.
+- A `Value` keeps the engine's adjacent form `{"type": "<Variant>", "value": ...}`,
+  with `BigInt` as a decimal string and `Null` as `{"type": "Null"}`.
+- Unknown fields are refused at every level.
+- The file mirrors engine types field for field, but its JSON is its own.
+  The engine's wire and catalogue encodings, schema hashes and bundle ids
+  do not depend on it.
+
+**Canonical text.** Object keys are sorted. Arrays keep their order. Indent
+is two spaces, and the file ends with a newline. Writing the same input
+twice gives identical bytes.
+
+**Top level.**
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `format` | integer | `1`. Read before anything else; any other value, or a non-integer, is refused. |
+| `current` | schema hash (64 hex) | The schema version the app's code is written against. MUST be one of `schemas`. |
+| `bundle` | bundle id (64 hex) | `bundle_id(current, permissions)`, computed as a store computes it when this deployment is published (§7, catalogue bundles). |
+| `schemas` | array of Schema | Every version the app ships, oldest first. Hashes are unique. |
+| `migrations` | array of Migration | Default `[]`. Each endpoint MUST be one of `schemas`. |
+| `permissions` | map table → TablePolicies | Default `{}`. For `current` only. Every key MUST be a table of `current`. |
+| `codegen` | Codegen | Default empty. Never affects a hash or bundle id. |
+
+**Schema** `{hash, tables}`. `hash` MUST equal `SchemaHash::compute` of
+`tables`. `tables` is a map from table name to Table.
+
+**Table.**
+- `columns`: array of Column, in declared order.
+- Optional `indexed_columns`: array of names.
+- Optional `composite_indexes`: array of arrays of names.
+- Optional `branch_by`: array of names.
+- Optional `history`: `"Full"` (the default, omitted) or `"Latest"`.
+- Tables carry no policies and no relations.
+
+**Column.**
+- `name`, `column_type`, `nullable` (bool).
+- Optional `references`: table name.
+- Optional `default`: Value.
+- Optional `merge_strategy`: `"Counter"`, `"GSet"`, `"Text"`, `"Markdown"` or
+  `"Html"`.
+
+**ColumnType** variants:
+- `Integer`, `BigInt`, `Double`, `Boolean`, `Text`, `Timestamp`, `Uuid`,
+  `TransactionId`, `Bytea`;
+- `Enum {variants: [string]}`;
+- `EnumPayload {cases: [{name, fields: [Column]}]}`;
+- `Json {schema?}`, where `schema` is a draft-07 JSON Schema;
+- `Array {element: ColumnType}`;
+- `Row {columns: [Column]}`.
+
+The catalogue-native enum types are not supported in the file yet. The writer
+refuses them.
+
+**Migration** `{from, to, forward: [TableLens]}`. `from` and `to` are schema
+hashes. A TableLens is `{table, added?, removed?, renamed_from?, operations?}`:
+- `added` and `removed` default to `false`, and `operations` to `[]`.
+- An added or removed table has no other changes.
+- Operations are `Introduce {column, column_type, default}`,
+  `Drop {column, column_type, default}` and `Rename {from, to}`.
+- Every migration MUST pass the lens checks a deployment runs (§10.6). Where
+  it sits in the whole history is the store's to judge, because the store's
+  catalogue may hold versions the file no longer ships.
+
+**TablePolicies** `{select?, insert?, update?, delete?}`. Each is
+`{using?, with_check?}`, and each of those is a PolicyExpr.
+
+**PolicyExpr** variants:
+- comparisons: `Cmp {column, op, value: PolicyValue}` and
+  `SessionCmp {path, op, value: Value}`, where `op` is `Eq`, `Ne`, `Lt`, `Le`,
+  `Gt` or `Ge`;
+- null checks: `IsNull {column}`, `SessionIsNull {path}`, `IsNotNull {column}`,
+  `SessionIsNotNull {path}`;
+- containment and lists: `Contains {column, value: PolicyValue}`,
+  `SessionContains {path, value}`, `In {column, session_path}`,
+  `InList {column, values: [PolicyValue]}`, `SessionInList {path, values}`;
+- relations: `Exists {table, condition}`, `ExistsRel {rel: RelationExpr}`,
+  `Inherits {operation, via_column, max_depth?}`,
+  `InheritsReferencing {operation, source_table, via_column, max_depth?}`;
+- logic: `And {exprs}`, `Or {exprs}`, `Not {expr}`, `True`, `False`.
+
+A PolicyValue is `Literal {value: Value}` or `SessionRef {path}`. The
+permissions MUST compile against `current`, as a deployment compiles them
+(§7).
+
+**RelationExpr** variants:
+- `TableScan {table, alias?}`;
+- `Filter {input, predicate}`;
+- `Union {inputs: [{label, input}]}`;
+- `Join {left, right, on: [{left, right}], join_kind: "Inner"|"Left"}`;
+- `Project {input, columns: [{alias, expr: KeyRef}]}`;
+- `Gather {seed, step, frontier_key: KeyRef, max_depth?, dedupe_key: [KeyRef]}`,
+  where an absent `max_depth` means until a fixpoint;
+- `Distinct {input, key: [KeyRef]}`;
+- `OrderBy {input, terms: [{column, direction: "Asc"|"Desc"}]}`;
+- `Offset {input, offset}` and `Limit {input, limit}`.
+
+Supporting types:
+- A ColumnRef is `{scope?, column}`.
+- A KeyRef is `Column {column: ColumnRef}` or
+  `RowId {row: "Current"|"Outer"|"Frontier"}`.
+- **Predicate** variants are `Cmp {left, op, right: ValueRef}`,
+  `IsNull {column}`, `IsNotNull {column}`, `In {left, values}`,
+  `Contains {left, right}`, `EnumMatch {column, case, payload}`,
+  `And {exprs}`, `Or {exprs}`, `Not {expr}`, `True` and `False`.
+- **ValueRef** variants are `Literal {value}`, `Param {name}`,
+  `SessionRef {path}`, `OuterColumn {column}`, `FrontierColumn {column}` and
+  `RowId {row}`. A `Literal` keeps the relation IR's JSON form, either a bare
+  JSON value or a typed Value, as the engine reads it.
+
+The engine's own JSON for the relation IR is externally tagged because it is
+also postcard-encoded on the query wire. This section's form exists only in
+the file.
+
+**Codegen.** `codegen` is `{tables?, slices?}`. `tables` maps a table of
+`current` to `{relations?, ts_only?}`:
+- `relations` maps a name to `Forward {table, column}` or
+  `Reverse {table, relation}`. A forward relation's `column` MUST be a column
+  of its own table. A reverse relation's `relation` MUST name a forward
+  relation on `table` that points back.
+- `ts_only` lists `Computed {column}` (not stored) and `Transform {column}`
+  (a stored column with a TS-only transform, which MUST exist). Other
+  languages emit nothing for a computed column, emit the stored type for a
+  transformed one, and warn for both.
+
+`slices` maps an exported slice's name to a non-empty array of tables of
+`current`.
+
+**Refusals.** `load` refuses a file that breaks any rule above. The error
+names the field and, where regenerating fixes it, says to run
+`jazz-tools validate`. `write` runs the same checks, so it never emits a file
+`load` would refuse.
+
+Fixtures: `crates/jazz/fixtures/app-artifact/`.
+
 ### Active schema and local schema
 
 The authority's **active schema** selects one structural schema and one explicit
