@@ -452,6 +452,17 @@ pub fn decode_schema(schema: &[u8]) -> HostResult<JazzSchema> {
     Ok(jazz_model::model::public_schema_convert::decode_public_schema_json(schema)?)
 }
 
+/// [`decode_schema`], refusing too what a deployment may not introduce
+/// (`check_deployable_policies`): what `jazz-tools validate` checks.
+/// Opening a store decodes its schema with [`decode_schema`] alone.
+pub fn validate_deployable_schema(schema: &[u8]) -> HostResult<JazzSchema> {
+    use jazz_model::model::public_schema_convert::check_deployable_policies;
+    let decoded = decode_schema(schema)?;
+    check_deployable_policies(decoded.public_schema())
+        .map_err(|error| format!("compile public schema: {error}"))?;
+    Ok(decoded)
+}
+
 /// How long a Remote one-shot read waits for the server to cover it
 /// without progress before failing with `NotObserved` (see
 /// [`CoverageBudget`]).
