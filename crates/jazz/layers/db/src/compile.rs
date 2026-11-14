@@ -568,6 +568,12 @@ impl<'a> Ctx<'a> {
     /// table is its effective rows: head rows (tombstones included, so they
     /// mask), then base rows the head does not override. Filters, policies,
     /// ordering and windows all apply after this masking.
+    /// Whether [`Ctx::source`] reads `table`'s stored table itself, not
+    /// a branch view or a cut over it.
+    fn reads_table_directly(&self, table: &Table) -> bool {
+        self.cut.is_none() && (self.view.is_none() || table.branch_by.is_empty())
+    }
+
     pub(crate) fn source(&mut self, table: &Table) -> Result<String, Error> {
         // Explicit columns: a schema view reads its own columns of the
         // physical (unioned) table.
@@ -1506,7 +1512,11 @@ impl<'a> Ctx<'a> {
     ///
     /// `None` when the batched statement would return more columns than
     /// [`BATCH_COLUMNS_MAX`] where the per-parent one fits: it adds the
-    /// parent's index, and a page its row number.
+    /// parent's index, and a page of an array of references its row
+    /// number. `None` too for a page of a reverse relation read through a
+    /// branch view or a cut: the per-parent statement reaches each
+    /// parent's page through the view, where the batched one would read
+    /// the view whole for every parent.
     pub fn compile_children_batch(
         self,
         array: &ArraySubquery,
@@ -1516,9 +1526,14 @@ impl<'a> Ctx<'a> {
     ) -> Result<Option<(Compiled, usize)>, Error> {
         let child = self.schema.table(&array.table)?;
         let paged = array.limit.is_some() || array.offset > 0;
+        if paged && !elements && !self.reads_table_directly(child) {
+            return Ok(None);
+        }
         // id, _clock, _state, the projection, _writer, the parent's index
-        // and, paged, the row number.
-        let width = projection(child, array.select.as_deref())?.len() + 5 + usize::from(paged);
+        // and, for a page of an array of references, the row number.
+        let width = projection(child, array.select.as_deref())?.len()
+            + 5
+            + usize::from(paged && elements);
         if width > BATCH_COLUMNS_MAX {
             return Ok(None);
         }
@@ -1622,8 +1637,9 @@ impl<'a> Ctx<'a> {
                     // parent and stops at the page's end. Numbering every
                     // child in a window instead reads all of each parent's
                     // children (a room's whole history for its newest
-                    // message). A source holds one row per (id, branch), so
-                    // the outer read joins the page back by those.
+                    // message). The source is the stored table (see
+                    // `compile_children_batch`), one row per (id, branch),
+                    // so the outer read seeks the page back by those.
                     let limit = self.bind(Sql::Integer(array.limit.map_or(-1, |l| l as i64)));
                     let offset = self.bind(Sql::Integer(array.offset as i64));
                     let page_source = self.source(child)?;

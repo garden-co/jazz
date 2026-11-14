@@ -1591,6 +1591,119 @@ mod branch_views {
         removed.sort();
         (shown(added), shown(updated), removed)
     }
+
+    /// A page of a reverse relation read through a branch view (or a
+    /// snapshot) does about the work of the per-parent statements: the
+    /// batch reads it per parent there, since a batched statement would
+    /// read the view's `UNION ALL` whole for every parent.
+    #[test]
+    fn a_page_through_a_view_does_about_the_per_parent_work() {
+        const POSTS: usize = 5;
+        const PER_POST: usize = 600;
+        let schema = compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("posts")
+                        .column("branch_id", ColumnType::Uuid)
+                        .column("rank", ColumnType::Integer)
+                        .branch_by("branch_id")
+                        .policies(read_and_allow_all_writes(PolicyExpr::True)),
+                )
+                .table(
+                    TableSchemaBuilder::new("comments")
+                        .column("branch_id", ColumnType::Uuid)
+                        .fk_column("post", "posts")
+                        .column("rank", ColumnType::Integer)
+                        .composite_index(["post", "rank"])
+                        .branch_by("branch_id")
+                        .policies(read_and_allow_all_writes(PolicyExpr::True)),
+                )
+                .build(),
+        );
+        let db = block_on(Db::open(DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x56; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        let insert = |table: &str, row: RowUuid, values, target| {
+            block_on(db.insert(
+                table,
+                values,
+                InsertOptions {
+                    row_id: Some(row),
+                    target,
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        };
+        for p in 0..POSTS {
+            insert(
+                "posts",
+                id(5, p),
+                cells(vec![("rank", Value::I32(p as i32))]),
+                ExactWriteTarget::Branch(base()),
+            );
+            for k in 0..PER_POST {
+                // A third of the comments only the head has.
+                let branch = if k % 3 == 0 { head() } else { base() };
+                insert(
+                    "comments",
+                    id(6, p * PER_POST + k),
+                    cells(vec![
+                        ("post", post(p)),
+                        ("rank", Value::I32((k / 2) as i32)),
+                    ]),
+                    ExactWriteTarget::Branch(branch),
+                );
+            }
+        }
+        block_on(db.tick()).unwrap();
+        let frozen = block_on(db.capture_snapshot()).unwrap();
+        let views = [
+            (
+                "head over live base",
+                ReadOpts::default().branch_view(head(), Some(BranchViewBase::Current(base()))),
+            ),
+            (
+                "head over frozen base",
+                ReadOpts::default()
+                    .branch_view(head(), Some(BranchViewBase::snapshot(base(), frozen))),
+            ),
+            ("base", ReadOpts::default().branch_view(base(), None)),
+        ];
+        for (view, opts) in &views {
+            for (offset, limit) in [(0, Some(1)), (PER_POST - 3, None)] {
+                let mut page = ArraySubquery::new("comments", "comments", "post", "id")
+                    .order_by("rank", OrderDirection::Desc)
+                    .offset(offset);
+                if let Some(limit) = limit {
+                    page = page.limit(limit);
+                }
+                let prepared = db
+                    .prepare_query(&Query::from("posts").array_subquery(page))
+                    .unwrap();
+                let read = |mode| {
+                    set_mode(mode);
+                    jazz::db::take_vm_steps_for_test();
+                    let tree = block_on(db.all_result_tree(&prepared, opts.clone())).unwrap();
+                    (tree, jazz::db::take_vm_steps_for_test())
+                };
+                let (per_parent, per_parent_steps) = read((true, false));
+                let (batched, batched_steps) = read((true, true));
+                set_mode((true, true));
+                assert_eq!(batched, per_parent, "{view}, offset {offset}");
+                assert!(
+                    batched_steps <= 2 * per_parent_steps + 1_000,
+                    "{view}, offset {offset}, limit {limit:?}: batched read took \
+                     {batched_steps} SQLite steps, per parent {per_parent_steps}"
+                );
+            }
+        }
+    }
 }
 
 /// A paged reverse relation, batched, reads each parent's page as that
