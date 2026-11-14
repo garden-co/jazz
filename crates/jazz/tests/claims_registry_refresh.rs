@@ -67,7 +67,7 @@ fn count(s: &mut SubscriptionStream, mut n: usize) -> usize {
                 }
                 n = n.checked_sub(removed.len()).unwrap() + added.len();
             }
-            SubscriptionEvent::Rejected { reason } => panic!("{reason}"),
+            SubscriptionEvent::Rejected { reason, .. } => panic!("{reason}"),
             _ => {}
         }
     }
@@ -76,7 +76,7 @@ fn count(s: &mut SubscriptionStream, mut n: usize) -> usize {
 /// Alice executes a query carrying Bob's request claims. Bob's claims are ignored
 /// by execution, so Alice's registry remains live and must drive revocation.
 #[test]
-fn review_cross_subject_request_claims_follow_effective_registry() {
+fn cross_subject_request_claims_follow_effective_registry() {
     let db = open(schema(
         PolicyExpr::eq_session("body", vec!["claims".into(), "body".into()]),
         false,
