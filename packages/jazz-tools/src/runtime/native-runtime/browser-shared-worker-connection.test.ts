@@ -1332,6 +1332,96 @@ describe("broker worker that never starts", () => {
   });
 });
 
+describe("broker SharedWorker under the Vite dev server's pre-bundle", () => {
+  it("constructs the worker where the dev server resolves the package, for lease and runtime alike", async () => {
+    vi.resetModules();
+    vi.doMock("../browser-worker-assets.js", () => ({
+      browserRuntimeModuleUrl: () =>
+        "http://localhost:5173/node_modules/.vite/deps/chunk-7ATA2QW3.js?v=7d09ffa4",
+      bundledBrowserWorkerUrl: () =>
+        "http://localhost:5173/node_modules/worker/jazz-broker-worker.js",
+    }));
+    try {
+      const connection = await import("./browser-shared-worker-connection.js");
+      const urls: string[] = [];
+      const names: string[] = [];
+      const leasePort = new DelayedLeasePort(0);
+      vi.stubGlobal(
+        "SharedWorker",
+        class {
+          readonly port = leasePort;
+
+          constructor(url: URL | string, options: { name: string }) {
+            urls.push(String(url));
+            names.push(options.name);
+          }
+        },
+      );
+      const lease = await connection.SharedBrowserForegroundNodeLease.acquire({
+        dbName: "prebundled-root",
+        storageOwner: "owner",
+      });
+      await lease.retire();
+      expect(urls).toEqual(["http://localhost:5173/@id/jazz-tools/_worker/broker"]);
+
+      const runtimePort = new ScriptedRuntimePort(() => undefined);
+      vi.stubGlobal(
+        "SharedWorker",
+        class {
+          readonly port = runtimePort;
+
+          constructor(url: URL | string, options: { name: string }) {
+            urls.push(String(url));
+            names.push(options.name);
+          }
+        },
+      );
+      const runtime = new connection.SharedBrowserWorkerConnection(
+        {
+          connectUpstreamPeer: () => ({ recvWireFrames: () => [] }),
+          onPeerTransportWork: () => () => undefined,
+          onLocalSettlementChange: () => () => undefined,
+          progressPeerTransport: async () => undefined,
+          retirePeerTransport: async () => undefined,
+          reportRemoteServerTransportError: vi.fn(),
+          reportRemoteMutationError: vi.fn(),
+          flushLocalSettlements: async () => undefined,
+        } as never,
+        {
+          schema: {},
+          dbName: "prebundled-root",
+          author: new Uint8Array(16),
+          initialSyncFlushEvery: 1,
+          appId: "app",
+          storageOwner: "owner",
+          authSessionKey: "scope",
+          authJson: "{}",
+          sessionClaims: {},
+        },
+        "runtime-fingerprint",
+        {
+          onAuthFailure: vi.fn(),
+          onAuthRestored: vi.fn(),
+          onExplicitOfflineChange: vi.fn(),
+          onFailure: vi.fn(),
+          onStorageReset: vi.fn(),
+          onStorageInvalidated: vi.fn(),
+        },
+      );
+      await runtime.shutdown();
+      // One realm: same script URL and name for the lease and the runtime.
+      expect(urls).toEqual([
+        "http://localhost:5173/@id/jazz-tools/_worker/broker",
+        "http://localhost:5173/@id/jazz-tools/_worker/broker",
+      ]);
+      expect(names[1]).toBe(names[0]);
+    } finally {
+      vi.doUnmock("../browser-worker-assets.js");
+      vi.resetModules();
+    }
+  });
+});
+
 describe("broker SharedWorker construction", () => {
   it("has exactly one bundler-visible broker worker construction site (#3801)", async () => {
     // webpack 5 emits one worker chunk, with its own URL, per

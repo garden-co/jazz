@@ -163,17 +163,13 @@ The local-first client loads Jazz's Wasm in the browser, and your backend loads 
     export default defineConfig({
       // plugins: your framework's plugin (React, Vue, Svelte, Solid, SvelteKit) ...
       // Load the Wasm as a real module instead of pre-bundling it.
-      // On Vite 6 or 7: exclude: ["jazz-wasm", "jazz-tools"] (see below).
       optimizeDeps: { exclude: ["jazz-wasm"] },
     });
     ```
 
-    On Vite 6 or 7, also exclude `jazz-tools`; otherwise `vite dev` can't load Jazz's worker and the
-    client stays thin. Those versions pre-bundle `jazz-tools` without rewriting the URL of its worker,
-    so the dev server answers it with your `index.html`, and after about 10 seconds the upgrade gives
-    up ("Shared browser runtime did not issue a foreground node lease"). Vite 8 rewrites the URL, so
-    `jazz-wasm` alone is enough there; that includes SvelteKit 3, while SvelteKit 2 runs on Vite 7.
-    Production builds aren't affected.
+    `jazz-wasm` is the only package to exclude. Vite still pre-bundles `jazz-tools` under `vite dev`,
+    and Jazz then has the dev server load its worker from the `jazz-tools` package. Before alpha.62,
+    Vite 6 and 7 also needed `jazz-tools` excluded; keeping that exclude does no harm.
 
     It needs Vite 6 or later: Vite 5 answers the local-first chunk with a 500, "Vite is unable to
     parse the worker options as the value is not static". This is the same for React, Vue, Svelte,

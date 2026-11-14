@@ -2,7 +2,9 @@ import {
   createBrowserWorkerAssetScope,
   resolveBrowserWorkerRuntimeSources,
   resolveBrowserWorkerUrl,
+  vitePrebundledBrokerWorkerUrl,
 } from "../browser-worker-config.js";
+import { browserRuntimeModuleUrl } from "../browser-worker-assets.js";
 import {
   BrowserWorkerUnresponsiveError,
   deserializeBrowserRelayError,
@@ -48,6 +50,10 @@ function createBrokerSharedWorker(
   if (usesJazzResolvedWorkerUrl(runtimeSources)) {
     return new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), { type: "module", name });
   }
+  // Under the Vite dev server's pre-bundle the literal below points nowhere
+  // (Vite 6/7); the dev server resolves the worker by package instead.
+  const prebundledUrl = vitePrebundledBrokerWorkerUrl(browserRuntimeModuleUrl());
+  if (prebundledUrl) return new SharedWorker(prebundledUrl, { type: "module", name });
   return new SharedWorker(new URL("../../worker/jazz-broker-worker.js", import.meta.url), {
     type: "module",
     name,
@@ -82,8 +88,8 @@ function watchBrokerWorkerStart(
     void describeBrokerWorkerLoadFailure({
       workerUrl: usesJazzResolvedWorkerUrl(runtimeSources)
         ? resolveBrowserWorkerUrl(runtimeSources)
-        : undefined,
-      moduleUrl: import.meta.url,
+        : vitePrebundledBrokerWorkerUrl(browserRuntimeModuleUrl()),
+      moduleUrl: browserRuntimeModuleUrl(),
     }).then(onFailure);
   };
   const stop = () => {
