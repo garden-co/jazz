@@ -33,7 +33,7 @@ export class DirectConnectionManager extends ConnectionManager {
    * while the app renders. The client created later takes the connection. */
   private dialAhead(): void {
     const { config, runtimeSource } = this.host;
-    if (!runtimeSource.dialAhead || runtimeSource.nativeConnection) return;
+    if (!runtimeSource?.dialAhead || runtimeSource.nativeConnection) return;
     if (!config.serverUrl || this.isExplicitlyOffline() || this.getCurrentClient()) return;
     const auth = transportAuth(config, config);
     if (!auth) return;
@@ -171,7 +171,7 @@ export class DirectConnectionManager extends ConnectionManager {
         await this.host.runtimeSource?.nativeConnection.disconnect();
       } else {
         // Offline before the first query: the connection dialled ahead goes too.
-        this.host.runtimeSource.cancelDialAhead?.();
+        this.host.runtimeSource?.cancelDialAhead?.();
         await this.clientEntry?.client.disconnectTransport();
       }
       // An in-flight or failed disconnect is not permission for a

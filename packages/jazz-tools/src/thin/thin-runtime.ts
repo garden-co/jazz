@@ -172,6 +172,9 @@ export class DialedThinCarrier {
         else this.ended = true;
       },
     });
+    // Closed before a runtime took it, nobody waits for its hello: `onTerminal`
+    // says why it ended.
+    void this.carrier.ready().catch(() => undefined);
   }
 
   /** Hand the connection over, to a runtime opening `url` with `authJson`
