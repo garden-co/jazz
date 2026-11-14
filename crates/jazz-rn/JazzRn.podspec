@@ -76,6 +76,8 @@ Pod::Spec.new do |s|
   end
   File.symlink(relay_framework, payload_link) unless File.symlink?(payload_link)
   s.vendored_frameworks = "ios-payload/JazzNativeRelay.xcframework"
+  # NWPathMonitor tells the relay when the device's network path changes.
+  s.frameworks = "Network"
   s.pod_target_xcconfig = { "HEADER_SEARCH_PATHS" => relay_header_search_path }
   # Use install_modules_dependencies helper to install the dependencies if React Native version >=0.71.0.
   # See https://github.com/facebook/react-native/blob/febf6b7f33fdb4904669f99d795eba4c0f95d7bf/scripts/cocoapods/new_architecture.rb#L79.
