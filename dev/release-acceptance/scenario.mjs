@@ -16,13 +16,19 @@ const accountIdOf = (snap) => (deviceAccounts ? snap.user?.accountId : snap.acco
 const { createJazz, remote } = backendModule;
 // Baseline packages that predate the rename call it createJazzSession.
 const createJazzClient = backendModule.createJazzClient ?? backendModule.createJazzSession;
-const app = s.defineApp(
-  {
-    docs: s.table({ label: s.string(), body: s.string(), metadata: s.json() }, {}),
-    denied: s.table({ value: s.string() }, {}),
-  },
-  { migrations: "none" },
+const definition = {
+  docs: s.table({ label: s.string(), body: s.string(), metadata: s.json() }, {}),
+  denied: s.table({ value: s.string() }, {}),
+};
+// createJazz refuses `{ migrations: "none" }` with remote() from alpha.62:
+// ship the app's single version, as its generated migrations module would.
+// Baseline packages without `appMigrations` take "none".
+const { appMigrations } = await import(pathToFileURL(require.resolve("jazz-tools/testing"))).catch(
+  () => ({}),
 );
+const app = s.defineApp(definition, {
+  migrations: typeof appMigrations === "function" ? await appMigrations(definition) : "none",
+});
 const permissions = s.definePermissions(app, ({ policy }) => {
   for (const op of ["allowRead", "allowInsert", "allowUpdate", "allowDelete"])
     policy.docs[op].always();
