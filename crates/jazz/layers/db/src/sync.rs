@@ -14147,22 +14147,7 @@ impl Db {
                     };
                     then.push((row, at));
                 }
-                // A client before alpha.64 records an aggregate's rows by
-                // their group alone (no values): it still validates so, as
-                // it did, rather than conflicting on every such read until
-                // it upgrades. Its aggregate reads stay unchecked by value.
-                let legacy = || -> Result<bool, Error> {
-                    if read.query.aggregate.is_none() {
-                        return Ok(false);
-                    }
-                    let groups: Vec<([u8; 16], Option<Pos>)> = inner
-                        .read_versions_as(&prepared, identity, &spec, false)?
-                        .iter()
-                        .map(|(row, at)| (*row.0.as_bytes(), Some(at.0)))
-                        .collect();
-                    Ok(groups == then)
-                };
-                if now != then && !legacy().map_err(|e| (e, Vec::new()))? {
+                if now != then {
                     let rows = mentioned(&inner);
                     return Err((Error::serialization_conflict(), rows));
                 }

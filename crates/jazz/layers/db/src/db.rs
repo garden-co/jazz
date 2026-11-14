@@ -5285,25 +5285,12 @@ impl Inner {
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
     ) -> Result<Vec<(RowUuid, sync::Rank)>, Error> {
-        self.read_versions_as(prepared, identity, read, true)
-    }
-
-    /// [`Inner::read_versions`]; with `valued` false, an aggregate's rows
-    /// by their group alone, as clients before alpha.64 record them (see
-    /// the authority's validation in `sync.rs`).
-    pub(crate) fn read_versions_as(
-        &self,
-        prepared: &PreparedQuery,
-        identity: Option<AuthorSubject>,
-        read: &ReadSpec,
-        valued: bool,
-    ) -> Result<Vec<(RowUuid, sync::Rank)>, Error> {
         let roots = self.run(prepared, identity, read)?;
         let mut out = versions(&roots);
         // An aggregate's rows have no version of their own (each is a
         // group, at position 0): named by their values too, a group whose
         // value changed reads as another row, so the commit conflicts.
-        if valued && prepared.query.aggregate.is_some() {
+        if prepared.query.aggregate.is_some() {
             for (version, row) in out.iter_mut().zip(&roots) {
                 version.1 = aggregate_read_id(row);
             }
