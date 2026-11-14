@@ -1,0 +1,31 @@
+name: Live agent brief
+
+# `npm create jazz` prints the agent brief live from https://jazz.tools/quickstart.md,
+# so a docs prod that lags main hands agents an old brief. This fails while the
+# live brief differs from main's docs/public/quickstart.md more than a day after
+# it last changed. The docs prod deploy runs the same check, without the grace.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-brief:
+    name: Live brief matches main
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          # The brief's last change date needs its history, not the blobs.
+          fetch-depth: 0
+          filter: blob:none
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+      - run: node dev/scripts/check-live-brief.mjs --grace-hours 24

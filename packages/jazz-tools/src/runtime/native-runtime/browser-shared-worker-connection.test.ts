@@ -1363,7 +1363,9 @@ describe("broker SharedWorker under the Vite dev server's pre-bundle", () => {
         storageOwner: "owner",
       });
       await lease.retire();
-      expect(urls).toEqual(["http://localhost:5173/@id/jazz-tools/_worker/broker"]);
+      expect(urls).toEqual([
+        "http://localhost:5173/@id/jazz-tools/_worker/broker?worker_file&type=module",
+      ]);
 
       const runtimePort = new ScriptedRuntimePort(() => undefined);
       vi.stubGlobal(
@@ -1412,8 +1414,8 @@ describe("broker SharedWorker under the Vite dev server's pre-bundle", () => {
       await runtime.shutdown();
       // One realm: same script URL and name for the lease and the runtime.
       expect(urls).toEqual([
-        "http://localhost:5173/@id/jazz-tools/_worker/broker",
-        "http://localhost:5173/@id/jazz-tools/_worker/broker",
+        "http://localhost:5173/@id/jazz-tools/_worker/broker?worker_file&type=module",
+        "http://localhost:5173/@id/jazz-tools/_worker/broker?worker_file&type=module",
       ]);
       expect(names[1]).toBe(names[0]);
     } finally {
