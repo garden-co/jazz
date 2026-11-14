@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createJazzClient, type Db, type JazzClientConfig } from "jazz-tools";
-import { deployApp } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
+import { deployApp } from "../../../../../../packages/jazz-tools/tests/browser/deploy.js";
 import {
   TestCleanup,
   uniqueDbName,
