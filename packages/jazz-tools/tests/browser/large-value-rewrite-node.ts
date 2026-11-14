@@ -1,11 +1,12 @@
-import { createJazz, remote, type Jazz } from "../../src/backend/create-jazz.js";
+import { createTestJazz, remote, type Jazz } from "../../src/backend/create-jazz.js";
 import {
   largeValueRewriteApp as app,
   largeValueRewritePermissions,
 } from "./large-value-rewrite-schema.js";
 import type { JazzServerInfo } from "./testing-server.js";
 
-// The app's backend, run against the core in `info` (as the app runs it).
+// The app's backend, run against the test core in `info` (as the app runs it,
+// but on `{ migrations: "none" }`, as `startTestJazz` runs a test's app).
 const backends = new Map<string, Jazz>();
 
 function backendDb(appId: string) {
@@ -15,7 +16,7 @@ function backendDb(appId: string) {
 }
 
 export async function largeValueRewriteBackendOpen(info: JazzServerInfo): Promise<void> {
-  const jazz = createJazz({
+  const jazz = createTestJazz({
     app,
     permissions: largeValueRewritePermissions,
     store: remote({ url: info.serverUrl, appId: info.appId, secret: info.adminSecret }),
