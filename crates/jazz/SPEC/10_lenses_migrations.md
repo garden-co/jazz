@@ -785,18 +785,25 @@ as `now()` require a deterministic authority/origin rule before they can be
 accepted. Merge-strategy-only changes still change schema identity because they
 change future merge behavior.
 
-### 10.10 The app artifact (`jazz.app.json`)
+### 10.10 The app's files (`jazz.app.json`, `jazz.permissions.json`)
 
-`jazz.app.json` carries an app's schema versions, the migrations between
-them, the permissions of its current version, and metadata for typed code,
-in one language-neutral file. `jazz-tools validate` compiles the app's
-TypeScript and hands the result to the Rust writer
-(`jazz::tools::deployment::artifact::write`), the file's only writer. Every
-runtime reads it with `artifact::load`, its only reader. A backend publishes
-the file's deployment at startup and pins its sessions to its `bundle`.
-Clients open along its schemas and migrations and ignore its permissions.
+An app is described by two language-neutral files beside its `schema.ts`:
+
+- `jazz.app.json` carries the app's schema versions, the migrations between
+  them, and metadata for typed code. The app and its clients ship it.
+- `jazz.permissions.json` carries the permissions of the current version
+  and their bundle id. Only backends read it, so no client bundle carries
+  the app's policies.
+
+`jazz-tools validate` compiles the app's TypeScript and hands the result to
+the Rust writer (`jazz::tools::deployment::artifact::write`), the files'
+only writer, which renders both. A backend reads both with `artifact::load`,
+publishes their deployment at startup and pins its sessions to the
+permissions file's `bundle`. Clients open along the app file's schemas and
+migrations.
 
 **Conventions.**
+
 - Fields are snake_case.
 - Every sum type is an object with an internal `"type"` tag naming a
   PascalCase variant, e.g. `{"type": "Cmp", ...}`. A variant without fields
@@ -806,30 +813,38 @@ Clients open along its schemas and migrations and ignore its permissions.
 - A `Value` keeps the engine's adjacent form `{"type": "<Variant>", "value": ...}`,
   with `BigInt` as a decimal string and `Null` as `{"type": "Null"}`.
 - Unknown fields are refused at every level.
-- The file mirrors engine types field for field, but its JSON is its own.
+- The files mirror engine types field for field, but their JSON is their own.
   The engine's wire and catalogue encodings, schema hashes and bundle ids
   do not depend on it.
 
 **Canonical text.** Object keys are sorted. Arrays keep their order. Indent
-is two spaces, and the file ends with a newline. Writing the same input
+is two spaces, and each file ends with a newline. Writing the same input
 twice gives identical bytes.
 
-**Top level.**
+**`jazz.app.json`, top level.**
 
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `format` | integer | `1`. Read before anything else; any other value, or a non-integer, is refused. |
-| `current` | schema hash (64 hex) | The schema version the app's code is written against. MUST be one of `schemas`. |
-| `bundle` | bundle id (64 hex) | `bundle_id(current, permissions)`, computed as a store computes it when this deployment is published (§7, catalogue bundles). |
-| `schemas` | array of Schema | Every version the app ships, oldest first. Hashes are unique. |
-| `migrations` | array of Migration | Default `[]`. Each endpoint MUST be one of `schemas`. |
-| `permissions` | map table → TablePolicies | Default `{}`. For `current` only. Every key MUST be a table of `current`. |
-| `codegen` | Codegen | Default empty. Never affects a hash or bundle id. |
+| Field        | Type                 | Meaning                                                                         |
+| ------------ | -------------------- | ------------------------------------------------------------------------------- |
+| `format`     | integer              | `1`. Read before anything else; any other value, or a non-integer, is refused.  |
+| `current`    | schema hash (64 hex) | The schema version the app's code is written against. MUST be one of `schemas`. |
+| `schemas`    | array of Schema      | Every version the app ships, oldest first. Hashes are unique.                   |
+| `migrations` | array of Migration   | Default `[]`. Each endpoint MUST be one of `schemas`.                           |
+| `codegen`    | Codegen              | Default empty. Never affects a hash or bundle id.                               |
+
+**`jazz.permissions.json`, top level.**
+
+| Field         | Type                      | Meaning                                                                                                                      |
+| ------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `format`      | integer                   | `1`, read as the app file's `format` is.                                                                                     |
+| `schema`      | schema hash (64 hex)      | The schema the permissions were compiled for. MUST equal the app file's `current`: the two files are written together.       |
+| `permissions` | map table → TablePolicies | Default `{}`. Every key MUST be a table of `schema`.                                                                         |
+| `bundle`      | bundle id (64 hex)        | `bundle_id(schema, permissions)`, computed as a store computes it when this deployment is published (§7, catalogue bundles). |
 
 **Schema** `{hash, tables}`. `hash` MUST equal `SchemaHash::compute` of
 `tables`. `tables` is a map from table name to Table.
 
 **Table.**
+
 - `columns`: array of Column, in declared order.
 - Optional `indexed_columns`: array of names.
 - Optional `composite_indexes`: array of arrays of names.
@@ -838,6 +853,7 @@ twice gives identical bytes.
 - Tables carry no policies and no relations.
 
 **Column.**
+
 - `name`, `column_type`, `nullable` (bool).
 - Optional `references`: table name.
 - Optional `default`: Value.
@@ -845,6 +861,7 @@ twice gives identical bytes.
   `"Html"`.
 
 **ColumnType** variants:
+
 - `Integer`, `BigInt`, `Double`, `Boolean`, `Text`, `Timestamp`, `Uuid`,
   `TransactionId`, `Bytea`;
 - `Enum {variants: [string]}`;
@@ -858,6 +875,7 @@ refuses them.
 
 **Migration** `{from, to, forward: [TableLens]}`. `from` and `to` are schema
 hashes. A TableLens is `{table, added?, removed?, renamed_from?, operations?}`:
+
 - `added` and `removed` default to `false`, and `operations` to `[]`.
 - An added or removed table has no other changes.
 - Operations are `Introduce {column, column_type, default}`,
@@ -870,6 +888,7 @@ hashes. A TableLens is `{table, added?, removed?, renamed_from?, operations?}`:
 `{using?, with_check?}`, and each of those is a PolicyExpr.
 
 **PolicyExpr** variants:
+
 - comparisons: `Cmp {column, op, value: PolicyValue}` and
   `SessionCmp {path, op, value: Value}`, where `op` is `Eq`, `Ne`, `Lt`, `Le`,
   `Gt` or `Ge`;
@@ -884,10 +903,11 @@ hashes. A TableLens is `{table, added?, removed?, renamed_from?, operations?}`:
 - logic: `And {exprs}`, `Or {exprs}`, `Not {expr}`, `True`, `False`.
 
 A PolicyValue is `Literal {value: Value}` or `SessionRef {path}`. The
-permissions MUST compile against `current`, as a deployment compiles them
+permissions MUST compile against `schema`, as a deployment compiles them
 (§7).
 
 **RelationExpr** variants:
+
 - `TableScan {table, alias?}`;
 - `Filter {input, predicate}`;
 - `Union {inputs: [{label, input}]}`;
@@ -900,6 +920,7 @@ permissions MUST compile against `current`, as a deployment compiles them
 - `Offset {input, offset}` and `Limit {input, limit}`.
 
 Supporting types:
+
 - A ColumnRef is `{scope?, column}`.
 - A KeyRef is `Column {column: ColumnRef}` or
   `RowId {row: "Current"|"Outer"|"Frontier"}`.
@@ -918,6 +939,7 @@ the file.
 
 **Codegen.** `codegen` is `{tables?, slices?}`. `tables` maps a table of
 `current` to `{relations?, ts_only?}`:
+
 - `relations` maps a name to `Forward {table, column}` or
   `Reverse {table, relation}`. A forward relation's `column` MUST be a column
   of its own table. A reverse relation's `relation` MUST name a forward
@@ -930,10 +952,11 @@ the file.
 `slices` maps an exported slice's name to a non-empty array of tables of
 `current`.
 
-**Refusals.** `load` refuses a file that breaks any rule above. The error
-names the field and, where regenerating fixes it, says to run
-`jazz-tools validate`. `write` runs the same checks, so it never emits a file
-`load` would refuse.
+**Refusals.** `load` refuses a pair of files that breaks any rule above,
+including an app file that still carries `permissions` or `bundle` (the
+single-file shape before they moved out). The error names the file and the
+field and, where regenerating fixes it, says to run `jazz-tools validate`.
+`write` runs the same checks, so it never emits files `load` would refuse.
 
 Fixtures: `crates/jazz/fixtures/app-artifact/`.
 
