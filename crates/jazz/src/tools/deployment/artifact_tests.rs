@@ -751,13 +751,15 @@ fn what_the_files_cant_say_is_refused_by_name() {
         variants: vec!["a".into()],
     };
     input.current = SchemaHash::compute(&structural(input.schemas[0].clone())).to_string();
-    let error = write(input).unwrap_err().to_string();
-    assert!(
-        error.contains("not supported in jazz.permissions.json yet")
-            || error.contains("not supported"),
-        "{error}"
-    );
+    let error = write(input).unwrap_err();
+    assert_eq!(error.kind(), ArtifactErrorKind::Unsupported, "{error}");
+    assert!(error.is_unsupported());
+    let error = error.to_string();
+    assert!(error.contains(expr::UNSUPPORTED), "{error}");
     assert!(error.contains("catalogue-native enum"), "{error}");
+    // A malformed file is wrong input, not something the files can't say.
+    let refused = load(b"{", b"{}").unwrap_err();
+    assert_eq!(refused.kind(), ArtifactErrorKind::Refused, "{refused}");
 }
 
 #[test]
@@ -1659,6 +1661,126 @@ fn epic_drops_hop_prints_as_a_hop() {
     let read = permissions_file::read(&json::parse(text.as_bytes()).unwrap(), &schema, &relations)
         .unwrap_or_else(|e| panic!("{e:?}\n{text}"));
     assert_eq!(read[&TableName::from("files")], policies, "{text}");
+}
+
+/// Deep nesting of every recursive construct is refused with an error, never
+/// a stack overflow.
+#[test]
+fn deep_nesting_is_refused_not_overflowed() {
+    const N: usize = 5000;
+    let nest = |open: &str, inner: &str, close: &str| {
+        format!("{}{inner}{}", open.repeat(N), close.repeat(N))
+    };
+    let deep_sources = [
+        (
+            "typed literals",
+            nest("array(", "", ")").replacen("array(", "owner = array(", 1),
+        ),
+        ("parentheses", nest("(", "true", ")")),
+        ("not", nest("not ", "true", "")),
+        ("anyOf", nest("anyOf(", "true", ")")),
+        ("exists", nest("exists shares(", "", ")")),
+        (
+            "from",
+            format!("exists ({})", nest("from (", "from shares", ")")),
+        ),
+        (
+            "join",
+            format!(
+                "exists ({})",
+                nest("from shares join (", "from shares", ")")
+            ),
+        ),
+        (
+            "union",
+            format!("exists ({})", nest("from union(a: ", "from shares", ")")),
+        ),
+        (
+            "recursive",
+            format!(
+                "exists ({})",
+                nest(
+                    "from recursive(seed: ",
+                    "from shares",
+                    ", step: from shares, frontier: id(row), dedupe: (), maxDepth: 1)"
+                )
+            ),
+        ),
+        (
+            "where not",
+            format!("exists (from shares where {})", nest("not ", "true", "")),
+        ),
+        (
+            "where parentheses",
+            format!("exists (from shares where {})", nest("(", "true", ")")),
+        ),
+        (
+            "relation typed literals",
+            format!(
+                "exists (from shares where shares.user = {})",
+                nest("array(", "", ")")
+            ),
+        ),
+    ];
+    for (what, source) in deep_sources {
+        let error = read_policy("todos", &source, serde_json::json!({})).unwrap_err();
+        assert!(error.contains("nests too deeply"), "{what}: {error}");
+    }
+
+    // The files' JSON.
+    let written = write(shared_todos()).unwrap();
+    for (what, deep) in [
+        ("arrays", nest("[", "1", "]")),
+        ("objects", nest("{\"a\": ", "1", "}")),
+    ] {
+        let file = format!("{{\"format\": 1, \"tables\": {{}}, \"x\": {deep}}}");
+        let error = load(written.app.as_bytes(), file.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("nesting too deep"), "{what}: {error}");
+        let error = load(file.as_bytes(), written.permissions.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("nesting too deep"), "{what}: {error}");
+    }
+
+    // The writer, given an engine policy nested deeper than the grammar reads.
+    let current = loaded(shared_todos()).current_schema().clone();
+    let relations = shared_todos().codegen.relations();
+    let mut not = PolicyExpr::True;
+    let mut array = Value::Null;
+    let mut rel = RelationExpr::TableScan {
+        table: "shares".into(),
+        alias: None,
+    };
+    for _ in 0..N {
+        not = PolicyExpr::Not(Box::new(not));
+        array = Value::Array(vec![array]);
+        rel = RelationExpr::Limit {
+            input: Box::new(rel),
+            limit: 1,
+        };
+    }
+    for deep in [
+        not,
+        PolicyExpr::SessionCmp {
+            path: vec!["user".into()],
+            op: CmpOp::Eq,
+            value: array,
+        },
+        PolicyExpr::ExistsRel { rel },
+    ] {
+        let mut permissions = crate::catalogue::Permissions::new();
+        permissions.insert(
+            TableName::from("todos"),
+            TablePolicies {
+                select: OperationPolicy::using(deep),
+                ..TablePolicies::default()
+            },
+        );
+        let error = permissions_file::write(&permissions, &current, &relations).unwrap_err();
+        assert!(error.contains("nested more than 64 levels deep"), "{error}");
+    }
 }
 
 #[test]

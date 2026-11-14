@@ -306,7 +306,16 @@ pub fn write(
         let name = table.as_str();
         let at = |op: &str, e: String| format!("tables.{name}.{op}: {e}");
         let mut ops = Vec::new();
-        let print = |e: &PolicyExpr| policy_json(e, &context, name);
+        // Nothing recurses through a policy deeper than the grammar reads.
+        let print = |e: &PolicyExpr| {
+            if expr::too_deep(e, 0) {
+                return Err(expr::unsupported(&format!(
+                    "a policy nested more than {} levels deep",
+                    expr::MAX_DEPTH
+                )));
+            }
+            policy_json(e, &context, name)
+        };
         let one_sided = |op: &str,
                          policy: &crate::tools::public_schema::OperationPolicy,
                          usual_using: bool,
