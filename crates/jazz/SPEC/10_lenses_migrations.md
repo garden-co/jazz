@@ -808,10 +808,13 @@ Neither file carries a schema hash or bundle id: loaders compute them.
 
 - Plain JSON. Unknown keys are refused at every level, except `$comment`
   (a string, allowed in every object) and a top-level `$schema` (a JSON
-  Schema URL, ignored on load).
+  Schema URL, ignored on load; the writer puts
+  `https://jazz.tools/schemas/jazz.app.schema.json`, resp.
+  `jazz.permissions.schema.json`, first). Repeated keys are refused.
 - Column and table names are identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
 - Object key order is significant only for `columns` (declared order, which
-  the schema hash covers) and `history`.
+  the schema hash covers) and `history` (oldest first). The writer lists
+  tables by name.
 - Tool-written text is canonical: two-space indent, keys in the order this
   section lists them, a value on one line when its line fits in 100
   characters and expanded otherwise, and a trailing newline. Writing the same
@@ -857,15 +860,20 @@ Neither file carries a schema hash or bundle id: loaders compute them.
   - `{"json": <JSON Schema>}` or `{"json": true}` for any JSON;
   - `{"array": <Column type>}`.
   - Options: `"optional": true`, `"default": <Value>`,
-    `"merge": "counter" | "g-set" | "text" | "markdown" | "html"`.
-- Values are JSON in the column's type: strings for `string` and `uuid`,
-  numbers for `int`/`float`, a decimal string for `bigint`, an ISO 8601
-  string for `timestamp`, base64 for `bytes`, arrays for `array`, objects
-  `{"<case>": {...}}` for payload enums, and `null` for an optional column.
+    `"merge": "counter" | "g-set" | "text" | "markdown" | "html"`, and
+    `"references": "<table>"` for a column that references a table no
+    forward relation names (a forward relation's column references its
+    table without it; history versions, which carry no relations, use it).
+- Values are JSON in the column's type: strings for `string`, enums and
+  `uuid`, numbers for `int`/`float`, a decimal string for `bigint`, the
+  engine's integer for `timestamp` (an ISO 8601 form is not supported yet),
+  base64 for `bytes`, any JSON for `json`, arrays for `array`, objects
+  `{"<case>": {...}}` for payload enums, and `null`.
 
-**Version** `{tables, $comment?}`: an earlier schema in the same Table form.
-Names are the snapshot names `migrations create` gives them
-(`20261102-3fa1c2d9e0b4`, its timestamp and short hash).
+**Version** `{tables, $comment?}`: an earlier schema in the same Table form
+(without relations). The writer names a version by its short schema hash,
+the first 12 hex characters (`3fa1c2d9e0b4`), as snapshot names end; a
+hand-written file may use any name.
 
 **Migration** `{from, to?, createTables?, dropTables?, renameTables?, migrate?}`,
 the readable form of `defineMigration`:
@@ -874,7 +882,9 @@ the readable form of `defineMigration`:
 - `createTables` / `dropTables`: arrays of table names.
 - `renameTables`: map new name → old name.
 - `migrate`: map table → column → op:
-  - `{"add": <Column type>, "default": <Value>}` (`m.add.*`);
+  - `{"add": <Column type>, "default": <Value>}` (`m.add.*`); the type
+    carries no `?`, as a lens carries no nullability, and a missing
+    `default` is `null`;
   - `{"drop": <Column type>, "backwardsDefault": <Value>}` (`m.drop.*`);
   - `{"renameFrom": "<old>"}` (`m.renameFrom`).
 
@@ -952,49 +962,61 @@ Meaning:
   the row being checked.
 - `exists t(c₁, c₂, …)` holds when some row of `t` satisfies every
   condition. `.rel(…)` hops along `t`'s relation `rel` to the rows it leads
-  to, filtered by that hop's conditions (`hopTo`).
+  to, filtered by that hop's conditions (`hopTo`); hops, and `exists` inside
+  `exists`, parse but are not supported in jazz.permissions.json yet.
 - `allowedTo.op(rel)` holds when the row that relation `rel` leads to allows
   `op` (`allowedTo.read`, …). A reverse relation inherits from the rows
   pointing here; `maxDepth` bounds recursive chains.
-- `col = null` and `col != null` test for null. `col in [v, …]` and
+- `col = null` and `col != null` test for null (`not col = null` is the
+  engine's `Not(IsNull)`, kept apart from `col != null`). `col in [v, …]` and
   `col in session.claims.teams` test membership; `col contains v` tests an
   array column. A comparison compares a column with a value, or a session
   claim with a literal.
 - A literal takes the type of the column it is compared with; one that can't
-  (e.g. `'x'` for an `int`) is refused.
+  (e.g. `'x'` for an `int`, a non-UUID for a `uuid`) is refused. Compared with
+  a session claim, `'…'` is text, `1` an int, `1.5` a float.
+- Comparing two columns of the row is not supported yet. Inside `exists`,
+  `this.col` is a value (the checked row's column), so
+  `exists chats(id = this.chatId)` compares `chats.id` with it.
+- Nesting deeper than 64 levels is refused.
 - `and` binds tighter than `or`; `not` tighter than both.
 
 Policies map one to one onto the engine's PolicyExpr (§7): comparisons to
 `Cmp`/`SessionCmp`/`IsNull`/`IsNotNull`/`In`/`InList`/`Contains`, `exists`
 to `Exists`/`ExistsRel`, `allowedTo` to `Inherits`/`InheritsReferencing`,
 `anyOf`/`or` to `Or`, `allOf`/`and` and condition lists to `And`, `not` to
-`Not`. Relation expressions the grammar can't spell yet (joins, projections,
-unions) are refused by the writer with a "not supported in
-jazz.permissions.json yet" error naming the policy; `validate` then reports
-it and leaves the TS app as it runs.
+`Not`. `this.col` inside `exists` is the session path
+`["__jazz_outer_row", col]` the TS DSL compiles it to. The writer prints
+top-level `Or`/`And` as `anyOf`/`allOf` objects and everything else as one
+string. Relation expressions (`ExistsRel`: `policy.exists(…)`, `hopTo`,
+joins, projections, unions) are refused by the writer with a "not supported
+in jazz.permissions.json yet" error naming the policy; `validate` then
+reports it and leaves the TS app as it runs.
 
 **Errors.** Every refusal names the file, the JSON path and, inside an
 expression, the exact span, with a suggestion and a correct example:
 
 ```text
-jazz.permissions.json: tables.chatMembers.read[1]:
+jazz.permissions.json: tables.chatMembers.read.anyOf[1]:
   exists chatMembers(chatId = this.chatId, userID = session.user)
                                            ^^^^^^
   unknown column `userID` in chatMembers; did you mean `userId`?
-  `exists` takes a table and its conditions, e.g.
-  exists chatMembers(chatId = this.id, userId = session.user)
   Grammar: https://jazz.tools/docs/reference/app-files#expressions
 ```
 
 Names are suggested by edit distance among the columns, tables, relations,
-claims or defs in scope.
+operations, keys or defs in scope; syntax errors (`==`, `"…"` strings, a
+missing `and`) add a correct example (`e.g. …`).
 
 **Loading.** `artifact::load(app, permissions)` checks both files: every
 reference resolves, every policy compiles against the current schema as a
 deployment compiles it, every migration passes its lens checks. It computes
 each schema hash and the bundle id. `artifact::load_client(app)` checks the
 schemas and migrations alone. `write` runs the same checks, so it never
-emits files `load` would refuse.
+emits files `load` would refuse, and it reads its output back: if the files
+don't reproduce the engine input exactly (schema hashes, lenses,
+permissions), it refuses with "not supported … yet" rather than write files
+that would publish something else.
 
 Fixtures: `crates/jazz/fixtures/app-artifact/`.
 
