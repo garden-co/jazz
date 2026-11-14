@@ -1,0 +1,391 @@
+{
+  "bundle": "2048b270ec4bf1e42797fbf2beeda89cc4e17a038c5e546d8de94e525bab6731",
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "analyses": {
+        "relations": {
+          "recordsViaAnalyses": {
+            "relation": "analyses",
+            "table": "records",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "categories": {
+        "relations": {
+          "recordsViaCategories": {
+            "relation": "categories",
+            "table": "records",
+            "type": "Reverse"
+          },
+          "recordsViaCategory": {
+            "relation": "category",
+            "table": "records",
+            "type": "Reverse"
+          },
+          "teamsViaCategory": {
+            "relation": "category",
+            "table": "teams",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "people": {
+        "relations": {
+          "recordsViaAddress": {
+            "relation": "addressRelation",
+            "table": "records",
+            "type": "Reverse"
+          },
+          "recordsViaPeople": {
+            "relation": "people",
+            "table": "records",
+            "type": "Reverse"
+          },
+          "recordsViaPerson": {
+            "relation": "person",
+            "table": "records",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "records": {
+        "relations": {
+          "addressRelation": {
+            "column": "address",
+            "table": "people",
+            "type": "Forward"
+          },
+          "analyses": {
+            "column": "analysis_ids",
+            "table": "analyses",
+            "type": "Forward"
+          },
+          "categories": {
+            "column": "category_ids",
+            "table": "categories",
+            "type": "Forward"
+          },
+          "category": {
+            "column": "category_id",
+            "table": "categories",
+            "type": "Forward"
+          },
+          "people": {
+            "column": "person_ids",
+            "table": "people",
+            "type": "Forward"
+          },
+          "person": {
+            "column": "personId",
+            "table": "people",
+            "type": "Forward"
+          },
+          "statuses": {
+            "column": "status_ids",
+            "table": "statuses",
+            "type": "Forward"
+          },
+          "team": {
+            "column": "team_id",
+            "table": "teams",
+            "type": "Forward"
+          },
+          "teams": {
+            "column": "teamIds",
+            "table": "teams",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "statuses": {
+        "relations": {
+          "recordsViaStatuses": {
+            "relation": "statuses",
+            "table": "records",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "teams": {
+        "relations": {
+          "category": {
+            "column": "category_id",
+            "table": "categories",
+            "type": "Forward"
+          },
+          "recordsViaTeam": {
+            "relation": "team",
+            "table": "records",
+            "type": "Reverse"
+          },
+          "recordsViaTeams": {
+            "relation": "teams",
+            "table": "records",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "d0aec10beaedfd257eb7aa1c93de2de414723fd694ed8ff5ab7aa6229d14b7a9",
+  "format": 1,
+  "migrations": [],
+  "permissions": {
+    "people": {
+      "select": {
+        "using": {
+          "rel": {
+            "columns": [
+              {
+                "alias": "id",
+                "expr": {
+                  "column": {
+                    "column": "id",
+                    "scope": "__hop_0"
+                  },
+                  "type": "Column"
+                }
+              }
+            ],
+            "input": {
+              "join_kind": "Inner",
+              "left": {
+                "table": "people",
+                "type": "TableScan"
+              },
+              "on": [
+                {
+                  "left": {
+                    "column": "id",
+                    "scope": "people"
+                  },
+                  "right": {
+                    "column": "person_ids",
+                    "scope": "__hop_0"
+                  }
+                }
+              ],
+              "right": {
+                "alias": "__hop_0",
+                "table": "records",
+                "type": "TableScan"
+              },
+              "type": "Join"
+            },
+            "type": "Project"
+          },
+          "type": "ExistsRel"
+        }
+      }
+    },
+    "records": {
+      "select": {
+        "using": {
+          "rel": {
+            "columns": [
+              {
+                "alias": "id",
+                "expr": {
+                  "column": {
+                    "column": "id",
+                    "scope": "__hop_0"
+                  },
+                  "type": "Column"
+                }
+              }
+            ],
+            "input": {
+              "join_kind": "Inner",
+              "left": {
+                "table": "records",
+                "type": "TableScan"
+              },
+              "on": [
+                {
+                  "left": {
+                    "column": "person_ids",
+                    "scope": "records"
+                  },
+                  "right": {
+                    "column": "id",
+                    "scope": "__hop_0"
+                  }
+                }
+              ],
+              "right": {
+                "alias": "__hop_0",
+                "table": "people",
+                "type": "TableScan"
+              },
+              "type": "Join"
+            },
+            "type": "Project"
+          },
+          "type": "ExistsRel"
+        }
+      }
+    }
+  },
+  "schemas": [
+    {
+      "hash": "d0aec10beaedfd257eb7aa1c93de2de414723fd694ed8ff5ab7aa6229d14b7a9",
+      "tables": {
+        "analyses": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "summary",
+              "nullable": false
+            }
+          ]
+        },
+        "categories": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "label",
+              "nullable": false
+            }
+          ]
+        },
+        "people": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            }
+          ]
+        },
+        "records": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "category_id",
+              "nullable": false,
+              "references": "categories"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "personId",
+              "nullable": false,
+              "references": "people"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "team_id",
+              "nullable": false,
+              "references": "teams"
+            },
+            {
+              "column_type": {
+                "element": {
+                  "type": "Uuid"
+                },
+                "type": "Array"
+              },
+              "name": "teamIds",
+              "nullable": false,
+              "references": "teams"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "address",
+              "nullable": true,
+              "references": "people"
+            },
+            {
+              "column_type": {
+                "element": {
+                  "type": "Uuid"
+                },
+                "type": "Array"
+              },
+              "name": "category_ids",
+              "nullable": false,
+              "references": "categories"
+            },
+            {
+              "column_type": {
+                "element": {
+                  "type": "Uuid"
+                },
+                "type": "Array"
+              },
+              "name": "person_ids",
+              "nullable": false,
+              "references": "people"
+            },
+            {
+              "column_type": {
+                "element": {
+                  "type": "Uuid"
+                },
+                "type": "Array"
+              },
+              "name": "analysis_ids",
+              "nullable": false,
+              "references": "analyses"
+            },
+            {
+              "column_type": {
+                "element": {
+                  "type": "Uuid"
+                },
+                "type": "Array"
+              },
+              "name": "status_ids",
+              "nullable": false,
+              "references": "statuses"
+            }
+          ]
+        },
+        "statuses": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "label",
+              "nullable": false
+            }
+          ]
+        },
+        "teams": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "category_id",
+              "nullable": false,
+              "references": "categories"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
