@@ -246,14 +246,27 @@ checks who is signed in, and on its sync connections, thin and local-first. Your
 reads that header.
 
 ```ts title="cli.ts"
-import { createJazzClient } from "jazz-tools/client";
+import { createJazzClient, type AccountStore } from "jazz-tools/client";
 import { loadSavedToken } from "./token-store";
+
+// Outside a browser, Jazz needs somewhere to keep which account is signed in. In memory is enough
+// for a client your backend signs in through `bearer`: it asks your backend again on each start.
+let saved: string | null = null;
+const store: AccountStore = {
+  read: async () => saved,
+  update: async (change) => void (saved = change(saved)),
+};
 
 const session = await createJazzClient({
   serverUrl: "https://my-app.com/jazz",
   bearer: () => loadSavedToken(), // your app's session token, or null when signed out
+  store,
 });
 ```
+
+`store` is required outside a browser, which keeps it in `localStorage`; without it,
+`createJazzClient` throws. A client that keeps a device account across runs needs a store that
+lasts, such as a file, and its `update` must be atomic across every process that shares it.
 
 After your own sign-in or sign-out, call `session.refresh()` so Jazz asks your backend again.
 Sync connections carry the token only to your app's own origin.
