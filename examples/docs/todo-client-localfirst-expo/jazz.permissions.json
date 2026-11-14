@@ -1,0 +1,16 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "projects": { "read": "true", "insert": "true" },
+    "todos": {
+      "read": "owner_id = session.user",
+      "insert": "owner_id = session.user",
+      "update": {
+        "old": { "allOf": ["owner_id = session.user", "done = false"] },
+        "new": "owner_id = session.user"
+      },
+      "delete": { "allOf": ["owner_id = session.user", "done = false"] }
+    }
+  }
+}

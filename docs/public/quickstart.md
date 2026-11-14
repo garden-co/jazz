@@ -55,6 +55,13 @@
      `npx jazz-tools migrations create`, and keep `defineApp(schema, { migrations })` importing
      `./migrations` (/docs/schemas/migrations). Never delete or move the store to get past a schema
      error: it means a migration is missing, and the user's data is in that store.
+   - After changing `schema.ts`, `permissions.ts` or migrations, run `npx jazz-tools validate` and
+     commit the `jazz.app.json` and `jazz.permissions.json` it writes: readable JSON forms of the
+     schema and policies, which other languages load and which `createJazz` checks at startup
+     (/docs/reference/app-files). Their policy expressions read like SQL:
+     `exists chatMembers(chatId = this.id, userId = session.user)`, `allowedTo.read(chat)`,
+     `$createdBy.account = session.user`, `role in ['admin', 'owner']`. An error from `validate`
+     points at the spot in the expression and suggests a fix.
    - In either case, use these Jazz features instead of modeling them yourself:
      - Built-in metadata columns like `$createdBy`, `$createdAt`, `$updatedBy` and `$updatedAt`:
        /docs/reading/metadata

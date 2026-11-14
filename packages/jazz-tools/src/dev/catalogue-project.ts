@@ -51,6 +51,13 @@ import { renderMigrationStub, UNFILLED_STUB_TODO } from "./migrations.js";
 import { normalizeSchemaHashInput } from "./schema-utils.js";
 import { legacySchemaHash } from "./legacy-schema-hash.js";
 import {
+  buildAppFiles,
+  checkAppFiles,
+  unsupportedWarning,
+  writeAppFiles,
+  type BuiltAppFiles,
+} from "./app-files.js";
+import {
   assertMigrationMatchesCanonicalBundle,
   computeSchemaHash,
   deployArtifacts,
@@ -227,6 +234,18 @@ export async function validateProject(
   await checkLocalMigrations(compiled.wasmSchema, migrationsDir);
   const schema = await schemaSnapshotStatus(migrationsDir, compiled.wasmSchema);
   if (!options.check) await writeLocalClientMigrations(options.schemaDir, migrationsDir);
+  // The readable IR of the app (SPEC 10.10), beside migrations/index.ts.
+  const appFiles = await localAppFiles(compiled, migrationsDir);
+  const appFilesWarnings: string[] = [];
+  if ("unsupported" in appFiles) {
+    // The app runs as on .62; the format just can't say it yet. Writer
+    // refusals warn: only drift between files and code refuses.
+    appFilesWarnings.push(unsupportedWarning(appFiles.unsupported));
+  } else if (options.check) {
+    await checkAppFiles(options.schemaDir, compiled.schemaFile, appFiles.files);
+  } else {
+    await writeAppFiles(compiled.schemaFile, appFiles.files);
+  }
   const unshipped = await unshippedMigrationsWarning(options.schemaDir, migrationsDir);
   return {
     schema,
@@ -235,6 +254,7 @@ export async function validateProject(
     tableCount: compiled.schema.tables.length,
     warnings: [
       ...(unshipped ? [unshipped] : []),
+      ...appFilesWarnings,
       ...retired,
       ...collectConventionalProvenanceDiagnostics(compiled.schema),
       ...collectMissingExplicitPolicyDiagnostics(
@@ -1294,6 +1314,10 @@ export async function createMigration(
   // not only after the next `validate`.
   if (result.status !== "unchanged" && (await hasRootSchema(options.schemaDir))) {
     await writeLocalClientMigrations(options.schemaDir, options.migrationsDir);
+    // A stub with steps left to fill in doesn't load yet: validate writes
+    // the readable files once it is filled.
+    const stubPending = "unfilledSteps" in result && result.unfilledSteps > 0;
+    if (!stubPending) await writeLocalAppFiles(options.schemaDir, options.migrationsDir);
   }
   return result;
 }
@@ -2029,6 +2053,82 @@ async function checkLocalMigrations(schema: WasmSchema, migrationsDir: string): 
       }`,
     );
   }
+}
+
+/**
+ * The app's jazz.app.json and jazz.permissions.json from what this project
+ * holds locally: schema.ts, permissions.ts, its snapshots (oldest first, by
+ * the timestamp their names start with) and its migration files.
+ */
+async function localAppFiles(
+  compiled: LoadedSchemaProject,
+  migrationsDir: string,
+): Promise<BuiltAppFiles> {
+  const { current, schemas, edges } = await localClientMigrations(
+    compiled.wasmSchema,
+    migrationsDir,
+  );
+  const names = new Map(
+    (await new MigrationStorage(migrationsDir).listSnapshots()).map(({ hash, fileName }) => [
+      hash,
+      fileName,
+    ]),
+  );
+  const key = (hash: string) => (hash === current ? "\uffff" : (names.get(hash) ?? hash));
+  const order = oldestFirst([...schemas.keys()], edges, key);
+  return buildAppFiles({
+    current,
+    schemas: order.map((hash) => schemas.get(hash)!),
+    migrations: edges.map((edge) => ({
+      fromHash: edge.fromHash,
+      toHash: edge.toHash,
+      forward: serializeForwardLenses(edge.migration.forward),
+    })),
+    permissions: compiled.permissions ?? {},
+    wasmSchema: compiled.wasmSchema,
+    module: compiled.module,
+  });
+}
+
+/** Write the app's readable files from what this project holds, as validate does. */
+async function writeLocalAppFiles(schemaDir: string, migrationsDir: string): Promise<void> {
+  const compiled = await loadCompiledSchema(schemaDir);
+  // The files hold the app's permissions: a project without permissions.ts
+  // has none to write yet, and `validate` refuses it, saying so.
+  if (!compiled.permissions) return;
+  const built = await localAppFiles(compiled, migrationsDir);
+  if ("files" in built) await writeAppFiles(compiled.schemaFile, built.files);
+}
+
+/**
+ * `hashes` with every migration's source before its target, and otherwise
+ * in `key` order, so the same project always lists its versions alike.
+ */
+function oldestFirst(
+  hashes: string[],
+  edges: ReadonlyArray<{ fromHash: string; toHash: string }>,
+  key: (hash: string) => string,
+): string[] {
+  const incoming = new Map(hashes.map((hash) => [hash, 0]));
+  for (const { toHash } of edges) incoming.set(toHash, (incoming.get(toHash) ?? 0) + 1);
+  const byKey = (a: string, b: string) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0);
+  const ready = hashes.filter((hash) => incoming.get(hash) === 0).sort(byKey);
+  const order: string[] = [];
+  while (ready.length > 0) {
+    const next = ready.shift()!;
+    order.push(next);
+    for (const { fromHash, toHash } of edges) {
+      if (fromHash !== next) continue;
+      const left = incoming.get(toHash)! - 1;
+      incoming.set(toHash, left);
+      if (left === 0) {
+        ready.push(toHash);
+        ready.sort(byKey);
+      }
+    }
+  }
+  // A cycle leaves versions out: the writer refuses it by name.
+  return [...order, ...hashes.filter((hash) => !order.includes(hash)).sort(byKey)];
 }
 
 /** The snapshots and migration files in `migrationsDir`, leading to `schema`. */
