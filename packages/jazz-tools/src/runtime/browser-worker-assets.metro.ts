@@ -37,11 +37,18 @@ export function browserRuntimeModuleUrl(): string {
   return location.href;
 }
 export function bundledBrowserWorkerUrl(): string {
-  // Undocumented in Expo: fail by name, not with a TypeError, if it's gone.
-  if (typeof require === "undefined" || typeof require.unstable_resolveWorker !== "function") {
+  // Expo rewrites this exact call at build time (@expo/metro-config's
+  // collect-dependencies matches `require.unstable_resolveWorker(...)`), so
+  // `require.unstable_resolveWorker` never exists at runtime: never read it
+  // except in this call. Undocumented in Expo, so a Metro that no longer
+  // rewrites it fails here by name, not with a bare TypeError.
+  let worker: string;
+  try {
+    worker = require.unstable_resolveWorker("../worker/jazz-broker-worker.js");
+  } catch {
     throw new Error(METRO_WORKER_API_ERROR);
   }
-  return pageUrl(require.unstable_resolveWorker("../worker/jazz-broker-worker.js"));
+  return pageUrl(worker);
 }
 
 /** The binary shipped beside the worker, which is the pair the worker's glue was checked against. */
