@@ -977,12 +977,6 @@ fn every_policy_variant() -> PolicyExpr {
             op: CmpOp::Eq,
             value: PolicyValue::Literal(Value::Uuid(uuid())),
         },
-        // An enclosing-row reference outside `exists`: only the raw path.
-        PolicyExpr::Cmp {
-            column: "owner".into(),
-            op: CmpOp::Eq,
-            value: outer("owner"),
-        },
         PolicyExpr::SessionCmp {
             path: path(),
             op: CmpOp::Ne,
@@ -1049,7 +1043,10 @@ fn every_policy_variant() -> PolicyExpr {
             table: "shares".into(),
             condition: Box::new(PolicyExpr::True),
         },
-        // `exists` in `exists`, each level reaching the row around it.
+        // `exists` in `exists`. The one shape left out: an outer-row
+        // reference in the nested `exists` (or outside any), which the
+        // engine refuses at validation and deploy, as the writer does
+        // (`the_writer_refuses_outer_rows_the_engine_refuses`).
         PolicyExpr::Exists {
             table: "shares".into(),
             condition: Box::new(PolicyExpr::And(vec![
@@ -1062,16 +1059,16 @@ fn every_policy_variant() -> PolicyExpr {
                     table: "todos".into(),
                     condition: Box::new(PolicyExpr::And(vec![
                         PolicyExpr::Cmp {
-                            column: "id".into(),
+                            column: "name".into(),
                             op: CmpOp::Eq,
-                            value: outer("todo"),
+                            value: PolicyValue::Literal(Value::Text("n".into())),
                         },
                         PolicyExpr::Exists {
                             table: "shares".into(),
                             condition: Box::new(PolicyExpr::Cmp {
                                 column: "user".into(),
                                 op: CmpOp::Eq,
-                                value: outer("owner"),
+                                value: PolicyValue::SessionRef(vec!["user".into()]),
                             }),
                         },
                     ])),
@@ -1452,8 +1449,7 @@ fn relation_hops_and_nested_exists_round_trip() {
         "exists shares(todo = this.id, exists todos(owner = session.user))"
     );
     through_the_permissions_file(&nested);
-    // Which row an outer column is, deeper in, the engine reads two ways:
-    // the file only names it by its raw path.
+    // Deeper in, the engine refuses an outer-row reference; so does the reader.
     let error = read_policy(
         "todos",
         "exists shares as s(exists todos(id = s.todo))",
@@ -1464,25 +1460,70 @@ fn relation_hops_and_nested_exists_round_trip() {
         error.contains("names only its own row's columns"),
         "{error}"
     );
-    let deep = PolicyExpr::Exists {
+}
+
+#[test]
+fn the_writer_refuses_outer_rows_the_engine_refuses() {
+    let outer =
+        |column: &str| PolicyValue::SessionRef(vec!["__jazz_outer_row".into(), column.into()]);
+    let current = loaded(shared_todos()).current_schema().clone();
+    let relations = shared_todos().codegen.relations();
+    let write_read = |expr: PolicyExpr| {
+        let mut permissions = crate::catalogue::Permissions::new();
+        permissions.insert(
+            TableName::from("todos"),
+            TablePolicies {
+                select: OperationPolicy::using(expr),
+                ..TablePolicies::default()
+            },
+        );
+        permissions_file::write(&permissions, &current, &relations).unwrap_err()
+    };
+    // In an `exists` inside another `exists`.
+    let nested = PolicyExpr::Exists {
         table: "shares".into(),
         condition: Box::new(PolicyExpr::Exists {
             table: "todos".into(),
             condition: Box::new(PolicyExpr::Cmp {
                 column: "id".into(),
                 op: CmpOp::Eq,
-                value: PolicyValue::SessionRef(vec!["__jazz_outer_row".into(), "todo".into()]),
+                value: outer("todo"),
             }),
         }),
     };
-    assert_eq!(
-        printed("todos", &deep),
-        "exists shares(exists todos(id = session.__jazz_outer_row.todo))"
+    let error = write_read(nested);
+    assert!(
+        error.contains("tables.todos.read: ") && error.contains(expr::NESTED_OUTER_ROW),
+        "{error}"
     );
+    assert_eq!(
+        expr::NESTED_OUTER_ROW,
+        "not supported in policies yet: an `exists` inside another `exists` can't refer to the checked row's columns"
+    );
+    // Outside any `exists`.
+    let error = write_read(PolicyExpr::Cmp {
+        column: "owner".into(),
+        op: CmpOp::Eq,
+        value: outer("owner"),
+    });
+    assert!(
+        error.contains("tables.todos.read: ") && error.contains(expr::OUTSIDE_OUTER_ROW),
+        "{error}"
+    );
+    // And the reader refuses the raw path, at its span.
+    let error = read_policy(
+        "todos",
+        "exists shares(exists todos(id = session.__jazz_outer_row.todo))",
+        serde_json::json!({}),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("`session.__jazz_outer_row` is not a session value"),
+        "{error}"
+    );
+    assert!(error.contains("^^^^"), "{error}");
 }
 
-/// epic-drop's file move check, as its permissions.ts compiles it:
-/// `policy.exists(policy.files.where({ id: file.id }).hopTo("folder").where({ owner_id: me }))`.
 #[test]
 fn epic_drops_hop_prints_as_a_hop() {
     let schema = schema(vec![
