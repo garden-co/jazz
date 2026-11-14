@@ -2540,6 +2540,170 @@ describe("createJazz", () => {
     expect((await jazz.db.all(app.todos.where({ id: later.id }))).length).toBe(1);
   }, 60_000);
 
+  /**
+   * Alice's browser on the HTTP stream of a backend whose authenticate
+   * counts the asks for stream sends, and a raw send into her session.
+   */
+  async function streamSendsOf(options: { streamAuthReuseSeconds?: number } = {}) {
+    const signedOut = new Set<string>();
+    const sends: string[] = [];
+    const state = { expiresIn: 3600, gate: undefined as Promise<void> | undefined };
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      ...options,
+      authenticate: async (request) => {
+        const url = new URL(request.url);
+        if (request.method === "POST" && /\/stream\/[^/]+$/.test(url.pathname)) {
+          sends.push(request.headers.get("x-test-user") ?? "");
+          if (request.headers.get("x-slow")) await state.gate;
+        }
+        const userId = request.headers.get("x-test-user");
+        return userId && !signedOut.has(userId)
+          ? { userId, expiresAt: Date.now() / 1000 + state.expiresIn }
+          : null;
+      },
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: false });
+    const previous = (globalThis as { location?: unknown }).location;
+    (globalThis as { location?: unknown }).location = {
+      host: new URL(origin).host,
+      href: `${origin}/`,
+    };
+    cleanups.push(async () => {
+      (globalThis as { location?: unknown }).location = previous;
+    });
+    const alice = await userSession(jazz.appId, origin, "alice");
+    const owner = alice.session!.user!;
+    for (const title of ["one", "two", "three", "four"]) {
+      await alice.db.insert(app.todos, { title, owner }).wait({ tier: "global" });
+    }
+    const sessionPath = requestPaths.find((path) => /\/stream\/[^/]+$/.test(path))!;
+    const key = streamKeys.get(sessionPath)!;
+    const posts = requestPaths.filter((path) => path === sessionPath).length;
+    const send = (headers: Record<string, string>) =>
+      statusOf(`${origin}${sessionPath}`, "POST", { "x-jazz-stream-key": key, ...headers });
+    return { jazz, signedOut, sends, state, posts, send, asked: () => sends.length };
+  }
+
+  /** Move both clocks `ms` ahead until the returned function is called. */
+  function later(ms: number) {
+    const now = Date.now();
+    const perf = performance.now();
+    const date = vi.spyOn(Date, "now").mockReturnValue(now + ms);
+    const mono = vi.spyOn(performance, "now").mockReturnValue(perf + ms);
+    return () => {
+      date.mockRestore();
+      mono.mockRestore();
+    };
+  }
+
+  it("asks authenticate once per stream session while a send's credentials stay the same", async () => {
+    // A save is several sends in a row: each used to re-run the app's
+    // authenticate (a session lookup). Now a send reuses the session's last
+    // answer while its headers match, for at most a minute and never past
+    // that answer's expiresAt; anything else asks again.
+    const { jazz, signedOut, sends, state, posts, send, asked } = await streamSendsOf();
+    expect(posts).toBeGreaterThan(1);
+    // Once admitted, its sends reuse the answer.
+    expect(sends.length).toBeLessThanOrEqual(1);
+
+    // This client's headers differ from the browser's (user-agent, accept):
+    // its first send asks; the same headers again don't, nor do ones a proxy
+    // sets per request.
+    expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    const before = asked();
+    expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    expect(await send({ "x-test-user": "alice", "x-request-id": "1" })).toBeLessThan(300);
+    expect(await send({ "x-test-user": "alice", "x-forwarded-for": "10.0.0.2" })).toBeLessThan(300);
+    expect(asked()).toBe(before);
+    // A changed credential asks again, and another user's never passes.
+    expect(await send({ "x-test-user": "bob" })).toBe(403);
+    expect(asked()).toBe(before + 1);
+    expect(await send({ "x-test-user": "alice", cookie: "other=1" })).toBeLessThan(300);
+    expect(asked()).toBe(before + 2);
+    expect(await send({ "x-test-user": "alice", cookie: "other=1" })).toBeLessThan(300);
+    expect(asked()).toBe(before + 2);
+    // So do the identity headers of proxies (oauth2-proxy, Cloudflare Access).
+    let n = asked();
+    const identityHeaders: Record<string, string>[] = [
+      { "x-forwarded-user": "alice" },
+      { "x-forwarded-user": "mallory" },
+      { "cf-access-jwt-assertion": "a" },
+      { "cf-access-jwt-assertion": "b" },
+    ];
+    for (const headers of identityHeaders) {
+      expect(await send({ "x-test-user": "alice", ...headers })).toBeLessThan(300);
+      expect(asked()).toBe(++n);
+    }
+
+    // An answer past its expiresAt is asked again, even within the minute.
+    state.expiresIn = 5;
+    expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    n = asked();
+    let restore = later(6_000);
+    try {
+      expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    } finally {
+      restore();
+    }
+    expect(asked()).toBe(n + 1);
+    state.expiresIn = 3600;
+
+    // Signed out elsewhere with this cookie still held: cut off once the
+    // reused answer is a minute old...
+    expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    signedOut.add("alice");
+    expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    restore = later(61_000);
+    try {
+      expect(await send({ "x-test-user": "alice" })).toBe(403);
+    } finally {
+      restore();
+    }
+    // ...and at once with revokeUser, cached answer or not.
+    signedOut.delete("alice");
+    expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    signedOut.add("alice");
+    expect(await jazz.revokeUser("alice")).toBe(1);
+    expect(await send({ "x-test-user": "alice" })).toBe(410);
+  }, 60_000);
+
+  it("keeps only the latest stream send's authenticate answer", async () => {
+    // A slow ask that started before a refusal must not re-arm the reuse.
+    const { state, send, asked } = await streamSendsOf();
+    let open!: () => void;
+    state.gate = new Promise((resolve) => (open = resolve));
+    const slow = send({ "x-test-user": "alice", "x-slow": "1" });
+    await expect.poll(asked).toBeGreaterThan(0);
+    expect(await send({ "x-test-user": "bob" })).toBe(403);
+    open();
+    expect(await slow).toBeLessThan(300);
+    const n = asked();
+    expect(await send({ "x-test-user": "alice", "x-slow": "1" })).toBeLessThan(300);
+    expect(asked()).toBe(n + 1);
+  }, 60_000);
+
+  it("asks authenticate on every stream send with streamAuthReuseSeconds: 0", async () => {
+    const { send, asked } = await streamSendsOf({ streamAuthReuseSeconds: 0 });
+    const n = asked();
+    for (let i = 0; i < 3; i++) expect(await send({ "x-test-user": "alice" })).toBeLessThan(300);
+    expect(asked()).toBe(n + 3);
+    for (const value of [-1, Number.NaN, Infinity, "60"]) {
+      expect(() =>
+        createJazz({
+          app,
+          permissions,
+          store: memory(),
+          authenticate,
+          streamAuthReuseSeconds: value as number,
+        }),
+      ).toThrow(/streamAuthReuseSeconds must be a number/);
+    }
+  }, 60_000);
+
   it("lets a client end its stream session once signed out, and calls one already ended done", async () => {
     // #5187: a client ends its stream as it signs out, when the app's
     // sign-in is already gone. That was a 403, and a DELETE that arrived
