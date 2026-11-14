@@ -1046,7 +1046,8 @@ Meaning:
   `exists t(…).rel(…)` hops along `t`'s relation `rel` to the rows it leads to,
   filtered by that hop's conditions (`hopTo`); it is the relation
   `from t join <target> as __hop_0 on … where … select __hop_0.id as id`
-  TS builds, and the writer prints it as that relation. A hop's conditions
+  TS builds, and the writer prints a relation of exactly that shape in this
+  form, so the `__hop_<i>` names never appear in a file TS wrote. A hop's conditions
   compare its table's columns with values and with the checked row's
   (`this.col`).
   `exists ( query )` is any relation (`ExistsRel`).

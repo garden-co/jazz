@@ -2843,8 +2843,14 @@ pub fn unsupported(what: &str) -> String {
 /// literals, `session.__jazz_outer_row…`, `via`), which always does.
 pub fn print(expr: &PolicyExpr, context: &Context<'_>, table: &str) -> Result<String, String> {
     let mut last = String::new();
-    for explicit in [false, true] {
-        let printer = Printer { context, explicit };
+    // Shortest first (hops as `exists t(…).rel(…)`), then without hops, then
+    // explicit.
+    for (explicit, hops) in [(false, true), (false, false), (true, false)] {
+        let printer = Printer {
+            context,
+            explicit,
+            hops,
+        };
         let text = printer.policy(expr, &mut vec![table.to_string()], 0);
         let back = parse(&text).and_then(|ast| compile(&ast, context, table));
         if back.as_ref() == Ok(expr) {
@@ -2863,6 +2869,9 @@ pub fn print(expr: &PolicyExpr, context: &Context<'_>, table: &str) -> Result<St
 struct Printer<'a, 'c> {
     context: &'a Context<'c>,
     explicit: bool,
+    /// Print relations of the shape `exists t(…).rel(…)` compiles to (TS's
+    /// `hopTo`) in that form.
+    hops: bool,
 }
 
 /// Precedence: `or`'s items 2, `and`'s 3, `not`'s 3 (`not not x` reads fine).
@@ -3065,7 +3074,11 @@ impl Printer<'_, '_> {
                 levels.pop();
                 format!("exists {}({})", name_text(table), conditions.join(", "))
             }
-            PolicyExpr::ExistsRel { rel } => format!("exists ({})", query_text(rel)),
+            PolicyExpr::ExistsRel { rel } => self
+                .hops
+                .then(|| self.hop_text(rel, levels))
+                .flatten()
+                .unwrap_or_else(|| format!("exists ({})", query_text(rel))),
             PolicyExpr::Inherits {
                 operation,
                 via_column,
@@ -3115,6 +3128,212 @@ impl Printer<'_, '_> {
                 allowed_text(*operation, &relation, *max_depth)
             }
         }
+    }
+}
+
+/// `scope.column` when `c` is a column of `scope`.
+fn column_in<'r>(c: &'r RelationColumnRef, scope: &str) -> Option<&'r str> {
+    (c.scope.as_deref() == Some(scope)).then_some(c.column.as_str())
+}
+
+impl Printer<'_, '_> {
+    /// `rel` as `exists t(…).rel(…)…` when it is exactly what that compiles
+    /// to: `t` joined along relations to `__hop_<i>`, filtered by each
+    /// level's conditions in order, yielding the last hop's ids.
+    fn hop_text(&self, rel: &RelationExpr, levels: &[String]) -> Option<String> {
+        let RelationExpr::Project { input, columns } = rel else {
+            return None;
+        };
+        let [column] = columns.as_slice() else {
+            return None;
+        };
+        let (input, predicates) = match input.as_ref() {
+            RelationExpr::Filter { input, predicate } => (
+                input.as_ref(),
+                match predicate {
+                    RelationPredicate::And(items) if items.len() >= 2 => items.iter().collect(),
+                    RelationPredicate::And(_) => return None,
+                    other => vec![other],
+                },
+            ),
+            other => (other, Vec::new()),
+        };
+        // Peel the joins: the last is the outermost.
+        let mut joins = Vec::new();
+        let mut at = input;
+        while let RelationExpr::Join {
+            left,
+            right,
+            on,
+            join_kind: RelationJoinKind::Inner,
+        } = at
+        {
+            let RelationExpr::TableScan {
+                table,
+                alias: Some(alias),
+            } = right.as_ref()
+            else {
+                return None;
+            };
+            let [on] = on.as_slice() else {
+                return None;
+            };
+            joins.push((table, alias, on));
+            at = left;
+        }
+        joins.reverse();
+        let RelationExpr::TableScan { table, alias } = at else {
+            return None;
+        };
+        if joins.is_empty() {
+            return None;
+        }
+        let base_scope = alias.as_deref().unwrap_or(table);
+        // Each hop: the relation that joins the previous level to it.
+        let mut scopes = vec![(table.clone(), base_scope.to_string())];
+        let mut names = Vec::new();
+        for (i, (target, hop_alias, on)) in joins.iter().enumerate() {
+            let hop_scope = format!("__hop_{i}");
+            if **hop_alias != hop_scope {
+                return None;
+            }
+            let (at_table, at_scope) = scopes.last().expect("the base").clone();
+            let name =
+                self.context
+                    .relations
+                    .get(&at_table)?
+                    .iter()
+                    .find_map(|(name, relation)| {
+                        let (left, right) = match relation {
+                            CodegenRelation::Forward { table: t, column } if t == *target => {
+                                (column.clone(), "id".to_string())
+                            }
+                            CodegenRelation::Reverse { table: t, relation } if t == *target => {
+                                ("id".to_string(), forward_column(self.context, t, relation)?)
+                            }
+                            _ => return None,
+                        };
+                        (column_in(&on.left, &at_scope) == Some(left.as_str())
+                            && column_in(&on.right, &hop_scope) == Some(right.as_str()))
+                        .then(|| name.clone())
+                    })?;
+            names.push(name);
+            scopes.push(((*target).clone(), hop_scope));
+        }
+        let RelationProjectExpr::Column(out) = &column.expr else {
+            return None;
+        };
+        if column.alias != "id" || column_in(out, &scopes.last()?.1) != Some("id") {
+            return None;
+        }
+        // Conditions by level, in level order.
+        let mut conditions: Vec<Vec<String>> = vec![Vec::new(); scopes.len()];
+        let mut level = 0;
+        for predicate in predicates {
+            let (at, text) =
+                scopes
+                    .iter()
+                    .enumerate()
+                    .skip(level)
+                    .find_map(|(i, (_, scope))| {
+                        Some((i, self.hop_condition(predicate, scope, levels, 0)?))
+                    })?;
+            level = at;
+            conditions[at].push(text);
+        }
+        let mut text = format!("exists {}", name_text(table));
+        if let Some(alias) = alias {
+            text.push_str(&format!(" as {}", name_text(alias)));
+        }
+        text.push_str(&format!("({})", conditions[0].join(", ")));
+        for (name, conditions) in names.iter().zip(&conditions[1..]) {
+            text.push_str(&format!(".{}({})", name_text(name), conditions.join(", ")));
+        }
+        Some(text)
+    }
+
+    /// A relation predicate whose columns are all `scope`'s, as a hop's
+    /// condition.
+    fn hop_condition(
+        &self,
+        p: &RelationPredicate,
+        scope: &str,
+        levels: &[String],
+        precedence: u8,
+    ) -> Option<String> {
+        let all = |items: &[RelationPredicate], precedence: u8| {
+            items
+                .iter()
+                .map(|i| self.hop_condition(i, scope, levels, precedence))
+                .collect::<Option<Vec<_>>>()
+        };
+        let column = |c: &RelationColumnRef| column_in(c, scope).map(column_text);
+        let value = |v: &RelationValueRef| -> Option<String> {
+            Some(match v {
+                RelationValueRef::OuterColumn(RelationColumnRef {
+                    scope: None,
+                    column,
+                }) if levels.len() <= 2 => format!("this.{}", column_text(column)),
+                RelationValueRef::SessionRef(path) => session_text(path),
+                RelationValueRef::Literal(json) => match json {
+                    serde_json::Value::String(s) => quoted(s),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Number(_) => match value_ref_text(v) {
+                        text if !text.starts_with("json(") => text,
+                        _ => return None,
+                    },
+                    serde_json::Value::Null => return None,
+                    other => match serde_json::from_value::<Value>(other.clone()) {
+                        Ok(Value::Null) | Err(_) => return None,
+                        Ok(value) => typed_text(&value),
+                    },
+                },
+                _ => return None,
+            })
+        };
+        Some(match p {
+            RelationPredicate::True => "true".into(),
+            RelationPredicate::False => "false".into(),
+            RelationPredicate::Or(items) if items.len() >= 2 => {
+                wrap(all(items, 2)?.join(" or "), 1, precedence)
+            }
+            RelationPredicate::And(items) if items.len() >= 2 => {
+                wrap(all(items, 3)?.join(" and "), 2, precedence)
+            }
+            RelationPredicate::Or(items) => format!("anyOf({})", all(items, 0)?.join(", ")),
+            RelationPredicate::And(items) => format!("allOf({})", all(items, 0)?.join(", ")),
+            RelationPredicate::Not(inner) => wrap(
+                format!("not {}", self.hop_condition(inner, scope, levels, 3)?),
+                3,
+                precedence,
+            ),
+            RelationPredicate::Cmp { left, op, right } => {
+                let op = match op {
+                    RelationCmpOp::Eq => "=",
+                    RelationCmpOp::Ne => "!=",
+                    RelationCmpOp::Lt => "<",
+                    RelationCmpOp::Le => "<=",
+                    RelationCmpOp::Gt => ">",
+                    RelationCmpOp::Ge => ">=",
+                };
+                format!("{} {op} {}", column(left)?, value(right)?)
+            }
+            RelationPredicate::IsNull { column: c } => format!("{} = null", column(c)?),
+            RelationPredicate::IsNotNull { column: c } => format!("{} != null", column(c)?),
+            RelationPredicate::In { left, values } => format!(
+                "{} in [{}]",
+                column(left)?,
+                values
+                    .iter()
+                    .map(value)
+                    .collect::<Option<Vec<_>>>()?
+                    .join(", ")
+            ),
+            RelationPredicate::Contains { left, right } => {
+                format!("{} contains {}", column(left)?, value(right)?)
+            }
+            RelationPredicate::EnumMatch { .. } => return None,
+        })
     }
 }
 
