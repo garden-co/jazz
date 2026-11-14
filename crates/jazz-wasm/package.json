@@ -30,6 +30,11 @@
   "scripts": {
     "build": "node ../../dev/artifacts/build.mjs wasm release",
     "build:fast": "node ../../dev/artifacts/build.mjs wasm fast",
-    "build:profiling": "node ../../dev/artifacts/build.mjs wasm profiling"
+    "build:profiling": "node ../../dev/artifacts/build.mjs wasm profiling",
+    "build:durable-object-kv": "wasm-pack build . --target web --release --out-dir tests/durable-object-kv/pkg --no-pack -- --features do-kv-bench",
+    "test:durable-object-kv": "node tests/durable-object-kv/smoke.mjs"
+  },
+  "devDependencies": {
+    "miniflare": "4.20260401.0"
   }
 }

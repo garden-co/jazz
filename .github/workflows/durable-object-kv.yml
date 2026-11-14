@@ -1,0 +1,55 @@
+name: Durable Object KV store
+
+# The store on a Durable Object's synchronous KV storage (`jazz::kv_vfs`,
+# jazz-wasm's `durable-object-kv` feature) in local workerd. No shipped
+# bundle builds the feature, so this is its only wasm32 build. Label-gated:
+# the wasm build takes minutes.
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled]
+    paths:
+      - "crates/jazz/layers/db/src/kv_vfs.rs"
+      - "crates/jazz/layers/db/src/kv_vfs/**"
+      - "crates/jazz-wasm/**"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/durable-object-kv.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: durable-object-kv-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workerd-smoke:
+    name: KV VFS store in local workerd
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch'
+        || (
+          contains(github.event.pull_request.labels.*.name, 'durable-object-kv')
+          && github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: wasm32-unknown-unknown
+          sccache: "true"
+          sccache-key: durable-object-kv-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
+
+      - name: Build the KV store probes
+        run: pnpm --filter jazz-wasm build:durable-object-kv
+
+      - name: Run the workerd smoke test
+        run: pnpm --filter jazz-wasm test:durable-object-kv

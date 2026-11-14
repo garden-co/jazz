@@ -2005,6 +2005,7 @@ dependencies = [
  "jazz-text",
  "jazz-types",
  "postcard",
+ "rsqlite-vfs",
  "rusqlite",
  "serde",
  "serde_bytes",

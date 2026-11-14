@@ -67,6 +67,8 @@ mod history_reads;
 mod host_tables;
 #[path = "../include_live.rs"]
 mod include_live;
+#[path = "../kv_vfs_store.rs"]
+mod kv_vfs_store;
 #[path = "../large_value_append.rs"]
 mod large_value_append;
 #[path = "../large_value_chunk_store.rs"]
