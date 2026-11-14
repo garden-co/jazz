@@ -97,6 +97,13 @@ a core of its own, separate from production's (a dry run with its own data, not 
   4. Deploy the backend with the new schema and migration. Better Auth 1.7.3 and later can't create
      accounts against the old schema, so sign-ups fail until it's published. The adapter refuses to
      start while your schema still requires `issuer`, with an error that links here.
+
+  The adapter now also enforces that `better_auth_account` is unique on `(providerId, accountId)`.
+  Duplicate rows could only exist in a rare setup, where one OIDC `providerId` was used with several
+  issuers on Better Auth 1.7.0–1.7.2. If account writes (token refreshes, password changes, account
+  links) fail with `Unique constraint violated` after upgrading, reach out to us rather than deleting
+  rows yourself.
+
 - **React Native: ship a new native build.** This release raises the native relay ABI to 6, so a
   JavaScript bundle needs a native build from the same release; an over-the-air update alone
   isn't enough.
