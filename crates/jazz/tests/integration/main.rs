@@ -171,6 +171,8 @@ mod serializable_relay;
 mod serializable_sqlite;
 #[path = "../serializable_sync.rs"]
 mod serializable_sync;
+#[path = "../serializable_windows.rs"]
+mod serializable_windows;
 #[path = "../server_store_reset.rs"]
 mod server_store_reset;
 #[path = "../session_policy_values.rs"]
