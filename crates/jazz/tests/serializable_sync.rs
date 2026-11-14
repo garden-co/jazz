@@ -257,6 +257,53 @@ impl Net {
     }
 }
 
+impl Net {
+    fn join(&self, i: usize, c: &str) {
+        let write = block_on(self.db(i).insert("members", code(c), Default::default())).unwrap();
+        self.settle(i, write.mergeable_tx_id())
+            .expect("join settles");
+    }
+
+    /// Join `c` only if it has fewer than `capacity` members, counted
+    /// inside one serializable transaction (an aggregate read).
+    /// `between` runs after the count and before the commit.
+    fn book(&self, i: usize, c: &str, capacity: u64, between: impl FnOnce()) -> Redeem {
+        let db = self.db(i);
+        let open = OpenTransactionId::new();
+        block_on(db.begin_serializable(open)).unwrap();
+        let count = db.prepare_query(&members_query(c).count()).unwrap();
+        let rows = self.drive(db.tx_ref(open).all_prepared(&count)).unwrap();
+        let counted = match rows.first().and_then(|row| row.cell_at(0)) {
+            Some(Value::U64(n)) => n,
+            other => panic!("count {other:?}"),
+        };
+        if counted >= capacity {
+            db.abandon_transaction_handle(open).unwrap();
+            return Redeem::Invalid;
+        }
+        between();
+        self.drive(
+            db.tx_ref(open)
+                .insert("members", code(c), Default::default()),
+        )
+        .unwrap();
+        let receipt = match self.drive(db.commit_serializable_handle(open)) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                assert_eq!(error.code, ErrorCode::TransactionConflict, "{error}");
+                return Redeem::Conflict;
+            }
+        };
+        match self.settle(i, receipt.0) {
+            Ok(_) => Redeem::Joined,
+            Err(error) => {
+                common::assert_serialization_conflict(&error);
+                Redeem::Conflict
+            }
+        }
+    }
+}
+
 const OWNER: usize = 0;
 const BACKEND: usize = 1;
 const OTHER: usize = 2;
@@ -1143,4 +1190,47 @@ fn an_offline_serializable_commit_keeps_its_reads_across_a_restart() {
             assert_eq!(net.members("abc"), 2);
         }
     }
+}
+
+/// An aggregate read is validated by its value (jazz#5520): another
+/// backend's booking between the count and the commit changes the count,
+/// so the commit conflicts instead of overbooking. Before, an aggregate's
+/// rows were recorded as their group at version 0 and always matched.
+#[test]
+fn a_count_that_changed_before_the_commit_conflicts() {
+    let net = Net::new(3);
+    net.join(OWNER, "show");
+    let outcome = net.book(BACKEND, "show", 2, || net.join(OTHER, "show"));
+    assert_eq!(outcome, Redeem::Conflict);
+    assert_eq!(net.members("show"), 2, "the show is not overbooked");
+}
+
+/// An unchanged count commits.
+#[test]
+fn an_unchanged_count_commits() {
+    let net = Net::new(3);
+    net.join(OWNER, "show");
+    net.unrelated_receipt(BACKEND);
+    assert_eq!(net.book(BACKEND, "show", 2, || {}), Redeem::Joined);
+    assert_eq!(net.members("show"), 2);
+    // Full now: the next booking sees it.
+    assert_eq!(net.book(OTHER, "show", 2, || {}), Redeem::Invalid);
+}
+
+/// Two backends race for the last place: exactly one books it.
+#[test]
+fn racing_bookings_of_the_last_place_admit_exactly_one() {
+    let net = Net::new(3);
+    net.join(OWNER, "show");
+    let other = std::cell::Cell::new(None);
+    let first = net.book(BACKEND, "show", 2, || {
+        other.set(Some(net.book(OTHER, "show", 2, || {})))
+    });
+    let outcomes = [first, other.take().unwrap()];
+    assert_eq!(
+        outcomes.iter().filter(|o| **o == Redeem::Joined).count(),
+        1,
+        "{outcomes:?}"
+    );
+    assert_eq!(net.members("show"), 2);
 }

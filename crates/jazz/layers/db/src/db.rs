@@ -5285,8 +5285,29 @@ impl Inner {
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
     ) -> Result<Vec<(RowUuid, sync::Rank)>, Error> {
+        self.read_versions_as(prepared, identity, read, true)
+    }
+
+    /// [`Inner::read_versions`]; with `valued` false, an aggregate's rows
+    /// by their group alone, as clients before alpha.64 record them (see
+    /// the authority's validation in `sync.rs`).
+    pub(crate) fn read_versions_as(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        valued: bool,
+    ) -> Result<Vec<(RowUuid, sync::Rank)>, Error> {
         let roots = self.run(prepared, identity, read)?;
         let mut out = versions(&roots);
+        // An aggregate's rows have no version of their own (each is a
+        // group, at position 0): named by their values too, a group whose
+        // value changed reads as another row, so the commit conflicts.
+        if valued && prepared.query.aggregate.is_some() {
+            for (version, row) in out.iter_mut().zip(&roots) {
+                version.1 = aggregate_read_id(row);
+            }
+        }
         if !prepared.query.array_subqueries.is_empty() {
             let mut run = RelationRun::new(self, prepared, identity, read);
             let nodes = self.nest(
@@ -9305,6 +9326,20 @@ fn conflict(message: impl Into<String>) -> Error {
 /// A read row's version: its table, row, position and writer, when the
 /// read carried it.
 type ReadVersion = (Arc<str>, RowUuid, Pos, Option<Arc<[u8]>>);
+
+/// An aggregate row as a serializable read records it: its group (the row
+/// id the read gives it) and every value it computed, so the authority's
+/// re-run matches only while the aggregate's values are unchanged.
+pub(crate) fn aggregate_read_id(row: &CurrentRow) -> RowUuid {
+    let mut hasher = jazz_types::sha256::Hasher::new();
+    hasher.update(b"jazz serializable aggregate read v1\0");
+    hasher.update(row.id.0.as_bytes());
+    let cells = postcard::to_allocvec(&*row.cells).expect("encode aggregate values");
+    hasher.update(&(cells.len() as u64).to_be_bytes());
+    hasher.update(&cells);
+    let digest = hasher.finalize();
+    RowUuid::from_bytes(digest.as_bytes()[..16].try_into().expect("16 bytes"))
+}
 
 fn versions(rows: &[CurrentRow]) -> Vec<ReadVersion> {
     rows.iter()
