@@ -12,6 +12,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { createServer as createNetServer } from "node:net";
 import {
   cpSync,
   existsSync,
@@ -67,6 +68,21 @@ function createConsumerProject() {
   return root;
 }
 
+/**
+ * A port nothing listens on. Vite treats `port: 0` as its default 5173, and
+ * other suites may hold that one.
+ */
+async function freePort() {
+  const probe = createNetServer();
+  await new Promise((resolve, reject) => {
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", resolve);
+  });
+  const { port } = probe.address();
+  await new Promise((resolve) => probe.close(resolve));
+  return port;
+}
+
 const viteMajors = [
   // The workspace's own Vite 8, whose optimizer already rewrites the literal;
   // pre-bundled Jazz takes the dev-server path there too.
@@ -83,7 +99,8 @@ for (const { name, specifier, literalBreaks } of viteMajors) {
       root,
       configFile: false,
       logLevel: "silent",
-      server: { port: 0, strictPort: false },
+      // An explicit IPv4 loopback: `localhost` may bind only ::1.
+      server: { host: "127.0.0.1", port: await freePort(), strictPort: true },
       // The documented config: Jazz's Wasm is excluded, jazz-tools is not.
       optimizeDeps: { exclude: ["jazz-wasm"] },
     });
@@ -92,7 +109,8 @@ for (const { name, specifier, literalBreaks } of viteMajors) {
       rmSync(root, { recursive: true, force: true });
     });
     await server.listen();
-    const origin = server.resolvedUrls.local[0];
+    const { address, port } = server.httpServer.address();
+    const origin = `http://${address}:${port}/`;
 
     const main = await fetch(new URL("src/main.js", origin));
     assert.equal(main.status, 200);
