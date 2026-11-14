@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -112,7 +112,13 @@ function bundleAt(directory: string): ClientMigrations {
   );
 }
 function migrationAt(directory: string) {
-  const source = readFileSync(join(root, directory, "remove-better-auth-issuer.ts"), "utf8");
+  // `migrations create --name remove-better-auth-issuer` names the file
+  // <timestamp>-remove-better-auth-issuer-<fromHash>-<toHash>.ts.
+  const file = readdirSync(join(root, directory)).find((name) =>
+    /^\d{8}T\d{6}-remove-better-auth-issuer-[0-9a-f]{12}-[0-9a-f]{12}\.ts$/.test(name),
+  );
+  if (!file) throw new Error(`${directory} has no remove-better-auth-issuer migration`);
+  const source = readFileSync(join(root, directory, file), "utf8");
   // Same public builders as the normal schema loader, without loading unrelated
   // native backend exports. This checks the real migration; it simulates no DB.
   return new Function(
