@@ -564,16 +564,16 @@ impl<'a> Ctx<'a> {
         )
     }
 
-    /// The SQL source a table is read from. Under a branch view a branched
-    /// table is its effective rows: head rows (tombstones included, so they
-    /// mask), then base rows the head does not override. Filters, policies,
-    /// ordering and windows all apply after this masking.
     /// Whether [`Ctx::source`] reads `table`'s stored table itself, not
     /// a branch view or a cut over it.
     fn reads_table_directly(&self, table: &Table) -> bool {
         self.cut.is_none() && (self.view.is_none() || table.branch_by.is_empty())
     }
 
+    /// The SQL source a table is read from. Under a branch view a branched
+    /// table is its effective rows: head rows (tombstones included, so they
+    /// mask), then base rows the head does not override. Filters, policies,
+    /// ordering and windows all apply after this masking.
     pub(crate) fn source(&mut self, table: &Table) -> Result<String, Error> {
         // Explicit columns: a schema view reads its own columns of the
         // physical (unioned) table.
