@@ -1106,6 +1106,11 @@ fn write_migration(
             renames.push((lens.table.clone(), Json::string(old)));
         }
         if lens.operations.is_empty() {
+            // A table lens with no column changes (an enum gaining variants,
+            // say) is still a lens: keep it as an empty entry.
+            if !lens.added && !lens.removed && lens.renamed_from.is_none() {
+                migrate.push((lens.table.clone(), Json::Object(Vec::new())));
+            }
             continue;
         }
         let ops = lens
