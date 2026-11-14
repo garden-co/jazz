@@ -88,7 +88,7 @@ pub type JsonValue = serde_json::Value;
 /// Validate a schema and its embedded permissions without opening a database.
 #[napi(js_name = "validateSchema")]
 pub fn validate_schema(schema: Uint8Array) -> js::Result<()> {
-    binding_host::decode_schema(&schema).map_err(host_error)?;
+    binding_host::validate_deployable_schema(&schema).map_err(host_error)?;
     Ok(())
 }
 
