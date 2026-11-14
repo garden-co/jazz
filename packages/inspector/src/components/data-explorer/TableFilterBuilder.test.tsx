@@ -126,6 +126,31 @@ describe("TableFilterBuilder", () => {
       value: [3, 5],
     });
   });
+  it("splits text in values on every comma, stray quotes and brackets included (#3677)", () => {
+    const onClausesChange = vi.fn();
+    render(
+      <TableFilterBuilder
+        schemaColumns={[...schemaColumns]}
+        clauses={[]}
+        onClausesChange={onClausesChange}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "title" } });
+    fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "in" } });
+    fireEvent.change(screen.getByLabelText("Value"), {
+      target: { value: 'O"Neil, Smith, [draft, {open' },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add where clause" }));
+
+    const clauses = onClausesChange.mock.calls[0]?.[0] as TableFilterClause[];
+    expect(clauses[0]).toMatchObject({
+      column: "title",
+      operator: "in",
+      value: ['O"Neil', "Smith", "[draft", "{open"],
+    });
+  });
+
   it("keeps JSON object strings with commas intact in in values", () => {
     const onClausesChange = vi.fn();
     render(
