@@ -15,6 +15,12 @@ type PolicyTestAppSchema = { wasmSchema: WasmSchema };
 export type PolicyTestAppOptions = {
   /** Override only the client credential; the local authority keeps its configured secret. */
   clientBackendSecret?: string | null;
+  /**
+   * The test clients' slow-query threshold, as `slowQueryThresholdMs` on a
+   * client (default 50; `0` turns the slow-query log off, so a suite whose
+   * policies make slow queries prints no reports).
+   */
+  slowQueryThresholdMs?: number;
 };
 /**
  * Session accepted by {@link PolicyTestApp.as}.
@@ -309,6 +315,9 @@ export async function createPolicyTestApp(
         : (options.clientBackendSecret ?? undefined),
     bundle,
     env: "test",
+    ...(options.slowQueryThresholdMs === undefined
+      ? {}
+      : { slowQueryThresholdMs: options.slowQueryThresholdMs }),
   });
 
   return new PolicyTestApp(expectFn, app, jazzContext, server);
