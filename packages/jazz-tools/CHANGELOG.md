@@ -1,5 +1,31 @@
 # jazz-tools
 
+## 2.0.0-alpha.63
+
+### Patch Changes
+
+- cb1ed6d: Roll back callback transactions when their future is cancelled or their callback
+  panics, releasing the SQLite writer lock and preventing cancelled writes from
+  leaking into subsequent transactions.
+- e8dc3a1: `compositeIndex` in TypeScript schemas now accepts the provenance timestamps `$createdAt` and `$updatedAt`, as the Rust schema builder already does, so a list's newest page (`where({ roomId }).orderBy("$createdAt", "desc").limit(n)`) is served from an index instead of sorting the whole list: `s.table({...}).compositeIndex(["roomId", "$createdAt"])`.
+- 26d4824: Live queries now refresh when the executing user's registered claims change, even if the prepared query carries claims for a different user. Matching explicit claims, including an explicitly empty scope, remain fixed.
+- 3af9bab: The Inspector's IN / NOT IN filter splits Text, Enum and other non-JSON values on every comma again, so a stray quote or bracket (`O"Neil, Smith`) no longer stops the split. JSON and array values still split only on commas outside strings and brackets.
+- 50de7ab: The Inspector overlay's Subscriptions page no longer says "No active subscriptions" when it simply can't see them. A page's Db records subscriptions only from the moment the Inspector is mounted (or from the start with `devMode: true` in its client config), so the page now says which ones it lists, and that listing earlier ones is not supported yet. An empty result from the filters says so separately.
+- 58d9c70: Deploying permissions, publishing a bundle and `jazz-tools validate` now refuse an `exists` nested inside another `exists` that refers to the checked row's columns, with an explicit "not supported in policies yet" error that names the policy path and points to relations (`hopTo`) instead. The engine didn't agree on which row such a reference names. The TypeScript permissions DSL can't produce this shape, so no app built with it is affected. A store that already holds such a policy still opens and serves it as before.
+- 4fc8f35: Fix a 2.0.0-alpha.62 slowdown in nested includes with a limit or offset, such as a room list with each room's newest message. Each parent's page is now read from the relation's index and stops at the page's end, instead of reading every child of every parent and keeping the first few. BandChat's room list over 100 rooms opens in about 4 ms again, down from about 600 ms.
+- 74e06c0: `createJazzClient` from `jazz-tools/client` works on Node, Deno, Bun and CLIs without a `store`: where there is no browser storage (localStorage with Web Locks), the session keeps its selection in memory for the process, which is all a user your backend names (`bearer`) needs, so `createJazzClient({ serverUrl, bearer })` no longer throws "createAccountManager requires an AccountStore outside the browser". A device account on such a host (`initial: "device"`, `createDeviceAccount()`, `restoreDeviceAccount()`, `reopenDeviceAccount()`, `serverUrl: null`) still needs a `store` to keep its key, and is refused with a `DeviceAccountNeedsStoreError` naming that option. Store errors on browsers without localStorage or Web Locks, and on bare React Native, now name the `store` option of `createJazzClient`.
+- e8c2883: `jazz-tools validate` and `migrations create` now also write two readable JSON files beside `schema.ts`: `jazz.app.json` (your tables, their relations and the schema history your app ships) and `jazz.permissions.json` (your current permissions, read only by backends). Nothing else changes: your app keeps running from `schema.ts`, `permissions.ts` and `migrations/index.ts`. Commit both files; other languages, such as Rust's `jazz::tools::deployment::artifact::load`, read them. Keep formatters off them.
+
+  `validate --check` also fails when either file is missing or out of date. `createJazz` refuses to start when the committed files no longer match your TypeScript, naming the file to regenerate with `npx jazz-tools validate`. A project without the files starts as before, and an app the files can't describe yet gets a warning. Policy expressions in the files read like SQL; see https://jazz.tools/docs/reference/app-files.
+
+- 7ddf57f: Missing-policy warnings from `jazz-tools validate` and deploys now say what the missing grant denies, that your backend isn't checked when it acts as the system (so a table only your backend writes is fine), and how to declare that on purpose with `.never()` instead of adding an allow rule to silence the warning. The Declarative Permissions page gains a short section on tables only your backend writes.
+- 4663f48: Svelte: `JazzProvider` no longer remounts the app when the session republishes its snapshot with the same client. The in-place local-first upgrade (`client: () => import("jazz-tools/local-first")` without `localFirst: "now"`) publishes one, and the remount reset component state such as a half-typed form (#5459).
+- f0cd402: `vercel()`: a backend whose connections stop reaching its core recovers on its own. When the core's Sandbox answers `/health` but connections to the core keep ending without opening (hung or refused before they reach it), the instance now stops that Sandbox session after 20 s, and the next request wakes a fresh one. Before, it reconnected to the same session until the session ended, and its failed attempts kept that session awake.
+- Updated dependencies [687f9b8]
+- Updated dependencies [9e594cc]
+  - jazz-rn@2.0.0-alpha.63
+  - jazz-wasm@2.0.0-alpha.63
+
 ## 2.0.0-alpha.62
 
 ### Minor Changes
