@@ -158,7 +158,14 @@ export async function checkAppFiles(
   schemaFile: string,
   files: AppFiles,
 ): Promise<void> {
-  for (const [path, text] of appFilePaths(dirname(schemaFile), files)) {
+  const paths = appFilePaths(dirname(schemaFile), files);
+  if (paths.every(([path]) => !existsSync(path))) {
+    throw new Error(
+      `Neither ${paths.map(([path]) => relative(schemaDir, path) || path).join(" nor ")} is committed: ` +
+        "run `jazz-tools validate` and commit jazz.app.json and jazz.permissions.json.",
+    );
+  }
+  for (const [path, text] of paths) {
     const committed = await readFile(path, "utf8").catch(() => null);
     if (committed === text) continue;
     const shown = relative(schemaDir, path) || path;

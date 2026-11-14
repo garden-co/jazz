@@ -1,41 +1,56 @@
-import { existsSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it } from "vitest";
+import type { WasmSchema } from "../drivers/types.js";
+import { computeSchemaHash } from "../schema-hash.js";
+import { buildAppFiles, checkAppFiles, unsupportedWarning } from "./app-files.js";
 
-// Every .62 app has a form in the files (SPEC 10.10): should the writer
-// ever refuse one, validate fails loudly instead of skipping the files.
-vi.mock("jazz-napi", async (original) => ({
-  ...(await original<typeof import("jazz-napi")>()),
-  writeAppArtifact: () => {
-    throw new Error(
-      "jazz.permissions.json: tables.notes.read: a relation join is not supported in jazz.permissions.json yet",
-    );
-  },
-}));
+// validate's handling of an app the files can't express yet (a row
+// column): the real writer refuses through jazz-napi
+// with JAZZ_APP_FILES_UNSUPPORTED, validate turns that into a warning and
+// writes neither file. The warning text is what validate prints.
 
-const { validateProject } = await import("./catalogue-project.js");
-
-const indexPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-it("validate refuses, as a bug to report, an app the writer can't express", async () => {
-  const root = await mkdtemp(join(tmpdir(), "jazz-validate-unsupported-"));
+it("validate warns, without failing, for an app the files can't express yet", async () => {
+  const schema = {
+    notes: {
+      columns: [
+        {
+          name: "status",
+          column_type: {
+            type: "Row",
+            columns: [{ name: "at", column_type: { type: "Timestamp" }, nullable: false }],
+          },
+          nullable: true,
+        },
+      ],
+    },
+  } as unknown as WasmSchema;
+  const built = await buildAppFiles({
+    current: await computeSchemaHash(schema),
+    schemas: [schema],
+    migrations: [],
+    permissions: {},
+    wasmSchema: schema,
+  });
+  expect("unsupported" in built).toBe(true);
+  if (!("unsupported" in built)) return;
+  expect(unsupportedWarning(built.unsupported)).toMatch(
+    /jazz\.app\.json and jazz\.permissions\.json were not written: .*row column.*runs from its TS as before/,
+  );
+});
+
+it("validate --check says what to do when a project commits neither file", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jazz-validate-check-absent-"));
   roots.push(root);
-  await writeFile(join(root, "package.json"), JSON.stringify({ type: "module" }));
-  await writeFile(
-    join(root, "schema.ts"),
-    `import { schema as s } from ${JSON.stringify(indexPath)}; export const app = s.defineApp({notes:s.table({body:s.string()}, {})}, { migrations: "none" });`,
+  await expect(
+    checkAppFiles(root, join(root, "schema.ts"), { app: "{}\n", permissions: "{}\n" }),
+  ).rejects.toThrow(
+    "Neither jazz.app.json nor jazz.permissions.json is committed: run `jazz-tools validate` and commit jazz.app.json and jazz.permissions.json.",
   );
-  await writeFile(join(root, "permissions.ts"), `export default {};`);
-  await expect(validateProject({ schemaDir: root })).rejects.toThrow(
-    /not supported in jazz\.permissions\.json yet.*report it/,
-  );
-  expect(existsSync(join(root, "jazz.app.json"))).toBe(false);
-  expect(existsSync(join(root, "jazz.permissions.json"))).toBe(false);
 });
