@@ -8,7 +8,7 @@
  * read the files. Node only.
  */
 import { existsSync } from "node:fs";
-import { readFile, unlink, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { runtimeSchemaJsonReplacer } from "../drivers/schema-wire.js";
 import type { WasmSchema } from "../drivers/types.js";
@@ -163,29 +163,6 @@ export async function checkAppFiles(
         : `${shown} is not what schema.ts, permissions.ts and the migrations make: run \`jazz-tools validate\` and commit the jazz.app.json and jazz.permissions.json it writes.`,
     );
   }
-}
-
-/**
- * For an app the format can't express yet: committed files would describe
- * something else than what the app runs, so they go (`validate`), or must be
- * absent (`validate --check`).
- */
-export async function removeStaleAppFiles(
-  schemaDir: string,
-  schemaFile: string,
-  check: boolean,
-): Promise<string[]> {
-  const dir = dirname(schemaFile);
-  const present = [APP_FILE, PERMISSIONS_FILE].filter((file) => existsSync(join(dir, file)));
-  if (present.length === 0) return [];
-  const shown = present.map((file) => relative(schemaDir, join(dir, file)) || file);
-  if (check) {
-    throw new Error(
-      `${shown.join(" and ")} must not be committed while the format can't express this app: run \`jazz-tools validate\` to remove them.`,
-    );
-  }
-  for (const file of present) await unlink(join(dir, file));
-  return [`Removed ${shown.join(" and ")}, which no longer describe this app.`];
 }
 
 /** The warning for an app whose files the format can't express yet. */
