@@ -502,7 +502,7 @@ struct Parser<'a> {
 }
 
 /// Nesting (`not`, parentheses, `exists`) deeper than this is refused.
-const MAX_DEPTH: usize = 64;
+pub const MAX_DEPTH: usize = 64;
 
 /// Parse an expression string.
 pub fn parse(source: &str) -> Result<Ast, ExprError> {
@@ -1276,7 +1276,7 @@ impl Parser<'_> {
         if let Some(Tok::Ident(w)) = self.peek_at(0)
             && TYPED.contains(&w.as_str())
         {
-            return Ok(self.typed_literal()?.0);
+            return Ok(self.deeper(|p| p.typed_literal())?.0);
         }
         Err(ExprError::new(
             self.here(),
@@ -2170,6 +2170,12 @@ fn compile_in(ast: &Ast, context: &Context<'_>, scope: &Scope) -> Result<PolicyE
                     ),
                 ));
             }
+            if scope.calling.len() >= MAX_DEPTH {
+                return Err(ExprError::new(
+                    *span,
+                    "definitions call each other too deeply",
+                ));
+            }
             let mut calling = scope.calling.clone();
             calling.push(name.clone());
             let params = def
@@ -2839,15 +2845,23 @@ fn edit_distance(a: &str, b: &str) -> usize {
 // Printing
 // ---------------------------------------------------------------------------
 
+/// The wording of everything the app files can't express (yet).
+pub const UNSUPPORTED: &str = "is not supported in jazz app files yet";
+
 /// Why something can't be written in an app file.
 pub fn unsupported(what: &str) -> String {
-    format!("{what} is not supported in jazz app files yet")
+    format!("{what} {UNSUPPORTED}")
 }
 
 /// Print `expr`, a policy on `table`, as the text that reads back as exactly
 /// `expr`: the shortest spelling when it does, else the explicit one (typed
 /// literals, `literal(null)`, `exists (from …)`, `via`), which always does.
 pub fn print(expr: &PolicyExpr, context: &Context<'_>, table: &str) -> Result<String, String> {
+    if too_deep(expr, 0) {
+        return Err(unsupported(&format!(
+            "a policy nested more than {MAX_DEPTH} levels deep"
+        )));
+    }
     if let Some(refusal) = outer_row_refusal(expr, 0) {
         return Err(refusal.into());
     }
@@ -2903,6 +2917,106 @@ fn outer_row_refusal(expr: &PolicyExpr, depth: usize) -> Option<&'static str> {
         }
         PolicyExpr::Not(inner) => outer_row_refusal(inner, depth),
         _ => None,
+    }
+}
+
+/// Whether `expr` nests deeper than the grammar reads, checked before
+/// anything recurses through it all (the walk stops at the limit).
+pub fn too_deep(expr: &PolicyExpr, depth: usize) -> bool {
+    if depth > MAX_DEPTH {
+        return true;
+    }
+    let value = |v: &PolicyValue| match v {
+        PolicyValue::Literal(v) => value_too_deep(v, depth + 1),
+        PolicyValue::SessionRef(_) => false,
+    };
+    match expr {
+        PolicyExpr::And(items) | PolicyExpr::Or(items) => {
+            items.iter().any(|i| too_deep(i, depth + 1))
+        }
+        PolicyExpr::Not(inner) => too_deep(inner, depth + 1),
+        PolicyExpr::Exists { condition, .. } => too_deep(condition, depth + 1),
+        PolicyExpr::ExistsRel { rel } => relation_too_deep(rel, depth + 1),
+        PolicyExpr::Cmp { value: v, .. } | PolicyExpr::Contains { value: v, .. } => value(v),
+        PolicyExpr::InList { values, .. } => values.iter().any(value),
+        PolicyExpr::SessionCmp { value: v, .. } | PolicyExpr::SessionContains { value: v, .. } => {
+            value_too_deep(v, depth + 1)
+        }
+        PolicyExpr::SessionInList { values, .. } => {
+            values.iter().any(|v| value_too_deep(v, depth + 1))
+        }
+        _ => false,
+    }
+}
+
+fn value_too_deep(value: &Value, depth: usize) -> bool {
+    if depth > MAX_DEPTH {
+        return true;
+    }
+    match value {
+        Value::Array(values) | Value::Row { values, .. } | Value::Enum { values, .. } => {
+            values.iter().any(|v| value_too_deep(v, depth + 1))
+        }
+        _ => false,
+    }
+}
+
+fn json_too_deep(value: &serde_json::Value, depth: usize) -> bool {
+    if depth > MAX_DEPTH {
+        return true;
+    }
+    match value {
+        serde_json::Value::Array(items) => items.iter().any(|v| json_too_deep(v, depth + 1)),
+        serde_json::Value::Object(entries) => entries.values().any(|v| json_too_deep(v, depth + 1)),
+        _ => false,
+    }
+}
+
+fn relation_too_deep(rel: &RelationExpr, depth: usize) -> bool {
+    if depth > MAX_DEPTH {
+        return true;
+    }
+    let next = depth + 1;
+    match rel {
+        RelationExpr::TableScan { .. } => false,
+        RelationExpr::Filter { input, predicate } => {
+            relation_too_deep(input, next) || predicate_too_deep(predicate, next)
+        }
+        RelationExpr::Union { inputs } => inputs.iter().any(|a| relation_too_deep(&a.input, next)),
+        RelationExpr::Join { left, right, .. } => {
+            relation_too_deep(left, next) || relation_too_deep(right, next)
+        }
+        RelationExpr::Gather { seed, step, .. } => {
+            relation_too_deep(seed, next) || relation_too_deep(step, next)
+        }
+        RelationExpr::Project { input, .. }
+        | RelationExpr::Distinct { input, .. }
+        | RelationExpr::OrderBy { input, .. }
+        | RelationExpr::Offset { input, .. }
+        | RelationExpr::Limit { input, .. } => relation_too_deep(input, next),
+    }
+}
+
+fn predicate_too_deep(p: &RelationPredicate, depth: usize) -> bool {
+    if depth > MAX_DEPTH {
+        return true;
+    }
+    let next = depth + 1;
+    let value = |v: &RelationValueRef| match v {
+        RelationValueRef::Literal(json) => json_too_deep(json, next),
+        _ => false,
+    };
+    match p {
+        RelationPredicate::And(items) | RelationPredicate::Or(items) => {
+            items.iter().any(|i| predicate_too_deep(i, next))
+        }
+        RelationPredicate::Not(inner) => predicate_too_deep(inner, next),
+        RelationPredicate::EnumMatch { payload, .. } => predicate_too_deep(payload, next),
+        RelationPredicate::Cmp { right, .. } | RelationPredicate::Contains { right, .. } => {
+            value(right)
+        }
+        RelationPredicate::In { values, .. } => values.iter().any(value),
+        _ => false,
     }
 }
 

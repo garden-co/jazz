@@ -55,7 +55,22 @@ pub const PERMISSIONS_SCHEMA_URL: &str = "https://jazz.tools/schemas/jazz.permis
 pub struct ArtifactError {
     file: &'static str,
     message: String,
+    kind: ArtifactErrorKind,
 }
+
+/// What kind of refusal an [`ArtifactError`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactErrorKind {
+    /// The input is wrong: a malformed or inconsistent file or input.
+    Refused,
+    /// The input is fine, but the files can't express it (yet): the writer
+    /// refuses rather than write something that reads back differently.
+    Unsupported,
+}
+
+/// The JavaScript `error.code` bindings give an
+/// [`ArtifactErrorKind::Unsupported`] refusal.
+pub const UNSUPPORTED_CODE: &str = "JAZZ_APP_FILES_UNSUPPORTED";
 
 impl ArtifactError {
     fn new(message: impl Into<String>) -> Self {
@@ -66,7 +81,26 @@ impl ArtifactError {
         Self {
             file,
             message: message.into(),
+            kind: ArtifactErrorKind::Refused,
         }
+    }
+
+    /// What the files can't express, in `file`.
+    fn unsupported(file: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            kind: ArtifactErrorKind::Unsupported,
+            ..Self::in_file(file, message)
+        }
+    }
+
+    /// Whether the input was wrong, or the files can't express it.
+    pub fn kind(&self) -> ArtifactErrorKind {
+        self.kind
+    }
+
+    /// Whether the files can't express the input (yet).
+    pub fn is_unsupported(&self) -> bool {
+        self.kind == ArtifactErrorKind::Unsupported
     }
 
     fn at(file: &'static str, (path, message): (String, String)) -> Self {
@@ -565,8 +599,21 @@ pub fn write(input: ArtifactInput) -> Result<WrittenApp, ArtifactError> {
         .iter()
         .map(|m| Ok((name_of(&m.from_hash)?, name_of(&m.to_hash)?, m)))
         .collect::<Result<Vec<_>, ArtifactError>>()?;
+    // An inconsistent migration is wrong input; everything else the writers
+    // refuse is what the files can't express.
+    if let Some(lens) = input
+        .migrations
+        .iter()
+        .flat_map(|m| &m.forward)
+        .find(|lens| lens.added && lens.removed)
+    {
+        return Err(ArtifactError::new(format!(
+            "table {} cannot be both added and removed",
+            lens.table
+        )));
+    }
     let app_json = app_file::write(&current, &history, &migrations, &input.codegen)
-        .map_err(ArtifactError::new)?;
+        .map_err(|error| ArtifactError::unsupported(APP_FILE, error))?;
     let relations = input.codegen.relations();
     let permissions: Permissions = input
         .permissions
@@ -574,7 +621,7 @@ pub fn write(input: ArtifactInput) -> Result<WrittenApp, ArtifactError> {
         .filter(|(_, p)| *p != TablePolicies::default())
         .collect();
     let permissions_json = permissions_file::write(&permissions, &current, &relations)
-        .map_err(|error| ArtifactError::in_file(PERMISSIONS_FILE, error))?;
+        .map_err(|error| ArtifactError::unsupported(PERMISSIONS_FILE, error))?;
     let written = WrittenApp {
         app: json::print(&with_schema(app_json, APP_SCHEMA_URL)),
         permissions: json::print(&with_schema(permissions_json, PERMISSIONS_SCHEMA_URL)),
@@ -583,9 +630,10 @@ pub fn write(input: ArtifactInput) -> Result<WrittenApp, ArtifactError> {
     // Read the files back as a backend will.
     let loaded = load(written.app.as_bytes(), written.permissions.as_bytes())?;
     let round_trip = |what: &str| {
-        ArtifactError::new(expr::unsupported(&format!(
-            "{what}, which the file can't express exactly,"
-        )))
+        ArtifactError::unsupported(
+            APP_FILE,
+            expr::unsupported(&format!("{what}, which the file can't express exactly,")),
+        )
     };
     if loaded.current_hash() != current_hash {
         return Err(round_trip("the current schema"));
@@ -606,7 +654,7 @@ pub fn write(input: ArtifactInput) -> Result<WrittenApp, ArtifactError> {
     }
     for (table, policies) in &permissions {
         if loaded.permissions().get(table) != Some(policies) {
-            return Err(ArtifactError::in_file(
+            return Err(ArtifactError::unsupported(
                 PERMISSIONS_FILE,
                 expr::unsupported(&format!(
                     "tables.{table}: a policy that doesn't read back the same"
