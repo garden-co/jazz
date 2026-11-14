@@ -58,6 +58,10 @@ reaches that URL, without your `inspect` hook: it holds no data. Everything it s
 `<basePath>/inspect/api`, which only answers requests your `inspect` hook (or an approved token)
 lets in, so a visitor without access gets no data.
 
+In the data grid, a value over 32 KB shows as a summary such as "‹large bytes value, 5.2 MB›" and
+can't be edited there; the CLI and MCP `get` read it in parts (see
+[Large values](/docs/tooling/cli-and-mcp#large-values)).
+
 Besides the data grid, it has:
 
 - **View as user**: browse the data under one user's permissions. If your permissions read `session.claims`, give that user's claims too ("with claims"): without them you see what a session with no claims would, and the Inspector says so.
