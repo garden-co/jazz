@@ -19,6 +19,13 @@ const KEY_NAMESPACE = new TextEncoder().encode("jazz-auth-key-v1");
 /** RFC 4122 DNS namespace, for audiences that are not UUIDs. */
 const DNS_NAMESPACE = parseUuidText("6ba7b810-9dad-11d1-80b4-00c04fd430c8")!;
 const encoder = new TextEncoder();
+// noble enables an 8-bit window for the base point at import, so the first
+// `getPublicKey`/`sign` builds a 4096-point table: ~40 ms of a page's startup,
+// for the one or two signatures a load makes. A 4-bit window builds an eighth of
+// them (a few ms) and signs a fraction of a millisecond slower. The
+// results are the same. It applies to this noble instance, which the app may
+// share.
+ed25519.Point.BASE.precompute(4);
 
 export interface SelfSignedTokenOptions {
   /** The 32-byte identity seed, base64url-encoded. */

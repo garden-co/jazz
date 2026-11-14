@@ -2936,7 +2936,8 @@ export class Db {
     )
       throw new Error("Account context mismatch");
     try {
-      const token = await accountToken(account, accountRegistry(account));
+      // A renewal: never the token the server may just have refused.
+      const token = await accountToken(account, accountRegistry(account), { fresh: true });
       if (this.shutdownAbort.signal.aborted) throw new Error("Account context closed");
       const reserved =
         account.identity.issuer === "urn:jazz:local-first"
