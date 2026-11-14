@@ -59,25 +59,28 @@ const schema = {
     { roomId: s.uuid(), reader: s.uuid(), lastReadAt: s.timestamp() },
     { room: s.rel("rooms", "roomId") },
   ),
-  messages: s.table(
-    {
-      roomId: s.uuid(),
-      senderId: s.uuid(),
-      text: s.string(),
-      attachment: s.bytes().optional(),
-      attachmentName: s.string().optional(),
-      attachmentType: s.string().optional(),
-      attachmentSize: s.int().optional(),
-      // A message can carry a shared sketch instead of (or as well as) a file.
-      canvasId: s.uuid().optional(),
-    },
-    {
-      room: s.rel("rooms", "roomId"),
-      sender: s.rel("profiles", "senderId"),
-      canvas: s.rel("canvases", "canvasId"),
-      reactionsViaMessage: s.reverse("reactions", "message"),
-    },
-  ),
+  messages: s
+    .table(
+      {
+        roomId: s.uuid(),
+        senderId: s.uuid(),
+        text: s.string(),
+        attachment: s.bytes().optional(),
+        attachmentName: s.string().optional(),
+        attachmentType: s.string().optional(),
+        attachmentSize: s.int().optional(),
+        // A message can carry a shared sketch instead of (or as well as) a file.
+        canvasId: s.uuid().optional(),
+      },
+      {
+        room: s.rel("rooms", "roomId"),
+        sender: s.rel("profiles", "senderId"),
+        canvas: s.rel("canvases", "canvasId"),
+        reactionsViaMessage: s.reverse("reactions", "message"),
+      },
+    )
+    // A room's newest page: roomId = ? ORDER BY $createdAt DESC LIMIT n.
+    .compositeIndex(["roomId", "$createdAt"]),
   reactions: s.table(
     {
       roomId: s.uuid(),
