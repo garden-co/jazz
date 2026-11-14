@@ -26,6 +26,13 @@ pub fn variant_registry_id_for_path(path: &str) -> u64 {
     if hash == 0 { 1 } else { hash }
 }
 
+/// A cell's value.
+///
+/// Its postcard encoding must stay stable across releases: a serializable
+/// transaction's read set names each aggregate row by a hash of its encoded
+/// values (`aggregate_read_id` in jazz-db), and the authority compares that
+/// hash with its own. Changing how a value encodes makes every aggregate
+/// read conflict between peers on either side of the change.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum Value {
     U8(u8),
