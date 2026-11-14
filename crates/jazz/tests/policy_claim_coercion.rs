@@ -235,15 +235,20 @@ fn mallory_claims(column: Column) -> Vec<Claim> {
 }
 
 fn session(db: &Db, n: u8, claim: &Claim) -> AuthorSubject {
+    session_with(db, n, "who", claim)
+}
+
+/// A session whose claim `name` is `claim`.
+fn session_with(db: &Db, n: u8, name: &str, claim: &Claim) -> AuthorSubject {
     let mut bytes = [0x60; 16];
     bytes[15] = n;
     let author = AuthorSubject::for_test_bytes(bytes);
     let claims = match claim {
         Claim::Json(value) => {
-            jazz::binding_args::policy_claims(&author, json!({ "who": value })).unwrap()
+            jazz::binding_args::policy_claims(&author, json!({ name: value })).unwrap()
         }
         Claim::Raw(value) => {
-            BTreeMap::from([(jazz::query::provider_claim_key("who"), value.clone())])
+            BTreeMap::from([(jazz::query::provider_claim_key(name), value.clone())])
         }
     };
     db.set_identity_claims(author, claims);
@@ -397,4 +402,135 @@ fn a_query_filter_on_a_claim_converts_it_as_a_policy_does() {
             assert_eq!(rows.len(), 1, "{column:?} / {spelling:?}");
         }
     }
+}
+
+/// A table readable as `policy` says, with one row.
+fn open_with(policy: PolicyExpr) -> Db {
+    let db = block_on(Db::open(DbConfig::new(
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column("body", ColumnType::Text)
+                        .policies(TablePolicies::new().with_select(policy)),
+                )
+                .build(),
+        ),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    block_on(db.insert(
+        "notes",
+        BTreeMap::from([("body".to_owned(), Value::String("hi".to_owned()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    db
+}
+
+fn visible(db: &Db, who: AuthorSubject) -> usize {
+    let prepared = db.prepare_query(&Query::from("notes")).unwrap();
+    block_on(db.all_for_identity(&prepared, ReadOpts::default(), who))
+        .unwrap()
+        .len()
+}
+
+fn claims_path(name: &str) -> Vec<String> {
+    vec!["claims".to_owned(), name.to_owned()]
+}
+
+/// A deny list in a claim (`not(session.claims.blocked contains <uuid>)`)
+/// denies whatever way the issuer spells the uuid, and the positive form
+/// grants alike: an array claim's elements compare as the literal's type.
+///
+/// ```
+/// mallory (claims.blocked = ["<HER UUID>"]) ──read──► notes ✗
+/// ```
+#[test]
+fn a_uuid_in_an_array_claim_matches_whatever_its_spelling() {
+    use jazz::tools::{ObjectId, Value as PublicValue};
+    let mallory_id = uuid::Uuid::from_bytes([0xbb; 16]);
+    let blocked = || PolicyExpr::SessionContains {
+        path: claims_path("blocked"),
+        value: PublicValue::Uuid(ObjectId::from_uuid(mallory_id)),
+    };
+    let deny = open_with(PolicyExpr::not(blocked()));
+    let allow = open_with(blocked());
+    let spellings = [
+        mallory_id.to_string(),
+        mallory_id.to_string().to_uppercase(),
+        mallory_id.simple().to_string(),
+    ];
+    for (n, spelling) in spellings.iter().enumerate() {
+        let claim = Claim::Json(json!([spelling]));
+        let on_deny = session_with(&deny, n as u8, "blocked", &claim);
+        assert_eq!(visible(&deny, on_deny), 0, "{spelling}: still blocked");
+        let on_allow = session_with(&allow, n as u8, "blocked", &claim);
+        assert_eq!(visible(&allow, on_allow), 1, "{spelling}: listed");
+    }
+    let someone_else = Claim::Json(json!([uuid::Uuid::from_bytes([0xcc; 16]).to_string()]));
+    let other = session_with(&deny, 9, "blocked", &someone_else);
+    assert_eq!(
+        visible(&deny, other),
+        1,
+        "a list without her lets others read"
+    );
+}
+
+/// A claim in a mixed-type literal list (`role in [1, "admin"]`) compares
+/// with each literal as that literal's type, so negating the list denies
+/// exactly the claims the list grants.
+#[test]
+fn a_claim_in_a_mixed_literal_list_compares_with_each_literal_as_its_type() {
+    use jazz::tools::Value as PublicValue;
+    let listed = || PolicyExpr::SessionInList {
+        path: claims_path("role"),
+        values: vec![
+            PublicValue::Integer(1),
+            PublicValue::Text("admin".to_owned()),
+        ],
+    };
+    let allow = open_with(listed());
+    let deny = open_with(PolicyExpr::not(listed()));
+    let cases = [
+        (json!("admin"), true),
+        (json!(1), true),
+        (json!("1"), true),
+        (json!("01"), false),
+        (json!("editor"), false),
+    ];
+    for (n, (claim, listed)) in cases.into_iter().enumerate() {
+        let claim = Claim::Json(claim);
+        let on_allow = session_with(&allow, n as u8, "role", &claim);
+        let on_deny = session_with(&deny, n as u8, "role", &claim);
+        assert_eq!(
+            visible(&allow, on_allow),
+            listed as usize,
+            "{claim:?} in the list"
+        );
+        assert_eq!(
+            visible(&deny, on_deny),
+            !listed as usize,
+            "{claim:?} not in it"
+        );
+    }
+}
+
+/// A timestamp never reads a string claim as its milliseconds: only
+/// Integer and BigInt columns take decimal strings.
+#[test]
+fn a_timestamp_compares_only_with_a_number_claim() {
+    use jazz::tools::{CmpOp, Value as PublicValue};
+    let db = open_with(PolicyExpr::SessionCmp {
+        path: claims_path("since"),
+        op: CmpOp::Eq,
+        value: PublicValue::Timestamp(1_700_000_000_000),
+    });
+    let number = session_with(&db, 1, "since", &Claim::Json(json!(1_700_000_000_000_u64)));
+    assert_eq!(visible(&db, number), 1);
+    let text = session_with(&db, 2, "since", &Claim::Json(json!("1700000000000")));
+    assert_eq!(visible(&db, text), 0);
 }

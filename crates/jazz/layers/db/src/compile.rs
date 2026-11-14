@@ -2347,29 +2347,50 @@ impl<'a> Ctx<'a> {
                     .iter()
                     .map(public_value)
                     .collect::<Result<Vec<_>, _>>()?;
-                // The literals share one type; a claim compares as it.
-                let ty = values.iter().find_map(literal_type);
-                let left = self.claim_term(session, path, ty.as_ref())?;
-                let options = values
-                    .iter()
-                    .map(|value| self.value_term(value))
-                    .collect::<Result<Vec<_>, _>>()?;
-                self.in_list(left, options)?
+                // A claim compares with each literal as that literal's type:
+                // one IN per type, OR-ed. A literal without one compares
+                // with the claim as it is.
+                let mut groups: Vec<(Option<ValueType>, Vec<&Value>)> = Vec::new();
+                for value in &values {
+                    let ty = literal_type(value);
+                    match groups.iter_mut().find(|(group, _)| *group == ty) {
+                        Some((_, members)) => members.push(value),
+                        None => groups.push((ty, vec![value])),
+                    }
+                }
+                let mut parts = Vec::with_capacity(groups.len());
+                for (ty, members) in groups {
+                    let left = self.claim_term(session, path, ty.as_ref())?;
+                    let options = members
+                        .into_iter()
+                        .map(|value| self.value_term(value))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    parts.push(self.in_list(left, options)?);
+                }
+                or(&parts)
             }
             // Both sides are known at compile time: an array claim holds the
             // value, or a text claim contains it.
             PolicyExpr::SessionContains { path, value } => {
                 let needle = public_value(value)?;
-                let same = |a: &Value, b: &Value| match (a, b) {
-                    (Value::Uuid(u), Value::String(s)) | (Value::String(s), Value::Uuid(u)) => {
-                        u.to_string() == *s
+                // A claim element compares as the literal's type, as
+                // everywhere else ([`claim_as`]); the session's own values
+                // as they are.
+                let ty = literal_type(&needle).filter(|_| is_claim(path));
+                let holds = |item: &Value| match (&ty, unwrap_nullable(item.clone())) {
+                    (_, None) => false,
+                    (Some(ty), Some(item)) => {
+                        claim_as(ty, item).is_some_and(|item| same_sql(&item, &needle))
                     }
-                    (a, b) => a == b,
+                    (None, Some(item)) => match (&item, &needle) {
+                        (Value::Uuid(u), Value::String(s)) | (Value::String(s), Value::Uuid(u)) => {
+                            u.to_string() == *s
+                        }
+                        (a, b) => a == b,
+                    },
                 };
                 bool_sql(match session.resolve(path) {
-                    Some(Value::Array(items)) => items.iter().any(|item| {
-                        unwrap_nullable(item.clone()).is_some_and(|i| same(&i, &needle))
-                    }),
+                    Some(Value::Array(items)) => items.iter().any(holds),
                     Some(Value::String(text)) => match &needle {
                         Value::String(part) => text.contains(part.as_str()),
                         _ => false,
@@ -3246,6 +3267,12 @@ pub(crate) fn is_claim(path: &[String]) -> bool {
     path.len() >= 2 && path[0] == "claims"
 }
 
+/// Whether two values are the same SQLite value (so `I32(5)` and `U64(5)`
+/// are).
+fn same_sql(a: &Value, b: &Value) -> bool {
+    matches!((to_sql(a), to_sql(b)), (Ok(Some(a)), Ok(Some(b))) if a == b)
+}
+
 /// Whether an [`Operand::Claim`] key names a provider claim
 /// (`session.claims.*`) rather than a part of the session itself.
 fn is_provider_claim_key(key: &str) -> bool {
@@ -3257,10 +3284,11 @@ fn literal_type(value: &Value) -> Option<ValueType> {
     Some(match value {
         Value::Uuid(_) => ValueType::Uuid,
         Value::String(_) => ValueType::String,
-        Value::I32(_) | Value::I64(_) | Value::U8(_) | Value::U16(_) | Value::U32(_) => {
-            ValueType::I64
+        Value::I32(_) | Value::I64(_) => ValueType::I64,
+        // Timestamps and other unsigned values compare as they are.
+        Value::U8(_) | Value::U16(_) | Value::U32(_) | Value::U48(_) | Value::U64(_) => {
+            ValueType::U64
         }
-        Value::U64(_) | Value::U48(_) => ValueType::U64,
         _ => return None,
     })
 }

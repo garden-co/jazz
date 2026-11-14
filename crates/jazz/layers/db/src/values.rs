@@ -1101,9 +1101,9 @@ pub(crate) fn unwrap_nullable_type(ty: &ValueType) -> &ValueType {
 ///
 /// A claim is JSON, so its type is only known from what it is compared
 /// with: a UUID column reads a string as the UUID it spells, a text column
-/// a UUID claim as its hyphenated text, and an integer column a string as
-/// the integer it spells in canonical decimal (`"42"`, not `"042"` or
-/// `"42.0"`). A claim the type cannot hold is `None`: it matches nothing.
+/// a UUID claim as its hyphenated text, and an Integer or BigInt column a
+/// string as the integer it spells in canonical decimal (`"42"`, not
+/// `"042"` or `"42.0"`; timestamps take numbers only). A claim the type cannot hold is `None`: it matches nothing.
 /// Each claim converts to at most one value, so no claim matches a row it
 /// does not name. Other types compare the claim as it is.
 pub(crate) fn claim_as(ty: &ValueType, claim: Value) -> Option<Value> {
@@ -1117,16 +1117,9 @@ pub(crate) fn claim_as(ty: &ValueType, claim: Value) -> Option<Value> {
         (ValueType::Uuid, claim @ Value::Uuid(_)) => claim,
         (ValueType::Uuid, _) => return None,
         (ValueType::String, Value::Uuid(uuid)) => Value::String(uuid.to_string()),
-        (
-            ValueType::U8
-            | ValueType::U16
-            | ValueType::U32
-            | ValueType::U48
-            | ValueType::U64
-            | ValueType::I32
-            | ValueType::I64,
-            Value::String(text),
-        ) => {
+        // Integer and BigInt columns; a timestamp (`U64`) never reads a
+        // string as its milliseconds.
+        (ValueType::I32 | ValueType::I64, Value::String(text)) => {
             let number: i64 = text.parse().ok()?;
             if number.to_string() != text {
                 return None;
