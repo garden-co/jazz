@@ -43,10 +43,17 @@ exclude = [
   "examples/todo-server-rs",
   "examples/docs/todo-server-rs",
   "vendor/ruzstd",
+  "vendor/sqlite-wasm-rs",
   # The alpha59-alpha60 exporter and its test fixture, built inside an alpha.59
   # checkout by their prepare.sh.
   "dev/alpha59-alpha60",
 ]
+
+# The browser build's SQLite. A global patch, so rusqlite's wasm FFI and
+# jazz-wasm link the same copy; it drops SQLite extensions Jazz never uses.
+# See vendor/sqlite-wasm-rs/JAZZ_PATCH.md.
+[patch.crates-io]
+sqlite-wasm-rs = { path = "vendor/sqlite-wasm-rs" }
 
 [workspace.dependencies]
 jazz = { path = "crates/jazz", default-features = false }
