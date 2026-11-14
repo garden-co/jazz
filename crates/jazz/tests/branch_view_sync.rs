@@ -1971,3 +1971,33 @@ fn a_tabs_settled_row_needs_a_live_read_to_stay_current_through_its_worker() {
         );
     }
 }
+
+/// A draft over main edited x, and the draft's read holds x's id. A
+/// main-view read opened beside it must still receive main's x: the
+/// replica holds versions per branch, so the draft read holding the id
+/// does not make main's version one the replica has (offset-page
+/// deduplication of openings applies only to tables without branches).
+#[test]
+fn a_base_version_another_views_read_holds_by_id_still_ships() {
+    let (server, client, _) = connected();
+    let (main, draft) = (branch(0xf1), branch(0xf2));
+    put(&server, &main, 0x80, "x", 1);
+    put(&server, &main, 0x81, "y", 2);
+    put(&server, &main, 0x82, "z", 3);
+    set_rank(&server, 0x80, &draft, &main, 9);
+    let query = Query::from("todos").order_by("rank", OrderDirection::Asc);
+    let main_view = ReadOpts::default().branch_view(main.clone(), None);
+    let draft_view =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let prepared = client.prepare_query(&query).unwrap();
+    let _draft = block_on(client.subscribe(&prepared, draft_view.clone())).unwrap();
+    pump(&server, &client);
+    assert_eq!(titles(&client, &query, draft_view.clone()), ["y", "z", "x"]);
+    let _main = block_on(client.subscribe(&prepared, main_view.clone())).unwrap();
+    pump(&server, &client);
+    assert_eq!(titles(&client, &query, main_view.clone()), ["x", "y", "z"]);
+    assert_eq!(
+        titles(&client, &query, main_view.clone()),
+        titles(&server, &query, main_view)
+    );
+}
