@@ -478,6 +478,13 @@ export interface JazzCoreSocketEvent {
 export type JsonValue =
   any
 
+/**
+ * Read and check an app's `jazz.app.json` (`app`) and
+ * `jazz.permissions.json` (`permissions`) as a backend does. Returns the
+ * current schema hash and the bundle id the two files make.
+ */
+export declare function loadAppArtifact(app: string, permissions: string): JsonValue
+
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
 
 /** Exact build/ABI fingerprint for the generated native artifact. */
@@ -596,4 +603,20 @@ export interface VerifyTokenResult {
   ok: boolean
   id: string
   error?: string
+}
+
+/**
+ * Build the `jazz.app.json` and `jazz.permissions.json` texts from what
+ * `jazz-tools validate` compiled (an
+ * [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput) as
+ * JSON): the files' only writer, which refuses what a reader would.
+ */
+export declare function writeAppArtifact(input: string): WrittenAppFiles
+
+/** An app's two files, as [`write_app_artifact`] renders them. */
+export interface WrittenAppFiles {
+  /** `jazz.app.json`, which the app and its clients ship. */
+  app: string
+  /** `jazz.permissions.json`, which only its backends read. */
+  permissions: string
 }

@@ -21,7 +21,7 @@ pub fn parse_schema_hash(hash_text: &str) -> Result<SchemaHash, String> {
     Ok(SchemaHash::from_bytes(hash_bytes))
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishMigrationRequest {
     pub from_hash: String,
@@ -29,7 +29,7 @@ pub struct PublishMigrationRequest {
     pub forward: Vec<PublishTableLens>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishTableLens {
     pub table: String,
@@ -41,7 +41,7 @@ pub struct PublishTableLens {
     pub operations: Vec<PublishLensOp>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum PublishLensOp {
     Introduce {
@@ -193,6 +193,13 @@ pub struct ClientMigrations {
 pub fn client_migrations(json: &[u8]) -> Result<(Vec<JazzSchema>, Vec<MigrationLens>), String> {
     let bundle: ClientMigrations =
         serde_json::from_slice(json).map_err(|error| format!("decode migrations: {error}"))?;
+    lower_client_migrations(bundle)
+}
+
+/// [`client_migrations`] for a decoded bundle.
+pub(super) fn lower_client_migrations(
+    bundle: ClientMigrations,
+) -> Result<(Vec<JazzSchema>, Vec<MigrationLens>), String> {
     let mut by_hash = std::collections::HashMap::new();
     for entry in &bundle.schemas {
         let claimed = parse_schema_hash(&entry.hash)?;
@@ -238,7 +245,14 @@ pub fn client_migrations(json: &[u8]) -> Result<(Vec<JazzSchema>, Vec<MigrationL
 pub fn check_client_migrations(json: &[u8], target: &str) -> Result<(), String> {
     let bundle: ClientMigrations =
         serde_json::from_slice(json).map_err(|error| format!("decode migrations: {error}"))?;
-    let target = parse_schema_hash(target)?;
+    check_decoded_client_migrations(bundle, parse_schema_hash(target)?)
+}
+
+/// [`check_client_migrations`] for a decoded bundle.
+pub(super) fn check_decoded_client_migrations(
+    bundle: ClientMigrations,
+    target: SchemaHash,
+) -> Result<(), String> {
     let mut schemas = Vec::new();
     let mut by_hash = std::collections::HashMap::new();
     for entry in &bundle.schemas {

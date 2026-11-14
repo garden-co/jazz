@@ -1,0 +1,87 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "projects": {
+      "columns": { "name": "string" },
+      "relations": { "todosViaProject": { "reverse": "todos", "relation": "project" } }
+    },
+    "table_with_constraints": {
+      "columns": {
+        "data": {
+          "json": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "additionalProperties": false,
+            "properties": {
+              "datetime": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$",
+                "type": "string"
+              },
+              "integer": { "maximum": 10, "minimum": 0, "type": "integer" },
+              "string": { "maxLength": 10, "minLength": 1, "type": "string" }
+            },
+            "type": "object"
+          }
+        }
+      }
+    },
+    "table_with_defaults": {
+      "columns": {
+        "integer": { "type": "int", "default": 1 },
+        "float": { "type": "float", "default": 1.0 },
+        "bytes": { "type": "bytes", "default": "AAH/" },
+        "enum": { "enum": ["a", "b", "c"], "default": "a" },
+        "json": {
+          "json": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "additionalProperties": false,
+            "properties": { "age": { "type": "number" }, "name": { "type": "string" } },
+            "required": ["name"],
+            "type": "object"
+          },
+          "default": { "name": "default name" }
+        },
+        "timestampDate": { "type": "timestamp", "default": 1767225600000 },
+        "timestampNumber": { "type": "timestamp", "default": 0 },
+        "string": { "type": "string", "default": "default value" },
+        "array": { "array": "string", "default": ["a", "b", "c"] },
+        "boolean": { "type": "boolean", "default": true },
+        "nullable": { "type": "string", "optional": true, "default": null },
+        "nullableInteger": { "type": "int", "optional": true, "default": null },
+        "refId": {
+          "type": "uuid",
+          "optional": true,
+          "default": "00000000-0000-0000-0000-000000000000"
+        }
+      },
+      "relations": { "ref": { "rel": "todos", "column": "refId" } }
+    },
+    "todos": {
+      "columns": {
+        "title": "string",
+        "done": { "type": "boolean", "default": false },
+        "tags": { "array": "string", "default": [] },
+        "projectId": "uuid",
+        "ownerId": "uuid?",
+        "assigneesIds": { "array": "uuid", "default": [] }
+      },
+      "relations": {
+        "assignees": { "rel": "users", "column": "assigneesIds" },
+        "owner": { "rel": "users", "column": "ownerId" },
+        "project": { "rel": "projects", "column": "projectId" },
+        "table_with_defaultsViaRef": { "reverse": "table_with_defaults", "relation": "ref" }
+      },
+      "indexes": ["done"]
+    },
+    "users": {
+      "columns": { "name": "string", "friendsIds": { "array": "uuid" } },
+      "relations": {
+        "friends": { "rel": "users", "column": "friendsIds" },
+        "todosViaAssignees": { "reverse": "todos", "relation": "assignees" },
+        "todosViaOwner": { "reverse": "todos", "relation": "owner" },
+        "usersViaFriends": { "reverse": "users", "relation": "friends" }
+      }
+    }
+  }
+}

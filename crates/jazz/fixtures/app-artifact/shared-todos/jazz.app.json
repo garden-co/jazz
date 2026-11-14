@@ -1,0 +1,53 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "shares": {
+      "columns": { "todo": "uuid?", "user": "uuid" },
+      "relations": { "todo": { "rel": "todos", "column": "todo" } },
+      "history": "latest"
+    },
+    "todos": {
+      "columns": {
+        "name": "string",
+        "owner": "uuid?",
+        "tags": { "array": "string" },
+        "status": { "enum": { "open": {}, "done": { "at": "timestamp" } }, "optional": true },
+        "meta": { "json": { "type": "object" }, "optional": true }
+      },
+      "relations": { "shares": { "reverse": "shares", "relation": "todo" } },
+      "indexes": ["owner"],
+      "tsOnly": { "shareCount": "computed", "meta": "transform" }
+    }
+  },
+  "history": {
+    "00304e9bce65": {
+      "tables": {
+        "shares": {
+          "columns": {
+            "todo": { "type": "uuid", "optional": true, "references": "todos" },
+            "user": "uuid"
+          }
+        },
+        "todos": { "columns": { "title": "string", "owner": "uuid?" } }
+      }
+    }
+  },
+  "migrations": [
+    {
+      "from": "00304e9bce65",
+      "migrate": {
+        "todos": {
+          "name": { "renameFrom": "title" },
+          "tags": { "add": { "array": "string" }, "default": [] },
+          "status": {
+            "add": { "enum": { "open": {}, "done": { "at": "timestamp" } } },
+            "default": null
+          },
+          "meta": { "add": { "json": { "type": "object" } }, "default": null }
+        }
+      }
+    }
+  ],
+  "slices": { "sharing": ["shares"] }
+}

@@ -166,7 +166,12 @@ export interface VercelCore {
     headers: string[][],
     onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
     access?: "admin" | "backend" | "session",
-  ): { send(data: Uint8Array): boolean; close(): void };
+  ): {
+    send(data: Uint8Array): boolean;
+    close(): void;
+    /** Resolves once the session reaches the core (see `CoreSocket.opened`). */
+    readonly opened?: Promise<void>;
+  };
   close(): Promise<void>;
 }
 
@@ -202,6 +207,12 @@ const ENSURE_FRESH_MS = 10_000;
  */
 const ROUTER_ERROR_HEADER = "x-vercel-error";
 const KEEPALIVE_MS = 30_000;
+// A session that answers `/health` while connections to its core keep
+// ending without opening (none opening in between), for this long and this
+// many times, is stopped, so the next wake starts a fresh one. A core that
+// is restarting opens connections again well within this.
+const UNREACHED_RECYCLE_MS = 20_000;
+const UNREACHED_RECYCLE_COUNT = 2;
 
 // After a start that can't succeed, requests fail fast for this long
 // instead of each waking the Sandbox into the same failure.
@@ -1032,6 +1043,19 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     }
   };
 
+  /**
+   * Stop the session `sbx` belongs to, so the next wake starts a fresh one.
+   * Other instances may be watching the same session; only the session this
+   * one saw fail is stopped, never a newer one.
+   */
+  const stopSession = async (sbx: SandboxHandle) => {
+    const watched = sbx.currentSession().startedAt.getTime();
+    const now = await getRunning();
+    if (now && now.currentSession().startedAt.getTime() === watched) {
+      await now.stop().catch(() => {});
+    }
+  };
+
   /** Resume (or create) the Sandbox and wait until the server answers. */
   const wake = async (): Promise<{ sbx: SandboxHandle; base: string }> => {
     const t0 = performance.now();
@@ -1097,13 +1121,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           performance.now() - healthT0 > NOT_LISTENING_RECYCLE_MS
         ) {
           recycled = true;
-          // Other instances may be watching the same session; only the
-          // session this one saw fail is stopped, never a newer one.
-          const watched = sbx.currentSession().startedAt.getTime();
-          const now = await getRunning();
-          if (now && now.currentSession().startedAt.getTime() === watched) {
-            await now.stop().catch(() => {});
-          }
+          await stopSession(sbx);
           sbx = null;
           break;
         }
@@ -1171,6 +1189,28 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   const distrust = () => {
     suspect = true;
   };
+  /**
+   * Since when connections to the core have ended without ever opening,
+   * with none opening since, and how many. A core can answer `/health` and
+   * still be out of reach for connections (Vercel's router stopped passing
+   * them to its session): waking it then finds it healthy at the same
+   * address, so only a fresh session gets connections through again.
+   */
+  let unreached: { since: number; count: number } | undefined;
+  const connectionUnreached = () => {
+    distrust();
+    unreached = unreached
+      ? { since: unreached.since, count: unreached.count + 1 }
+      : { since: Date.now(), count: 1 };
+  };
+  const connectionReached = () => {
+    unreached = undefined;
+  };
+  /** Whether the session `live` names keeps refusing connections it answers `/health` for. */
+  const unreachable = () =>
+    unreached !== undefined &&
+    unreached.count >= UNREACHED_RECYCLE_COUNT &&
+    Date.now() - unreached.since >= UNREACHED_RECYCLE_MS;
 
   const ensure = (): Promise<NonNullable<typeof live>> => {
     lastActivity = Date.now();
@@ -1183,6 +1223,11 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
         if (live && !suspect && (await getRunning())) {
           live.checkedAt = Date.now();
           return live;
+        }
+        if (live && unreachable()) {
+          // Its `/health` would pass again: start a fresh session instead.
+          unreached = undefined;
+          await stopSession(live.sbx);
         }
         const { sbx, base } = await wake();
         suspect = false;
@@ -1225,6 +1270,9 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   const keepalive = setInterval(() => {
     if (!live) return;
     if (sockets === 0 && Date.now() - lastActivity > idleMs) return;
+    // Attempts that never reach the core aren't use: a session no
+    // connection gets through to is left to time out, not kept awake.
+    if (unreached) return;
     void sdk.Sandbox.get({ name, resume: false, ...creds })
       .then((sbx) => {
         if (sbx.status !== "running") return;
@@ -1272,7 +1320,11 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       void response.body?.cancel().catch(() => {});
       return send(again);
     },
-    WebSocket: wakingWebSocket(async () => (await ensure()).core.serverUrl, distrust),
+    WebSocket: wakingWebSocket(async () => (await ensure()).core.serverUrl, {
+      dropped: distrust,
+      unreached: connectionUnreached,
+      reached: connectionReached,
+    }),
   });
 
   return {
@@ -1302,17 +1354,24 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
         ({ core }) => {
           if (closed) return;
           try {
+            let reached = false;
             inner = core.openSocket(
               headers,
               (error, event) => {
                 if (error || event.kind === "close") done();
-                // A dropped connection to the core: the client reconnects,
-                // and its next session finds the core awake again.
-                if (event.kind === "close" && event.code === 1006) distrust();
+                // A connection that never reached the core counts toward
+                // recycling its session; a dropped one only wakes it: the
+                // client reconnects, and its next session finds it awake.
+                if (event.kind === "close" && inner?.opened && !reached) connectionUnreached();
+                else if (event.kind === "close" && event.code === 1006) distrust();
                 onEvent(error, event);
               },
               access,
             );
+            void inner.opened?.then(() => {
+              reached = true;
+              connectionReached();
+            });
           } catch (error) {
             done();
             onEvent(error instanceof Error ? error : new Error(String(error)), {
@@ -1379,10 +1438,15 @@ function resendable(request: Request, given?: unknown): boolean {
  * slower open. Nothing is replayed, since a client sends nothing before
  * `open`. A connection that opened and then dropped is reported as it is:
  * the client's own reconnect, and the query machinery above it, take over.
+ *
+ * `hooks` hears how each connection went: `dropped` for a connection to the
+ * core that closed abnormally (the core may be down), `unreached` once a
+ * connection ends without ever having opened (retries spent, or the client
+ * gave up waiting), and `reached` once one opens.
  */
 function wakingWebSocket(
   resolveOrigin: () => Promise<string>,
-  onDropped: () => void,
+  hooks: { dropped: () => void; unreached: () => void; reached: () => void },
 ): WebSocketConstructor {
   return class WakingSocket implements BrowserWebSocket {
     binaryType: "arraybuffer" | "blob" = "arraybuffer";
@@ -1409,6 +1473,7 @@ function wakingWebSocket(
           socket.addEventListener("open", () => {
             if (this.socket !== socket || this.readyState !== 0) return;
             this.readyState = 1;
+            hooks.reached();
             this.emit("open");
           });
           socket.addEventListener("message", (event) => {
@@ -1420,9 +1485,9 @@ function wakingWebSocket(
           });
           socket.addEventListener("close", (event) => {
             if (this.socket !== socket) return;
-            if (event.code === 1006) onDropped();
+            if (event.code === 1006) hooks.dropped();
             if (this.readyState === 0 && event.code === 1006 && this.retry()) return;
-            this.finish(event.code, event.reason);
+            this.finish(event.code, event.reason, this.readyState === 0);
           });
         },
         (error: unknown) => {
@@ -1457,16 +1522,20 @@ function wakingWebSocket(
     close(): void {
       if (this.readyState >= 2) return;
       this.socket?.close();
-      this.finish(1000, "client closed");
+      // A client gives up on a connection that doesn't open in time (its
+      // handshake timeout): that one never reached the core either.
+      this.finish(1000, "client closed", this.readyState === 0);
     }
 
     private emit(type: string, event?: unknown): void {
       for (const listener of this.listeners.get(type) ?? []) listener(event);
     }
 
-    private finish(code: number, reason: string): void {
+    /** End this socket; `unreached` if it ends without having reached the core. */
+    private finish(code: number, reason: string, unreached = false): void {
       if (this.readyState >= 3) return;
       this.readyState = 3;
+      if (unreached) hooks.unreached();
       this.emit("close", { code, reason });
     }
   };
