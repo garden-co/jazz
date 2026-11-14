@@ -9,7 +9,7 @@
  * insert with a permissions error because the sender is not yet a member.
  *
  * Fix: gate the composer on membershipReady (true only after chatMembers insert
- * is acknowledged at edge-tier), not just userId + myProfile.
+ * is acknowledged by the server, at the global tier), not just userId + myProfile.
  *
  * Test contract:
  *   A. The composer MUST transition through a disabled state before enabling

@@ -2169,6 +2169,147 @@ pub struct NativeRelaySocketWorker {
     join: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
+/// What the device's operating system says about its network path
+/// (`NWPathMonitor` on iOS). The default is a usable path on unknown
+/// interfaces, which is how a host without a monitor behaves: nothing in the
+/// worker changes until a monitor reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetworkPath {
+    /// The device has a route out at all.
+    pub satisfied: bool,
+    /// The interface kinds the path uses, as [`NETWORK_INTERFACE_WIFI`] and
+    /// friends. Zero when unknown.
+    pub interfaces: u32,
+}
+
+impl Default for NetworkPath {
+    fn default() -> Self {
+        Self {
+            satisfied: true,
+            interfaces: 0,
+        }
+    }
+}
+
+pub const NETWORK_INTERFACE_WIFI: u32 = 1 << 0;
+pub const NETWORK_INTERFACE_CELLULAR: u32 = 1 << 1;
+pub const NETWORK_INTERFACE_WIRED: u32 = 1 << 2;
+pub const NETWORK_INTERFACE_OTHER: u32 = 1 << 3;
+
+/// Interfaces the device only stops routing through when they go away: Wi-Fi,
+/// wired, and other (a VPN's tunnel, whose sockets die with it). The path
+/// leaves cellular as soon as Wi-Fi is preferred, while cellular itself stays
+/// up and keeps carrying the sockets opened on it, so a link opened on
+/// cellular is not dropped for that.
+const NETWORK_INTERFACES_GONE_WHEN_LEFT: u32 =
+    NETWORK_INTERFACE_WIFI | NETWORK_INTERFACE_WIRED | NETWORK_INTERFACE_OTHER;
+
+/// However often the path changes, it cuts a backoff short at most once per
+/// this long after an attempt began: a flapping path must not become a
+/// reconnect loop.
+const PATH_RETRY_FLOOR: Duration = Duration::from_secs(1);
+
+/// The device's one network path, set by the platform's monitor and read by
+/// every socket worker.
+static NETWORK_PATH: std::sync::LazyLock<tokio::sync::watch::Sender<NetworkPath>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::channel(NetworkPath::default()).0);
+
+/// Report the device's network path. Only a real change reaches the workers.
+pub fn report_network_path(path: NetworkPath) {
+    NETWORK_PATH.send_if_modified(|current| {
+        let changed = *current != path;
+        *current = path;
+        changed
+    });
+}
+
+/// Follow the device's network path.
+pub fn network_path() -> tokio::sync::watch::Receiver<NetworkPath> {
+    NETWORK_PATH.subscribe()
+}
+
+/// One wait's view of the network path, from the moment it was taken.
+///
+/// A socket bound to an interface the device no longer uses is dead even if
+/// nothing has told it so yet: the operating system's word arrives at once,
+/// the transport's silence watchdog only after its deadline.
+struct PathWatch {
+    path: tokio::sync::watch::Receiver<NetworkPath>,
+    taken_on: NetworkPath,
+}
+
+impl PathWatch {
+    fn new(path: &tokio::sync::watch::Receiver<NetworkPath>) -> Self {
+        let mut path = path.clone();
+        let taken_on = *path.borrow_and_update();
+        Self { path, taken_on }
+    }
+
+    /// A watch that compares against `taken_on`, a path seen earlier.
+    fn since(path: &tokio::sync::watch::Receiver<NetworkPath>, taken_on: NetworkPath) -> Self {
+        let mut path = path.clone();
+        path.borrow_and_update();
+        Self { path, taken_on }
+    }
+
+    /// Resolves once the path can no longer carry a connection opened when
+    /// this watch was taken: the device lost its route, or stopped using a
+    /// Wi-Fi or wired interface the connection may be bound to. An interface
+    /// added alongside does not end it. While `connecting`, a route that came
+    /// back after the attempt began without one ends it too: that attempt was
+    /// dialled into no network and may hang until its timeout, while a fresh
+    /// one can land at once. Cancel-safe.
+    async fn lost(&mut self, connecting: bool) -> String {
+        loop {
+            if self.path.changed().await.is_err() {
+                return std::future::pending().await;
+            }
+            let now = *self.path.borrow_and_update();
+            if !now.satisfied {
+                return "the device lost its network path".to_owned();
+            }
+            if !self.taken_on.satisfied || self.taken_on.interfaces == 0 {
+                if connecting {
+                    return "the device's network path came back".to_owned();
+                }
+                // A link that got through while the device reported no path
+                // lives on the path it reports now.
+                self.taken_on = now;
+                continue;
+            }
+            if self.taken_on.interfaces & NETWORK_INTERFACES_GONE_WHEN_LEFT & !now.interfaces != 0 {
+                return "the device's network path moved to another interface".to_owned();
+            }
+        }
+    }
+
+    /// The connection was admitted. One dialled while the device reported no
+    /// path got through anyway, so the monitor was behind: the link lives on
+    /// the path the device reports now, and is watched against that.
+    fn admitted(&mut self) {
+        if !self.taken_on.satisfied || self.taken_on.interfaces == 0 {
+            self.taken_on = *self.path.borrow();
+        }
+    }
+
+    /// Resolves once the device has a usable path that differs from the one
+    /// this watch was taken on, at once if it already has. Cancel-safe.
+    async fn usable_again(&mut self) {
+        let now = *self.path.borrow();
+        if now.satisfied && now != self.taken_on {
+            return;
+        }
+        loop {
+            if self.path.changed().await.is_err() {
+                return std::future::pending().await;
+            }
+            if self.path.borrow_and_update().satisfied {
+                return;
+            }
+        }
+    }
+}
+
 /// Private native socket inputs. This is intentionally absent from postcard
 /// commands and diagnostics: JavaScript can neither configure the endpoint
 /// nor read its bearer.
@@ -2182,6 +2323,10 @@ pub struct NativeRelaySocketConfig {
     pub authorization: Option<String>,
     /// Every event of the worker's [`UpstreamLink`], in order.
     pub on_event: Arc<dyn Fn(LinkEvent) + Send + Sync>,
+    /// The device's network path ([`network_path`] in production).
+    pub network_path: tokio::sync::watch::Receiver<NetworkPath>,
+    /// Retry timing ([`LinkPolicy::default`] in production).
+    pub link_policy: LinkPolicy,
 }
 
 impl std::fmt::Debug for NativeRelaySocketConfig {
@@ -2359,8 +2504,12 @@ async fn run_socket_worker(
         use std::hash::BuildHasher;
         std::collections::hash_map::RandomState::new().hash_one(std::process::id())
     };
-    let mut link = UpstreamLink::new(LinkPolicy::default(), seed);
+    let mut link = UpstreamLink::new(config.link_policy, seed);
     let mut actions = link.handle(0, LinkInput::ServerConfigured(true));
+    // The path the last attempt was made on: the backoff it earned is a
+    // judgement about that path, not about one the device moved to since.
+    let mut attempted_on = *config.network_path.borrow();
+    let mut attempt_began: Option<tokio::time::Instant> = None;
     loop {
         for event in link.drain_events() {
             (config.on_event)(event);
@@ -2387,9 +2536,23 @@ async fn run_socket_worker(
             Some(Ok((token, after_ms))) => {
                 let sleep = tokio::time::sleep(Duration::from_millis(after_ms));
                 tokio::pin!(sleep);
+                let mut path = PathWatch::since(&config.network_path, attempted_on);
+                let mut path_moved = false;
                 loop {
                     tokio::select! {
                         () = &mut sleep => break LinkInput::TimerFired(token),
+                        // The backoff spares a server that is down; a device
+                        // whose own path came back, or moved, has nothing to
+                        // wait for, beyond the floor that keeps a flapping
+                        // path from turning into a reconnect loop.
+                        () = path.usable_again(), if !path_moved => {
+                            path_moved = true;
+                            let now = tokio::time::Instant::now();
+                            let earliest = attempt_began.map_or(now, |began| began + PATH_RETRY_FLOOR);
+                            if earliest < sleep.deadline() {
+                                sleep.as_mut().reset(earliest.max(now));
+                            }
+                        }
                         () = wake.notified() => {
                             if cancelled.load(Ordering::Acquire) {
                                 return;
@@ -2408,8 +2571,19 @@ async fn run_socket_worker(
                         (config.on_event)(event);
                     }
                 };
-                match connect_and_bridge(&relay, &config, &*connector, &cancelled, &wake, admitted)
-                    .await
+                let mut path = PathWatch::new(&config.network_path);
+                attempted_on = path.taken_on;
+                attempt_began = Some(tokio::time::Instant::now());
+                match connect_and_bridge(
+                    &relay,
+                    &config,
+                    &*connector,
+                    &cancelled,
+                    &wake,
+                    &mut path,
+                    admitted,
+                )
+                .await
                 {
                     LinkEnd::Cancelled => return,
                     LinkEnd::Lost(failure) => LinkInput::Ended(attempt, failure),
@@ -2434,6 +2608,7 @@ async fn connect_and_bridge(
     connector: &dyn NativeTransportConnector,
     cancelled: &AtomicBool,
     wake: &Arc<tokio::sync::Notify>,
+    path: &mut PathWatch,
     admitted: impl FnOnce(),
 ) -> LinkEnd {
     let inbound_wake = Arc::clone(wake);
@@ -2447,11 +2622,18 @@ async fn connect_and_bridge(
         bundle: None,
         wake: Arc::new(move || inbound_wake.notify_one()),
     };
+    // Taken before the attempt: a path lost between dialling and admission
+    // ends this connection like one lost afterwards.
     let connecting = connector.connect(request);
     tokio::pin!(connecting);
     let connected = loop {
         tokio::select! {
             result = &mut connecting => break result,
+            reason = path.lost(true) => {
+                return LinkEnd::Lost(LinkFailure::Network(format!(
+                    "native relay socket connect abandoned: {reason}"
+                )));
+            }
             () = wake.notified() => {
                 if cancelled.load(Ordering::Acquire) {
                     return LinkEnd::Cancelled;
@@ -2502,6 +2684,7 @@ async fn connect_and_bridge(
         wire,
     };
     admitted();
+    path.admitted();
     let end = bridge_connection(
         relay,
         &lease.wire,
@@ -2509,6 +2692,7 @@ async fn connect_and_bridge(
         connected.terminal,
         cancelled,
         wake,
+        path,
     )
     .await;
     drop(lease);
@@ -2524,6 +2708,7 @@ async fn bridge_connection(
     mut terminal: jazz::tools::native_transport_connector::NativeTransportTerminalFuture,
     cancelled: &AtomicBool,
     wake: &tokio::sync::Notify,
+    path: &mut PathWatch,
 ) -> LinkEnd {
     // Losing an admitted link is an outage, whatever the transport calls it,
     // unless the server refused the credential.
@@ -2611,6 +2796,12 @@ async fn bridge_connection(
         }
         tokio::select! {
             terminal = &mut terminal => return terminal_end(terminal),
+            // The socket may never hear of it: a dead route is silence.
+            reason = path.lost(false) => {
+                return LinkEnd::Lost(LinkFailure::Network(format!(
+                    "native relay socket dropped: {reason}"
+                )));
+            }
             _ = wire.outbound_ready.notified() => {},
             _ = wake.notified() => {},
             _ = tokio::time::sleep(Duration::from_millis(50)) => {},

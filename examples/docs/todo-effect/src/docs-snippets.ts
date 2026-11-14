@@ -36,7 +36,7 @@ export const openTodos = Stream.unwrap(
 // #endregion where-subscription-effect
 
 // #region reading-durability-tier-effect
-export const readTodosAtEdgeDurability = Effect.gen(function* () {
+export const readTodosAtRemoteTier = Effect.gen(function* () {
   const jazz = yield* Jazz;
   return yield* jazz.all(app.todos.where({ done: false }), { tier: ReadTier.Remote });
 });

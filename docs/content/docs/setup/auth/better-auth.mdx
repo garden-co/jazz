@@ -6,6 +6,18 @@ description: "Learn how to sign users in with Better Auth and connect its sessio
 [Better Auth](https://www.better-auth.com/) is a self-hosted auth framework. It runs in the same
 backend as Jazz, so `authenticate` asks it directly who the request's session cookie belongs to.
 
+<Callout type="info" title="Jazz can be Better Auth's database">
+  You don't need a separate PostgreSQL or other database for Better Auth. With the Jazz adapter,
+  Better Auth keeps its users, sessions and accounts in Jazz, next to your app's data:
+  `database: jazzAdapter({ db: async () => jazz.db, schema: app.wasmSchema })`. See
+  [Store Better Auth's tables in Jazz](#store-better-auths-tables-in-jazz), the
+  [Next.js, Better Auth and Vercel](/docs/setup/nextjs-better-auth) guide, and the
+  [Better Auth chat example](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat).
+  That's different from a separate Better Auth server that issues JWTs your backend only verifies
+  (with [`fromJWT`](/docs/setup/auth/custom#tokens-from-your-identity-provider)): there, Better Auth
+  keeps its own database.
+</Callout>
+
 ## Server
 
 ```ts title="jazz.server.ts"

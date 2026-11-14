@@ -449,15 +449,36 @@ function hasAnyExplicitPolicy(tablePolicies: TablePolicies | undefined): boolean
   );
 }
 
+const POLICY_BUILDER: Record<ExplicitPolicyOperation, string> = {
+  read: "allowRead",
+  insert: "allowInsert",
+  update: "allowUpdate",
+  delete: "allowDelete",
+};
+
+// A missing grant is a valid choice (a table only the backend writes,
+// #3216): the warnings say what it denies, that the backend acting as the
+// system isn't checked, and how to declare it on purpose, so nobody adds an
+// allow rule just to silence them.
 function missingExplicitPolicyMessage(
   tableName: string,
   operation: ExplicitPolicyOperation,
 ): string {
-  return `Warning: table "${tableName}" has a policy set but no explicit ${operation} policy in permissions.ts; ${operation}s will be denied.`;
+  return (
+    `Warning: table "${tableName}" has no ${operation} policy in permissions.ts, so users can't ${operation} its rows. ` +
+    `Your backend isn't checked when it acts as the system, so if only it should ${operation} them, that's fine: ` +
+    `declare \`policy.${tableName}.${POLICY_BUILDER[operation]}.never()\` to say so and silence this warning. ` +
+    `Don't add an allow rule just to silence it.`
+  );
 }
 
 function missingTablePolicyMessage(tableName: string): string {
-  return `Warning: table "${tableName}" has no policy declarations in permissions.ts; the server denies reads, inserts, updates, and deletes without explicit grants.`;
+  return (
+    `Warning: table "${tableName}" has no policies in permissions.ts, so users can't read, insert, update or delete its rows. ` +
+    `Your backend isn't checked when it acts as the system, so if only it uses this table, that's fine: ` +
+    `declare \`.never()\` for each operation (\`policy.${tableName}.allowRead.never()\`, …) to say so and silence this warning. ` +
+    `Don't add allow rules just to silence it.`
+  );
 }
 
 export function validatePermissionsAgainstSchema(

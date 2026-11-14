@@ -173,7 +173,7 @@ describe("dev catalogue push behavior", () => {
         schemaFile: join(root, "schema.ts"),
         status: kind === "initial" ? "published" : "already-stored",
       });
-      expect(result.warnings.some((warning) => warning.includes("no explicit insert policy"))).toBe(
+      expect(result.warnings.some((warning) => warning.includes("has no insert policy"))).toBe(
         true,
       );
       expect(events).toContainEqual({

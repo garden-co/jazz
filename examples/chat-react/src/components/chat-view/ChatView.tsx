@@ -60,7 +60,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   // acknowledged this user's membership.  Starts true if the user was already
   // a member before this component mounted (e.g. returning to a chat they
   // joined in a previous session); otherwise becomes true only after the
-  // auto-join insert is durably persisted at edge tier.
+  // auto-join insert is acknowledged by the server (the global tier).
   const [membershipReady, setMembershipReady] = useState(false);
 
   useEffect(() => {

@@ -23,7 +23,7 @@ const artist = (organizationId: string, name = "New artist") => ({
   searchKey: name.toLowerCase(),
 });
 
-describe("BigLabel roles at the Jazz edge", () => {
+describe("BigLabel roles on the Jazz server", () => {
   it("refuses role escalation, forged assignments and writes a role can't make", async () => {
     testApp = await createPolicyTestApp(app, permissions, expect);
     const seeded = await seed(testApp);

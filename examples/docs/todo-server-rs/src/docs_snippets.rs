@@ -134,7 +134,7 @@ pub async fn subscribe_todos(
 // #endregion reading-subscriptions-rust
 
 // #region reading-durability-tier-rust
-pub async fn read_todos_at_edge_durability(client: &JazzClient) -> jazz::tools::Result<usize> {
+pub async fn read_todos_at_remote_tier(client: &JazzClient) -> jazz::tools::Result<usize> {
     let query = Query::from("todos");
     let rows = client.query(query, ReadTier::Remote).await?;
     Ok(rows.len())

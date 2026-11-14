@@ -38,7 +38,7 @@ export function subscribeOpenTodos(db: Db, onChange: (todos: unknown[]) => void)
 // #endregion where-subscription-ts
 
 // #region reading-durability-tier-ts
-export async function readTodosAtEdgeDurability(db: Db) {
+export async function readTodosAtRemoteTier(db: Db) {
   return db.all(app.todos.where({ done: false }), { tier: ReadTier.Remote });
 }
 // #endregion reading-durability-tier-ts

@@ -424,6 +424,8 @@ impl NativeRelayHost {
                         author,
                         session,
                         self.socket_connector(),
+                        self.socket_network_path(),
+                        self.socket_link_policy(),
                     )?)
                 }
                 _ => None,
