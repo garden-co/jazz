@@ -158,7 +158,6 @@ describe("React Native account preparation", () => {
     const artifact = {
       format: 1,
       current: "head",
-      bundle: "bundle",
       schemas: [{ hash: "root", tables: {} }],
       migrations: [{ from: "root", to: "head", forward: [] }],
     };
