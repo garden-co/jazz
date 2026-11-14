@@ -265,7 +265,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_attach_account_schema_json
         let lease = unsafe { live_arg(lease)? };
         let capability = unsafe { capability_arg(capability, capability_len)? };
         let schema =
-            unsafe { bounded_bytes_arg(schema, schema_len, NATIVE_RELAY_ADMISSION_MAX_BYTES)? };
+            unsafe { bounded_bytes_arg(schema, schema_len, NATIVE_RELAY_SCHEMA_SOURCE_MAX_BYTES)? };
         let schema =
             std::str::from_utf8(schema).map_err(|_| JazzNativeRelayStatus::InvalidCommand)?;
         let mut host = lease.lock()?;
