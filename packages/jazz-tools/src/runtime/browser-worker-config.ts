@@ -41,7 +41,7 @@ export function resolveBrowserWorkerUrl(runtimeSources?: RuntimeSourcesConfig): 
       ? `${prebundledUrl}&jazz-runtime-version=${encodeURIComponent(runtimeSources.wasmVersion)}`
       : prebundledUrl;
   }
-  // Keep this literal statically analyzable so bundlers emit the worker asset.
+  // The published worker's URL, versioned: part of the realm's identity.
   const bundledUrl = bundledBrowserWorkerUrl();
   return versionRuntimeAssetUrl(
     resolveConfiguredUrl(bundledUrl, typeof location !== "undefined" ? location.href : undefined),
