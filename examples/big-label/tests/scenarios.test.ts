@@ -15,7 +15,7 @@ describe("BigLabel public workload fixtures", () => {
     for (const profile of ["smoke", "small", "scaled"] as const)
       // This verifies only deterministic fixture construction. Deployed
       // tenant isolation is covered by authority.server.test.ts, where a
-      // foreign client queries the real edge.
+      // foreign client queries the real server.
       expect(tenantOperations(profile).foreignRows).toBe(0);
   });
 });
