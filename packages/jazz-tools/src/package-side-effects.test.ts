@@ -56,6 +56,125 @@ function topLevelEffects(path: string, listed: (distPath: string) => boolean = (
   });
 }
 
+/** Built-ins whose construction only creates a value for the module itself. */
+const PURE_CALLS = new Set([
+  "WeakMap",
+  "WeakSet",
+  "Map",
+  "Set",
+  "RegExp",
+  "URL",
+  "TextEncoder",
+  "TextDecoder",
+  "Symbol",
+  "Symbol.for",
+  "Object.freeze",
+  "Object.fromEntries",
+  "Object.getOwnPropertyNames",
+  "Array.from",
+  "Uint8Array.from",
+  "String",
+  "Promise",
+  "Promise.resolve",
+  // Array and TextEncoder methods on a value the module just built.
+  "<value>.map",
+  "<value>.filter",
+  "<value>.join",
+  "<value>.encode",
+]);
+
+/**
+ * Top-level calls reviewed as side-effect-free: each builds a value the
+ * module keeps for itself, so dropping the unused module drops nothing else.
+ * Keyed `<file>: <callee>`. A new entry needs the same review.
+ */
+const REVIEWED_CALLS = new Set([
+  "backend/vercel-store.ts: <value>.repeat",
+  "classic-api.ts: classicFunction",
+  "classic-api.ts: classicNamespace",
+  "dev/inspector-overlay/loader.ts: HostBinding",
+  "dsl.ts: AddBuilder",
+  "dsl.ts: DropBuilder",
+  "inspect/mcp.ts: WHERE_OPERATORS.join",
+  "local-first-auth/identity.ts: utf8",
+  "permissions/index.ts: kindGuard",
+  "prosemirror/overlays.ts: PluginKey",
+  "prosemirror/sync.ts: PluginKey",
+  "react-core/provider.tsx: createContext",
+  "react-core/session.tsx: createContext",
+  "removed-api.ts: removed",
+  "runtime/author-id.ts: Utf8Decoder",
+  "runtime/native-runtime/native-codec.ts: Utf8Decoder",
+  "runtime/native-runtime/native-row-codec.ts: Utf8Decoder",
+  "runtime/native-runtime/native-runtime-adapter.ts: Utf8Decoder",
+  "runtime/util.ts: Utf8Decoder",
+  "runtime/json-schema-validator.ts: DRAFT4.plain.filter",
+  "runtime/json-schema-validator.ts: DRAFT7.plain.filter",
+  "runtime/json-schema-validator.ts: DRAFT2019.single.filter",
+  "runtime/json-schema-validator.ts: DRAFT2019.plain.filter",
+  "runtime/json-schema-validator.ts: base64Pattern",
+  "runtime/json-schema-validator.ts: base32Pattern",
+  // Adds the session object it returns to a module-local WeakSet.
+  "runtime/system-identity.ts: markTrustedReservedSession",
+  "schema-loader.ts: fileURLToPath",
+  "schema-loader.ts: existsSync",
+  "subscriptions-orchestrator.ts: makeDeferred",
+  "thin/self-signed-token.ts: parseUuidText",
+  "vue/provider.ts: defineComponent",
+  "vue/session.ts: defineComponent",
+  "worker/jazz-broker-worker-core.ts: crypto.randomUUID",
+]);
+
+function isNamePath(node: ts.Expression): boolean {
+  return (
+    ts.isIdentifier(node) || (ts.isPropertyAccessExpression(node) && isNamePath(node.expression))
+  );
+}
+
+/**
+ * Calls a module makes while it initializes: in top-level variable
+ * initializers, `export default`, and class static blocks and fields.
+ * Function bodies don't run on import, so they're skipped.
+ */
+function initializerCalls(path: string): string[] {
+  const file = ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true);
+  const calls: string[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionLike(node) || ts.isClassExpression(node)) return;
+    if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+      // A method called on a computed value (`[…].map(…)`, `new X().y()`)
+      // is named by the method alone.
+      const callee = node.expression;
+      calls.push(
+        ts.isPropertyAccessExpression(callee) && !isNamePath(callee.expression)
+          ? `<value>.${callee.name.text}`
+          : callee.getText(file),
+      );
+    }
+    ts.forEachChild(node, visit);
+  };
+  for (const statement of file.statements) {
+    if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (declaration.initializer) visit(declaration.initializer);
+      }
+    } else if (ts.isExportAssignment(statement)) {
+      visit(statement.expression);
+    } else if (ts.isClassDeclaration(statement)) {
+      for (const member of statement.members) {
+        if (ts.isClassStaticBlockDeclaration(member)) calls.push("<static block>");
+        else if (
+          ts.isPropertyDeclaration(member) &&
+          member.initializer &&
+          member.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword)
+        )
+          visit(member.initializer);
+      }
+    }
+  }
+  return calls;
+}
+
 describe("package.json sideEffects", () => {
   // Bundlers drop any module the list doesn't name once nothing uses its
   // exports. A module that patches globals or starts a worker on import has
@@ -72,6 +191,27 @@ describe("package.json sideEffects", () => {
     expect(unlisted).toEqual([]);
   });
 
+  // A module that isn't listed may still call something while it
+  // initializes. Each such call must be one that only builds a value for the
+  // module (so dropping the module loses nothing): a pure built-in, or one
+  // reviewed in REVIEWED_CALLS. Anything else is either listed in
+  // sideEffects or reviewed here.
+  it("unlisted modules only make reviewed calls while they initialize", () => {
+    const { sideEffects } = JSON.parse(readFileSync(`${packageRoot}/package.json`, "utf8")) as {
+      sideEffects: string[];
+    };
+    const listed = (path: string) => sideEffects.some((pattern) => matchesGlob(path, pattern));
+    const unreviewed = shippedSources()
+      .filter((path) => !listed(distPath(path)))
+      .flatMap((path) =>
+        initializerCalls(path)
+          .filter((callee) => !PURE_CALLS.has(callee))
+          .map((callee) => `${relative(srcRoot, path)}: ${callee}`),
+      )
+      .filter((entry) => !REVIEWED_CALLS.has(entry));
+    expect(unreviewed).toEqual([]);
+  });
+
   it("the scan finds the modules it has to keep", () => {
     // Guards the scan itself: these run code on import today.
     for (const path of [
@@ -81,5 +221,7 @@ describe("package.json sideEffects", () => {
     ]) {
       expect(topLevelEffects(`${srcRoot}/${path}`), path).not.toEqual([]);
     }
+    expect(initializerCalls(`${srcRoot}/dsl.ts`)).toContain("AddBuilder");
+    expect(initializerCalls(`${srcRoot}/vue/session.ts`)).toContain("defineComponent");
   });
 });
