@@ -307,6 +307,14 @@ pub fn prepare_deployment(
             })?;
         table.policies = policies;
     }
+    // What a deployment may not introduce, though a store already holding
+    // it still opens (see `check_deployable_policies`).
+    jazz_model::model::public_schema_convert::check_deployable_policies(&target).map_err(
+        |error| DeploymentError::InvalidPermissions {
+            schema: request.target_schema_hash,
+            reason: error.to_string(),
+        },
+    )?;
     let active_schema =
         JazzSchema::new(&target).map_err(|error| DeploymentError::InvalidPermissions {
             schema: request.target_schema_hash,

@@ -49,7 +49,7 @@ static TALC: talc::wasm::WasmDynamicTalc = talc::wasm::new_wasm_dynamic_allocato
 /// Validate a schema and its embedded permissions without opening a database.
 #[wasm_bindgen(js_name = validateSchema)]
 pub fn validate_schema(schema: Vec<u8>) -> Result<(), JsValue> {
-    binding_host::decode_schema(&schema)
+    binding_host::validate_deployable_schema(&schema)
         .map(|_| ())
         .map_err(host_error)
 }

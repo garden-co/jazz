@@ -89,6 +89,120 @@ pub fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConver
     ))
 }
 
+/// Refuse what a deployment may not introduce, beyond what
+/// [`convert_public_schema`] checks. Deployments and `jazz-tools validate`
+/// run it; opening a store does not, so a catalogue that already holds such
+/// a policy still opens and serves as before.
+///
+/// An `Exists` nested inside another `Exists` that refers to
+/// `__jazz_outer_row` is refused: the engine does not agree which row that
+/// names (the SQL compiler reads the enclosing `exists`'s row, validation
+/// and sync the row under check), so the form is not supported until that
+/// is settled.
+pub fn check_deployable_policies(schema: &Schema) -> Result<(), SchemaConversionError> {
+    for (name, table) in schema {
+        let slots = [
+            ("select.using", table.policies.select.using.as_ref()),
+            (
+                "insert.with_check",
+                table.policies.insert.with_check.as_ref(),
+            ),
+            ("update.using", table.policies.update.using.as_ref()),
+            (
+                "update.with_check",
+                table.policies.update.with_check.as_ref(),
+            ),
+            ("delete.using", table.policies.delete.using.as_ref()),
+        ];
+        for (slot, expr) in slots {
+            if let Some(expr) = expr {
+                refuse_nested_outer_rows(
+                    expr,
+                    &format!("$.{}.policies.{slot}", name.as_str()),
+                    false,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The outer-row column `expr` refers to, if any (inside nested `Exists`
+/// conditions too).
+fn outer_row_reference(expr: &PolicyExpr) -> Option<String> {
+    let outer = |path: &[String]| {
+        (path.first().map(String::as_str) == Some(OUTER_ROW))
+            .then(|| path.get(1).cloned().unwrap_or_default())
+    };
+    let value = |value: &PolicyValue| match value {
+        PolicyValue::SessionRef(path) => outer(path),
+        PolicyValue::Literal(_) => None,
+    };
+    match expr {
+        PolicyExpr::Cmp { value: v, .. } | PolicyExpr::Contains { value: v, .. } => value(v),
+        PolicyExpr::InList { values, .. } => values.iter().find_map(value),
+        PolicyExpr::In { session_path, .. } => outer(session_path),
+        PolicyExpr::SessionCmp { path, .. }
+        | PolicyExpr::SessionIsNull { path }
+        | PolicyExpr::SessionIsNotNull { path }
+        | PolicyExpr::SessionContains { path, .. }
+        | PolicyExpr::SessionInList { path, .. } => outer(path),
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
+            parts.iter().find_map(outer_row_reference)
+        }
+        PolicyExpr::Not(inner) => outer_row_reference(inner),
+        PolicyExpr::Exists { condition, .. } => outer_row_reference(condition),
+        _ => None,
+    }
+}
+
+const OUTER_ROW: &str = "__jazz_outer_row";
+
+/// The rule [`check_deployable_policies`] enforces, as users read it: the
+/// `jazz.permissions.json` writer refuses the same shape with this text.
+pub const NESTED_OUTER_ROW: &str = "not supported in policies yet: an `exists` inside another \
+     `exists` can't refer to the checked row's columns";
+
+/// Refuse an `Exists` inside another `Exists`'s condition (`nested`) that
+/// refers to the outer row.
+fn refuse_nested_outer_rows(
+    expr: &PolicyExpr,
+    path: &str,
+    nested: bool,
+) -> Result<(), SchemaConversionError> {
+    match expr {
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
+            let kind = if matches!(expr, PolicyExpr::And(_)) {
+                "And"
+            } else {
+                "Or"
+            };
+            for (index, part) in parts.iter().enumerate() {
+                refuse_nested_outer_rows(part, &format!("{path}.{kind}[{index}]"), nested)?;
+            }
+            Ok(())
+        }
+        PolicyExpr::Not(inner) => refuse_nested_outer_rows(inner, &format!("{path}.Not"), nested),
+        PolicyExpr::Exists { table, condition } => {
+            let path = format!("{path}.Exists");
+            if nested && let Some(column) = outer_row_reference(condition) {
+                return Err(SchemaConversionError::new(
+                    path,
+                    format!(
+                        "{NESTED_OUTER_ROW} (this `exists` over `{table}` refers to \
+                         `{OUTER_ROW}.{column}`). Correlate with the outer `exists`'s row \
+                         through a relation instead (`ExistsRel`, e.g. \
+                         `policy.<table>.where(...).hopTo(...)`), or move the condition onto \
+                         the outermost `exists`"
+                    ),
+                ));
+            }
+            refuse_nested_outer_rows(condition, &format!("{path}.condition"), true)
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Decode and compile the public JSON schema used by native bindings.
 pub fn decode_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
     let schema: Schema =
