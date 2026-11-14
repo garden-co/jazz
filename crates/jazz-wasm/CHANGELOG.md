@@ -1,5 +1,13 @@
 # jazz-wasm
 
+## 2.0.0-alpha.62
+
+### Patch Changes
+
+- 56b3e92: Update live results with a forward include when the included row changes through a nullable reference.
+- 1324b9b: A writer now keeps the rows it inserts into a table it cannot read (a write-only insert), and the delete/restore commits after them, as a cold copy once the authority accepts them, including after a later refused edit. Previously the writer's replica dropped them on acceptance. A covering remote read still reconciles that copy away, and a live read of the table still evicts the row so its result keeps matching the authority's. A write that moves a row out of its writer's read scope still evicts the row, with or without a live read, as does another writer's version superseding it. A refused write refreshes the rows its writer may read and no longer evicts the ones it may not.
+- 4d6f815: Keep a transaction's reads inside its lifetime. Reads run in the order they were started, see the writes staged before them, and share one serializable snapshot. Committing while a read started through the transaction is still pending now fails with a `not_observed` error and ends the transaction without publishing it, instead of publishing before the read answered. Await every transaction read before committing.
+
 ## 2.0.0-alpha.61
 
 ## 2.0.0-alpha.60
