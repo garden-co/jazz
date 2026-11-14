@@ -41,6 +41,8 @@ export interface LoadedSchemaProject {
   permissions?: CompiledPermissionsMap;
   schema: Schema;
   wasmSchema: WasmSchema;
+  /** schema.ts's exports, for what the app's jazz.app.json names (slices). */
+  module?: Record<string, unknown>;
 }
 
 type LoadedTsModule = {
@@ -631,5 +633,6 @@ export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchem
     permissions,
     schema,
     wasmSchema: loadedSchema.wasmSchema ?? schemaToWasm(schema),
+    module: loadedModule.module,
   };
 }

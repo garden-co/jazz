@@ -1,0 +1,99 @@
+{
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "projects": {
+        "relations": {
+          "todosViaProject": {
+            "relation": "projectRelation",
+            "table": "todos",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "todos": {
+        "relations": {
+          "parentRelation": {
+            "column": "parent",
+            "table": "todos",
+            "type": "Forward"
+          },
+          "projectRelation": {
+            "column": "project",
+            "table": "projects",
+            "type": "Forward"
+          },
+          "todosViaParent": {
+            "relation": "parentRelation",
+            "table": "todos",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "f61fddb5c8ac94f49979ef9ed5cd7f7db735996cc13f3afc0704a5f48d0ca92d",
+  "format": 1,
+  "migrations": [],
+  "schemas": [
+    {
+      "hash": "f61fddb5c8ac94f49979ef9ed5cd7f7db735996cc13f3afc0704a5f48d0ca92d",
+      "tables": {
+        "projects": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            }
+          ]
+        },
+        "todos": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "done",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "description",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "parent",
+              "nullable": true,
+              "references": "todos"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "project",
+              "nullable": true,
+              "references": "projects"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

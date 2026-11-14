@@ -1,0 +1,313 @@
+{
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "bandInvites": {
+        "relations": {
+          "band": {
+            "column": "bandId",
+            "table": "bands",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "bands": {
+        "relations": {
+          "invitesViaBand": {
+            "relation": "band",
+            "table": "bandInvites",
+            "type": "Reverse"
+          },
+          "membersViaBand": {
+            "relation": "band",
+            "table": "members",
+            "type": "Reverse"
+          },
+          "stopsViaBand": {
+            "relation": "band",
+            "table": "stops",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "members": {
+        "relations": {
+          "band": {
+            "column": "bandId",
+            "table": "bands",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "stopNotes": {
+        "relations": {
+          "band": {
+            "column": "bandId",
+            "table": "bands",
+            "type": "Forward"
+          },
+          "stop": {
+            "column": "stopId",
+            "table": "stops",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "stops": {
+        "relations": {
+          "band": {
+            "column": "bandId",
+            "table": "bands",
+            "type": "Forward"
+          },
+          "notesViaStop": {
+            "relation": "stop",
+            "table": "stopNotes",
+            "type": "Reverse"
+          },
+          "venue": {
+            "column": "venueId",
+            "table": "venues",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "venues": {
+        "relations": {
+          "band": {
+            "column": "bandId",
+            "table": "bands",
+            "type": "Forward"
+          },
+          "stopsViaVenue": {
+            "relation": "venue",
+            "table": "stops",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "fe7f83ec735520f17a141fce778da257d48bf1a8563906de7169c3cff39ab174",
+  "format": 1,
+  "migrations": [],
+  "schemas": [
+    {
+      "hash": "fe7f83ec735520f17a141fce778da257d48bf1a8563906de7169c3cff39ab174",
+      "tables": {
+        "bandInvites": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "bandId",
+              "nullable": false,
+              "references": "bands"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "code",
+              "nullable": false
+            }
+          ]
+        },
+        "bands": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "ownerId",
+              "nullable": false
+            }
+          ]
+        },
+        "members": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "bandId",
+              "nullable": false,
+              "references": "bands"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "inviteCode",
+              "nullable": true
+            }
+          ]
+        },
+        "stopNotes": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "stopId",
+              "nullable": false,
+              "references": "stops"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "bandId",
+              "nullable": false,
+              "references": "bands"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "merge_strategy": "Markdown",
+              "name": "body",
+              "nullable": false
+            }
+          ]
+        },
+        "stops": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "bandId",
+              "nullable": false,
+              "references": "bands"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "venueId",
+              "nullable": false,
+              "references": "venues"
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "date",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "confirmed",
+                  "tentative",
+                  "cancelled"
+                ]
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "merge_strategy": "Markdown",
+              "name": "publicDescription",
+              "nullable": false
+            }
+          ]
+        },
+        "venues": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "city",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "country",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "lat",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "lng",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "capacity",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "ownerId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "bandId",
+              "nullable": true,
+              "references": "bands"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

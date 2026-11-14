@@ -1,0 +1,71 @@
+{
+  "bundle": "5a8b18484bcb08f7d1fb67293204dc6956658c17909e4cd43216f7ed6c0e099a",
+  "format": 1,
+  "permissions": {
+    "projects": {
+      "insert": {
+        "with_check": {
+          "type": "True"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      }
+    },
+    "todos": {
+      "delete": {
+        "using": {
+          "column": "done",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "type": "Literal",
+            "value": {
+              "type": "Boolean",
+              "value": false
+            }
+          }
+        }
+      },
+      "insert": {
+        "with_check": {
+          "column": "done",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "type": "Literal",
+            "value": {
+              "type": "Boolean",
+              "value": false
+            }
+          }
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "column": "done",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "type": "Literal",
+            "value": {
+              "type": "Boolean",
+              "value": false
+            }
+          }
+        },
+        "with_check": {
+          "type": "True"
+        }
+      }
+    }
+  },
+  "schema": "51d3cfb859fd89fa4ff3738a1f3b6c84a387c3a954f6fc1a69b5791e66b894a3"
+}

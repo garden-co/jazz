@@ -1,0 +1,109 @@
+{
+  "bundle": "343393dc7d5d68fe7650a939c0855d70122a93cc356d4061495718e3edd03b72",
+  "format": 1,
+  "permissions": {
+    "projects": {
+      "delete": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "True"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "True"
+        },
+        "with_check": {
+          "type": "True"
+        }
+      }
+    },
+    "todos": {
+      "delete": {
+        "using": {
+          "column": "done",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "type": "Literal",
+            "value": {
+              "type": "Boolean",
+              "value": false
+            }
+          }
+        }
+      },
+      "insert": {
+        "with_check": {
+          "column": "done",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "type": "Literal",
+            "value": {
+              "type": "Boolean",
+              "value": false
+            }
+          }
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "column": "done",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "type": "Literal",
+            "value": {
+              "type": "Boolean",
+              "value": false
+            }
+          }
+        },
+        "with_check": {
+          "type": "True"
+        }
+      }
+    },
+    "users": {
+      "delete": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "True"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "True"
+        },
+        "with_check": {
+          "type": "True"
+        }
+      }
+    }
+  },
+  "schema": "0df370750528d1ee8fd0af76d69725650040bc3eabac5c0930bf0304f85bc1b5"
+}

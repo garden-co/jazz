@@ -25,6 +25,7 @@ export const {
   JazzCore,
   JazzCoreSocket,
   JazzServer,
+  loadAppArtifact,
   NapiDb,
   StreamingMutation,
   Subscription,
@@ -36,4 +37,5 @@ export const {
   resolveTextAnchor,
   resolveTextRange,
   validateSchema,
+  writeAppArtifact,
 } = nativeBinding;

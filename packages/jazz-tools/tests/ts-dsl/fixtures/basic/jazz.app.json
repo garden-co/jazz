@@ -1,0 +1,410 @@
+{
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "projects": {
+        "relations": {
+          "todosViaProject": {
+            "relation": "project",
+            "table": "todos",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "table_with_defaults": {
+        "relations": {
+          "ref": {
+            "column": "refId",
+            "table": "todos",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "todos": {
+        "relations": {
+          "assignees": {
+            "column": "assigneesIds",
+            "table": "users",
+            "type": "Forward"
+          },
+          "owner": {
+            "column": "ownerId",
+            "table": "users",
+            "type": "Forward"
+          },
+          "project": {
+            "column": "projectId",
+            "table": "projects",
+            "type": "Forward"
+          },
+          "table_with_defaultsViaRef": {
+            "relation": "ref",
+            "table": "table_with_defaults",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "users": {
+        "relations": {
+          "friends": {
+            "column": "friendsIds",
+            "table": "users",
+            "type": "Forward"
+          },
+          "todosViaAssignees": {
+            "relation": "assignees",
+            "table": "todos",
+            "type": "Reverse"
+          },
+          "todosViaOwner": {
+            "relation": "owner",
+            "table": "todos",
+            "type": "Reverse"
+          },
+          "usersViaFriends": {
+            "relation": "friends",
+            "table": "users",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "0df370750528d1ee8fd0af76d69725650040bc3eabac5c0930bf0304f85bc1b5",
+  "format": 1,
+  "migrations": [],
+  "schemas": [
+    {
+      "hash": "0df370750528d1ee8fd0af76d69725650040bc3eabac5c0930bf0304f85bc1b5",
+      "tables": {
+        "projects": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            }
+          ]
+        },
+        "table_with_constraints": {
+          "columns": [
+            {
+              "column_type": {
+                "schema": {
+                  "$schema": "http://json-schema.org/draft-07/schema#",
+                  "additionalProperties": false,
+                  "properties": {
+                    "datetime": {
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$",
+                      "type": "string"
+                    },
+                    "integer": {
+                      "maximum": 10,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "string": {
+                      "maxLength": 10,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "Json"
+              },
+              "name": "data",
+              "nullable": false
+            }
+          ]
+        },
+        "table_with_defaults": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "default": {
+                "type": "Integer",
+                "value": 1
+              },
+              "name": "integer",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "default": {
+                "type": "Double",
+                "value": 1.0
+              },
+              "name": "float",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Bytea"
+              },
+              "default": {
+                "type": "Bytea",
+                "value": [
+                  0,
+                  1,
+                  255
+                ]
+              },
+              "name": "bytes",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "a",
+                  "b",
+                  "c"
+                ]
+              },
+              "default": {
+                "type": "Text",
+                "value": "a"
+              },
+              "name": "enum",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "schema": {
+                  "$schema": "http://json-schema.org/draft-07/schema#",
+                  "additionalProperties": false,
+                  "properties": {
+                    "age": {
+                      "type": "number"
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                },
+                "type": "Json"
+              },
+              "default": {
+                "type": "Text",
+                "value": "{\"name\":\"default name\"}"
+              },
+              "name": "json",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "default": {
+                "type": "Timestamp",
+                "value": 1767225600000
+              },
+              "name": "timestampDate",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "default": {
+                "type": "Timestamp",
+                "value": 0
+              },
+              "name": "timestampNumber",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "default": {
+                "type": "Text",
+                "value": "default value"
+              },
+              "name": "string",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "element": {
+                  "type": "Text"
+                },
+                "type": "Array"
+              },
+              "default": {
+                "type": "Array",
+                "value": [
+                  {
+                    "type": "Text",
+                    "value": "a"
+                  },
+                  {
+                    "type": "Text",
+                    "value": "b"
+                  },
+                  {
+                    "type": "Text",
+                    "value": "c"
+                  }
+                ]
+              },
+              "name": "array",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "default": {
+                "type": "Boolean",
+                "value": true
+              },
+              "name": "boolean",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "default": {
+                "type": "Null"
+              },
+              "name": "nullable",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "default": {
+                "type": "Null"
+              },
+              "name": "nullableInteger",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "default": {
+                "type": "Uuid",
+                "value": "00000000-0000-0000-0000-000000000000"
+              },
+              "name": "refId",
+              "nullable": true,
+              "references": "todos"
+            }
+          ]
+        },
+        "todos": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "default": {
+                "type": "Boolean",
+                "value": false
+              },
+              "name": "done",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "element": {
+                  "type": "Text"
+                },
+                "type": "Array"
+              },
+              "default": {
+                "type": "Array",
+                "value": []
+              },
+              "name": "tags",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "projectId",
+              "nullable": false,
+              "references": "projects"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "ownerId",
+              "nullable": true,
+              "references": "users"
+            },
+            {
+              "column_type": {
+                "element": {
+                  "type": "Uuid"
+                },
+                "type": "Array"
+              },
+              "default": {
+                "type": "Array",
+                "value": []
+              },
+              "name": "assigneesIds",
+              "nullable": false,
+              "references": "users"
+            }
+          ],
+          "indexed_columns": [
+            "done"
+          ]
+        },
+        "users": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "element": {
+                  "type": "Uuid"
+                },
+                "type": "Array"
+              },
+              "name": "friendsIds",
+              "nullable": false,
+              "references": "users"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

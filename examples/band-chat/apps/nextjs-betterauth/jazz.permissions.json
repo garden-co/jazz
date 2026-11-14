@@ -1,0 +1,1497 @@
+{
+  "bundle": "62538e743e7c8eb879fe0e8e890ee6728e7701c8b5eb148ca65365241612b93b",
+  "format": 1,
+  "permissions": {
+    "better_auth_account": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_jwks": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_session": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_user": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_verification": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "canvases": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "roomId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "roomId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "roomMembers",
+          "type": "Exists"
+        }
+      },
+      "select": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "roomId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "roomId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "roomMembers",
+          "type": "Exists"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "joinRequests": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "column": "requester",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "roomId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "$createdBy.account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "rooms",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "column": "requester",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "profileId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "author",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "profiles",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "exprs": [
+            {
+              "column": "requester",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "roomId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "$createdBy.account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "rooms",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "messages": {
+      "delete": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "id",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "senderId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "author",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "profiles",
+          "type": "Exists"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "roomId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "roomId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "memberAuthor",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "roomMembers",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "senderId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "author",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "profiles",
+              "type": "Exists"
+            },
+            {
+              "exprs": [
+                {
+                  "column": "canvasId",
+                  "type": "IsNull"
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "id",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "canvasId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "roomId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "roomId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "canvases",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "roomId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "roomId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "roomMembers",
+          "type": "Exists"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "profiles": {
+      "delete": {
+        "using": {
+          "column": "author",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "insert": {
+        "with_check": {
+          "column": "author",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "select": {
+        "using": {
+          "exprs": [
+            {
+              "column": "author",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "operation": "Select",
+              "source_table": "messages",
+              "type": "InheritsReferencing",
+              "via_column": "senderId"
+            },
+            {
+              "operation": "Select",
+              "source_table": "roomMembers",
+              "type": "InheritsReferencing",
+              "via_column": "memberProfileId"
+            },
+            {
+              "operation": "Select",
+              "source_table": "joinRequests",
+              "type": "InheritsReferencing",
+              "via_column": "profileId"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "update": {
+        "using": {
+          "column": "author",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        },
+        "with_check": {
+          "column": "author",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      }
+    },
+    "reactions": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "column": "author",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "messageId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "roomId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "roomId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "messages",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "roomId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "roomId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "memberAuthor",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "roomMembers",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "column": "author",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "messageId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "roomId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "roomId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "messages",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "roomId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "roomId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "memberAuthor",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "roomMembers",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "messageId"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "readMarkers": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "column": "reader",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "roomId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "$createdBy.account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "rooms",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "column": "reader",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "roomId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "roomId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "memberAuthor",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "roomMembers",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "roomId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "roomId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "roomMembers",
+          "type": "Exists"
+        }
+      },
+      "update": {
+        "using": {
+          "column": "reader",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "column": "reader",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "roomId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "roomId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "memberAuthor",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "roomMembers",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      }
+    },
+    "roomMembers": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "roomId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "$createdBy.account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "rooms",
+              "type": "Exists"
+            },
+            {
+              "column": "memberAuthor",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "roomId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "$createdBy.account",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "rooms",
+              "type": "Exists"
+            },
+            {
+              "column": "memberProfileId",
+              "type": "IsNotNull"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "memberProfileId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "author",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "memberAuthor"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "profiles",
+              "type": "Exists"
+            },
+            {
+              "exprs": [
+                {
+                  "column": "memberAuthor",
+                  "op": "Eq",
+                  "type": "Cmp",
+                  "value": {
+                    "path": [
+                      "user"
+                    ],
+                    "type": "SessionRef"
+                  }
+                },
+                {
+                  "condition": {
+                    "exprs": [
+                      {
+                        "column": "roomId",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "roomId"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      },
+                      {
+                        "column": "requester",
+                        "op": "Eq",
+                        "type": "Cmp",
+                        "value": {
+                          "path": [
+                            "__jazz_outer_row",
+                            "memberAuthor"
+                          ],
+                          "type": "SessionRef"
+                        }
+                      }
+                    ],
+                    "type": "And"
+                  },
+                  "table": "joinRequests",
+                  "type": "Exists"
+                }
+              ],
+              "type": "Or"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "operation": "Select",
+          "type": "Inherits",
+          "via_column": "roomId"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "rooms": {
+      "delete": {
+        "using": {
+          "column": "$createdBy.account",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "True"
+        }
+      },
+      "select": {
+        "using": {
+          "exprs": [
+            {
+              "column": "$createdBy.account",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "roomId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "memberAuthor",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "roomMembers",
+              "type": "Exists"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "update": {
+        "using": {
+          "column": "$createdBy.account",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        },
+        "with_check": {
+          "column": "$createdBy.account",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      }
+    },
+    "strokes": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "column": "author",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "roomId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "roomId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "memberAuthor",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "roomMembers",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "column": "author",
+              "op": "Eq",
+              "type": "Cmp",
+              "value": {
+                "path": [
+                  "user"
+                ],
+                "type": "SessionRef"
+              }
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "roomId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "roomId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "memberAuthor",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "user"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "roomMembers",
+              "type": "Exists"
+            },
+            {
+              "condition": {
+                "exprs": [
+                  {
+                    "column": "id",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "canvasId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  },
+                  {
+                    "column": "roomId",
+                    "op": "Eq",
+                    "type": "Cmp",
+                    "value": {
+                      "path": [
+                        "__jazz_outer_row",
+                        "roomId"
+                      ],
+                      "type": "SessionRef"
+                    }
+                  }
+                ],
+                "type": "And"
+              },
+              "table": "canvases",
+              "type": "Exists"
+            }
+          ],
+          "type": "And"
+        }
+      },
+      "select": {
+        "using": {
+          "condition": {
+            "exprs": [
+              {
+                "column": "roomId",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "__jazz_outer_row",
+                    "roomId"
+                  ],
+                  "type": "SessionRef"
+                }
+              },
+              {
+                "column": "memberAuthor",
+                "op": "Eq",
+                "type": "Cmp",
+                "value": {
+                  "path": [
+                    "user"
+                  ],
+                  "type": "SessionRef"
+                }
+              }
+            ],
+            "type": "And"
+          },
+          "table": "roomMembers",
+          "type": "Exists"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    }
+  },
+  "schema": "2322e143bd2759b30f51c27f300fb37206653faf1142a5cc7b16fc9f821ff7a7"
+}

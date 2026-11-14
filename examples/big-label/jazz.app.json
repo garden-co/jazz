@@ -1,0 +1,1568 @@
+{
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "artists": {
+        "relations": {
+          "organization": {
+            "column": "organizationId",
+            "table": "organizations",
+            "type": "Forward"
+          },
+          "releasesViaArtist": {
+            "relation": "artist",
+            "table": "releases",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "better_auth_account": {
+        "relations": {
+          "user": {
+            "column": "userId",
+            "table": "better_auth_user",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "better_auth_session": {
+        "relations": {
+          "user": {
+            "column": "userId",
+            "table": "better_auth_user",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "better_auth_user": {
+        "relations": {
+          "better_auth_accountViaUser": {
+            "relation": "user",
+            "table": "better_auth_account",
+            "type": "Reverse"
+          },
+          "better_auth_sessionViaUser": {
+            "relation": "user",
+            "table": "better_auth_session",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "catalogues": {
+        "relations": {
+          "organization": {
+            "column": "organizationId",
+            "table": "organizations",
+            "type": "Forward"
+          },
+          "releasesViaCatalogue": {
+            "relation": "catalogue",
+            "table": "releases",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "memberships": {
+        "relations": {
+          "organization": {
+            "column": "organizationId",
+            "table": "organizations",
+            "type": "Forward"
+          },
+          "person": {
+            "column": "personId",
+            "table": "people",
+            "type": "Forward"
+          },
+          "releaseAssignmentsViaMembership": {
+            "relation": "membership",
+            "table": "releaseAssignments",
+            "type": "Reverse"
+          },
+          "teamAssignmentsViaMembership": {
+            "relation": "membership",
+            "table": "teamAssignments",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "organizations": {
+        "relations": {
+          "artistsViaOrganization": {
+            "relation": "organization",
+            "table": "artists",
+            "type": "Reverse"
+          },
+          "cataloguesViaOrganization": {
+            "relation": "organization",
+            "table": "catalogues",
+            "type": "Reverse"
+          },
+          "membershipsViaOrganization": {
+            "relation": "organization",
+            "table": "memberships",
+            "type": "Reverse"
+          },
+          "releaseAssignmentsViaOrganization": {
+            "relation": "organization",
+            "table": "releaseAssignments",
+            "type": "Reverse"
+          },
+          "releaseTeamsViaOrganization": {
+            "relation": "organization",
+            "table": "releaseTeams",
+            "type": "Reverse"
+          },
+          "releasesViaOrganization": {
+            "relation": "organization",
+            "table": "releases",
+            "type": "Reverse"
+          },
+          "teamAssignmentsViaOrganization": {
+            "relation": "organization",
+            "table": "teamAssignments",
+            "type": "Reverse"
+          },
+          "teamsViaOrganization": {
+            "relation": "organization",
+            "table": "teams",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "people": {
+        "relations": {
+          "membershipsViaPerson": {
+            "relation": "person",
+            "table": "memberships",
+            "type": "Reverse"
+          },
+          "personEmailsViaPerson": {
+            "relation": "person",
+            "table": "personEmails",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "personEmails": {
+        "relations": {
+          "person": {
+            "column": "personId",
+            "table": "people",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "releaseAssignments": {
+        "relations": {
+          "membership": {
+            "column": "membershipId",
+            "table": "memberships",
+            "type": "Forward"
+          },
+          "organization": {
+            "column": "organizationId",
+            "table": "organizations",
+            "type": "Forward"
+          },
+          "release": {
+            "column": "releaseId",
+            "table": "releases",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "releaseTeams": {
+        "relations": {
+          "organization": {
+            "column": "organizationId",
+            "table": "organizations",
+            "type": "Forward"
+          },
+          "release": {
+            "column": "releaseId",
+            "table": "releases",
+            "type": "Forward"
+          },
+          "team": {
+            "column": "teamId",
+            "table": "teams",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "releases": {
+        "relations": {
+          "artist": {
+            "column": "artistId",
+            "table": "artists",
+            "type": "Forward"
+          },
+          "catalogue": {
+            "column": "catalogueId",
+            "table": "catalogues",
+            "type": "Forward"
+          },
+          "organization": {
+            "column": "organizationId",
+            "table": "organizations",
+            "type": "Forward"
+          },
+          "releaseAssignmentsViaRelease": {
+            "relation": "release",
+            "table": "releaseAssignments",
+            "type": "Reverse"
+          },
+          "releaseTeamsViaRelease": {
+            "relation": "release",
+            "table": "releaseTeams",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "teamAssignments": {
+        "relations": {
+          "membership": {
+            "column": "membershipId",
+            "table": "memberships",
+            "type": "Forward"
+          },
+          "organization": {
+            "column": "organizationId",
+            "table": "organizations",
+            "type": "Forward"
+          },
+          "team": {
+            "column": "teamId",
+            "table": "teams",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "teams": {
+        "relations": {
+          "organization": {
+            "column": "organizationId",
+            "table": "organizations",
+            "type": "Forward"
+          },
+          "releaseTeamsViaTeam": {
+            "relation": "team",
+            "table": "releaseTeams",
+            "type": "Reverse"
+          },
+          "teamAssignmentsViaTeam": {
+            "relation": "team",
+            "table": "teamAssignments",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "d986c626f864b1dd9e3e6a642819200d76f0e67d63da84553f95ceaa2e2ef207",
+  "format": 1,
+  "migrations": [
+    {
+      "forward": [
+        {
+          "operations": [
+            {
+              "column": "issuer",
+              "column_type": {
+                "type": "Text"
+              },
+              "default": {
+                "type": "Text",
+                "value": ""
+              },
+              "type": "Drop"
+            }
+          ],
+          "table": "better_auth_account"
+        }
+      ],
+      "from": "b6640bee549149d8eaf9f9f8e7cddf486d6b3bd50cee2ddbb06a855e1980aa04",
+      "to": "d986c626f864b1dd9e3e6a642819200d76f0e67d63da84553f95ceaa2e2ef207"
+    }
+  ],
+  "schemas": [
+    {
+      "hash": "b6640bee549149d8eaf9f9f8e7cddf486d6b3bd50cee2ddbb06a855e1980aa04",
+      "tables": {
+        "artists": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "organizationId",
+              "nullable": false,
+              "references": "organizations"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "genre",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "searchKey",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_account": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "issuer",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "accountId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "providerId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "accessToken",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "refreshToken",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "idToken",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "accessTokenExpiresAt",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "refreshTokenExpiresAt",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "scope",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "password",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_jwks": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "publicKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "privateKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "alg",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "crv",
+              "nullable": true
+            }
+          ]
+        },
+        "better_auth_session": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "token",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "ipAddress",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "userAgent",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            }
+          ]
+        },
+        "better_auth_user": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "email",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "emailVerified",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "image",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_verification": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "identifier",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "value",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "catalogues": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "organizationId",
+              "nullable": false,
+              "references": "organizations"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "code",
+              "nullable": false
+            }
+          ]
+        },
+        "memberships": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "organizationId",
+              "nullable": false,
+              "references": "organizations"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "personId",
+              "nullable": false,
+              "references": "people"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "role",
+              "nullable": false
+            }
+          ]
+        },
+        "organizations": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "slug",
+              "nullable": false
+            }
+          ]
+        },
+        "people": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            }
+          ]
+        },
+        "personEmails": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "personId",
+              "nullable": false,
+              "references": "people"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "email",
+              "nullable": false
+            }
+          ]
+        },
+        "releaseAssignments": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "organizationId",
+              "nullable": false,
+              "references": "organizations"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "releaseId",
+              "nullable": false,
+              "references": "releases"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "membershipId",
+              "nullable": false,
+              "references": "memberships"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "role",
+              "nullable": false
+            }
+          ]
+        },
+        "releaseTeams": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "organizationId",
+              "nullable": false,
+              "references": "organizations"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "releaseId",
+              "nullable": false,
+              "references": "releases"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "teamId",
+              "nullable": false,
+              "references": "teams"
+            }
+          ]
+        },
+        "releases": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "organizationId",
+              "nullable": false,
+              "references": "organizations"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "artistId",
+              "nullable": false,
+              "references": "artists"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "catalogueId",
+              "nullable": true,
+              "references": "catalogues"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "catalogNumber",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "catalogSequence",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "format",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "releaseDate",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "searchKey",
+              "nullable": false
+            }
+          ]
+        },
+        "teamAssignments": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "organizationId",
+              "nullable": false,
+              "references": "organizations"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "teamId",
+              "nullable": false,
+              "references": "teams"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "membershipId",
+              "nullable": false,
+              "references": "memberships"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "role",
+              "nullable": false
+            }
+          ]
+        },
+        "teams": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "organizationId",
+              "nullable": false,
+              "references": "organizations"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "hash": "d986c626f864b1dd9e3e6a642819200d76f0e67d63da84553f95ceaa2e2ef207",
+      "tables": {
+        "artists": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "organizationId",
+              "nullable": false,
+              "references": "organizations"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "genre",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "searchKey",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_account": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "accountId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "providerId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "accessToken",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "refreshToken",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "idToken",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "accessTokenExpiresAt",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "refreshTokenExpiresAt",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "scope",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "password",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_jwks": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "publicKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "privateKey",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "alg",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "crv",
+              "nullable": true
+            }
+          ]
+        },
+        "better_auth_session": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "token",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "ipAddress",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "userAgent",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false,
+              "references": "better_auth_user"
+            }
+          ]
+        },
+        "better_auth_user": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "email",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "emailVerified",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "image",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "better_auth_verification": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "identifier",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "value",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "expiresAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "createdAt",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "updatedAt",
+              "nullable": false
+            }
+          ]
+        },
+        "catalogues": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "organizationId",
+              "nullable": false,
+              "references": "organizations"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "code",
+              "nullable": false
+            }
+          ]
+        },
+        "memberships": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "organizationId",
+              "nullable": false,
+              "references": "organizations"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "personId",
+              "nullable": false,
+              "references": "people"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "role",
+              "nullable": false
+            }
+          ]
+        },
+        "organizations": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "slug",
+              "nullable": false
+            }
+          ]
+        },
+        "people": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "userId",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            }
+          ]
+        },
+        "personEmails": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "personId",
+              "nullable": false,
+              "references": "people"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "email",
+              "nullable": false
+            }
+          ]
+        },
+        "releaseAssignments": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "organizationId",
+              "nullable": false,
+              "references": "organizations"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "releaseId",
+              "nullable": false,
+              "references": "releases"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "membershipId",
+              "nullable": false,
+              "references": "memberships"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "role",
+              "nullable": false
+            }
+          ]
+        },
+        "releaseTeams": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "organizationId",
+              "nullable": false,
+              "references": "organizations"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "releaseId",
+              "nullable": false,
+              "references": "releases"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "teamId",
+              "nullable": false,
+              "references": "teams"
+            }
+          ]
+        },
+        "releases": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "organizationId",
+              "nullable": false,
+              "references": "organizations"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "artistId",
+              "nullable": false,
+              "references": "artists"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "catalogueId",
+              "nullable": true,
+              "references": "catalogues"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "catalogNumber",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "catalogSequence",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "format",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Timestamp"
+              },
+              "name": "releaseDate",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "searchKey",
+              "nullable": false
+            }
+          ]
+        },
+        "teamAssignments": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "organizationId",
+              "nullable": false,
+              "references": "organizations"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "teamId",
+              "nullable": false,
+              "references": "teams"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "membershipId",
+              "nullable": false,
+              "references": "memberships"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "role",
+              "nullable": false
+            }
+          ]
+        },
+        "teams": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "organizationId",
+              "nullable": false,
+              "references": "organizations"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

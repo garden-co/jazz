@@ -1,0 +1,420 @@
+{
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "activity": {
+        "relations": {
+          "actor": {
+            "column": "actorId",
+            "table": "crew",
+            "type": "Forward"
+          },
+          "show": {
+            "column": "showId",
+            "table": "shows",
+            "type": "Forward"
+          },
+          "task": {
+            "column": "taskId",
+            "table": "tasks",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "comments": {
+        "relations": {
+          "author": {
+            "column": "authorId",
+            "table": "crew",
+            "type": "Forward"
+          },
+          "task": {
+            "column": "taskId",
+            "table": "tasks",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "crew": {
+        "relations": {
+          "assignedTasks": {
+            "relation": "assignee",
+            "table": "tasks",
+            "type": "Reverse"
+          },
+          "memberships": {
+            "relation": "crew",
+            "table": "showCrew",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "showCrew": {
+        "relations": {
+          "crew": {
+            "column": "crewId",
+            "table": "crew",
+            "type": "Forward"
+          },
+          "show": {
+            "column": "showId",
+            "table": "shows",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "showInvites": {
+        "relations": {
+          "show": {
+            "column": "showId",
+            "table": "shows",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "shows": {
+        "relations": {
+          "activity": {
+            "relation": "show",
+            "table": "activity",
+            "type": "Reverse"
+          },
+          "crew": {
+            "relation": "show",
+            "table": "showCrew",
+            "type": "Reverse"
+          },
+          "invites": {
+            "relation": "show",
+            "table": "showInvites",
+            "type": "Reverse"
+          },
+          "tasks": {
+            "relation": "show",
+            "table": "tasks",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      },
+      "tasks": {
+        "relations": {
+          "activity": {
+            "relation": "task",
+            "table": "activity",
+            "type": "Reverse"
+          },
+          "assignee": {
+            "column": "assigneeId",
+            "table": "crew",
+            "type": "Forward"
+          },
+          "comments": {
+            "relation": "task",
+            "table": "comments",
+            "type": "Reverse"
+          },
+          "show": {
+            "column": "showId",
+            "table": "shows",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "eee271fbb284b62bb48730800515e17806d793d113c3d408e646fe68db0a8c8e",
+  "format": 1,
+  "migrations": [],
+  "schemas": [
+    {
+      "hash": "eee271fbb284b62bb48730800515e17806d793d113c3d408e646fe68db0a8c8e",
+      "tables": {
+        "activity": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "showId",
+              "nullable": false,
+              "references": "shows"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "taskId",
+              "nullable": false,
+              "references": "tasks"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "actorId",
+              "nullable": false,
+              "references": "crew"
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "created",
+                  "moved",
+                  "assigned",
+                  "renamed",
+                  "commented",
+                  "deleted"
+                ]
+              },
+              "name": "kind",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "detail",
+              "nullable": true
+            }
+          ]
+        },
+        "checklistItems": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Boolean"
+              },
+              "name": "done",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "ownerAccount",
+              "nullable": false
+            }
+          ]
+        },
+        "comments": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "taskId",
+              "nullable": false,
+              "references": "tasks"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "authorId",
+              "nullable": false,
+              "references": "crew"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "body",
+              "nullable": false
+            }
+          ]
+        },
+        "crew": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "account",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            }
+          ]
+        },
+        "showCrew": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "showId",
+              "nullable": false,
+              "references": "shows"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "crewId",
+              "nullable": false,
+              "references": "crew"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "account",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "chief",
+                  "crew"
+                ]
+              },
+              "name": "role",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "inviteCode",
+              "nullable": true
+            }
+          ]
+        },
+        "showInvites": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "showId",
+              "nullable": false,
+              "references": "shows"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "code",
+              "nullable": false
+            }
+          ]
+        },
+        "shows": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "venue",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "date",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "doors",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "chiefAccount",
+              "nullable": false
+            }
+          ]
+        },
+        "tasks": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "showId",
+              "nullable": false,
+              "references": "shows"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "title",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "todo",
+                  "doing",
+                  "done",
+                  "blocked"
+                ]
+              },
+              "name": "status",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "assigneeId",
+              "nullable": true,
+              "references": "crew"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "merge_strategy": "Text",
+              "name": "notes",
+              "nullable": true
+            },
+            {
+              "column_type": {
+                "type": "Double"
+              },
+              "name": "rank",
+              "nullable": false
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,313 @@
+{
+  "bundle": "04c174e288eb05428a8ded3194a10733ed1f36d0a77a1f152e74d3fefe35bc20",
+  "format": 1,
+  "permissions": {
+    "better_auth_account": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_jwks": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_session": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_user": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "better_auth_verification": {
+      "delete": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "False"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "False"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "False"
+        },
+        "with_check": {
+          "type": "False"
+        }
+      }
+    },
+    "messages": {
+      "delete": {
+        "using": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "type": "True"
+                },
+                {
+                  "op": "Eq",
+                  "path": [
+                    "claims",
+                    "role"
+                  ],
+                  "type": "SessionCmp",
+                  "value": {
+                    "type": "Text",
+                    "value": "admin"
+                  }
+                }
+              ],
+              "type": "And"
+            },
+            {
+              "exprs": [
+                {
+                  "type": "True"
+                },
+                {
+                  "column": "$createdBy.account",
+                  "op": "Eq",
+                  "type": "Cmp",
+                  "value": {
+                    "path": [
+                      "user"
+                    ],
+                    "type": "SessionRef"
+                  }
+                }
+              ],
+              "type": "And"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "type": "True"
+                },
+                {
+                  "op": "Eq",
+                  "path": [
+                    "claims",
+                    "role"
+                  ],
+                  "type": "SessionCmp",
+                  "value": {
+                    "type": "Text",
+                    "value": "admin"
+                  }
+                }
+              ],
+              "type": "And"
+            },
+            {
+              "type": "True"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "select": {
+        "using": {
+          "exprs": [
+            {
+              "type": "True"
+            },
+            {
+              "type": "True"
+            }
+          ],
+          "type": "Or"
+        }
+      },
+      "update": {
+        "using": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "type": "True"
+                },
+                {
+                  "op": "Eq",
+                  "path": [
+                    "claims",
+                    "role"
+                  ],
+                  "type": "SessionCmp",
+                  "value": {
+                    "type": "Text",
+                    "value": "admin"
+                  }
+                }
+              ],
+              "type": "And"
+            },
+            {
+              "exprs": [
+                {
+                  "type": "True"
+                },
+                {
+                  "column": "$createdBy.account",
+                  "op": "Eq",
+                  "type": "Cmp",
+                  "value": {
+                    "path": [
+                      "user"
+                    ],
+                    "type": "SessionRef"
+                  }
+                }
+              ],
+              "type": "And"
+            }
+          ],
+          "type": "Or"
+        },
+        "with_check": {
+          "exprs": [
+            {
+              "exprs": [
+                {
+                  "type": "True"
+                },
+                {
+                  "op": "Eq",
+                  "path": [
+                    "claims",
+                    "role"
+                  ],
+                  "type": "SessionCmp",
+                  "value": {
+                    "type": "Text",
+                    "value": "admin"
+                  }
+                }
+              ],
+              "type": "And"
+            },
+            {
+              "exprs": [
+                {
+                  "type": "True"
+                },
+                {
+                  "column": "$createdBy.account",
+                  "op": "Eq",
+                  "type": "Cmp",
+                  "value": {
+                    "path": [
+                      "user"
+                    ],
+                    "type": "SessionRef"
+                  }
+                }
+              ],
+              "type": "And"
+            }
+          ],
+          "type": "Or"
+        }
+      }
+    }
+  },
+  "schema": "c95f3dba180615f83246729f0dceceab4b384ad00a92f30c59964f725524d822"
+}

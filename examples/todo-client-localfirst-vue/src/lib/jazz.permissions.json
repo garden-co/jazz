@@ -1,0 +1,76 @@
+{
+  "bundle": "015d0ba4307b00a1c77f3be54da45de3e2ef483cec3c80a0d9fa69487ddc3979",
+  "format": 1,
+  "permissions": {
+    "projects": {
+      "insert": {
+        "with_check": {
+          "type": "True"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      }
+    },
+    "todos": {
+      "delete": {
+        "using": {
+          "column": "owner_id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "insert": {
+        "with_check": {
+          "column": "owner_id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "column": "owner_id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        },
+        "with_check": {
+          "column": "owner_id",
+          "op": "Eq",
+          "type": "Cmp",
+          "value": {
+            "path": [
+              "user"
+            ],
+            "type": "SessionRef"
+          }
+        }
+      }
+    }
+  },
+  "schema": "86cb6a677db0e9bcf52e9907941801bcbf2cb3944c7a8c5ff6b257051c1bc104"
+}

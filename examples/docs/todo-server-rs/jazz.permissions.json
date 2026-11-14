@@ -1,0 +1,44 @@
+{
+  "bundle": "b0e7c3029eb1bdac15b26c40593eff8b6a36f3569838d8425e12db6d1942ba7c",
+  "format": 1,
+  "permissions": {
+    "projects": {
+      "insert": {
+        "with_check": {
+          "type": "True"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      }
+    },
+    "todos": {
+      "delete": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "True"
+        }
+      },
+      "select": {
+        "using": {
+          "type": "True"
+        }
+      },
+      "update": {
+        "using": {
+          "type": "True"
+        },
+        "with_check": {
+          "type": "True"
+        }
+      }
+    }
+  },
+  "schema": "f01997b29114f22266ddcbd328b3aba89b2e6ff16d60255068d6774dc4bd208f"
+}

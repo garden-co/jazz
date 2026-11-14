@@ -1,0 +1,254 @@
+{
+  "codegen": {
+    "slices": {},
+    "tables": {
+      "files": {
+        "relations": {
+          "folder": {
+            "column": "folder_id",
+            "table": "folders",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "folderInvites": {
+        "relations": {
+          "folder": {
+            "column": "folder_id",
+            "table": "folders",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "folderMembers": {
+        "relations": {
+          "folder": {
+            "column": "folder_id",
+            "table": "folders",
+            "type": "Forward"
+          },
+          "folderOwner": {
+            "column": "folder_owner_id",
+            "table": "profiles",
+            "type": "Forward"
+          },
+          "user": {
+            "column": "user_id",
+            "table": "profiles",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "folders": {
+        "relations": {
+          "filesViaFolder": {
+            "relation": "folder",
+            "table": "files",
+            "type": "Reverse"
+          },
+          "parent": {
+            "column": "parent_id",
+            "table": "folders",
+            "type": "Forward"
+          }
+        },
+        "ts_only": []
+      },
+      "profiles": {
+        "relations": {
+          "hostedMemberships": {
+            "relation": "folderOwner",
+            "table": "folderMembers",
+            "type": "Reverse"
+          },
+          "memberships": {
+            "relation": "user",
+            "table": "folderMembers",
+            "type": "Reverse"
+          }
+        },
+        "ts_only": []
+      }
+    }
+  },
+  "current": "63f6bc222535168c0d2103c511fd1ad6c93fa24cf36df4aff0735964b3712314",
+  "format": 1,
+  "migrations": [],
+  "schemas": [
+    {
+      "hash": "63f6bc222535168c0d2103c511fd1ad6c93fa24cf36df4aff0735964b3712314",
+      "tables": {
+        "files": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "folder_id",
+              "nullable": false,
+              "references": "folders"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "content_type",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Integer"
+              },
+              "name": "size_bytes",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "owner_id",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Bytea"
+              },
+              "name": "contents",
+              "nullable": false
+            }
+          ],
+          "indexed_columns": [
+            "folder_id"
+          ]
+        },
+        "folderInvites": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "folder_id",
+              "nullable": false,
+              "references": "folders"
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "code",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "viewer",
+                  "editor"
+                ]
+              },
+              "name": "role",
+              "nullable": false
+            }
+          ]
+        },
+        "folderMembers": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "folder_id",
+              "nullable": false,
+              "references": "folders"
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "user_id",
+              "nullable": false,
+              "references": "profiles"
+            },
+            {
+              "column_type": {
+                "type": "Enum",
+                "variants": [
+                  "viewer",
+                  "editor"
+                ]
+              },
+              "name": "role",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "invite_code",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "folder_owner_id",
+              "nullable": false,
+              "references": "profiles"
+            }
+          ],
+          "indexed_columns": [
+            "folder_id",
+            "user_id"
+          ]
+        },
+        "folders": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "owner_id",
+              "nullable": false
+            },
+            {
+              "column_type": {
+                "type": "Uuid"
+              },
+              "name": "parent_id",
+              "nullable": true,
+              "references": "folders"
+            }
+          ]
+        },
+        "profiles": {
+          "columns": [
+            {
+              "column_type": {
+                "type": "Text"
+              },
+              "name": "name",
+              "nullable": false
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

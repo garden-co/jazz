@@ -481,3 +481,48 @@ it("publishes the current schema once validate moved the legacy migrations", asy
   vi.stubGlobal("fetch", fetchMock);
   expect((await deploy({ ...options, schemaDir: root })).changed).toBe(true);
 });
+
+it("validate writes jazz.app.json and jazz.permissions.json beside migrations/index.ts", async () => {
+  const { root } = await fixture();
+  await validateProject({ schemaDir: root });
+  const app = JSON.parse(await readFile(join(root, "jazz.app.json"), "utf8"));
+  const permissions = JSON.parse(await readFile(join(root, "jazz.permissions.json"), "utf8"));
+  expect(app.format).toBe(1);
+  expect(permissions.format).toBe(1);
+  // Clients ship the app file: it holds no permissions.
+  expect(JSON.stringify(app)).not.toMatch(/"(?:permissions|bundle|using|with_check)"/);
+  // The TS app runs from its TS as on .62: migrations/index.ts is still written.
+  expect(existsSync(join(root, "migrations", "index.ts"))).toBe(true);
+  // Writing again gives the same bytes, so --check passes.
+  const before = await readFile(join(root, "jazz.app.json"), "utf8");
+  await validateProject({ schemaDir: root, check: true });
+  expect(await readFile(join(root, "jazz.app.json"), "utf8")).toBe(before);
+});
+
+it("validate --check refuses a missing or stale jazz.app.json or jazz.permissions.json, naming it", async () => {
+  const { root } = await fixture();
+  await validateProject({ schemaDir: root });
+  for (const file of ["jazz.app.json", "jazz.permissions.json"]) {
+    const path = join(root, file);
+    const text = await readFile(path, "utf8");
+    await writeFile(path, text.replace("\n", "\n "));
+    await expect(validateProject({ schemaDir: root, check: true })).rejects.toThrow(
+      new RegExp(
+        `${file.replace(/\./g, "\\.")} is not what schema\\.ts, permissions\\.ts and the migrations make`,
+      ),
+    );
+    await rm(path);
+    await expect(validateProject({ schemaDir: root, check: true })).rejects.toThrow(
+      new RegExp(`${file.replace(/\./g, "\\.")} is missing`),
+    );
+    await writeFile(path, text);
+  }
+  // A permissions.ts edit makes jazz.permissions.json stale, not jazz.app.json.
+  await writeFile(
+    join(root, "permissions.ts"),
+    `export default { notes: { select: { using: { type: "True" } } } };`,
+  );
+  await expect(validateProject({ schemaDir: root, check: true })).rejects.toThrow(
+    /jazz\.permissions\.json is not what/,
+  );
+});
