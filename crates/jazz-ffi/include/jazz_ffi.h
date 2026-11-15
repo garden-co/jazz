@@ -212,8 +212,8 @@ void jazz_socket_free(JazzSocket *socket);
  * being served then answer as no one (free them with jazz_socket_free). An
  * authenticate call taking over 30 s is answered as no one, but free still
  * waits for that call to return. Called from inside the authenticate
- * callback, it returns at once and the callback stops being called once
- * that call returns (don't free ctx until then).
+ * callback, it waits for every other running call (not its own) and returns
+ * with the callback closed: ctx may be freed once that callback returns.
  */
 void jazz_endpoint_free(JazzEndpoint *endpoint);
 

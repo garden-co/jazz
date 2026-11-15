@@ -492,3 +492,97 @@ async fn no_authenticate_call_after_the_endpoint_is_freed() {
     server.shutdown().await;
     result.unwrap();
 }
+
+static SLOW_RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static FREED_WHILE_OTHERS_RAN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static ENDPOINT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Slow; the request carrying `x-free` frees the endpoint from inside.
+unsafe extern "C" fn slow_auth(
+    _ctx: *mut std::ffi::c_void,
+    request: *const std::ffi::c_char,
+) -> *mut std::ffi::c_char {
+    use std::sync::atomic::Ordering::SeqCst;
+    SLOW_RUNNING.fetch_add(1, SeqCst);
+    let request = unsafe { std::ffi::CStr::from_ptr(request) }
+        .to_str()
+        .unwrap()
+        .to_owned();
+    if request.contains("x-free") {
+        std::thread::sleep(Duration::from_millis(100));
+        let endpoint = ENDPOINT.swap(0, SeqCst) as *mut jazz_ffi::c_abi::JazzEndpoint;
+        unsafe { jazz_ffi::c_abi::jazz_endpoint_free(endpoint) };
+        // Every other call has returned: only this one runs.
+        if SLOW_RUNNING.load(SeqCst) != 1 {
+            FREED_WHILE_OTHERS_RAN.store(true, SeqCst);
+        }
+    } else {
+        std::thread::sleep(Duration::from_millis(600));
+    }
+    SLOW_RUNNING.fetch_sub(1, SeqCst);
+    std::ptr::null_mut()
+}
+
+/// C hosts: `jazz_endpoint_free` called from inside `authenticate` waits for
+/// the other calls still running before it returns, so when the freeing
+/// callback returns, no callback runs and `ctx` may be freed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn free_from_inside_authenticate_waits_for_the_other_calls() {
+    use jazz_ffi::c_abi::*;
+    use std::ffi::CString;
+    let app_id = jazz_app::AppId::random();
+    let server = jazz_server::JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let config = CString::new(backend_config(&server, &app_id.to_string(), "stage-plan")).unwrap();
+    let app = app_id.to_string();
+    let result = blocking(move || unsafe {
+        let mut err = std::ptr::null_mut();
+        let backend = jazz_open(config.as_ptr(), &mut err);
+        let endpoint = jazz_endpoint_new(backend, Some(slow_auth), std::ptr::null_mut(), std::ptr::null(), &mut err);
+        assert!(!endpoint.is_null());
+        ENDPOINT.store(endpoint as usize, std::sync::atomic::Ordering::SeqCst);
+        let sign_in = |free: bool| {
+            let mut headers = vec![json!(["content-type", "application/json"])];
+            if free {
+                headers.push(json!(["x-free", "1"]));
+            }
+            CString::new(
+                json!({ "method": "POST", "path": format!("/jazz/apps/{app}/accounts/backend-sign-in"),
+                        "headers": headers, "body": BASE64.encode(b"{}") })
+                .to_string(),
+            )
+            .unwrap()
+        };
+        let calls: Vec<_> = (0..6)
+            .map(|i| {
+                let request = sign_in(false);
+                let endpoint = endpoint as usize;
+                std::thread::spawn(move || {
+                    let _ = i;
+                    let mut err = std::ptr::null_mut();
+                    let out = jazz_endpoint_handle(endpoint as *const JazzEndpoint, request.as_ptr(), &mut err);
+                    jazz_string_free(out);
+                    jazz_string_free(err);
+                })
+            })
+            .collect();
+        while SLOW_RUNNING.load(std::sync::atomic::Ordering::SeqCst) < 6 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let freeing = sign_in(true);
+        let out = jazz_endpoint_handle(endpoint, freeing.as_ptr(), &mut err);
+        jazz_string_free(out);
+        for call in calls {
+            call.join().unwrap();
+        }
+        assert!(!FREED_WHILE_OTHERS_RAN.load(std::sync::atomic::Ordering::SeqCst));
+        jazz_close(backend);
+    })
+    .await;
+    server.shutdown().await;
+    result.unwrap();
+}

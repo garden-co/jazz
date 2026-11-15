@@ -618,18 +618,11 @@ pub unsafe extern "C" fn jazz_generate_device_key(err: *mut *mut c_char) -> *mut
 /// never called again (sockets still being served answer "no one").
 pub struct JazzEndpoint(crate::endpoint::EndpointCore, std::sync::Arc<AuthGate>);
 
-thread_local! {
-    /// Set while this thread runs a host's `authenticate`.
-    static IN_AUTHENTICATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 /// The host's `authenticate` and its `ctx`, while the endpoint lives.
-type AuthGate = std::sync::RwLock<
-    Option<(
-        unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
-        TokenContext,
-    )>,
->;
+type AuthGate = crate::gate::Gate<(
+    unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
+    TokenRef,
+)>;
 
 /// A socket an endpoint serves (opaque to C).
 pub struct JazzSocket(crate::endpoint::SocketCore);
@@ -679,37 +672,30 @@ pub unsafe extern "C" fn jazz_endpoint_new(
             )?
         };
         let gate: std::sync::Arc<AuthGate> =
-            std::sync::Arc::new(std::sync::RwLock::new(Some((cb, TokenContext(ctx)))));
+            std::sync::Arc::new(crate::gate::Gate::new((cb, TokenRef(ctx))));
         let calling = gate.clone();
         let auth: std::sync::Arc<crate::endpoint::HostAuthFn> =
             std::sync::Arc::new(move |request: &str| {
-                // Held for the call: `jazz_endpoint_free` waits for it, and
-                // once it has cleared the gate no call starts.
-                let gate = calling.read().unwrap_or_else(|e| e.into_inner());
-                let (cb, ctx) = gate.as_ref()?;
-                // `jazz_endpoint_free` from inside this callback must not
-                // wait for the read lock this thread holds.
-                IN_AUTHENTICATE.with(|flag| flag.set(true));
-                struct Leave;
-                impl Drop for Leave {
-                    fn drop(&mut self) {
-                        IN_AUTHENTICATE.with(|flag| flag.set(false));
-                    }
-                }
-                let _leave = Leave;
-                let request = CString::new(request).unwrap_or_default();
-                // SAFETY: per `jazz_endpoint_new`'s contract, while the
-                // endpoint (this gate) lives.
-                let answer = unsafe { cb(ctx.0, request.as_ptr()) };
-                if answer.is_null() {
-                    return None;
-                }
-                // SAFETY: the callback returns a NUL-terminated `malloc`ed string.
-                let text = unsafe { CStr::from_ptr(answer) }
-                    .to_string_lossy()
-                    .into_owned();
-                unsafe { free(answer.cast()) };
-                Some(text)
+                // Counted while it runs: `jazz_endpoint_free` waits for every
+                // running call, and once it closed the gate none starts.
+                calling
+                    .call(|&(cb, ctx)| {
+                        let request = CString::new(request).unwrap_or_default();
+                        // SAFETY: per `jazz_endpoint_new`'s contract, while
+                        // the endpoint (this gate) lives.
+                        let answer = unsafe { cb(ctx.0, request.as_ptr()) };
+                        if answer.is_null() {
+                            return None;
+                        }
+                        // SAFETY: the callback returns a NUL-terminated
+                        // `malloc`ed string.
+                        let text = unsafe { CStr::from_ptr(answer) }
+                            .to_string_lossy()
+                            .into_owned();
+                        unsafe { free(answer.cast()) };
+                        Some(text)
+                    })
+                    .flatten()
             });
         let endpoint = crate::endpoint::EndpointCore::new(
             core,
@@ -812,7 +798,7 @@ pub unsafe extern "C" fn jazz_endpoint_socket(
             on_message.ok_or_else(|| refused("on_message is NULL"))?,
             on_close.ok_or_else(|| refused("on_close is NULL"))?,
         );
-        let ctx = std::sync::Arc::new(TokenContext(ctx));
+        let ctx = std::sync::Arc::new(TokenRef(ctx));
         let closing = ctx.clone();
         let socket = endpoint.0.socket(
             upgrade,
@@ -892,18 +878,10 @@ pub unsafe extern "C" fn jazz_endpoint_free(endpoint: *mut JazzEndpoint) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: per the function's contract.
         let endpoint = unsafe { Box::from_raw(endpoint) };
-        // Waits for a running callback, then no callback is ever called:
-        // the host may free `ctx` once this returns.
-        if IN_AUTHENTICATE.with(std::cell::Cell::get) {
-            // Called from the callback itself: this thread holds the read
-            // lock. Close the gate once that call returns, without waiting.
-            let gate = endpoint.1.clone();
-            std::thread::spawn(move || {
-                gate.write().unwrap_or_else(|e| e.into_inner()).take();
-            });
-        } else {
-            endpoint.1.write().unwrap_or_else(|e| e.into_inner()).take();
-        }
+        // Waits for every running callback (but its own, when called from
+        // one), then no callback is ever called: the host may free `ctx`
+        // once this returns (from inside a callback: once that returns).
+        endpoint.1.close();
         let _ = endpoint.0.shutdown();
     }));
 }
