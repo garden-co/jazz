@@ -91,20 +91,29 @@ stages.
 Writes are local-first. A write that the server's permissions refuse doesn't fail the call: it
 stays local and never syncs.
 
+## Computed fields and transforms
+
+If `jazz.app.json` declares computed fields or transforms, the bindings declare an
+`interface JazzComputed` (e.g. `tasksPriority(score: Int): TaskPriority`,
+`isoDateView(stored: Long): String` and `isoDateStored(view: String): Long`), and
+`jazzapp.open(config, computed)` takes your implementation, so a missing one doesn't compile. Rows
+carry each computed field and each transformed column's view value; inserts and patches take the
+view value. Queries compare a transformed column as stored.
+
 ## Not supported yet
 
 In Kotlin, Jazz doesn't support these yet:
 
-- Android apps (the library is JVM-only for now) and other Kotlin Multiplatform targets;
-- connecting as an end user with a JWT: the app opens locally or as a backend;
-- includes and relations, `select` and recursive queries;
-- computed fields and transforms: `jazz-tools generate` refuses an app that declares them;
-- transactions;
-- choosing a durability tier for reads or writes;
-- payload enums, nested rows and catalogue enums in bindings;
-- text merge for `merge: "text"` columns (like StagePlan's `tasks.notes`): a write replaces the
+- connecting as an end user (JWT, local-first device accounts, sessions): the app opens locally or
+  as a backend;
+- editing `merge: "text"` columns (like StagePlan's `tasks.notes`) as text: a write replaces the
   whole string;
-- files and blobs;
+- files and large values (streaming reads and writes);
+- permission advice (`canRead`, `canInsert`, …);
+- `hopTo`, recursive `gather`, `union` and history queries;
+- writing enums with payloads (reading them works: a sealed interface per enum); nested rows and
+  catalogue enums in bindings;
+- Android (an AAR is in progress) and other Kotlin Multiplatform targets;
 - publishing `jazz-kotlin` to Maven Central: build it from the repository;
 - platforms other than Linux x86-64 for the bundled native library (elsewhere, build `jazz-ffi`
   yourself and point `jna.library.path` at it);
