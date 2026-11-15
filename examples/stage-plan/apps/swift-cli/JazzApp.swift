@@ -142,6 +142,24 @@ public enum JazzApp {
         public var actorId: Jazz.ID
         public var kind: ActivityKind
         public var detail: Swift.String?
+        /// Relation `actor`: the `Crew` row, when the query includes it (and it exists).
+        public var actor: Crew? {
+            get { _actor?.value }
+            set { _actor = newValue.map { Jazz.Included($0) } }
+        }
+        private var _actor: Jazz.Included<Crew>? = nil
+        /// Relation `show`: the `Show` row, when the query includes it (and it exists).
+        public var show: Show? {
+            get { _show?.value }
+            set { _show = newValue.map { Jazz.Included($0) } }
+        }
+        private var _show: Jazz.Included<Show>? = nil
+        /// Relation `task`: the `Task` row, when the query includes it (and it exists).
+        public var task: Task? {
+            get { _task?.value }
+            set { _task = newValue.map { Jazz.Included($0) } }
+        }
+        private var _task: Jazz.Included<Task>? = nil
 
         public init(id: Jazz.ID, showId: Jazz.ID, taskId: Jazz.ID, actorId: Jazz.ID, kind: ActivityKind, detail: Swift.String?) {
             self.id = id
@@ -152,6 +170,20 @@ public enum JazzApp {
             self.detail = detail
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.showId == b.showId && a.taskId == b.taskId && a.actorId == b.actorId && a.kind == b.kind && a.detail == b.detail
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(showId)
+            hasher.combine(taskId)
+            hasher.combine(actorId)
+            hasher.combine(kind)
+            hasher.combine(detail)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case showId = "showId"
@@ -159,6 +191,9 @@ public enum JazzApp {
             case actorId = "actorId"
             case kind = "kind"
             case detail = "detail"
+            case _actor = "actor"
+            case _show = "show"
+            case _task = "task"
         }
     }
 
@@ -224,7 +259,6 @@ public enum JazzApp {
     }
 
     /// Queries of `activity` and its columns.
-    /// (Its relations are left out: includes are not supported in Swift yet.)
     public enum activity {
         /// Every row of `activity`; narrow it with `where`, `orderBy`, `limit` and `offset`.
         public static func query() -> Jazz.Query<Activity> { Jazz.Query() }
@@ -241,6 +275,12 @@ public enum JazzApp {
         public static let kind = Jazz.Column<Activity, ActivityKind>("kind")
         /// Column `detail`.
         public static let detail = Jazz.Column<Activity, Swift.String?>("detail")
+        /// Relation `actor`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let actor = Jazz.Relation<Activity, Crew>("actor")
+        /// Relation `show`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let show = Jazz.Relation<Activity, Show>("show")
+        /// Relation `task`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let task = Jazz.Relation<Activity, Task>("task")
     }
 
     /// A row of `checklistItems`.
@@ -335,6 +375,18 @@ public enum JazzApp {
         public var taskId: Jazz.ID
         public var authorId: Jazz.ID
         public var body: Swift.String
+        /// Relation `author`: the `Crew` row, when the query includes it (and it exists).
+        public var author: Crew? {
+            get { _author?.value }
+            set { _author = newValue.map { Jazz.Included($0) } }
+        }
+        private var _author: Jazz.Included<Crew>? = nil
+        /// Relation `task`: the `Task` row, when the query includes it (and it exists).
+        public var task: Task? {
+            get { _task?.value }
+            set { _task = newValue.map { Jazz.Included($0) } }
+        }
+        private var _task: Jazz.Included<Task>? = nil
 
         public init(id: Jazz.ID, taskId: Jazz.ID, authorId: Jazz.ID, body: Swift.String) {
             self.id = id
@@ -343,11 +395,25 @@ public enum JazzApp {
             self.body = body
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.taskId == b.taskId && a.authorId == b.authorId && a.body == b.body
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(taskId)
+            hasher.combine(authorId)
+            hasher.combine(body)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case taskId = "taskId"
             case authorId = "authorId"
             case body = "body"
+            case _author = "author"
+            case _task = "task"
         }
     }
 
@@ -399,7 +465,6 @@ public enum JazzApp {
     }
 
     /// Queries of `comments` and its columns.
-    /// (Its relations are left out: includes are not supported in Swift yet.)
     public enum comments {
         /// Every row of `comments`; narrow it with `where`, `orderBy`, `limit` and `offset`.
         public static func query() -> Jazz.Query<Comment> { Jazz.Query() }
@@ -412,6 +477,10 @@ public enum JazzApp {
         public static let authorId = Jazz.Column<Comment, Jazz.ID>("authorId")
         /// Column `body`.
         public static let body = Jazz.Column<Comment, Swift.String>("body")
+        /// Relation `author`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let author = Jazz.Relation<Comment, Crew>("author")
+        /// Relation `task`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let task = Jazz.Relation<Comment, Task>("task")
     }
 
     /// A row of `crew`.
@@ -420,6 +489,10 @@ public enum JazzApp {
         public let id: Jazz.ID
         public var account: Jazz.ID
         public var name: Swift.String
+        /// Relation `assignedTasks`: the `Task` rows, when the query includes them.
+        public var assignedTasks: [Task]? = nil
+        /// Relation `memberships`: the `ShowCrew` rows, when the query includes them.
+        public var memberships: [ShowCrew]? = nil
 
         public init(id: Jazz.ID, account: Jazz.ID, name: Swift.String) {
             self.id = id
@@ -427,10 +500,23 @@ public enum JazzApp {
             self.name = name
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.account == b.account && a.name == b.name
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(account)
+            hasher.combine(name)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case account = "account"
             case name = "name"
+            case assignedTasks = "assignedTasks"
+            case memberships = "memberships"
         }
     }
 
@@ -475,7 +561,6 @@ public enum JazzApp {
     }
 
     /// Queries of `crew` and its columns.
-    /// (Its relations are left out: includes are not supported in Swift yet.)
     public enum crew {
         /// Every row of `crew`; narrow it with `where`, `orderBy`, `limit` and `offset`.
         public static func query() -> Jazz.Query<Crew> { Jazz.Query() }
@@ -486,6 +571,10 @@ public enum JazzApp {
         public static let account = Jazz.Column<Crew, Jazz.ID>("account")
         /// Column `name`.
         public static let name = Jazz.Column<Crew, Swift.String>("name")
+        /// Relation `assignedTasks`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let assignedTasks = Jazz.Relation<Crew, Task>("assignedTasks")
+        /// Relation `memberships`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let memberships = Jazz.Relation<Crew, ShowCrew>("memberships")
     }
 
     /// A row of `showCrew`.
@@ -497,6 +586,18 @@ public enum JazzApp {
         public var account: Jazz.ID
         public var role: ShowCrewRole
         public var inviteCode: Swift.String?
+        /// Relation `crew`: the `Crew` row, when the query includes it (and it exists).
+        public var crew: Crew? {
+            get { _crew?.value }
+            set { _crew = newValue.map { Jazz.Included($0) } }
+        }
+        private var _crew: Jazz.Included<Crew>? = nil
+        /// Relation `show`: the `Show` row, when the query includes it (and it exists).
+        public var show: Show? {
+            get { _show?.value }
+            set { _show = newValue.map { Jazz.Included($0) } }
+        }
+        private var _show: Jazz.Included<Show>? = nil
 
         public init(id: Jazz.ID, showId: Jazz.ID, crewId: Jazz.ID, account: Jazz.ID, role: ShowCrewRole, inviteCode: Swift.String?) {
             self.id = id
@@ -507,6 +608,20 @@ public enum JazzApp {
             self.inviteCode = inviteCode
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.showId == b.showId && a.crewId == b.crewId && a.account == b.account && a.role == b.role && a.inviteCode == b.inviteCode
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(showId)
+            hasher.combine(crewId)
+            hasher.combine(account)
+            hasher.combine(role)
+            hasher.combine(inviteCode)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case showId = "showId"
@@ -514,6 +629,8 @@ public enum JazzApp {
             case account = "account"
             case role = "role"
             case inviteCode = "inviteCode"
+            case _crew = "crew"
+            case _show = "show"
         }
     }
 
@@ -579,7 +696,6 @@ public enum JazzApp {
     }
 
     /// Queries of `showCrew` and its columns.
-    /// (Its relations are left out: includes are not supported in Swift yet.)
     public enum showCrew {
         /// Every row of `showCrew`; narrow it with `where`, `orderBy`, `limit` and `offset`.
         public static func query() -> Jazz.Query<ShowCrew> { Jazz.Query() }
@@ -596,6 +712,10 @@ public enum JazzApp {
         public static let role = Jazz.Column<ShowCrew, ShowCrewRole>("role")
         /// Column `inviteCode`.
         public static let inviteCode = Jazz.Column<ShowCrew, Swift.String?>("inviteCode")
+        /// Relation `crew`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let crew = Jazz.Relation<ShowCrew, Crew>("crew")
+        /// Relation `show`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let show = Jazz.Relation<ShowCrew, Show>("show")
     }
 
     /// A row of `showInvites`.
@@ -604,6 +724,12 @@ public enum JazzApp {
         public let id: Jazz.ID
         public var showId: Jazz.ID
         public var code: Swift.String
+        /// Relation `show`: the `Show` row, when the query includes it (and it exists).
+        public var show: Show? {
+            get { _show?.value }
+            set { _show = newValue.map { Jazz.Included($0) } }
+        }
+        private var _show: Jazz.Included<Show>? = nil
 
         public init(id: Jazz.ID, showId: Jazz.ID, code: Swift.String) {
             self.id = id
@@ -611,10 +737,22 @@ public enum JazzApp {
             self.code = code
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.showId == b.showId && a.code == b.code
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(showId)
+            hasher.combine(code)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case showId = "showId"
             case code = "code"
+            case _show = "show"
         }
     }
 
@@ -659,7 +797,6 @@ public enum JazzApp {
     }
 
     /// Queries of `showInvites` and its columns.
-    /// (Its relations are left out: includes are not supported in Swift yet.)
     public enum showInvites {
         /// Every row of `showInvites`; narrow it with `where`, `orderBy`, `limit` and `offset`.
         public static func query() -> Jazz.Query<ShowInvite> { Jazz.Query() }
@@ -670,6 +807,8 @@ public enum JazzApp {
         public static let showId = Jazz.Column<ShowInvite, Jazz.ID>("showId")
         /// Column `code`.
         public static let code = Jazz.Column<ShowInvite, Swift.String>("code")
+        /// Relation `show`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let show = Jazz.Relation<ShowInvite, Show>("show")
     }
 
     /// A row of `shows`.
@@ -681,6 +820,14 @@ public enum JazzApp {
         public var date: Swift.String
         public var doors: Swift.String
         public var chiefAccount: Jazz.ID
+        /// Relation `activity`: the `Activity` rows, when the query includes them.
+        public var activity: [Activity]? = nil
+        /// Relation `crew`: the `ShowCrew` rows, when the query includes them.
+        public var crew: [ShowCrew]? = nil
+        /// Relation `invites`: the `ShowInvite` rows, when the query includes them.
+        public var invites: [ShowInvite]? = nil
+        /// Relation `tasks`: the `Task` rows, when the query includes them.
+        public var tasks: [Task]? = nil
 
         public init(id: Jazz.ID, name: Swift.String, venue: Swift.String, date: Swift.String, doors: Swift.String, chiefAccount: Jazz.ID) {
             self.id = id
@@ -691,6 +838,20 @@ public enum JazzApp {
             self.chiefAccount = chiefAccount
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.name == b.name && a.venue == b.venue && a.date == b.date && a.doors == b.doors && a.chiefAccount == b.chiefAccount
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(name)
+            hasher.combine(venue)
+            hasher.combine(date)
+            hasher.combine(doors)
+            hasher.combine(chiefAccount)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case name = "name"
@@ -698,6 +859,10 @@ public enum JazzApp {
             case date = "date"
             case doors = "doors"
             case chiefAccount = "chiefAccount"
+            case activity = "activity"
+            case crew = "crew"
+            case invites = "invites"
+            case tasks = "tasks"
         }
     }
 
@@ -763,7 +928,6 @@ public enum JazzApp {
     }
 
     /// Queries of `shows` and its columns.
-    /// (Its relations are left out: includes are not supported in Swift yet.)
     public enum shows {
         /// Every row of `shows`; narrow it with `where`, `orderBy`, `limit` and `offset`.
         public static func query() -> Jazz.Query<Show> { Jazz.Query() }
@@ -780,6 +944,14 @@ public enum JazzApp {
         public static let doors = Jazz.Column<Show, Swift.String>("doors")
         /// Column `chiefAccount`.
         public static let chiefAccount = Jazz.Column<Show, Jazz.ID>("chiefAccount")
+        /// Relation `activity`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let activity = Jazz.Relation<Show, Activity>("activity")
+        /// Relation `crew`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let crew = Jazz.Relation<Show, ShowCrew>("crew")
+        /// Relation `invites`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let invites = Jazz.Relation<Show, ShowInvite>("invites")
+        /// Relation `tasks`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let tasks = Jazz.Relation<Show, Task>("tasks")
     }
 
     /// A row of `tasks`.
@@ -792,6 +964,22 @@ public enum JazzApp {
         public var assigneeId: Jazz.ID?
         public var notes: Swift.String?
         public var rank: Swift.Double
+        /// Relation `activity`: the `Activity` rows, when the query includes them.
+        public var activity: [Activity]? = nil
+        /// Relation `assignee`: the `Crew` row, when the query includes it (and it exists).
+        public var assignee: Crew? {
+            get { _assignee?.value }
+            set { _assignee = newValue.map { Jazz.Included($0) } }
+        }
+        private var _assignee: Jazz.Included<Crew>? = nil
+        /// Relation `comments`: the `Comment` rows, when the query includes them.
+        public var comments: [Comment]? = nil
+        /// Relation `show`: the `Show` row, when the query includes it (and it exists).
+        public var show: Show? {
+            get { _show?.value }
+            set { _show = newValue.map { Jazz.Included($0) } }
+        }
+        private var _show: Jazz.Included<Show>? = nil
 
         public init(id: Jazz.ID, showId: Jazz.ID, title: Swift.String, status: TaskStatus, assigneeId: Jazz.ID?, notes: Swift.String?, rank: Swift.Double) {
             self.id = id
@@ -803,6 +991,21 @@ public enum JazzApp {
             self.rank = rank
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.showId == b.showId && a.title == b.title && a.status == b.status && a.assigneeId == b.assigneeId && a.notes == b.notes && a.rank == b.rank
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(showId)
+            hasher.combine(title)
+            hasher.combine(status)
+            hasher.combine(assigneeId)
+            hasher.combine(notes)
+            hasher.combine(rank)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case showId = "showId"
@@ -811,6 +1014,10 @@ public enum JazzApp {
             case assigneeId = "assigneeId"
             case notes = "notes"
             case rank = "rank"
+            case activity = "activity"
+            case _assignee = "assignee"
+            case comments = "comments"
+            case _show = "show"
         }
     }
 
@@ -883,7 +1090,6 @@ public enum JazzApp {
     }
 
     /// Queries of `tasks` and its columns.
-    /// (Its relations are left out: includes are not supported in Swift yet.)
     public enum tasks {
         /// Every row of `tasks`; narrow it with `where`, `orderBy`, `limit` and `offset`.
         public static func query() -> Jazz.Query<Task> { Jazz.Query() }
@@ -902,5 +1108,13 @@ public enum JazzApp {
         public static let notes = Jazz.Column<Task, Swift.String?>("notes")
         /// Column `rank`.
         public static let rank = Jazz.Column<Task, Swift.Double>("rank")
+        /// Relation `activity`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let activity = Jazz.Relation<Task, Activity>("activity")
+        /// Relation `assignee`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let assignee = Jazz.Relation<Task, Crew>("assignee")
+        /// Relation `comments`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let comments = Jazz.Relation<Task, Comment>("comments")
+        /// Relation `show`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).
+        public static let show = Jazz.Relation<Task, Show>("show")
     }
 }

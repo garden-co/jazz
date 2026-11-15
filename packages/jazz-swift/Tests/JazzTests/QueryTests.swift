@@ -15,7 +15,29 @@ enum Tasks {
     static let due = Column<Task, Date?>("due")
 }
 
+struct Show: Row {
+    static let table = "shows"
+    let id: Jazz.ID
+    var name: String
+}
+
+enum Shows {
+    static let tasks = Relation<Show, Task>("tasks")
+}
+
 final class QueryTests: XCTestCase {
+    func testIncludeAndSelectJSON() throws {
+        let query = Query<Show>()
+            .include(Shows.tasks.where(Tasks.rank.gt(1)).orderBy(Tasks.rank.desc).limit(2).required())
+        XCTAssertEqual(
+            try query.json(),
+            #"{"include":[{"query":{"limit":2,"orderBy":[{"column":"rank","direction":"desc"}],"where":[{"column":"rank","op":"gt","value":1}]},"relation":"tasks","required":true}],"table":"shows"}"#
+        )
+        XCTAssertEqual(
+            try Query<Task>().select(Tasks.title, Tasks.rank).json(),
+            #"{"select":["title","rank"],"table":"tasks"}"#)
+    }
+
     func testQueryJSON() throws {
         let query = Query<Task>()
             .where(Tasks.title.eq("Load in"), Tasks.due.isNull(), Tasks.rank.in([1, 2.5]))
