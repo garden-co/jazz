@@ -3,4 +3,4 @@
 "jazz-napi": patch
 ---
 
-Server: a Backend or Admin websocket no longer busy-loops if the account registry stops, and an account websocket then closes with a retryable `NotReady` error. A large-value store I/O thread that dies now restarts the server runtime instead of silently stopping uploads and fetches.
+Server: a Backend or Admin websocket no longer busy-loops if the account registry stops, and an account websocket then closes with a retryable `NotReady` error.
