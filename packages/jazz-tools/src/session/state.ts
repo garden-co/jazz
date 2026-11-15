@@ -467,6 +467,12 @@ export async function createJazzSessionOwner<
         /** Revokes that credential once the client is shut down. */
         release?: () => void;
         error: Error;
+        /**
+         * Why it signed out, when the app didn't ask (a refused upgrade:
+         * `DiscardedDeviceAccountError`): shown while it waits, and on the
+         * `signed-out` it ends in.
+         */
+        notice?: Error;
         attempt?: Promise<void>;
         timer?: ReturnType<typeof setTimeout>;
         waitMs: number;
@@ -745,7 +751,11 @@ export async function createJazzSessionOwner<
       );
     if (token !== generation) throw superseded();
     if (draining && !client) {
-      publish({ status: "signing-out", error: draining.error, recovery: "action" });
+      publish({
+        status: "signing-out",
+        error: draining.notice ?? draining.error,
+        recovery: "action",
+      });
       watchDrain(draining);
       return;
     }
@@ -766,6 +776,11 @@ export async function createJazzSessionOwner<
     });
   };
   type Drain = NonNullable<typeof draining>;
+  /** The `signed-out` a sign-out's upload ends in: with its notice, if any. */
+  const drainEnded = (drain: Drain): SessionCoreSnapshot<Client> => ({
+    status: "signed-out",
+    ...(drain.notice ? { error: drain.notice, recovery: "action" as const } : {}),
+  });
   /**
    * A sign-out that left its upload pending but couldn't save the signed-out
    * selection shows `error`: save it again first, so a reload can't reopen
@@ -776,7 +791,7 @@ export async function createJazzSessionOwner<
     if (!drain || snapshot.status !== "error") return;
     await accounts.settleSelection(true);
     if (draining === drain && !closed)
-      publish({ status: "signing-out", error: drain.error, recovery: "action" });
+      publish({ status: "signing-out", error: drain.notice ?? drain.error, recovery: "action" });
   };
   /**
    * `signOut({ discardUnsynced })`'s teardown of `client`: drop its writes
@@ -920,7 +935,7 @@ export async function createJazzSessionOwner<
       () => {
         if (draining !== drain) return;
         endDrain(drain);
-        publish({ status: "signed-out" });
+        publish(drainEnded(drain));
       },
       (cause: unknown) => {
         drain.attempt = undefined;
@@ -936,7 +951,7 @@ export async function createJazzSessionOwner<
         // sign-out whose teardown fails is.
         console.error("Jazz signed out, but closing the signed-out client failed.", cause);
         endDrain(drain);
-        publish({ status: "signed-out" });
+        publish(drainEnded(drain));
       },
     );
     drain.attempt = attempt;
@@ -1138,19 +1153,35 @@ export async function createJazzSessionOwner<
       options.pendingDiscards &&
       (await accountForgotten(accounts, account.id))
     ) {
+      const refused = new DiscardedDeviceAccountError();
       await next.shutdown().catch(() => {});
+      // What `next` opened is no one's now (the writes the thin client
+      // handed it are still in the thin client, which uploads them as it
+      // signs out): wipe it by account, as the discard did, or leave it
+      // pending if another tab holds it.
+      if (options.deleteSignedOutStore) {
+        const wiped = await options.deleteSignedOutStore(account.id).catch((error: unknown) => {
+          console.warn("Jazz couldn't wipe the refused local-first store yet.", error);
+          return "held" as const;
+        });
+        if (wiped !== "deleted") options.pendingDiscards.record(account.id);
+      }
       if (token === generation && client === current && !closed) {
         await session.logout().catch(() => {});
         // Narrowed above, but the logout moved it on.
         const now = snapshot as SessionCoreSnapshot<Client>;
-        if (!selected && !closed && now.status === "signed-out")
-          publish({
-            status: "signed-out",
-            error: new DiscardedDeviceAccountError(),
-            recovery: "action",
-          });
+        if (!selected && !closed) {
+          if (now.status === "signed-out")
+            publish({ status: "signed-out", error: refused, recovery: "action" });
+          // Offline: the thin client still uploads. Say why while it waits,
+          // and on the signed-out it ends in.
+          else if (now.status === "signing-out" && draining) {
+            draining.notice = refused;
+            publish({ status: "signing-out", error: refused, recovery: "action" });
+          }
+        }
       }
-      throw new DiscardedDeviceAccountError();
+      throw refused;
     }
     if (token !== generation || client !== current || closed) {
       await next.shutdown().catch(() => {});

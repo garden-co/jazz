@@ -1,4 +1,5 @@
 import { it, expect, vi } from "vitest";
+import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 import {
   forgetDeviceAccount,
   prepareAccountManager,
@@ -537,13 +538,20 @@ it("refuses the local-first upgrade of a device account another tab's discard fo
       mintToken: () =>
         `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: "00000000-0000-4000-8000-000000000001" }))}.sig`,
     });
-  const pendingDiscards = { record() {}, clear() {}, list: () => [] as string[] };
+  const pending = new Set<string>();
+  const pendingDiscards = {
+    record: (account: string) => void pending.add(account),
+    clear: (account: string) => void pending.delete(account),
+    list: () => [...pending],
+  };
+  const deleteSignedOutStore = vi.fn(async (_account: string) => "deleted" as const);
   // A thin sign-in: no hold on the store, so its check passes.
-  const thin = { shutdown: vi.fn(async () => {}) };
+  const thin = { shutdown: vi.fn(async (_options?: { waitForSync?: boolean }) => {}) };
   const session = await createJazzSessionOwner({
     accounts: await manager(),
     openClient: vi.fn(async () => thin),
     pendingDiscards,
+    deleteSignedOutStore,
   });
   await session.createLocalFirst();
   const account = session.getSnapshot().account!.id;
@@ -556,11 +564,68 @@ it("refuses the local-first upgrade of a device account another tab's discard fo
     "discarded on this device",
   );
   expect(replica.shutdown).toHaveBeenCalled();
+  // The refused store is wiped, and the thin client signed out.
+  expect(deleteSignedOutStore).toHaveBeenCalledWith(account);
+  expect(pending.size).toBe(0);
+  expect(thin.shutdown).toHaveBeenCalledWith({ waitForSync: true });
   expect(session.getSnapshot()).toMatchObject({
     status: "signed-out",
     recovery: "action",
     error: { name: "DiscardedDeviceAccountError" },
   });
   expect(session.getSnapshot().client).toBeUndefined();
+  await session.close();
+});
+
+it("says why while a refused upgrade's sign-out waits offline, and once it ends", async () => {
+  let value: string | null = null;
+  const registry = "https://core.example/apps/test/accounts";
+  const store = {
+    read: async () => value,
+    update: async (transform: (current: string | null) => string) => {
+      value = transform(value);
+    },
+  };
+  const manager = () =>
+    prepareAccountManager({
+      appId: "test",
+      registry,
+      store,
+      mintToken: () =>
+        `e30.${btoa(JSON.stringify({ iss: "urn:jazz:local-first", sub: "00000000-0000-4000-8000-000000000001" }))}.sig`,
+    });
+  const pendingDiscards = { record() {}, clear() {}, list: () => [] as string[] };
+  let offline = true;
+  const thin = {
+    db: { getAuthState: () => ({}) },
+    shutdown: vi.fn(async (options?: { waitForSync?: boolean }) => {
+      if (options?.waitForSync && offline)
+        throw new GracefulShutdownSyncError(new Error("websocket transport error"));
+    }),
+  };
+  const session = await createJazzSessionOwner({
+    accounts: await manager(),
+    openClient: vi.fn(async () => thin),
+    pendingDiscards,
+    deleteSignedOutStore: async () => "deleted" as const,
+  });
+  await session.createLocalFirst();
+  await forgetDeviceAccount(await manager(), session.getSnapshot().account!.id);
+  await expect(
+    replaceJazzSessionClient(session, async () => ({ shutdown: async () => {} })),
+  ).rejects.toThrow("discarded on this device");
+  // Offline: signing out, its thin writes waiting to upload, and the app told why.
+  expect(session.getSnapshot()).toMatchObject({
+    status: "signing-out",
+    error: { name: "DiscardedDeviceAccountError" },
+  });
+  offline = false;
+  await session.retry();
+  expect(thin.shutdown).toHaveBeenLastCalledWith({ waitForSync: true });
+  expect(session.getSnapshot()).toMatchObject({
+    status: "signed-out",
+    recovery: "action",
+    error: { name: "DiscardedDeviceAccountError" },
+  });
   await session.close();
 });

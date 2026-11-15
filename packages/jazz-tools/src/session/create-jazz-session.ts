@@ -27,7 +27,11 @@ import {
   type LocalFirstLoader,
   type LocalFirstModule,
 } from "../runtime/local-first-upgrade.js";
-import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
+import {
+  createJazzSessionOwner,
+  DiscardedDeviceAccountError,
+  replaceJazzSessionClient,
+} from "./state.js";
 import { coreInitial, createStartedJazzSession, type JazzSession } from "./jazz-session.js";
 import { DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
@@ -606,6 +610,15 @@ function upgradeInBackground(session: BrowserJazzSession, loader: LocalFirstLoad
     void afterPageLoad().then(() => {
       if (session.getSnapshot().client !== client) return;
       return client.db.upgradeToLocalFirst(loader).catch((error: unknown) => {
+        // Another tab discarded this device account as it upgraded: the
+        // session signed out (its snapshot says why), nothing stays thin.
+        if (error instanceof DiscardedDeviceAccountError) {
+          console.warn(
+            "Jazz signed out: another tab discarded this device account (signOut({ discardUnsynced })) while it upgraded to local-first.",
+            error,
+          );
+          return;
+        }
         if (session.getSnapshot().client !== client) return;
         console.warn("Jazz could not upgrade to the local-first client; staying thin.", error);
       });
