@@ -10,7 +10,7 @@
 #
 # usage: dev/scripts/build-kotlin-dist.sh <natives> <out> [--android]
 #
-# <natives> is what the kotlin-dist workflow's per-platform jobs build
+# <natives> is what attach-language-artifacts.yml's per-platform jobs build
 # (`cargo build -p jazz-ffi --profile release`, the library renamed into its
 # JNA directory). Locally, `mkdir -p n/linux-x86-64 && cp target/release/
 # libjazz_ffi.so n/linux-x86-64/` makes a Linux-only one.
