@@ -158,6 +158,7 @@ In a route of your own, `endpoint.ForUser(r)` is a handle acting as the request'
 
 What TypeScript's main backend (`createJazz`) does that Go's doesn't yet:
 
+- a backend-authority handle (TS `jazz.db`): reads and writes that bypass permissions, as the system;
 - `jazz.revokeUser` (ending a user's sessions) and the `refresh` hook;
 - trusted backend clients (`backendClients`);
 - linking a device account to a user (the endpoint's `backend-link` routes);
