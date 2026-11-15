@@ -47,14 +47,22 @@ export function createProgram(
   };
 }
 
-/** Errors in the project's own files, as `file:line:col: message`. */
-export function typeErrors(ts: Ts, program: TS.Program, root: string): string[] {
-  const out: string[] = [];
+/** An error in one of the project's own files. */
+export interface TypeError {
+  /** `file:line:col: message`. */
+  text: string;
+  /** The error without its position: the same error before and after a rewrite moved its line. */
+  key: string;
+}
+
+/** Errors in the project's own files. */
+export function typeErrors(ts: Ts, program: TS.Program, root: string): TypeError[] {
+  const out: TypeError[] = [];
   for (const diagnostic of ts.getPreEmitDiagnostics(program)) {
     if (diagnostic.category !== ts.DiagnosticCategory.Error) continue;
-    const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n");
+    const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n").split("\n")[0]!;
     if (!diagnostic.file) {
-      out.push(message);
+      out.push({ text: message, key: `TS${diagnostic.code} ${message}` });
       continue;
     }
     const path = relative(root, diagnostic.file.fileName);
@@ -62,7 +70,10 @@ export function typeErrors(ts: Ts, program: TS.Program, root: string): string[] 
     const { line, character } = diagnostic.file.getLineAndCharacterOfPosition(
       diagnostic.start ?? 0,
     );
-    out.push(`${path}:${line + 1}:${character + 1}: ${message.split("\n")[0]}`);
+    out.push({
+      text: `${path}:${line + 1}:${character + 1}: ${message}`,
+      key: `${path} TS${diagnostic.code} ${message}`,
+    });
   }
   return out;
 }

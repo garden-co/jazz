@@ -87,6 +87,8 @@ export interface UpgradeReport {
   notes: string[];
   /** Typecheck errors after the conversion, as `file:line:col: message`. */
   typeErrors: string[];
+  /** Typecheck errors the project had before the conversion too: reported, not counted. */
+  preexistingTypeErrors: string[];
   /** Whether the typecheck ran. */
   typechecked: boolean;
   /** `"TODO: …"` strings left in jazz.app.json. */
@@ -238,6 +240,7 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     manual: rewrites.manual,
     notes,
     typeErrors: [],
+    preexistingTypeErrors: [],
     typechecked: false,
     todos: computed.todos,
   };
@@ -267,6 +270,23 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
 
   if (options.dryRun) return report;
 
+  // The project's errors before the conversion, against its own jazz-tools,
+  // so the closing typecheck tells upgrade's errors from ones it found there.
+  let before: Set<string> | undefined;
+  if (!options.skipTypecheck && !isRustApp(project.schemaDir)) {
+    const roots = new Set(project.configFileNames);
+    for (const file of rewrites.files)
+      if (/\.(ts|tsx|mts|cts)$/.test(file.file)) roots.add(file.file);
+    if (roots.size > 0) {
+      const handle = createProgram(ts, [...roots], project.compilerOptions, undefined);
+      try {
+        before = new Set(typeErrors(ts, handle.program, project.root).map((e) => e.key));
+      } finally {
+        handle.dispose();
+      }
+    }
+  }
+
   for (const [path, text] of writes) writeFileSync(path, text);
   for (const path of deleted) rmSync(path, { force: true });
   removeEmptyDirs([...deleted].map(dirname), project.root);
@@ -295,7 +315,11 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
         : undefined;
     const handle = createProgram(ts, [...roots], project.compilerOptions, override);
     try {
-      report.typeErrors = typeErrors(ts, handle.program, project.root);
+      for (const error of typeErrors(ts, handle.program, project.root)) {
+        (before?.has(error.key) ? report.preexistingTypeErrors : report.typeErrors).push(
+          error.text,
+        );
+      }
       report.typechecked = true;
     } finally {
       handle.dispose();
@@ -656,8 +680,17 @@ export function formatReport(report: UpgradeReport, dryRun = false): string {
   section("Left for you (upgrade can't convert these)", report.manual);
   section("Notes", report.notes);
   if (report.typechecked) {
-    if (report.typeErrors.length === 0) lines.push("Typecheck passed.");
-    else
+    section(
+      `Typecheck: ${report.preexistingTypeErrors.length} error${report.preexistingTypeErrors.length === 1 ? "" : "s"} the project had before the conversion too (not upgrade's, and not counted)`,
+      report.preexistingTypeErrors,
+    );
+    if (report.typeErrors.length === 0) {
+      lines.push(
+        report.preexistingTypeErrors.length === 0
+          ? "Typecheck passed."
+          : "Typecheck passed: no errors besides the ones the project already had.",
+      );
+    } else
       section(
         `Typecheck: ${report.typeErrors.length} error${report.typeErrors.length === 1 ? "" : "s"} (the conversion is left in place for you to fix)`,
         report.typeErrors,

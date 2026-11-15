@@ -189,6 +189,24 @@ describe("jazz-tools upgrade: conversions", () => {
     );
   });
 
+  it("reports type errors the project already had apart, and doesn't count them", async () => {
+    const dir = fixture("backend-history");
+    const server = join(dir, "server", "jazz.ts");
+    writeFileSync(
+      server,
+      `${readFileSync(server, "utf8")}\nexport const planted: number = "not a number";\n`,
+    );
+    const report = await upgradeProject({ dir, generate });
+    const planted = (errors: string[]) =>
+      errors.filter((e) => e.includes("not assignable to type 'number'"));
+    expect(planted(report.preexistingTypeErrors)).toHaveLength(1);
+    expect(planted(report.preexistingTypeErrors)[0]).toMatch(/^server\/jazz\.ts:\d+:\d+: /);
+    expect(planted(report.typeErrors)).toHaveLength(0);
+    expect(formatReport(report)).toContain(
+      "the project had before the conversion too (not upgrade's, and not counted)",
+    );
+  });
+
   it("writes nothing on a dry run", async () => {
     const dir = fixture("backend-history");
     const before = projectFiles(dir);
