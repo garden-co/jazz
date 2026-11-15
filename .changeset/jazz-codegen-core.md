@@ -8,7 +8,8 @@ Loaders now refuse, naming the JSON path:
 
 - a `"TODO: …"` placeholder left in `migrations`, a computed field's type or a transform's types;
 - a relation named like a column of its table, or `id` (as the TS DSL refused);
-- a history version no chain of migrations connects to the current tables, unless its rows pass unchanged (index, merge-strategy or column-order changes, which earlier versions wrote no migration for): those get the implied identity step.
+
+A history version no chain of migrations connects to the current tables gets the implied identity step when its rows pass unchanged (index, merge-strategy or column-order changes, which earlier versions wrote no migration for); any other loads with a warning, and generating bindings refuses it.
 
 The expression grammar reads `session.identity` (the exact login: `$createdBy.identity = session.identity`), and a `select` or `order by` list inside `recursive(…)` no longer runs into the next field, so the writer reads back the Gather policies it prints.
 

@@ -394,3 +394,34 @@ fn a_renamed_table_may_reorder_its_columns() {
         migration(&created)
     );
 }
+
+#[test]
+fn bindings_refuse_a_version_no_migration_leads_from() {
+    let stranded = r#"{ "format": 1,
+        "tables": { "todos": { "columns": { "title": "string", "note": "string?" } } },
+        "history": { "v1": { "tables": { "todos": { "columns": { "title": "string" } } } } } }"#;
+    let error = generate(Lang::TypeScript, stranded.as_bytes())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("history.v1: no migration leads from it"),
+        "{error}"
+    );
+    assert!(jazz_codegen::compile_app(stranded.as_bytes()).is_err());
+    // `migrations create` still runs on such a file: it's what repairs it.
+    let bindings = generate(
+        Lang::TypeScript,
+        file(r#"{ "todos": { "columns": { "title": "string" } } }"#).as_bytes(),
+    )
+    .unwrap();
+    // The bindings' version is the stranded one, so nothing new is written,
+    // but it runs.
+    let created = create(
+        Lang::TypeScript,
+        stranded.as_bytes(),
+        Some(&bindings),
+        "note",
+    )
+    .unwrap();
+    assert!(!created.changed);
+}

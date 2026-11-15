@@ -29,8 +29,12 @@ pub struct App {
     pub transforms: Vec<Transform>,
     /// The engine schema, history and lenses a runtime opens along.
     pub compiled: Compiled,
-    /// What loaded but is ignored (a .63 file's `slices`, `tsOnly`).
+    /// What loaded but is ignored (a .63 file's `slices`, `tsOnly`), and
+    /// the stranded versions.
     pub warnings: Vec<String>,
+    /// History versions no migration connects to the current one, whose
+    /// rows would need transforming: bindings refuse them.
+    pub stranded: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +207,7 @@ impl App {
                 migrations: definition.migrations().to_vec(),
             },
             warnings: definition.warnings().to_vec(),
+            stranded: definition.stranded().to_vec(),
         }
     }
 

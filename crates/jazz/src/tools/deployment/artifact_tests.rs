@@ -2014,15 +2014,17 @@ fn a_version_whose_rows_pass_unchanged_needs_no_written_migration() {
             .all(|lens| lens.operations.is_empty())
     );
     assert_eq!(load_client(file.as_bytes()).unwrap().schemas.len(), 2);
+    assert!(app.stranded().is_empty());
     // A version whose rows would need transforming still needs its migration.
     let structural = file.replace(
         r#""done": "boolean" } } } } }"#,
         r#""note": "string?" } } } } }"#,
     );
-    let error = load_app(structural.as_bytes()).unwrap_err().to_string();
+    let app = load_app(structural.as_bytes()).unwrap();
     assert!(
-        error.contains("history.a1b2c3d4e5f6: no migration leads from it"),
-        "{error}"
+        app.stranded()[0].contains("history.a1b2c3d4e5f6: no migration leads from it"),
+        "{:?}",
+        app.stranded()
     );
 }
 
@@ -2112,18 +2114,24 @@ fn the_exact_login_is_session_identity() {
 }
 
 #[test]
-fn every_history_version_must_lead_to_the_current_one() {
-    let error = edited_app(|v| {
-        v.as_object_mut().unwrap().remove("migrations");
-    });
-    assert!(
-        error.contains("history.00304e9bce65: no migration leads from it to the current `tables`"),
-        "{error}"
-    );
+fn a_version_no_migration_leads_from_loads_with_a_warning() {
+    // As `jazz-tools validate` wrote files before alpha.65 while a
+    // migration was still to be written; `generate` refuses them.
     let written = write(shared_todos()).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&written.app).unwrap();
     value.as_object_mut().unwrap().remove("migrations");
-    assert!(load_client(value.to_string().as_bytes()).is_err());
+    let app = load_app(value.to_string().as_bytes()).unwrap();
+    assert_eq!(app.stranded().len(), 1);
+    assert!(
+        app.stranded()[0]
+            .contains("history.00304e9bce65: no migration leads from it to the current `tables`"),
+        "{:?}",
+        app.stranded()
+    );
+    assert!(app.warnings().contains(&app.stranded()[0]));
+    load_client(value.to_string().as_bytes()).unwrap();
+    let loaded = load(value.to_string().as_bytes(), written.permissions.as_bytes()).unwrap();
+    assert_eq!(loaded.warnings().len(), 1);
 }
 
 /// `policy.<t>.gather(…)` policies from the TS DSL: a query inside
