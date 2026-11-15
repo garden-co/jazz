@@ -506,6 +506,77 @@ impl Core {
         })
     }
 
+    /// The server's advice on whether this user may do `op` (`read`,
+    /// `insert`, `update`, `delete`) without doing it: `Some(true)`,
+    /// `Some(false)`, or `None` when no server can say (TS's `canRead` …).
+    /// Advisory: `true` doesn't promise the write will succeed (the data or
+    /// the permissions may change before it runs). Not in a transaction.
+    /// `insert` takes `row_json`; `read` and `delete` take `id`; `update`
+    /// takes `id` and an optional `row_json` patch.
+    pub fn can(
+        &self,
+        table_name: &str,
+        op: &str,
+        id: Option<&str>,
+        row_json: Option<&str>,
+    ) -> Result<Option<bool>> {
+        use jazz_app::jazz::tools::PermissionAdviceRequest as Request;
+        let table = self.table(table_name)?;
+        let id = || -> Result<jazz_app::ObjectId> {
+            convert::parse_id(
+                id.ok_or_else(|| refused(format!("can {op} needs an \"id\"")))?,
+                "the id",
+            )
+        };
+        let cells = |what: &str| -> Result<Vec<(String, Value)>> {
+            match row_json {
+                Some(row) => {
+                    let (given, cells) = convert::cells(table, table_name, row, what)?;
+                    if given.is_some() {
+                        return Err(refused(format!(
+                            "can {op}: {what} takes no \"id\" (advice is about the row's columns)"
+                        )));
+                    }
+                    Ok(cells)
+                }
+                None => Ok(Vec::new()),
+            }
+        };
+        let table = table_name.to_owned();
+        let request = match op {
+            "read" => Request::Read { table, row: id()? },
+            "delete" => Request::Delete { table, row: id()? },
+            "insert" => {
+                if row_json.is_none() {
+                    return Err(refused("can insert needs a \"row\""));
+                }
+                Request::Insert {
+                    table,
+                    values: cells("the row")?.into_iter().collect(),
+                }
+            }
+            "update" => Request::Update {
+                table,
+                row: id()?,
+                values: cells("the patch")?,
+            },
+            other => {
+                return Err(refused(format!(
+                    "op must be \"read\", \"insert\", \"update\" or \"delete\", not {other:?}"
+                )));
+            }
+        };
+        let advice = block_on(self.open_jazz()?.with_client(move |client| async move {
+            Ok(client.permission_advice(request).await?)
+        }))?;
+        use jazz_app::jazz::protocol::PermissionAdvice as Advice;
+        Ok(match advice {
+            Advice::Allowed => Some(true),
+            Advice::Denied => Some(false),
+            Advice::Unknown => None,
+        })
+    }
+
     /// Begins a serializable transaction: its reads see a snapshot and its
     /// own writes, and its writes commit together or not at all.
     pub fn tx_begin(&self, serializable: bool) -> Result<String> {

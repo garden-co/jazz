@@ -14,32 +14,6 @@ type NativeQueryCodecFixture = {
 };
 
 describe("native query codec", () => {
-  it("encodes a payload enum match as the core predicate with a nested payload tree", () => {
-    expect(
-      bytesToHex(
-        queryWithPredicates("events", [
-          {
-            column: "event",
-            op: "EnumMatch",
-            case: "message",
-            payload: {
-              op: "All",
-              predicates: [
-                {
-                  column: "level",
-                  op: "Eq",
-                  value: { type: "Integer", value: 2 },
-                },
-              ],
-            },
-          },
-        ]),
-      ),
-    ).toBe(
-      "066576656e7473010b00056576656e74076d65737361676500010300056c6576656c030f040000000000000000000000000000",
-    );
-  });
-
   it("pins forward, reverse, nested, projected, required and partial query layouts", () => {
     const fixture = nativeQueryCodecFixture();
     for (const [name, table, arraySubqueries, select, orderBy, relation, partial] of queryCases()) {

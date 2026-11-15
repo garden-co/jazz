@@ -231,6 +231,15 @@ pub unsafe extern "C" fn jazz_call(
                 )?;
                 "null".into()
             }
+            "can" => {
+                let row = args
+                    .get("row")
+                    .filter(|r| !r.is_null())
+                    .map(Json::to_string);
+                let id = args.get("id").and_then(Json::as_str);
+                Json::from(core.can(&string("table")?, &string("op")?, id, row.as_deref())?)
+                    .to_string()
+            }
             "txBegin" => {
                 let serializable = match args.get("serializable") {
                     None | Some(Json::Null) => true,
