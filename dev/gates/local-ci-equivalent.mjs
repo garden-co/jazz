@@ -46,6 +46,7 @@ export const ciPartitionJobs = Object.freeze({
   typescript: "test-ts",
   "react-native": "test-react-native",
   "jazz-ffi-bindings": "test-jazz-ffi-bindings",
+  go: "test-go",
 });
 
 const command = (label, executable, args, options = {}) =>
@@ -308,6 +309,9 @@ export const ciPartitions = Object.freeze({
       "dev/gates/jazz-ffi-compile-bindings.sh",
     ]),
   ]),
+  // The Go bindings and the StagePlan Go example (installs Go when the
+  // image has none).
+  go: Object.freeze([command("Go bindings", "bash", ["dev/gates/go-bindings.sh"])]),
 });
 
 export const focusedCommands = Object.freeze([
