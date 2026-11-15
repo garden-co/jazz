@@ -2580,10 +2580,21 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     // Between the client and this backend only: the core never sees it.
     const renewal = parsed[SESSION_RENEWAL_PRELUDE_FIELD] === 1;
     delete parsed[SESSION_RENEWAL_PRELUDE_FIELD];
-    const auth = (parsed.auth && typeof parsed.auth === "object" ? parsed.auth : parsed) as Record<
-      string,
-      unknown
-    >;
+    // Vouch only for an `auth` that carries exactly one client credential.
+    const vouchedAuth = (base: Record<string, unknown>) => {
+      const hasToken = base.jwt_token != null;
+      const hasSession = base.backend_session != null;
+      if (hasToken === hasSession)
+        throw new Error("createJazz: a guest prelude must carry exactly one credential");
+      return { ...base, backend_secret: core.backendSecret };
+    };
+    const separateAuth =
+      parsed.auth != null && typeof parsed.auth === "object" && !Array.isArray(parsed.auth);
+    const auth = (separateAuth ? parsed.auth : parsed) as Record<string, unknown>;
+    // Credentials are read from `auth` alone; top-level copies are dropped.
+    if (separateAuth) {
+      for (const field of PRELUDE_CREDENTIAL_FIELDS) delete parsed[field];
+    }
     const client = await backendClients.resolve(request);
     if (client === "refused") return UNVERIFIED_CREDENTIAL;
     if (client?.kind === "backend") {
@@ -2609,7 +2620,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     const others = ["backend_secret", "admin_secret", "backend_session"];
     // Browser worker transports send `jwt_token: null` alongside a backend
     // session; only a real token counts as one.
-    const token = auth.jwt_token ?? parsed.jwt_token;
+    const token = auth.jwt_token;
     if (token !== undefined && token !== null) {
       const localFirst =
         typeof token === "string" && parseJwtPayload(token)?.iss === LOCAL_FIRST_JWT_ISSUER;
@@ -2628,7 +2639,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       if (audience.endpoint === undefined) {
         // Its own token decides who it is; the backend's secret only vouches
         // for the bundle this socket is pinned to (see `pinnedSocket`).
-        const pinned = { ...parsed, auth: { ...auth, backend_secret: core.backendSecret } };
+        const pinned = { ...parsed, auth: vouchedAuth(auth) };
         return {
           prelude: new TextEncoder().encode(JSON.stringify(pinned)),
           userId: undefined,
@@ -2641,7 +2652,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       const vouched = {
         ...parsed,
         local_first_audience: audience.endpoint,
-        auth: { ...auth, backend_secret: core.backendSecret },
+        auth: vouchedAuth(auth),
       };
       // The backend's word on the endpoint needs backend access; the
       // guest's own token still decides who it is.
@@ -4501,6 +4512,21 @@ function reauthenticateBatch(): Buffer {
  * verify on this backend: the client reports it as `invalid`, not `missing`.
  */
 const UNVERIFIED_CREDENTIAL = "unverified-credential";
+
+/**
+ * Prelude slots that carry a credential. When the client sends a distinct
+ * `auth` object, `admitPrelude` reads these from `auth` alone and drops any
+ * top-level copy, so a credential it checks is exactly the one forwarded to
+ * the core (`local_first_audience` is the backend's own word on a guest's
+ * endpoint, never the client's).
+ */
+const PRELUDE_CREDENTIAL_FIELDS = [
+  "jwt_token",
+  "backend_secret",
+  "admin_secret",
+  "backend_session",
+  "local_first_audience",
+] as const;
 
 /**
  * What a Jazz route answers (500) when the app's `authenticate` threw. The
