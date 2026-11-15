@@ -663,7 +663,14 @@ async fn connect(
                 let _ = commands.send(Command::Shutdown(reply));
             }
         });
-        user_session::start(client.clone(), user, credential, sync.clone(), stop)
+        user_session::start(
+            client.clone(),
+            user,
+            credential,
+            config.server_url.as_deref().unwrap_or_default(),
+            sync.clone(),
+            stop,
+        )
     });
     Ok((
         client,
