@@ -2080,8 +2080,13 @@ impl<'a> Ctx<'a> {
                 Term::NaN => "0".to_owned(),
                 term => format!("({} IS NULL)", term.sql().expect("present")),
             },
-            Predicate::EnumMatch { .. } => {
-                return Err(unsupported("enum payload predicates"));
+            Predicate::EnumMatch {
+                column,
+                case,
+                payload,
+            } => {
+                let cell = column_sql(table, alias, column)?;
+                self.enum_match(&cell, table.column_type(column), column, case, payload)?
             }
         })
     }
@@ -2109,6 +2114,164 @@ impl<'a> Ctx<'a> {
             ),
         };
         self.cmp(op, left, right)
+    }
+
+    /// Payload-enum `cell` (of type `ty`, column `column`) holds `case`
+    /// and its fields match `payload`. The cell is `[tag, {field: value}]`
+    /// JSON text (see [`crate::values`]' payload-enum cells), so the case is
+    /// its tag at `$[0]` and a field is read at `$[1]."field"`.
+    fn enum_match(
+        &mut self,
+        cell: &str,
+        ty: Option<&ValueType>,
+        column: &str,
+        case: &str,
+        payload: &Predicate,
+    ) -> Result<String, Error> {
+        let schema = match ty {
+            Some(ValueType::Enum(schema)) => schema,
+            Some(ValueType::Nullable(inner)) => match inner.as_ref() {
+                ValueType::Enum(schema) => schema,
+                _ => return Err(query_error(format!("`{column}` is not a payload enum"))),
+            },
+            _ => return Err(query_error(format!("`{column}` is not a payload enum"))),
+        };
+        let tag = schema
+            .tag(case)
+            .map_err(|_| query_error(format!("`{column}` has no enum case `{case}`")))?;
+        let enum_case = schema.case(tag).map_err(query_error)?;
+        let tag = self.bind(Sql::Integer(i64::from(tag)));
+        let payload = self.enum_payload(cell, column, enum_case, payload)?;
+        Ok(format!(
+            "(json_extract({cell}, '$[0]') = {tag} AND COALESCE({payload}, 0))"
+        ))
+    }
+
+    /// `predicate` over the fields of payload-enum case `case`: comparisons
+    /// of a field with a literal or parameter, null tests and their
+    /// combinations.
+    fn enum_payload(
+        &mut self,
+        cell: &str,
+        column: &str,
+        case: &crate::records::EnumCase,
+        predicate: &Predicate,
+    ) -> Result<String, Error> {
+        let parts = |this: &mut Self, children: &[Predicate]| {
+            children
+                .iter()
+                .map(|child| this.enum_payload(cell, column, case, child))
+                .collect::<Result<Vec<_>, _>>()
+        };
+        let (op, left, right) = match predicate {
+            Predicate::All(children) => return Ok(and(&parts(self, children)?)),
+            Predicate::Any(children) => return Ok(or(&parts(self, children)?)),
+            Predicate::Not(child) => {
+                return Ok(format!(
+                    "(NOT COALESCE({}, 0))",
+                    self.enum_payload(cell, column, case, child)?
+                ));
+            }
+            Predicate::IsNull(operand) => {
+                let field = self.enum_field(cell, column, case, operand)?;
+                return Ok(format!("({field} IS NULL)"));
+            }
+            Predicate::In(left, options) => {
+                let field = self.enum_field(cell, column, case, left)?;
+                let options = options
+                    .iter()
+                    .map(|option| self.enum_field_value(option))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let options: Vec<_> = options.into_iter().flatten().collect();
+                if options.is_empty() {
+                    return Ok("0".to_owned());
+                }
+                return Ok(format!("({field} IN ({}))", options.join(", ")));
+            }
+            Predicate::Eq(l, r) => ("=", l, r),
+            Predicate::Ne(l, r) => ("<>", l, r),
+            Predicate::Lt(l, r) => ("<", l, r),
+            Predicate::Lte(l, r) => ("<=", l, r),
+            Predicate::Gt(l, r) => (">", l, r),
+            Predicate::Gte(l, r) => (">=", l, r),
+            other => {
+                return Err(unsupported(format!(
+                    "{other:?} on the payload of enum column `{column}`"
+                )));
+            }
+        };
+        let field = self.enum_field(cell, column, case, left)?;
+        match (self.enum_field_value(right)?, op) {
+            (Some(value), op) => Ok(format!("({field} {op} {value})")),
+            (None, "=") => Ok(format!("({field} IS NULL)")),
+            (None, "<>") => Ok(format!("({field} IS NOT NULL)")),
+            (None, _) => Err(unsupported(
+                "ordering comparisons against null in an enum payload",
+            )),
+        }
+    }
+
+    /// The SQL reading payload field `operand` of `case` out of `cell`.
+    fn enum_field(
+        &mut self,
+        cell: &str,
+        column: &str,
+        case: &crate::records::EnumCase,
+        operand: &Operand,
+    ) -> Result<String, Error> {
+        let Operand::Column(field) = operand else {
+            return Err(unsupported(format!(
+                "an enum payload test on `{column}` must name a field first"
+            )));
+        };
+        if !case
+            .payload
+            .fields()
+            .iter()
+            .any(|candidate| candidate.name.as_deref() == Some(field.as_str()))
+        {
+            return Err(query_error(format!(
+                "enum case `{}` of `{column}` has no field `{field}`",
+                case.name
+            )));
+        }
+        let path = format!("$[1].\"{}\"", field.replace('"', "\\\""));
+        let path = self.bind(Sql::Text(path.into_bytes()));
+        Ok(format!("json_extract({cell}, {path})"))
+    }
+
+    /// A literal or parameter compared with a payload field, bound as what
+    /// `json_extract` reads that field as; `None` for null.
+    fn enum_field_value(&mut self, operand: &Operand) -> Result<Option<String>, Error> {
+        let value = match operand {
+            Operand::Literal(value) => value.clone(),
+            Operand::Param(name) => self
+                .binding
+                .get(name)
+                .ok_or_else(|| query_error(format!("parameter `{name}` is not bound")))?
+                .clone(),
+            other => {
+                return Err(unsupported(format!(
+                    "comparing an enum payload field with {other:?}"
+                )));
+            }
+        };
+        let sql = match crate::values::payload_field_json(&value)? {
+            serde_json::Value::Null => return Ok(None),
+            serde_json::Value::Bool(value) => Sql::Integer(i64::from(value)),
+            serde_json::Value::Number(number) => match (number.as_i64(), number.as_f64()) {
+                (Some(int), _) => Sql::Integer(int),
+                (None, Some(real)) => Sql::Real(real),
+                (None, None) => return Err(unsupported("an enum payload number above i64")),
+            },
+            serde_json::Value::String(text) => Sql::Text(text.into_bytes()),
+            other => {
+                return Err(unsupported(format!(
+                    "comparing an enum payload field with {other}"
+                )));
+            }
+        };
+        Ok(Some(self.bind(sql)))
     }
 
     /// [`Self::operand`] compared with a column of type `ty`: a provider
@@ -2940,8 +3103,15 @@ impl<'a> Ctx<'a> {
                 let right = self.rel_value_as(right, ty.as_ref(), rel, scope)?;
                 self.contains(left, right)
             }
-            RelationPredicate::EnumMatch { .. } => {
-                return Err(unsupported("enum payload relation predicates"));
+            RelationPredicate::EnumMatch {
+                column,
+                case,
+                payload,
+            } => {
+                let ty = self.rel_column_type(rel, column);
+                let cell = self.resolve(rel, column)?;
+                let payload = enum_payload_predicate(payload)?;
+                self.enum_match(&cell, ty.as_ref(), &column.column, case, &payload)?
             }
         })
     }
@@ -4137,6 +4307,56 @@ fn whole_key(table: &Table, alias: &str, sql: String) -> String {
     } else {
         sql
     }
+}
+
+/// A relation enum-match's payload predicate as the flat predicate
+/// [`Ctx::enum_match`] compiles: its column refs name the case's fields.
+fn enum_payload_predicate(predicate: &RelationPredicate) -> Result<Predicate, Error> {
+    let value = |value: &RelationValueRef| match value {
+        RelationValueRef::Literal(json) => Ok(Operand::Literal(json_value(json)?)),
+        RelationValueRef::Param(name) => Ok(Operand::Param(name.clone())),
+        other => Err(unsupported(format!(
+            "comparing an enum payload field with {other:?}"
+        ))),
+    };
+    let field = |column: &RelationColumnRef| Operand::Column(column.column.clone());
+    let children = |parts: &[RelationPredicate]| {
+        parts
+            .iter()
+            .map(enum_payload_predicate)
+            .collect::<Result<Vec<_>, _>>()
+    };
+    Ok(match predicate {
+        RelationPredicate::True => Predicate::All(Vec::new()),
+        RelationPredicate::False => Predicate::Any(Vec::new()),
+        RelationPredicate::And(parts) => Predicate::All(children(parts)?),
+        RelationPredicate::Or(parts) => Predicate::Any(children(parts)?),
+        RelationPredicate::Not(part) => Predicate::Not(Box::new(enum_payload_predicate(part)?)),
+        RelationPredicate::IsNull { column } => Predicate::IsNull(field(column)),
+        RelationPredicate::IsNotNull { column } => {
+            Predicate::Not(Box::new(Predicate::IsNull(field(column))))
+        }
+        RelationPredicate::In { left, values } => Predicate::In(
+            field(left),
+            values.iter().map(value).collect::<Result<Vec<_>, _>>()?,
+        ),
+        RelationPredicate::Cmp { left, op, right } => {
+            let (left, right) = (field(left), value(right)?);
+            match op {
+                RelationCmpOp::Eq => Predicate::Eq(left, right),
+                RelationCmpOp::Ne => Predicate::Ne(left, right),
+                RelationCmpOp::Lt => Predicate::Lt(left, right),
+                RelationCmpOp::Le => Predicate::Lte(left, right),
+                RelationCmpOp::Gt => Predicate::Gt(left, right),
+                RelationCmpOp::Ge => Predicate::Gte(left, right),
+            }
+        }
+        other => {
+            return Err(unsupported(format!(
+                "{other:?} in an enum payload predicate"
+            )));
+        }
+    })
 }
 
 /// A public schema value (policy literals, defaults) as a storage value.

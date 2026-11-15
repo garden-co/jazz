@@ -16,8 +16,8 @@ use jazz_types::records::{
 
 use crate::model::public_api::policy::{CmpOp, PolicyValue};
 use crate::model::public_schema::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, HistoryRetention, Operation, PolicyExpr,
-    Schema, TableName, TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, EnumCaseDescriptor, HistoryRetention,
+    Operation, PolicyExpr, Schema, TableName, TableSchema, Value,
 };
 use crate::query::{
     RecursionBound, RelationColumnRef, RelationExpr, RelationJoinKind, RelationPredicate,
@@ -918,63 +918,7 @@ fn convert_default_for_column_type(
         (
             ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. },
             Value::Enum { case, values },
-        ) => {
-            let (case_index, entry) = cases
-                .iter()
-                .enumerate()
-                .find(|(_, entry)| entry.name == *case)
-                .ok_or_else(|| {
-                    column_err(
-                        table,
-                        column,
-                        format!("payload enum default case {case:?} is not declared"),
-                    )
-                })?;
-            if entry.fields.len() != values.len() {
-                return Err(column_err(
-                    table,
-                    column,
-                    "payload enum default field count does not match its case",
-                ));
-            }
-            let mut fields = Vec::with_capacity(entry.fields.len());
-            let mut converted = Vec::with_capacity(values.len());
-            for (field, value) in entry.fields.iter().zip(values) {
-                let mut value_type =
-                    convert_column_type(table, field.name.as_str(), &field.column_type)?;
-                if field.nullable {
-                    value_type = value_type.nullable();
-                }
-                let value = if matches!(value, Value::Null) {
-                    if !field.nullable {
-                        return Err(err(
-                            format!("$.{}.{}.{}", table.as_str(), column, field.name.as_str()),
-                            "payload enum default cannot use null for a required field",
-                        ));
-                    }
-                    RecordValue::Nullable(None)
-                } else {
-                    let inner = convert_default_for_column_type(
-                        table,
-                        field.name.as_str(),
-                        &field.column_type,
-                        value,
-                    )?;
-                    if field.nullable {
-                        RecordValue::Nullable(Some(Box::new(inner)))
-                    } else {
-                        inner
-                    }
-                };
-                fields.push((field.name.as_str().to_owned(), value_type));
-                converted.push(value);
-            }
-            let case_tag = u32::try_from(case_index)
-                .map_err(|_| column_err(table, column, "payload enum case index exceeds u32"))?;
-            EnumValue::create(case_tag, RecordDescriptor::new(fields), &converted)
-                .map(RecordValue::Enum)
-                .map_err(|error| column_err(table, column, error.to_string()))
-        }
+        ) => payload_enum_record_value(table, column, cases, case, values, "default"),
         (ColumnType::Timestamp, Value::Timestamp(value)) => Ok(RecordValue::U64(*value)),
         (ColumnType::Double, Value::Double(value)) => Ok(RecordValue::F64(*value)),
         (ColumnType::Uuid, Value::Uuid(value)) => Ok(RecordValue::Uuid(*value.uuid())),
@@ -1000,6 +944,94 @@ fn convert_default_for_column_type(
             table,
             column,
             format!("default {value:?} does not match column type {column_type:?}"),
+        )),
+    }
+}
+
+/// A payload-enum value as the record value stored for it: the case's tag
+/// (its declaration index) with the case's fields, positional as declared.
+/// `what` names the value in errors ("default", "value").
+fn payload_enum_record_value(
+    table: &TableName,
+    column: &str,
+    cases: &[EnumCaseDescriptor],
+    case: &str,
+    values: &[Value],
+    what: &str,
+) -> Result<RecordValue, SchemaConversionError> {
+    let (case_index, entry) = cases
+        .iter()
+        .enumerate()
+        .find(|(_, entry)| entry.name == *case)
+        .ok_or_else(|| {
+            column_err(
+                table,
+                column,
+                format!("payload enum {what} case {case:?} is not declared"),
+            )
+        })?;
+    if entry.fields.len() != values.len() {
+        return Err(column_err(
+            table,
+            column,
+            format!("payload enum {what} field count does not match its case"),
+        ));
+    }
+    let mut fields = Vec::with_capacity(entry.fields.len());
+    let mut converted = Vec::with_capacity(values.len());
+    for (field, value) in entry.fields.iter().zip(values) {
+        let mut value_type = convert_column_type(table, field.name.as_str(), &field.column_type)?;
+        if field.nullable {
+            value_type = value_type.nullable();
+        }
+        let value = if matches!(value, Value::Null) {
+            if !field.nullable {
+                return Err(err(
+                    format!("$.{}.{}.{}", table.as_str(), column, field.name.as_str()),
+                    format!("payload enum {what} cannot use null for a required field"),
+                ));
+            }
+            RecordValue::Nullable(None)
+        } else {
+            let inner = convert_default_for_column_type(
+                table,
+                field.name.as_str(),
+                &field.column_type,
+                value,
+            )?;
+            if field.nullable {
+                RecordValue::Nullable(Some(Box::new(inner)))
+            } else {
+                inner
+            }
+        };
+        fields.push((field.name.as_str().to_owned(), value_type));
+        converted.push(value);
+    }
+    let case_tag = u32::try_from(case_index)
+        .map_err(|_| column_err(table, column, "payload enum case index exceeds u32"))?;
+    EnumValue::create(case_tag, RecordDescriptor::new(fields), &converted)
+        .map(RecordValue::Enum)
+        .map_err(|error| column_err(table, column, error.to_string()))
+}
+
+/// The record value a public value of a payload-enum column is stored and
+/// compared as. Writes and filter literals go through here, as column
+/// defaults do, so all three encode a case the same way.
+pub fn payload_enum_value_to_record(
+    column: &str,
+    column_type: &ColumnType,
+    value: &Value,
+) -> Result<RecordValue, SchemaConversionError> {
+    let table = TableName::new("");
+    match (column_type, value) {
+        (
+            ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. },
+            Value::Enum { case, values },
+        ) => payload_enum_record_value(&table, column, cases, case, values, "value"),
+        _ => Err(err(
+            column,
+            format!("{value:?} is not a value of payload enum column type {column_type:?}"),
         )),
     }
 }

@@ -293,6 +293,7 @@ pub(crate) fn to_sql(value: &Value) -> Result<Option<Sql>, Error> {
         Value::Uuid(v) => Sql::Blob(v.as_bytes().to_vec()),
         Value::EnumTag(v) => Sql::Integer(*v as i64),
         Value::Array(items) => Sql::Text(array_json(items)?.to_string().into_bytes()),
+        Value::Enum(value) => Sql::Text(payload_enum_json(value)?.to_string().into_bytes()),
         other => return Err(unsupported(format!("storing {other:?} in SQLite"))),
     }))
 }
@@ -332,6 +333,102 @@ fn element_json(item: &Value) -> Result<serde_json::Value, Error> {
             )));
         }
     })
+}
+
+/// A payload-enum cell as JSON text: `[tag, {field: value, ...}]`, the case's
+/// tag (its declaration index, which a schema never reorders) and its
+/// fields by name, as JSON scalars the way array elements are (bytes as
+/// hex). SQL reads a case and its fields with `json_extract` (see
+/// `compile`'s enum matches); [`payload_enum_value`] reads it back.
+fn payload_enum_json(value: &crate::records::EnumValue) -> Result<serde_json::Value, Error> {
+    let record = value.record();
+    let values = record
+        .to_values()
+        .map_err(|e| Error::new(ErrorCode::Storage, format!("enum payload: {e}")))?;
+    let mut fields = serde_json::Map::new();
+    for (field, value) in record.descriptor().fields().iter().zip(&values) {
+        let name = field
+            .name
+            .clone()
+            .ok_or_else(|| unsupported("storing an enum payload with an unnamed field"))?;
+        fields.insert(name, payload_field_json(value)?);
+    }
+    Ok(serde_json::json!([value.tag(), fields]))
+}
+
+/// One payload field as JSON: what [`element_json`] makes of it, bytes as
+/// lowercase hex (arrays hold no bytes).
+pub(crate) fn payload_field_json(value: &Value) -> Result<serde_json::Value, Error> {
+    match value {
+        Value::Nullable(Some(inner)) => payload_field_json(inner),
+        Value::Bytes(bytes) => Ok(hex(bytes).into()),
+        other => element_json(other),
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn unhex(text: &str) -> Option<Vec<u8>> {
+    if text.len() % 2 != 0 {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok())
+        .collect()
+}
+
+/// A payload-enum cell (see [`payload_enum_json`]) back as its value.
+fn payload_enum_value(
+    schema: &crate::records::EnumSchema,
+    cell: &[u8],
+) -> Result<Option<Value>, Error> {
+    use serde_json::Value as Json;
+    let malformed = |why: &str| Error::new(ErrorCode::Storage, format!("enum cell: {why}"));
+    let json: Json = serde_json::from_slice(cell).map_err(|e| malformed(&e.to_string()))?;
+    let Json::Array(parts) = json else {
+        return Err(malformed("not an array"));
+    };
+    let (Some(tag), Some(Json::Object(fields))) =
+        (parts.first().and_then(Json::as_u64), parts.get(1))
+    else {
+        return Err(malformed("not a tag and its fields"));
+    };
+    let tag = u32::try_from(tag).map_err(|_| malformed("tag out of range"))?;
+    let case = schema
+        .case(tag)
+        .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
+    fn field(ty: &ValueType, json: &Json) -> Option<Value> {
+        match (ty, json) {
+            (ValueType::Nullable(_), Json::Null) => Some(Value::Nullable(None)),
+            (ValueType::Nullable(inner), json) => {
+                Some(Value::Nullable(Some(Box::new(field(inner, json)?))))
+            }
+            (ValueType::Bytes, Json::String(text)) => unhex(text).map(Value::Bytes),
+            (ty, json) => json_element(ty, json),
+        }
+    }
+    let values = case
+        .payload
+        .fields()
+        .iter()
+        .map(|descriptor| {
+            let json = descriptor
+                .name
+                .as_deref()
+                .and_then(|name| fields.get(name))
+                .unwrap_or(&Json::Null);
+            field(&descriptor.value_type, json)
+        })
+        .collect::<Option<Vec<_>>>();
+    let Some(values) = values else {
+        return Ok(None);
+    };
+    crate::records::EnumValue::create(tag, case.payload, &values)
+        .map(|value| Some(Value::Enum(value)))
+        .map_err(|e| Error::new(ErrorCode::Storage, format!("enum cell: {e}")))
 }
 
 /// A JSON array element back as a value of its declared type.
@@ -433,6 +530,9 @@ pub(crate) fn from_sql(
             let json = serde_json::from_slice(cell)
                 .map_err(|e| Error::new(ErrorCode::Storage, format!("array cell: {e}")))?;
             return Ok(json_element(ty, &json));
+        }
+        (ValueType::Enum(schema), ValueRef::Text(cell)) => {
+            return payload_enum_value(schema, cell);
         }
         _ => {}
     }

@@ -45,6 +45,7 @@ use crate::model::public_schema::{
     ColumnDescriptor, ColumnType, OrderedRowDelta, QueryResult, Row, Schema, Session, TableName,
     TableSchema, Value, WriteContext, validate_json_value,
 };
+use crate::model::public_schema_convert::payload_enum_value_to_record;
 use crate::model::transaction::{OpenTransactionId, TransactionId};
 use crate::object::{ObjectId, OutputOccurrenceId, ResultKey};
 use crate::query::Query;
@@ -2141,6 +2142,11 @@ fn public_to_core_value_for_column_type(
             .map(|value| public_to_core_value_for_column_type(value, element))
             .collect::<Result<Vec<_>>>()
             .map(CoreValue::Array),
+        (
+            value @ Value::Enum { .. },
+            ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. },
+        ) => payload_enum_value_to_record("", column_type, &value)
+            .map_err(|error| JazzError::Write(error.to_string())),
         (value, _) => public_to_core_value(value),
     }
 }
@@ -2230,8 +2236,47 @@ fn core_to_public_value_for_column_type(
             .map(|value| core_to_public_value_for_column_type(value, element))
             .collect::<Result<Vec<_>>>()
             .map(Value::Array),
+        (
+            CoreValue::Enum(value),
+            ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. },
+        ) => payload_enum_public_value(value, cases),
         (value, _) => core_to_public_value(value),
     }
+}
+
+/// A stored payload-enum value as its public `Value::Enum`: the case named by
+/// its tag (the case's declaration index), with the case's fields in
+/// declaration order.
+fn payload_enum_public_value(
+    value: crate::records::EnumValue,
+    cases: &[crate::model::public_schema::EnumCaseDescriptor],
+) -> Result<Value> {
+    let tag = value.tag();
+    let case = usize::try_from(tag)
+        .ok()
+        .and_then(|index| cases.get(index))
+        .ok_or_else(|| JazzError::Query(format!("payload enum tag {tag} names no case")))?;
+    let fields = value
+        .record()
+        .to_values()
+        .map_err(|error| JazzError::Query(error.to_string()))?;
+    if fields.len() != case.fields.len() {
+        return Err(JazzError::Query(format!(
+            "payload enum case {} holds {} fields, not the {} it declares",
+            case.name,
+            fields.len(),
+            case.fields.len()
+        )));
+    }
+    let values = fields
+        .into_iter()
+        .zip(&case.fields)
+        .map(|(value, field)| core_to_public_value_for_column_type(value, &field.column_type))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Value::Enum {
+        case: case.name.clone(),
+        values,
+    })
 }
 
 // ---- results ----------------------------------------------------------------
@@ -2597,6 +2642,146 @@ mod tests {
                     .expect("the stale failure is not this call's");
                 assert!(attached);
                 assert!(started.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+            })
+            .await;
+    }
+    fn status_type() -> ColumnType {
+        use crate::model::public_schema::EnumCaseDescriptor;
+        ColumnType::EnumPayload {
+            cases: vec![
+                EnumCaseDescriptor {
+                    name: "open".into(),
+                    fields: vec![],
+                },
+                EnumCaseDescriptor {
+                    name: "done".into(),
+                    fields: vec![ColumnDescriptor::new("at", ColumnType::Timestamp)],
+                },
+            ],
+        }
+    }
+
+    /// A payload-enum column writes `Value::Enum`, reads it back, and
+    /// filters on its case and fields with an enum match.
+    #[tokio::test]
+    async fn payload_enums_write_read_and_match() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let schema = SchemaBuilder::new()
+                    .table(
+                        TableSchema::builder("todos")
+                            .column("title", ColumnType::Text)
+                            .column("status", status_type())
+                            .nullable_column("previous", status_type()),
+                    )
+                    .build();
+                let client = JazzClient::test_client(schema).await;
+                let done = |at| Value::Enum {
+                    case: "done".into(),
+                    values: vec![Value::Timestamp(at)],
+                };
+                let open = Value::Enum {
+                    case: "open".into(),
+                    values: vec![],
+                };
+                let row = |title: &str, status: Value| {
+                    HashMap::from([
+                        ("title".to_owned(), Value::Text(title.into())),
+                        ("status".to_owned(), status),
+                    ])
+                };
+                let (a, values, _) = client.insert("todos", row("a", done(7))).unwrap();
+                assert_eq!(values, vec![Value::Text("a".into()), done(7), Value::Null]);
+                client.insert("todos", row("b", open.clone())).unwrap();
+                client
+                    .update("todos", a, vec![("previous".to_owned(), open.clone())])
+                    .unwrap();
+
+                let titles = |query: Query| {
+                    let client = client.clone();
+                    async move {
+                        let mut titles: Vec<_> = client
+                            .query(query, ReadTier::LocalFirst)
+                            .await
+                            .unwrap()
+                            .into_iter()
+                            .map(|row| row.fields[0].value.clone())
+                            .collect();
+                        titles.sort_by_key(|value| format!("{value:?}"));
+                        titles
+                    }
+                };
+                let rows = client
+                    .query(Query::from("todos"), ReadTier::LocalFirst)
+                    .await
+                    .unwrap();
+                let read: Vec<_> = rows
+                    .iter()
+                    .map(|row| {
+                        row.fields
+                            .iter()
+                            .map(|f| f.value.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+                assert!(read.contains(&vec![Value::Text("a".into()), done(7), open.clone()]));
+                assert!(read.contains(&vec![Value::Text("b".into()), open.clone(), Value::Null]));
+
+                let matching = |case: &str, payload: crate::query::Predicate| {
+                    let mut query = Query::from("todos");
+                    query.filters.push(crate::query::Predicate::EnumMatch {
+                        column: "status".into(),
+                        case: case.into(),
+                        payload: Box::new(payload),
+                    });
+                    query
+                };
+                let at = |op: fn(
+                    crate::query::Operand,
+                    crate::query::Operand,
+                ) -> crate::query::Predicate,
+                          at: u64| {
+                    op(
+                        crate::query::col("at"),
+                        crate::query::lit(CoreValue::U64(at)),
+                    )
+                };
+                let any = crate::query::all_of([]);
+                assert_eq!(
+                    titles(matching("done", any.clone())).await,
+                    vec![Value::Text("a".into())]
+                );
+                assert_eq!(
+                    titles(matching("open", any)).await,
+                    vec![Value::Text("b".into())]
+                );
+                assert_eq!(
+                    titles(matching("done", at(crate::query::eq, 7))).await,
+                    vec![Value::Text("a".into())]
+                );
+                assert!(
+                    titles(matching("done", at(crate::query::gt, 7)))
+                        .await
+                        .is_empty()
+                );
+                let error = client
+                    .query(
+                        matching("open", at(crate::query::eq, 7)),
+                        ReadTier::LocalFirst,
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("has no field `at`"), "{error}");
+
+                let wrong = Value::Enum {
+                    case: "closed".into(),
+                    values: vec![],
+                };
+                let error = client.insert("todos", row("c", wrong)).unwrap_err();
+                assert!(
+                    error.to_string().contains("\"closed\" is not declared"),
+                    "{error}"
+                );
             })
             .await;
     }
