@@ -41,7 +41,7 @@ pub fn create(
         changed: false,
         todos: Vec::new(),
     };
-    let app = App::load(app_json).map_err(|error| CodegenError::from_artifact(error))?;
+    let app = App::load(app_json).map_err(CodegenError::from_artifact)?;
     let Some(bindings) = bindings else {
         // No bindings: the app has no earlier version yet.
         return Ok(unchanged());

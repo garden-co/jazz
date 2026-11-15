@@ -76,6 +76,24 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Check jazz.app.json (and jazz.permissions.json) and regenerate the
+    /// committed bindings; with --check, fail when they are stale instead.
+    Validate {
+        /// The directory holding jazz.app.json.
+        #[arg(long, default_value = ".")]
+        dir: std::path::PathBuf,
+        /// The bindings' language.
+        #[arg(long, default_value = "ts")]
+        lang: String,
+        /// Fail when the bindings are stale instead of rewriting them.
+        #[arg(long)]
+        check: bool,
+    },
+    /// Manage the migrations in jazz.app.json.
+    Migrations {
+        #[command(subcommand)]
+        action: MigrationsAction,
+    },
     /// Create a new resource
     Create {
         #[command(subcommand)]
@@ -272,6 +290,47 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
+enum MigrationsAction {
+    /// Write the migration from the version the committed bindings were
+    /// generated from to the edited `tables`, leaving TODOs to resolve.
+    Create {
+        /// The migration's name.
+        #[arg(long)]
+        name: String,
+        /// The directory holding jazz.app.json.
+        #[arg(long, default_value = ".")]
+        dir: std::path::PathBuf,
+        /// The bindings' language.
+        #[arg(long, default_value = "ts")]
+        lang: String,
+    },
+}
+
+/// Print a command's outcome and exit 0, or its refusal and exit 1.
+fn finish_app_files(result: Result<jazz_cli::app_files::Outcome, String>) -> ! {
+    let code = match result {
+        Ok(outcome) => {
+            for warning in outcome.warnings {
+                eprintln!("warning: {warning}");
+            }
+            for note in outcome.notes {
+                println!("{note}");
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            1
+        }
+    };
+    std::process::exit(code)
+}
+
+fn lang(name: &str) -> Result<jazz_codegen::Lang, String> {
+    jazz_codegen::Lang::parse(name).map_err(|error| error.to_string())
+}
+
+#[derive(Subcommand)]
 enum CreateResource {
     /// Create a new application
     App {
@@ -310,6 +369,24 @@ async fn run() {
             shutdown_tracing();
             std::process::exit(code);
         }
+        Commands::Validate {
+            dir,
+            lang: name,
+            check,
+        } => finish_app_files(
+            lang(&name).and_then(|lang| jazz_cli::app_files::validate(&dir, lang, check)),
+        ),
+        Commands::Migrations {
+            action:
+                MigrationsAction::Create {
+                    name,
+                    dir,
+                    lang: language,
+                },
+        } => finish_app_files(
+            lang(&language)
+                .and_then(|lang| jazz_cli::app_files::migrations_create(&dir, lang, &name)),
+        ),
         Commands::Create { resource } => match resource {
             CreateResource::App { name } => {
                 let app_id = name.map_or_else(AppId::random, |name| AppId::from_name(&name));
