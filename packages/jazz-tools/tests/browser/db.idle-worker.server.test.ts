@@ -1,8 +1,9 @@
 import { afterEach, expect, it } from "vitest";
-import { generateAuthSecret, schema } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { generateAuthSecret } from "../../src/index.js";
+import { app } from "./apps/local-first-server-wait/jazz.generated.js";
+import permissions from "./apps/local-first-server-wait/jazz.permissions.json";
 import { TestCleanup, createBrowserTestDb, uniqueDbName, waitForCondition } from "./support.js";
-import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
+import { deploy, getJazzServerInfo, startJazzApp } from "./testing-server.js";
 import { sharedWorkerTimerBrowserCommands } from "./browser-commands.js";
 
 // A tab connected through its shared worker to a server, with nothing to
@@ -10,14 +11,7 @@ import { sharedWorkerTimerBrowserCommands } from "./browser-commands.js";
 // transport pump used to re-arm each other after every core tick, so an idle
 // worker armed the 16ms server-pump timer ~60 times a second forever.
 
-const app = schema.defineApp(
-  { entries: schema.table({ title: schema.string() }, {}) },
-  { migrations: "none" },
-);
-const permissions = schema.definePermissions(app, ({ policy }) => [
-  policy.entries.allowRead.always(),
-  policy.entries.allowInsert.always(),
-]);
+// The app (apps/local-first-server-wait): entries every user may read and insert.
 
 const ctx = new TestCleanup();
 afterEach(async () => {
@@ -32,10 +26,10 @@ it("lets the shared worker go idle once a connected tab has nothing to sync", as
     serverUrl: coreUrl,
     adminSecret,
   } = await getJazzServerInfo(uniqueDbName("idle-worker"));
-  await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
+  await deploy({ appId, serverUrl: coreUrl, adminSecret, app, permissions });
   const { serverUrl } = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
-    { schema: app.wasmSchema, permissions },
+    { schema: app, permissions },
   );
   const dbName = uniqueDbName("idle-worker-db");
   const db = ctx.track(
