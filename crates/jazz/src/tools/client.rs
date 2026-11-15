@@ -132,6 +132,8 @@ struct State {
     upstream: Option<Upstream>,
     /// Open transactions and whether they staged a write.
     transactions: HashMap<OpenTransactionId, bool>,
+    /// Open transactions begun mergeable; the others are serializable.
+    mergeable_transactions: std::collections::HashSet<OpenTransactionId>,
     closed_transactions: HashMap<OpenTransactionId, ClosedTransaction>,
     /// Engine seqs of this client's commits, by public transaction id.
     writes: HashMap<TransactionId, u64>,
@@ -1711,6 +1713,17 @@ impl JazzClient {
     /// if every read and written row is unchanged since then. Staged writes
     /// are not visible to ordinary reads until the transaction commits.
     pub fn begin_transaction(&self) -> Result<JazzTransaction> {
+        self.begin(false)
+    }
+
+    /// Begin a mergeable transaction: its writes commit together, each
+    /// merging with concurrent ones as a plain write does (TS's default
+    /// `transaction`). Its reads see local data with its own staged writes.
+    pub fn begin_mergeable_transaction(&self) -> Result<JazzTransaction> {
+        self.begin(true)
+    }
+
+    fn begin(&self, mergeable: bool) -> Result<JazzTransaction> {
         // Each staged write carries this handle's identity (checked when
         // staged, and named on the commit for the authority).
         self.write_identity()?;
@@ -1724,11 +1737,18 @@ impl JazzClient {
                 transaction_id = OpenTransactionId::new();
             }
         }
-        crate::db::block_on(db.begin_serializable(transaction_id)).map_err(write_error)?;
-        self.shared
-            .state()
-            .transactions
-            .insert(transaction_id, false);
+        if mergeable {
+            crate::db::block_on(db.begin_mergeable(transaction_id)).map_err(write_error)?;
+        } else {
+            crate::db::block_on(db.begin_serializable(transaction_id)).map_err(write_error)?;
+        }
+        {
+            let mut state = self.shared.state();
+            state.transactions.insert(transaction_id, false);
+            if mergeable {
+                state.mergeable_transactions.insert(transaction_id);
+            }
+        }
         let write_context = self
             .write_context
             .clone()
@@ -1748,10 +1768,22 @@ impl JazzClient {
                 "transaction cannot commit without writes".to_string(),
             ));
         }
-        let receipt = crate::db::block_on(self.db()?.commit_serializable_handle(transaction_id));
+        let mergeable = self
+            .shared
+            .state
+            .borrow()
+            .mergeable_transactions
+            .contains(&transaction_id);
+        let db = self.db()?;
+        let receipt = if mergeable {
+            crate::db::block_on(db.commit_mergeable_handle(transaction_id))
+        } else {
+            crate::db::block_on(db.commit_serializable_handle(transaction_id))
+        };
         {
             let mut state = self.shared.state();
             state.transactions.remove(&transaction_id);
+            state.mergeable_transactions.remove(&transaction_id);
             state
                 .closed_transactions
                 .insert(transaction_id, ClosedTransaction::Committed);
@@ -1769,6 +1801,7 @@ impl JazzClient {
             .map_err(write_error)?;
         let mut state = self.shared.state();
         state.transactions.remove(&transaction_id);
+        state.mergeable_transactions.remove(&transaction_id);
         state
             .closed_transactions
             .insert(transaction_id, ClosedTransaction::RolledBack);
