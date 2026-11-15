@@ -178,6 +178,18 @@ struct Member {
     /// settles it globally.
     settled: sync::SettledBy,
     told: std::cell::Cell<Option<DurabilityTier>>,
+    joined: std::cell::Cell<Joined>,
+}
+
+/// Where a member stands with its group's result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Joined {
+    /// Told nothing yet: it waits for an opening of a current result. A
+    /// group that awaits chunks holds rows that may be stale, so a member
+    /// that joins it then waits with it instead of opening on them.
+    AwaitingOpening,
+    /// Opened: follows the group's deltas.
+    Open,
 }
 
 /// One shared live result.
@@ -455,7 +467,8 @@ impl Fanout {
             }
             for member in &group.members {
                 let now = member.settled.tier();
-                if member.settled.get()
+                if member.joined.get() == Joined::Open
+                    && member.settled.get()
                     && member.told.get().is_none_or(|told| told < now)
                     && let Some(queue) = member.queue.upgrade()
                 {
@@ -501,12 +514,18 @@ impl Inner {
             position: format!("{:?}", read.position),
         };
         let now = settled.get();
-        let member = |queue: &Queue| Member {
+        // `opened`: the member's queue starts with an opening.
+        let member = |queue: &Queue, opened: bool| Member {
             queue: Rc::downgrade(queue),
             shape: prepared.shape,
             bound: !prepared.binding.is_empty(),
             settled: settled.clone(),
-            told: std::cell::Cell::new(now.then(|| settled.tier())),
+            told: std::cell::Cell::new((opened && now).then(|| settled.tier())),
+            joined: std::cell::Cell::new(if opened {
+                Joined::Open
+            } else {
+                Joined::AwaitingOpening
+            }),
         };
         let tier = settled.tier();
         let open = |rows: &[CurrentRow]| {
@@ -528,12 +547,15 @@ impl Inner {
             .cloned()
         {
             let mut group = handle.borrow_mut();
-            let queue: Queue = Rc::new(RefCell::new(if group.opened {
+            // While the group awaits chunks its rows may be stale: the
+            // joiner opens with the group's next successful run instead.
+            let opened = group.opened && !group.awaiting;
+            let queue: Queue = Rc::new(RefCell::new(if opened {
                 VecDeque::from([open(&group.rows)])
             } else {
                 VecDeque::new()
             }));
-            group.members.push(member(&queue));
+            group.members.push(member(&queue, opened));
             self.fan.stats.shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
         }
@@ -594,7 +616,7 @@ impl Inner {
             identity,
             read,
             rows,
-            members: vec![member(&queue)],
+            members: vec![member(&queue, !awaiting)],
             watches,
             evidence,
             recheck,
@@ -2015,6 +2037,9 @@ impl Inner {
             // Settlement withheld while waiting is published now.
             group.push(delta(false, Vec::new(), Vec::new(), Vec::new()));
         }
+        // Members that joined while the group waited saw no rows: they
+        // open on the current ones (the deltas above went to the others).
+        group.open_waiting(&rows);
         // Order keys that are not shown may have moved even when no row
         // did: read them again with the rows.
         group.rows = rows;
@@ -2068,37 +2093,66 @@ fn refresh_includes(group: &mut Group, changed: &BTreeSet<(String, RowUuid)>) {
 }
 
 impl Group {
+    /// Publish `event` to every member. A delta reaches only opened
+    /// members; an opening opens the others too.
     fn push(&mut self, event: SubscriptionEvent) {
         self.members.retain(|m| m.queue.strong_count() > 0);
         for member in &self.members {
-            if let Some(queue) = member.queue.upgrade() {
-                let mut event = event.clone();
-                if let SubscriptionEvent::Delta {
-                    reset,
-                    added,
-                    settled,
-                    tier,
-                    ..
-                } = &mut event
-                {
-                    *settled = member.settled.get();
-                    *tier = member.settled.tier();
-                    let told = settled.then_some(*tier);
-                    if *reset || told != member.told.get() {
-                        tracing::debug!(
-                            target: "jazz::sync",
-                            table = %self.query().table,
-                            opening = *reset,
-                            rows = added.len(),
-                            settled = *settled,
-                            tier = ?*tier,
-                            "subscription delivered",
-                        );
-                    }
-                    member.told.set(told);
-                }
-                queue.borrow_mut().push_back(event);
+            Self::deliver(self.query(), member, event.clone());
+        }
+    }
+
+    /// Open the members still waiting for an opening on `rows`.
+    fn open_waiting(&mut self, rows: &[CurrentRow]) {
+        if self
+            .members
+            .iter()
+            .all(|member| member.joined.get() == Joined::Open)
+        {
+            return;
+        }
+        let event = opening(rows);
+        for member in &self.members {
+            if member.joined.get() == Joined::AwaitingOpening {
+                Self::deliver(self.query(), member, event.clone());
             }
+        }
+    }
+
+    fn deliver(query: &Query, member: &Member, event: SubscriptionEvent) {
+        match &event {
+            SubscriptionEvent::Delta { reset: true, .. } => member.joined.set(Joined::Open),
+            // A delta is relative to an opening this member has not had.
+            SubscriptionEvent::Delta { .. } if member.joined.get() != Joined::Open => return,
+            _ => {}
+        }
+        if let Some(queue) = member.queue.upgrade() {
+            let mut event = event;
+            if let SubscriptionEvent::Delta {
+                reset,
+                added,
+                settled,
+                tier,
+                ..
+            } = &mut event
+            {
+                *settled = member.settled.get();
+                *tier = member.settled.tier();
+                let told = settled.then_some(*tier);
+                if *reset || told != member.told.get() {
+                    tracing::debug!(
+                        target: "jazz::sync",
+                        table = %query.table,
+                        opening = *reset,
+                        rows = added.len(),
+                        settled = *settled,
+                        tier = ?*tier,
+                        "subscription delivered",
+                    );
+                }
+                member.told.set(told);
+            }
+            queue.borrow_mut().push_back(event);
         }
     }
 }
