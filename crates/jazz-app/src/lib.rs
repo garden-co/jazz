@@ -36,6 +36,7 @@ pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
 pub use table::{Fields, Implementations, Insert, Table, Update};
 pub use value::{ColumnValue, Json, Timestamp};
 
+pub use jazz::account_registry::AccountId;
 pub use jazz::tools::{AppId, ObjectId, ReadTier};
 
 /// The `jazz` crate, for generated code and [`Jazz::with_client`].

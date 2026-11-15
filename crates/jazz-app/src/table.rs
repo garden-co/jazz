@@ -44,6 +44,9 @@ pub struct Fields<'a> {
     table: &'static str,
     id: ObjectId,
     fields: Vec<QueryResultField>,
+    /// Where the next column usually is: bindings take them in the order
+    /// the query delivers them.
+    next: usize,
     implementations: &'a Implementations,
 }
 
@@ -59,16 +62,19 @@ impl<'a> Fields<'a> {
 
     /// Takes the column `name`'s value.
     pub fn take<T: ColumnValue>(&mut self, name: &str) -> Result<T> {
-        let at = self
-            .fields
-            .iter()
-            .position(|field| field.name == name)
-            .ok_or_else(|| self.error(format!("no column {name}")))?;
+        let at = match self.fields.get(self.next) {
+            Some(field) if field.name == name => self.next,
+            _ => self
+                .fields
+                .iter()
+                .position(|field| field.name == name)
+                .ok_or_else(|| self.error(format!("no column {name}")))?,
+        };
+        self.next = at + 1;
         let value = std::mem::replace(&mut self.fields[at].value, Value::Null);
-        let shown = format!("{value:?}");
-        T::from_value(value).ok_or_else(|| {
+        T::from_value(value).map_err(|value| {
             self.error(format!(
-                "column {name} holds {shown}, not a {}",
+                "column {name} holds {value:?}, not a {}",
                 std::any::type_name::<T>()
             ))
         })
@@ -91,6 +97,7 @@ pub(crate) fn decode<T: Table>(
         table: T::NAME,
         id,
         fields,
+        next: 0,
         implementations,
     })
 }

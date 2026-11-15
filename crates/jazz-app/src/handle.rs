@@ -11,6 +11,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use jazz::account_registry::AccountId;
 use jazz::tools::{
     AppContext, ClientStorage, JazzClient, ObjectId, QueryResult, ReadTier, Session, TableName,
 };
@@ -47,6 +48,7 @@ pub struct Jazz {
 
 struct Info {
     bundle: Option<String>,
+    account: Option<AccountId>,
     implementations: Implementations,
 }
 
@@ -102,11 +104,12 @@ impl Jazz {
             .name("jazz-client".into())
             .spawn(move || run(files, config, receiver, ready))
             .map_err(|error| Error::Config(format!("cannot start the client thread: {error}")))?;
-        let bundle = opened.await.map_err(|_| Error::Stopped)??;
+        let (bundle, account) = opened.await.map_err(|_| Error::Stopped)??;
         Ok(Self {
             commands,
             info: Arc::new(Info {
                 bundle,
+                account,
                 implementations,
             }),
         })
@@ -115,6 +118,11 @@ impl Jazz {
     /// The permissions bundle this backend published and is pinned to.
     pub fn bundle(&self) -> Option<&str> {
         self.info.bundle.as_deref()
+    }
+
+    /// The account of the user this backend acts as.
+    pub fn account(&self) -> Option<AccountId> {
+        self.info.account
     }
 
     /// Runs `job` with the untyped client on its thread: for what the typed
@@ -248,7 +256,11 @@ impl Jazz {
         Ok(Subscription::new(receiver, self.clone()))
     }
 
-    /// Stops the client for every clone, after the jobs already sent.
+    /// Stops the client for every clone: the calls already made finish
+    /// first, then open subscriptions end and later calls fail with
+    /// [`Error::Stopped`]. Call it before the process exits when the app
+    /// keeps a persistent store ([`crate::Storage::Dir`]), so its last
+    /// writes are flushed and the store closed.
     pub async fn shutdown(&self) -> Result<()> {
         let (reply, done) = oneshot::channel();
         if self.commands.send(Command::Shutdown(reply)).is_err() {
@@ -322,7 +334,7 @@ fn run(
     files: AppFiles,
     config: Config,
     mut commands: mpsc::UnboundedReceiver<Command>,
-    ready: oneshot::Sender<Result<Option<String>>>,
+    ready: oneshot::Sender<Result<Opened>>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -338,31 +350,39 @@ fn run(
     };
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
-        let (client, bundle) = match connect(files, config).await {
+        let (client, opened) = match connect(files, config).await {
             Ok(opened) => opened,
             Err(error) => {
                 let _ = ready.send(Err(error));
                 return;
             }
         };
-        if ready.send(Ok(bundle)).is_err() {
+        if ready.send(Ok(opened)).is_err() {
             let _ = client.shutdown().await;
             return;
         }
+        // Jobs run as local tasks, so a slow one never holds up the rest.
+        // Subscription forwarders are spawned by their jobs and are not in
+        // here: they end with the client.
+        let mut jobs = tokio::task::JoinSet::new();
         let mut stopped = None;
-        while let Some(command) = commands.recv().await {
-            match command {
-                Command::Run(job) => {
-                    tokio::task::spawn_local(job(client.clone()));
-                }
-                Command::Shutdown(reply) => {
-                    stopped = Some(reply);
-                    break;
-                }
+        loop {
+            tokio::select! {
+                command = commands.recv() => match command {
+                    Some(Command::Run(job)) => {
+                        jobs.spawn_local(job(client.clone()));
+                    }
+                    Some(Command::Shutdown(reply)) => {
+                        stopped = Some(reply);
+                        break;
+                    }
+                    None => break,
+                },
+                Some(_) = jobs.join_next(), if !jobs.is_empty() => {}
             }
         }
-        // Let the jobs already started finish their synchronous part.
-        tokio::task::yield_now().await;
+        // The jobs already sent finish before the client stops.
+        while jobs.join_next().await.is_some() {}
         let result = client.shutdown().await.map_err(Error::from);
         if let Some(reply) = stopped {
             let _ = reply.send(result);
@@ -370,7 +390,9 @@ fn run(
     });
 }
 
-async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Option<String>)> {
+type Opened = (Option<String>, Option<AccountId>);
+
+async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Opened)> {
     let loaded = files.load()?;
     let (storage, data_dir) = match config.storage {
         Storage::Memory => (ClientStorage::Memory, std::env::temp_dir()),
@@ -392,6 +414,7 @@ async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Option<
         migrations: loaded.migrations,
     };
     let mut bundle = None;
+    let mut admitted = None;
     if let (Some(backend), Some(server), Some(app)) =
         (&config.backend, &config.server_url, &loaded.backend)
     {
@@ -400,6 +423,7 @@ async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Option<
         let mut session = Session::new(BACKEND_ISSUER, backend.user_id.clone());
         session.account_id = Some(account);
         context.account_id = Some(account);
+        admitted = Some(account);
         context.backend_secret = Some(backend.backend_secret.clone());
         context.backend_session = Some(session);
         context.bundle = Some(published.clone());
@@ -414,7 +438,7 @@ async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Option<
         )
         .await?
     };
-    Ok((client, bundle))
+    Ok((client, (bundle, admitted)))
 }
 
 #[allow(dead_code)]

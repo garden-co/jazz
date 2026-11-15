@@ -11,8 +11,8 @@ use jazz::tools::{ObjectId, Value};
 /// generated enums.
 pub trait ColumnValue: Sized + Send + 'static {
     fn into_value(self) -> Value;
-    /// `None` when `value` is not of this type.
-    fn from_value(value: Value) -> Option<Self>;
+    /// `value` back when it is not of this type.
+    fn from_value(value: Value) -> Result<Self, Value>;
 }
 
 macro_rules! scalar {
@@ -21,10 +21,10 @@ macro_rules! scalar {
             fn into_value(self) -> Value {
                 Value::$variant(self)
             }
-            fn from_value(value: Value) -> Option<Self> {
+            fn from_value(value: Value) -> Result<Self, Value> {
                 match value {
-                    Value::$variant(value) => Some(value),
-                    _ => None,
+                    Value::$variant(value) => Ok(value),
+                    other => Err(other),
                 }
             }
         }
@@ -43,9 +43,9 @@ impl<T: ColumnValue> ColumnValue for Option<T> {
     fn into_value(self) -> Value {
         self.map_or(Value::Null, T::into_value)
     }
-    fn from_value(value: Value) -> Option<Self> {
+    fn from_value(value: Value) -> Result<Self, Value> {
         match value {
-            Value::Null => Some(None),
+            Value::Null => Ok(None),
             value => T::from_value(value).map(Some),
         }
     }
@@ -55,10 +55,11 @@ impl<T: ColumnValue> ColumnValue for Vec<T> {
     fn into_value(self) -> Value {
         Value::Array(self.into_iter().map(T::into_value).collect())
     }
-    fn from_value(value: Value) -> Option<Self> {
+    /// An element of another type is the value given back.
+    fn from_value(value: Value) -> Result<Self, Value> {
         match value {
             Value::Array(values) => values.into_iter().map(T::from_value).collect(),
-            _ => None,
+            other => Err(other),
         }
     }
 }
@@ -80,10 +81,10 @@ impl ColumnValue for Timestamp {
     fn into_value(self) -> Value {
         Value::Timestamp(self.0)
     }
-    fn from_value(value: Value) -> Option<Self> {
+    fn from_value(value: Value) -> Result<Self, Value> {
         match value {
-            Value::Timestamp(millis) => Some(Self(millis)),
-            _ => None,
+            Value::Timestamp(millis) => Ok(Self(millis)),
+            other => Err(other),
         }
     }
 }
@@ -96,10 +97,12 @@ impl ColumnValue for Json {
     fn into_value(self) -> Value {
         Value::Text(self.0.to_string())
     }
-    fn from_value(value: Value) -> Option<Self> {
+    fn from_value(value: Value) -> Result<Self, Value> {
         match value {
-            Value::Text(text) => serde_json::from_str(&text).ok().map(Self),
-            _ => None,
+            Value::Text(text) => serde_json::from_str(&text)
+                .map(Self)
+                .map_err(|_| Value::Text(text)),
+            other => Err(other),
         }
     }
 }
@@ -125,15 +128,17 @@ macro_rules! text_enum {
         }
         impl $crate::ColumnValue for $ty {
             fn into_value(self) -> $crate::jazz::tools::Value {
-                $crate::jazz::tools::Value::Text(self.as_str().to_owned())
+                $crate::jazz::tools::Value::Text(::std::borrow::ToOwned::to_owned(self.as_str()))
             }
-            fn from_value(value: $crate::jazz::tools::Value) -> Option<Self> {
+            fn from_value(
+                value: $crate::jazz::tools::Value,
+            ) -> ::std::result::Result<Self, $crate::jazz::tools::Value> {
                 match value {
                     $crate::jazz::tools::Value::Text(text) => match text.as_str() {
-                        $($name => Some(Self::$variant),)+
-                        _ => None,
+                        $($name => ::std::result::Result::Ok(Self::$variant),)+
+                        _ => ::std::result::Result::Err($crate::jazz::tools::Value::Text(text)),
                     },
-                    _ => None,
+                    other => ::std::result::Result::Err(other),
                 }
             }
         }
