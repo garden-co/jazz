@@ -246,7 +246,7 @@ impl<I: Ord, P> PartialEq for Entry<I, P> {
 impl<I: Ord, P> Eq for Entry<I, P> {}
 impl<I: Ord, P> PartialOrd for Entry<I, P> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.key_cmp(other))
+        Some(self.cmp(other))
     }
 }
 impl<I: Ord, P> Ord for Entry<I, P> {
@@ -284,10 +284,10 @@ impl<I: Ord, P> TopK<I, P> {
         let entry = Entry { score, id, payload };
         if self.heap.len() < self.k {
             self.heap.push(entry);
-        } else if let Some(mut worst) = self.heap.peek_mut() {
-            if entry < *worst {
-                *worst = entry;
-            }
+        } else if let Some(mut worst) = self.heap.peek_mut()
+            && entry < *worst
+        {
+            *worst = entry;
         }
     }
 

@@ -4539,6 +4539,9 @@ mod tests {
             jazz_types::records::ValueType::Bool => RecordValue::Bool(true),
             jazz_types::records::ValueType::String => RecordValue::String("value".to_owned()),
             jazz_types::records::ValueType::Bytes => RecordValue::Bytes(vec![8]),
+            jazz_types::records::ValueType::Vector(dimensions) => {
+                RecordValue::Bytes(vec![0; *dimensions as usize * 4])
+            }
             // Author columns hold dictionary codes.
             value_type if value_type.as_interned().is_some() => RecordValue::U32(0),
             jazz_types::records::ValueType::Internal(_) => {
