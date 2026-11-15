@@ -25,7 +25,11 @@ in the list, or whose `items` don't match the tabs.
    Generated files carry no `#region` markers. A test fails if a symbol is missing.
 5. Set `enabled: true`.
 
-While a language is switched off, the build (`plugin.ts`, before includes run)
-drops its tabs, and `source.ts` drops its setup page and sidebar entry. So a
+While a language is switched off, the build (`plugin.ts`, on each page's source
+before its includes are read) drops its tabs, and `source.ts` drops its setup page and sidebar entry. So a
 language that misses a release appears nowhere in that release's docs, and its
 tabs can sit on main before its examples are ready.
+
+Put language tabs and `<BindingsExcerpt>` in pages only, not in
+`content/partials`: an included partial doesn't pass through the plugin, so a
+test refuses them there.
