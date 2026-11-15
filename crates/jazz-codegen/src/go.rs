@@ -53,8 +53,9 @@ const BACKQUOTE: &str = "` + \"`\" + `";
 /// Package-level names the bindings declare themselves.
 const RESERVED: &[&str] = &["App", "Source", "Open"];
 
-/// Method names of a table value, which no column may take.
-const TABLE_METHODS: &[&str] = &["Query", "Insert", "Update", "Delete"];
+/// Method names of a table value or a patch struct, which no column may
+/// take as its Go name.
+const TABLE_METHODS: &[&str] = &["Query", "Insert", "Update", "Delete", "MarshalJSON"];
 
 /// Words Go spells in capitals inside a name (`userID`, `avatarURL`).
 const INITIALISMS: &[&str] = &[
@@ -150,7 +151,12 @@ impl<'a> Writer<'a> {
             if value == row {
                 value = format!("{row}Table");
             }
-            let ty = format!("{}Table", lower_first(&value));
+            // `todosTable`; `activityTable` for the value `ActivityTable`.
+            let ty = if value.ends_with("Table") {
+                lower_first(&value)
+            } else {
+                format!("{}Table", lower_first(&value))
+            };
             let what = format!("table `{}`", table.name);
             let names = TableNames {
                 new: format!("New{row}"),
@@ -256,7 +262,9 @@ impl<'a> Writer<'a> {
                 let mut values = Vec::new();
                 let mut seen = BTreeMap::new();
                 for variant in variants {
-                    let constant = format!("{name}{}", go_ident(&pascal_words(variant), variant)?);
+                    // The value's words follow the type's name, so a value may
+                    // start with a digit (`"1"` → `NoteLevel1`).
+                    let constant = go_ident(&format!("{name}{}", pascal_words(variant)), variant)?;
                     if let Some(other) = seen.insert(constant.clone(), variant.clone()) {
                         return Err(CodegenError::unsupported(format!(
                             "{what}: values `{other}` and `{variant}` are both the Go name `{constant}`"
@@ -641,7 +649,8 @@ fn go_string(text: &str) -> String {
 }
 
 /// A name inside a struct tag's backquotes: what `encoding/json` reads
-/// back as the key. A tag can't hold a backquote, `"` or `,`.
+/// back as the key. Authored column names are identifiers
+/// (`[A-Za-z_][A-Za-z0-9_]*`), which a tag holds as they are.
 fn go_tag_name(name: &str) -> String {
     name.to_owned()
 }
