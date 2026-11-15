@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkBindings, exampleAppDirs, isRustCrate, root } from "../example-bindings.mjs";
+import { checkBindings, exampleAppDirs, root } from "../example-bindings.mjs";
 import { planFor } from "../local-ci-equivalent.mjs";
 
 test("finds every example app that commits a jazz.app.json, recipe apps included", () => {
@@ -14,22 +14,22 @@ test("finds every example app that commits a jazz.app.json, recipe apps included
   assert.ok(dirs.length >= 60, `only ${dirs.length} apps found`);
 });
 
-test("reports each app whose generate --check fails, and skips Rust crates", () => {
+test("reports each app whose generate --check fails, Rust crates included", () => {
   const scratch = mkdtempSync(join(tmpdir(), "example-bindings-"));
   try {
     for (const dir of ["fresh", "stale", "crate"]) mkdirSync(join(scratch, dir));
     writeFileSync(join(scratch, "crate", "Cargo.toml"), '[package]\nname = "x"\n');
-    assert.equal(isRustCrate(join(scratch, "crate")), true);
-    assert.equal(isRustCrate(join(scratch, "fresh")), false);
     const run = (dir) =>
-      dir.endsWith("stale")
-        ? { status: 1, stdout: "", stderr: "bindings out of date: run `jazz-tools generate`\n" }
-        : { status: 0, stdout: "up to date\n", stderr: "" };
+      dir.endsWith("fresh")
+        ? { status: 0, stdout: "up to date\n", stderr: "" }
+        : { status: 1, stdout: "", stderr: "bindings out of date: run `jazz-tools generate`\n" };
     const result = checkBindings(["fresh", "stale", "crate"], { cwd: scratch, run });
     assert.deepEqual(result, {
-      failures: ["stale: bindings out of date: run `jazz-tools generate`"],
-      skipped: ["crate"],
-      checked: 2,
+      failures: [
+        "stale: bindings out of date: run `jazz-tools generate`",
+        "crate: bindings out of date: run `jazz-tools generate`",
+      ],
+      checked: 3,
     });
   } finally {
     rmSync(scratch, { recursive: true, force: true });
