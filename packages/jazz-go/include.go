@@ -165,10 +165,12 @@ type queryJSON struct {
 	Select  []any         `json:"select,omitempty"`
 	Include []includeJSON `json:"include,omitempty"`
 	History bool          `json:"history,omitempty"`
-	Gather  *gatherJSON   `json:"gather,omitempty"`
-	HopTo   []string      `json:"hopTo,omitempty"`
-	After   *queryJSON    `json:"after,omitempty"`
-	Union   []queryJSON   `json:"union,omitempty"`
+	// IncludeDeleted reads deleted rows too.
+	IncludeDeleted bool        `json:"includeDeleted,omitempty"`
+	Gather         *gatherJSON `json:"gather,omitempty"`
+	HopTo          []string    `json:"hopTo,omitempty"`
+	After          *queryJSON  `json:"after,omitempty"`
+	Union          []queryJSON `json:"union,omitempty"`
 }
 
 type gatherJSON struct {

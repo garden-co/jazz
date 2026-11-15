@@ -12,71 +12,76 @@ import (
 // StreamChunk is how many bytes a streaming write sends per call.
 const StreamChunk = 256 << 10
 
-// InsertStreaming inserts row into table, then streams r into its bytes
-// column, a chunk at a time, so a large file is never held in memory
-// whole. If reading r or a write fails, the row is deleted again.
-func InsertStreaming[N, R any](ctx context.Context, q Querier, table string, row N, column string, r io.Reader) (R, error) {
+// InsertStreaming inserts row into table with its bytes column streamed
+// from r, a chunk at a time, so a large file is never held in memory
+// whole. The row appears whole once the upload finishes; if reading r
+// fails, nothing is written.
+func InsertStreaming[N, R any](ctx context.Context, q Querier, table string, row N, column string, r io.Reader, opts ...WriteOption) (R, error) {
+	var out R
 	encoded, err := encode(q, row)
 	if err != nil {
-		var zero R
-		return zero, err
+		return out, err
 	}
-	fields, err := Fields(encoded)
+	raw, err := upload(ctx, q, map[string]any{"table": table, "column": column, "kind": "insert", "row": encoded}, r, opts)
 	if err != nil {
-		var zero R
-		return zero, err
+		return out, err
 	}
-	fields[column] = []byte{}
-	inserted, err := Insert[map[string]any, R](ctx, q, table, fields)
-	if err != nil {
-		return inserted, err
-	}
-	var id struct {
-		ID string `json:"id"`
-	}
-	if b, err := json.Marshal(inserted); err == nil {
-		_ = json.Unmarshal(b, &id)
-	}
-	if err := appendStream(ctx, q, table, id.ID, column, 0, r); err != nil {
-		_ = remove(context.WithoutCancel(ctx), q, table, id.ID, nil)
-		var zero R
-		return zero, err
-	}
-	return inserted, nil
+	err = decodeRow(q.computed(), table, raw, &out)
+	return out, err
 }
 
 // UpdateStreaming replaces the bytes column of the row of table with id
 // by what r holds, streamed a chunk at a time.
-func UpdateStreaming(ctx context.Context, q Querier, table, id, column string, r io.Reader) error {
-	if err := update(ctx, q, table, id, map[string]any{column: []byte{}}, nil); err != nil {
-		return err
-	}
-	return appendStream(ctx, q, table, id, column, 0, r)
+func UpdateStreaming(ctx context.Context, q Querier, table, id, column string, r io.Reader, opts ...WriteOption) error {
+	_, err := upload(ctx, q, map[string]any{"table": table, "column": column, "kind": "update", "id": id}, r, opts)
+	return err
 }
 
-func appendStream(ctx context.Context, q Querier, table, id, column string, at int64, r io.Reader) error {
+// UpsertStreaming writes the row of table with id (inserting it with row's
+// columns if there is none) with its bytes column streamed from r.
+func UpsertStreaming[N any](ctx context.Context, q Querier, table, id string, row N, column string, r io.Reader, opts ...WriteOption) error {
+	encoded, err := encode(q, row)
+	if err != nil {
+		return err
+	}
+	_, err = upload(ctx, q, map[string]any{"table": table, "column": column, "kind": "upsert", "id": id, "row": encoded}, r, opts)
+	return err
+}
+
+func upload(ctx context.Context, q Querier, begin map[string]any, r io.Reader, opts []WriteOption) (json.RawMessage, error) {
+	if _, ok := q.(*Tx); ok {
+		return nil, &Error{Kind: KindNotSupported, Message: "streaming uploads don't run inside a transaction"}
+	}
+	var begun struct {
+		Upload string `json:"upload"`
+	}
+	if err := q.call(ctx, "uploadBegin", begin, &begun); err != nil {
+		return nil, err
+	}
+	abort := func() {
+		_ = q.call(context.WithoutCancel(ctx), "uploadAbort", map[string]any{"upload": begun.Upload}, nil)
+	}
 	buf := make([]byte, StreamChunk)
 	for {
 		n, err := io.ReadFull(r, buf)
 		if n > 0 {
-			edit := map[string]any{
-				"kind":    "splice",
-				"column":  column,
-				"within":  map[string]any{"units": "bytes", "from": at, "to": at},
-				"splices": []map[string]any{{"at": 0, "delete": 0, "insert": base64.StdEncoding.EncodeToString(buf[:n])}},
+			chunk := base64.StdEncoding.EncodeToString(buf[:n])
+			if err := q.call(ctx, "uploadPush", map[string]any{"upload": begun.Upload, "bytes": chunk}, nil); err != nil {
+				abort()
+				return nil, err
 			}
-			if err := q.call(ctx, "edit", map[string]any{"table": table, "id": id, "edits": []any{edit}}, nil); err != nil {
-				return err
-			}
-			at += int64(n)
 		}
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return nil
+			break
 		}
 		if err != nil {
-			return err
+			abort()
+			return nil, err
 		}
 	}
+	var raw json.RawMessage
+	err := q.call(ctx, "uploadFinish", withOptions(map[string]any{"upload": begun.Upload}, opts), &raw)
+	return raw, err
 }
 
 // ReadBytes is the bytes column of the row of table with id, as a reader.

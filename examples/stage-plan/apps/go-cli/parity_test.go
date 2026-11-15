@@ -289,6 +289,13 @@ func TestUpsertAndRestore(t *testing.T) {
 	if err := jazzapp.Tasks.Delete(ctx, db, id); err != nil {
 		t.Fatal(err)
 	}
+	byID := jazzapp.Tasks.Query().Where(jazzapp.Tasks.ID.Eq(id))
+	if live, err := byID.All(ctx, db); err != nil || len(live) != 0 {
+		t.Fatalf("deleted, still read: %+v %v", live, err)
+	}
+	if all, err := jazz.IncludeDeleted(byID).All(ctx, db); err != nil || len(all) != 1 {
+		t.Fatalf("includeDeleted: %+v %v", all, err)
+	}
 	restored, err := jazzapp.Tasks.Restore(ctx, db, id)
 	if err != nil || restored.ID != id || restored.Title != "Load-in early" {
 		t.Fatalf("restore: %+v %v", restored, err)
@@ -301,5 +308,60 @@ func TestUpsertAndRestore(t *testing.T) {
 	heads, err := jazz.Select[head](jazzapp.Tasks.Query().Where(jazzapp.Tasks.ID.Eq(id)), jazz.Range(jazzapp.Tasks.Title, 0, 4)).All(ctx, db)
 	if err != nil || len(heads) != 1 || heads[0].Title != "Load" {
 		t.Fatalf("partial title: %+v %v", heads, err)
+	}
+}
+
+func TestHopUnionAndHistory(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	srv := testServer(t)
+	db := openTest(t, srv, "alice")
+	show, err := ensureShow(ctx, db, "Hop Night")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := addTask(ctx, db, show.ID, "Load-in")
+	for _, title := range []string{"Line check", "Soundcheck"} {
+		if _, err := addTask(ctx, db, show.ID, title); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// From the show's first task to its show.
+	shows, err := jazz.HopTo(
+		jazzapp.Tasks.Query().Where(jazzapp.Tasks.ID.Eq(first.ID)),
+		jazzapp.Tasks.Show,
+	).Where(jazzapp.Shows.Name.Eq("Hop Night")).All(ctx, db)
+	if err != nil || len(shows) != 1 || shows[0].ID != show.ID {
+		t.Fatalf("hop: %+v %v", shows, err)
+	}
+
+	// The first and the last task, each once.
+	ends, err := jazz.Union(
+		jazzapp.Tasks.Query().Where(jazzapp.Tasks.ShowID.Eq(show.ID), jazzapp.Tasks.Rank.Lte(1)),
+		jazzapp.Tasks.Query().Where(jazzapp.Tasks.ShowID.Eq(show.ID), jazzapp.Tasks.Rank.Gte(3)),
+	).OrderBy(jazzapp.Tasks.Rank.Asc()).All(ctx, db)
+	if err != nil || len(ends) != 2 || ends[0].Title != "Load-in" || ends[1].Title != "Soundcheck" {
+		t.Fatalf("union: %+v %v", ends, err)
+	}
+
+	// The first task's versions, as the server accepted them.
+	if err := moveTask(ctx, db, first.ID, jazzapp.TaskStatusDoing); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.WaitForSync(ctx, jazz.WriteGlobal); err != nil {
+		t.Fatal(err)
+	}
+	versions, err := jazzapp.Tasks.History().
+		Where(jazz.NewColumn[jazz.Version[jazzapp.Task], string]("id").Eq(first.ID)).
+		OrderBy(jazz.AcceptedAt[jazzapp.Task]().Asc()).
+		Tier(jazz.ReadRemote).
+		All(ctx, db)
+	if err != nil || len(versions) != 2 {
+		t.Fatalf("history: %+v %v", versions, err)
+	}
+	if versions[0].Row.Status != jazzapp.TaskStatusTodo || versions[1].Row.Status != jazzapp.TaskStatusDoing ||
+		versions[0].TransactionID == "" || versions[1].AcceptedAt < versions[0].AcceptedAt {
+		t.Fatalf("versions: %+v", versions)
 	}
 }

@@ -48,24 +48,19 @@ func Union[R any](qs ...*Query[R]) *Query[R] {
 // Version is a version of a row of R, from its table's history.
 type Version[R any] struct {
 	Row R
-	// Version numbers the row's versions, oldest first.
-	Version int64
-	// At is when the server accepted the version.
-	At Timestamp
-	// By is who wrote it, when known.
-	By *string
-	// Deleted says the version deleted the row.
-	Deleted bool
+	// TransactionID is the transaction that wrote the version: with the
+	// row's id, it tells versions apart.
+	TransactionID string
+	// AcceptedAt is when the server accepted the version.
+	AcceptedAt Timestamp
 }
 
 // UnmarshalJSON reads the row and its $history metadata.
 func (v *Version[R]) UnmarshalJSON(data []byte) error {
 	var meta struct {
 		History struct {
-			Version int64     `json:"version"`
-			At      Timestamp `json:"at"`
-			By      *string   `json:"by"`
-			Deleted bool      `json:"deleted"`
+			TransactionID string    `json:"transactionId"`
+			AcceptedAt    Timestamp `json:"acceptedAt"`
 		} `json:"$history"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
@@ -74,8 +69,7 @@ func (v *Version[R]) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &v.Row); err != nil {
 		return err
 	}
-	h := meta.History
-	v.Version, v.At, v.By, v.Deleted = h.Version, h.At, h.By, h.Deleted
+	v.TransactionID, v.AcceptedAt = meta.History.TransactionID, meta.History.AcceptedAt
 	return nil
 }
 
@@ -147,4 +141,16 @@ func CanUpdate(ctx context.Context, q Querier, table, id string, patch any) (Adv
 // CanDelete advises whether the row of table with id may be deleted.
 func CanDelete(ctx context.Context, q Querier, table, id string) (Advice, error) {
 	return advise(ctx, q, map[string]any{"table": table, "op": "delete", "id": id})
+}
+
+// AcceptedAt is a history version's $acceptedAt, to order versions by.
+func AcceptedAt[R any]() Column[Version[R], Timestamp] {
+	return Column[Version[R], Timestamp]{name: "$acceptedAt"}
+}
+
+// IncludeDeleted is q reading deleted rows too (to show or Restore them).
+func IncludeDeleted[R any](q *Query[R]) *Query[R] {
+	c := &Query[R]{table: q.table, raw: q.toJSON().cloneParts()}
+	c.raw.IncludeDeleted = true
+	return c
 }
