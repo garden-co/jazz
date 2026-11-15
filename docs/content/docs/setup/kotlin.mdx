@@ -1,6 +1,6 @@
 ---
 title: Kotlin Backend
-description: "Open a Jazz app from Kotlin on the JVM with the jazz-kotlin library and typed bindings generated from jazz.app.json."
+description: "Open a Jazz app from Kotlin, on the JVM or Android, with the jazz-kotlin library and typed bindings generated from jazz.app.json."
 ---
 
 A Kotlin/JVM service can be your app's backend. It opens the app from the same `jazz.app.json` and
@@ -31,6 +31,10 @@ dependencies {
 Building `jazz-kotlin` runs `cargo build -p jazz-ffi`, so it needs a Rust toolchain. It loads
 `libjazz_ffi` through JNA: set `-Djna.library.path` to the directory that holds it
 (`target/debug` in the Jazz checkout). It runs on JDK 17 or later.
+
+On Android, depend on `packages/jazz-kotlin-android` instead: the same API as an AAR, with
+`libjazz_ffi` for arm64-v8a, armeabi-v7a and x86_64 (minSdk 24). Building it needs the Android SDK
+and NDK, and `cargo-ndk`.
 
 ## Generate the bindings
 
@@ -91,6 +95,51 @@ stages.
 Writes are local-first. A write that the server's permissions refuse doesn't fail the call: it
 stays local and never syncs.
 
+## Open the app as an end user
+
+An app on a user's device (a desktop app, or Android) syncs through your backend's Jazz endpoint
+(`createJazz`'s handler, e.g. `https://app.example/jazz`), never with the sync server's secrets. It
+signs in with a local-first device account:
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#context-setup-kotlin-client
+</include>
+
+or as a user your backend signs in, with their bearer token:
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#auth-bearer-kotlin
+</include>
+
+`jazz.session` and `jazz.syncStatus` are `StateFlow`s of who is signed in and how the app syncs;
+`jazz.link(bearer)` joins a device account to your sign-in:
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#auth-session-kotlin
+</include>
+
+## Edit text
+
+A `"merge": "text"` column (like StagePlan's `tasks.notes`) is written as an edit of what you
+read, so concurrent edits merge. `jazz.edit(table, id) { … }` also splices text and bytes and sets
+values inside JSON columns.
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-text-edit-kotlin
+</include>
+
+## Large values
+
+Stream a large text or `bytea` value in, and read back only the part you need:
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-streaming-upload-kotlin
+</include>
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-partial-value-kotlin
+</include>
+
 ## Computed fields and transforms
 
 If `jazz.app.json` declares computed fields or transforms, the bindings declare an
@@ -104,19 +153,14 @@ view value. Queries compare a transformed column as stored.
 
 In Kotlin, Jazz doesn't support these yet:
 
-- connecting as an end user (JWT, local-first device accounts, sessions): the app opens locally or
-  as a backend;
-- editing `merge: "text"` columns (like StagePlan's `tasks.notes`) as text: a write replaces the
-  whole string;
-- files and large values (streaming reads and writes);
-- permission advice (`canRead`, `canInsert`, …);
+- reading part of a large value inside an include (root queries only);
 - `hopTo`, recursive `gather`, `union` and history queries;
+- guest (anonymous) users;
 - writing enums with payloads (reading them works: a sealed interface per enum); nested rows and
   catalogue enums in bindings;
-- Android (an AAR is in progress) and other Kotlin Multiplatform targets;
-- publishing `jazz-kotlin` to Maven Central: build it from the repository;
-- platforms other than Linux x86-64 for the bundled native library (elsewhere, build `jazz-ffi`
-  yourself and point `jna.library.path` at it);
+- Kotlin Multiplatform targets other than the JVM and Android;
+- publishing `jazz-kotlin` and `jazz-kotlin-android` to Maven Central: build them from the
+  repository;
 - non-finite doubles (`NaN`, infinities): writing or comparing one throws, as JSON has none;
 - `limit` and `offset` with `watch`: they apply to the server's result before `watch` re-sorts it
   locally, so a page can be off after changes. Use them with `all`.

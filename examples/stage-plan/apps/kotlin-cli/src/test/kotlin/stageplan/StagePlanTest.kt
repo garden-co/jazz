@@ -5,6 +5,7 @@ import jazzapp.CrewTable
 import jazzapp.NewComment
 import jazzapp.NewCrew
 import jazzapp.TaskStatus
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import tools.jazz.include
 import jazzapp.Tasks
@@ -186,6 +187,10 @@ class StagePlanTest {
             }
             assertEquals("changed my mind", error.message)
             assertEquals("A", jazz.one(Tasks.where(Tasks.id eq a.id))!!.title)
+            // Upsert twice, delete, restore.
+            val restored = DocsSnippets.upsertAndRestore(jazz, show.id)
+            assertEquals(TaskStatus.Doing, restored.status)
+            assertEquals("Load out", jazz.one(Tasks.where(Tasks.id eq restored.id))?.title)
             // Global writes and reads.
             val strike = DocsSnippets.writeTier(jazz, show.id)
             assertEquals(TaskStatus.Doing, DocsSnippets.readTier(jazz, show.id).single { it.id == strike.id }.status)
@@ -198,6 +203,85 @@ class StagePlanTest {
             kotlin.test.assertTrue(DocsSnippets.transactionErrors(jazz, a.id).startsWith("refused"))
             // Nothing of the refused transaction applied.
             kotlin.test.assertTrue(jazz.one(Tasks.where(Tasks.id eq a.id))!!.status != TaskStatus.Blocked)
+        }
+    }
+
+    @Test
+    fun text_edits_and_permission_advice(): Unit = runBlocking {
+        open("user-6").use { jazz ->
+            val me = jazz.account()!!
+            val show = showNamed(jazz, "Premiere")
+            val task = addTask(jazz, show, "Rig")
+            jazz.update(Tasks, task.id, tier = tools.jazz.WriteTier.Global) { notes("Lights") }
+            val read = jazz.one(Tasks.where(Tasks.id eq task.id))!!
+            assertEquals("Lights\nBring gaffer tape.", DocsSnippets.editText(jazz, read))
+            // An edit of an older value keeps what changed since: both edits survive.
+            jazz.editText(Tasks, task.id, Tasks.notes, editedFrom = "Lights", text = "Stage lights")
+            val merged = jazz.one(Tasks.where(Tasks.id eq task.id))!!.notes!!
+            kotlin.test.assertTrue(merged.contains("Stage lights") && merged.contains("gaffer tape"), merged)
+            // Streaming a large value in, and reading part of it back.
+            val long = "0123456789".repeat(50_000)
+            val preview = DocsSnippets.largeValues(jazz, task.id, long.byteInputStream())
+            assertEquals(long.take(80), preview)
+            assertEquals(long.length, jazz.one(Tasks.where(Tasks.id eq task.id))!!.notes!!.length)
+            // Partial edits: a splice of the title.
+            jazz.edit(Tasks, task.id) { splice(Tasks.title, tools.jazz.SpliceUnits.Utf16, 0, 3, tools.jazz.Splice.text(3, 0, "ging")) }
+            assertEquals("Rigging", jazz.one(Tasks.where(Tasks.id eq task.id))!!.title)
+            // Permission advice: Ada isn't in the show's crew, so assigning her is refused.
+            val ada = jazz.insert(CrewTable, NewCrew(account = me, name = "Ada"), tier = tools.jazz.WriteTier.Global)
+            val (rename, assign, delete, add) = DocsSnippets.permissionAdvice(jazz, read, ada.id)
+            assertEquals(true, rename)
+            assertEquals(false, assign)
+            assertEquals(true, add)
+            kotlin.test.assertNotNull(delete)
+        }
+    }
+
+    @Test
+    fun end_users_sign_in_with_device_accounts_and_bearer_tokens(): Unit = runBlocking {
+        val endpointProcess = ProcessBuilder(
+            System.getenv("JAZZ_END_USER_ENDPOINT"),
+            java.io.File("jazz.app.json").absolutePath,
+            java.io.File("jazz.permissions.json").absolutePath,
+        ).redirectError(ProcessBuilder.Redirect.INHERIT).start()
+        try {
+            val line = endpointProcess.inputStream.bufferedReader().readLine() ?: error("the endpoint didn't start")
+            val info = kotlinx.serialization.json.Json.parseToJsonElement(line).let { it as kotlinx.serialization.json.JsonObject }
+            val appId = info["appId"].toString().trim('"')
+            val endpoint = info["endpoint"].toString().trim('"')
+
+            // A device account signs up by opening with a new key.
+            val carol = DocsSnippets.openClient(endpoint, appId, tools.jazz.JazzAuth.generateDeviceKey())
+            carol.use {
+                val state = carol.session.value
+                kotlin.test.assertTrue(state is tools.jazz.SessionState.SignedIn && state.user.kind == "device", "$state")
+                val account = (state as tools.jazz.SessionState.SignedIn).user.account
+                val show = carol.insert(
+                    jazzapp.Shows,
+                    jazzapp.NewShow(name = "Carol's", venue = "V", date = "D", doors = "19:00", chiefAccount = account),
+                    tier = tools.jazz.WriteTier.Global,
+                )
+                assertEquals("Carol's", carol.one(jazzapp.Shows.where(jazzapp.Shows.id eq show.id), tools.jazz.ReadTier.Remote)?.name)
+                kotlinx.coroutines.withTimeout(30_000) {
+                    carol.syncStatus.first { it.link == tools.jazz.Link.Connected && it.synced }
+                }
+            }
+
+            // A user the backend signs in, with a bearer token.
+            val asked = java.util.Collections.synchronizedList(ArrayList<Boolean>())
+            val alice = DocsSnippets.signIn(endpoint, appId) { fresh -> asked += fresh; "token-alice" }
+            assertEquals("alice", (alice.session.value as tools.jazz.SessionState.SignedIn).user.subject)
+            assertEquals(false, asked.first())
+            val states = kotlinx.coroutines.channels.Channel<tools.jazz.SessionState?>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+            val watching = launch { alice.session.collect { states.send(it) } }
+            assertEquals(listOf("signed in as alice"), DocsSnippets.sessionState(alice).filter { it != "offline" })
+            kotlin.test.assertTrue(asked.contains(true), "refreshSession asks for a fresh token")
+            kotlinx.coroutines.withTimeout(30_000) { while (states.receive() != tools.jazz.SessionState.SignedOut) Unit }
+            watching.cancel()
+            kotlin.test.assertFailsWith<tools.jazz.JazzException.Closed> { alice.all(jazzapp.Shows.query()) }
+        } finally {
+            endpointProcess.outputStream.close()
+            endpointProcess.destroy()
         }
     }
 }

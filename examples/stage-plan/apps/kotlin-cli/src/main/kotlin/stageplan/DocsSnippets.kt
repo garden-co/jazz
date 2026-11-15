@@ -10,7 +10,13 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import tools.jazz.Jazz
+import tools.jazz.JazzAuth
 import tools.jazz.JazzConfig
+import tools.jazz.chunks
+import tools.jazz.Link
+import tools.jazz.SessionState
+import tools.jazz.Storage
+import tools.jazz.SyncStatus
 import tools.jazz.JazzException
 import tools.jazz.JazzRow
 import tools.jazz.ReadTier
@@ -265,5 +271,110 @@ object DocsSnippets {
         }
         // #endregion writing-mutation-errors-kotlin
         return result
+    }
+
+    suspend fun editText(jazz: Jazz, task: Task): String? {
+        // #region writing-text-edit-kotlin
+        // tasks.notes is "merge": "text": write it as an edit of what you read, and
+        // concurrent edits by others merge instead of one overwriting the other.
+        val before: String = task.notes ?: ""
+        jazz.editText(Tasks, task.id, Tasks.notes, editedFrom = before, text = "$before\nBring gaffer tape.")
+        // #endregion writing-text-edit-kotlin
+        return jazz.one(Tasks.where(Tasks.id eq task.id))?.notes
+    }
+
+    suspend fun permissionAdvice(jazz: Jazz, task: Task, crewId: String): List<Boolean?> {
+        // #region reading-permission-advice-kotlin
+        // Ask before offering an action: true, false, or null when no server can say.
+        val canRename = jazz.canUpdate(Tasks, task.id) { title("Renamed") }
+        val canAssign = jazz.canUpdate(Tasks, task.id) { assigneeId(crewId) }
+        val canDelete = jazz.canDelete(Tasks, task.id)
+        val canAdd = jazz.canInsert(Tasks, NewTask(showId = task.showId, title = "New", status = TaskStatus.Todo, rank = 1.0))
+        // #endregion reading-permission-advice-kotlin
+        return listOf(canRename, canAssign, canDelete, canAdd)
+    }
+
+    suspend fun openClient(endpoint: String, appId: String, deviceKey: String): Jazz {
+        // #region context-setup-kotlin-client
+        // An end user's app: it syncs through your backend's Jazz endpoint, signed in
+        // with a local-first device account (keep the key in the platform keychain).
+        val jazz = jazzapp.open(
+            JazzConfig(
+                appId = appId,
+                serverUrl = endpoint, // e.g. "https://app.example/jazz"
+                storage = Storage.Persistent,
+                dataDir = System.getProperty("java.io.tmpdir") + "/stage-plan-" + appId,
+                auth = JazzAuth.DeviceAccount(deviceKey), // JazzAuth.generateDeviceKey() once
+            ),
+        )
+        // #endregion context-setup-kotlin-client
+        return jazz
+    }
+
+    suspend fun signIn(endpoint: String, appId: String, fetchToken: suspend (fresh: Boolean) -> String?): Jazz {
+        // #region auth-bearer-kotlin
+        // A user your backend signs in: Jazz asks for their token when connecting,
+        // before it expires, and after the server refuses one.
+        val jazz = jazzapp.open(
+            JazzConfig(
+                appId = appId,
+                serverUrl = endpoint,
+                auth = JazzAuth.Bearer { reason -> fetchToken(reason.fresh) },
+            ),
+        )
+        val me: String? = (jazz.session.value as? SessionState.SignedIn)?.user?.account
+        // #endregion auth-bearer-kotlin
+        checkNotNull(me)
+        return jazz
+    }
+
+    suspend fun sessionState(jazz: Jazz): List<String> {
+        val seen = ArrayList<String>()
+        // #region auth-session-kotlin
+        // The session and sync status as StateFlows: collect them in your UI.
+        when (val session = jazz.session.value) {
+            is SessionState.SignedIn -> seen += "signed in as ${session.user.subject}"
+            is SessionState.Expired -> seen += "session expired (${session.reason}): sign in again"
+            SessionState.SignedOut, null -> seen += "signed out"
+        }
+        val sync: SyncStatus = jazz.syncStatus.value
+        if (sync.link is Link.Offline) seen += "offline"
+        if (!sync.synced) seen += "${sync.pendingUploads} changes to upload"
+        jazz.refreshSession() // ask for a fresh token now
+        jazz.signOut() // also closes the app
+        // #endregion auth-session-kotlin
+        return seen
+    }
+
+    suspend fun upsertAndRestore(jazz: Jazz, showId: String): Task {
+        // #region writing-upsert-kotlin
+        // A row with an id you choose (e.g. derived from another system): inserted the
+        // first time, replaced whole after that.
+        val id = java.util.UUID.nameUUIDFromBytes("import:$showId:load-out".toByteArray()).toString()
+        val row = NewTask(showId = showId, title = "Load out", status = TaskStatus.Todo, rank = 50.0)
+        jazz.upsert(Tasks, id, row)
+        jazz.upsert(Tasks, id, row.copy(status = TaskStatus.Doing))
+        // #endregion writing-upsert-kotlin
+        // #region writing-restore-kotlin
+        jazz.delete(Tasks, id)
+        // Undo: bring the deleted row back as it was (or pass a row as its new content).
+        val restored: Task = jazz.restore(Tasks, id)
+        // #endregion writing-restore-kotlin
+        return restored
+    }
+
+    suspend fun largeValues(jazz: Jazz, taskId: String, notes: java.io.InputStream): String? {
+        // #region writing-streaming-upload-kotlin
+        // Stream a large value in, chunk by chunk, without holding it in memory:
+        // nothing is written if the stream fails or the call is cancelled.
+        jazz.updateStreaming(Tasks, taskId, Tasks.notes, notes.chunks())
+        // #endregion writing-streaming-upload-kotlin
+        // #region reading-partial-value-kotlin
+        // Read only the part of a large value you show: here, the first 80 characters.
+        val preview: String? = jazz.one(
+            Tasks.where(Tasks.id eq taskId).select(Tasks.title, Tasks.notes.range(0, 80)),
+        )?.get(Tasks.notes)
+        // #endregion reading-partial-value-kotlin
+        return preview
     }
 }
