@@ -176,6 +176,19 @@ describe("jazz-tools upgrade: conversions", () => {
     }
   });
 
+  it("converts enum columns with cases (jazz#5621 makes their writes fail on alpha.64, not their declaration)", async () => {
+    const dir = fixture("enum-cases");
+    const report = await upgrade(dir);
+    const app = JSON.parse(readFileSync(join(dir, "jazz.app.json"), "utf8"));
+    expect(app.tables.issues.columns.kind).toEqual({
+      enum: { bug: { severity: "int" }, feature: { area: "string" } },
+    });
+    expect(report.todos).toBe(0);
+    expect(readFileSync(join(dir, "jazz.generated.ts"), "utf8")).toContain(
+      'export type IssueKind = { type: "bug"; severity: number } | { type: "feature"; area: string };',
+    );
+  });
+
   it("writes nothing on a dry run", async () => {
     const dir = fixture("backend-history");
     const before = projectFiles(dir);
