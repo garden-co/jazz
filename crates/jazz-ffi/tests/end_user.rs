@@ -16,9 +16,18 @@ use serde_json::{Value, json};
 
 struct Tokens(Mutex<Vec<String>>, &'static str);
 impl TokenProvider for Tokens {
-    fn token(&self, reason: String) -> Option<String> {
-        self.0.lock().unwrap().push(reason);
-        Some(format!("token-{}", self.1))
+    fn token(&self, reason: String) -> Result<Option<String>, jazz_ffi::JazzError> {
+        self.0.lock().unwrap().push(reason.clone());
+        // A refresh that fails (a network blip) must not sign alice out.
+        if reason == "refresh" && self.1 == "flaky" {
+            return Err(jazz_ffi::JazzError::Io {
+                reason: "offline".into(),
+            });
+        }
+        Ok(Some(format!(
+            "token-{}",
+            if self.1 == "flaky" { "alice" } else { self.1 }
+        )))
     }
 }
 
@@ -91,6 +100,7 @@ async fn end_users_sign_in_and_sync_through_the_app() {
         assert!(parse(&carol.sync_status().unwrap()).get("link").is_some());
 
         let asked = Arc::new(Tokens(Mutex::new(Vec::new()), "alice"));
+        let alice_config = alice.clone();
         let alice = JazzHandle::open_with_tokens(alice, asked.clone()).unwrap();
         let state = parse(&alice.session_state().unwrap().unwrap());
         assert_eq!(state["status"], "signedIn", "{state}");
@@ -104,6 +114,19 @@ async fn end_users_sign_in_and_sync_through_the_app() {
 
         alice.refresh().unwrap();
         assert!(asked.0.lock().unwrap().iter().any(|reason| reason == "refresh"));
+        // A provider whose refresh fails (a network blip) keeps alice
+        // signed in: the failure is the call's, not a sign-out.
+        let flaky = JazzHandle::open_with_tokens(
+            alice_config.clone(),
+            Arc::new(Tokens(Mutex::new(Vec::new()), "flaky")),
+        )
+        .unwrap();
+        assert!(flaky.refresh().is_err());
+        let state = parse(&flaky.session_state().unwrap().unwrap());
+        assert_eq!(state["status"], "signedIn", "{state}");
+        flaky.all(json!({ "table": "shows" }).to_string()).unwrap();
+        flaky.shutdown().unwrap();
+
         alice.sign_out().unwrap();
         let mut last = Value::Null;
         while let Ok(state) = states.recv_timeout(Duration::from_secs(2)) {

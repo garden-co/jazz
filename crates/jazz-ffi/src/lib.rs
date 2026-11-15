@@ -60,7 +60,9 @@ impl JazzHandle {
             .and_then(|c| c.get("contract").and_then(serde_json::Value::as_u64))
             .unwrap_or(1);
         let host = core::HostTokens(Arc::new(move |reason: &str| {
-            tokens.token(reason.to_owned())
+            tokens
+                .token(reason.to_owned())
+                .map_err(|error| error.to_string())
         }));
         let core = core::Core::open_with_tokens(&config_json, Some(Arc::new(host)))
             .map_err(|error| JazzError::from(error).for_contract(contract))?;
@@ -520,10 +522,12 @@ impl std::fmt::Debug for JazzHandle {
 /// Where an end user's bearer tokens come from (the host's own sign-in).
 /// Called on a thread of its own, so it may block; `reason` is `connect`,
 /// `renew`, `expired` or `refresh` (the last two want a fresh token, not a
-/// cached one). `None` means no one is signed in.
+/// cached one). `None` means no one is signed in (the app stops); an error
+/// means the fetch failed (a network blip): the session stays signed in and
+/// asks again.
 #[uniffi::export(with_foreign)]
 pub trait TokenProvider: Send + Sync {
-    fn token(&self, reason: String) -> Option<String>;
+    fn token(&self, reason: String) -> Result<Option<String>>;
 }
 
 /// What a session or sync watch calls with each state (JSON).
