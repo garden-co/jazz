@@ -37,6 +37,9 @@ const FORMAT_PREFIX: &str = "// Bindings format ";
 /// How the embedded `jazz.app.json` starts: a raw multi-line string follows.
 const APP_PREFIX: &str = "    public static let app = ";
 
+/// The enum that holds the recorded source and the embedded app.
+const JAZZ_APP_OPEN: &str = "\npublic enum JazzApp {\n";
+
 /// How the recorded source starts.
 const SOURCE_PREFIX: &str = "    public static let source = ";
 
@@ -59,9 +62,15 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
 }
 
 /// Whether `manifest` (a `Package.swift`) is a package that uses the Jazz
-/// Swift runtime: it names the `jazz-swift` package.
+/// Swift runtime: it names the `jazz-swift` package, as a quoted name or the
+/// last part of a quoted path or URL (`"jazz-swift"`, `".../jazz-swift"`,
+/// `".../jazz-swift.git"`), not merely mentions it.
 pub fn is_app_manifest(manifest: &str) -> bool {
-    manifest.contains("jazz-swift")
+    manifest.match_indices("jazz-swift").any(|(at, word)| {
+        let before = manifest[..at].chars().next_back();
+        let after = &manifest[at + word.len()..];
+        matches!(before, Some('"' | '/')) && (after.starts_with('"') || after.starts_with(".git\""))
+    })
 }
 
 struct TableNames {
@@ -247,13 +256,14 @@ impl<'a> Writer<'a> {
             names.patch.clone(),
             names.namespace.clone(),
         );
-        let mut idents = BTreeSet::from(["id".to_owned(), "query".to_owned()]);
+        // `self` is no property name even in backticks.
+        let mut idents = BTreeSet::from(["id".to_owned(), "query".to_owned(), "self".to_owned()]);
         let mut fields = Vec::new();
         for column in &table.columns {
             let ident = value_ident(&column.name)?;
             if !idents.insert(ident.trim_matches('`').to_owned()) {
                 return Err(CodegenError::unsupported(format!(
-                    "`{}.{}` is the Swift name `{ident}`, which another column, `id` or `query` already is",
+                    "`{}.{}` is the Swift name `{ident}`, which another column, `id`, `query` or `self` already is",
                     table.name, column.name
                 )));
             }
@@ -391,7 +401,7 @@ impl<'a> Writer<'a> {
             file.push('\n');
         }
         out.push_str("/// The app: its `jazz.app.json`, and opening it.\n");
-        out.push_str("public enum JazzApp {\n");
+        out.push_str(&JAZZ_APP_OPEN[1..]);
         out.push_str(
             "    /// `sha256:…` of the `jazz.app.json` these bindings were generated from.\n",
         );
@@ -544,6 +554,12 @@ pub(crate) fn read(bindings: &str) -> Result<crate::bindings::Recorded, CodegenE
         .and_then(|rest| rest.split('.').next())
         .and_then(|n| n.parse::<u32>().ok())
         .ok_or_else(|| refuse("no `// Bindings format <n>.` second line"))?;
+    // Only `JazzApp` holds them: a table's namespace may have columns named
+    // `source` or `app`.
+    let start = bindings
+        .find(JAZZ_APP_OPEN)
+        .ok_or_else(|| refuse("no `public enum JazzApp`"))?;
+    let bindings = &bindings[start..];
     let source = bindings
         .lines()
         .find_map(|line| line.strip_prefix(SOURCE_PREFIX))
@@ -743,6 +759,48 @@ mod tests {
         assert!(is_app_manifest(
             r#".package(path: "../../packages/jazz-swift")"#
         ));
+        assert!(is_app_manifest(
+            r#".package(url: "https://github.com/garden-co/jazz-swift.git", from: "1.0.0")"#
+        ));
         assert!(!is_app_manifest("let package = Package(name: \"x\")"));
+        assert!(!is_app_manifest(
+            "// not jazz-swift-tools, see jazz-swiftly"
+        ));
+        assert!(!is_app_manifest(
+            r#".package(path: "../my-jazz-swift-fork/x")"#
+        ));
+    }
+
+    const COLUMNS_NAMED_LIKE_JAZZ_APP: &str = r#"{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "links": { "columns": { "source": "string", "app": "string?", "format": "int" } }
+  }
+}
+"#;
+
+    #[test]
+    fn columns_named_source_or_app_read_back() {
+        let file = COLUMNS_NAMED_LIKE_JAZZ_APP.as_bytes();
+        let generated = crate::generate(crate::Lang::Swift, file).unwrap();
+        assert!(generated.contains(
+            "    public static let source = Jazz.Column<Link, Swift.String>(\"source\")"
+        ));
+        let app = App::load(file).unwrap();
+        let recorded = read(&generated).unwrap();
+        assert_eq!(recorded.source, app.source);
+        assert_eq!(
+            crate::bindings::staleness(&app, crate::Lang::Swift, Some(&generated)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_column_named_self_is_refused() {
+        let file =
+            br#"{ "format": 1, "tables": { "things": { "columns": { "self": "string" } } } }"#;
+        let error = crate::generate(crate::Lang::Swift, file).unwrap_err();
+        assert!(error.is_unsupported(), "{error}");
     }
 }
