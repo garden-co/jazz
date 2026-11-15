@@ -459,3 +459,25 @@ async fn a_backend_acts_as_its_session_user_under_permissions() {
     server.shutdown().await;
     result.unwrap();
 }
+
+/// A subscription ends with a last `on_error` when the app shuts down, so a
+/// Swift `AsyncStream` or Kotlin `Flow` built on it finishes instead of
+/// waiting forever.
+#[test]
+fn shutdown_ends_live_subscriptions_with_on_error() {
+    let jazz = JazzHandle::open(client_config()).unwrap();
+    let (sender, events) = mpsc::channel();
+    let _subscription = jazz
+        .subscribe(
+            json!({ "table": "shows" }).to_string(),
+            Arc::new(Collect(sender)),
+        )
+        .unwrap();
+    assert_eq!(next(&events)["reset"], true);
+    jazz.shutdown().unwrap();
+    let end = events
+        .recv_timeout(Duration::from_secs(5))
+        .expect("a last event");
+    assert_eq!(end, Err("the app is closed".to_owned()));
+    assert!(events.recv_timeout(Duration::from_millis(200)).is_err());
+}

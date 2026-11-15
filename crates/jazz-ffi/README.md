@@ -101,6 +101,20 @@ columns (`merge: "text"`) take plain string writes.
   an `updated` row when its related rows change.
 - **Select:** `"select": ["<column>", …]` returns those columns (and `id`,
   always) instead of all of them, at the root or in an include.
+- **Transactions:** UniFFI `JazzHandle.begin() -> Transaction` (`all`,
+  `one`, `insert`, `update`, `delete`, `commit(tier?)`, `rollback`; dropped
+  uncommitted, it rolls back). C ABI: `jazz_call` methods `txBegin`
+  `{serializable?}` → `{tx}`, `"tx"` in the args of any read or write, then
+  `txCommit {tx, tier?}` or `txRollback {tx}`. Transactions are
+  serializable: reads see a snapshot plus their own writes; writes commit
+  together or not at all. A transaction that only read just ends. Closing
+  the app rolls back open transactions.
+- **Tiers:** reads and subscriptions take `"local"`, `"localFirst"`
+  (default) or `"remote"`; writes and commits take `"local"` or `"global"`,
+  the durability they wait for (`"edge"` is refused). UniFFI: `all_at`,
+  `one_at`, `insert_at`, `update_at`, `delete_at`, `subscribe_at`. C ABI:
+  `"tier"` in the args, or `{"query", "tier"}` for `jazz_subscribe`.
+- **Contract version:** `"contract": 1 | 2` in the open config (default 1).
 - **Row:** `{ "id", "<column>": … }`, with the authored column names. An
   insert may give its own `id`.
 - **Delta:** `{ "added": [row], "updated": [row], "removed": [id], "reset",
@@ -110,7 +124,12 @@ columns (`merge: "text"`) take plain string writes.
   positions, so an ordered subscription re-sorts locally. A row that only
   moved is left out.
 
-After the app closes, each open subscription gets one last error, `Closed`
+Every way a subscription ends, other than being cancelled, ends with one
+last error, after which no callback comes: a rejection (`Refused`), or
+`Closed` when the app closes or the stream ends for any other reason (the
+client stopping, the server ending the query). A row that permissions stop
+granting arrives as `removed`; the subscription goes on. After the app
+closes, each open subscription gets one last error, `Closed`
 (kind `"closed"` on the C ABI). `jazz_unsubscribe` returns only once no
 callback is running, so the host may free `ctx` right after. Called from
 inside the callback, it doesn't wait. A subscription may be freed before or

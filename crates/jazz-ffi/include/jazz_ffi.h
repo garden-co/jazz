@@ -29,8 +29,9 @@ typedef struct JazzSubscription JazzSubscription;
 /*
  * Called on a thread of the subscription's own. kind is "delta" (json is
  * the delta JSON; the first has "reset": true and the full result) or
- * "error" (json is the error JSON, e.g. kind "closed" after jazz_close;
- * no callback follows). Both strings are
+ * "error" (json is the error JSON; no callback follows). Kind "closed"
+ * means this subscription ended: its app closed, or its stream ended for
+ * another reason (the client stopping, the server ending the query). Both strings are
  * valid only during the call. ctx is passed through unchanged and must be
  * usable from that thread.
  */
@@ -54,10 +55,22 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *   "update"  {"table": T, "id": I, "patch": P} -> null
  *   "delete"  {"table": T, "id": I}           -> null
  *   "account" {}                              -> "<account uuid>" | null
+ *   "txBegin"    {"serializable"?: true}      -> {"tx": "<id>"}
+ *   "txCommit"   {"tx", "tier"?}              -> null
+ *   "txRollback" {"tx"}                       -> null
+ * Reads (all, one) and writes (insert, update, delete) also take "tx": run
+ * inside that open transaction (its reads see its own writes), and "tier":
+ * for reads "local" | "localFirst" (default) | "remote"; for writes and
+ * txCommit "local" | "global", the durability to wait for. A write inside a
+ * transaction takes no tier: give it to txCommit. Use a transaction from
+ * one thread at a time.
  */
 char *jazz_call(JazzHandle *handle, const char *method, const char *args_json, char **err);
 
-/* Subscribes to query_json; cb gets its deltas until jazz_unsubscribe. */
+/*
+ * Subscribes to query_json (a query, or {"query": Q, "tier"?}); cb gets its
+ * deltas until jazz_unsubscribe.
+ */
 JazzSubscription *jazz_subscribe(JazzHandle *handle, const char *query_json, JazzCallback cb,
                                  void *ctx, char **err);
 

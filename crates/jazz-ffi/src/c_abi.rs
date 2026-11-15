@@ -14,7 +14,7 @@ use std::ptr;
 use serde_json::{Value as Json, json};
 
 use crate::JazzError;
-use crate::core::{Core, Event, SubscriptionCore};
+use crate::core::{Core, Event, Opts, SubscriptionCore, parse_tx, write_tier};
 use crate::error::{FfiError, refused};
 
 /// An open app (opaque to C).
@@ -106,11 +106,13 @@ pub unsafe extern "C" fn jazz_open(
     })
 }
 
-/// Calls `method` (`all`, `one`, `insert`, `update`, `delete`, `account`)
-/// with its arguments as JSON: `{query}`, `{query}`, `{table,row}`,
-/// `{table,id,patch}`, `{table,id}`, `{}`. Returns its result as JSON:
-/// rows, a row or `null`, the inserted row, `null`, `null`, the account id
-/// or `null`.
+/// Calls `method` (`all`, `one`, `insert`, `update`, `delete`, `account`,
+/// `txBegin`, `txCommit`, `txRollback`) with its arguments as JSON:
+/// `{query}`, `{query}`, `{table,row}`, `{table,id,patch}`, `{table,id}`,
+/// `{}`, `{serializable?}`, `{tx,tier?}`, `{tx}`. Reads and writes also take
+/// `"tx"` (run inside that transaction) and `"tier"`. Returns its result as
+/// JSON: rows, a row or `null`, the inserted row, `null`, `null`, the
+/// account id or `null`, `{tx}`, `null`, `null`.
 ///
 /// # Safety
 /// `handle` comes from `jazz_open` and is not closed; the strings are
@@ -146,22 +148,50 @@ pub unsafe extern "C" fn jazz_call(
                 .map(str::to_owned)
                 .ok_or_else(|| refused(format!("args_json.{name} must be a string")))
         };
+        let opts = |read: bool| Opts::parse(args.get("tx"), args.get("tier"), read);
         let result = match method {
-            "all" => core.all(&field("query")?.to_string())?,
+            "all" => core.all(&field("query")?.to_string(), &opts(true)?)?,
             "one" => core
-                .one(&field("query")?.to_string())?
+                .one(&field("query")?.to_string(), &opts(true)?)?
                 .unwrap_or_else(|| "null".into()),
-            "insert" => core.insert(&string("table")?, &field("row")?.to_string())?,
+            "insert" => {
+                core.insert(&string("table")?, &field("row")?.to_string(), &opts(false)?)?
+            }
             "update" => {
                 core.update(
                     &string("table")?,
                     &string("id")?,
                     &field("patch")?.to_string(),
+                    &opts(false)?,
                 )?;
                 "null".into()
             }
             "delete" => {
-                core.delete(&string("table")?, &string("id")?)?;
+                core.delete(&string("table")?, &string("id")?, &opts(false)?)?;
+                "null".into()
+            }
+            "txBegin" => {
+                let serializable = match args.get("serializable") {
+                    None | Some(Json::Null) => true,
+                    Some(Json::Bool(serializable)) => *serializable,
+                    Some(_) => return Err(refused("args_json.serializable must be a boolean")),
+                };
+                json!({ "tx": core.tx_begin(serializable)? }).to_string()
+            }
+            "txCommit" => {
+                let tier = match args.get("tier").filter(|t| !t.is_null()) {
+                    Some(tier) => {
+                        Some(write_tier(tier.as_str().ok_or_else(|| {
+                            refused("args_json.tier must be a string")
+                        })?)?)
+                    }
+                    None => None,
+                };
+                core.tx_commit(parse_tx(&string("tx")?)?, tier)?;
+                "null".into()
+            }
+            "txRollback" => {
+                core.tx_rollback(parse_tx(&string("tx")?)?)?;
                 "null".into()
             }
             "account" => Json::from(core.account()?).to_string(),
@@ -194,10 +224,20 @@ pub unsafe extern "C" fn jazz_subscribe(
     guarded(err, ptr::null_mut(), || {
         // SAFETY: per the function's contract.
         let (core, query) = unsafe { (handle(handle_ptr)?, text(query_json, "query_json")?) };
+        // `{ "query": Q, "tier"? }`, or the query itself.
+        let parsed = crate::convert::parse(query, "query_json")?;
+        let (query, opts) = match parsed.get("query") {
+            Some(inner) if parsed.get("table").is_none() => (
+                inner.to_string(),
+                Opts::parse(None, parsed.get("tier"), true)?,
+            ),
+            _ => (query.to_owned(), Opts::default()),
+        };
         let cb = cb.ok_or_else(|| refused("the callback is NULL"))?;
         let ctx = Context(ctx);
         let subscription = core.subscribe(
-            query,
+            &query,
+            &opts,
             Box::new(move |event| {
                 let ctx = &ctx;
                 let (kind, json) = match event {
