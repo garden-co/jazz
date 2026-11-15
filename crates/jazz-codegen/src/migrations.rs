@@ -11,9 +11,9 @@
 use jazz::tools::deployment::artifact::{self, json::Json};
 use jazz::tools::public_schema::{ColumnDescriptor, ColumnType, Schema, SchemaHash, TableSchema};
 
-use crate::CodegenError;
 use crate::bindings;
 use crate::model::App;
+use crate::{CodegenError, Lang};
 
 /// What [`create`] did.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,10 +26,11 @@ pub struct Created {
     pub todos: Vec<String>,
 }
 
-/// Write the migration from the version `bindings` (the committed module)
-/// were generated from to the file's current `tables`. `name` is recorded
-/// as the migration's `name`.
+/// Write the migration from the version `bindings` (the committed file in
+/// `lang`) were generated from to the file's current `tables`. `name` is
+/// recorded as the migration's `name`.
 pub fn create(
+    lang: Lang,
     app_json: &[u8],
     bindings: Option<&str>,
     name: &str,
@@ -41,12 +42,12 @@ pub fn create(
         changed: false,
         todos: Vec::new(),
     };
-    let app = App::load(app_json).map_err(|error| CodegenError::from_artifact(error))?;
+    let app = App::load(app_json).map_err(CodegenError::from_artifact)?;
     let Some(bindings) = bindings else {
         // No bindings: the app has no earlier version yet.
         return Ok(unchanged());
     };
-    let recorded = bindings::read(bindings)?;
+    let recorded = bindings::read(lang, bindings)?;
     if app
         .compiled
         .schemas
@@ -397,30 +398,16 @@ fn table_steps(table: &str, from: &TableSchema, to: &TableSchema) -> Result<Json
         })
         .collect();
     if steps.is_empty() && notes.is_empty() {
-        let reference_only = from.columns.columns.len() == to.columns.columns.len()
-            && to.columns.columns.iter().all(|column| {
-                from.columns.columns.iter().any(|source| {
-                    source.name == column.name
-                        && source.column_type == column.column_type
-                        && source.nullable == column.nullable
-                        && source.merge_strategy == column.merge_strategy
-                        && (source.references.is_none() || source.references == column.references)
-                })
-            })
-            && to.columns.columns.iter().any(|c| c.references.is_some());
-        if reference_only {
-            return Ok(Json::object(vec![(
-                "$comment",
-                Json::string(
-                    "Adds reference metadata with an identity lens; existing UUID values are kept.",
-                ),
-            )]));
-        }
-        return Ok(todo(format!(
-            "no migration step was inferred for the change to table `{table}`. If its rows pass \
-             unchanged, replace this with {{}}; otherwise describe the change with add, drop and \
-             renameFrom steps."
-        )));
+        // No column is added, dropped, retyped or made optional: every row
+        // passes unchanged, so the table's lens is the identity. Say what
+        // changed.
+        return Ok(Json::object(vec![(
+            "$comment",
+            Json::string(format!(
+                "Rows pass unchanged: only {} changed.",
+                unchanged_rows_changes(from, to).join(", ")
+            )),
+        )]));
     }
     let mut out = Vec::new();
     if !notes.is_empty() {
@@ -428,6 +415,55 @@ fn table_steps(table: &str, from: &TableSchema, to: &TableSchema) -> Result<Json
     }
     out.extend(steps);
     Ok(Json::Object(out))
+}
+
+/// What changed in a table whose rows pass unchanged.
+fn unchanged_rows_changes(from: &TableSchema, to: &TableSchema) -> Vec<&'static str> {
+    let mut changes = Vec::new();
+    let column = |table: &TableSchema, name: &jazz::tools::public_schema::ColumnName| {
+        table
+            .columns
+            .columns
+            .iter()
+            .find(|c| &c.name == name)
+            .cloned()
+    };
+    let pairs: Vec<(ColumnDescriptor, ColumnDescriptor)> = to
+        .columns
+        .columns
+        .iter()
+        .filter_map(|c| column(from, &c.name).map(|s| (s, c.clone())))
+        .collect();
+    if from.indexed_columns != to.indexed_columns || from.composite_indexes != to.composite_indexes
+    {
+        changes.push("indexes");
+    }
+    if from.history != to.history {
+        changes.push("history retention");
+    }
+    if from.branch_by != to.branch_by {
+        changes.push("branchBy");
+    }
+    if pairs
+        .iter()
+        .any(|(a, b)| a.merge_strategy != b.merge_strategy)
+    {
+        changes.push("merge strategies");
+    }
+    if pairs.iter().any(|(a, b)| a.default != b.default) {
+        changes.push("defaults");
+    }
+    if pairs.iter().any(|(a, b)| a.references != b.references) {
+        changes.push("references");
+    }
+    let order = |t: &TableSchema| t.columns.columns.iter().map(|c| c.name).collect::<Vec<_>>();
+    if order(from) != order(to) {
+        changes.push("the column order");
+    }
+    if changes.is_empty() {
+        changes.push("the table's options");
+    }
+    changes
 }
 
 /// The fields of the migration from `from` to `to`, after `name` and

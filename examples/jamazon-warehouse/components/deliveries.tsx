@@ -14,7 +14,7 @@ import {
 import { Text } from "@astryxdesign/core/Text";
 import { useAll, useDb } from "jazz-tools/react";
 import { useState } from "react";
-import type { District } from "@/schema";
+import type { District } from "@/jazz.generated";
 import { formatCents, formatCount } from "@/src/format";
 import { consoleQueries, deliverBatch, PAGE_SIZE, type DeliveredOrder } from "@/src/warehouse";
 import { useScope } from "./console";

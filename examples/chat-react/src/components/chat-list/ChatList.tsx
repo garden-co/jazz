@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { navigate } from "@/hooks/useRouter";
 import { fireAndReport, waitForWrite } from "@/lib/db-write";
-import { app } from "../../../schema.js";
+import { app } from "../../../jazz.generated.js";
 import { DurabilityTier } from "jazz-tools";
 
 export const ChatList = () => {

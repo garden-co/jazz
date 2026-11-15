@@ -47,7 +47,7 @@ case-sensitive.
 | viewer | read the label                                                     |
 
 `src/roles.ts` describes the roles for the UI, which hides or disables what a
-role can't do. `permissions.ts` enforces the same rules on the Jazz server, so a
+role can't do. `jazz.permissions.json` enforces the same rules on the Jazz server, so a
 write sent anyway is refused. `tests/roles.server.test.ts` proves it against a
 real local server: no self-promotion, no admin inserts, no cross-tenant team or
 catalogue references, viewers can't write, editors can't manage teams or
@@ -58,7 +58,7 @@ read its own profile and the profiles of members of its labels, nothing more.
 To add a member, an admin enters their email. `POST /api/members` uses the
 backend only to look the email up in `personEmails` (written only by the
 bootstrap route from the verified sign-in, and unreadable by browsers). It then
-writes the membership as the caller, via `forReqUser()`, so `permissions.ts`
+writes the membership as the caller, via `forReqUser()`, so `jazz.permissions.json`
 decides: only admins add members, only as editors or viewers. The route
 answers non-admins with "forbidden" before looking anything up, so it can't be
 used to probe emails or membership. The write is a serializable

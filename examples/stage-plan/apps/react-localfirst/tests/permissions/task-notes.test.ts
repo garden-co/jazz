@@ -1,7 +1,7 @@
 import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { app } from "../../schema.js";
-import permissions from "../../permissions.js";
+import { app } from "../../jazz.generated.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
 import { updateTaskNotes } from "../../src/model/actions.js";
 
 const chiefAccount = "00000000-0000-4000-8000-00000000c41f";

@@ -537,6 +537,15 @@ impl Parser<'_> {
         self.tokens.get(self.at + offset).map(|t| &t.tok)
     }
 
+    /// Whether a `,` continues a query's list (`select`, `order by`) rather
+    /// than ending the query: inside `recursive(…)` and `union(…)` a query
+    /// is followed by `, <field>: …`.
+    fn list_continues(&self) -> bool {
+        self.is_tok(&Tok::Comma)
+            && !(matches!(self.peek_at(1), Some(Tok::Ident(_)))
+                && self.peek_at(2) == Some(&Tok::Colon))
+    }
+
     fn here(&self) -> Span {
         self.peek().map_or((self.end, self.end), |t| t.span)
     }
@@ -1006,6 +1015,7 @@ impl Parser<'_> {
         let known = matches!(
             parts.as_slice(),
             ["user"]
+                | ["identity"]
                 | ["identity", "subject"]
                 | ["identity", "issuer"]
                 | ["authMode"]
@@ -1021,7 +1031,7 @@ impl Parser<'_> {
         if !known {
             return Err(ExprError::new(
                 (start, end),
-                "a session value is `session.user` or `session.claims.<name>` (or `session.identity.subject`, `session.identity.issuer`, `session.authMode`)",
+                "a session value is `session.user` or `session.claims.<name>` (or `session.identity`, `session.identity.subject`, `session.identity.issuer`, `session.authMode`)",
             )
             .example("session.claims.role = 'admin'"));
         }
@@ -1359,7 +1369,7 @@ impl Parser<'_> {
                         self.expect_word("as")?;
                         let (alias, _) = self.name("a name after `as`")?;
                         columns.push(RelationProjectColumn { alias, expr });
-                        if self.is_tok(&Tok::Comma) {
+                        if self.list_continues() {
                             self.at += 1;
                         } else {
                             break;
@@ -1397,7 +1407,7 @@ impl Parser<'_> {
                             OrderDirection::Asc
                         };
                         terms.push(RelationOrderBy { column, direction });
-                        if self.is_tok(&Tok::Comma) {
+                        if self.list_continues() {
                             self.at += 1;
                         } else {
                             break;

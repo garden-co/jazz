@@ -1,95 +1,95 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface Canvas {
+export type Canvas = {
   readonly id: string;
   chatId: string;
-}
+};
 
-export interface CanvasInsert {
+export type CanvasInsert = {
   chatId: string;
-}
+};
 
-export interface ChatMember {
+export type ChatMember = {
   readonly id: string;
   chatId: string;
   userId: string;
   joinCode: string | null;
-}
+};
 
-export interface ChatMemberInsert {
+export type ChatMemberInsert = {
   chatId: string;
   userId: string;
   joinCode?: string | null;
-}
+};
 
-export interface Chat {
+export type Chat = {
   readonly id: string;
   name: string | null;
   isPublic: boolean;
   joinCode: string | null;
-}
+};
 
-export interface ChatInsert {
+export type ChatInsert = {
   name?: string | null;
   isPublic: boolean;
   joinCode?: string | null;
-}
+};
 
-export interface Message {
+export type Message = {
   readonly id: string;
   chatId: string;
   text: string;
   senderId: string;
-}
+};
 
-export interface MessageInsert {
+export type MessageInsert = {
   chatId: string;
   text: string;
   senderId: string;
-}
+};
 
-export interface Profile {
+export type Profile = {
   readonly id: string;
   userId: string;
   name: string;
   avatar: string | null;
-}
+};
 
-export interface ProfileInsert {
+export type ProfileInsert = {
   userId: string;
   name: string;
   avatar?: string | null;
-}
+};
 
-export interface Reaction {
+export type Reaction = {
   readonly id: string;
   messageId: string;
   userId: string;
   emoji: string;
-}
+};
 
-export interface ReactionInsert {
+export type ReactionInsert = {
   messageId: string;
   userId: string;
   emoji: string;
-}
+};
 
-export interface Stroke {
+export type Stroke = {
   readonly id: string;
   canvasId: string;
   color: string;
   width: number;
   pointsJson: string;
-}
+};
 
-export interface StrokeInsert {
+export type StrokeInsert = {
   canvasId: string;
   color: string;
   width: number;
   pointsJson: string;
-}
+};
 
 interface Types extends AppTypes {
   canvases: {

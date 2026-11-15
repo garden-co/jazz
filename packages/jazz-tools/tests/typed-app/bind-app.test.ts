@@ -61,3 +61,12 @@ describe("bindApp", () => {
     expect(() => testPermissions(app, { tables: { nope: { read: "true" } } })).toThrow();
   });
 });
+
+import { columnTypeSignature } from "../../src/runtime/schema-metadata.js";
+describe("column type signatures", () => {
+  it("ignore key order, as the engine's serde form and the TS form differ in it", () => {
+    expect(columnTypeSignature({ element: { type: "Text" }, type: "Array" } as never)).toBe(
+      columnTypeSignature({ type: "Array", element: { type: "Text" } }),
+    );
+  });
+});

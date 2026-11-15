@@ -24,8 +24,8 @@ import {
   startJazzApp,
   type JazzServerInfo,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
-import { app } from "../../schema.js";
-import permissions from "../../permissions.js";
+import { app } from "../../jazz.generated.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "../../constants.js";
 
 /** A test user's client: its Db, and how to close it. */
@@ -41,7 +41,7 @@ type Role = "admin" | "member";
 // it. Its `authenticate` names each test user with their role claim.
 beforeAll(async () => {
   const core = await getJazzServerInfo(__APP_ID__);
-  await deploy({ ...core, schema: app, permissions });
+  await deploy({ ...core, app, permissions });
   server = await startJazzApp(core, { schema: app, permissions });
 });
 

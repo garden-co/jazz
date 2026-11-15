@@ -1,7 +1,7 @@
 <!-- #region reading-one-vue -->
 <script setup lang="ts">
 import { useOne } from "jazz-tools/vue";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 const props = defineProps<{ id: string }>();
 

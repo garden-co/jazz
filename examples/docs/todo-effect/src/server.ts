@@ -4,8 +4,8 @@ import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { sqlite } from "jazz-tools/backend";
 import { Jazz, JazzBackend } from "jazz-tools/effect/backend";
-import { app as schemaApp } from "../schema.js";
-import permissions from "../permissions.js";
+import { app as schemaApp } from "../jazz.generated.js";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 
 // Your own auth decides who a request is (a session cookie, a header).
 // `sessionExpiresAt`: when that session expires, in Unix seconds.

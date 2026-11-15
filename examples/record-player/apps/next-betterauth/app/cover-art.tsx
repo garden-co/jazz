@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useAll } from "jazz-tools/react";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 
 const PLACEHOLDER_HUES = [
   "blue",

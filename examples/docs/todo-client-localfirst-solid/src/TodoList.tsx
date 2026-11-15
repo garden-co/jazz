@@ -1,6 +1,6 @@
 import { For, createSignal } from "solid-js";
 import { useAll } from "jazz-tools/solid";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 export function TodoList() {
   const todos = useAll(() => ({ query: app.todos }));

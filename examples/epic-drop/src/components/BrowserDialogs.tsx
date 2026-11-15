@@ -1,7 +1,7 @@
 import { useDb } from "jazz-tools/react";
 import { AlertDialog } from "@astryxdesign/core/AlertDialog";
 import { useToast } from "@astryxdesign/core/Toast";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import { deleteFolderTree, type Folder, type FolderIndex } from "../folders.js";
 import type { Invite } from "../sharing.js";
 import { JoinDialog } from "./JoinDialog.js";

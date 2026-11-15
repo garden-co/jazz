@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { PermissionAdvice } from "jazz-tools";
 import { createPolicyTestApp, type PolicyTestApp, type TestDb } from "jazz-tools/testing";
-import { app, type BlockKind, type WorkspaceRole } from "../../schema.js";
-import permissions from "../../permissions.js";
+import { app, type BlockKind, type MemberRole as WorkspaceRole } from "../../jazz.generated.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
 
 /**
  * Policy receipts for BandBook. Every assertion goes through the serving

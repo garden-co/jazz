@@ -18,8 +18,8 @@ import {
   startJazzApp,
   type JazzServerInfo,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server";
-import permissions from "../../permissions";
-import { app } from "../../schema";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
+import { app } from "../../jazz.generated";
 import { memoryAccountStore } from "../../../../../testing/accounts";
 
 const cleanup = new TestCleanup();

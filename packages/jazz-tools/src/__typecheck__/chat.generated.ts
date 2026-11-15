@@ -1,4 +1,4 @@
-// Hand-written in the shape `jazz-tools validate` generates, for the type tests.
+// Hand-written in the shape `jazz-tools generate` generates, for the type tests.
 import { bindApp, type AppTypes, type ComputedImpl, type TransformImpl } from "../typed-app.js";
 
 export interface Chat {

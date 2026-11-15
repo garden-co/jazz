@@ -87,14 +87,12 @@ export interface TestJazz {
    * the core (with its migration), then restart the app's Jazz on it. Every
    * origin keeps its port, so clients reconnect where they were.
    */
-  redeploy(
-    next: {
-      /** The next version: its history and migrations ship with it. */
-      app: SchemaSourceInput;
-      /** Its `jazz.permissions.json`. */
-      permissions: AppPermissionsFile;
-    },
-  ): Promise<DeployResult>;
+  redeploy(next: {
+    /** The next version: its history and migrations ship with it. */
+    app: SchemaSourceInput;
+    /** Its `jazz.permissions.json`. */
+    permissions: AppPermissionsFile;
+  }): Promise<DeployResult>;
   /** Stop the app's Jazz, its origins and (if this started it) the core. */
   stop(): Promise<void>;
 }

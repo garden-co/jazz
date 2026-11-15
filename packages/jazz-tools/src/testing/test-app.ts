@@ -1,7 +1,7 @@
 /**
  * Apps defined inline, for tests: a `jazz.app.json` (and its
  * `jazz.permissions.json`) written as an object in the test, compiled by
- * Jazz's Rust loader exactly as `jazz-tools validate` compiles the files
+ * Jazz's Rust loader exactly as `jazz-tools generate` compiles the files
  * into `jazz.generated.ts`. Node only: it loads jazz-napi synchronously, so
  * a test can define its app at the top level.
  *
@@ -17,13 +17,7 @@
  */
 import { createRequire } from "node:module";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
-import {
-  bindApp,
-  boundApp,
-  type App,
-  type AppTypes,
-  type BindAppOptions,
-} from "../typed-app.js";
+import { bindApp, boundApp, type App, type AppTypes, type BindAppOptions } from "../typed-app.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 
 /** A `jazz.app.json`, as an object; `format` defaults to 1. */
