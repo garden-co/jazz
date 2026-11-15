@@ -200,4 +200,30 @@ class StagePlanTest {
             kotlin.test.assertTrue(jazz.one(Tasks.where(Tasks.id eq a.id))!!.status != TaskStatus.Blocked)
         }
     }
+
+    @Test
+    fun text_edits_and_permission_advice(): Unit = runBlocking {
+        open("user-6").use { jazz ->
+            val me = jazz.account()!!
+            val show = showNamed(jazz, "Premiere")
+            val task = addTask(jazz, show, "Rig")
+            jazz.update(Tasks, task.id, tier = tools.jazz.WriteTier.Global) { notes("Lights") }
+            val read = jazz.one(Tasks.where(Tasks.id eq task.id))!!
+            assertEquals("Lights\nBring gaffer tape.", DocsSnippets.editText(jazz, read))
+            // An edit of an older value keeps what changed since: both edits survive.
+            jazz.editText(Tasks, task.id, Tasks.notes, editedFrom = "Lights", text = "Stage lights")
+            val merged = jazz.one(Tasks.where(Tasks.id eq task.id))!!.notes!!
+            kotlin.test.assertTrue(merged.contains("Stage lights") && merged.contains("gaffer tape"), merged)
+            // Partial edits: a splice of the title.
+            jazz.edit(Tasks, task.id) { splice(Tasks.title, tools.jazz.SpliceUnits.Utf16, 0, 3, tools.jazz.Splice.text(3, 0, "ging")) }
+            assertEquals("Rigging", jazz.one(Tasks.where(Tasks.id eq task.id))!!.title)
+            // Permission advice: Ada isn't in the show's crew, so assigning her is refused.
+            val ada = jazz.insert(CrewTable, NewCrew(account = me, name = "Ada"), tier = tools.jazz.WriteTier.Global)
+            val (rename, assign, delete, add) = DocsSnippets.permissionAdvice(jazz, read, ada.id)
+            assertEquals(true, rename)
+            assertEquals(false, assign)
+            assertEquals(true, add)
+            kotlin.test.assertNotNull(delete)
+        }
+    }
 }

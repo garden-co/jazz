@@ -41,6 +41,17 @@ public interface Native : AutoCloseable {
         onError: (kind: String, message: String) -> Unit,
     ): () -> Unit = subscribe(queryJson, onDelta, onError)
 
+    /** Sets text-merge column [column] to [text], an edit of [editedFrom]. */
+    public fun editText(table: String, id: String, column: String, editedFrom: String, text: String): Unit =
+        throw JazzException.NotSupported("text edits")
+
+    /** Partial edits ([editsJson]: text, splice and jsonSet edits), with an optional patch, in one write. */
+    public fun edit(table: String, id: String, patchJson: String?, editsJson: String): Unit =
+        throw JazzException.NotSupported("partial edits")
+
+    /** The server's advice on whether `op` would be allowed: `true`, `false` or `null` (unknown). */
+    public fun can(table: String, op: String, argsJson: String): Boolean? = null
+
     /** Returns once every write so far reached [tier]. */
     public fun waitForSync(tier: String) {}
 
@@ -60,6 +71,10 @@ public interface NativeTransaction {
     public fun insert(table: String, rowJson: String): String
     public fun update(table: String, id: String, patchJson: String)
     public fun delete(table: String, id: String)
+    public fun editText(table: String, id: String, column: String, editedFrom: String, text: String): Unit =
+        throw JazzException.NotSupported("text edits")
+    public fun edit(table: String, id: String, patchJson: String?, editsJson: String): Unit =
+        throw JazzException.NotSupported("partial edits")
     public fun commit(tier: String?)
     public fun rollback()
 }

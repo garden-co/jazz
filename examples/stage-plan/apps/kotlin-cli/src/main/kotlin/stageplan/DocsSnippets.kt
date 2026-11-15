@@ -266,4 +266,25 @@ object DocsSnippets {
         // #endregion writing-mutation-errors-kotlin
         return result
     }
+
+    suspend fun editText(jazz: Jazz, task: Task): String? {
+        // #region writing-text-edit-kotlin
+        // tasks.notes is "merge": "text": write it as an edit of what you read, and
+        // concurrent edits by others merge instead of one overwriting the other.
+        val before: String = task.notes ?: ""
+        jazz.editText(Tasks, task.id, Tasks.notes, editedFrom = before, text = "$before\nBring gaffer tape.")
+        // #endregion writing-text-edit-kotlin
+        return jazz.one(Tasks.where(Tasks.id eq task.id))?.notes
+    }
+
+    suspend fun permissionAdvice(jazz: Jazz, task: Task, crewId: String): List<Boolean?> {
+        // #region reading-permission-advice-kotlin
+        // Ask before offering an action: true, false, or null when no server can say.
+        val canRename = jazz.canUpdate(Tasks, task.id) { title("Renamed") }
+        val canAssign = jazz.canUpdate(Tasks, task.id) { assigneeId(crewId) }
+        val canDelete = jazz.canDelete(Tasks, task.id)
+        val canAdd = jazz.canInsert(Tasks, NewTask(showId = task.showId, title = "New", status = TaskStatus.Todo, rank = 1.0))
+        // #endregion reading-permission-advice-kotlin
+        return listOf(canRename, canAssign, canDelete, canAdd)
+    }
 }

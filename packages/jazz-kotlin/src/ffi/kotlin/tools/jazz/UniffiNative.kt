@@ -68,6 +68,11 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
         live { handle.updateAt(table, id, patchJson, tier) }
     override fun deleteAt(table: String, id: String, tier: String): Unit = live { handle.deleteAt(table, id, tier) }
     override fun waitForSync(tier: String): Unit = live { handle.waitForSync(tier) }
+    override fun editText(table: String, id: String, column: String, editedFrom: String, text: String): Unit =
+        live { handle.editText(table, id, column, editedFrom, text) }
+    override fun edit(table: String, id: String, patchJson: String?, editsJson: String): Unit =
+        live { handle.edit(table, id, patchJson, editsJson) }
+    override fun can(table: String, op: String, argsJson: String): Boolean? = live { handle.can(table, op, argsJson) }
 
     override fun subscribeAt(queryJson: String, tier: String, onDelta: (String) -> Unit, onError: (String, String) -> Unit): () -> Unit =
         listen(onDelta, onError) { handle.subscribeAt(queryJson, tier, it) }
@@ -80,6 +85,10 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
             override fun insert(table: String, rowJson: String): String = call { tx.insert(table, rowJson) }
             override fun update(table: String, id: String, patchJson: String): Unit = call { tx.update(table, id, patchJson) }
             override fun delete(table: String, id: String): Unit = call { tx.delete(table, id) }
+            override fun editText(table: String, id: String, column: String, editedFrom: String, text: String): Unit =
+                call { tx.editText(table, id, column, editedFrom, text) }
+            override fun edit(table: String, id: String, patchJson: String?, editsJson: String): Unit =
+                call { tx.edit(table, id, patchJson, editsJson) }
             override fun commit(tier: String?): Unit = try { call { tx.commit(tier) } } finally { tx.destroy() }
             override fun rollback(): Unit = try { call { tx.rollback() } } finally { tx.destroy() }
         }

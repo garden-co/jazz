@@ -122,6 +122,47 @@ public class Jazz internal constructor(
         if (tier == null) native.delete(table.tableName, id) else native.deleteAt(table.tableName, id, tier.wire)
     }
 
+    /**
+     * Sets text-merge column [column] (`"merge": "text"`, like StagePlan's
+     * `tasks.notes`) of row [id] to [text], an edit of [editedFrom], the
+     * value you last read: what others changed since is kept, merged.
+     */
+    public suspend fun editText(table: Table<*, *, *>, id: String, column: Column<out String?>, editedFrom: String, text: String): Unit =
+        io { native.editText(table.tableName, id, column.name, editedFrom, text) }
+
+    /**
+     * Partial edits of row [id], with an optional [patch] of whole columns,
+     * in one write: `jazz.edit(Tasks, id) { text(Tasks.notes, old, new) }`.
+     */
+    public suspend fun <P : Patch> edit(
+        table: Table<*, *, P>,
+        id: String,
+        patch: (P.() -> Unit)? = null,
+        edits: Edits.() -> Unit,
+    ): Unit = io {
+        val patchJson = patch?.let { patchJson(table, it) }
+        native.edit(table.tableName, id, patchJson, Edits().apply(edits).toJson())
+    }
+
+    /** Whether this user may read row [id] of [table]: the server's advice, or `null` when it can't say. */
+    public suspend fun canRead(table: Table<*, *, *>, id: String): Boolean? = io { native.can(table.tableName, "read", idArgs(id)) }
+
+    /** Whether this user may insert [row] into [table]; `null` when the server can't say. */
+    public suspend fun <Row : Any, Insert : Any, P : Patch> canInsert(table: Table<Row, Insert, P>, row: Insert): Boolean? = io {
+        native.can(table.tableName, "insert", "{\"row\":${insertJson(table, row)}}")
+    }
+
+    /** Whether this user may make [patch] (or any change, without one) to row [id] of [table]. */
+    public suspend fun <P : Patch> canUpdate(table: Table<*, *, P>, id: String, patch: (P.() -> Unit)? = null): Boolean? = io {
+        val row = patch?.let { ",\"row\":${patchJson(table, it)}" } ?: ""
+        native.can(table.tableName, "update", "{\"id\":${JsonPrimitive(id)}$row}")
+    }
+
+    /** Whether this user may delete row [id] of [table]. */
+    public suspend fun canDelete(table: Table<*, *, *>, id: String): Boolean? = io { native.can(table.tableName, "delete", idArgs(id)) }
+
+    private fun idArgs(id: String): String = "{\"id\":${JsonPrimitive(id)}}"
+
     /** Returns once every write made so far reached [tier]; throws if the server refused one. */
     public suspend fun waitForSync(tier: WriteTier = WriteTier.Global): Unit = io { native.waitForSync(tier.wire) }
 
@@ -186,6 +227,18 @@ public class Jazz internal constructor(
         ): Unit = run { tx.update(table.tableName, id, patchJson(table, patch)) }
 
         public suspend fun delete(table: Table<*, *, *>, id: String): Unit = run { tx.delete(table.tableName, id) }
+
+        /** [Jazz.editText], in the transaction. */
+        public suspend fun editText(table: Table<*, *, *>, id: String, column: Column<out String?>, editedFrom: String, text: String): Unit =
+            run { tx.editText(table.tableName, id, column.name, editedFrom, text) }
+
+        /** [Jazz.edit], in the transaction. */
+        public suspend fun <P : Patch> edit(
+            table: Table<*, *, P>,
+            id: String,
+            patch: (P.() -> Unit)? = null,
+            edits: Edits.() -> Unit,
+        ): Unit = run { tx.edit(table.tableName, id, patch?.let { patchJson(table, it) }, Edits().apply(edits).toJson()) }
     }
 
     private fun <Row : Any> decodeAll(query: Query<Row>, json: String): List<Row> =
