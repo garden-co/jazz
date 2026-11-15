@@ -2,7 +2,8 @@
 
 The Kotlin/JVM runtime for Jazz apps: `suspend` calls and `Flow` subscriptions over
 [`jazz-ffi`](../../crates/jazz-ffi) (UniFFI, through JNA), for the typed bindings
-`jazz-tools generate` writes to `src/main/kotlin/JazzApp.kt` beside a `build.gradle.kts`.
+jazz-codegen's Kotlin back end writes to `src/main/kotlin/JazzApp.kt` beside a `build.gradle.kts`
+(through `jazz-tools generate` once Kotlin is switched on in the CLI).
 
 ```kotlin
 val jazz = jazzapp.open(JazzConfig(appId = …, serverUrl = …, permissions = …, backendSecret = …, adminSecret = …, sessionSubject = "user-1"))

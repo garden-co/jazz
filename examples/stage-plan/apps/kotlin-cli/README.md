@@ -2,7 +2,10 @@
 
 StagePlan as a Kotlin/JVM command-line backend over `jazz-kotlin`. `jazz.app.json` and
 `jazz.permissions.json` are byte-identical copies of `../react-localfirst`'s (CI checks it; never
-edit them here). `src/main/kotlin/JazzApp.kt` is what `jazz-tools generate` writes for them.
+edit them here). `src/main/kotlin/JazzApp.kt` is what jazz-codegen's Kotlin back end writes for them. Kotlin is
+switched off in the CLI for now, so regenerate it with
+`JAZZ_UPDATE_FIXTURES=1 cargo test -p jazz-codegen --test golden the_stage_plan_kotlin_cli` (a
+golden test checks it in CI); once Kotlin is on, `jazz-tools generate`.
 
 As the user `JAZZ_USER`, it creates a show (with them as its chief) if there is none of that
 name, lists its tasks by `rank`, adds a task, and moves a task between stages:

@@ -18,6 +18,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.SerializationException
 
@@ -212,11 +213,14 @@ class JazzTest {
         fake.subscribeGate = gate
         val jazz = open(fake)
         val job = launch(Dispatchers.Default) { jazz.subscribe(Items.query()).collect {} }
-        // The collector is cancelled while the native subscribe is still running.
-        withTimeout(5_000) { while (fake.subs.isEmpty() && fake.errorCallbacks.isEmpty()) { delay(5); if (gate.count == 1L) break } }
+        // Cancel only once the native subscribe is running, then let it return:
+        // the subscription it returns must still be cancelled.
+        withContext(Dispatchers.IO) { check(fake.subscribeEntered.await(5, java.util.concurrent.TimeUnit.SECONDS)) }
         job.cancel()
         gate.countDown()
         job.join()
+        // The native subscription was made (after the cancel) and then cancelled.
+        assertTrue(fake.subscribeEntered.count == 0L)
         withTimeout(5_000) { while (fake.subs.isNotEmpty()) delay(10) }
     }
 }

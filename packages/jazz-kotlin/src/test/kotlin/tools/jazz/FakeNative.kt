@@ -92,6 +92,7 @@ class FakeNative : Native {
     override fun subscribe(queryJson: String, onDelta: (String) -> Unit, onError: (String) -> Unit): () -> Unit {
         val q = jazzJson.parseToJsonElement(queryJson).jsonObject
         if (closed) throw JazzException.Closed()
+        subscribeEntered.countDown()
         subscribeGate?.await()
         val entry = q to onDelta
         subs += entry
@@ -103,6 +104,9 @@ class FakeNative : Native {
 
     /** Set to make subscribe wait (on another thread) until it opens. */
     var subscribeGate: java.util.concurrent.CountDownLatch? = null
+
+    /** Counted down when a subscribe call has entered (before it waits on [subscribeGate]). */
+    val subscribeEntered = java.util.concurrent.CountDownLatch(1)
     val errorCallbacks = java.util.Collections.synchronizedList(ArrayList<(String) -> Unit>())
 
     override fun close() {

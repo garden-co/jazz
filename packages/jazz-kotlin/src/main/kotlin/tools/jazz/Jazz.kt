@@ -145,8 +145,9 @@ public class Jazz internal constructor(private val native: Native) : AutoCloseab
     )
 
     private fun raw(query: Query<*>): Flow<RawDelta> = callbackFlow {
-        // Kept as soon as the native core returns it: a cancel while
-        // subscribing (withContext then throws) still unsubscribes.
+        // Assigned inside withContext, as soon as the native core returns it:
+        // a cancel while subscribing makes withContext throw on return, and
+        // the finally still unsubscribes.
         var cancel: (() -> Unit)? = null
         try {
             withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {

@@ -1,5 +1,8 @@
-// StagePlan, as a Kotlin/JVM CLI over jazz-kotlin. `jazz-tools generate`
-// sees this file beside jazz.app.json and writes src/main/kotlin/JazzApp.kt.
+// StagePlan, as a Kotlin/JVM CLI over jazz-kotlin. src/main/kotlin/JazzApp.kt is what
+// jazz-codegen's Kotlin back end writes for jazz.app.json. While Kotlin is switched off in the
+// CLI, regenerate it with
+//   JAZZ_UPDATE_FIXTURES=1 cargo test -p jazz-codegen --test golden the_stage_plan_kotlin_cli
+// (once it's on, `jazz-tools generate` here, which this file's jazz-kotlin dependency triggers).
 
 plugins {
     kotlin("jvm") version "2.2.21"
