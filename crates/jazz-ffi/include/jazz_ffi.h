@@ -72,7 +72,8 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *               "id"?, "row"?}                               -> true|false|null
  *              (advisory: true does not promise the write succeeds; null =
  *              unknown, e.g. no server; not available inside a transaction)
- *   "upsert"   {"table", "id", "row"}            -> the row (row: a whole row)
+ *   "upsert"   {"table", "id", "row"}            -> the row (a new id: row has
+ *              every required column; an existing row: the columns it names)
  *   "restore"  {"table", "id", "patch"?}         -> the row (patch: a whole row)
  *   "uploadBegin"  {"table", "column", "kind"?, "id"?, "row"?} -> {"upload"}
  *   "uploadPush"   {"upload", "bytes": base64}                -> null
@@ -206,7 +207,10 @@ void jazz_socket_free(JazzSocket *socket);
  * Frees an endpoint. When it returns, the authenticate callback is not
  * running and is never called again, so its ctx may be freed; sockets still
  * being served then answer as no one (free them with jazz_socket_free). An
- * authenticate call taking over 30 s is answered as no one.
+ * authenticate call taking over 30 s is answered as no one, but free still
+ * waits for that call to return. Called from inside the authenticate
+ * callback, it returns at once and the callback stops being called once
+ * that call returns (don't free ctx until then).
  */
 void jazz_endpoint_free(JazzEndpoint *endpoint);
 

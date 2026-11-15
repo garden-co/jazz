@@ -190,10 +190,13 @@ editedFrom, text}` and `edit {table, id, patch?, edits}`, with `"tx"` and
   the write will succeed, as the data or permissions may change first. Not
   inside a transaction.
 - **Upsert and restore:** UniFFI `upsert(table, id, row)` and C ABI
-  `upsert {table, id, row}` write the row with this id: an insert if there is
-  none, else its columns replaced; `row` is a whole row, as for an insert.
+  `upsert {table, id, row}` write the row with this id: for a new id an
+  insert (`row` then needs every required column, else `missing required
+field`), for an existing row the columns `row` names (a partial row
+  updates).
   `restore(table, id, patch?)` / `restore {table, id, patch?}` brings back a
-  deleted row as it was, or with `patch` (a whole row) as its content. Both
+  deleted row as it was, or with `patch` (a whole row) as its content; a
+  patch naming another row's `id` is refused. Both
   return the row, take `"tx"` and `"tier"`, and are on `Transaction` too.
 - **Streaming uploads:** UniFFI `begin_upload(table, column, kind, id?,
 row?) -> Upload` (`push(bytes)`, `finish() -> row`, `abort()`); C ABI
