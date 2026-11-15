@@ -138,7 +138,7 @@ fn union(items: Vec<String>) -> String {
 }
 
 /// Parenthesise a union or intersection where it's an operand.
-fn group(ty: String) -> String {
+pub(crate) fn group(ty: String) -> String {
     if top_level_operator(&ty) {
         format!("({ty})")
     } else {
