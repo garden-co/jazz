@@ -1611,6 +1611,31 @@ impl JazzClient {
         Ok(true)
     }
 
+    /// Wait until every write committed so far reached the server, failing
+    /// if the authority rejected one (TS's `waitForSync`). Without a server
+    /// there is nothing to wait for.
+    pub async fn wait_for_sync(&self) -> Result<()> {
+        if self.shared.serverless {
+            return Ok(());
+        }
+        let db = self.db()?;
+        self.shared
+            .settle(db.wait_for_pending_writes(CoreDurabilityTier::Global))
+            .await?
+            .map_err(|error| {
+                if error.is_authorization_denied() {
+                    JazzError::Sync(format!(
+                        "a write was rejected before reaching the server: {}",
+                        crate::db::AUTHORIZATION_DENIED
+                    ))
+                } else {
+                    JazzError::Write(format!(
+                        "a write was rejected before reaching the server: {error}"
+                    ))
+                }
+            })
+    }
+
     /// Wait until a commit of this client reaches `tier`, failing if the
     /// authority rejected it.
     pub async fn wait_for_transaction(

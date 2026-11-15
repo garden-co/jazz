@@ -86,6 +86,8 @@ pub(crate) fn to_value(
             }
             Value::Text(text.to_owned())
         }
+        // The engine's client can't write them yet (its public values have
+        // no payload enum).
         ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. } => {
             return Err(unsupported(format!(
                 "writing an enum with payloads ({path})"
@@ -720,6 +722,15 @@ fn predicate(
         .and_then(Json::as_str)
         .ok_or_else(|| refused(format!("{path} needs an \"op\"")))?;
     let column = column(table, table_name, name)?;
+    if matches!(
+        column.column_type.as_ref(),
+        ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. }
+    ) && !matches!(op, "isNull" | "isNotNull")
+    {
+        return Err(unsupported(format!(
+            "comparing {name}, an enum with payloads ({path})"
+        )));
+    }
     let value = condition.get("value");
     let path = format!("{path}.value");
     let literal = || -> Result<q::Operand> {
