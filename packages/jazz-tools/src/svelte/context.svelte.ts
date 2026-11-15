@@ -14,7 +14,7 @@ export interface JazzContext {
 
 /**
  * Initialize the Jazz context for descendant Svelte components.
- * Called internally by {@link JazzSvelteProvider} and {@link JazzSvelteClientProvider}.
+ * Called internally by `JazzProvider` and `JazzSvelteClientProvider`.
  */
 export function initJazzContext(): JazzContext {
   const ctx: JazzContext = $state({ db: null, session: null, subscriptionStore: null });
@@ -29,7 +29,7 @@ export function getJazzContext(): JazzContext {
   const ctx = getContext<JazzContext | undefined>(JAZZ_CTX_KEY);
   if (!ctx) {
     throw new Error(
-      "getDb/getSession must be used within <JazzSvelteProvider> or <JazzSvelteClientProvider>",
+      "getDb/getSession must be used within <JazzProvider> or <JazzSvelteClientProvider>",
     );
   }
   return ctx;

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createAccountManager } from "../../src/accounts/create-account-manager.js";
+import { createTestAccountManager } from "../../src/runtime/testing/account-fixtures.js";
 import {
   generateAuthSecret,
   schema,
@@ -296,7 +296,7 @@ describe("raw websocket private read gate", () => {
     const backend = await publishSchemaAndPermissions(core, createdByPermissions, createdByApp);
     const { appId, serverUrl } = backend;
 
-    const accounts = await createAccountManager({ appId, serverUrl });
+    const accounts = await createTestAccountManager({ appId, serverUrl });
     const account = accounts.restoreLocalFirst(generateAuthSecret());
     const client = await openJazzClient({
       appId,

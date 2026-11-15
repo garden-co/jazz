@@ -2,7 +2,7 @@
  * The request's user has no Jazz account yet, so there is no one to act as.
  * Jazz never creates an account on the backend by itself: the user gets one
  * when they sign in from a client, when a local-first guest links to them
- * (`linkWithBackend`), or when your backend calls `jazz.createAccountFor`.
+ * (the session's `linkDeviceAccount()`), or when your backend calls `jazz.createAccountFor`.
  *
  * `jazz-tools/backend` is often loaded outside an app's bundle, so a caller
  * can see this error from a different copy of the class: match it with

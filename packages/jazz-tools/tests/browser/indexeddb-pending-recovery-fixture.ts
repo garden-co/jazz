@@ -2,7 +2,7 @@ import { schema as s } from "../../src/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { createAccountManagerWithRuntime } from "../../src/accounts/enrollment.js";
 import { accountRegistryUrl } from "../../src/accounts/context.js";
-import { createAccountManager } from "../../src/accounts/create-account-manager.js";
+import { createTestAccountManager } from "../../src/runtime/testing/account-fixtures.js";
 import type { Db } from "../../src/runtime/db.js";
 
 export const recoveryApp = s.defineApp(
@@ -41,7 +41,7 @@ let db: Db;
 export async function open(config: RecoveryConfig): Promise<void> {
   const driver = { type: "persistent" as const, dbName: `pending-recovery-${config.appId}` };
   if (config.secret) {
-    const accounts = await createAccountManager({
+    const accounts = await createTestAccountManager({
       appId: config.appId,
       serverUrl: config.serverUrl,
     });

@@ -5,7 +5,7 @@
  * primitives, query helpers, cleanup tracking, and synced-Db factory.
  */
 
-import { createAccountManager } from "../../src/accounts/create-account-manager.js";
+import { createTestAccountManager } from "../../src/runtime/testing/account-fixtures.js";
 import { Db, type QueryBuilder } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { getJazzServerInfo } from "./testing-server.js";
@@ -247,7 +247,7 @@ export async function createSyncedDb(
 ): Promise<Db> {
   const localFirstSecret = secret ?? generateAuthSecret();
   const { appId, serverUrl } = testingServer ?? (await getJazzServerInfo());
-  const accounts = await createAccountManager({ appId, serverUrl });
+  const accounts = await createTestAccountManager({ appId, serverUrl });
   const account = accounts.restoreLocalFirst(localFirstSecret);
   return ctx.track(
     await createBrowserTestDb({

@@ -6,8 +6,10 @@ import type { Db } from "../runtime/db.js";
 import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
-import { createAccountManagerWithMinter } from "../accounts/account-manager-core.js";
-import type { AccountManagerConfig } from "../accounts/create-account-manager.js";
+import {
+  createAccountManagerWithMinter,
+  type AccountManagerConfig,
+} from "../accounts/account-manager-core.js";
 import {
   createClient,
   mintLocalFirstTokenInJs,

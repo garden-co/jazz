@@ -1,10 +1,10 @@
-import { createSignal } from "solid-js";
+import { createSignal, type JSX } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbConfig } from "../runtime/db.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
-import { JazzClientProvider, LegacyJazzProvider as JazzProvider } from "./provider.js";
-import type { PendingSolidJazzClient } from "./create-solid-jazz-client.js";
+import { JazzClientProvider } from "./provider.js";
+import { createSolidJazzClient, type PendingSolidJazzClient } from "./create-solid-jazz-client.js";
 
 const openJazzClient = vi.hoisted(() => vi.fn<(config: DbConfig) => Promise<JazzClient>>());
 
@@ -30,6 +30,17 @@ function makeClient(id: string, shutdown = vi.fn(async () => undefined)): JazzCl
     session: null,
     shutdown,
   };
+}
+
+// A client created from a reactive config, as an app composes it with
+// `JazzClientProvider`.
+function ConfigProvider(props: { config: DbConfig; fallback: JSX.Element; children: JSX.Element }) {
+  const client = createSolidJazzClient(() => props.config);
+  return (
+    <JazzClientProvider client={client} fallback={props.fallback}>
+      {props.children}
+    </JazzClientProvider>
+  );
 }
 
 async function flushMicrotasks(): Promise<void> {
@@ -74,7 +85,7 @@ describe("Solid providers", () => {
     expect(client.shutdown).not.toHaveBeenCalled();
   });
 
-  it("JazzProvider owns client creation, replacement and shutdown", async () => {
+  it("createSolidJazzClient owns client creation, replacement and shutdown", async () => {
     const first = deferred<JazzClient>();
     const second = deferred<JazzClient>();
     openJazzClient.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
@@ -82,9 +93,9 @@ describe("Solid providers", () => {
     const [config, setConfig] = createSignal<DbConfig>({ appId: "first" });
     const dispose = render(
       () => (
-        <JazzProvider config={config()} fallback={<p>Loading</p>}>
+        <ConfigProvider config={config()} fallback={<p>Loading</p>}>
           <p>Ready</p>
-        </JazzProvider>
+        </ConfigProvider>
       ),
       container,
     );
@@ -123,7 +134,7 @@ describe("Solid providers", () => {
     expect(secondClient.shutdown).toHaveBeenCalledOnce();
   });
 
-  it("JazzProvider skips obsolete factories and never overlaps client lifecycles", async () => {
+  it("createSolidJazzClient skips obsolete factories and never overlaps client lifecycles", async () => {
     const pendingClients = new Map<string, Deferred<JazzClient>>();
     openJazzClient.mockImplementation((config) => {
       const pending = deferred<JazzClient>();
@@ -134,9 +145,9 @@ describe("Solid providers", () => {
     const [config, setConfig] = createSignal<DbConfig>({ appId: "first" });
     const dispose = render(
       () => (
-        <JazzProvider config={config()} fallback={<p>Loading</p>}>
+        <ConfigProvider config={config()} fallback={<p>Loading</p>}>
           <p>Ready</p>
-        </JazzProvider>
+        </ConfigProvider>
       ),
       container,
     );

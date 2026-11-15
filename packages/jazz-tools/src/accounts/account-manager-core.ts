@@ -3,7 +3,60 @@ import { accountAppId } from "./local-first.js";
 import { clientScope, DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
 import { prepareAccountManager, readableSelection, type AccountStore } from "./persistence.js";
 import { markProcessOnly, processAccountStore } from "./process-store.js";
-import type { AccountManagerConfig } from "./create-account-manager.js";
+import type { RuntimeSourcesConfig } from "../runtime/context.js";
+import type { AppBearer } from "./enrollment.js";
+
+export interface AccountManagerConfig {
+  /**
+   * Backend and test code only; a browser client leaves it out and is scoped
+   * by `serverUrl` (see `clientScope`).
+   */
+  appId?: string;
+  /** The app id an existing local-first app's users were created under. */
+  scope?: string;
+  /**
+   * The app's Jazz endpoint (default `"/jazz"`, its own backend), or `null`
+   * to keep Jazz on this device only, with no server and no sign-in.
+   */
+  serverUrl?: string | null;
+  env?: string;
+  runtimeSources?: RuntimeSourcesConfig;
+  /**
+   * Where this device keeps its accounts' selection and device account keys.
+   * A browser page or worker defaults to localStorage; only that default
+   * reopens the last external account before its provider confirms it.
+   * Elsewhere (Node, Deno, Bun, a CLI) the default keeps the selection in
+   * memory for this process, which is enough for a user your backend names
+   * (`bearer`); a device account there needs a durable store (a file, the OS
+   * keychain) and is refused without one (`DeviceAccountNeedsStoreError`).
+   * React Native requires one; `jazz-tools/expo` supplies it.
+   */
+  store?: AccountStore;
+  /**
+   * The `fetch` sign-in requests to the app's backend go through (default:
+   * the global one), as for a test or a proxy. The backend
+   * names the user by the cookie a browser sends on the sync connection too,
+   * so a bearer this adds would sign in but never sync: pass `bearer`
+   * instead. Outside a browser page or worker (Node, Deno, a CLI) without
+   * `bearer`, the session's `refresh()` and `linkDeviceAccount()` refuse
+   * without calling it.
+   */
+  fetch?: typeof fetch;
+  /**
+   * Hosts without cookies only (Node, Deno, Bun, a CLI): the app's own token
+   * for its backend, read whenever it is needed. It is sent as
+   * `Authorization: Bearer` when signing in through the backend
+   * (`refresh()`, `linkDeviceAccount()`) and on every sync connection,
+   * thin and local-first, where the backend's `authenticate` reads who the
+   * user is. Return null while no one is signed in.
+   *
+   * Not supported yet in a browser page or worker, whose sync connection
+   * can't carry a header: there the backend's cookie names the user. On
+   * React Native it is refused here: pass `bearer` to `createJazzClient`
+   * from `jazz-tools/react-native` or `jazz-tools/expo` instead.
+   */
+  bearer?: AppBearer;
+}
 
 /** Signs a local-first account's token for `audience` (see `prepareAccountManager`). */
 export type LocalFirstTokenMinter = (secret: string, audience: string) => string;
@@ -121,7 +174,7 @@ export function clientRegistryUrl(config: {
 export const deviceOnlyFetch: typeof fetch = () =>
   Promise.reject(
     new Error(
-      "Jazz runs on this device only (serverUrl: null), so it can't sign in through a backend. Set serverUrl to use loginWithBackend or linkWithBackend.",
+      "Jazz runs on this device only (serverUrl: null), so it can't sign in through a backend. Set serverUrl to use refresh() or linkDeviceAccount().",
     ),
   );
 
@@ -170,7 +223,7 @@ function keepsBrowserStorage(): boolean {
 export const cookielessFetch: typeof fetch = () =>
   Promise.reject(
     new Error(
-      "loginWithBackend and linkWithBackend need a browser: the app's backend names the signed-in user by the cookie a browser sends on Jazz's sync connection, and this host sends none. Pass the app's token as bearer instead (on createJazzClient, from jazz-tools/react-native or jazz-tools/expo on React Native). A server acts for its users through jazz-tools/backend (jazz.forReqUser).",
+      "refresh() and linkDeviceAccount() need a browser: the app's backend names the signed-in user by the cookie a browser sends on Jazz's sync connection, and this host sends none. Pass the app's token as bearer instead (on createJazzClient, from jazz-tools/react-native or jazz-tools/expo on React Native). A server acts for its users through jazz-tools/backend (jazz.forReqUser).",
     ),
   );
 
