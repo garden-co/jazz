@@ -37,3 +37,13 @@ The example leaves out what the Go bindings don't support yet: `tasks.notes`
 is a text-merge column, which the CLI never writes, and there are no
 includes (relations), comments or activity feed. See
 [Go Backend](https://jazz.tools/docs/setup/go#not-supported-yet).
+
+## Serving end users: `cmd/go-backend`
+
+`go run ./cmd/go-backend` is StagePlan's backend in Go: it publishes the
+permissions and serves the app's Jazz endpoint at `/jazz`, where end users
+sign in with a JWT (verified against `JWKS_URL`) or a device account. See
+the comment at the top of `cmd/go-backend/main.go` for its configuration.
+A TypeScript client derives the app id from its `serverUrl` unless it passes
+`scope`: run the core and `go-backend` with that id, or pass
+`scope: "<JAZZ_APP_ID>"` to `createJazzClient`.

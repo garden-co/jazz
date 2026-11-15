@@ -92,7 +92,8 @@ base_path?, session_ttl_secs?) -> Endpoint` (`is_socket(path)`,
 `jazz_endpoint_new`/`_handle`/`_is_socket`/`_for_user`/`_socket`,
 `jazz_socket_push`/`_free`, `jazz_endpoint_free`. Requests and responses
 are JSON (bodies base64); the host upgrades the socket path itself and
-pumps its WebSocket's binary messages through the socket. The
+pumps every WebSocket data message (binary or text, as bytes: TS sends
+its prelude as text) through the socket. The
 `Authenticator` (called on a thread of its own) maps a request to
 `{"kind": "user", "userId", "claims"?, "expiresAt"}`, `{"kind":
 "deviceAccount"}` or none.

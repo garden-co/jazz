@@ -1,3 +1,4 @@
+import type { WasmSchema } from "../drivers/types.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { testApp } from "../testing/index.js";
 import { boundApp } from "../typed-app.js";
@@ -9,7 +10,7 @@ const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
 /** A jazz.permissions.json that denies everything. */
 const permissions = { format: 1, tables: {} };
 /** The current schema hash, as the bindings carry it. */
-const hashOf = (app: ReturnType<typeof testApp>) => boundApp(app.wasmSchema)!.schema.current;
+const hashOf = (app: { wasmSchema: WasmSchema }) => boundApp(app.wasmSchema)!.schema.current;
 const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 afterEach(() => vi.unstubAllGlobals());
 

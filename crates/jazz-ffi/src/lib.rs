@@ -730,7 +730,8 @@ pub struct Socket {
 
 #[uniffi::export]
 impl Socket {
-    /// A binary message from the client.
+    /// A message from the client: every data message, binary or text (TS
+    /// sends its prelude as text), as its bytes.
     pub fn push(&self, message: Vec<u8>) -> Result<()> {
         self.inner.push(message).map_err(JazzError::from)
     }

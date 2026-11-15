@@ -21,7 +21,8 @@ import (
 // handshake. It enforces what a server must of a client (masked frames,
 // no reserved bits, control-frame rules, well-formed fragmentation and
 // closes), caps message sizes, and drops a connection that goes quiet.
-// Text messages are refused: Jazz's protocol is binary.
+// Text and binary messages both pass through as their bytes (TS clients
+// send their prelude as text); a text message must be valid UTF-8.
 
 // Limits of the endpoint's sockets.
 const (
@@ -169,7 +170,7 @@ const (
 // connection's.
 func (c *wsConn) readMessage() ([]byte, error) {
 	var message []byte
-	fragmented := false
+	fragmented, text := false, false
 	for {
 		c.conn.SetReadDeadline(time.Now().Add(wsIdle))
 		fin, opcode, payload, err := c.readFrame()
@@ -192,13 +193,11 @@ func (c *wsConn) readMessage() ([]byte, error) {
 			}
 			c.closeWith(code, reason)
 			return nil, io.EOF
-		case opText:
-			return nil, &wsError{wsUnsupportedData, "text messages are not supported"}
-		case opBinary:
+		case opText, opBinary:
 			if fragmented {
 				return nil, protocolError("a new message inside a fragmented one")
 			}
-			message, fragmented = payload, !fin
+			message, fragmented, text = payload, !fin, opcode == opText
 		case opContinuation:
 			if !fragmented {
 				return nil, protocolError("a continuation without a message")
@@ -209,7 +208,10 @@ func (c *wsConn) readMessage() ([]byte, error) {
 			message = append(message, payload...)
 			fragmented = !fin
 		}
-		if (opcode == opBinary || opcode == opContinuation) && !fragmented {
+		if (opcode == opText || opcode == opBinary || opcode == opContinuation) && !fragmented {
+			if text && !utf8.Valid(message) {
+				return nil, &wsError{wsInvalidPayload, "a text message that isn't UTF-8"}
+			}
 			return message, nil
 		}
 	}

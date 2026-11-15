@@ -113,8 +113,15 @@ async fn serve(stream: TcpStream, endpoint: Arc<Endpoint>) {
         let read = async move {
             while let Some(Ok(message)) = incoming.next().await {
                 match message {
+                    // Every data message, binary or text (TS sends its
+                    // prelude as text), goes in as bytes.
                     Message::Binary(data) => {
                         if pushing.push(data.to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Message::Text(text) => {
+                        if pushing.push(text.as_bytes().to_vec()).is_err() {
                             break;
                         }
                     }
