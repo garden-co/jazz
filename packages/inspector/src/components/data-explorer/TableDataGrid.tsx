@@ -65,6 +65,10 @@ function formatCellValue(value: unknown): string {
     ).join(" ");
     return `${value.byteLength.toLocaleString()} bytes${preview ? ` · ${preview}` : ""}${value.byteLength > 16 ? " …" : ""}`;
   }
+  if (value instanceof Float32Array) {
+    const preview = Array.from(value.subarray(0, 4), (entry) => String(entry)).join(", ");
+    return `[${value.length.toLocaleString()} floats]${preview ? ` · ${preview}${value.length > 4 ? ", …" : ""}` : ""}`;
+  }
   if (value instanceof Date) return value.toISOString();
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
@@ -522,6 +526,13 @@ function unwrapDefaultValue(defaultValue: Value, columnType: ColumnType): unknow
         ? JSON.parse(String(defaultValue.value))
         : defaultValue.value;
     case "Bytea":
+      if (columnType.type === "Vector") {
+        const bytes = new Uint8Array(defaultValue.value);
+        const view = new DataView(bytes.buffer);
+        return Float32Array.from({ length: bytes.byteLength / 4 }, (_, index) =>
+          view.getFloat32(index * 4, true),
+        );
+      }
       return new Uint8Array(defaultValue.value);
     case "Array": {
       if (columnType.type !== "Array") {

@@ -41,7 +41,21 @@ export interface JsonSqlType<Output = JsonValue> {
    */
   __output?: Output;
 }
-export type SqlType = ScalarSqlType | ArraySqlType | EnumSqlType | JsonSqlType<unknown>;
+/**
+ * `dimensions` binary32 values (SPEC 20.1), read and written as
+ * `Float32Array`. Declared only in `jazz.app.json` (`{ "vector": n }`):
+ * there is no DSL builder.
+ */
+export interface VectorSqlType {
+  kind: "VECTOR";
+  dimensions: number;
+}
+export type SqlType =
+  | ScalarSqlType
+  | ArraySqlType
+  | EnumSqlType
+  | JsonSqlType<unknown>
+  | VectorSqlType;
 /**
  * How concurrent writes to a column combine. `counter` sums integer changes,
  * `g-set` unions arrays, and `text`, `markdown` and `html` merge concurrent
@@ -85,7 +99,9 @@ type SqlTypeValue<T extends SqlType, Init extends boolean> = T extends ScalarSql
           : never
       : T extends JsonSqlType<infer Output>
         ? Output
-        : never;
+        : T extends VectorSqlType
+          ? Float32Array
+          : never;
 
 export interface Column {
   name: string;

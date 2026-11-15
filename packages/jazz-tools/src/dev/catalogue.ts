@@ -293,6 +293,10 @@ function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
     };
   }
 
+  if (sqlType.kind === "VECTOR") {
+    return { type: "Vector", dimensions: sqlType.dimensions };
+  }
+
   return {
     type: "Array",
     element: sqlTypeToWasmColumnType(sqlType.element),

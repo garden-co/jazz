@@ -1,5 +1,6 @@
 import type { TxId } from "./runtime/client.js";
 import { historyTableName, resolveQueryTable } from "./runtime/history-relation.js";
+import { vectorLiteralJson } from "./runtime/vector.js";
 import { assertRelationshipDeclaration } from "./relationships.js";
 import { resolveQueryOutputTable } from "./runtime/query-output-table.js";
 import {
@@ -1369,6 +1370,8 @@ function cloneBuiltCondition(condition: BuiltCondition): BuiltCondition {
 
 function queryBuilderJsonReplacer(_key: string, value: unknown): unknown {
   if (value instanceof Uint8Array) return [...value];
+  // Hex of the f32le bytes, so a filter keeps every bit (JSON numbers lose -0).
+  if (value instanceof Float32Array) return vectorLiteralJson(value);
   return typeof value === "bigint" ? value.toString() : value;
 }
 
@@ -1751,6 +1754,7 @@ export class TypedTableQueryBuilder<
         ((columnType?.type === "Json" && !hasRecognizedOperator) ||
           (columnType?.type === "Timestamp" && value instanceof Date) ||
           (columnType?.type === "Bytea" && value instanceof Uint8Array) ||
+          (columnType?.type === "Vector" && value instanceof Float32Array) ||
           (columnType?.type === "Row" &&
             columnType.columns.some((column) => Object.hasOwn(value, column.name))));
 

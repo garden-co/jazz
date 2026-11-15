@@ -17,6 +17,7 @@ import type {
 import { schemaDefinitionToAst } from "./migrations.js";
 import type { CompiledPermissionsMap } from "./schema-permissions.js";
 import { validatePermissionsAgainstSchema } from "./schema-permissions.js";
+import { assertVectorBytes, bytesToVector } from "./runtime/vector.js";
 
 const localJazzToolsSourceEntry = fileURLToPath(new URL("./index.ts", import.meta.url));
 const localJazzToolsEntry = existsSync(localJazzToolsSourceEntry)
@@ -192,6 +193,8 @@ function columnTypeToSqlType(columnType: ColumnType): SqlType {
       return { kind: "ARRAY", element: columnTypeToSqlType(columnType.element) };
     case "Row":
       throw new Error("Root schema loading does not yet support row-valued columns.");
+    case "Vector":
+      return { kind: "VECTOR", dimensions: columnType.dimensions };
   }
 }
 
@@ -286,6 +289,12 @@ function wasmValueToDefault(value: Value, columnType: ColumnType, nullable = tru
       return value.value.map((inner) => wasmValueToDefault(inner, columnType.element));
     case "Row":
       throw new Error("Root schema loading does not yet support row-valued defaults.");
+    case "Vector":
+      if (value.type !== "Bytea") {
+        throw new Error("Vector default does not match column type.");
+      }
+      assertVectorBytes(value.value, columnType.dimensions);
+      return bytesToVector(value.value);
   }
 }
 
