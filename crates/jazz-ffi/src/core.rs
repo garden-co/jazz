@@ -365,7 +365,18 @@ impl Core {
         block_on(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
             let edits = whole_pages(&client, &name, id, edits).await?;
-            let committed = client.update_with_edits(&name, id, cells, edits)?;
+            let committed = client
+                .update_with_edits(&name, id, cells, edits)
+                .map_err(|error| match error {
+                    // As jazz-app reports an edit of a row this client
+                    // cannot see.
+                    jazz_app::jazz::tools::JazzError::Write(message)
+                        if message.contains("NotObserved") =>
+                    {
+                        jazz_app::Error::Config(format!("no {name} row {id}"))
+                    }
+                    other => other.into(),
+                })?;
             mark_wrote(tx);
             settle(&client, committed, tier).await
         }))?;
