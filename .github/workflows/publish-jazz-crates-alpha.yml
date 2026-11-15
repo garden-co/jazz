@@ -163,14 +163,33 @@ jobs:
       - name: Verify packages
         run: node dev/scripts/publish-crates.mjs --verify
 
-      # Fails until at least one crate (jazz-tools) has a trusted publisher for
-      # this workflow; new crates don't need it.
-      - name: Get a crates.io token (trusted publishing)
-        id: crates-io-auth
-        continue-on-error: true
+      # Before anything is published: which crates need which credential.
+      # Fails if a new crate needs CRATES_IO_BOOTSTRAP_TOKEN and it's missing.
+      - name: Plan auth per crate
+        id: plan
+        env:
+          CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
+        run: node dev/scripts/publish-crates.mjs --plan
+
+      # Also before anything is published: proves the OIDC exchange works
+      # (a trusted publisher for this workflow and environment exists), so a
+      # missing one stops the run instead of leaving it half published.
+      - name: Check trusted publishing
+        if: steps.plan.outputs.needs_oidc == 'true'
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
-      - name: Publish in dependency order
+      - name: Publish new crates, up to the first that needs OIDC
+        env:
+          CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
+        run: node dev/scripts/publish-crates.mjs --publish --stop-before-oidc
+
+      # A fresh token for the rest: trusted-publishing tokens last 30 minutes.
+      - name: Get a crates.io token (trusted publishing)
+        id: crates-io-auth
+        if: steps.plan.outputs.needs_oidc == 'true'
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+
+      - name: Publish the rest in dependency order
         env:
           CRATES_IO_OIDC_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
           CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}

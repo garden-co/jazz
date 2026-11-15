@@ -6,7 +6,15 @@
 //   node dev/scripts/publish-crates.mjs --list       the crates, in order
 //   node dev/scripts/publish-crates.mjs --verify     cargo package, every crate together
 //   node dev/scripts/publish-crates.mjs --dry-run    cargo publish --dry-run, every crate together
-//   node dev/scripts/publish-crates.mjs --publish    publish each crate not yet on crates.io
+//   node dev/scripts/publish-crates.mjs --plan       which auth each unpublished crate needs
+//   node dev/scripts/publish-crates.mjs --publish [--stop-before-oidc]
+//                                                    publish each crate not yet on crates.io
+//
+// The workflow runs --plan first, which fails before anything is published
+// if a crate's credential is missing, and proves the OIDC exchange works
+// before the first publish. Then it publishes up to the first crate that
+// needs OIDC (--stop-before-oidc), fetches a fresh OIDC token, and publishes
+// the rest, so the 30-minute token can't expire during the bootstrap publishes.
 //
 // --publish picks a token per crate by asking crates.io whether the crate
 // exists. An existing crate is published with CRATES_IO_OIDC_TOKEN (crates.io
@@ -16,6 +24,7 @@
 // failed run can be re-run.
 
 import { spawnSync } from "node:child_process";
+import { appendFileSync } from "node:fs";
 import { cargoMetadata, publishPlan, withVendoredMembers } from "./rust-crates.mjs";
 
 const CRATES_IO = "https://crates.io/api/v1/crates";
@@ -39,8 +48,12 @@ export async function registryState(name, version, fetchImpl = fetch) {
   return { exists: true, published: true };
 }
 
+const OIDC = ["CRATES_IO_OIDC_TOKEN", "trusted publishing"];
+const BOOTSTRAP = ["CRATES_IO_BOOTSTRAP_TOKEN", "bootstrap token (new crate)"];
+
 async function main() {
   const mode = process.argv[2];
+  const stopBeforeOidc = process.argv.includes("--stop-before-oidc");
   // With the vendored crates as members the lockfile gains their optional
   // dependencies, so cargo runs without --locked here; Cargo.lock is restored
   // afterwards, and CI checks it with --locked everywhere else.
@@ -64,10 +77,34 @@ async function main() {
     case "--dry-run":
       cargo(["publish", "--dry-run", "--allow-dirty", ...packages]);
       return;
+    case "--plan":
     case "--publish":
       break;
     default:
-      throw new Error("Usage: publish-crates.mjs --list | --verify | --dry-run | --publish");
+      throw new Error(
+        "Usage: publish-crates.mjs --list | --verify | --dry-run | --plan | --publish [--stop-before-oidc]",
+      );
+  }
+
+  if (mode === "--plan") {
+    const needs = [];
+    let needsOidc = false;
+    for (const name of plan.order) {
+      const { version } = plan.byName.get(name);
+      const state = await registryState(name, version);
+      const auth = state.published ? "already published" : state.exists ? OIDC[1] : BOOTSTRAP[1];
+      console.log(`${name}@${version}: ${auth}`);
+      if (state.published) continue;
+      if (state.exists) needsOidc = true;
+      else if (!process.env[BOOTSTRAP[0]]) needs.push(name);
+    }
+    if (process.env.GITHUB_OUTPUT)
+      appendFileSync(process.env.GITHUB_OUTPUT, `needs_oidc=${needsOidc}\n`);
+    if (needs.length > 0)
+      throw new Error(
+        `New crates need ${BOOTSTRAP[0]} (a publish-new token in the publish environment): ${needs.join(", ")}`,
+      );
+    return;
   }
 
   const summary = [];
@@ -79,9 +116,11 @@ async function main() {
       summary.push(`${name}@${version}: already published`);
       continue;
     }
-    const [variable, auth] = state.exists
-      ? ["CRATES_IO_OIDC_TOKEN", "trusted publishing"]
-      : ["CRATES_IO_BOOTSTRAP_TOKEN", "bootstrap token (new crate)"];
+    const [variable, auth] = state.exists ? OIDC : BOOTSTRAP;
+    if (state.exists && stopBeforeOidc) {
+      console.log(`==> stopping before ${name}@${version}, which needs ${auth}`);
+      break;
+    }
     const token = process.env[variable];
     if (!token) {
       throw new Error(
