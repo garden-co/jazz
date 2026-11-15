@@ -179,7 +179,7 @@ this document or public receipts.
 
 `changesets-release-pr.yml` creates versions/changelogs and the release PR; it does
 not publish. `publish-jazz-tools-alpha.yml` publishes packages and creates the
-source tag; `publish-crates.yml` then publishes the Rust crates (see "Rust crates
+source tag; `publish-jazz-crates-alpha.yml` then publishes the Rust crates (see "Rust crates
 on crates.io"). GitHub Release creation/publication is currently manual. Do not assume
 a green Changesets action or an existing tag means the packages or GitHub Release
 have been published.
@@ -208,12 +208,12 @@ crates.io is an unrelated project), and its library is still named `jazz`.
 `jazz-tools` is the CLI (`crates/jazz-cli`), so `cargo install jazz-tools`
 installs the `jazz-tools` binary. `jazz-ruzstd` is the patched ruzstd fork in
 `vendor/ruzstd` and keeps its upstream version (0.8.3). Every other workspace
-crate has `publish = false`, except `jazz-wasm-tracing`, which
-`publish-jazz-crates-alpha.yml` releases separately. Published crates resolve
+crate has `publish = false`, except `jazz-wasm-tracing` (the wasm-tracing
+fork jazz-wasm uses), which is published last, at its own version. Published crates resolve
 upstream `sqlite-wasm-rs`: the root `[patch.crates-io]` only applies inside
 this workspace (and only to wasm builds).
 
-`publish-crates.yml` runs when "Publish jazz-tools alpha" succeeds on
+`publish-jazz-crates-alpha.yml` runs when "Publish jazz-tools alpha" succeeds on
 `release`. It publishes only after npm has jazz-tools at that version and
 `v<version>` points at the release commit. It verifies every package
 (`cargo package`), then publishes each crate in order. A version already on
@@ -224,19 +224,20 @@ crates.io whether the crate exists:
 - **crates that don't exist yet** are published with the `publish`
   environment's `CRATES_IO_BOOTSTRAP_TOKEN` secret.
 
-To check a candidate without publishing, dispatch `publish-crates.yml` on the
-rc branch with `dry_run: true`. It runs `cargo publish --dry-run` for every
+To check a candidate without publishing, dispatch `publish-jazz-crates-alpha.yml` on the
+rc branch with `mode: dry-run`. It runs `cargo publish --dry-run` for every
 crate in dependency order, needs no credential, and runs outside the `publish`
-environment. A real manual run is `dry_run: false` with `tag: v<version>`.
+environment. A real manual run is `mode: publish` with `tag: v<version>`.
 
 ### One-time bootstrap (first publish of new crates)
 
 A crate can only get a trusted publisher once it exists on crates.io, so new
 crates are published with a short-lived token the first time:
 
-1. **Before the run:** on crates.io, for `jazz-tools` (it already exists), open
-   Settings → Trusted Publishing and add a GitHub publisher: repository
-   `garden-co/jazz`, workflow `publish-crates.yml`, environment `publish`.
+1. **Before the run:** on crates.io, check that `jazz-tools` (it already
+   exists) has a GitHub trusted publisher (Settings → Trusted Publishing) for
+   repository `garden-co/jazz`, workflow `publish-jazz-crates-alpha.yml`,
+   environment `publish`. One may exist since alpha.62; add it if not.
 2. **Create the token:** crates.io → Account Settings → API Tokens → New
    Token. Use the scope `publish-new`, an expiry of 1 day, and crate scopes
    for exactly the new crates. Store it as the `CRATES_IO_BOOTSTRAP_TOKEN`
@@ -245,11 +246,11 @@ crates are published with a short-lived token the first time:
    jazz-ruzstd, jazz-compression, jazz-text, jazz-types, jazz-model,
    jazz-protocol, jazz-db, jazz-core, jazz-native-transport, jazz-app,
    jazz-codegen, jazz-ffi, jazz-otel, jazz-server.
-3. **Publish:** let `publish-crates.yml` run after the npm publish, or
-   dispatch it with `dry_run: false`, `tag: v<version>`. The summary at the
+3. **Publish:** let `publish-jazz-crates-alpha.yml` run after the npm publish, or
+   dispatch it with `mode: publish`, `tag: v<version>`. The summary at the
    end of its log shows which auth each crate used.
 4. **Afterwards, for every new crate:** add the same trusted publisher
-   (`garden-co/jazz`, `publish-crates.yml`, environment `publish`). Then
+   (`garden-co/jazz`, `publish-jazz-crates-alpha.yml`, environment `publish`). Then
    delete the `CRATES_IO_BOOTSTRAP_TOKEN` secret and revoke the token on
    crates.io. Also add the `garden-co` owners team to each crate (`cargo
 owner --add github:garden-co:<team> <crate>`), so they aren't owned by one

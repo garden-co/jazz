@@ -97,8 +97,9 @@ export const ciPartitions = Object.freeze({
     // Ready PRs run only this partition, so it carries the TypeScript
     // typecheck too. The binding declarations it needs are committed.
     command("jazz-tools typecheck", "pnpm", ["--filter", "jazz-tools", "check"]),
-    command("crate publication selector contract", "bash", [
-      "dev/scripts/publish-crates-alpha.test.sh",
+    command("crate publication selector contract", "node", [
+      "--test",
+      "dev/scripts/check-lockstep-versions.test.mjs",
     ]),
     // npm packages, published Rust crates and the Go module share one version.
     command("lockstep versions", "node", ["dev/scripts/check-lockstep-versions.mjs"]),
@@ -324,7 +325,7 @@ export const ciPartitions = Object.freeze({
       "dev/gates/jazz-ffi-compile-bindings.sh",
     ]),
   ]),
-  // Every crate publish-crates.yml publishes packages and builds from its
+  // Every crate publish-jazz-crates-alpha.yml publishes packages and builds from its
   // .crate against the others, as crates.io will see them.
   "crates-package": Object.freeze([
     command("cargo package, published crates", "node", [

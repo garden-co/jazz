@@ -19,14 +19,15 @@ export const ROOT_CRATES = Object.freeze(["jazz-app", "jazz-tools", "jazz-codege
  */
 export const INDEPENDENTLY_VERSIONED = Object.freeze({
   "jazz-ruzstd": "the patched ruzstd 0.8.3 fork (vendor/ruzstd)",
+  "jazz-wasm-tracing": "the maintained wasm-tracing fork (crates/wasm-tracing)",
 });
 
 /**
- * Workspace crates outside the closure that may stay publishable, each with
- * its own release flow.
+ * Workspace crates outside the closure that are published too, after it (the
+ * wasm-tracing fork jazz-wasm uses, on crates.io since before the closure).
  */
 export const PUBLISHED_OUTSIDE_CLOSURE = Object.freeze({
-  "jazz-wasm-tracing": "published by publish-jazz-crates-alpha.yml at its own version",
+  "jazz-wasm-tracing": "jazz-wasm's tracing subscriber, a fork published at its own version",
 });
 
 /**
@@ -120,12 +121,21 @@ export function publishPlan(metadata) {
     order.push(name);
   };
   for (const name of [...closure].sort()) place(name);
+  for (const name of Object.keys(PUBLISHED_OUTSIDE_CLOSURE))
+    if (byName.has(name) && !closure.has(name)) {
+      closure.add(name);
+      place(name);
+    }
 
   for (const name of order) {
     const pkg = byName.get(name);
     if (!isPublishable(pkg))
       problems.push(`${name} is needed by ${ROOT_CRATES.join(", ")} but has publish = false`);
-    for (const field of ["description", "license", "repository", "rust_version"])
+    const required =
+      name in INDEPENDENTLY_VERSIONED
+        ? ["description", "license"]
+        : ["description", "license", "repository", "rust_version"];
+    for (const field of required)
       if (!pkg[field]) problems.push(`${name} has no ${field.replace("_", "-")}`);
     for (const dep of shipped(pkg))
       if (!dep.req || dep.req === "*")
