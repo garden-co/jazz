@@ -70,6 +70,39 @@ async fn durable_writes_wait_for_the_servers_verdict() {
 }
 
 /// A transaction body that panics rolls back and reports it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wait_for_sync_reports_a_refusal_that_settled_before_it() {
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let jazz = open(&server, app_id).await;
+    let me = ObjectId::from_uuid(jazz.account().unwrap().0);
+    let durable = jazz.durable(DurabilityTier::GlobalServer);
+
+    // Refused, never waited for; then a write the server accepts, settled
+    // before the wait (jazz#5728).
+    jazz.insert(NewNote::new(ObjectId::new(), "refused, unwaited"))
+        .await
+        .unwrap();
+    durable
+        .insert(NewNote::new(me, "accepted after"))
+        .await
+        .unwrap();
+    let synced = jazz.wait_for_sync().await;
+    assert!(
+        synced.is_err(),
+        "the earlier refusal is reported: {synced:?}"
+    );
+    // Reported once.
+    jazz.wait_for_sync().await.unwrap();
+
+    jazz.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_panicking_transaction_rolls_back() {
     let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();

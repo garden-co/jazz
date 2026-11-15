@@ -8879,7 +8879,9 @@ impl Db {
     /// earliest rejection among them and the writer's commits rejected
     /// earlier that no wait has reported yet (jazz#5728). Each rejection is
     /// reported once: the earliest per call, the others by later calls.
-    /// Another writer's rejections are never reported here.
+    /// Another writer's rejections are never reported here. The writer is
+    /// the author, not a session object: two sessions of the same user
+    /// share their writes and rejections.
     pub async fn wait_for_sync(
         &self,
         tier: DurabilityTier,
