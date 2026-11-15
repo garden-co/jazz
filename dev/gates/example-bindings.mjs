@@ -56,12 +56,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.error(`example bindings: ${cli} is missing; build jazz-tools first`);
     process.exit(1);
   }
-  // Kotlin apps (a build.gradle.kts) are checked by the Kotlin partition
-  // (dev/scripts/test-kotlin.sh), with the Rust jazz-tools: the npm CLI
-  // generates only TS and Rust bindings.
-  const { failures, checked } = checkBindings(
-    exampleAppDirs().filter((dir) => !existsSync(join(root, dir, "build.gradle.kts"))),
-  );
+  const { failures, checked } = checkBindings(exampleAppDirs());
   if (failures.length > 0) {
     console.error(
       `example bindings: ${failures.length} of ${checked} apps fail \`jazz-tools generate --check\`:\n` +
