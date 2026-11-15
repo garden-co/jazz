@@ -36,8 +36,8 @@ it("a failed graceful shutdown leaves the Db open, and a later shutdown closes i
     // Draining takes no new work, but the Db may still reconnect to upload.
     expect(() => db.insert(app.notes, { title: "while draining" })).toThrow(DbClosedError);
     expect(db.isUsable()).toBe(false);
-    // A shutdown asked for meanwhile shares the drain.
-    expect(db.shutdown()).toBe(draining);
+    // Another graceful shutdown asked for meanwhile shares the drain.
+    expect(db.shutdown({ waitForSync: true })).toBe(draining);
     db.abortGracefulShutdown();
     await expect(draining).rejects.toBeInstanceOf(GracefulShutdownSyncError);
 
@@ -72,5 +72,49 @@ it("reports an operation during teardown as closing, and the shutdown it shares"
     expect(db.shutdown({ waitForSync: true })).toBe(shutdown);
     db.abortGracefulShutdown();
     await expect(shutdown).resolves.toBeUndefined();
+  });
+});
+
+it("a plain shutdown during a drain that fails still ends closed", async () => {
+  await withDb(async (db) => {
+    await db.disconnect();
+    await db.insert(app.notes, { title: "offline" }).wait({ tier: "local" });
+    let observed = 0;
+
+    // An offline sign-out drains; a provider unmounts meanwhile.
+    const signOut = db.shutdown({ waitForSync: true });
+    db.onShutdown(() => observed++);
+    // Registered during the drain, it waits for the teardown.
+    expect(observed).toBe(0);
+    const unmount = db.shutdown();
+    // A second graceful shutdown still shares the drain itself.
+    expect(db.shutdown({ waitForSync: true })).toBe(signOut);
+    db.abortGracefulShutdown();
+
+    await expect(signOut).rejects.toBeInstanceOf(GracefulShutdownSyncError);
+    // The drain's failure didn't leave the Db open: the plain shutdown closed it.
+    expect(db.isUsable()).toBe(false);
+    await expect(unmount).resolves.toBeUndefined();
+    expect(observed).toBe(1);
+    expect(() => db.insert(app.notes, { title: "after close" })).toThrow(
+      "Cannot operate on a Db that is shutting down or closed: it is closed.",
+    );
+    await expect(db.reconnect()).rejects.toThrow("Cannot reconnect a Db that is shutting down.");
+  });
+});
+
+it("a listener registered during a drain that fails stays armed for the later teardown", async () => {
+  await withDb(async (db) => {
+    await db.disconnect();
+    await db.insert(app.notes, { title: "offline" }).wait({ tier: "local" });
+    let observed = 0;
+    const signOut = db.shutdown({ waitForSync: true });
+    db.onShutdown(() => observed++);
+    db.abortGracefulShutdown();
+    await expect(signOut).rejects.toBeInstanceOf(GracefulShutdownSyncError);
+    expect(observed).toBe(0);
+    expect(db.isUsable()).toBe(true);
+    await db.shutdown();
+    expect(observed).toBe(1);
   });
 });

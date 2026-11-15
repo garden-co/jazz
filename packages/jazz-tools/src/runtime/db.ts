@@ -2531,7 +2531,12 @@ export class Db {
   /** See {@link DbPhase}. Only {@link beginTeardown} and its end move it. */
   private phase: DbPhase = "open";
   /** A graceful shutdown waiting for pending writes, while still `open`. */
-  private gracefulDrain: { done: Promise<void>; cancel(): void } | null = null;
+  private gracefulDrain: {
+    done: Promise<void>;
+    cancel(): void;
+    /** A plain shutdown arrived meanwhile: a failed drain still tears down. */
+    teardownAnyway: boolean;
+  } | null = null;
   /** Teardown's outcome, from the moment the Db enters `closing`. */
   private teardown: Promise<void> | null = null;
   /** Set once the session that owned this Db moved on to another one. */
@@ -4639,11 +4644,20 @@ export class Db {
    * stays open. Otherwise, or once they uploaded, the Db moves to `closing`
    * and on to `closed`, for good.
    *
+   * A plain shutdown (no `waitForSync`) always ends `closed`. One asked for
+   * while a drain runs waits for that drain, as before, but if the drain
+   * fails it tears down anyway: the drain's own caller still gets the
+   * `GracefulShutdownSyncError`, but the Db no longer stays open.
+   *
    * Idempotent: concurrent or repeated calls share the same in-flight promise.
    */
   shutdown(options: ShutdownOptions = {}): Promise<void> {
     if (this.teardown) return this.teardown;
-    if (this.gracefulDrain) return this.gracefulDrain.done;
+    if (this.gracefulDrain) {
+      if (options.waitForSync) return this.gracefulDrain.done;
+      this.gracefulDrain.teardownAnyway = true;
+      return this.gracefulDrain.done.catch(() => this.beginTeardown());
+    }
     if (!options.waitForSync) return this.beginTeardown();
     // Publish the drain before it starts: waiting can call back into the Db.
     let resolveDrain!: (result: Promise<void>) => void;
@@ -4661,6 +4675,7 @@ export class Db {
         syncAbort.abort();
         rejectCancelled(new Error("Graceful shutdown cancelled"));
       },
+      teardownAnyway: false,
     };
     this.gracefulDrain = drain;
     resolveDrain(
@@ -4675,8 +4690,11 @@ export class Db {
           ]);
         } catch (error) {
           syncAbort.abort();
-          // The Db never left `open`: it takes work again.
           if (this.gracefulDrain === drain) this.gracefulDrain = null;
+          // The Db never left `open`, and takes work again, unless a plain
+          // shutdown asked for it meanwhile: that one closes it now, with no
+          // moment in between where it reads as open.
+          if (drain.teardownAnyway) void this.beginTeardown().catch(() => {});
           throw new GracefulShutdownSyncError(error);
         }
         // Teardown takes over from here: a caller that shares this promise
@@ -4710,7 +4728,9 @@ export class Db {
 
   /** @internal Dispose account refresh and invalidation observers with the context. */
   onShutdown(listener: () => void): () => void {
-    if (this.stopping) listener();
+    // A drain may fail and leave the Db open: a listener registered during
+    // one waits for the teardown, if it comes.
+    if (this.phase !== "open") listener();
     else this.shutdownListeners.add(listener);
     return () => this.shutdownListeners.delete(listener);
   }
