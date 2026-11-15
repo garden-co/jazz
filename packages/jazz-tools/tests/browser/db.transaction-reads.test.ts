@@ -615,19 +615,20 @@ describe("db mergeable transaction reads browser integration", () => {
   });
 
   describe("db.transaction(cb)", () => {
-    it("rejects an async mergeable transaction that only reads because it has no commit", async () => {
+    it("resolves an async mergeable transaction that only reads, as there is nothing to commit", async () => {
       const { value: existingTodo } = db.insert(app.todos, {
         title: "Alice reviewed the plan",
         done: false,
       });
 
-      await expect(
-        db.transaction(async (tx) => {
-          const rows = await tx.all(app.todos);
-          expect(rows).toEqual([existingTodo]);
-          return "no writes needed";
-        }),
-      ).rejects.toThrow("empty mergeable transaction has no committed unit; roll it back instead");
+      const result = await db.transaction(async (tx) => {
+        const rows = await tx.all(app.todos);
+        expect(rows).toEqual([existingTodo]);
+        return "no writes needed";
+      });
+      expect(result.value).toBe("no writes needed");
+      await expect(result.wait({ tier: "global" })).resolves.toBe("no writes needed");
+      await expect(db.all(app.todos)).resolves.toEqual([existingTodo]);
     });
 
     it("rolls back cleanly when an async mergeable transaction reads then throws before writing", async () => {

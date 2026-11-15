@@ -391,6 +391,34 @@ describe("Db mergeable transactions", () => {
     );
   });
 
+  // A callback that finds nothing to do (a cleanup with no stale rows) is
+  // an ordinary outcome: it resolves, and its result's wait resolves at
+  // once (jazz#5505). The explicit `commit()` below still refuses.
+  it("resolves a callback transaction that wrote nothing, with nothing committed", async () => {
+    await allTodos();
+    const onlyReads = await db.transaction(async (tx) => {
+      expect(await tx.all(app.todos.where({}), { tier: "local-first" })).toEqual([]);
+      return "nothing to clean up";
+    });
+    expect(onlyReads.value).toBe("nothing to clean up");
+    await expect(onlyReads.wait({ tier: "global" })).resolves.toBe("nothing to clean up");
+    await expect(onlyReads.txId).rejects.toMatchObject({
+      name: "EmptyTransactionError",
+      code: "empty_transaction",
+    });
+
+    const nothingAtAll = await db.transaction(() => 7);
+    await expect(nothingAtAll.wait({ tier: "local" })).resolves.toBe(7);
+    await expect(nothingAtAll.mapValue((n) => n + 1).wait({ tier: "local" })).resolves.toBe(8);
+
+    // A later write is unaffected, and a callback that writes still commits.
+    const wrote = await db.transaction((tx) =>
+      tx.insert(app.todos, { title: "after an empty one", done: false }),
+    );
+    await wrote.wait({ tier: "local" });
+    expect((await allTodos()).map((todo) => todo.title)).toEqual(["after an empty one"]);
+  });
+
   it("rejects committing an empty mergeable transaction after Db initialization", async () => {
     await allTodos();
     const tx = db.beginTransaction();
