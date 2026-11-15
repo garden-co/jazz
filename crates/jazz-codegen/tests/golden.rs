@@ -267,9 +267,7 @@ fn kotlin_refuses_tables_that_would_shadow_types_it_uses() {
 }
 
 #[test]
-fn kotlin_is_switched_off_in_the_cli_until_its_runtime_lands() {
-    let error = Lang::parse("kotlin").unwrap_err();
-    assert!(error.is_unsupported());
-    assert!(error.to_string().contains("not available yet"), "{error}");
-    assert!(!Lang::ALL.contains(&Lang::Kotlin));
+fn kotlin_is_a_cli_language() {
+    assert_eq!(Lang::parse("kotlin").unwrap(), Lang::Kotlin);
+    assert!(Lang::ALL.contains(&Lang::Kotlin));
 }

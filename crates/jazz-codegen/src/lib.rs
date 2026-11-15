@@ -85,18 +85,15 @@ impl Lang {
         match name {
             "ts" | "typescript" => Ok(Lang::TypeScript),
             "rust" | "rs" => Ok(Lang::Rust),
-            // Switched off until the jazz-kotlin runtime lands.
-            "kotlin" | "kt" => Err(CodegenError::unsupported(
-                "Kotlin bindings are not available yet",
-            )),
+            "kotlin" | "kt" => Ok(Lang::Kotlin),
             other => Err(CodegenError::unsupported(format!(
-                "generating bindings in `{other}` is not supported yet; supported: ts, rust"
+                "generating bindings in `{other}` is not supported yet; supported: ts, rust, kotlin"
             ))),
         }
     }
 
     /// Every language, in the order `jazz-tools generate` handles them.
-    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust];
+    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust, Lang::Kotlin];
 
     /// The file whose presence beside `jazz.app.json` says the app is
     /// written in this language, so `validate` writes its bindings.
