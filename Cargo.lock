@@ -2020,6 +2020,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "futures-core",
+ "futures-util",
  "jazz",
  "jazz-codegen",
  "jazz-native-transport",

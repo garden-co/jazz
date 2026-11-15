@@ -35,7 +35,7 @@ Declare reverse relations explicitly on the target table. For example, if `todos
 The reverse relation returns matching source rows as an array. Its name is your choice;
 Jazz does not generate an inverse or infer names from UUID columns.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-reverse-relation-ts
@@ -45,6 +45,12 @@ Jazz does not generate an inverse or infer names from UUID columns.
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-reverse-relation-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-reverse-relation-rust
+    </include>
+
   </Tab>
 </Tabs>
 

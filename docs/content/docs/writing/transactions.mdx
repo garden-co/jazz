@@ -62,7 +62,7 @@ already apply locally first and sync in the background.
 The callback form commits automatically when the callback finishes. Jazz rolls the transaction back
 if the callback throws or returns a rejected promise.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-ts
@@ -72,6 +72,12 @@ if the callback throws or returns a rejected promise.
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-transaction-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-transaction-rust
+    </include>
+
   </Tab>
 </Tabs>
 
