@@ -120,3 +120,59 @@ pub(crate) async fn enrol(
     }
     Ok(admitted.account)
 }
+
+/// A user the app's backend signed in: what `createJazz`'s
+/// `backend-sign-in` answers.
+#[derive(Debug, Deserialize)]
+pub(crate) struct SignedIn {
+    pub account: AccountId,
+    pub identity: SignedInIdentity,
+    #[serde(default)]
+    pub claims: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SignedInIdentity {
+    pub issuer: String,
+    pub subject: String,
+}
+
+/// Signs the bearer's user in at the app's Jazz endpoint (`createJazz`'s
+/// handler, e.g. `https://app.example/jazz`), as a browser does with its
+/// cookies: the backend's `authenticate` names the user, and the core
+/// resolves (or creates) their account. `None`: the bearer names no one.
+pub(crate) async fn sign_in(
+    endpoint: &str,
+    app_id: AppId,
+    bearer: &str,
+) -> Result<Option<SignedIn>> {
+    let response = http()?
+        .post(app_url(endpoint, app_id, "accounts/backend-sign-in"))
+        .bearer_auth(bearer)
+        .send()
+        .await
+        .map_err(|error| Error::Server(format!("signing in: {error}")))?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Ok(None);
+    }
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(Error::Server(
+            "the server has no backend sign-in: Config::server must be the app's Jazz \
+             endpoint (createJazz's handler, e.g. https://app.example/jazz), not the core"
+                .into(),
+        ));
+    }
+    if !response.status().is_success() {
+        return Err(refusal("signing in", response).await);
+    }
+    let signed_in: SignedIn = response
+        .json()
+        .await
+        .map_err(|error| Error::Server(format!("signing in: {error}")))?;
+    if signed_in.account.is_system() {
+        return Err(Error::Server(
+            "signing in returned the system account".into(),
+        ));
+    }
+    Ok(Some(signed_in))
+}
