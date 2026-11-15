@@ -30,7 +30,10 @@ public struct User: Decodable, Hashable, Sendable {
     public var issuer: String?
     public var subject: String?
     public var claims: JSONValue?
-    public var kind: String?
+    /// A local-first device account, or a user the app's backend signed in.
+    public var kind: Kind
+
+    public enum Kind: String, Decodable, Hashable, Sendable { case device, backend }
 }
 
 /// An end user's session.
@@ -57,19 +60,63 @@ public enum SessionState: Hashable, Sendable {
     }
 }
 
-/// How the client is syncing, as TS's `SyncStatus`.
+/// How the client syncs, as TS's `SyncStatus`.
 public struct SyncStatus: Decodable, Hashable, Sendable {
-    /// The connection: e.g. "online", "connecting", "offline".
-    public var link: String
-    /// Local writes the server hasn't acknowledged yet.
-    public var pendingUploads: Int?
-    /// When the oldest of them was made (milliseconds since the epoch).
-    public var oldestPendingAt: Double?
-    /// Writes the server rejected.
-    public var rejected: Int?
-    public var lastError: String?
-    /// Whether everything written so far has synced.
-    public var synced: Bool?
+    /// The upstream connection.
+    public var link: Link
+    /// Transactions committed here that the server hasn't accepted or
+    /// rejected yet (including ones recovered after a restart).
+    public var pendingUploads: Int
+    /// When the oldest of them was committed.
+    public var oldestPendingAt: Date?
+    /// This client's transactions the server rejected since it opened.
+    public var rejected: Int
+    /// The latest thing that went wrong with sync since the client opened.
+    public var lastError: SyncError?
+    /// Nothing waits for upload, and the link is connected (or there's no server).
+    public var synced: Bool
+}
+
+/// The upstream connection, as TS's `SyncStatus.link`.
+public enum Link: Decodable, Hashable, Sendable {
+    /// No server: the app runs locally.
+    case localOnly
+    case connecting
+    case connected
+    /// Not syncing; `retrying` when the client reconnects on its own. With
+    /// `reason == .auth`, `auth` says why the server refused the credential.
+    case offline(reason: OfflineReason, retrying: Bool, auth: JSONValue?)
+
+    private enum Keys: String, CodingKey { case state, reason, retrying, auth }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        switch try c.decode(String.self, forKey: .state) {
+        case "localOnly": self = .localOnly
+        case "connecting": self = .connecting
+        case "connected": self = .connected
+        default:
+            self = .offline(
+                reason: (try? c.decode(OfflineReason.self, forKey: .reason)) ?? .disconnected,
+                retrying: (try? c.decode(Bool.self, forKey: .retrying)) ?? false,
+                auth: try? c.decodeIfPresent(JSONValue.self, forKey: .auth))
+        }
+    }
+}
+
+/// Why the link is offline, as TS's `OfflineReason`.
+public enum OfflineReason: String, Decodable, Hashable, Sendable {
+    case network, auth, stopped, disconnected
+}
+
+/// Something that went wrong with sync, as TS's `SyncError`.
+public struct SyncError: Decodable, Hashable, Sendable {
+    /// `rejected`, `network`, `auth` or `stopped`.
+    public var kind: String
+    /// The rejection's code, for `rejected`.
+    public var code: String?
+    public var message: String
+    public var at: Date
 }
 
 final class Tokens: TokenProvider, @unchecked Sendable {
