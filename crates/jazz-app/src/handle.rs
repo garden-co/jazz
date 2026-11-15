@@ -116,11 +116,17 @@ impl Jazz {
             Storage::Dir(dir) => Some(dir.clone()),
             Storage::Memory => None,
         };
+        // Held until the client has stopped: `delete_client_storage` won't
+        // pull the store from under this app.
+        let store = storage_dir
+            .as_deref()
+            .map(crate::lifecycle::StoreDir::hold)
+            .transpose()?;
         let (commands, receiver) = mpsc::unbounded_channel();
         let (ready, opened) = oneshot::channel();
         std::thread::Builder::new()
             .name("jazz-client".into())
-            .spawn(move || run(files, config, receiver, ready))
+            .spawn(move || run(files, config, store, receiver, ready))
             .map_err(|error| Error::Config(format!("cannot start the client thread: {error}")))?;
         let (bundle, account) = opened.await.map_err(|_| Error::Stopped)??;
         Ok(Self {
@@ -331,6 +337,7 @@ pub(crate) fn decode_result<T: Table>(
 fn run(
     files: AppFiles,
     config: Config,
+    store: Option<crate::lifecycle::StoreDir>,
     mut commands: mpsc::UnboundedReceiver<Command>,
     ready: oneshot::Sender<Result<Opened>>,
 ) {
@@ -414,6 +421,8 @@ fn run(
             while jobs.join_next().await.is_some() {}
         }
         let result = client.shutdown().await;
+        // The store is closed: a caller woken below may delete it.
+        drop(store);
         let failure = result.as_ref().err().map(ToString::to_string);
         let mut replies = stopped.into_iter();
         if let Some(first) = replies.next() {

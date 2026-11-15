@@ -25,7 +25,13 @@ impl Settler {
                 // mutation error.
                 crate::lifecycle::claim(written);
                 let waited = client.wait_for_transaction(written, tier).await;
-                if waited.is_ok() {
+                // Only a refusal is the reporter's to drop: a wait that
+                // ended otherwise (the driver stopped, the write unknown)
+                // handled nothing, so a later refusal is a mutation error.
+                if !waited
+                    .as_ref()
+                    .is_err_and(|error| error.is_transaction_rejection())
+                {
                     crate::lifecycle::unclaim(written);
                 }
                 Ok(waited?)

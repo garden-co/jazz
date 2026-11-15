@@ -1792,12 +1792,14 @@ impl JazzClient {
                 // authority's verdict on the transaction.
                 if error.is_authorization_denied() {
                     JazzError::Sync(format!(
-                        "transaction was rejected before reaching {tier:?} durability: {}",
+                        "{} {tier:?} durability: {}",
+                        super::REJECTED_BEFORE,
                         crate::db::AUTHORIZATION_DENIED
                     ))
                 } else {
                     JazzError::Write(format!(
-                        "transaction was rejected before reaching {tier:?} durability: {error}"
+                        "{} {tier:?} durability: {error}",
+                        super::REJECTED_BEFORE
                     ))
                 }
             })
@@ -1891,8 +1893,12 @@ impl JazzClient {
 impl JazzClient {
     /// Leave the server, keeping local reads and writes working (TS's
     /// `db.disconnect()`); [`JazzClient::reconnect`] resumes sync with the
-    /// same client. Returns whether a link was attached.
+    /// same client. Returns whether a link was attached: without a server
+    /// there is none, and nothing changes.
     pub fn disconnect(&self) -> bool {
+        if self.shared.serverless {
+            return false;
+        }
         self.shared.upstream_paused.send_replace(true);
         let detached = detach(&self.shared);
         self.shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
@@ -1901,8 +1907,12 @@ impl JazzClient {
 
     /// Resume sync after [`JazzClient::disconnect`] (TS's
     /// `db.reconnect()`), waiting until the link is attached. Returns
-    /// whether there was anything to reattach.
+    /// whether there was anything to reattach: without a server there is
+    /// nothing, and it returns `false` at once.
     pub async fn reconnect(&self) -> Result<bool> {
+        if self.shared.serverless {
+            return Ok(false);
+        }
         // An attempt the keeper started before this call (a retry during an
         // outage) may still fail after it: only attempts started from here
         // on answer it.
@@ -1938,6 +1948,8 @@ impl JazzClient {
 
     /// Keep the writes the server refuses, for
     /// [`JazzClient::take_mutation_errors`] (TS's `onMutationError`).
+    /// Owned by `jazz-app`, like that: not public API.
+    #[doc(hidden)]
     pub fn track_mutation_errors(&self) {
         self.shared.db.track_upstream_rejections();
     }
@@ -1945,6 +1957,11 @@ impl JazzClient {
     /// This client's writes the server refused since the last call (with
     /// [`JazzClient::track_mutation_errors`] on), oldest first. Each is
     /// reported once; their payloads are released.
+    ///
+    /// Destructive, and owned by `jazz-app`: its reporter takes these for
+    /// `Jazz::mutation_errors`, so another caller (say through
+    /// `Jazz::with_client`) would steal refusals from it. Not public API.
+    #[doc(hidden)]
     pub fn take_mutation_errors(&self) -> Vec<MutationError> {
         let node = self.shared.identity.node;
         let mut errors = Vec::new();
@@ -2034,15 +2051,27 @@ pub struct StreamingUpload {
 
 /// A write of this client the server refused: see
 /// [`JazzClient::take_mutation_errors`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serializes as `{"transaction": "<id>", "message", "denied",
+/// "serializable"}`, the transaction as its string id.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MutationError {
     /// The refused commit, as its write returned it.
+    #[serde(serialize_with = "serialize_display")]
     pub transaction: TransactionId,
     pub message: String,
     /// Refused by a permission.
     pub denied: bool,
     /// A serializable transaction's commit.
     pub serializable: bool,
+}
+
+fn serialize_display<T: std::fmt::Display, S: serde::Serializer>(
+    value: &T,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.collect_str(value)
 }
 
 /// A transaction-scoped client handle.

@@ -171,6 +171,21 @@ pub enum JazzError {
     ChannelClosed,
 }
 
+/// How a durable wait's error for a refused transaction begins.
+#[cfg(feature = "runtime")]
+pub(crate) const REJECTED_BEFORE: &str = "transaction was rejected before reaching";
+
+#[cfg(feature = "runtime")]
+impl JazzError {
+    /// Whether this is [`JazzClient::wait_for_transaction`]'s error for a
+    /// transaction the server refused, rather than a wait that failed for
+    /// another reason. For `jazz-app`'s mutation-error reporting.
+    #[doc(hidden)]
+    pub fn is_transaction_rejection(&self) -> bool {
+        matches!(self, Self::Sync(message) | Self::Write(message) if message.starts_with(REJECTED_BEFORE))
+    }
+}
+
 /// Result type for Jazz operations.
 #[cfg(feature = "runtime")]
 pub type Result<T> = std::result::Result<T, JazzError>;
