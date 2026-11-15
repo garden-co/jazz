@@ -27,13 +27,14 @@ use std::marker::PhantomData;
 
 use jazz::query::Predicate;
 
-use crate::query::{Condition, Many, One, Query, table};
+use crate::query::{Condition, Many, One, Query, Refs, table};
 use crate::table::Table;
 use crate::untyped;
 
 /// A relation [`Query::hop_to`] follows from rows of `T`: a forward
-/// relation ([`One`]) to the row each references, or a reverse one
-/// ([`Many`]) to the rows referencing each.
+/// relation ([`One`]) to the row each references, an array one ([`Refs`])
+/// to the rows each references, or a reverse one ([`Many`]) to the rows
+/// referencing each.
 pub trait Hop<T>: Copy {
     /// The table it reaches.
     type To: Table;
@@ -45,6 +46,16 @@ impl<T: Table, U: Table, N> Hop<T> for One<T, U, N> {
     type To = U;
     fn into_untyped(self) -> untyped::Hop {
         untyped::Hop::Forward {
+            column: self.column().to_owned(),
+            to: table::<U>(),
+        }
+    }
+}
+
+impl<T: Table, U: Table, N> Hop<T> for Refs<T, U, N> {
+    type To = U;
+    fn into_untyped(self) -> untyped::Hop {
+        untyped::Hop::ForwardArray {
             column: self.column().to_owned(),
             to: table::<U>(),
         }
