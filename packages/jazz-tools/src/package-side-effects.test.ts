@@ -97,6 +97,7 @@ const REVIEWED_CALLS = new Set([
   "classic-api.ts: classicNamespace",
   "dev/app-files.ts: join",
   "dev/project.ts: join",
+  "upgrade/project.ts: join",
   "dev/inspector-overlay/loader.ts: HostBinding",
   "inspect/mcp.ts: WHERE_OPERATORS.join",
   "local-first-auth/identity.ts: utf8",

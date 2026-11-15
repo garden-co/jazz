@@ -203,7 +203,7 @@ describe("cli generate", () => {
     expect(logs.filter((line) => line.includes("built-in $createdAt"))).toHaveLength(1);
   });
 
-  it("validates root jazz.app.json, writing only jazz.generated.ts", async () => {
+  it("checks root jazz.app.json, writing only jazz.generated.ts", async () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root, todosApp(), emptyPermissions());
 
@@ -265,7 +265,7 @@ describe("cli generate", () => {
     );
   });
 
-  it("validates root jazz.app.json and jazz.permissions.json", async () => {
+  it("checks root jazz.app.json and jazz.permissions.json", async () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root);
 
@@ -274,7 +274,7 @@ describe("cli generate", () => {
     expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
     expect(await fileExists(join(root, "permissions.test.ts"))).toBe(false);
     expect(logs.join("\n")).toMatch(
-      /Validated jazz\.app\.json and jazz\.permissions\.json; wrote .*jazz\.generated\.ts\. Commit it\./,
+      /Checked jazz\.app\.json and jazz\.permissions\.json; wrote .*jazz\.generated\.ts\. Commit it\./,
     );
   });
 
