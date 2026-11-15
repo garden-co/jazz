@@ -56,11 +56,11 @@ describe("typed app prototype", () => {
     );
   });
 
-  it.each(["union", "wasmSchema", "schemaAst"])(
+  it.each(["union", "wasmSchema", "schemaAst", "_schema", "exists", "constructor", "toString"])(
     "rejects a table named %s instead of masking an app control",
     (tableName) => {
       expect(() => testApp({ tables: { [tableName]: { columns: { value: "string" } } } })).toThrow(
-        /reserved/i,
+        `Schema name "${tableName}" is reserved for Jazz schema controls.`,
       );
     },
   );
@@ -517,7 +517,9 @@ describe("typed app prototype", () => {
           },
         },
       }),
-    ).toThrow();
+    ).toThrow(
+      /^jazz\.app\.json: migrations: invalid schema [0-9a-f]{64}: \$\.todos\.owner: reference target table 'accounts' does not exist$/,
+    );
     // The same inside an array reference.
     expect(() =>
       testApp({
@@ -529,7 +531,9 @@ describe("typed app prototype", () => {
           },
         },
       }),
-    ).toThrow();
+    ).toThrow(
+      /^jazz\.app\.json: migrations: invalid schema [0-9a-f]{64}: \$\.groups\.members: reference target table 'accounts' does not exist$/,
+    );
   });
 
   it("infers fields with defaults as optional for init payloads", () => {
