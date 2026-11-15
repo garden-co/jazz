@@ -24,6 +24,8 @@ pub struct Created {
     pub changed: bool,
     /// JSON paths of the TODOs the author must resolve, in file order.
     pub todos: Vec<String>,
+    /// Why nothing was written, when it isn't simply that nothing changed.
+    pub note: Option<String>,
 }
 
 /// Write the migration from the version `bindings` (the committed file in
@@ -41,6 +43,7 @@ pub fn create(
         app: text.to_string(),
         changed: false,
         todos: Vec::new(),
+        note: None,
     };
     let app = App::load(app_json).map_err(CodegenError::from_artifact)?;
     let Some(bindings) = bindings else {
@@ -58,6 +61,16 @@ pub fn create(
     }
     let from = &recorded.current_schema;
     let to = app.compiled.current_schema();
+    // Single-column indexes change the hash, not the version or the rows
+    // (#5494): there is nothing to migrate, as `bindings::staleness` says.
+    if bindings::differs_only_in_indexes(from, to) {
+        return Ok(Created {
+            note: Some(
+                "only single-column indexes changed: no migration needed; run `jazz-tools generate`".into(),
+            ),
+            ..unchanged()
+        });
+    }
     let version = SchemaHash::compute(from).to_string()[..12].to_string();
 
     let mut root = artifact::json::parse(app_json).map_err(CodegenError::new)?;
@@ -103,6 +116,7 @@ pub fn create(
         app: out,
         changed: true,
         todos,
+        note: None,
     })
 }
 

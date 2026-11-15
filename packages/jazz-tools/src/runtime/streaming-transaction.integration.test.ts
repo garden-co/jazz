@@ -1,19 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
-import { createPolicyTestApp } from "../testing/index.js";
+import { createPolicyTestApp, testApp } from "../testing/index.js";
 
-const app = s.defineApp(
-  {
-    files: s.table({ name: s.string(), data: s.bytes() }, {}),
+const app = testApp({ tables: { files: { columns: { name: "string", data: "bytes" } } } });
+
+const permissions = {
+  tables: {
+    files: {
+      read: "$createdBy.account = session.user",
+      insert: "true",
+      update: "$createdBy.account = session.user",
+    },
   },
-  { migrations: "none" },
-);
-
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.files.allowRead.where({ "$createdBy.account": session.user });
-  policy.files.allowInsert.always();
-  policy.files.allowUpdate.where({ "$createdBy.account": session.user });
-});
+};
 
 const uploader = {
   issuer: "https://auth.files.example",
@@ -33,9 +31,9 @@ async function* chunks(): AsyncGenerator<Uint8Array> {
 
 describe("streaming inside a transaction", () => {
   it("commits a streamed value with the transaction's other writes", async () => {
-    const testApp = await createPolicyTestApp(app, permissions, expect);
+    const policyApp = await createPolicyTestApp(app, permissions, expect);
     try {
-      const db = testApp.as(uploader);
+      const db = policyApp.as(uploader);
       const tx = db.beginTransaction();
       const streamed = tx.insertStreaming(app.files, { name: "blob", data: chunks() });
       tx.insert(app.files, { name: "small", data: new Uint8Array([1, 2, 3]) });
@@ -48,27 +46,27 @@ describe("streaming inside a transaction", () => {
       expect(row?.data).toEqual(expected);
       expect((await db.all(app.files)).map((file) => file.name).sort()).toEqual(["blob", "small"]);
     } finally {
-      await testApp.shutdown();
+      await policyApp.shutdown();
     }
   }, 30_000);
 
   it("drops a streamed value when the transaction rolls back", async () => {
-    const testApp = await createPolicyTestApp(app, permissions, expect);
+    const policyApp = await createPolicyTestApp(app, permissions, expect);
     try {
-      const db = testApp.as(uploader);
+      const db = policyApp.as(uploader);
       const tx = db.beginTransaction();
       await tx.insertStreaming(app.files, { name: "discarded", data: chunks() });
       await tx.rollback();
       expect(await db.all(app.files)).toEqual([]);
     } finally {
-      await testApp.shutdown();
+      await policyApp.shutdown();
     }
   }, 30_000);
 
   it("fails the commit when a source throws mid-stream", async () => {
-    const testApp = await createPolicyTestApp(app, permissions, expect);
+    const policyApp = await createPolicyTestApp(app, permissions, expect);
     try {
-      const db = testApp.as(uploader);
+      const db = policyApp.as(uploader);
       async function* failing(): AsyncGenerator<Uint8Array> {
         yield expected.subarray(0, 50_000);
         throw new Error("source broke");
@@ -81,14 +79,14 @@ describe("streaming inside a transaction", () => {
       await expect(tx.commit().wait({ tier: "local" })).rejects.toThrow();
       expect(await db.all(app.files)).toEqual([]);
     } finally {
-      await testApp.shutdown();
+      await policyApp.shutdown();
     }
   }, 30_000);
 
   it("streams into a row in a serializable transaction callback", async () => {
-    const testApp = await createPolicyTestApp(app, permissions, expect);
+    const policyApp = await createPolicyTestApp(app, permissions, expect);
     try {
-      const db = testApp.as(uploader);
+      const db = policyApp.as(uploader);
       const { id } = db.insert(app.files, { name: "file", data: new Uint8Array() }).value;
       const committed = await db.serializableTransaction(async (tx) => {
         await tx.updateStreaming(app.files, id, { data: chunks() });
@@ -96,7 +94,7 @@ describe("streaming inside a transaction", () => {
       await committed.wait();
       expect((await db.one(app.files.where({ id })))?.data).toEqual(expected);
     } finally {
-      await testApp.shutdown();
+      await policyApp.shutdown();
     }
   }, 30_000);
 });

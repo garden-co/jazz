@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useOne } from "jazz-tools/react";
 import { Grid, HStack, Selector, Skeleton, TextInput, Token, VStack } from "@astryxdesign/core";
-import { app, type IssuePriority, type IssueStatus } from "@/schema";
+import { app, type IssuePriority, type IssueStatus } from "@/jazz.generated";
 import {
   ISSUE_PRIORITIES,
   ISSUE_STATUSES,

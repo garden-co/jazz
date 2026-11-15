@@ -1,9 +1,8 @@
-// No example's client code imports its permissions module.
+// No example's client code imports its jazz.permissions.json.
 //
-// An app's compiled permissions belong to its backends: they read them from
-// jazz.permissions.json. A client file that imports permissions.ts (even for
-// one constant) pulls `definePermissions(...)` and the app's rules into
-// every client bundle that reaches it. Tests, benchmarks, scripts and files
+// An app's permissions belong to its backends: `createJazz({ app, permissions })`
+// takes the imported file. A client file that imports it puts the app's rules
+// in every client bundle that reaches it. Tests, benchmarks, scripts and files
 // named as server code may import it.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -14,9 +13,9 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
-/** Imports of an app's permissions module: `./permissions`, `../permissions.js`, `@/permissions`, `$lib/permissions`. */
+/** Imports of an app's permissions file: `./jazz.permissions.json`, `@/jazz.permissions.json`, `$lib/…`, `import(…)`. */
 const PERMISSIONS_IMPORT =
-  /\bfrom\s+["'](?:(?:\.{1,2}\/)+(?:src\/(?:lib\/)?)?|@\/|\$lib\/)permissions(?:\.[jt]s)?["']|\bimport\(\s*["'](?:\.{1,2}\/)+permissions(?:\.[jt]s)?["']\s*\)/;
+  /\bfrom\s+["'](?:(?:\.{1,2}\/)+(?:src\/(?:lib\/)?)?|@\/|\$lib\/)jazz\.permissions\.json["']|\bimport\(\s*["'](?:\.{1,2}\/)+(?:src\/(?:lib\/)?)?jazz\.permissions\.json["']/;
 
 /**
  * Paths that never reach a client bundle: tests, benchmarks, scripts, and
@@ -52,15 +51,20 @@ test("no example's client code imports its permissions module", () => {
   assert.deepEqual(
     offenders,
     [],
-    `These client files import a permissions module, which puts the app's rules in every client bundle. ` +
-      `Move what they need (a constant, say) to a module both sides import:\n${offenders.join("\n")}`,
+    `These client files import jazz.permissions.json, which puts the app's rules in every client bundle. ` +
+      `Only backends pass it to createJazz:\n${offenders.join("\n")}`,
   );
 });
 
 test("the check recognises a client import and a server one", () => {
-  assert.ok(PERMISSIONS_IMPORT.test('import { MAX } from "@/permissions";'));
-  assert.ok(PERMISSIONS_IMPORT.test('import permissions from "../permissions.js";'));
-  assert.ok(!PERMISSIONS_IMPORT.test('import permissions from "./jazz.permissions.json";'));
+  assert.ok(PERMISSIONS_IMPORT.test('import permissions from "@/jazz.permissions.json";'));
+  assert.ok(
+    PERMISSIONS_IMPORT.test(
+      'import permissions from "../jazz.permissions.json" with { type: "json" };',
+    ),
+  );
+  assert.ok(PERMISSIONS_IMPORT.test('const p = await import("./jazz.permissions.json");'));
+  assert.ok(!PERMISSIONS_IMPORT.test('import { app } from "./jazz.generated";'));
   assert.ok(!NOT_CLIENT.test("examples/x/src/components/Cart.tsx"));
   assert.ok(NOT_CLIENT.test("examples/x/src/lib/jazz.server.ts"));
   assert.ok(NOT_CLIENT.test("examples/x/app/api/jazz/route.ts"));

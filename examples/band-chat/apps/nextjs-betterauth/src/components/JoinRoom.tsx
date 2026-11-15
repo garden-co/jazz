@@ -2,7 +2,7 @@
 
 import { useAll } from "jazz-tools/react";
 import { Button, Center, EmptyState, HStack, MobileNavToggle, VStack } from "@astryxdesign/core";
-import { app, type Profile } from "../../schema";
+import { app, type Profile } from "../../jazz.generated";
 
 /**
  * Shown for a room link you are not a member of. You cannot read the room yet,

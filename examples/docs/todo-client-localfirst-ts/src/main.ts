@@ -2,7 +2,7 @@ import type { Db } from "jazz-tools";
 import { sessionConfig, type SessionOverrides } from "./account.js";
 import { createJazzClient, type JazzClient, type JazzSession } from "jazz-tools/client";
 import { authSessionExamples } from "./auth-session-snippets.js";
-import { app, type Todo } from "../schema.js";
+import { app, type Todo } from "../jazz.generated.js";
 
 // Keep docs-only auth snippets in the compiled example app.
 void authSessionExamples;

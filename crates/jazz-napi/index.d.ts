@@ -404,6 +404,11 @@ export interface CreatedMigration {
   changed: boolean
   /** JSON paths of the `"TODO: …"` strings left for the author. */
   todos: Array<string>
+  /**
+   * Why nothing was written, when it isn't simply that nothing changed
+   * (an index-only edit).
+   */
+  note?: string
 }
 
 export interface DeleteOptions {

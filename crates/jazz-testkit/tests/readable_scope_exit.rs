@@ -303,7 +303,7 @@ async fn run_revoked_exit_shared_case(dependency: bool, changes_filter: bool, sh
     let shared_reader = if shared_cache {
         Some(
             TestingClient::builder()
-                .with_server(&server)
+                .with_server(server)
                 .with_schema(schema.clone())
                 .with_user_id("shared-backend")
                 .as_admin()
@@ -331,7 +331,7 @@ async fn run_revoked_exit_shared_case(dependency: bool, changes_filter: bool, sh
         None
     };
     let alice = TestingClient::builder()
-        .with_server(&server)
+        .with_server(server)
         .with_schema(schema)
         .with_user_id("alice")
         .as_user()

@@ -36,10 +36,13 @@ async function init({
   const { createJazzContext } = await import(
     new URL("dist/backend/create-jazz-context.js", root).href
   );
+  // The adapter exports the app's jazz.permissions.json; a context takes
+  // the policies Jazz's Rust loader compiles from it.
+  const { testPermissions } = await import(new URL("dist/testing/test-app.js", root).href);
   context = createJazzContext({
     appId,
     app: adapter.app,
-    permissions: adapter.permissions,
+    permissions: testPermissions(adapter.app, adapter.permissions),
     driver: { type: "memory" },
     serverUrl,
     backendSecret,

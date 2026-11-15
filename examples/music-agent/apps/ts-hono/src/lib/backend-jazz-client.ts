@@ -1,5 +1,5 @@
-import { app } from "@/schema";
-import permissions from "@/permissions";
+import { app } from "@/jazz.generated";
+import permissions from "@/jazz.permissions.json" with { type: "json" };
 import { createJazz, remote, sqlite, type Jazz } from "jazz-tools/backend";
 import { jazzAppId } from "./jazz-env";
 

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "documents": {
+      "read": "exists workspaceMembers(workspaceId = this.workspaceId, user_id = session.user)",
+      "insert": {
+        "anyOf": [
+          "exists workspaceMembers(workspaceId = this.workspaceId, user_id = session.user, role = 'writer')",
+          "exists workspaceMembers(workspaceId = this.workspaceId, user_id = session.user, role = 'contributor')",
+          "exists workspaceMembers(workspaceId = this.workspaceId, user_id = session.user, role = 'admin')"
+        ]
+      },
+      "update": {
+        "anyOf": [
+          "exists workspaceMembers(workspaceId = this.workspaceId, user_id = session.user, role = 'writer')",
+          "exists workspaceMembers(workspaceId = this.workspaceId, user_id = session.user, role = 'admin')",
+          {
+            "allOf": [
+              "$createdBy = session.user",
+              "exists workspaceMembers(workspaceId = this.workspaceId, user_id = session.user, role = 'contributor')"
+            ]
+          }
+        ]
+      },
+      "delete": {
+        "anyOf": [
+          "exists workspaceMembers(workspaceId = this.workspaceId, user_id = session.user, role = 'writer')",
+          "exists workspaceMembers(workspaceId = this.workspaceId, user_id = session.user, role = 'admin')",
+          {
+            "allOf": [
+              "$createdBy = session.user",
+              "exists workspaceMembers(workspaceId = this.workspaceId, user_id = session.user, role = 'contributor')"
+            ]
+          }
+        ]
+      }
+    },
+    "workspaceMembers": {
+      "read": "exists workspaceMembers(workspaceId = this.workspaceId, user_id = session.user)",
+      "insert": {
+        "anyOf": [
+          "exists workspaceMembers(workspaceId = this.workspaceId, user_id = session.user, role = 'admin')",
+          {
+            "allOf": [
+              { "allOf": ["user_id = session.user", "role = 'admin'"] },
+              "exists workspaces(id = this.workspaceId, $createdBy = session.user)"
+            ]
+          }
+        ]
+      },
+      "update": "exists workspaceMembers(workspaceId = this.workspaceId, user_id = session.user, role = 'admin')",
+      "delete": {
+        "anyOf": [
+          "exists workspaceMembers(workspaceId = this.workspaceId, user_id = session.user, role = 'admin')",
+          "user_id = session.user"
+        ]
+      }
+    },
+    "workspaces": {
+      "read": "exists workspaceMembers(workspaceId = this.id, user_id = session.user)",
+      "insert": "true",
+      "update": "exists workspaceMembers(workspaceId = this.id, user_id = session.user, role = 'admin')",
+      "delete": "exists workspaceMembers(workspaceId = this.id, user_id = session.user, role = 'admin')"
+    }
+  }
+}

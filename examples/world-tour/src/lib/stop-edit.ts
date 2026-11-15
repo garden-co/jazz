@@ -1,5 +1,6 @@
 import type { Db } from "jazz-tools";
-import { app, type StopStatus } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
+import { type StopStatus } from "../../app-extras.js";
 import { asLines } from "./text.js";
 
 /** The stop texts as the edit form opened them. */

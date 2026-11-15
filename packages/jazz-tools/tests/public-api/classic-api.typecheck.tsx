@@ -1,4 +1,7 @@
-import { co, z, CoMap, Group, schema as s, type Db } from "jazz-tools";
+import { co, z, CoMap, Group, type Db } from "jazz-tools";
+// `../../` from here and from the scratch copy scripts/classic-api.test.mjs
+// compiles (packages/jazz-tools/.test-tmp/<dir>/) both reach the package root.
+import { app, type Todo } from "../../tests/public-api/apps/todos/jazz.generated.js";
 import {
   useCoState,
   useAccount,
@@ -80,13 +83,9 @@ void [oldVueProps, currentVueProps, currentSolidProps];
 
 // Positive consumers prevent unrelated module/type-resolution failures from hiding
 // accidental rejection of the supported Jazz 2 schema, query and React interfaces.
-const app = s.defineApp(
-  { todos: s.table({ title: s.string(), done: s.boolean() }, {}) },
-  { migrations: "none" },
-);
 declare const db: Db;
 db.insert(app.todos, { title: "Jazz 2", done: false });
-const todo: s.RowOf<typeof app.todos> = { id: "todo", title: "Jazz 2", done: false };
+const todo: Todo = { id: "todo", title: "Jazz 2", done: false };
 function Todos() {
   const { data } = useAll(app.todos.where({ done: false }));
   return data?.map((row) => <p key={row.id}>{row.title}</p>);

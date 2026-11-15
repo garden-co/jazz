@@ -2,7 +2,7 @@
 import React, { useEffect } from "react";
 import { act, render, waitFor } from "@testing-library/react";
 import { expect, it } from "vitest";
-import { schema } from "../../src/schema-namespace.js";
+import { app } from "./apps/notes/jazz.generated.js";
 import { useAll, useOne, useDb, useSession, type Db } from "../../src/react-native/index.js";
 import { JazzDbProvider } from "../../src/react-core/provider.js";
 import {
@@ -21,12 +21,6 @@ function JazzProvider(props: {
 import type { QueryBuilder, QueryOptions } from "../../src/runtime/db.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = schema.defineApp(
-  {
-    notes: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
-  },
-  { migrations: "none" },
-);
 type Note = { id: string; title: string; done: boolean };
 
 function Probe({

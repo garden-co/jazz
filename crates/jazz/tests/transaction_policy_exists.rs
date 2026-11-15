@@ -113,8 +113,7 @@ fn a_staged_insert_without_its_board_is_still_refused() {
         member_of(RowUuid::from_bytes([9; 16])),
         session(alice()),
     ))
-    .err()
-    .expect("no such board");
+    .expect_err("no such board");
     assert!(
         error.message.contains("INSERT policy denied"),
         "{}",
@@ -143,8 +142,7 @@ fn a_commit_whose_later_write_removes_the_evidence_is_refused() {
     ))
     .unwrap();
     let error = block_on(db.commit_mergeable_handle(open))
-        .err()
-        .expect("the member's board is gone at the end of the unit");
+        .expect_err("the member's board is gone at the end of the unit");
     assert!(
         error
             .message
@@ -238,8 +236,7 @@ fn a_row_staged_and_deleted_is_no_evidence() {
         db.tx_ref(open)
             .insert("members", member_of(board), session(alice())),
     )
-    .err()
-    .expect("the board is gone");
+    .expect_err("the board is gone");
     assert!(
         error.message.contains("INSERT policy denied"),
         "{}",
@@ -289,8 +286,7 @@ fn a_staged_row_is_no_evidence_for_its_own_check() {
             ..session(alice())
         },
     ))
-    .err()
-    .expect("its own parent");
+    .expect_err("its own parent");
     assert!(
         error.message.contains("INSERT policy denied"),
         "{}",
@@ -313,8 +309,7 @@ fn a_staged_row_is_no_evidence_for_its_own_check() {
             ..Default::default()
         },
     ))
-    .err()
-    .expect("its own parent, after an earlier write to it");
+    .expect_err("its own parent, after an earlier write to it");
     assert!(error.message.contains("WITH CHECK"), "{}", error.message);
 }
 
@@ -367,9 +362,8 @@ fn a_cycle_of_staged_rows_is_refused_at_commit() {
         },
     ))
     .expect("y is staged, so x's new parent passes as it is staged");
-    let error = block_on(db.commit_mergeable_handle(open))
-        .err()
-        .expect("x and y only ground each other");
+    let error =
+        block_on(db.commit_mergeable_handle(open)).expect_err("x and y only ground each other");
     assert!(error.is_authorization_denied(), "{}", error.message);
     assert!(
         error

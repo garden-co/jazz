@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { useDb } from "jazz-tools/vue";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 const db = useDb();
 const title = ref("");

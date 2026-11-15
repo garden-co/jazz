@@ -1,0 +1,21 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "attachments": {
+      "columns": { "conversation_id": "uuid", "filename": "string", "payload": "bytes" },
+      "relations": { "conversation": { "rel": "conversations", "column": "conversation_id" } }
+    },
+    "conversations": {
+      "columns": { "title": "string" },
+      "relations": {
+        "turnsViaConversation": { "reverse": "turns", "relation": "conversation" },
+        "attachmentsViaConversation": { "reverse": "attachments", "relation": "conversation" }
+      }
+    },
+    "turns": {
+      "columns": { "conversation_id": "uuid", "body": "string" },
+      "relations": { "conversation": { "rel": "conversations", "column": "conversation_id" } }
+    }
+  }
+}

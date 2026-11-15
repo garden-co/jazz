@@ -1,13 +1,14 @@
 import { afterEach, expect, it } from "vitest";
-import { schema } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
 import { openBrowserSessionCore as createJazzClient } from "../../src/session/create-jazz-session.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
 import { resolveDefaultPersistentDbName } from "../../src/runtime/db.js";
 import { isThinDb } from "../../src/runtime/local-first-upgrade.js";
 import { uniqueDbName, waitForCondition } from "./support.js";
 import { vfsPages, vfsPath } from "./idb-vfs.js";
+import { app } from "./apps/clear-on-sign-out/jazz.generated.js";
+import permissions from "./apps/clear-on-sign-out/jazz.permissions.json";
 import {
+  deploy,
   getJazzServerInfo,
   jazzAppFetch,
   jazzAppUserUrl,
@@ -19,15 +20,7 @@ import {
 // while no page of theirs is open (a server-side logout, or the tab closed)
 // must leave nothing of theirs in IndexedDB once the next page loads (rc.4
 // R49). The replica is the local-first SQLite file in the IndexedDB VFS.
-
-const app = schema.defineApp(
-  { notes: schema.table({ text: schema.string() }, {}) },
-  { migrations: "none" },
-);
-const permissions = schema.definePermissions(app, ({ policy }) => [
-  policy.notes.allowRead.always(),
-  policy.notes.allowInsert.always(),
-]);
+// The app (apps/clear-on-sign-out): notes every user may read and insert.
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -40,10 +33,16 @@ it("wipes a user signed out while no page was open from IndexedDB on the next lo
     serverUrl: coreUrl,
     adminSecret,
   } = await getJazzServerInfo(uniqueDbName("clear-on-sign-out"));
-  await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
+  await deploy({
+    appId,
+    serverUrl: coreUrl,
+    adminSecret,
+    app,
+    permissions: permissions,
+  });
   const backend = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
-    { schema: app.wasmSchema, permissions },
+    { schema: app, permissions },
   );
   const aliceUrl = await jazzAppUserUrl(backend, "alice");
   // The backend answers no CORS: send the session's own requests to it from Node.

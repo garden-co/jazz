@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { shipOrder } from "./orders";
 
 /** How long the pretend warehouse takes to pack a paid order. */

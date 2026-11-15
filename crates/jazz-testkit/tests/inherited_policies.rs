@@ -247,8 +247,7 @@ fn user_context(
     schema: jazz::tools::Schema,
     user_id: &str,
 ) -> jazz::tools::AppContext {
-    let mut context = server.make_user_context(schema, user_id);
-    context
+    server.make_user_context(schema, user_id)
 }
 
 async fn connect_ready_user(

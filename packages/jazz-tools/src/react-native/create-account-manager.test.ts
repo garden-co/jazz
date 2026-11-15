@@ -2,7 +2,8 @@ import { NATIVE_RELAY_ABI_V1 } from "jazz-rn/native-relay-abi";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAccountManager } from "./create-account-manager.js";
 import { createDb } from "./create-db.js";
-import { schema as s } from "./index.js";
+import { testApp } from "../testing/test-app.js";
+import { shippedMigrations } from "../runtime/client-migrations.js";
 import { accountToken } from "../accounts/enrollment.js";
 import { accountRegistryUrl } from "../accounts/context.js";
 
@@ -154,11 +155,14 @@ describe("React Native account preparation", () => {
       openAttached: vi.fn(),
     };
     mocks.install.mockReturnValue(native);
-    const migrations = {
-      schemas: [{ hash: "root", schema: { tables: {} } }],
-      migrations: [{ fromHash: "root", toHash: "head", forward: [] }],
-    };
-    const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations });
+    const app = testApp({
+      tables: { notes: { columns: { title: "string" } } },
+      history: { v1: { tables: { notes: { columns: { body: "string" } } } } },
+      migrations: [{ from: "v1", migrate: { notes: { title: { renameFrom: "body" } } } }],
+    });
+    const migrations = shippedMigrations(app.wasmSchema)!;
+    expect(migrations.schemas).toHaveLength(2);
+    expect(migrations.migrations).toHaveLength(1);
     const config = { appId: "native-history", serverUrl: "https://core.example", store: store() };
     const manager = await createAccountManager(config);
     const db = await createDb({ appId: config.appId, account: manager.createLocalFirst() });

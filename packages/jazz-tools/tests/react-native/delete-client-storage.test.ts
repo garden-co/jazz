@@ -1,13 +1,12 @@
 import { expect, it } from "vitest";
-import { schema as s } from "../../src/schema-namespace.js";
+import { testApp, testPermissions } from "../../src/testing/index.js";
 import { ReadTier } from "../../src/runtime/client.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
-const permissions = s.definePermissions(app, ({ policy }) => [
-  policy.notes.allowRead.always(),
-  policy.notes.allowInsert.always(),
-]);
+const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
+const permissions = testPermissions(app, {
+  tables: { notes: { read: "true", insert: "true" } },
+});
 
 // #5145: on React Native `deleteClientStorage()` deleted nothing (it logged
 // that it is "only available in browser runtimes"), although it is the

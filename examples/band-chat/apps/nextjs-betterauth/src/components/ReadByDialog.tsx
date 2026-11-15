@@ -2,7 +2,7 @@
 
 import { useAll } from "jazz-tools/react";
 import { Dialog, DialogHeader, List, ListItem, Text, VStack } from "@astryxdesign/core";
-import { app } from "../../schema";
+import { app } from "../../jazz.generated";
 import { ProfileAvatar, useDirectory } from "../lib/profiles";
 import type { MessageSummary } from "./RoomView";
 

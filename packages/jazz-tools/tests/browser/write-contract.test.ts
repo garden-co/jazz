@@ -24,7 +24,7 @@ async function openDb(label: string) {
   );
 }
 
-// Same scenarios as tests/react-native (RN) and tests/ts-dsl (NAPI): #3273 parity.
+// Same scenarios as tests/react-native (RN) and tests/typed-app (NAPI): #3273 parity.
 describe("WASM write contract", () => {
   it("reports a resident tombstone through the write handle", async () =>
     assertResidentTombstoneRejectsThroughHandle(await openDb("tombstone")));

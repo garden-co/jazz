@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.tests.json",
+  "compilerOptions": {
+    "resolveJsonModule": true,
+    "types": ["node"]
+  },
+  "include": [
+    "tests/browser/**/*.ts",
+    "tests/browser/**/*.tsx",
+    "tests/shared/**/*.ts",
+    "src/types/**/*.d.ts"
+  ]
+}

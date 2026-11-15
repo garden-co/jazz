@@ -69,10 +69,15 @@ function printWrapperHelp() {
   console.log("Usage: jazz-tools <COMMAND> [options]");
   console.log("");
   console.log("Commands:");
-  console.log("  validate              Validate root schema.ts and permissions.ts");
-  console.log("  schema compile        Print schema JSON from local schema.ts");
   console.log(
-    "  migrations create     Generate a typed structural migration stub from snapshots or schema hashes",
+    "  generate              Check jazz.app.json and jazz.permissions.json and write jazz.generated.ts",
+  );
+  console.log("  migrations create     Record a schema change in jazz.app.json (--name <name>)");
+  console.log(
+    "  upgrade               Convert an alpha.64 app to jazz.app.json and jazz.permissions.json",
+  );
+  console.log(
+    "  schema compile        Print the compiled schema jazz.generated.ts embeds, as JSON",
   );
   console.log("  migrations graph      Visualize the full migration graph");
   console.log("  login                 Sign in to Jazz Cloud with your dashboard account");
@@ -99,7 +104,7 @@ if (!command || command === "--help" || command === "-h") {
 } else if (command === "help" && args.length === 1) {
   printWrapperHelp();
 } else if (command === "build") {
-  fail("`jazz-tools build` has been renamed to `jazz-tools validate`.");
+  fail("`jazz-tools build` has been renamed to `jazz-tools generate`.");
 } else {
   // Every command, including the removed ones (deploy, server, create), is
   // the TypeScript CLI's: it explains what replaced a removed command.

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { definePermissions } from "../permissions/index.js";
-import { schema as s } from "../schema-namespace.js";
+import { testApp, testPermissions } from "../testing/index.js";
 import { createInspector, type InspectEvent, type InspectorDeps } from "./inspect.js";
 
 // Viewing as a user, and explaining why they may read each row, with stub
@@ -8,17 +7,16 @@ import { createInspector, type InspectEvent, type InspectorDeps } from "./inspec
 // E10 (alpha.61): viewing as a user ran as a session with no claims, so
 // policies that read claims answered as if the user had none, silently.
 
-const app = s.defineApp(
-  { expenses: s.table({ title: s.string(), owner: s.uuid() }, {}) },
-  { migrations: "none" },
-);
-const readsClaims = definePermissions(app, ({ policy, anyOf, session }) => {
-  policy.expenses.allowRead.where(
-    anyOf([{ owner: session.user }, session.where({ "claims.role": "manager" })]),
-  );
+const app = testApp({
+  tables: { expenses: { columns: { title: "string", owner: "uuid" } } },
 });
-const readsNoClaims = definePermissions(app, ({ policy, session }) => {
-  policy.expenses.allowRead.where({ owner: session.user });
+const readsClaims = testPermissions(app, {
+  tables: {
+    expenses: { read: { anyOf: ["owner = session.user", "session.claims.role = 'manager'"] } },
+  },
+});
+const readsNoClaims = testPermissions(app, {
+  tables: { expenses: { read: "owner = session.user" } },
 });
 
 const FIRST = "11111111-1111-4111-8111-111111111111";

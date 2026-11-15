@@ -22,6 +22,7 @@ import { playwright } from "@vitest/browser-playwright";
 import { readCorrectnessArtifactSnapshot } from "../../dev/artifacts/test-artifact-store.mjs";
 import {
   jazzAppFront,
+  jazzTestDeployment,
   jazzAppUser,
   jazzAppSignOut,
   jazzAppVisitor,
@@ -169,14 +170,17 @@ export default defineConfig({
     include: ["react/jsx-dev-runtime", "react/jsx-runtime"],
   },
   resolve: {
-    alias: {
+    alias: [
       // Needed because jazz-tools browser tests import from source (../../src/),
       // bypassing node_modules resolution. Consumers don't need this.
       // Point Vite at the workspace package, rather than its generated
       // directory. The package manifest selects pkg/jazz_wasm.js; wasm-pack's
       // web target intentionally does not emit a second manifest in pkg/.
-      "jazz-wasm": jazzWasmTestEntry,
-    },
+      { find: "jazz-wasm", replacement: jazzWasmTestEntry },
+      // Committed test apps' jazz.generated.ts import "jazz-tools": the
+      // source, as the tests themselves use it.
+      { find: /^jazz-tools$/, replacement: resolve(__dirname, "src/index.ts") },
+    ],
   },
   worker: {
     plugins: () => [wasm(), topLevelAwait()],
@@ -253,6 +257,8 @@ export default defineConfig({
           console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
         },
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
+        jazzTestDeployment: async (_context, bound, permissions) =>
+          jazzTestDeployment(bound, permissions),
         jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
         jazzAppUser: async (_context, frontUrl, userId, claims) =>
           jazzAppUser(frontUrl, userId, claims),

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "items": {
+      "columns": {
+        "count": { "type": "int", "merge": "counter" },
+        "tags": { "array": "string", "merge": "g-set" },
+        "transformed": { "type": "string", "transform": "length" },
+        "optionalCount": "int?",
+        "defaultedCount": { "type": "int", "default": 0 },
+        "optionalDefaulted": { "type": "int", "optional": true, "default": null },
+        "transformedOptional": { "type": "string", "optional": true, "transform": "length" },
+        "defaultedMerge": { "type": "int", "default": 0, "merge": "counter" }
+      }
+    }
+  },
+  "transforms": { "length": { "stored": "string", "view": "int" } }
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "chatMembers": {
+      "columns": { "chatId": "uuid", "userId": "string", "joinCode": "string?" },
+      "relations": { "chat": { "rel": "chats", "column": "chatId" } }
+    },
+    "chats": {
+      "columns": {
+        "name": "string?",
+        "isPublic": "boolean",
+        "createdBy": "string",
+        "joinCode": "string?"
+      },
+      "relations": {
+        "chatMembersViaChat": { "reverse": "chatMembers", "relation": "chat" },
+        "messagesViaChat": { "reverse": "messages", "relation": "chat" }
+      }
+    },
+    "messages": {
+      "columns": {
+        "chatId": "uuid",
+        "senderId": "uuid",
+        "text": "string",
+        "createdAt": "timestamp"
+      },
+      "relations": {
+        "chat": { "rel": "chats", "column": "chatId" },
+        "sender": { "rel": "profiles", "column": "senderId" },
+        "reactionsViaMessage": { "reverse": "reactions", "relation": "message" }
+      }
+    },
+    "profiles": {
+      "columns": { "userId": "string", "name": "string", "avatar": "string?" },
+      "relations": { "messagesViaSender": { "reverse": "messages", "relation": "sender" } }
+    },
+    "reactions": {
+      "columns": { "messageId": "uuid", "userId": "string", "emoji": "string" },
+      "relations": { "message": { "rel": "messages", "column": "messageId" } }
+    }
+  }
+}

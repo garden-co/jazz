@@ -2,18 +2,14 @@ import { expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { schema } from "../../src/schema-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
 import { createTransportControl } from "../../src/runtime/testing/transport-control.js";
 import { withNativeRelayFixture } from "./fixture.js";
-import type { TestJazz } from "../../src/testing/index.js";
+import { testApp, testPermissions, type TestJazz } from "../../src/testing/index.js";
 
-const app = schema.defineApp(
-  {
-    todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
-  },
-  { migrations: "none" },
-);
+const app = testApp({
+  tables: { todos: { columns: { title: "string", done: "boolean" } } },
+});
 
 // These cases intentionally have no authority peer: an ordinary persisted
 // local write is not evidence of Core admission.
@@ -74,20 +70,19 @@ it("resumes strict remote reads and Global write waits after native reconnect", 
   });
   let backend: TestJazz | undefined;
   try {
-    const permissions = schema.definePermissions(app, ({ policy }) => [
-      policy.todos.allowRead.always(),
-      policy.todos.allowInsert.always(),
-      policy.todos.allowUpdate.always(),
-      policy.todos.allowDelete.always(),
-    ]);
+    const permissionsFile = {
+      format: 1,
+      tables: { todos: { read: "true", insert: "true", update: "true", delete: "true" } },
+    };
+    const permissions = testPermissions(app, permissionsFile);
     await deploy({
       appId: server.appId,
       serverUrl: server.url,
       adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
+      app,
+      permissions: permissionsFile,
     });
-    backend = await startTestJazz({ core: server, app, permissions });
+    backend = await startTestJazz({ core: server, app, permissions: permissionsFile });
     await withNativeRelayFixture(
       app,
       permissions,
@@ -165,16 +160,14 @@ it("keeps local work usable while remote read tiers recover from an established 
   });
   let backend: TestJazz | undefined;
   try {
-    const permissions = schema.definePermissions(app, ({ policy }) => [
-      policy.todos.allowRead.always(),
-      policy.todos.allowInsert.always(),
-    ]);
+    const permissionsFile = { format: 1, tables: { todos: { read: "true", insert: "true" } } };
+    const permissions = testPermissions(app, permissionsFile);
     await deploy({
       appId: server.appId,
       serverUrl: server.url,
       adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
+      app,
+      permissions: permissionsFile,
     });
     const initial = {
       appId: server.appId,
@@ -182,7 +175,7 @@ it("keeps local work usable while remote read tiers recover from an established 
       adminSecret: server.adminSecret,
       backendSecret: server.backendSecret,
     };
-    backend = await startTestJazz({ core: server, app, permissions });
+    backend = await startTestJazz({ core: server, app, permissions: permissionsFile });
     await withNativeRelayFixture(
       app,
       permissions,
@@ -255,16 +248,14 @@ it("shows local rows at the deadline when a live server has not answered", async
   let backend: TestJazz | undefined;
   const transport = await createTransportControl(server.url);
   try {
-    const permissions = schema.definePermissions(app, ({ policy }) => [
-      policy.todos.allowRead.always(),
-      policy.todos.allowInsert.always(),
-    ]);
+    const permissionsFile = { format: 1, tables: { todos: { read: "true", insert: "true" } } };
+    const permissions = testPermissions(app, permissionsFile);
     await deploy({
       appId: server.appId,
       serverUrl: server.url,
       adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
+      app,
+      permissions: permissionsFile,
     });
     const nativeOptions = async (userId: string) => ({
       appId: server.appId,
@@ -275,7 +266,7 @@ it("shows local rows at the deadline when a live server has not answered", async
     backend = await startTestJazz({
       core: { ...server, url: transport.url },
       app,
-      permissions,
+      permissions: permissionsFile,
     });
     await withNativeRelayFixture(
       app,

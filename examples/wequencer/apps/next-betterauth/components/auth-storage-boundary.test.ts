@@ -6,8 +6,8 @@ import {
   type LocalJazzServerHandle,
   type TestJazz,
 } from "jazz-tools/testing";
-import permissions from "../permissions";
-import { app } from "../schema";
+import permissions from "../jazz.permissions.json" with { type: "json" };
+import { app } from "../jazz.generated";
 import { memoryAccountStore } from "../../../../testing/accounts";
 
 describe("Better Auth storage boundary", () => {

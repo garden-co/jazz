@@ -10,7 +10,7 @@ import { useAll } from "jazz-tools/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { useCart } from "@/src/store/cart";
 import { useShopper } from "./StoreProviders";
 
