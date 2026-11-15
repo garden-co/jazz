@@ -1,12 +1,12 @@
 ---
-title: Kotlin Backend
-description: "Open a Jazz app from Kotlin, on the JVM or Android, with the jazz-kotlin library and typed bindings generated from jazz.app.json."
+title: Kotlin
+description: "Build Jazz apps in Kotlin, for Android and the JVM, with the jazz-kotlin library and typed bindings generated from jazz.app.json."
 ---
 
-A Kotlin/JVM service can be your app's backend. It opens the app from the same `jazz.app.json` and
-`jazz.permissions.json` as every other language, with typed bindings generated from them. On start
-it publishes the app's permissions bundle, as `createJazz` does. Then it acts as one user of the
-app, in a session pinned to that bundle.
+Kotlin is for apps: Android apps and JVM desktop or command-line clients. For apps: run your backend
+in TypeScript, Rust or Go. A Kotlin app opens the same `jazz.app.json` as every other language,
+with typed bindings generated from it, and syncs as an end user through your backend's Jazz
+endpoint (`createJazz`'s handler), or runs locally.
 
 The `jazz-kotlin` library wraps Jazz's native core (`jazz-ffi`, through JNA). Its calls are
 `suspend` functions, and subscriptions are `Flow`s. It runs on JDK 17 or later, and on Android
@@ -86,35 +86,9 @@ these fully qualified (`kotlin.String`), so a table may be called `Result` or `U
 
 ## Open the app
 
-<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
-  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#context-setup-kotlin-backend
-</include>
-
-`Jazz` is safe to use from any coroutine. Its calls run on `Dispatchers.IO`, and the native core
-runs the client on a thread of its own. Call `jazz.close()` (it's `AutoCloseable`) before the
-process exits. Closing ends open `watch`es and subscriptions with `JazzException.Closed`, later
-calls throw it too, and closing twice is harmless.
-
-`jazz.account()` is the account id of the user the backend acts as. Write it into columns that
-policies compare with `session.user`, like StagePlan's `shows.chiefAccount`.
-
-The backend needs the sync server's admin secret, to publish the bundle, and its backend secret, to
-vouch for the user it acts as. Like every backend, give it no HTTP surface that callers can reach
-without your own authentication.
-
-The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Kotlin
-tab for each example. `examples/stage-plan/apps/kotlin-cli` in the repository is a complete
-command-line app: it creates a show, lists its tasks by rank, adds tasks and moves them between
-stages.
-
-Writes are local-first. A write that the server's permissions refuse doesn't fail the call: it
-stays local and never syncs.
-
-## Open the app as an end user
-
-An app on a user's device (a desktop app, or Android) syncs through your backend's Jazz endpoint
-(`createJazz`'s handler, e.g. `https://app.example/jazz`), never with the sync server's secrets. It
-signs in with a local-first device account:
+The app syncs through your backend's Jazz endpoint (`createJazz`'s handler, e.g.
+`https://app.example/jazz`), never with the sync server's secrets. It signs in with a local-first
+device account:
 
 <include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
   ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#context-setup-kotlin-client
@@ -132,6 +106,19 @@ or as a user your backend signs in, with their bearer token:
 <include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
   ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#auth-session-kotlin
 </include>
+
+`Jazz` is safe to use from any coroutine: its calls are main-safe `suspend` functions, and the
+native core syncs on a thread of its own. Call `jazz.close()` (it's `AutoCloseable`) when you're
+done; closing ends open `watch`es and subscriptions with `JazzException.Closed`.
+
+Writes are local-first: a write the server's permissions refuse doesn't fail the call, it rolls
+back once the server answers. Write at `WriteTier.Global` (or call `waitForSync`) to see the
+refusal as a `JazzException.Permission`.
+
+The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Kotlin
+tab for each example. `examples/stage-plan/apps/kotlin-cli` in the repository is a complete
+end-user app: it signs in, creates a show, lists its tasks by rank, adds tasks and moves them
+between stages.
 
 ## Edit text
 
