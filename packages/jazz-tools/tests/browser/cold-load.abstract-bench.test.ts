@@ -1,19 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
-import { schema as s, generateAuthSecret } from "../../src/index.js";
+import { generateAuthSecret } from "../../src/index.js";
 import { createBrowserTestDb as createDb } from "./account-fixtures.js";
 import type { Db } from "../../src/runtime/db.js";
+// tasks { title, done }: the schema hash the committed cold-load fixtures were written with.
+import { app } from "./apps/cold-load/jazz.generated.js";
 import { INDEXEDDB_BTREE_DATABASE_VERSION } from "../../src/runtime/indexeddb-page-store.js";
 
 declare const __JAZZ_ABSTRACT_BENCH__: string;
 declare const __JAZZ_COLD_LOAD_BATCH_UPDATES__: boolean;
 declare const __JAZZ_COLD_LOAD_FIXTURE__: string;
 declare const __JAZZ_COLD_LOAD_RESPONSIVENESS__: boolean;
-
-const app = s.defineApp(
-  { tasks: s.table({ title: s.string(), done: s.boolean() }, {}) },
-  { migrations: "none" },
-);
 
 // Opt-in diagnostic receipt, not a wall-clock correctness gate. Reopen is a
 // fresh runtime in the same browser session (the WASM module cache stays warm).

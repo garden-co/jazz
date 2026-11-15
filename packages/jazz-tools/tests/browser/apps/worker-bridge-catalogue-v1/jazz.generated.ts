@@ -1,0 +1,53 @@
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// Bindings format 1. Formatters may reformat this file, except `app` below.
+import { bindApp, type AppTypes } from "jazz-tools";
+
+export interface Todo {
+  readonly id: string;
+  title: string;
+  completed: boolean;
+}
+
+export interface TodoInsert {
+  title: string;
+  completed: boolean;
+}
+
+interface Types extends AppTypes {
+  todos: {
+    row: Todo;
+    insert: TodoInsert;
+    columns: {
+      title: { kind: "string"; nullable: false; value: string };
+      completed: { kind: "boolean"; nullable: false; value: boolean };
+    };
+    relations: {};
+  };
+}
+
+// The compiled schema, as JSON that jazz-tools reads back: formatters leave it as it is.
+// biome-ignore format: generated JSON
+// prettier-ignore
+export const app = bindApp<Types>({
+  "source": "sha256:6f7e6e56d53031af7983153d69b80a23f452e0f1f680319e5297a03d8046660e",
+  "schema": {
+    "current": "4e8374087b5d6e9a5c6680a2f8f6f73a2d6caa24235c8e4aa23814a066007ee7",
+    "schemas": [
+      {
+        "hash": "4e8374087b5d6e9a5c6680a2f8f6f73a2d6caa24235c8e4aa23814a066007ee7",
+        "schema": {
+          "tables": {
+            "todos": {
+              "columns": [
+                { "column_type": { "type": "Text" }, "name": "title", "nullable": false },
+                { "column_type": { "type": "Boolean" }, "name": "completed", "nullable": false },
+              ],
+            },
+          },
+        },
+      },
+    ],
+    "migrations": [],
+  },
+  "relations": { "todos": {} },
+});

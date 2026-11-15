@@ -1,0 +1,20 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "jobs": {
+      "columns": {
+        "meta": {
+          "json": {
+            "type": "object",
+            "properties": {
+              "code": { "type": "string", "pattern": "^[a-z]+\\-[0-9]+$" },
+              "count": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["code"]
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "files": { "columns": { "name": "string", "contents": "bytes" } }
+  }
+}

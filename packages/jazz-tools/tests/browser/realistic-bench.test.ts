@@ -5,8 +5,9 @@ import type { Db, QueryBuilder, TableProxy } from "../../src/runtime/db.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { loadWasmModule } from "../../src/runtime/wasm-loader.js";
-import { schema as s } from "../../src/index.js";
 import { getJazzServerInfo } from "./testing-server.js";
+// The project board as in project_board.schema.json (same schema hash), with its relations.
+import { app as projectBoardApp } from "./apps/project-board/jazz.generated.js";
 
 import schemaJson from "../../../../dev/benchmarks/realistic/schema/project_board.schema.json";
 import profileJson from "../../../../dev/benchmarks/realistic/profiles/s.json";
@@ -259,94 +260,6 @@ const DEFAULT_CI_BROWSER_LIMITS = {
   b7RootTaskLimit: 400,
 } as const;
 type BrowserLimitOverrides = Partial<Record<keyof typeof DEFAULT_CI_BROWSER_LIMITS, number>>;
-
-const projectBoardSchema = {
-  users: s.table(
-    { display_name: s.string(), email: s.string() },
-    {
-      membershipsViaUser: s.reverse("memberships", "user"),
-      tasksViaAssignee: s.reverse("tasks", "assignee"),
-      task_commentsViaAuthor: s.reverse("task_comments", "author"),
-      task_watchersViaUser: s.reverse("task_watchers", "user"),
-      activity_eventsViaActor: s.reverse("activity_events", "actor"),
-    },
-  ),
-  organizations: s.table(
-    { name: s.string(), created_at: s.timestamp() },
-    {
-      membershipsViaOrganization: s.reverse("memberships", "organization"),
-      projectsViaOrganization: s.reverse("projects", "organization"),
-    },
-  ),
-  memberships: s.table(
-    {
-      organization_id: s.uuid(),
-      user_id: s.uuid(),
-      role: s.string(),
-    },
-    { organization: s.rel("organizations", "organization_id"), user: s.rel("users", "user_id") },
-  ),
-  projects: s.table(
-    {
-      organization_id: s.uuid(),
-      name: s.string(),
-      archived: s.boolean(),
-      updated_at: s.timestamp(),
-    },
-    {
-      organization: s.rel("organizations", "organization_id"),
-      tasksViaProject: s.reverse("tasks", "project"),
-      activity_eventsViaProject: s.reverse("activity_events", "project"),
-    },
-  ),
-  tasks: s.table(
-    {
-      project_id: s.uuid(),
-      title: s.string(),
-      status: s.string(),
-      priority: s.int(),
-      assignee_id: s.uuid(),
-      updated_at: s.timestamp(),
-      due_at: s.timestamp().optional(),
-    },
-    {
-      project: s.rel("projects", "project_id"),
-      assignee: s.rel("users", "assignee_id"),
-      task_commentsViaTask: s.reverse("task_comments", "task"),
-      task_watchersViaTask: s.reverse("task_watchers", "task"),
-      activity_eventsViaTask: s.reverse("activity_events", "task"),
-    },
-  ),
-  task_comments: s.table(
-    {
-      task_id: s.uuid(),
-      author_id: s.uuid(),
-      body: s.string(),
-      created_at: s.timestamp(),
-    },
-    { task: s.rel("tasks", "task_id"), author: s.rel("users", "author_id") },
-  ),
-  task_watchers: s.table(
-    { task_id: s.uuid(), user_id: s.uuid() },
-    { task: s.rel("tasks", "task_id"), user: s.rel("users", "user_id") },
-  ),
-  activity_events: s.table(
-    {
-      project_id: s.uuid(),
-      task_id: s.uuid().optional(),
-      actor_id: s.uuid(),
-      kind: s.string(),
-      created_at: s.timestamp(),
-      payload: s.string(),
-    },
-    {
-      project: s.rel("projects", "project_id"),
-      task: s.rel("tasks", "task_id"),
-      actor: s.rel("users", "actor_id"),
-    },
-  ),
-};
-const projectBoardApp = s.defineApp(projectBoardSchema, { migrations: "none" });
 
 function resolveBrowserLimitOverrides(): BrowserLimitOverrides {
   const raw = (__JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON__ ?? "").trim();
