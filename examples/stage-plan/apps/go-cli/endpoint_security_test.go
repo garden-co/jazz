@@ -207,7 +207,7 @@ func TestEndpointSurvivesMalformedAndOversizedFrames(t *testing.T) {
 		{"unmasked", []byte{0x82, 0x02, 'h', 'i'}, 1002},
 		{"reserved bits", []byte{0xc2, 0x80, 1, 2, 3, 4}, 1002},
 		{"oversized", []byte{0x82, 0x80 | 127, 0, 0, 0, 0, 0, 0x20, 0, 1}, 1009},
-		{"text", []byte{0x81, 0x80, 1, 2, 3, 4}, 1003},
+		{"text that isn't UTF-8", []byte{0x81, 0x82, 0, 0, 0, 0, 0xff, 0xfe}, 1007},
 	} {
 		conn, r := rawSocket(t, app, srv.appID)
 		conn.Write(c.frame)

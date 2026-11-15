@@ -110,7 +110,7 @@ func TestWebSocketRefusesMalformedFrames(t *testing.T) {
 		{"long ping", [][]byte{frame(0x80|opPing, make([]byte, 126), false)}, wsProtocolError},
 		{"continuation first", [][]byte{frame(0x80|opContinuation, []byte("x"), false)}, wsProtocolError},
 		{"message inside a message", [][]byte{frame(opBinary, []byte("a"), false), frame(0x80|opBinary, []byte("b"), false)}, wsProtocolError},
-		{"text", [][]byte{frame(0x80|opText, []byte("hi"), false)}, wsUnsupportedData},
+		{"text not utf-8", [][]byte{frame(0x80|opText, []byte{0xff, 0xfe}, false)}, wsInvalidPayload},
 		{"one-byte close", [][]byte{frame(0x80|opClose, []byte{3}, false)}, wsProtocolError},
 		{"bad close code", [][]byte{frame(0x80|opClose, []byte{0x03, 0xec}, false)}, wsProtocolError},
 		{"close reason not utf-8", [][]byte{frame(0x80|opClose, []byte{0x03, 0xe8, 0xff}, false)}, wsInvalidPayload},
@@ -136,6 +136,11 @@ func TestWebSocketReadsMessagesAndAnswersPings(t *testing.T) {
 	)
 	if err != nil || string(message) != "hello" {
 		t.Fatalf("%q %v", message, err)
+	}
+	// A text message (a TS client's prelude) passes through as its bytes.
+	message, err, _ = serve(t, frame(0x80|opText, []byte(`{"auth":{}}`), false))
+	if err != nil || string(message) != `{"auth":{}}` {
+		t.Fatalf("text: %q %v", message, err)
 	}
 	// The client's close is echoed with its code.
 	_, err, sent := serve(t, frame(0x80|opClose, []byte{0x0f, 0xa0}, false)) // 4000
