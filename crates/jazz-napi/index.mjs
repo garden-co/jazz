@@ -40,6 +40,7 @@ export const {
   nativeArtifactFingerprint,
   resolveTextAnchor,
   resolveTextRange,
+  schemaHash,
   schemaSourceHash,
   validateBindings,
   validateSchema,

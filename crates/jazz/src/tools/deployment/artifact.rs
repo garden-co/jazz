@@ -957,12 +957,22 @@ fn retargeted_reference(
                     })
                 })
                 .unwrap_or_else(|| column.name_str().to_string());
+            // A reference to a table the migration renames follows it.
+            let followed = |table: &TableName| -> TableName {
+                forward
+                    .iter()
+                    .find(|l| l.renamed_from.as_deref() == Some(table.as_str()))
+                    .map_or(*table, |l| TableName::from(l.table.as_str()))
+            };
             if let Some(source) = old
                 .columns
                 .columns
                 .iter()
                 .find(|c| c.name_str() == old_column)
-                && retargets(source, column)
+                && matches!(
+                    (&source.references, &column.references),
+                    (Some(a), Some(b)) if followed(a) != *b
+                )
             {
                 return Some(format!(
                     "column {name}.{} moves its reference from {} to {}, which is not supported \
@@ -1083,20 +1093,6 @@ fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactErro
             }
         }
         let columns = || schema.columns.columns.iter().map(|c| c.name_str());
-        let indexed = schema
-            .indexed_columns
-            .iter()
-            .flatten()
-            .chain(schema.composite_indexes.iter().flatten());
-        for column in indexed {
-            if entry.computed.iter().any(|f| f.name == column.as_str()) {
-                return Err(ArtifactError::new(format!(
-                    "tables.{name}.indexes: `{}` is a computed field, which isn't stored, so it \
-                     can't be indexed; index the columns it's computed from",
-                    column.as_str()
-                )));
-            }
-        }
         for (index, field) in entry.computed.iter().enumerate() {
             let path = format!("tables.{name}.computed.{}", field.name);
             if field.name == "id" || has_column(schema, &field.name) {

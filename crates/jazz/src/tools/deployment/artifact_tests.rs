@@ -2410,8 +2410,9 @@ fn a_migration_may_not_move_a_reference_to_another_table() {
 fn a_computed_field_cant_be_indexed() {
     let error = edited_app(|v| v["tables"]["todos"]["indexes"] = serde_json::json!(["shareCount"]));
     assert!(
-        error
-            .contains("tables.todos.indexes: `shareCount` is a computed field, which isn't stored"),
+        error.contains(
+            "tables.todos.indexes[0]: `shareCount` is a computed field, which isn't stored"
+        ),
         "{error}"
     );
 }
@@ -2423,4 +2424,32 @@ fn the_schema_hash_is_the_engines_without_policies() {
     let json = serde_json::to_vec(app.current_schema()).unwrap();
     assert_eq!(schema_hash(&json).unwrap(), app.current_hash());
     assert!(schema_hash(b"{\"tables\": 1}").is_err());
+}
+
+#[test]
+fn a_reference_follows_the_table_a_migration_renames() {
+    let file = r#"{ "format": 1,
+        "tables": {
+            "people": { "columns": { "name": "string" } },
+            "todos": { "columns": { "owner": { "type": "uuid", "references": "people" } } } },
+        "history": { "v1": { "tables": {
+            "users": { "columns": { "name": "string" } },
+            "todos": { "columns": { "owner": { "type": "uuid", "references": "users" } } } } } },
+        "migrations": [{ "from": "v1", "renameTables": { "people": "users" }, "migrate": { "todos": {} } }] }"#;
+    let app = load_app(file.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    assert!(app.stranded().is_empty());
+}
+
+#[test]
+fn an_index_names_a_stored_column() {
+    let error = edited_app(|v| v["tables"]["todos"]["indexes"] = serde_json::json!(["nmae"]));
+    assert!(
+        error.contains(
+            "tables.todos.indexes[0]: table todos has no column `nmae`; did you mean `name`?"
+        ),
+        "{error}"
+    );
+    edited_app_loads(|v| {
+        v["tables"]["todos"]["indexes"] = serde_json::json!(["owner", ["owner", "$createdAt"]])
+    });
 }

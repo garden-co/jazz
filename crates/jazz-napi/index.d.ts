@@ -543,6 +543,13 @@ export interface RestoreOptions {
 }
 
 /**
+ * The engine's hash of a schema in its own JSON form (`{ "tables": … }`),
+ * policies dropped as a deployment drops them, as 64 hex characters. Not
+ * [`schema_source_hash`], which hashes the `jazz.app.json` file.
+ */
+export declare function schemaHash(engineSchemaJson: string): string
+
+/**
  * `"sha256:<hex>"` of a `jazz.app.json` text, CRLF read as LF: the
  * `source` generated bindings record.
  */

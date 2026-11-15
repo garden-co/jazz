@@ -402,6 +402,42 @@ fn read_tables(
                 }
             }
         }
+        // An index names stored columns (a composite one also `$createdAt`
+        // or `$updatedAt`).
+        let column_names: Vec<&str> = columns.iter().map(|c| c.name_str()).collect();
+        let check_index =
+            |column: &str, item_path: String, composite: bool| -> Result<(), Refusal> {
+                if column_names.contains(&column)
+                    || (composite && matches!(column, "$createdAt" | "$updatedAt"))
+                {
+                    return Ok(());
+                }
+                if computed.iter().any(|f| f.name == column) {
+                    return Err(refuse(
+                        item_path,
+                        format!(
+                            "`{column}` is a computed field, which isn't stored, so it can't be \
+                         indexed; index the columns it's computed from"
+                        ),
+                    ));
+                }
+                Err(refuse(
+                    item_path,
+                    format!(
+                        "table {name} has no column `{column}`{}",
+                        super::expr::did_you_mean(column, column_names.iter().copied())
+                    ),
+                ))
+            };
+        for (i, column) in indexed_columns.iter().flatten().enumerate() {
+            check_index(column, format!("{path}.indexes[{i}]"), false)?;
+        }
+        for (i, index) in composite_indexes.iter().enumerate() {
+            for column in index {
+                check_index(column, format!("{path}.indexes"), true)
+                    .map_err(|(p, m)| (format!("{p}.composite[{i}]"), m))?;
+            }
+        }
         let branch_by = match table.get("branchBy") {
             Some(value) => names(value, &format!("{path}.branchBy"))?,
             None => Vec::new(),

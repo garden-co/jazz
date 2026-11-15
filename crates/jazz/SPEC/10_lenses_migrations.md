@@ -934,6 +934,15 @@ writes the migration that connects it.
 **Relation names.** A relation may not take the name of a column of its
 table, nor `id`, as the TS DSL refused.
 
+**Indexes** name stored columns of their table (a composite index also
+`$createdAt` and `$updatedAt`); a computed field isn't stored, so it can't
+be indexed.
+
+**References.** A migration may not move a kept column's reference to
+another table: its values name rows of the old one (add a new column and
+drop this one later). A reference to a table the same migration renames
+follows it.
+
 **Files from alpha.63.** A file's `slices` (schema slicing is gone in
 alpha.65) and a table's `tsOnly` load with a warning that they are ignored;
 `jazz-tools upgrade` turns `tsOnly` into `computed` and `transforms` and
