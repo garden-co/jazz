@@ -213,8 +213,21 @@ guarantee its history is complete.
 
 ## The generated bindings
 
-`jazz-tools generate` writes `jazz.generated.ts` from `jazz.app.json`. It exports the typed `app`
-you pass to queries, mutations, and subscriptions throughout your application code:
+`jazz-tools generate` writes typed bindings from `jazz.app.json`, in your app's language: a row
+type and an insert type per table, and an enum type per enum column. For StagePlan's `tasks` table
+(the [StagePlan example](https://github.com/garden-co/jazz/tree/main/examples/stage-plan)):
+
+<Tabs groupId="jazz-environment" items={["TypeScript"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <BindingsExcerpt language="TypeScript" />
+  </Tab>
+</Tabs>
+
+The rest of this section is about the TypeScript bindings; each language's setup page covers its
+own.
+
+In TypeScript, the bindings are `jazz.generated.ts`. It exports the typed `app` you pass to
+queries, mutations, and subscriptions throughout your application code:
 
 ```ts title="app.ts"
 import { app, type Todo } from "./jazz.generated";
