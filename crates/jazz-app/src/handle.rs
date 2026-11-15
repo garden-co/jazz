@@ -17,14 +17,18 @@ use jazz::tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, QueryResult, ReadTier,
     Session, TableName, TransactionId,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::app::AppFiles;
+use crate::auth::{Auth, DEVICE_TOKEN_TTL_SECS, TokenReason};
 use crate::backend;
 use crate::config::{Config, Storage};
 use crate::error::{Error, Result};
 use crate::include::Row;
 use crate::query::Query;
+use crate::session::{
+    self as user_session, Credential, Session as UserSession, SyncStatus, User, UserKind,
+};
 use crate::subscription::{self, Subscription};
 use crate::table::{self, Implementations, Insert, Table, Update};
 
@@ -51,6 +55,12 @@ const BACKEND_ISSUER: &str = "jazz:backend";
 pub struct Jazz {
     pub(crate) commands: mpsc::UnboundedSender<Command>,
     pub(crate) info: Arc<Info>,
+    /// The user one of the endpoint's handles acts for
+    /// ([`crate::Endpoint::for_user`]): its reads and writes run as their
+    /// session, under their permissions, on the endpoint's trusted link.
+    pub(crate) scope: Option<Arc<Session>>,
+    /// Whether this handle acts for one of the backend's users.
+    pub(crate) for_user: bool,
     /// The tier this handle's writes wait for ([`Jazz::durable`]); `None`
     /// returns once a write is committed locally.
     pub(crate) durability: Option<DurabilityTier>,
@@ -62,6 +72,23 @@ pub(crate) struct Info {
     pub(crate) implementations: Implementations,
     /// No server: nothing confirms a write past the local store.
     pub(crate) serverless: bool,
+    /// An end user's session ([`Config::user`]).
+    pub(crate) session: Option<UserSession>,
+    pub(crate) sync: watch::Receiver<SyncStatus>,
+    /// What a backend holds to vouch for its users ([`crate::Endpoint`]).
+    pub(crate) backend: Option<BackendLink>,
+    /// How this backend was opened, for the trusted client its endpoint
+    /// acts for its users with.
+    pub(crate) opened_with: Option<(AppFiles, Config)>,
+}
+
+/// A backend's way to the core, for the endpoint it serves its users with.
+#[derive(Clone)]
+pub(crate) struct BackendLink {
+    pub server: String,
+    pub app_id: jazz::tools::AppId,
+    pub backend_secret: String,
+    pub admin_secret: String,
 }
 
 impl std::fmt::Debug for Jazz {
@@ -89,6 +116,39 @@ impl Jazz {
         config: Config,
         implementations: Implementations,
     ) -> Result<Self> {
+        Self::open_as(files, config, implementations, Link::Own).await
+    }
+
+    /// The client a backend's endpoint acts for its users with
+    /// ([`crate::Endpoint::for_user`]), as `createJazz`'s backend session:
+    /// its link states only the backend's secret and the bundle it is pinned
+    /// to, so the core trusts it to act for the sessions its calls name, and
+    /// its schema carries the permissions, so their reads evaluate here too.
+    pub(crate) async fn open_for_users(&self) -> Result<Self> {
+        let Some((files, config)) = self.info.opened_with.clone() else {
+            return Err(Error::Config(
+                "an endpoint is served by the app's backend: open it with Config::backend".into(),
+            ));
+        };
+        let config = Config {
+            storage: Storage::Memory,
+            ..config
+        };
+        Self::open_as(
+            files,
+            config,
+            self.info.implementations.clone(),
+            Link::TrustedForUsers,
+        )
+        .await
+    }
+
+    async fn open_as(
+        files: AppFiles,
+        config: Config,
+        implementations: Implementations,
+        link: Link,
+    ) -> Result<Self> {
         let files = match config.backend.as_ref().and_then(|b| b.permissions.clone()) {
             Some(permissions) => files.with_permissions(permissions),
             None => files,
@@ -103,21 +163,58 @@ impl Jazz {
                 "a backend needs the app's jazz.permissions.json".into(),
             ));
         }
-        if config.server_url.is_some() && config.backend.is_none() {
-            return Err(Error::Unsupported(
-                "connecting to a sync server as an end user; open the app as a backend \
-                 (Config::backend) or locally (no server)"
+        if config.backend.is_some() && config.user.is_some() {
+            return Err(Error::Config(
+                "open either as the app's backend or as an end user, not both".into(),
+            ));
+        }
+        if config.user.is_some() && config.server_url.is_none() {
+            return Err(Error::Config(
+                "an end user needs the app's Jazz endpoint (Config::server), \
+                 e.g. https://app.example/jazz"
+                    .into(),
+            ));
+        }
+        if config.user.is_some()
+            && !config.allow_insecure_http
+            && config.sends_credentials_in_plain_text()
+        {
+            return Err(Error::Config(
+                "an end user's credentials would cross the network in plain text: use \
+                 https:// (or wss://), or Config::allow_insecure_http for a dev server"
+                    .into(),
+            ));
+        }
+        if config.server_url.is_some() && config.backend.is_none() && config.user.is_none() {
+            return Err(Error::Config(
+                "a server needs someone to connect as: the app's backend (Config::backend) \
+                 or an end user (Config::user)"
                     .into(),
             ));
         }
         let serverless = config.server_url.is_none();
+        let opened_with = config
+            .backend
+            .is_some()
+            .then(|| (files.clone(), config.clone()));
         let (commands, receiver) = mpsc::unbounded_channel();
         let (ready, opened) = oneshot::channel();
         std::thread::Builder::new()
             .name("jazz-client".into())
-            .spawn(move || run(files, config, receiver, ready))
+            .spawn({
+                // The session stops the client through this, without keeping
+                // it alive: it stops with its last handle all the same.
+                let stopper = commands.downgrade();
+                move || run(files, config, link, receiver, ready, stopper)
+            })
             .map_err(|error| Error::Config(format!("cannot start the client thread: {error}")))?;
-        let (bundle, account) = opened.await.map_err(|_| Error::Stopped)??;
+        let Opened {
+            bundle,
+            account,
+            session,
+            sync,
+            backend,
+        } = opened.await.map_err(|_| Error::Stopped)??;
         Ok(Self {
             commands,
             info: Arc::new(Info {
@@ -125,7 +222,13 @@ impl Jazz {
                 account,
                 implementations,
                 serverless,
+                session,
+                sync,
+                backend,
+                opened_with,
             }),
+            scope: None,
+            for_user: false,
             durability: None,
         })
     }
@@ -135,9 +238,30 @@ impl Jazz {
         self.info.bundle.as_deref()
     }
 
-    /// The account of the user this backend acts as.
+    /// The account of the user this backend acts as, or of the end user
+    /// signed in.
     pub fn account(&self) -> Option<AccountId> {
-        self.info.account
+        match &self.scope {
+            Some(session) => session.account_id,
+            None => self.info.account,
+        }
+    }
+
+    /// This backend's handle, acting as `session`'s user: the same client,
+    /// with every read and write run as them and their permissions.
+    pub(crate) fn scoped(&self, session: Session) -> Self {
+        Self {
+            commands: self.commands.clone(),
+            info: self.info.clone(),
+            scope: Some(Arc::new(session)),
+            for_user: true,
+            durability: self.durability,
+        }
+    }
+
+    /// Whether this handle acts for one of the backend's users.
+    pub fn acts_for_user(&self) -> bool {
+        self.for_user
     }
 
     /// Runs `job` with the untyped client on its thread: for what the typed
@@ -149,7 +273,12 @@ impl Jazz {
         R: Send + 'static,
     {
         let (reply, answer) = oneshot::channel();
+        let scope = self.scope.clone();
         let job: Job = Box::new(move |client| {
+            let client = match scope {
+                Some(session) => client.for_session((*session).clone()),
+                None => client,
+            };
             Box::pin(async move {
                 // A panic in the job is its caller's error, not the end of
                 // the client: the other jobs and the client run on.
@@ -276,7 +405,13 @@ impl Jazz {
     /// with [`Error::Stopped`]. Call it before the process exits when the app
     /// keeps a persistent store ([`crate::Storage::Dir`]), so its last
     /// writes are flushed and the store closed.
+    ///
+    /// On a handle acting for a user ([`crate::Endpoint::for_user`]) it does
+    /// nothing: [`crate::Endpoint::shutdown`] stops the client it shares.
     pub async fn shutdown(&self) -> Result<()> {
+        if self.for_user {
+            return Ok(());
+        }
         let (reply, done) = oneshot::channel();
         if self.commands.send(Command::Shutdown(reply)).is_err() {
             return Ok(());
@@ -322,11 +457,23 @@ pub(crate) fn decode_result<T: Row>(
     table::decode(id, row.fields, implementations)
 }
 
+/// Which link a backend opens.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Link {
+    /// Its own: the session of the user it acts as, pinned to its bundle.
+    Own,
+    /// Its endpoint's, trusted to act for its users (see
+    /// [`Jazz::open_for_users`]).
+    TrustedForUsers,
+}
+
 fn run(
     files: AppFiles,
     config: Config,
+    link: Link,
     mut commands: mpsc::UnboundedReceiver<Command>,
     ready: oneshot::Sender<Result<Opened>>,
+    stopper: mpsc::WeakUnboundedSender<Command>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -342,7 +489,7 @@ fn run(
     };
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
-        let (client, opened) = match connect(files, config).await {
+        let (client, opened) = match connect(files, config, link, stopper).await {
             Ok(opened) => opened,
             Err(error) => {
                 let _ = ready.send(Err(error));
@@ -425,10 +572,32 @@ pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "a panic without a message".to_owned())
 }
 
-type Opened = (Option<String>, Option<AccountId>);
+struct Opened {
+    bundle: Option<String>,
+    account: Option<AccountId>,
+    session: Option<UserSession>,
+    sync: watch::Receiver<SyncStatus>,
+    backend: Option<BackendLink>,
+}
 
-async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Opened)> {
-    let loaded = files.load()?;
+async fn connect(
+    files: AppFiles,
+    config: Config,
+    link_kind: Link,
+    stopper: mpsc::WeakUnboundedSender<Command>,
+) -> Result<(JazzClient, Opened)> {
+    let mut loaded = files.load()?;
+    // The endpoint's client evaluates the sessions it acts for locally too:
+    // its schema carries the permissions the backend publishes, as
+    // `createJazz`'s backend session compiles them. Policies are not part
+    // of the schema's hash.
+    if let (Link::TrustedForUsers, Some(app)) = (link_kind, &loaded.backend) {
+        for (table, policies) in app.permissions().iter() {
+            if let Some(schema) = loaded.schema.get_mut(table) {
+                schema.policies = policies.clone();
+            }
+        }
+    }
     let (storage, data_dir) = match config.storage {
         Storage::Memory => (ClientStorage::Memory, std::env::temp_dir()),
         Storage::Dir(dir) => (ClientStorage::Persistent, dir),
@@ -450,30 +619,124 @@ async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Opened)
     };
     let mut bundle = None;
     let mut admitted = None;
+    let mut link = None;
     if let (Some(backend), Some(server), Some(app)) =
         (&config.backend, &config.server_url, &loaded.backend)
     {
         let published = backend::publish(server, config.app_id, backend, app).await?;
-        let account = backend::enrol(server, config.app_id, backend, BACKEND_ISSUER).await?;
-        let mut session = Session::new(BACKEND_ISSUER, backend.user_id.clone());
-        session.account_id = Some(account);
-        context.account_id = Some(account);
-        admitted = Some(account);
         context.backend_secret = Some(backend.backend_secret.clone());
-        context.backend_session = Some(session);
+        if link_kind == Link::Own {
+            let account = backend::enrol(server, config.app_id, backend, BACKEND_ISSUER).await?;
+            let mut session = Session::new(BACKEND_ISSUER, backend.user_id.clone());
+            session.account_id = Some(account);
+            context.account_id = Some(account);
+            admitted = Some(account);
+            context.backend_session = Some(session);
+        }
         context.bundle = Some(published.clone());
         bundle = Some(published);
+        link = Some(BackendLink {
+            server: server.clone(),
+            app_id: config.app_id,
+            backend_secret: backend.backend_secret.clone(),
+            admin_secret: backend.admin_secret.clone(),
+        });
     }
-    let client = if context.server_url.is_empty() {
-        JazzClient::connect(context).await?
-    } else {
-        JazzClient::connect_with_native_transport(
-            context,
-            Arc::new(jazz_native_transport::NativeWebSocketConnector),
-        )
-        .await?
+    let connector = Arc::new(jazz_native_transport::NativeWebSocketConnector);
+    let (client, user) = match (config.user, &config.server_url) {
+        (Some(auth), Some(endpoint)) => {
+            let (client, user, credential) =
+                connect_user(context, connector, auth, endpoint).await?;
+            admitted = Some(user.account);
+            (client, Some((user, credential)))
+        }
+        _ if context.server_url.is_empty() => (JazzClient::connect(context).await?, None),
+        _ => (
+            JazzClient::connect_with_native_transport(context, connector).await?,
+            None,
+        ),
     };
-    Ok((client, (bundle, admitted)))
+    let sync = user_session::watch_sync(client.clone());
+    let session = user.map(|(user, credential)| {
+        let stop = Box::new(move || {
+            if let Some(commands) = stopper.upgrade() {
+                let (reply, _) = oneshot::channel();
+                let _ = commands.send(Command::Shutdown(reply));
+            }
+        });
+        user_session::start(
+            client.clone(),
+            user,
+            credential,
+            config.server_url.as_deref().unwrap_or_default(),
+            sync.clone(),
+            stop,
+        )
+    });
+    Ok((
+        client,
+        Opened {
+            bundle,
+            account: admitted,
+            session,
+            sync,
+            backend: link,
+        },
+    ))
+}
+
+/// Connects as an end user through the app's Jazz endpoint, as a browser
+/// does: a device account presents its own proof, which the backend vouches
+/// for; a bearer's user is signed in first, then states their session with
+/// the bearer on the upgrade, which the backend checks it against.
+async fn connect_user(
+    mut context: AppContext,
+    connector: Arc<jazz_native_transport::NativeWebSocketConnector>,
+    auth: Auth,
+    endpoint: &str,
+) -> Result<(JazzClient, User, Credential)> {
+    let app = context.app_id;
+    match auth {
+        Auth::Device(key) => {
+            let account = key.account(app);
+            context.jwt_token = Some(key.mint(app, DEVICE_TOKEN_TTL_SECS)?);
+            context.account_id = Some(account);
+            let client = JazzClient::connect_with_native_transport(context, connector).await?;
+            let user = User {
+                account,
+                issuer: jazz::tools::identity::LOCAL_FIRST_ISSUER.to_owned(),
+                subject: key.user_id(),
+                claims: serde_json::json!({}),
+                kind: UserKind::Device,
+            };
+            Ok((client, user, Credential::Device { key, app }))
+        }
+        Auth::Bearer(provider) => {
+            let token = provider
+                .token(TokenReason::Connect)
+                .await?
+                .ok_or(Error::SignedOut)?;
+            let signed_in = backend::sign_in(endpoint, app, &token)
+                .await?
+                .ok_or(Error::SignedOut)?;
+            let mut session = Session::new(&signed_in.identity.issuer, &signed_in.identity.subject)
+                .with_claims(signed_in.claims.clone());
+            session.account_id = Some(signed_in.account);
+            context.account_id = Some(signed_in.account);
+            context.backend_session = Some(session);
+            let client =
+                JazzClient::connect_with_native_transport_bearer(context, connector, token.clone())
+                    .await?;
+            let user = User {
+                account: signed_in.account,
+                issuer: signed_in.identity.issuer,
+                subject: signed_in.identity.subject,
+                claims: signed_in.claims,
+                kind: UserKind::Backend,
+            };
+            Ok((client, user, Credential::Bearer { provider, token }))
+        }
+    }
 }
 
 #[allow(dead_code)]

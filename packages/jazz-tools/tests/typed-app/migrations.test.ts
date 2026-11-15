@@ -247,3 +247,98 @@ describe("migration lenses from jazz.app.json", () => {
     );
   });
 });
+
+// What `defineMigration`'s types refused before alpha.65 (the removed
+// "typechecks migrate coverage and op shapes"): a migration in jazz.app.json
+// has no TS types, so the loader refuses each shape when the app loads. Each
+// test also loads the corrected migration, so it fails if the loader
+// refuses for some other reason.
+describe("migrations the loader refuses", () => {
+  const titled = { todos: { columns: { title: "string" } } };
+  const withDescription = (description: string) => ({
+    todos: { columns: { title: "string", description } },
+  });
+
+  it("refuses dropping a column the migration adds", () => {
+    expect(() =>
+      forwardLens(titled, withDescription("string?"), {
+        migrate: { todos: { description: { drop: "string?", backwardsDefault: null } } },
+      }),
+    ).toThrow(/invalid catalogue update: dropped column is absent from source/);
+    expect(
+      forwardLens(titled, withDescription("string?"), {
+        migrate: { todos: { description: { add: "string?", default: null } } },
+      }),
+    ).toHaveLength(1);
+  });
+
+  it("refuses a null default for an added required column", () => {
+    expect(() =>
+      forwardLens(titled, withDescription("string"), {
+        migrate: { todos: { description: { add: "string", default: null } } },
+      }),
+    ).toThrow(/\$\.todos\.description: null default requires a nullable column/);
+    expect(
+      forwardLens(titled, withDescription("string"), {
+        migrate: { todos: { description: { add: "string", default: "" } } },
+      }),
+    ).toHaveLength(1);
+  });
+
+  it("refuses a removed column the migration doesn't drop or rename", () => {
+    const from = { users: { columns: { email: "string" } } };
+    const to = { users: { columns: {} } };
+    expect(() => forwardLens(from, to, { migrate: {} })).toThrow(
+      /the migration does not produce the columns of table "users" \("email" is left over\)/,
+    );
+    expect(
+      forwardLens(from, to, {
+        migrate: { users: { email: { drop: "string", backwardsDefault: "" } } },
+      }),
+    ).toHaveLength(1);
+  });
+
+  it("refuses a new table missing from createTables", () => {
+    const from = { users: { columns: { email: "string" } } };
+    const to = { ...from, profiles: { columns: { bio: "string?" } } };
+    expect(() => forwardLens(from, to)).toThrow(
+      /lineage table declarations do not partition schemas/,
+    );
+    expect(forwardLens(from, to, { createTables: ["profiles"] })).toHaveLength(1);
+  });
+
+  it("refuses a removed table missing from dropTables", () => {
+    const to = { users: { columns: { email: "string" } } };
+    const from = { ...to, legacyProfiles: { columns: { bio: "string?" } } };
+    expect(() => forwardLens(from, to)).toThrow(
+      /lineage table declarations do not partition schemas/,
+    );
+    expect(forwardLens(from, to, { dropTables: ["legacyProfiles"] })).toHaveLength(1);
+  });
+
+  it("refuses a table rename from a table of another shape", () => {
+    const to = { users: { columns: { email: "string" } } };
+    const rename = { renameTables: { users: "legacyUsers" } };
+    expect(() =>
+      forwardLens({ legacyUsers: { columns: { email: { json: true } } } }, to, rename),
+    ).toThrow(
+      /the migration does not produce the columns of table "users" \("email" comes out with another type\)/,
+    );
+    expect(forwardLens({ legacyUsers: { columns: { email: "string" } } }, to, rename)).toHaveLength(
+      1,
+    );
+  });
+
+  it("refuses a column rename from a column of another type", () => {
+    const from = { users: { columns: { email: "string" } } };
+    const rename = { migrate: { users: { emailAddress: { renameFrom: "email" } } } };
+    expect(() =>
+      forwardLens(from, { users: { columns: { emailAddress: "int" } } }, rename),
+    ).toThrow(
+      /the migration does not produce the columns of table "users" \("emailAddress" comes out with another type\)/,
+    );
+    expect(
+      forwardLens(from, { users: { columns: { emailAddress: "string" } } }, rename),
+    ).toHaveLength(1);
+  });
+});

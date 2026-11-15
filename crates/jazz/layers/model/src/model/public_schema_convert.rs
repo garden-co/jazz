@@ -57,6 +57,8 @@ pub const RESERVED_ROW_COLUMNS: [&str; 9] = [
 pub struct SchemaConversionError {
     path: String,
     message: String,
+    /// The `(table, column)` a policy named that the table doesn't have.
+    unknown_column: Option<(String, String)>,
 }
 
 impl SchemaConversionError {
@@ -64,8 +66,31 @@ impl SchemaConversionError {
         Self {
             path: path.into(),
             message: message.into(),
+            unknown_column: None,
         }
     }
+
+    /// The `(table, column)` of a policy that names a column its table
+    /// doesn't have, when that is why the schema was refused.
+    pub fn unknown_column(&self) -> Option<(&str, &str)> {
+        self.unknown_column
+            .as_ref()
+            .map(|(table, column)| (table.as_str(), column.as_str()))
+    }
+}
+
+/// The error for a policy refused with `query_error`: remembers an unknown
+/// column, so callers can explain it without reading the message.
+fn refused_policy(
+    path: String,
+    message: String,
+    query_error: &crate::query::QueryError,
+) -> SchemaConversionError {
+    let mut error = err(path, message);
+    if let crate::query::QueryError::UnknownColumn { table, column } = query_error {
+        error.unknown_column = Some((table.clone(), column.clone()));
+    }
+    error
 }
 
 impl fmt::Display for SchemaConversionError {
@@ -275,17 +300,19 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
     for table in tables {
         if let Some(policy) = &table.read_policy {
             policy.validate_runtime(&schema).map_err(|error| {
-                err(
+                refused_policy(
                     format!("$.{}.policies.select.using", table.name),
                     format!("read policy is invalid: {error}"),
+                    &error,
                 )
             })?;
         }
         for (label, policy) in table.write_policies.iter() {
             policy.validate_runtime(&schema).map_err(|error| {
-                err(
+                refused_policy(
                     format!("$.{}.policies.{label}", table.name),
                     format!("write policy is invalid: {error}"),
+                    &error,
                 )
             })?;
         }

@@ -335,6 +335,54 @@ impl Core {
         Ok(())
     }
 
+    /// Updates a row in place: `patch_json` sets whole columns (may be
+    /// `None`), `edits_json` edits text, bytes and JSON values partially
+    /// (see [`convert::edits`]); all in one write.
+    pub fn edit(
+        &self,
+        table_name: &str,
+        id: &str,
+        patch_json: Option<&str>,
+        edits_json: &str,
+        opts: &Opts,
+    ) -> Result<()> {
+        self.reachable(opts.write_tier)?;
+        let id = convert::parse_id(id, "the id")?;
+        let table = self.table(table_name)?;
+        let cells = match patch_json {
+            Some(patch) => {
+                let (patched_id, cells) = convert::cells(table, table_name, patch, "the patch")?;
+                if patched_id.is_some_and(|patched| patched != id) {
+                    return Err(refused("a patch cannot change a row's id"));
+                }
+                cells
+            }
+            None => Vec::new(),
+        };
+        let edits = convert::edits(table, table_name, &convert::parse(edits_json, "the edits")?)?;
+        let name = table_name.to_owned();
+        let (tx, tier) = (opts.tx, opts.write_tier);
+        block_on(self.open_jazz()?.with_client(move |client| async move {
+            let client = client_for(client, tx)?;
+            let edits = whole_pages(&client, &name, id, edits).await?;
+            let committed = client
+                .update_with_edits(&name, id, cells, edits)
+                .map_err(|error| match error {
+                    // As jazz-app reports an edit of a row this client
+                    // cannot see.
+                    jazz_app::jazz::tools::JazzError::Write(message)
+                        if message.contains("NotObserved") =>
+                    {
+                        jazz_app::Error::Config(format!("no {name} row {id}"))
+                    }
+                    other => other.into(),
+                })?;
+            mark_wrote(tx);
+            settle(&client, committed, tier).await
+        }))?;
+        Ok(())
+    }
+
     pub fn delete(&self, table_name: &str, id: &str, opts: &Opts) -> Result<()> {
         self.reachable(opts.write_tier)?;
         let id = convert::parse_id(id, "the id")?;
@@ -588,6 +636,82 @@ impl Drop for EndGuard {
             let _ = sender.send(Some(Event::Error(JazzError::Closed)));
         }
     }
+}
+
+/// Resolves splice pages given as the whole value to the value's current
+/// length, read as the edit's writer sees it.
+async fn whole_pages(
+    client: &JazzClient,
+    table: &str,
+    id: jazz_app::ObjectId,
+    edits: Vec<jazz_app::jazz::db::LargeValueUpdate>,
+) -> jazz_app::Result<Vec<jazz_app::jazz::db::LargeValueUpdate>> {
+    use jazz_app::jazz::db::{LargeValueUpdate, LargeValueUpdatePage as Page};
+    use jazz_app::jazz::query as q;
+    let mut resolved = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let LargeValueUpdate::Splice {
+            column,
+            within,
+            splices,
+        } = edit
+        else {
+            resolved.push(edit);
+            continue;
+        };
+        let to = match &within {
+            Page::Bytes { to, .. } | Page::TextUtf8 { to, .. } | Page::TextUtf16 { to, .. } => *to,
+        };
+        if to != convert::WHOLE_VALUE {
+            resolved.push(LargeValueUpdate::Splice {
+                column,
+                within,
+                splices,
+            });
+            continue;
+        }
+        let mut query = q::Query::from(table);
+        query.filters.push(q::eq(
+            q::col("id"),
+            q::lit(jazz_app::jazz::records::Value::Uuid(*id.uuid())),
+        ));
+        query.select = Some(vec![column.clone()]);
+        let rows = client.query(query, ReadTier::LocalOnly).await?;
+        let value = rows
+            .into_iter()
+            .next()
+            .and_then(|row| row.fields.into_iter().find(|f| f.name == column))
+            .map(|field| field.value)
+            .ok_or_else(|| jazz_app::Error::Config(format!("no {table} row {id}")))?;
+        let len = |page: &Page| -> u64 {
+            match (&value, page) {
+                (Value::Text(text), Page::TextUtf16 { .. }) => text.encode_utf16().count() as u64,
+                (Value::Text(text), _) => text.len() as u64,
+                (Value::Bytea(bytes), _) => bytes.len() as u64,
+                _ => 0,
+            }
+        };
+        let within = match within {
+            page @ Page::Bytes { .. } => Page::Bytes {
+                from: 0,
+                to: len(&page),
+            },
+            page @ Page::TextUtf8 { .. } => Page::TextUtf8 {
+                from: 0,
+                to: len(&page),
+            },
+            page @ Page::TextUtf16 { .. } => Page::TextUtf16 {
+                from: 0,
+                to: len(&page),
+            },
+        };
+        resolved.push(LargeValueUpdate::Splice {
+            column,
+            within,
+            splices,
+        });
+    }
+    Ok(resolved)
 }
 
 fn take_tx(tx: u64) -> jazz_app::Result<(JazzTransaction, bool)> {
