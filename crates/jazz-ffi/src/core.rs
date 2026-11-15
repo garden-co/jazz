@@ -177,7 +177,16 @@ impl Delivery {
 
 impl Core {
     pub fn open(config_json: &str) -> Result<Self> {
-        let (files, config, app_text) = config(config_json)?;
+        Self::open_with_tokens(config_json, None)
+    }
+
+    /// [`Self::open`] for an end user signing in with the app's bearer
+    /// (`"auth": { "bearer": true }`): `tokens` gives it.
+    pub fn open_with_tokens(
+        config_json: &str,
+        tokens: Option<Arc<dyn jazz_app::TokenProvider>>,
+    ) -> Result<Self> {
+        let (files, config, app_text) = config(config_json, tokens)?;
         let contract = convert::parse(config_json, "the config")?
             .get("contract")
             .and_then(Json::as_u64)
@@ -641,6 +650,93 @@ impl Core {
         Ok(())
     }
 
+    /// The end user's session as JSON (`{ "status": "signedIn", "user": … }`
+    /// and so on); `None` for a local app or a backend.
+    pub fn session_state(&self) -> Result<Option<String>> {
+        Ok(self
+            .open_jazz()?
+            .session()
+            .map(|session| serde_json::to_string(&session.state()).unwrap_or_default()))
+    }
+
+    /// The connection's status as JSON (`{ "link": … }`).
+    pub fn sync_status(&self) -> Result<String> {
+        Ok(serde_json::to_string(&self.open_jazz()?.sync_status()).unwrap_or_default())
+    }
+
+    /// Asks the token provider for a fresh token and reconnects with it.
+    pub fn refresh(&self) -> Result<()> {
+        let session = self
+            .open_jazz()?
+            .session()
+            .cloned()
+            .ok_or_else(|| refused("refresh is for an end user's app (\"auth\")"))?;
+        block_on(session.refresh())?;
+        Ok(())
+    }
+
+    /// Signs the end user out and closes the app.
+    pub fn sign_out(&self) -> Result<()> {
+        let jazz = self.open_jazz()?;
+        if jazz.session().is_none() {
+            return Err(refused("sign out is for an end user's app (\"auth\")"));
+        }
+        block_on(jazz.sign_out())?;
+        self.closed.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Calls `listener` with each state of the session (`session`) or the
+    /// connection (`sync`) as JSON, the current one first, on a thread of
+    /// its own, until cancelled.
+    pub fn watch(&self, what: &str, listener: Box<dyn Fn(String) + Send>) -> Result<Watch> {
+        use futures_util::StreamExt as _;
+        let jazz = self.open_jazz()?;
+        let mut stream: std::pin::Pin<Box<dyn futures_util::Stream<Item = String> + Send>> =
+            match what {
+                "session" => {
+                    let session = jazz
+                        .session()
+                        .ok_or_else(|| refused("watching the session is for an end user's app"))?;
+                    Box::pin(
+                        session
+                            .changes()
+                            .map(|state| serde_json::to_string(&state).unwrap_or_default()),
+                    )
+                }
+                "sync" => Box::pin(
+                    jazz.sync_changes()
+                        .map(|status| serde_json::to_string(&status).unwrap_or_default()),
+                ),
+                other => {
+                    return Err(refused(format!(
+                        "watch \"session\" or \"sync\", not {other:?}"
+                    )));
+                }
+            };
+        let (cancel, mut cancelled) = tokio::sync::oneshot::channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name("jazz-watch".into())
+            .spawn(move || {
+                block_on(async move {
+                    loop {
+                        let next =
+                            futures_util::future::select(stream.next(), &mut cancelled).await;
+                        match next {
+                            futures_util::future::Either::Left((Some(state), _)) => listener(state),
+                            _ => return,
+                        }
+                    }
+                })
+            })
+            .map_err(|error| FfiError::Io(format!("cannot start the watch's thread: {error}")))?;
+        Ok(Watch {
+            thread_id: thread.thread().id(),
+            thread: Mutex::new(Some(thread)),
+            cancel: Mutex::new(Some(cancel)),
+        })
+    }
+
     /// Closes the app: the calls already made finish, subscriptions end,
     /// and every later call fails with `Closed`. Closing again does nothing.
     pub fn close(&self) -> Result<()> {
@@ -812,6 +908,37 @@ thread_local! {
         const { RefCell::new(std::collections::VecDeque::new()) };
 }
 
+/// A watch of session or sync states.
+pub(crate) struct Watch {
+    thread_id: ThreadId,
+    thread: Mutex<Option<JoinHandle<()>>>,
+    cancel: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl Watch {
+    /// Ends the watch; when it returns no callback is running (unless it is
+    /// called from the callback itself).
+    pub fn cancel(&self) {
+        if let Some(cancel) = self.cancel.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = cancel.send(());
+        }
+        if std::thread::current().id() == self.thread_id {
+            return;
+        }
+        if let Some(thread) = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = cancel.send(());
+        }
+    }
+}
+
 pub(crate) struct SubscriptionCore {
     delivery: Arc<Delivery>,
     delivery_thread: ThreadId,
@@ -852,7 +979,59 @@ impl Drop for SubscriptionCore {
     }
 }
 
-fn config(config_json: &str) -> Result<(AppFiles, Config, String)> {
+/// A host's token source as jazz-app's.
+struct Tokens(Arc<dyn jazz_app::TokenProvider>);
+
+impl jazz_app::TokenProvider for Tokens {
+    fn token(&self, reason: jazz_app::TokenReason) -> jazz_app::TokenFuture {
+        self.0.token(reason)
+    }
+}
+
+/// A host callback that gives tokens, as a jazz-app [`TokenProvider`]: it is
+/// called on a thread of its own (it may block, and must not be called on
+/// the client's thread), with the reason as `connect`, `renew`, `expired`
+/// or `refresh`.
+pub(crate) struct HostTokens(pub Arc<HostTokenFn>);
+
+/// A host's token callback: the reason in, the token (or none) out.
+pub(crate) type HostTokenFn = dyn Fn(&str) -> Option<String> + Send + Sync;
+
+impl jazz_app::TokenProvider for HostTokens {
+    fn token(&self, reason: jazz_app::TokenReason) -> jazz_app::TokenFuture {
+        let callback = self.0.clone();
+        let reason = serde_json::to_value(reason)
+            .ok()
+            .and_then(|r| r.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "connect".into());
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("jazz-token".into())
+            .spawn(move || {
+                let token =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(&reason)))
+                        .unwrap_or(None);
+                let _ = sender.send(token);
+            });
+        Box::pin(async move {
+            spawned.map_err(|error| {
+                jazz_app::Error::Config(format!("cannot ask for a token: {error}"))
+            })?;
+            receiver.await.map_err(|_| jazz_app::Error::Stopped)
+        })
+    }
+}
+
+/// A new device account's key, as `jazz-auth-v1:…` text (TS's
+/// `exportDeviceKey`): keep it as a password, in the platform's keychain.
+pub(crate) fn generate_device_key() -> Result<String> {
+    Ok(jazz_app::DeviceKey::generate()?.to_string())
+}
+
+fn config(
+    config_json: &str,
+    tokens: Option<Arc<dyn jazz_app::TokenProvider>>,
+) -> Result<(AppFiles, Config, String)> {
     let Json::Object(config) = convert::parse(config_json, "the config")? else {
         return Err(refused("the config must be a JSON object"));
     };
@@ -865,6 +1044,7 @@ fn config(config_json: &str) -> Result<(AppFiles, Config, String)> {
     let mut backend_secret = None;
     let mut admin_secret = None;
     let mut session = None;
+    let mut auth = None;
     for (key, value) in &config {
         if value.is_null() {
             continue;
@@ -885,6 +1065,7 @@ fn config(config_json: &str) -> Result<(AppFiles, Config, String)> {
             "backendSecret" => backend_secret = Some(text()?),
             "adminSecret" => admin_secret = Some(text()?),
             "session" => session = Some(value.clone()),
+            "auth" => auth = Some(value.clone()),
             // Read by `Core::open`; checked here.
             "contract" => match value.as_u64() {
                 Some(1 | 2) => {}
@@ -895,9 +1076,9 @@ fn config(config_json: &str) -> Result<(AppFiles, Config, String)> {
                 }
             },
             "jwt" | "jwtToken" | "token" => {
-                return Err(unsupported(
-                    "connecting to a sync server as an end user with a JWT; open the app as a backend (permissions + backendSecret + session) or locally",
-                ));
+                return Err(refused(format!(
+                    "config.{key}: an end user's token comes from a token provider: \"auth\": {{ \"bearer\": true }}"
+                )));
             }
             other => return Err(refused(format!("the config has an unknown key {other:?}"))),
         }
@@ -964,6 +1145,41 @@ fn config(config_json: &str) -> Result<(AppFiles, Config, String)> {
             refused("a backend needs \"adminSecret\": it publishes the app's permissions bundle")
         })?;
         result = result.backend(Backend::new(backend_secret, admin_secret, subject));
+        if auth.is_some() {
+            return Err(refused(
+                "\"auth\" is for an end user; a backend has a \"session\"",
+            ));
+        }
+    } else if let Some(auth) = auth {
+        // An end user, syncing through the app's Jazz endpoint.
+        if result.server_url.is_none() {
+            return Err(refused(
+                "an end user (\"auth\") needs \"serverUrl\": the app's Jazz endpoint",
+            ));
+        }
+        let auth = match (auth.get("deviceKey"), auth.get("bearer")) {
+            (Some(Json::String(key)), None) => {
+                jazz_app::Auth::Device(key.parse().map_err(|_| {
+                    refused("config.auth.deviceKey is not a device key (jazz-auth-v1:…)")
+                })?)
+            }
+            (None, Some(Json::Bool(true))) => {
+                let tokens = tokens.ok_or_else(|| {
+                    refused("\"auth\": { \"bearer\": true } needs a token provider: open with one")
+                })?;
+                jazz_app::Auth::bearer(Tokens(tokens))
+            }
+            _ => {
+                return Err(refused(
+                    "config.auth is { \"deviceKey\": \"jazz-auth-v1:…\" } or { \"bearer\": true }",
+                ));
+            }
+        };
+        result = result.user(auth);
+    } else if result.server_url.is_some() {
+        return Err(refused(
+            "a \"serverUrl\" needs \"permissions\" (a backend) or \"auth\" (an end user)",
+        ));
     } else if backend_secret.is_some() || admin_secret.is_some() || session.is_some() {
         return Err(refused(
             "backendSecret, adminSecret and session are for a backend, which needs \"permissions\"",
