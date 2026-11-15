@@ -303,22 +303,20 @@ fn subscriptions_deliver_deltas_until_cancelled() {
     assert_eq!(counts.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
 }
 
-/// What jazz-app cannot do (offsets in includes, end-user JWT connect, foreign session
-/// issuers) and invalid input are refused with `Refused`, naming the pattern.
+/// What jazz-app cannot do (offsets in includes, foreign session issuers),
+/// misconfigured servers and invalid input are refused with `Refused`, naming the pattern.
 #[test]
 fn refuses_what_it_cannot_do_by_name() {
     assert!(refused(JazzHandle::open("not json".into())).contains("not valid JSON"));
     let message = refused(JazzHandle::open(
         json!({ "app": STAGE_PLAN_APP, "serverUrl": "http://localhost:1" }).to_string(),
     ));
-    assert!(
-        message.starts_with("not supported yet: connecting to a sync server as an end user"),
-        "{message}"
-    );
+    // A server needs a backend's permissions or an end user's `auth`.
+    assert!(message.contains("\"auth\""), "{message}");
     let message = refused(JazzHandle::open(
         json!({ "app": STAGE_PLAN_APP, "jwt": "x" }).to_string(),
     ));
-    assert!(message.starts_with("not supported yet"), "{message}");
+    assert!(message.contains("token provider"), "{message}");
     let message = refused(JazzHandle::open(
         json!({ "app": STAGE_PLAN_APP, "permissions": STAGE_PLAN_PERMISSIONS, "appId": nil_uuid(),
                 "serverUrl": "http://localhost:1", "backendSecret": "b", "adminSecret": "a",

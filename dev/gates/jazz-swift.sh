@@ -40,9 +40,12 @@ swift --version
 cd "$root"
 cargo test -q -p jazz-codegen --test golden -- swift
 cargo build -q -p jazz-cli --bin jazz-tools
+# The app endpoint the end-user tests sign in through.
+cargo build -q -p jazz-app --features test-relay --bin jazz-app-test-relay
 "$root/packages/jazz-swift/scripts/build-ffi.sh" --debug
 export JAZZ_FFI_LIB_DIR="$root/target/debug/jazz-ffi-static"
 export JAZZ_TOOLS_BIN="$root/target/debug/jazz-tools"
+export JAZZ_TEST_RELAY_BIN="$root/target/debug/jazz-app-test-relay"
 export CI="${CI:-1}"
 
 (cd "$root/packages/jazz-swift" && swift test)

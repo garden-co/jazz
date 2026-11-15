@@ -62,7 +62,28 @@ ship inside a mobile or desktop app. In .65, apps on users' devices open
 local-only clients (no `serverUrl`), because connecting as an end user with a
 JWT is not supported yet.
 
-Without `permissions`, it opens as a local client. `appId` is required for
+**End users** (contract v2): `"serverUrl"` is the app's Jazz endpoint (its
+backend's `createJazz` handler, never the core) and `"auth"` says who signs
+in: `{"deviceKey": "jazz-auth-v1:…"}` (a local-first device account; make one
+with `generate_device_key()` / `jazz_generate_device_key`, and keep it as a
+password in the platform's keychain) or `{"bearer": true}`, the app's own
+sign-in, whose tokens a host callback gives (UniFFI
+`JazzHandle.open_with_tokens(config, TokenProvider)`, C
+`jazz_open_user(config, token_cb, ctx, err)`): it is called on a thread of
+its own with `connect`, `renew`, `expired` or `refresh` and returns the token
+or none (signed out). `session_state()` / `"session"` gives
+`{"status": "signedIn"|"expired"|"signedOut", "user"?: {account, issuer,
+subject, claims, kind}}`; `sync_status()` / `"syncStatus"` gives `{"link":
+…}`; `watch_session` / `watch_sync` (C `jazz_watch(h, "session"|"sync", …)`,
+`jazz_unwatch`) call back with each state, the current one first;
+`refresh()` asks for a fresh token; `link(bearer)` / `"link"` links a
+device account to the app's own sign-in (the session becomes that user's, on
+the device's account); `sign_out()` signs out and closes the app. The sync
+status is TS's `SyncStatus` (`{link, pendingUploads, oldestPendingAt,
+rejected, lastError, synced}`). A backend's `bundle()` / `"bundle"` is the
+permissions bundle it published. Anonymous users are not supported (as in TS).
+
+Without `permissions` or `auth`, it opens as a local client. `appId` is required for
 `"persistent"` storage.
 
 ## Values, queries, rows, deltas
@@ -101,7 +122,11 @@ columns (`merge: "text"`) take plain string writes.
   an `updated` row when its related rows change.
 - **Select:** `"select": ["<column>", …]` returns those columns (and `id`,
   always) instead of all of them, at the root or in an include. `"*"` selects
-  every column.
+  every column. An entry may read part of a large value instead of all of
+  it: `{"column", "from", "to", "units": "utf8"|"utf16"|"bytes"}` (half-open;
+  UTF-8 on code point boundaries; bytes come back base64) or `{"column",
+"at": "<JSON pointer>"}` for a json column. Parts are for the root query,
+  not inside includes.
 - A forward relation through a `uuid[]` column reads as an array of the
   referenced rows; `required` on it keeps only rows whose every reference is
   readable. Stricter than TS: `required` on reverse relations or optional
@@ -125,6 +150,44 @@ columns (`merge: "text"`) take plain string writes.
   at once), and fails if the server refused one. It checks up to the last
   4096 writes individually; older ones rely on the core wait, which can miss
   a refusal that is no longer pending until jazz#5728 is fixed.
+- **Partial edits:** UniFFI `edit_text(table, id, column, edited_from,
+text)` sets a text-merge column (`merge: "text"`) to `text`, an edit of
+  `edited_from`, the value its writer last saw: changes others made since are
+  kept, as the server merges them (TS's `editedFrom`). `edit(table, id,
+patch?, edits)` takes a list of `{"kind": "text", "column", "text",
+"editedFrom"}`, `{"kind": "splice", "column", "within": {"units":
+"utf8"|"utf16"|"bytes", "from", "to"}, "splices": [{"at", "delete",
+"insert"}]}` (`insert` a string, or base64 for bytes; `at` relative to
+  `from`) and `{"kind": "jsonSet", "column", "edits": [{"at": "<JSON
+pointer>", "value"}]}`, plus an optional whole-column patch, as one write.
+  Without `within`, a splice's page is the whole current value, in
+  `"units"` (default `"utf8"`). Both on `Transaction` too. C ABI: `jazz_call`
+  `textEdit {table, id, column, units?, edits: [{pos, delete, insert}]}`
+  (splices over the whole value), `editText {table, id, column,
+editedFrom, text}` and `edit {table, id, patch?, edits}`, with `"tx"` and
+  `"tier"`.
+- **Permission advice:** UniFFI `can(table, op, args_json) -> Option<bool>`,
+  C ABI `can {table, op, id?, row?}` → `true` | `false` | `null`: whether the
+  server would let this user `read` / `insert` / `update` / `delete`, without
+  doing it (TS's `canRead`, …). `insert` takes `row`; `read` and `delete`
+  take `id`; `update` takes `id` and an optional `row` patch. `null` (no
+  server, or no decision) means unknown. It is advice: `true` doesn't promise
+  the write will succeed, as the data or permissions may change first. Not
+  inside a transaction.
+- **Upsert and restore:** UniFFI `upsert(table, id, row)` and C ABI
+  `upsert {table, id, row}` write the row with this id: an insert if there is
+  none, else its columns replaced; `row` is a whole row, as for an insert.
+  `restore(table, id, patch?)` / `restore {table, id, patch?}` brings back a
+  deleted row as it was, or with `patch` (a whole row) as its content. Both
+  return the row, take `"tx"` and `"tier"`, and are on `Transaction` too.
+- **Streaming uploads:** UniFFI `begin_upload(table, column, kind, id?,
+row?) -> Upload` (`push(bytes)`, `finish() -> row`, `abort()`); C ABI
+  `uploadBegin {table, column, kind?: "insert"|"update"|"upsert", id?,
+row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
+{upload, tier?}` → the row, `uploadAbort {upload}`. An insert takes the
+  row's other columns as `row` and no `id`; update and upsert take the `id`.
+  Not inside a transaction. Read a large value back in pages with `select`
+  parts.
 - **Contract version:** `"contract": 1 | 2` in the open config (default 1).
   With 2, errors have three more kinds: `permission` (the app's permissions
   refuse it, e.g. a write waiting for global durability), `notSupported`
@@ -132,6 +195,26 @@ columns (`merge: "text"`) take plain string writes.
   lost to another write; retry it). UniFFI: `JazzError.Permission`,
   `NotSupported`, `Conflict`, each with a `reason`. A contract 1 host sees
   these as `refused`, as before.
+- **hopTo, gather, union, history, includeDeleted** (lowered by jazz-app's
+  `untyped` builder, as the typed Rust API and TS lower them):
+  - `{"table", "where"?, "orderBy"?, "limit"?, "hopTo": "<rel>" | ["<rel>",
+…], "after"?: {"where", "orderBy", "limit", "offset", "select"}}`: rows
+    of the last hop's table; the top-level clauses filter the rows hopped
+    from, `after` the rows reached.
+  - `{"table", "where"?, "gather": {"relation", "maxDepth"?}}`: the rows
+    matching `where` and every row reached along a forward relation of the
+    table to itself, up to `maxDepth` (default 10).
+  - `{"union": [Q, …], "orderBy"?, "limit"?, "offset"?}`: every arm's rows,
+    as TS's union: a row matched by two arms comes twice, and `limit` /
+    `offset` count every occurrence; arms read one table, with `where` only.
+    Subscribing to a union whose arms overlap can mis-apply removals (deltas
+    name rows by id), as in jazz-app.
+  - `{"table", "history": true, "where"?, "orderBy"?, "limit"?}`: the
+    versions the server accepted, each row with `"$history":
+{"transactionId", "acceptedAt"}` (order by `"$acceptedAt"`); read it at
+    tier `remote`. Not subscribable yet.
+  - `"includeDeleted": true` on any of these or a plain query reads deleted
+    rows too.
 - **Row:** `{ "id", "<column>": … }`, with the authored column names. An
   insert may give its own `id`.
 - **Delta:** `{ "added": [row], "updated": [row], "removed": [id], "reset",

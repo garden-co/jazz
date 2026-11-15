@@ -13,38 +13,71 @@
 //! let mut changes = jazz.subscribe(todos::query()).await?; // a futures::Stream
 //! ```
 //!
-//! Not supported yet: connecting to a sync server as an end user (with a
-//! JWT), includes (nested related rows in one result), reads inside
-//! transactions.
+//! An end user's client ([`Config::user`]) signs in with a device account
+//! ([`Auth::Device`]) or the app's own bearer ([`Auth::bearer`]), and
+//! [`Jazz::session`] follows it; [`Session::link`] carries a device account
+//! over to the user's provider sign-in.
+//!
+//! Related rows come with a query's rows through `include` (a tuple per
+//! row: `(Todo, Option<Project>)`), and `select` reads only some columns
+//! (a [`Partial`] row); see [`Query::include`] and [`Query::select`].
+//!
+//! [`Query::hop_to`] reads the rows a relation reaches, [`Query::gather`]
+//! rows recursively and [`Query::union`] several queries' rows; a table's
+//! `history()` reads its rows' accepted versions ([`Version`]) and
+//! [`Query::include_deleted`] reads deleted rows too.
+//!
+//! Not supported yet: subscribing to history, and partial
+//! reads of large values.
 
+mod advice;
 mod app;
+mod auth;
 mod backend;
 mod config;
 mod edit;
 mod error;
 mod handle;
+mod history;
+mod include;
 mod large;
 mod query;
+mod relation;
+mod session;
 mod subscription;
 mod table;
 mod transaction;
+pub mod untyped;
 mod value;
 mod writes;
 
+pub use advice::Advice;
 pub use app::AppFiles;
+pub use auth::{Auth, Bearer, DeviceKey, TokenFuture, TokenProvider, TokenReason};
 pub use config::{Backend, Config, Storage};
 pub use edit::TextColumn;
 pub use error::{Error, Result};
 pub use handle::Jazz;
+pub use history::Version;
+pub use include::{
+    Include, IntoInclude, Nullability, OneInclude, Partial, RefsInclude, Row, Selection, With,
+};
 pub use large::{JsonColumn, LargeColumn, Page, Splice};
-pub use query::{Column, Condition, Many, One, Order, Query, created_at, id, updated_at};
+pub use query::{
+    Column, Condition, Many, NotNull, Nullable, One, Order, Query, Refs, created_at, deleted_at,
+    id, updated_at,
+};
+pub use relation::{Hop, Step};
+pub use session::{
+    AuthFailure, Link, Offline, Session, SessionState, SyncError, SyncStatus, User, UserKind,
+};
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
 pub use table::{Fields, Implementations, Insert, Table, Update};
 pub use transaction::Transaction;
 pub use value::{ColumnValue, Json, Timestamp};
 
 pub use jazz::account_registry::AccountId;
-pub use jazz::tools::{AppId, DurabilityTier, ObjectId, ReadTier};
+pub use jazz::tools::{AppId, DurabilityTier, ObjectId, ReadTier, TransactionId};
 
 /// The `jazz` crate, for generated code and [`Jazz::with_client`].
 #[doc(hidden)]
