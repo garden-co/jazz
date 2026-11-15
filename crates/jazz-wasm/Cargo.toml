@@ -47,6 +47,12 @@ default = ["console_error_panic_hook", "transport-compression-ruzstd"]
 bench-probes = []
 # Browser store probes (IndexedDB vs in memory); never in release builds.
 browser-bench = []
+# The store on a Cloudflare Durable Object's synchronous KV storage
+# (`jazz::kv_vfs`, `src/do_kv.rs`); not in the browser bundle.
+durable-object-kv = ["jazz/kv-vfs"]
+# Durable Object KV store probes for the workerd smoke test; implies
+# `durable-object-kv`.
+do-kv-bench = ["durable-object-kv"]
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]
 transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]

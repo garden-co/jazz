@@ -41,6 +41,8 @@ pub mod db;
 mod durable_object_limits;
 pub mod format;
 pub mod host;
+#[cfg(feature = "kv-vfs")]
+pub mod kv_vfs;
 pub(crate) mod large;
 pub mod link;
 pub(crate) mod merge;

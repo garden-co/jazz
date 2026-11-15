@@ -13,6 +13,8 @@ default = []
 runtime = ["dep:jsonwebtoken", "dep:tokio", "jazz-model/runtime"]
 # See jazz-db's `sql-trace`.
 sql-trace = ["jazz-db/sql-trace"]
+# See jazz-db's `kv-vfs`.
+kv-vfs = ["jazz-db/kv-vfs"]
 # See jazz-db's `durable-object-limits`.
 durable-object-limits = ["jazz-db/durable-object-limits"]
 testing = [
@@ -21,6 +23,7 @@ testing = [
   "jazz-model/testing",
   "jazz-protocol/testing",
   "jazz-db/testing",
+  "kv-vfs",
 ]
 transport-compression-lz4 = ["jazz-compression/lz4", "jazz-protocol/transport-compression-lz4"]
 transport-compression-zstd = ["jazz-compression/zstd", "jazz-protocol/transport-compression-zstd"]

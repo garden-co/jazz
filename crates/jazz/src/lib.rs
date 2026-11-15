@@ -31,6 +31,8 @@ pub use jazz_db::format;
 #[cfg(feature = "testing")]
 pub use jazz_db::full_materializations_for_test;
 pub use jazz_db::host;
+#[cfg(feature = "kv-vfs")]
+pub use jazz_db::kv_vfs;
 pub use jazz_db::link;
 pub use jazz_db::result_tree;
 pub use jazz_db::slow;
