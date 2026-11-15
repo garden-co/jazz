@@ -1326,8 +1326,10 @@ impl jazz_app::TokenProvider for Tokens {
 /// or `refresh`.
 pub(crate) struct HostTokens(pub Arc<HostTokenFn>);
 
-/// A host's token callback: the reason in, the token (or none) out.
-pub(crate) type HostTokenFn = dyn Fn(&str) -> Option<String> + Send + Sync;
+/// A host's token callback: the reason in, the token (or none: signed out)
+/// out, or an error (the fetch failed: the session stays, and asks again).
+pub(crate) type HostTokenFn =
+    dyn Fn(&str) -> std::result::Result<Option<String>, String> + Send + Sync;
 
 impl jazz_app::TokenProvider for HostTokens {
     fn token(&self, reason: jazz_app::TokenReason) -> jazz_app::TokenFuture {
@@ -1340,16 +1342,22 @@ impl jazz_app::TokenProvider for HostTokens {
         let spawned = std::thread::Builder::new()
             .name("jazz-token".into())
             .spawn(move || {
+                // A panicking callback is a failed fetch, not a sign-out.
                 let token =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(&reason)))
-                        .unwrap_or(None);
+                        .unwrap_or_else(|_| Err("the token provider panicked".into()));
                 let _ = sender.send(token);
             });
         Box::pin(async move {
             spawned.map_err(|error| {
                 jazz_app::Error::Config(format!("cannot ask for a token: {error}"))
             })?;
-            receiver.await.map_err(|_| jazz_app::Error::Stopped)
+            receiver
+                .await
+                .map_err(|_| jazz_app::Error::Stopped)?
+                .map_err(|reason| {
+                    jazz_app::Error::Server(format!("the token provider failed: {reason}"))
+                })
         })
     }
 }

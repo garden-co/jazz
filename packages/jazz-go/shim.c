@@ -14,10 +14,10 @@ JazzSubscription* jazz_go_subscribe(JazzHandle* h, const char* q, uintptr_t ctx,
 	return jazz_subscribe(h, q, jazz_go_callback, (void*)ctx, err);
 }
 
-extern char* jazzGoTokenCallback(uintptr_t ctx, char* reason);
+extern int jazzGoTokenCallback(uintptr_t ctx, char* reason, char** token);
 
-static char* jazz_go_token(void* ctx, const char* reason) {
-	return jazzGoTokenCallback((uintptr_t)ctx, (char*)reason);
+static int jazz_go_token(void* ctx, const char* reason, char** token) {
+	return jazzGoTokenCallback((uintptr_t)ctx, (char*)reason, token);
 }
 
 JazzHandle* jazz_go_open_user(const char* config, uintptr_t ctx, char** err) {

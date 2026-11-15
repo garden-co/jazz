@@ -43,7 +43,8 @@ const (
 )
 
 // TokenProvider gets the signed-in user's token: "" when no one is
-// signed in (the app then signs out). An error counts as "no token" too.
+// signed in (the app then signs out). An error (a network blip at your
+// auth provider) keeps the session: Jazz asks again later.
 type TokenProvider func(ctx context.Context, reason TokenReason) (string, error)
 
 type tokenAuth struct{ provider TokenProvider }
@@ -133,18 +134,24 @@ var (
 )
 
 //export jazzGoTokenCallback
-func jazzGoTokenCallback(ctx C.uintptr_t, reason *C.char) *C.char {
+func jazzGoTokenCallback(ctx C.uintptr_t, reason *C.char, token **C.char) C.int {
+	*token = nil
 	value, ok := providers.Load(uint64(ctx))
 	if !ok {
-		return nil
+		return 0 // the app closed: signed out
 	}
 	c, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	token, err := value.(TokenProvider)(c, TokenReason(C.GoString(reason)))
-	if err != nil || token == "" {
-		return nil
+	t, err := value.(TokenProvider)(c, TokenReason(C.GoString(reason)))
+	if err != nil {
+		// A failed fetch: the session stays, and Jazz asks again.
+		*token = C.CString(err.Error()) // jazz-ffi frees it
+		return 1
 	}
-	return C.CString(token) // jazz-ffi frees it
+	if t != "" {
+		*token = C.CString(t) // jazz-ffi frees it
+	}
+	return 0 // "" signs the user out
 }
 
 func openUser(config string, provider TokenProvider) (*C.JazzHandle, uint64, error) {
