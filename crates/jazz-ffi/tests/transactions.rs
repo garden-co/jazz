@@ -65,7 +65,8 @@ fn a_transaction_commits_its_writes_together_or_not_at_all() {
     tx.commit(None).unwrap();
 
     // Tiers: a local write waits for local durability; a serverless app
-    // can't reach global, and says so.
+    // can't reach global, and refuses it before writing (Rig and Doors are
+    // the only tasks).
     jazz.insert_at("tasks".into(), task(&show_id, "Doors", 4.0), "local".into())
         .unwrap();
     assert!(matches!(
@@ -81,7 +82,7 @@ fn a_transaction_commits_its_writes_together_or_not_at_all() {
             .as_array()
             .unwrap()
             .len(),
-        3
+        2
     );
     assert!(refused(jazz.all_at(tasks_of(&show_id), "nearby".into())).contains("read tier"));
 }
@@ -202,4 +203,67 @@ fn transactions_through_the_c_abi() {
     let mut err = ptr::null_mut();
     assert!(unsafe { jazz_open(c(&bad).as_ptr(), &mut err) }.is_null());
     unsafe { jazz_string_free(err) };
+}
+
+/// Review cases: `global` on a serverless app is refused before anything is
+/// written; a write that fails inside a transaction doesn't count as one,
+/// so committing it just ends it; ids from one handle don't name another's
+/// transactions; TS's `"local-first"` spelling is accepted.
+#[test]
+fn refusals_happen_before_writing_and_failed_writes_dont_count() {
+    let jazz = Handle::open(client_config()).unwrap();
+    let show_id = parse(&jazz.insert("shows".into(), show(nil_uuid())).unwrap())["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        refused(jazz.insert_at("tasks".into(), task(&show_id, "Far", 1.0), "global".into()))
+            .contains("unreachable")
+    );
+    let tx = jazz.clone().begin().unwrap();
+    tx.insert("tasks".into(), task(&show_id, "Far too", 2.0))
+        .unwrap();
+    assert!(refused(tx.commit(Some("global".into()))).contains("unreachable"));
+    assert_eq!(parse(&jazz.all(tasks_of(&show_id)).unwrap()), json!([]));
+
+    let tx = jazz.clone().begin().unwrap();
+    assert!(
+        tx.insert(
+            "tasks".into(),
+            json!({ "showId": show_id, "title": 3 }).to_string()
+        )
+        .is_err()
+    );
+    tx.commit(None).unwrap();
+    // Nothing leaked: a new transaction commits normally.
+    let tx = jazz.clone().begin().unwrap();
+    tx.insert("tasks".into(), task(&show_id, "Rig", 3.0))
+        .unwrap();
+    tx.commit(None).unwrap();
+    assert_eq!(
+        titles(&parse(&jazz.all(tasks_of(&show_id)).unwrap())),
+        ["Rig"]
+    );
+
+    jazz.all_at(tasks_of(&show_id), "local-first".into())
+        .unwrap();
+
+    let mut err = ptr::null_mut();
+    let config = json!({ "app": STAGE_PLAN_APP }).to_string();
+    let (a, b) = unsafe {
+        (
+            jazz_open(c(&config).as_ptr(), &mut err),
+            jazz_open(c(&config).as_ptr(), &mut err),
+        )
+    };
+    let tx = call(a, "txBegin", json!({})).unwrap()["tx"].clone();
+    assert_eq!(
+        call(b, "txRollback", json!({ "tx": tx })).unwrap_err()["kind"],
+        "refused"
+    );
+    call(a, "txRollback", json!({ "tx": tx })).unwrap();
+    unsafe {
+        jazz_close(a);
+        jazz_close(b);
+    }
 }
