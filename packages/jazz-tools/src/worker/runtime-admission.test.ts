@@ -8,7 +8,7 @@ const tasks = {
 
 function fingerprint(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
-    protocolVersion: "jazz-shared-runtime-v2",
+    protocolVersion: "jazz-shared-runtime-v3",
     dbName: "store",
     schemaHash: "tasks-schema",
     authClass: 'local-first:["account","urn:jazz:local-first","guest"]',

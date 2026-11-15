@@ -1265,7 +1265,10 @@ async function initialize(context: RuntimeContext): Promise<void> {
       },
     );
     context.runtime = runtime;
+    // A new runtime starts a new link: a refusal of the old one's credential
+    // is its own to report again.
     context.linkFate = null;
+    context.authFailure = null;
     unownedDb = null;
     context.runtime.onAuthFailure((reason) => {
       context.authFailureEpoch += 1;
