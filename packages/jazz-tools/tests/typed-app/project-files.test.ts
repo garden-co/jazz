@@ -42,11 +42,13 @@ describe("generate", () => {
   it("--check refuses missing or stale bindings without writing", async () => {
     const dir = await project();
     await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(
-      /no jazz\.generated\.ts: run `jazz-tools (generate|validate)`/,
+      "no jazz.generated.ts: run `jazz-tools generate`",
     );
     await generateApp({ cwd: dir });
     await writeFile(join(dir, "jazz.generated.ts"), "// edited\n");
-    await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(/jazz-tools generate/);
+    await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(
+      "jazz.generated.ts: not a module jazz-tools generated (its first line differs); regenerate it with `jazz-tools generate`",
+    );
     expect(await readFile(join(dir, "jazz.generated.ts"), "utf8")).toBe("// edited\n");
   });
 
@@ -59,7 +61,9 @@ describe("generate", () => {
       tables: { todos: { columns: { title: "string", done: "boolean", note: "string?" } } },
     };
     await writeFile(join(dir, "jazz.app.json"), JSON.stringify(edited, null, 2));
-    await expect(generateApp({ cwd: dir })).rejects.toThrow(/migrations create/);
+    await expect(generateApp({ cwd: dir })).rejects.toThrow(
+      "the schema changed since the last version: run `jazz-tools migrations create --name <name>`",
+    );
     expect(await readFile(join(dir, "jazz.generated.ts"), "utf8")).toBe(before);
 
     const created = await createAppMigration({ cwd: dir, name: "add-note" });
@@ -71,14 +75,20 @@ describe("generate", () => {
 
   it("refuses a missing permissions file and a name-less migration", async () => {
     const dir = await project(APP, null);
-    await expect(generateApp({ cwd: dir })).rejects.toThrow(/jazz\.permissions\.json is missing/);
-    await expect(createAppMigration({ cwd: dir, name: "" })).rejects.toThrow(/--name/);
+    await expect(generateApp({ cwd: dir })).rejects.toThrow(
+      /jazz\.permissions\.json is missing\. Every app has one, even if only backends read it: start from `\{ "format": 1, "tables": \{\} \}`, which denies everything\.$/,
+    );
+    await expect(createAppMigration({ cwd: dir, name: "" })).rejects.toThrow(
+      "`jazz-tools migrations create` needs `--name <name>`: letters, digits, `-` and `_`, e.g. `--name add-due-date`.",
+    );
   });
 
   it("points an alpha.64 project at upgrade", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-legacy-"));
     await writeFile(join(dir, "schema.ts"), "export {};\n");
-    await expect(generateApp({ cwd: dir })).rejects.toThrow(/jazz-tools upgrade/);
+    await expect(generateApp({ cwd: dir })).rejects.toThrow(
+      "schema.ts is an alpha.64 schema: jazz.app.json is now the app's schema. Run `npx jazz-tools upgrade` to convert the app.",
+    );
   });
 });
 
@@ -86,7 +96,7 @@ describe("createJazz's bindings check", () => {
   it("refuses bindings generated from another jazz.app.json, and passes without one", async () => {
     const dir = await project();
     await expect(checkRunningBindings("sha256:" + "0".repeat(64), dir)).rejects.toThrow(
-      /bindings out of date/,
+      "bindings out of date: jazz.generated.ts was generated from another jazz.app.json. Run `npx jazz-tools generate` and commit the jazz.generated.ts it writes.",
     );
     const empty = await mkdtemp(join(tmpdir(), "jazz-none-"));
     const warnings: string[] = [];
@@ -138,6 +148,8 @@ describe("finding the app's files", () => {
     const { mkdir } = await import("node:fs/promises");
     await mkdir(join(dir, "src"));
     await writeFile(join(dir, "src", "jazz.app.json"), JSON.stringify(APP));
-    await expect(generateApp({ cwd: dir })).rejects.toThrow(/found jazz\.app\.json in both/);
+    await expect(generateApp({ cwd: dir })).rejects.toThrow(
+      "found jazz.app.json in both jazz.app.json and src/jazz.app.json: keep one, or point the command at the app with --schema-dir.",
+    );
   });
 });

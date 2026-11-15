@@ -4,7 +4,7 @@
 #![allow(dead_code, clippy::all)]
 
 /// The `jazz.app.json` these bindings were generated from.
-pub const SOURCE: &str = "sha256:bb0ea977086496f447db27a19a5d100660c7ffad3b3e44bfe55d260335155cc3";
+pub const SOURCE: &str = "sha256:1c1db189429eef6aba3a44f8859e504af087390619f4a24125495f51d224eae4";
 
 /// The values of column `tasks.priority`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -164,6 +164,8 @@ pub struct Task {
     pub due_at: ::std::option::Option<::std::string::String>,
     pub tags: ::std::vec::Vec<::std::string::String>,
     pub meta: ::std::option::Option<::jazz_app::Json>,
+    pub notes: ::std::option::Option<::std::string::String>,
+    pub attachment: ::std::option::Option<::std::vec::Vec<u8>>,
     /// Computed from `score`, `priority`.
     pub urgent: bool,
 }
@@ -180,6 +182,8 @@ pub struct NewTask {
     pub due_at: ::std::option::Option<::std::string::String>,
     pub tags: ::std::vec::Vec<::std::string::String>,
     pub meta: ::std::option::Option<::jazz_app::Json>,
+    pub notes: ::std::option::Option<::std::string::String>,
+    pub attachment: ::std::option::Option<::std::vec::Vec<u8>>,
 }
 
 impl NewTask {
@@ -194,6 +198,8 @@ impl NewTask {
             due_at: ::std::option::Option::None,
             tags: tags.into(),
             meta: ::std::option::Option::None,
+            notes: ::std::option::Option::None,
+            attachment: ::std::option::Option::None,
         }
     }
 }
@@ -209,6 +215,8 @@ pub struct TaskUpdate {
     pub due_at: ::std::option::Option<::std::option::Option<::std::string::String>>,
     pub tags: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
     pub meta: ::std::option::Option<::std::option::Option<::jazz_app::Json>>,
+    pub notes: ::std::option::Option<::std::option::Option<::std::string::String>>,
+    pub attachment: ::std::option::Option<::std::option::Option<::std::vec::Vec<u8>>>,
 }
 
 impl ::jazz_app::Table for Task {
@@ -225,6 +233,8 @@ impl ::jazz_app::Table for Task {
         let due_at = row.take::<::std::option::Option<::jazz_app::Timestamp>>("dueAt")?.map(|stored| computed.iso_date_view(stored));
         let tags = row.take::<::std::vec::Vec<::std::string::String>>("tags")?;
         let meta = row.take::<::std::option::Option<::jazz_app::Json>>("meta")?;
+        let notes = row.take::<::std::option::Option<::std::string::String>>("notes")?;
+        let attachment = row.take::<::std::option::Option<::std::vec::Vec<u8>>>("attachment")?;
         let urgent = computed.tasks_urgent(score.clone(), priority.clone());
         ::std::result::Result::Ok(Self {
             id: row.id(),
@@ -235,6 +245,8 @@ impl ::jazz_app::Table for Task {
             due_at,
             tags,
             meta,
+            notes,
+            attachment,
             urgent,
         })
     }
@@ -268,6 +280,10 @@ impl ::jazz_app::Insert for NewTask {
         cells.insert("tags".to_owned(), ::jazz_app::ColumnValue::into_value(value));
         let value = self.meta;
         cells.insert("meta".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        let value = self.notes;
+        cells.insert("notes".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        let value = self.attachment;
+        cells.insert("attachment".to_owned(), ::jazz_app::ColumnValue::into_value(value));
         ::std::result::Result::Ok(cells)
     }
 }
@@ -301,6 +317,12 @@ impl ::jazz_app::Update for TaskUpdate {
         }
         if let ::std::option::Option::Some(value) = self.meta {
             cells.push(("meta".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+        }
+        if let ::std::option::Option::Some(value) = self.notes {
+            cells.push(("notes".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+        }
+        if let ::std::option::Option::Some(value) = self.attachment {
+            cells.push(("attachment".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
         }
         ::std::result::Result::Ok(cells)
     }
@@ -355,6 +377,16 @@ pub mod tasks {
     pub fn meta() -> ::jazz_app::Column<Task, ::std::option::Option<::jazz_app::Json>> {
         ::jazz_app::Column::new("meta")
     }
+
+    /// Column `notes`.
+    pub fn notes() -> ::jazz_app::Column<Task, ::std::option::Option<::std::string::String>> {
+        ::jazz_app::Column::new("notes")
+    }
+
+    /// Column `attachment`.
+    pub fn attachment() -> ::jazz_app::Column<Task, ::std::option::Option<::std::vec::Vec<u8>>> {
+        ::jazz_app::Column::new("attachment")
+    }
 }
 
 /// What the app's code computes: each computed field `jazz.app.json`
@@ -387,7 +419,9 @@ pub const APP: &str = r#"{
         "type": "string?",
         "dueAt": { "type": "timestamp", "optional": true, "transform": "isoDate" },
         "tags": { "array": "string" },
-        "meta": { "json": true, "optional": true }
+        "meta": { "json": true, "optional": true },
+        "notes": { "type": "string", "optional": true, "merge": "text" },
+        "attachment": "bytes?"
       },
       "computed": { "urgent": { "type": "boolean", "from": ["score", "priority"] } }
     }
