@@ -3,7 +3,7 @@
 import { useState, type FormEvent } from "react";
 import { useDb } from "jazz-tools/react";
 import { Button, Dialog, DialogHeader, HStack, TextInput, VStack } from "@astryxdesign/core";
-import { app } from "../../schema";
+import { app } from "../../jazz.generated";
 
 export function RenameRoomDialog({
   isOpen,

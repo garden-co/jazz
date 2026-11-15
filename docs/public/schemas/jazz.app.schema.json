@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://jazz.tools/schemas/jazz.app.schema.json",
   "title": "jazz.app.json",
-  "description": "An app's tables, relations, schema history and migrations. The app and its clients ship this file. See https://jazz.tools/docs/reference/app-files",
+  "description": "An app's tables, relations, computed fields, transforms, schema history and migrations. The app and its clients ship this file. See https://jazz.tools/docs/reference/app-files",
   "type": "object",
   "additionalProperties": false,
   "required": ["format", "tables"],
@@ -43,15 +43,28 @@
         "$ref": "#/$defs/migration"
       }
     },
-    "slices": {
+    "transforms": {
       "type": "object",
-      "description": "Slices schema.ts exports, by export name.",
+      "description": "Transforms columns name with \"transform\": a type the engine stores and the type code reads and writes. Every language implements each one.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      },
       "additionalProperties": {
-        "type": "array",
-        "items": {
-          "type": "string"
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["stored", "view"],
+        "properties": {
+          "stored": {
+            "$ref": "#/$defs/plainType"
+          },
+          "view": {
+            "$ref": "#/$defs/plainType"
+          },
+          "$comment": {
+            "type": "string"
+          }
         },
-        "minItems": 1
+        "description": "e.g. { \"stored\": \"timestamp\", \"view\": \"string\" }"
       }
     }
   },
@@ -145,16 +158,38 @@
           "const": "latest",
           "description": "Keep only each row's newest version."
         },
-        "tsOnly": {
+        "computed": {
           "type": "object",
+          "description": "Fields computed in code from stored columns, not stored. Every language implements each one.",
+          "propertyNames": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
           "additionalProperties": {
-            "enum": ["computed", "transform"]
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "from"],
+            "properties": {
+              "type": {
+                "$ref": "#/$defs/columnType"
+              },
+              "from": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Stored columns of this table (or id), in the order the implementation takes them."
+              },
+              "$comment": {
+                "type": "string"
+              }
+            },
+            "description": "e.g. { \"type\": { \"enum\": [\"low\", \"high\"] }, \"from\": [\"score\"] }"
           }
         }
       }
     },
     "column": {
-      "description": "A type string (\"string\", \"uuid?\", \u2026) or an object with one of type / enum / json / array and options.",
+      "description": "A type string (\"string\", \"uuid?\", …) or an object with one of type / enum / json / array and options.",
       "anyOf": [
         {
           "type": "string",
@@ -181,6 +216,10 @@
             },
             "references": {
               "type": "string"
+            },
+            "transform": {
+              "type": "string",
+              "description": "A transform of the top-level transforms that this column's stored value goes through."
             },
             "$comment": {
               "type": "string"
@@ -215,6 +254,10 @@
       "additionalProperties": false,
       "required": ["from"],
       "properties": {
+        "name": {
+          "type": "string",
+          "description": "What `migrations create --name` recorded."
+        },
         "$comment": {
           "type": "string"
         },
@@ -243,7 +286,7 @@
           "additionalProperties": {
             "type": "string"
           },
-          "description": "new name \u2192 old name"
+          "description": "new name → old name"
         },
         "migrate": {
           "type": "object",
@@ -289,6 +332,31 @@
           }
         }
       }
+    },
+    "plainType": {
+      "description": "A type without `?` or options.",
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)$"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "maxProperties": 1,
+          "properties": {
+            "type": {
+              "enum": ["string", "int", "bigint", "float", "boolean", "timestamp", "uuid", "bytes"]
+            },
+            "enum": {},
+            "json": {},
+            "array": {
+              "$ref": "#/$defs/columnType"
+            }
+          }
+        }
+      ]
     }
   }
 }

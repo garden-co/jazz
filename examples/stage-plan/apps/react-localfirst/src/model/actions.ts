@@ -6,8 +6,8 @@ import {
   type Show,
   type ShowCrew,
   type Task,
-  type TaskStatus,
-} from "../../schema.js";
+} from "../../jazz.generated.js";
+import { type TaskStatus } from "../../app-extras.js";
 
 export const STATUS_LABELS: Record<TaskStatus, string> = {
   todo: "To do",

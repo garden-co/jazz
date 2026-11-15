@@ -1,5 +1,5 @@
 /**
- * The CLI's work on an app's files: `validate [--check]` checks
+ * The CLI's work on an app's files: `generate [--check]` checks
  * `jazz.app.json` and `jazz.permissions.json` and (re)generates
  * `jazz.generated.ts`; `migrations create` records a schema change in
  * `jazz.app.json`. Both go through Jazz's Rust loader and generator
@@ -26,14 +26,14 @@ import {
 } from "./codegen-napi.js";
 import type { LocalMigrationGraph } from "./migration-graph.js";
 
-export interface ValidateOptions {
+export interface GenerateOptions {
   /** The project directory (`jazz.app.json` in it, ./src or ./src/lib). */
   cwd: string;
-  /** Write nothing; fail if `jazz.generated.ts` isn't what validate would write. */
+  /** Write nothing; fail if `jazz.generated.ts` isn't what generate would write. */
   check?: boolean;
 }
 
-export interface ValidateResult {
+export interface GenerateResult {
   dir: string;
   /** Whether `jazz.generated.ts` (or a Rust crate's `src/jazz_app.rs`) was (re)written. */
   wrote: boolean;
@@ -63,7 +63,7 @@ async function checkFiles(project: AppProject, check: boolean): Promise<string[]
   try {
     await validateBindings(project.app, project.bindings);
   } catch (error) {
-    // Stale bindings are what validate rewrites; `--check` refuses them below.
+    // Stale bindings are what generate rewrites; `--check` refuses them below.
     if (check || codeOf(error) !== BINDINGS_STALE) throw error;
   }
   return loaded.warnings ?? [];
@@ -74,11 +74,11 @@ function shown(project: { dir: string }, file: string): string {
 }
 
 /**
- * `jazz-tools validate`: check the files and regenerate `jazz.generated.ts`.
+ * `jazz-tools generate`: check the files and regenerate `jazz.generated.ts`.
  * Refuses a schema edited without `migrations create`, before it touches the
  * bindings: they hold the only copy of the previous version.
  */
-export async function validateApp(options: ValidateOptions): Promise<ValidateResult> {
+export async function generateApp(options: GenerateOptions): Promise<GenerateResult> {
   const project = await readAppProject(options.cwd);
   const warnings = await checkFiles(project, options.check ?? false);
   const outputs: Array<{ file: string; text: string }> = [
@@ -95,7 +95,7 @@ export async function validateApp(options: ValidateOptions): Promise<ValidateRes
     if (committed === text) continue;
     if (options.check) {
       throw new Error(
-        `bindings out of date: ${shown(project, file)} is not what ${APP_FILE} generates. Run \`npx jazz-tools validate\` and commit it.`,
+        `bindings out of date: ${shown(project, file)} is not what ${APP_FILE} generates. Run \`npx jazz-tools generate\` and commit it.`,
       );
     }
     await mkdir(dirname(path), { recursive: true });

@@ -1,5 +1,6 @@
 import type { Db, WriteResult } from "jazz-tools";
-import { app, type Crew, type TaskStatus } from "../../schema.js";
+import { app, type Crew } from "../../jazz.generated.js";
+import { type TaskStatus } from "../../app-extras.js";
 import {
   addComment,
   ensureChiefSetup,

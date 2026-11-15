@@ -2,7 +2,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createAppMigration, validateApp } from "../../src/dev/project.js";
+import { createAppMigration, generateApp } from "../../src/dev/project.js";
 import { checkRunningBindings } from "../../src/dev/app-files.js";
 
 const APP = {
@@ -18,56 +18,56 @@ async function project(app: unknown = APP, permissions: unknown = PERMISSIONS): 
   return dir;
 }
 
-describe("validate", () => {
+describe("generate", () => {
   it("writes jazz.generated.ts, then finds it up to date", async () => {
     const dir = await project();
-    expect((await validateApp({ cwd: dir })).wrote).toBe(true);
+    expect((await generateApp({ cwd: dir })).wrote).toBe(true);
     const generated = await readFile(join(dir, "jazz.generated.ts"), "utf8");
     expect(generated).toContain("export const app = bindApp<Types>(");
-    expect((await validateApp({ cwd: dir })).wrote).toBe(false);
-    await expect(validateApp({ cwd: dir, check: true })).resolves.toMatchObject({ wrote: false });
+    expect((await generateApp({ cwd: dir })).wrote).toBe(false);
+    await expect(generateApp({ cwd: dir, check: true })).resolves.toMatchObject({ wrote: false });
   });
 
   it("--check refuses missing or stale bindings without writing", async () => {
     const dir = await project();
-    await expect(validateApp({ cwd: dir, check: true })).rejects.toThrow(
-      /no jazz\.generated\.ts: run `jazz-tools validate`/,
+    await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(
+      /no jazz\.generated\.ts: run `jazz-tools (generate|validate)`/,
     );
-    await validateApp({ cwd: dir });
+    await generateApp({ cwd: dir });
     await writeFile(join(dir, "jazz.generated.ts"), "// edited\n");
-    await expect(validateApp({ cwd: dir, check: true })).rejects.toThrow(/jazz-tools validate/);
+    await expect(generateApp({ cwd: dir, check: true })).rejects.toThrow(/jazz-tools generate/);
     expect(await readFile(join(dir, "jazz.generated.ts"), "utf8")).toBe("// edited\n");
   });
 
   it("refuses an edited schema without a migration, before touching the bindings", async () => {
     const dir = await project();
-    await validateApp({ cwd: dir });
+    await generateApp({ cwd: dir });
     const before = await readFile(join(dir, "jazz.generated.ts"), "utf8");
     const edited = {
       ...APP,
       tables: { todos: { columns: { title: "string", done: "boolean", note: "string?" } } },
     };
     await writeFile(join(dir, "jazz.app.json"), JSON.stringify(edited, null, 2));
-    await expect(validateApp({ cwd: dir })).rejects.toThrow(/migrations create/);
+    await expect(generateApp({ cwd: dir })).rejects.toThrow(/migrations create/);
     expect(await readFile(join(dir, "jazz.generated.ts"), "utf8")).toBe(before);
 
     const created = await createAppMigration({ cwd: dir, name: "add-note" });
     expect(created).toMatchObject({ changed: true, todos: [] });
     const app = JSON.parse(await readFile(join(dir, "jazz.app.json"), "utf8"));
     expect(app.history).toBeDefined();
-    await expect(validateApp({ cwd: dir, check: true })).resolves.toBeDefined();
+    await expect(generateApp({ cwd: dir, check: true })).resolves.toBeDefined();
   });
 
   it("refuses a missing permissions file and a name-less migration", async () => {
     const dir = await project(APP, null);
-    await expect(validateApp({ cwd: dir })).rejects.toThrow(/jazz\.permissions\.json is missing/);
+    await expect(generateApp({ cwd: dir })).rejects.toThrow(/jazz\.permissions\.json is missing/);
     await expect(createAppMigration({ cwd: dir, name: "" })).rejects.toThrow(/--name/);
   });
 
   it("points an alpha.64 project at upgrade", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-legacy-"));
     await writeFile(join(dir, "schema.ts"), "export {};\n");
-    await expect(validateApp({ cwd: dir })).rejects.toThrow(/jazz-tools upgrade/);
+    await expect(generateApp({ cwd: dir })).rejects.toThrow(/jazz-tools upgrade/);
   });
 });
 
@@ -82,13 +82,13 @@ describe("createJazz's bindings check", () => {
   });
 });
 
-describe("validate in a Rust crate", () => {
+describe("generate in a Rust crate", () => {
   it("also writes src/jazz_app.rs when a Cargo.toml sits beside jazz.app.json", async () => {
     const dir = await project();
     await writeFile(join(dir, "Cargo.toml"), '[package]\nname = "app"\n');
     let rust: boolean;
     try {
-      await validateApp({ cwd: dir });
+      await generateApp({ cwd: dir });
       rust = true;
     } catch (error) {
       // Until the Rust back end (#rust) lands in this jazz-napi.
@@ -97,7 +97,7 @@ describe("validate in a Rust crate", () => {
     }
     if (rust) {
       expect(await readFile(join(dir, "src", "jazz_app.rs"), "utf8")).toContain("jazz");
-      await expect(validateApp({ cwd: dir, check: true })).resolves.toBeDefined();
+      await expect(generateApp({ cwd: dir, check: true })).resolves.toBeDefined();
     }
   });
 });

@@ -53,10 +53,13 @@ fn committed_bindings_read_back_and_fit_their_app() {
         let app_json = std::fs::read(dir.join("jazz.app.json")).unwrap();
         let app = App::load(&app_json).unwrap();
         let generated = generate(Lang::TypeScript, &app_json).unwrap();
-        let recorded = bindings::read(&generated).unwrap();
+        let recorded = bindings::read(Lang::TypeScript, &generated).unwrap();
         assert_eq!(recorded.source, app.source);
         assert_eq!(recorded.current, app.compiled.current);
-        assert_eq!(bindings::staleness(&app, Some(&generated)).unwrap(), None);
+        assert_eq!(
+            bindings::staleness(&app, Lang::TypeScript, Some(&generated)).unwrap(),
+            None
+        );
     }
 }
 

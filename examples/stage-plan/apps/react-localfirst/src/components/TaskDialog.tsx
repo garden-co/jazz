@@ -13,7 +13,8 @@ import { Heading, Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
-import { app, TASK_STATUSES, type Task, type TaskStatus } from "../../schema.js";
+import { app, type Task } from "../../jazz.generated.js";
+import { TASK_STATUSES, type TaskStatus } from "../../app-extras.js";
 import {
   addComment,
   assignTask,

@@ -1,7 +1,7 @@
 import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { app } from "../../schema.js";
-import permissions from "../../permissions.js";
+import { app } from "../../jazz.generated.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
 import { saveStopEdit } from "../../src/lib/stop-edit.js";
 import { startDemoTour } from "../../src/seed-loader.js";
 

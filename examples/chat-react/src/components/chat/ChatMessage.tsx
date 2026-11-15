@@ -23,7 +23,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Item, ItemContent } from "@/components/ui/item";
-import { app, type Message, type Profile } from "../../../schema.js";
+import { app, type Profile } from "../../../jazz.generated.js";
+import { type Message } from "../../../app-extras.js";
 
 interface ChatMessageProps {
   message: Message;

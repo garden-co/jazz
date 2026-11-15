@@ -13,7 +13,7 @@ import {
   VisuallyHidden,
 } from "@astryxdesign/core";
 import { useAll } from "jazz-tools/react";
-import { app } from "../../schema";
+import { app } from "../../jazz.generated";
 import { AddMemberDialog } from "../components/forms";
 import { PageHeader, PageSection } from "../components/page";
 import { useCan, useOrganization } from "../lib/organization";

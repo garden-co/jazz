@@ -1,5 +1,5 @@
 import type { Db, DurabilityTier } from "jazz-tools";
-import { app, type IssueStatus, type Page } from "@/schema";
+import { app, type IssueStatus, type Page } from "@/jazz.generated";
 import type { PageTree } from "./tree";
 
 /** A new page is visible and editable immediately; it syncs in the background. */

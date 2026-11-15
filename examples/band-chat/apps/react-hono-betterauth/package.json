@@ -8,7 +8,7 @@
     "dev:server": "tsx watch --env-file-if-exists=.env.development.local server/index.ts",
     "dev:vite": "wait-on --timeout 30000 http-get://127.0.0.1:3001/health && vite",
     "prebuild": "node scripts/check-config.mjs",
-    "build": "jazz-tools validate && vite build",
+    "build": "jazz-tools generate && vite build",
     "start": "NODE_ENV=production tsx server/index.ts",
     "typecheck": "tsc --noEmit",
     "test:e2e": "playwright test"

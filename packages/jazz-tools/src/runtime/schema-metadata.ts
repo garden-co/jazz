@@ -3,9 +3,19 @@ import type { ColumnType } from "../drivers/types.js";
 /** Normalize only JSON-schema object key order; semantic arrays remain ordered. */
 export function columnTypeSignature(columnType: ColumnType): string {
   return JSON.stringify(columnType, function (key, value) {
-    return key === "schema" && this.type === "Json" && value !== undefined
-      ? canonicalJsonSchema(value)
-      : value;
+    if (key === "schema" && this.type === "Json" && value !== undefined) {
+      return canonicalJsonSchema(value);
+    }
+    // Key order is not part of a column type: the engine's serde form
+    // (`{ element, type }`) and the TS form (`{ type, element }`) are one type.
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return Object.fromEntries(
+        Object.keys(value)
+          .sort()
+          .map((name) => [name, (value as Record<string, unknown>)[name]]),
+      );
+    }
+    return value;
   });
 }
 
