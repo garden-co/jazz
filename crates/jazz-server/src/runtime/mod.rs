@@ -2301,11 +2301,10 @@ pub(crate) const SESSION_BACKLOG_CEILING: usize = 256 * 1024 * 1024;
 /// [`EgressLimits::egress_budget_bytes`] and no memory limit is known.
 pub(crate) const EGRESS_BUDGET_DEFAULT: usize = 2 * 1024 * 1024 * 1024;
 
-/// How long a session may stay at its egress budget without reading
-/// before it is closed: the default of
+/// How far behind the minimum read rate a session may fall, while its
+/// output waits at the budget, before it is closed: the default of
 /// [`EgressLimits::slow_reader_timeout`] (`JAZZ_SLOW_READER_TIMEOUT_SECS`).
-/// Generous, so a slow mobile link that reads at all is never cut off: the
-/// clock restarts whenever the client reads below the budget.
+/// Generous, so a slow mobile link that pauses is not cut off ([`ReadClock`]).
 pub(crate) const SLOW_READER_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Bounds on the output the server holds for its clients. Every bound
@@ -2326,7 +2325,8 @@ pub struct EgressLimits {
     /// still reading are never closed for it, so the total may exceed it by
     /// what they hold (each bounded by its own backlog bound).
     pub egress_budget_bytes: usize,
-    /// How long a session may stay at its egress budget without reading.
+    /// How far behind [`Self::min_read_rate`] a session may fall, while its
+    /// output waits at the budget, before it is closed.
     pub slow_reader_timeout: Duration,
     /// How long a session must have been behind [`Self::min_read_rate`]
     /// before the egress budget may close it ([`STALL_GRACE`]).
@@ -2437,7 +2437,8 @@ impl ReadClock {
             self.caught_up.set(None);
             return None;
         }
-        let credit = Duration::from_secs_f64(progress as f64 / min_rate.max(1) as f64);
+        let credit = Duration::try_from_secs_f64(progress as f64 / min_rate.max(1) as f64)
+            .unwrap_or(Duration::MAX);
         let caught_up = self
             .caught_up
             .get()
@@ -4228,8 +4229,11 @@ mod tests {
         // count as reading: 1 MiB is 1024 s at 1 KiB/s.
         egress.written.fetch_add(1024 * 1024, Ordering::AcqRel);
         assert_eq!(check(full, 1001), Some(Duration::ZERO));
-        // Under the budget nothing waits on it.
-        assert_eq!(check(full - 1, 1002), None);
+        // Under the budget nothing waits on it, and the clock resets: back
+        // at the budget after a long stop, it starts from zero.
+        assert_eq!(check(full, 1300), Some(Duration::from_secs(299)));
+        assert_eq!(check(full - 1, 1301), None);
+        assert_eq!(check(full, 1302), Some(Duration::ZERO));
     }
 
     #[test]
