@@ -392,8 +392,11 @@ impl Session {
         let linked =
             crate::backend::link(&linking.endpoint, linking.app, bearer, &linking.key).await?;
         if linked.account != device {
+            // The backend has linked the user by now: say so, as the
+            // session stays the device's.
             return Err(Error::Server(format!(
-                "the backend linked account {} instead of the device's {}",
+                "the backend linked its user to account {}, not this device's {}; \
+                 the link stands on the backend, and this session stays the device's",
                 linked.account.0, device.0
             )));
         }
@@ -582,6 +585,7 @@ impl Machine {
                         };
                         self.set(linked);
                         let _ = reply.send(());
+                        ControlFlow::Continue(())
                     }
                     Some(Command::SignOut(reply)) => {
                         // The caller stops the client itself.
