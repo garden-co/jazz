@@ -69,15 +69,27 @@ export async function readAppProject(cwd: string): Promise<AppProject> {
 /**
  * `createJazz`'s check of the bindings it runs with against the project's
  * `jazz.app.json`: refused when the file changed since the bindings were
- * generated. A process with no `jazz.app.json` in reach (a deployed bundle,
- * which ships only the bindings) has nothing to compare and starts.
+ * generated. The project is `JAZZ_APP_DIR` if set, else the process's cwd. A
+ * process with no `jazz.app.json` in reach (a deployed bundle, which ships
+ * only the bindings) has nothing to compare and starts; outside production it
+ * says so, since a dev server started elsewhere (a monorepo root) would
+ * otherwise skip the check unnoticed.
  */
 export async function checkRunningBindings(
   source: string,
-  cwd: string = process.cwd(),
+  cwd: string = process.env.JAZZ_APP_DIR ?? process.cwd(),
+  warn: (message: string) => void = console.warn,
 ): Promise<void> {
   const dir = findAppDir(cwd);
-  if (!dir) return;
+  if (!dir) {
+    if (process.env.NODE_ENV !== "production") {
+      warn(
+        `jazz: no ${APP_FILE} in ${cwd} (looked in ${APP_ROOTS.join(", ")}), so createJazz can't check that ${GENERATED_FILE} is up to date. ` +
+          "Set JAZZ_APP_DIR to the app's directory to check it.",
+      );
+    }
+    return;
+  }
   const app = await readFile(join(dir, APP_FILE), "utf8");
   if ((await schemaSourceHash(app)) === source) return;
   const shown = relative(cwd, join(dir, GENERATED_FILE)) || GENERATED_FILE;

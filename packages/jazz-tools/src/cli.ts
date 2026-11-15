@@ -59,7 +59,7 @@ function parseArgs(args: string[]): { command: string; options: BuildOptions } {
   const schemaDir = getFlagValue(args, "--schema-dir", "last") ?? process.cwd();
   if (args.includes("--strict-provenance")) {
     throw new Error(
-      "--strict-provenance was removed: jazz.app.json's loader always refuses columns that duplicate Jazz's provenance columns.",
+      "--strict-provenance was removed with schema.ts: jazz.app.json's columns are taken as written. Use Jazz's $createdAt, $createdBy, $updatedAt and $updatedBy instead of columns that duplicate them.",
     );
   }
   return {
