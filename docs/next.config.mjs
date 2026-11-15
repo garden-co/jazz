@@ -84,6 +84,11 @@ const config = {
       { source: "/perf-timeline", destination: "/examples", permanent: false },
       { source: "/changelog", destination: "/docs/changelog", permanent: false },
       {
+        source: "/docs/setup/nextjs-better-auth",
+        destination: "/docs/reference/nextjs-better-auth",
+        permanent: false,
+      },
+      {
         source: "/docs/setup/rust",
         destination: "/docs/setup/deployment/own-server",
         permanent: false,

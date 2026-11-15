@@ -273,9 +273,3 @@ import { app } from "./jazz.generated";
 
 type TodoFilter = WhereOf<typeof app.todos>;
 ```
-
-## Large schemas
-
-The generated module declares every table's types directly, so TypeScript doesn't infer them from
-the schema: an app with hundreds of tables typechecks one table handle at a time, and every part
-of the app uses the same `app`.
