@@ -547,7 +547,7 @@ export function betterAuthAppFileNotes(tableNames: readonly string[]): string {
   return [
     `Jazz: wrote the Better Auth tables (${tableNames.join(", ")}) into jazz.app.json.`,
     "",
-    "Next, run `npx jazz-tools validate`. If it says the schema changed, run",
+    "Next, run `npx jazz-tools generate`. If it says the schema changed, run",
     "`npx jazz-tools migrations create --name <name>` and review the migration it writes.",
     "",
     "Only the backend's adapter touches these tables: a table without policies denies every client",

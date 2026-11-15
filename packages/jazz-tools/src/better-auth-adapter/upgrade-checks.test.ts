@@ -84,4 +84,19 @@ describe("Better Auth upgrade checks", () => {
       false,
     );
   });
+
+  it("generates with the docs' generation-only config: an empty schema and a db that throws", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const adapter = jazzAdapter({
+      db: async () => {
+        throw new Error("The generation config cannot query the database");
+      },
+      schema: {},
+    })({});
+    // As `npx @better-auth/cli generate --output <file>` calls it.
+    const generated = await adapter.createSchema!({}, "./does-not-exist/jazz.app.json");
+    expect(generated.path).toBe("./does-not-exist/jazz.app.json");
+    expect(JSON.parse(generated.code).tables.better_auth_user.columns.name).toBe("string");
+    expect(String(log.mock.calls[0]?.[0])).toContain("npx jazz-tools generate");
+  });
 });
