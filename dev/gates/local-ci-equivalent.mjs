@@ -327,7 +327,10 @@ export const ciPartitions = Object.freeze({
   // Every crate publish-crates.yml publishes packages and builds from its
   // .crate against the others, as crates.io will see them.
   "crates-package": Object.freeze([
-    command("cargo package, published crates", "node", ["dev/scripts/publish-crates.mjs", "--verify"]),
+    command("cargo package, published crates", "node", [
+      "dev/scripts/publish-crates.mjs",
+      "--verify",
+    ]),
   ]),
 });
 

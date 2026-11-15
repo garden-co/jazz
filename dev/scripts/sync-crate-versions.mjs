@@ -13,7 +13,9 @@ import { GO_VERSION_FILE } from "./check-lockstep-versions.mjs";
 
 const rootFlag = process.argv.indexOf("--root");
 const root = rootFlag === -1 ? process.cwd() : process.argv[rootFlag + 1];
-const version = JSON.parse(readFileSync(join(root, "packages/jazz-tools/package.json"), "utf8")).version;
+const version = JSON.parse(
+  readFileSync(join(root, "packages/jazz-tools/package.json"), "utf8"),
+).version;
 
 function edit(relative, change) {
   const path = join(root, relative);
@@ -50,17 +52,20 @@ for (const member of membersBlock.matchAll(/^\s*"([^"]+)"/gm)) {
   const manifest = join(root, member[1], "Cargo.toml");
   if (!existsSync(manifest)) continue;
   const text = readFileSync(manifest, "utf8");
-  if (/^version\.workspace = true$/m.test(text))
-    members.push(text.match(/^name = "([^"]+)"$/m)[1]);
+  if (/^version\.workspace = true$/m.test(text)) members.push(text.match(/^name = "([^"]+)"$/m)[1]);
 }
 edit("Cargo.lock", (text) =>
   text.replace(
     /^\[\[package\]\]\nname = "([^"]+)"\nversion = "([^"]+)"\n(?!source)/gm,
     (block, name, old) =>
-      members.includes(name) ? block.replace(`version = "${old}"`, `version = "${version}"`) : block,
+      members.includes(name)
+        ? block.replace(`version = "${old}"`, `version = "${version}"`)
+        : block,
   ),
 );
 
 // The Go module, once it has a version constant.
 if (existsSync(join(root, GO_VERSION_FILE)))
-  edit(GO_VERSION_FILE, (text) => text.replace(/\bVersion(\s*=\s*)"[^"]+"/, `Version$1"${version}"`));
+  edit(GO_VERSION_FILE, (text) =>
+    text.replace(/\bVersion(\s*=\s*)"[^"]+"/, `Version$1"${version}"`),
+  );

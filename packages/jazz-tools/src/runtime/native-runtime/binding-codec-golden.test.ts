@@ -262,7 +262,10 @@ function encodeEmptyRelationSnapshot(rootCount: number | bigint): Uint8Array {
 function bindingCodecGoldenFixture(): BindingCodecGoldenFixture {
   return JSON.parse(
     readFileSync(
-      new URL("../../../../../crates/jazz/layers/db/fixtures/binding_codec_golden.json", import.meta.url),
+      new URL(
+        "../../../../../crates/jazz/layers/db/fixtures/binding_codec_golden.json",
+        import.meta.url,
+      ),
       "utf8",
     ),
   ) as BindingCodecGoldenFixture;

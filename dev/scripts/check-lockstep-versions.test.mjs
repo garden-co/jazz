@@ -41,9 +41,15 @@ function workspace(version = V) {
       ["jazz-ruzstd", "=0.8.3"],
     ]),
     pkg("jazz-codegen", V, [["jazz-core", `=${V}`]]),
-    pkg("jazz-app", V, [["jazz-core", `=${V}`], ["jazz-codegen", "*", "dev"]]),
+    pkg("jazz-app", V, [
+      ["jazz-core", `=${V}`],
+      ["jazz-codegen", "*", "dev"],
+    ]),
     pkg("jazz-ffi", V, [["jazz-app", `=${V}`]]),
-    pkg("jazz-tools", version, [["jazz-core", `=${V}`], ["jazz-codegen", `=${V}`]]),
+    pkg("jazz-tools", version, [
+      ["jazz-core", `=${V}`],
+      ["jazz-codegen", `=${V}`],
+    ]),
     pkg("jazz-sim", "0.1.0", [["jazz-core", "*"]], { publish: [] }),
   ];
 }
@@ -106,7 +112,10 @@ test("reports a crate behind npm", () => {
 test("reports crates behind a bumped npm version, and the Go constant", () => {
   const root = repo("2.0.0-alpha.8");
   mkdirSync(join(root, "packages/jazz-go"));
-  writeFileSync(join(root, "packages/jazz-go/version.go"), `package jazz\n\nconst Version = "${V}"\n`);
+  writeFileSync(
+    join(root, "packages/jazz-go/version.go"),
+    `package jazz\n\nconst Version = "${V}"\n`,
+  );
   const { problems } = checkLockstep({ root, metadata: metadata(workspace()) });
   assert.ok(problems.includes(`crate jazz-core is ${V}, expected 2.0.0-alpha.8`));
   assert.ok(problems.includes(`crate jazz-app requires jazz-core =${V}, expected =2.0.0-alpha.8`));

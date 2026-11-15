@@ -58,7 +58,8 @@ export function checkLockstep({ root, metadata }) {
       for (const name of group) {
         const version = npm.get(name);
         if (version === undefined) problems.push(`npm package ${name} (fixed group) not found`);
-        else if (version !== expected) problems.push(`npm ${name} is ${version}, expected ${expected}`);
+        else if (version !== expected)
+          problems.push(`npm ${name} is ${version}, expected ${expected}`);
       }
 
   // crates.io: every published Jazz crate, and the exact requirements
@@ -108,7 +109,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     process.exit(1);
   }
   const independent = Object.keys(INDEPENDENTLY_VERSIONED).filter((name) => crates.includes(name));
-  console.log(`Lockstep at ${expected}: npm fixed group, ${crates.length - independent.length} crates`);
+  console.log(
+    `Lockstep at ${expected}: npm fixed group, ${crates.length - independent.length} crates`,
+  );
   console.log(`  crates.io order: ${crates.join(" -> ")}`);
   if (independent.length > 0) console.log(`  versioned apart: ${independent.join(", ")}`);
   console.log(`  Go: ${go === "absent" ? `${GO_VERSION_FILE} absent, skipped` : go}`);

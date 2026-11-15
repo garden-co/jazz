@@ -89,7 +89,8 @@ export function publishPlan(metadata) {
 
   for (const name of order) {
     const pkg = byName.get(name);
-    if (!isPublishable(pkg)) problems.push(`${name} is needed by ${ROOT_CRATES.join(", ")} but has publish = false`);
+    if (!isPublishable(pkg))
+      problems.push(`${name} is needed by ${ROOT_CRATES.join(", ")} but has publish = false`);
     for (const field of ["description", "license", "repository", "rust_version"])
       if (!pkg[field]) problems.push(`${name} has no ${field.replace("_", "-")}`);
     for (const dep of shipped(pkg))
