@@ -122,6 +122,22 @@ public class Jazz internal constructor(
     /** Signs the end user out, and closes the app. */
     public suspend fun signOut(): Unit = io { native.signOut() }
 
+    /**
+     * Links this device account to the user's account with your app's own
+     * sign-in ([bearer]): the session becomes that user's. Returns them.
+     */
+    public suspend fun link(bearer: String): JazzUser = io {
+        (SessionState.parse("""{"status":"signedIn","user":${native.link(bearer)}}""") as SessionState.SignedIn).user
+    }
+
+    /** Inserts row [id] as [row], or replaces it whole if it exists; returns it. */
+    public suspend fun <Row : Any, Insert : Any, P : Patch> upsert(table: Table<Row, Insert, P>, id: String, row: Insert): Row =
+        io { decodeStored(table, native.upsert(table.tableName, id, insertJson(table, row))) }
+
+    /** Brings back deleted row [id] of [table], as it was or with [row] as its content; returns it. */
+    public suspend fun <Row : Any, Insert : Any, P : Patch> restore(table: Table<Row, Insert, P>, id: String, row: Insert? = null): Row =
+        io { decodeStored(table, native.restore(table.tableName, id, row?.let { insertJson(table, it) })) }
+
     /** The account id of the user this backend acts as, or `null` for a client. */
     public suspend fun account(): String? = io { native.account() }
 
@@ -273,6 +289,14 @@ public class Jazz internal constructor(
         ): Unit = run { tx.update(table.tableName, id, patchJson(table, patch)) }
 
         public suspend fun delete(table: Table<*, *, *>, id: String): Unit = run { tx.delete(table.tableName, id) }
+
+        /** [Jazz.upsert], in the transaction. */
+        public suspend fun <Row : Any, Insert : Any, P : Patch> upsert(table: Table<Row, Insert, P>, id: String, row: Insert): Row =
+            run { decodeStored(table, tx.upsert(table.tableName, id, insertJson(table, row))) }
+
+        /** [Jazz.restore], in the transaction. */
+        public suspend fun <Row : Any, Insert : Any, P : Patch> restore(table: Table<Row, Insert, P>, id: String, row: Insert? = null): Row =
+            run { decodeStored(table, tx.restore(table.tableName, id, row?.let { insertJson(table, it) })) }
 
         /** [Jazz.editText], in the transaction. */
         public suspend fun editText(table: Table<*, *, *>, id: String, column: Column<out String?>, editedFrom: String, text: String): Unit =

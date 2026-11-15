@@ -187,6 +187,10 @@ class StagePlanTest {
             }
             assertEquals("changed my mind", error.message)
             assertEquals("A", jazz.one(Tasks.where(Tasks.id eq a.id))!!.title)
+            // Upsert twice, delete, restore.
+            val restored = DocsSnippets.upsertAndRestore(jazz, show.id)
+            assertEquals(TaskStatus.Doing, restored.status)
+            assertEquals("Load out", jazz.one(Tasks.where(Tasks.id eq restored.id))?.title)
             // Global writes and reads.
             val strike = DocsSnippets.writeTier(jazz, show.id)
             assertEquals(TaskStatus.Doing, DocsSnippets.readTier(jazz, show.id).single { it.id == strike.id }.status)
@@ -254,7 +258,7 @@ class StagePlanTest {
                 )
                 assertEquals("Carol's", carol.one(jazzapp.Shows.where(jazzapp.Shows.id eq show.id), tools.jazz.ReadTier.Remote)?.name)
                 kotlinx.coroutines.withTimeout(30_000) {
-                    carol.syncStatus.first { it == tools.jazz.SyncStatus.Connected }
+                    carol.syncStatus.first { it.link == tools.jazz.Link.Connected && it.synced }
                 }
             }
 

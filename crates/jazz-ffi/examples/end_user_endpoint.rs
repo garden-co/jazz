@@ -43,6 +43,7 @@ async fn main() {
         &server.base_url(),
         app_id,
         server.backend_secret(),
+        server.admin_secret(),
         backend.bundle().expect("the backend's bundle"),
     )
     .await;

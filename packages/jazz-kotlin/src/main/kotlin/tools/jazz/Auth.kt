@@ -99,33 +99,60 @@ public sealed interface SessionState {
     }
 }
 
-/** How the app syncs, as TS's `SyncStatus.link`. */
-public sealed interface SyncStatus {
+/** The upstream link, as TS's `SyncStatus.link`. */
+public sealed interface Link {
     /** No server: the app runs locally. */
-    public data object LocalOnly : SyncStatus
-    public data object Connecting : SyncStatus
-    public data object Connected : SyncStatus
+    public data object LocalOnly : Link
+    public data object Connecting : Link
+    public data object Connected : Link
 
     /** Not syncing: [reason] `network`, `stopped`, or an auth failure; [retrying] when it reconnects by itself. */
-    public data class Offline(val reason: String, val retrying: Boolean, val message: String?) : SyncStatus
+    public data class Offline(val reason: String, val retrying: Boolean, val message: String?) : Link
 
     public companion object {
+        internal fun parse(link: JsonObject?): Link = when (link?.get("state")?.jsonPrimitive?.content) {
+            "connecting" -> Connecting
+            "connected" -> Connected
+            "offline" -> Offline(
+                reason = when (val r = link["reason"]) {
+                    is JsonPrimitive -> r.content
+                    is JsonObject -> r.entries.firstOrNull()?.let { (k, v) -> "$k:${(v as? JsonPrimitive)?.content ?: v}" } ?: "offline"
+                    else -> "offline"
+                },
+                retrying = link["retrying"]?.jsonPrimitive?.booleanOrNull ?: false,
+                message = (link["message"] as? JsonPrimitive)?.content,
+            )
+            else -> LocalOnly
+        }
+    }
+}
+
+/** How the app syncs, as TS's `SyncStatus`. */
+public data class SyncStatus(
+    /** The upstream connection. */
+    val link: Link,
+    /** Transactions committed here the server hasn't accepted or rejected yet (also ones recovered after a restart). */
+    val pendingUploads: Int,
+    /** When the oldest of them was committed, in ms since the epoch. */
+    val oldestPendingAt: Long?,
+    /** Transactions of this client the server rejected since it opened. */
+    val rejected: Long,
+    /** The latest thing that went wrong with sync since it opened (it stays after the link recovers). */
+    val lastError: JsonElement?,
+    /** Nothing waits for upload, and the link is connected (or there's no server). */
+    val synced: Boolean,
+) {
+    public companion object {
         internal fun parse(json: String): SyncStatus {
-            val link = jazzJson.parseToJsonElement(json).jsonObject["link"]?.jsonObject ?: return LocalOnly
-            return when (link["state"]?.jsonPrimitive?.content) {
-                "connecting" -> Connecting
-                "connected" -> Connected
-                "offline" -> Offline(
-                    reason = when (val r = link["reason"]) {
-                        is JsonPrimitive -> r.content
-                        is JsonObject -> r.entries.firstOrNull()?.let { (k, v) -> "$k:${(v as? JsonPrimitive)?.content ?: v}" } ?: "offline"
-                        else -> "offline"
-                    },
-                    retrying = link["retrying"]?.jsonPrimitive?.booleanOrNull ?: false,
-                    message = (link["message"] as? JsonPrimitive)?.content,
-                )
-                else -> LocalOnly
-            }
+            val o = jazzJson.parseToJsonElement(json).jsonObject
+            return SyncStatus(
+                link = Link.parse(o["link"] as? JsonObject),
+                pendingUploads = (o["pendingUploads"] as? JsonPrimitive)?.content?.toIntOrNull() ?: 0,
+                oldestPendingAt = (o["oldestPendingAt"] as? JsonPrimitive)?.content?.toLongOrNull(),
+                rejected = (o["rejected"] as? JsonPrimitive)?.content?.toLongOrNull() ?: 0,
+                lastError = o["lastError"]?.takeUnless { it is kotlinx.serialization.json.JsonNull },
+                synced = (o["synced"] as? JsonPrimitive)?.booleanOrNull ?: false,
+            )
         }
     }
 }

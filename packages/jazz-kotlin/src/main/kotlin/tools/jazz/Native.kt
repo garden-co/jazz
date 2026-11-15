@@ -62,10 +62,19 @@ public interface Native : AutoCloseable {
     public fun sessionState(): String? = null
 
     /** The sync status as JSON: `{"link": {"state": …}}`. */
-    public fun syncStatus(): String = """{"link":{"state":"localOnly"}}"""
+    public fun syncStatus(): String = """{"link":{"state":"localOnly"},"synced":true}"""
 
     /** Calls [onChange] with each session (or, with [sync], sync status) state, the current one first; returns a cancel. */
     public fun watch(sync: Boolean, onChange: (String) -> Unit): () -> Unit = {}
+
+    /** Links this device account to the app's sign-in ([bearer]); the user as JSON. */
+    public fun link(bearer: String): String = throw JazzException.NotSupported("linking accounts")
+
+    /** Inserts or replaces row [id] with [rowJson] (a whole row); returns it. */
+    public fun upsert(table: String, id: String, rowJson: String): String = throw JazzException.NotSupported("upsert")
+
+    /** Brings back deleted row [id], as it was or with [patchJson] (a whole row) as its content; returns it. */
+    public fun restore(table: String, id: String, patchJson: String?): String = throw JazzException.NotSupported("restore")
 
     /** Asks the token provider for a fresh token. */
     public fun refresh() {}
@@ -90,6 +99,8 @@ public interface NativeTransaction {
     public fun insert(table: String, rowJson: String): String
     public fun update(table: String, id: String, patchJson: String)
     public fun delete(table: String, id: String)
+    public fun upsert(table: String, id: String, rowJson: String): String = throw JazzException.NotSupported("upsert")
+    public fun restore(table: String, id: String, patchJson: String?): String = throw JazzException.NotSupported("restore")
     public fun editText(table: String, id: String, column: String, editedFrom: String, text: String): Unit =
         throw JazzException.NotSupported("text edits")
     public fun edit(table: String, id: String, patchJson: String?, editsJson: String): Unit =

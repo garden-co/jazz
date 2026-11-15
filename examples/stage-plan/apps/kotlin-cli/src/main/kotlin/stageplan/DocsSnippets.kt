@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.toList
 import tools.jazz.Jazz
 import tools.jazz.JazzAuth
 import tools.jazz.JazzConfig
+import tools.jazz.Link
 import tools.jazz.SessionState
 import tools.jazz.Storage
 import tools.jazz.SyncStatus
@@ -335,10 +336,29 @@ object DocsSnippets {
             is SessionState.Expired -> seen += "session expired (${session.reason}): sign in again"
             SessionState.SignedOut, null -> seen += "signed out"
         }
-        if (jazz.syncStatus.value is SyncStatus.Offline) seen += "offline"
+        val sync: SyncStatus = jazz.syncStatus.value
+        if (sync.link is Link.Offline) seen += "offline"
+        if (!sync.synced) seen += "${sync.pendingUploads} changes to upload"
         jazz.refreshSession() // ask for a fresh token now
         jazz.signOut() // also closes the app
         // #endregion auth-session-kotlin
         return seen
+    }
+
+    suspend fun upsertAndRestore(jazz: Jazz, showId: String): Task {
+        // #region writing-upsert-kotlin
+        // A row with an id you choose (e.g. derived from another system): inserted the
+        // first time, replaced whole after that.
+        val id = java.util.UUID.nameUUIDFromBytes("import:$showId:load-out".toByteArray()).toString()
+        val row = NewTask(showId = showId, title = "Load out", status = TaskStatus.Todo, rank = 50.0)
+        jazz.upsert(Tasks, id, row)
+        jazz.upsert(Tasks, id, row.copy(status = TaskStatus.Doing))
+        // #endregion writing-upsert-kotlin
+        // #region writing-restore-kotlin
+        jazz.delete(Tasks, id)
+        // Undo: bring the deleted row back as it was (or pass a row as its new content).
+        val restored: Task = jazz.restore(Tasks, id)
+        // #endregion writing-restore-kotlin
+        return restored
     }
 }

@@ -82,6 +82,9 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
     override fun sessionState(): String? = live { handle.sessionState() }
     override fun syncStatus(): String = live { handle.syncStatus() }
     override fun refresh(): Unit = live { handle.refresh() }
+    override fun link(bearer: String): String = live { handle.link(bearer) }
+    override fun upsert(table: String, id: String, rowJson: String): String = live { handle.upsert(table, id, rowJson) }
+    override fun restore(table: String, id: String, patchJson: String?): String = live { handle.restore(table, id, patchJson) }
 
     override fun signOut() {
         if (!closed.compareAndSet(false, true)) return
@@ -122,6 +125,8 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
             override fun insert(table: String, rowJson: String): String = call { tx.insert(table, rowJson) }
             override fun update(table: String, id: String, patchJson: String): Unit = call { tx.update(table, id, patchJson) }
             override fun delete(table: String, id: String): Unit = call { tx.delete(table, id) }
+            override fun upsert(table: String, id: String, rowJson: String): String = call { tx.upsert(table, id, rowJson) }
+            override fun restore(table: String, id: String, patchJson: String?): String = call { tx.restore(table, id, patchJson) }
             override fun editText(table: String, id: String, column: String, editedFrom: String, text: String): Unit =
                 call { tx.editText(table, id, column, editedFrom, text) }
             override fun edit(table: String, id: String, patchJson: String?, editsJson: String): Unit =
