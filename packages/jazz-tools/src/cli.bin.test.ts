@@ -74,11 +74,11 @@ describe("bin integration", () => {
       }
     },
   );
-  it("routes validate through the TypeScript CLI for a root jazz.app.json project", async () => {
+  it("routes generate through the TypeScript CLI for a root jazz.app.json project", async () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root, todosApp(), emptyPermissions());
 
-    const result = runBin(["validate", "--schema-dir", root]);
+    const result = runBin(["generate", "--schema-dir", root]);
 
     expect(result.status).toBe(0);
     expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(true);
@@ -86,12 +86,12 @@ describe("bin integration", () => {
     expect(await fileExists(join(root, "schema", "app.ts"))).toBe(false);
   });
   it.each([
-    ["validate --schema-dir", ["validate", "--schema-dir"]],
+    ["generate --schema-dir", ["generate", "--schema-dir"]],
     [
-      "validate --schema-dir followed by another flag",
-      ["validate", "--schema-dir", "--strict-provenance"],
+      "generate --schema-dir followed by another flag",
+      ["generate", "--schema-dir", "--strict-provenance"],
     ],
-    ["validate --schema-dir with an empty value", ["validate", "--schema-dir", ""]],
+    ["generate --schema-dir with an empty value", ["generate", "--schema-dir", ""]],
   ])("rejects %s with a deterministic missing-value error", async (_description, args) => {
     const { root } = await createWorkspace();
     await writeAppFiles(root);
@@ -108,7 +108,7 @@ describe("bin integration", () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root);
 
-    const result = runBin(["validate", "--schema-dir", root, "--schema-dir"], { cwd: root });
+    const result = runBin(["generate", "--schema-dir", root, "--schema-dir"], { cwd: root });
 
     expect(result.status).toBe(1);
     expect(result.stdout).toBe("");
@@ -118,40 +118,40 @@ describe("bin integration", () => {
   it("rejects a missing jazz.permissions.json", async () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root, todosApp(), null);
-    const result = runBin(["validate", "--schema-dir", root]);
+    const result = runBin(["generate", "--schema-dir", root]);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("jazz.permissions.json is missing");
-    expect(result.stdout).not.toContain("Validated");
+    expect(result.stdout).not.toContain("Checked");
   });
 
-  it("validates root jazz.permissions.json through the validate command", async () => {
+  it("validates root jazz.permissions.json through the generate command", async () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root);
 
-    const result = runBin(["validate", "--schema-dir", root]);
+    const result = runBin(["generate", "--schema-dir", root]);
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("Validated jazz.app.json and jazz.permissions.json");
+    expect(result.stdout).toContain("Checked jazz.app.json and jazz.permissions.json");
     expect(await fileExists(join(root, "permissions.test.ts"))).toBe(false);
   });
 
-  it("finds src/jazz.app.json and src/jazz.permissions.json through the validate command", async () => {
+  it("finds src/jazz.app.json and src/jazz.permissions.json through the generate command", async () => {
     const { root } = await createWorkspace();
     const srcDir = join(root, "src");
     await writeAppFiles(srcDir);
 
-    const result = runBin(["validate", "--schema-dir", root]);
+    const result = runBin(["generate", "--schema-dir", root]);
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("Validated jazz.app.json and jazz.permissions.json");
+    expect(result.stdout).toContain("Checked jazz.app.json and jazz.permissions.json");
     expect(await fileExists(join(srcDir, "jazz.generated.ts"))).toBe(true);
   });
 
-  it("fails when validate is pointed at the legacy ./schema shim directory", async () => {
+  it("fails when generate is pointed at the legacy ./schema shim directory", async () => {
     const { root, schemaDir } = await createWorkspace();
     await writeAppFiles(root);
 
-    const result = runBin(["validate", "--schema-dir", schemaDir]);
+    const result = runBin(["generate", "--schema-dir", schemaDir]);
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(`No jazz.app.json in ${schemaDir}`);
@@ -160,27 +160,36 @@ describe("bin integration", () => {
   it("fails when no jazz.app.json can be found", async () => {
     const { root } = await createWorkspace();
 
-    const result = runBin(["validate", "--schema-dir", root]);
+    const result = runBin(["generate", "--schema-dir", root]);
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(`No jazz.app.json in ${root} (looked in ., src, src/lib).`);
   });
 
-  // QUESTION: the TS loader refused a project with schema.ts in more than one
-  // of ., src and src/lib ("Ambiguous schema location"). findAppDir in
-  // dev/app-files.ts takes the first directory holding jazz.app.json, so
-  // validate now succeeds on the root files. Should it still refuse?
-  it.skip("fails when multiple jazz.app.json candidate locations are present", async () => {
+  it("fails when multiple jazz.app.json candidate locations are present", async () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root);
     await writeAppFiles(join(root, "src", "lib"));
 
+    const result = runBin(["generate", "--schema-dir", root]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("found jazz.app.json in both");
+  });
+
+  it("points the renamed validate command at generate", async () => {
+    const { root } = await createWorkspace();
+    await writeAppFiles(root);
+
     const result = runBin(["validate", "--schema-dir", root]);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("Ambiguous schema location");
+    expect(result.stderr).toContain("renamed to `jazz-tools generate`");
+    expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(false);
   });
 
+  // bin/jazz-tools.js still names `validate` here and in its help (not yet
+  // renamed to `generate` there); these assertions follow the source.
   it("rejects the removed build alias with a validate hint", async () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root);
