@@ -31,22 +31,27 @@ mod include;
 mod query;
 mod subscription;
 mod table;
+mod transaction;
 mod value;
+mod writes;
 
 pub use app::AppFiles;
 pub use config::{Backend, Config, Storage};
 pub use error::{Error, Result};
-pub use handle::{Jazz, Transaction};
-pub use include::{Include, IntoInclude, Nullability, OneInclude, Partial, Row, Selection, With};
+pub use handle::Jazz;
+pub use include::{
+    Include, IntoInclude, Nullability, OneInclude, Partial, RefsInclude, Row, Selection, With,
+};
 pub use query::{
-    Column, Condition, Many, NotNull, Nullable, One, Order, Query, created_at, id, updated_at,
+    Column, Condition, Many, NotNull, Nullable, One, Order, Query, Refs, created_at, id, updated_at,
 };
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
 pub use table::{Fields, Implementations, Insert, Table, Update};
+pub use transaction::Transaction;
 pub use value::{ColumnValue, Json, Timestamp};
 
 pub use jazz::account_registry::AccountId;
-pub use jazz::tools::{AppId, ObjectId, ReadTier};
+pub use jazz::tools::{AppId, DurabilityTier, ObjectId, ReadTier};
 
 /// The `jazz` crate, for generated code and [`Jazz::with_client`].
 #[doc(hidden)]

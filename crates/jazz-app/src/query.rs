@@ -315,6 +315,42 @@ impl<T: Table, U: Table, N> One<T, U, N> {
     }
 }
 
+/// A forward relation over an array column: `T`'s `column` holds the ids
+/// of rows of `U`. `N` is whether the column may be null.
+#[derive(Debug)]
+pub struct Refs<T, U, N = NotNull> {
+    column: &'static str,
+    types: PhantomData<fn() -> (T, U)>,
+    nullability: PhantomData<N>,
+}
+
+impl<T, U, N> Clone for Refs<T, U, N> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T, U, N> Copy for Refs<T, U, N> {}
+
+impl<T: Table, U: Table, N> Refs<T, U, N> {
+    pub const fn new(column: &'static str) -> Self {
+        Self {
+            column,
+            types: PhantomData,
+            nullability: PhantomData,
+        }
+    }
+
+    /// The array column holding the references.
+    pub fn column(&self) -> &'static str {
+        self.column
+    }
+
+    /// Rows of `T` whose array references the row of `U` with this id.
+    pub fn referencing(self, id: ObjectId) -> Condition<T> {
+        Condition::new(q::contains(q::col(self.column), literal(Value::Uuid(id))))
+    }
+}
+
 /// A reverse relation: the rows of `U` whose `column` references a row of `T`.
 #[derive(Debug)]
 pub struct Many<T, U> {

@@ -4,7 +4,7 @@
 #![allow(dead_code, clippy::all)]
 
 /// The `jazz.app.json` these bindings were generated from.
-pub const SOURCE: &str = "sha256:e48c31f6e9c4320d12c025a468e79a39ea858238a44e4a0d0a2b6033723278fa";
+pub const SOURCE: &str = "sha256:060bee725893b3a123934fd0781fbf6a5a9da7860b21a3fc852ddfbab8b05799";
 
 /// The values of column `tasks.priority`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -164,6 +164,7 @@ pub struct Step {
     pub id: ::jazz_app::ObjectId,
     pub label: ::std::string::String,
     pub task: ::jazz_app::ObjectId,
+    pub blockers: ::std::vec::Vec<::jazz_app::ObjectId>,
 }
 
 /// A new row of `steps`: [`NewStep::new`] takes the columns it requires.
@@ -171,15 +172,17 @@ pub struct Step {
 pub struct NewStep {
     pub label: ::std::string::String,
     pub task: ::jazz_app::ObjectId,
+    pub blockers: ::std::vec::Vec<::jazz_app::ObjectId>,
 }
 
 impl NewStep {
-    /// A new row with the columns it requires, in this order: `label`, `task`. The others
+    /// A new row with the columns it requires, in this order: `label`, `task`, `blockers`. The others
     /// are left out; set them with `NewStep { column: …, ..NewStep::new(…) }`.
-    pub fn new(label: impl ::std::convert::Into<::std::string::String>, task: impl ::std::convert::Into<::jazz_app::ObjectId>) -> Self {
+    pub fn new(label: impl ::std::convert::Into<::std::string::String>, task: impl ::std::convert::Into<::jazz_app::ObjectId>, blockers: impl ::std::convert::Into<::std::vec::Vec<::jazz_app::ObjectId>>) -> Self {
         Self {
             label: label.into(),
             task: task.into(),
+            blockers: blockers.into(),
         }
     }
 }
@@ -189,21 +192,24 @@ impl NewStep {
 pub struct StepUpdate {
     pub label: ::std::option::Option<::std::string::String>,
     pub task: ::std::option::Option<::jazz_app::ObjectId>,
+    pub blockers: ::std::option::Option<::std::vec::Vec<::jazz_app::ObjectId>>,
 }
 
 impl ::jazz_app::Table for Step {
     const NAME: &'static str = "steps";
-    const COLUMNS: &'static [&'static str] = &["label", "task"];
+    const COLUMNS: &'static [&'static str] = &["label", "task", "blockers"];
     type New = NewStep;
     type Update = StepUpdate;
 
     fn decode(row: &mut ::jazz_app::Fields<'_>) -> ::jazz_app::Result<Self> {
         let label = row.take::<::std::string::String>("label")?;
         let task = row.take::<::jazz_app::ObjectId>("task")?;
+        let blockers = row.take::<::std::vec::Vec<::jazz_app::ObjectId>>("blockers")?;
         ::std::result::Result::Ok(Self {
             id: row.id(),
             label,
             task,
+            blockers,
         })
     }
 
@@ -224,6 +230,8 @@ impl ::jazz_app::Insert for NewStep {
         cells.insert("label".to_owned(), ::jazz_app::ColumnValue::into_value(value));
         let value = self.task;
         cells.insert("task".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        let value = self.blockers;
+        cells.insert("blockers".to_owned(), ::jazz_app::ColumnValue::into_value(value));
         ::std::result::Result::Ok(cells)
     }
 }
@@ -241,6 +249,9 @@ impl ::jazz_app::Update for StepUpdate {
         }
         if let ::std::option::Option::Some(value) = self.task {
             cells.push(("task".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+        }
+        if let ::std::option::Option::Some(value) = self.blockers {
+            cells.push(("blockers".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
         }
         ::std::result::Result::Ok(cells)
     }
@@ -269,6 +280,16 @@ pub mod steps {
     /// Column `task`.
     pub fn task() -> ::jazz_app::Column<Step, ::jazz_app::ObjectId> {
         ::jazz_app::Column::new("task")
+    }
+
+    /// Column `blockers`.
+    pub fn blockers() -> ::jazz_app::Column<Step, ::std::vec::Vec<::jazz_app::ObjectId>> {
+        ::jazz_app::Column::new("blockers")
+    }
+
+    /// Relation `blockerRows`: the `tasks` rows `blockers` references.
+    pub fn blocker_rows() -> ::jazz_app::Refs<Step, Task> {
+        ::jazz_app::Refs::new("blockers")
     }
 
     /// Relation `taskRelation`: the `tasks` row `task` references.
@@ -515,9 +536,13 @@ pub const APP: &str = r#"{
     "steps": {
       "columns": {
         "label": "string",
-        "task": { "type": "uuid", "references": "tasks" }
+        "task": { "type": "uuid", "references": "tasks" },
+        "blockers": { "array": "uuid" }
       },
-      "relations": { "taskRelation": { "rel": "tasks", "column": "task" } }
+      "relations": {
+        "taskRelation": { "rel": "tasks", "column": "task" },
+        "blockerRows": { "rel": "tasks", "column": "blockers" }
+      }
     },
     "tasks": {
       "columns": {
