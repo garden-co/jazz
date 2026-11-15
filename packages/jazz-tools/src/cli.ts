@@ -67,7 +67,9 @@ export async function validate(options: BuildOptions): Promise<void> {
   for (const warning of result.warnings) {
     console.warn(`\x1b[33m${warning}\x1b[0m`);
   }
-  const shown = relative(process.cwd(), join(result.dir, "jazz.generated.ts")) || "jazz.generated.ts";
+  const shown = result.bindings
+    .map((file) => relative(process.cwd(), join(result.dir, file)) || file)
+    .join(" and ");
   console.log(
     options.check
       ? `jazz.app.json, jazz.permissions.json and ${shown} are up to date.`
