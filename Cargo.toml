@@ -24,6 +24,7 @@ members = [
   "crates/jazz-napi",
   # Opens its app through jazz-app's Send + Clone handle.
   "examples/todo-server-rs",
+  "examples/stage-plan/apps/rust-cli",
   # The docs copy, whose snippets the docs include by region.
   "examples/docs/todo-server-rs",
   "examples/stage-plan/benchmarks",
