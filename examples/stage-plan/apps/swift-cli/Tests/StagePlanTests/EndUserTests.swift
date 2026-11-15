@@ -76,11 +76,6 @@ final class EndUserTests: XCTestCase {
     }
 
     func testADeviceAccountLinksToTheAppsSignIn() async throws {
-        // jazz-ffi's link panics outside a Tokio runtime (reported to
-        // #jazz-ffi-core); this runs once JAZZ_FFI_LINK_FIXED is set.
-        if ProcessInfo.processInfo.environment["JAZZ_FFI_LINK_FIXED"] == nil {
-            throw XCTSkip("jazz-ffi link() panics: no Tokio reactor (fix pending in jazz-ffi)")
-        }
         let server = try await TestServer()
         let relay = try await TestRelay(server)
         let device = try await endUser(relay, server, auth: .deviceKey(try Jazz.generateDeviceKey()))

@@ -69,15 +69,23 @@ gives `JazzApp.Task`, not `Task`. For each table, it gives you:
 
 `StagePlanApp.permissions()` reads `jazz.permissions.json`, which the example ships as a SwiftPM
 resource. The backend needs the sync server's admin secret (`adminSecret:`) to publish the bundle,
-and its backend secret (`backendSecret:`) to vouch for the user it acts as. Without `serverUrl` and
-`appId`, it runs on its own local store. `try await jazz.account()` gives the account id of the
-user it acts as.
+and its backend secret (`backendSecret:`) to vouch for the user it acts as. Never ship those
+secrets in an app on users' devices. `try await jazz.account()` gives the account id of the user
+it acts as.
 
-To connect to your server as a client instead:
+An app on a user's device opens as an end user instead. It syncs through your app's Jazz endpoint
+(its backend's `createJazz` handler, never the sync server itself), signed in with a device
+account or with your own sign-in's bearer tokens:
 
 <include cwd lang="swift" meta='title="Sources/StagePlan/DocsSnippets.swift"'>
   ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#context-setup-swift-client
 </include>
+
+`jazz.session` yields `.signedIn(user)`, `.expired` or `.signedOut` each time the session changes.
+`jazz.syncStatus()` and `jazz.syncChanges` report the link (`.connected`, `.offline(reason:…)`, …),
+pending uploads and rejections, as TypeScript's `SyncStatus`. `refresh()` asks your token provider
+again, `link(bearer:)` links a device account to your sign-in, and `signOut()` signs out and closes
+the app. `.local()` opens a client without a server.
 
 Before the process exits, call `try await jazz.close()`. It ends every live `watch` and
 `subscribe` loop with `JazzError.closed`.
@@ -136,7 +144,7 @@ closure returns, rolls back when the closure throws, and rethrows that error. Re
 
 ## Mergeable text and permission advice
 
-A text-merge column (`"merge": "text"`, like StagePlan's `tasks.notes`) reads as a plain `String`.
+A text-merge column (`"merge": "text"`, like StagePlan's `tasks.notes`) reads as a plain `String?`.
 To edit it so that concurrent edits merge instead of overwriting each other, use a `JazzText`
 handle:
 
@@ -150,17 +158,34 @@ patch, edits: [.text(…), .splice(…), .jsonSet(…)])` makes several partial 
 `jazz.canInsert(newRow)`, `canRead`, `canUpdate` and `canDelete` ask the app's permissions before
 you try. They return `true`, `false`, or `nil` when there's nothing to ask, such as no server.
 
+## Hops, history and uploads
+
+- `query.hopTo(JazzApp.tasks.show)` reads the rows a relation leads to. The hop takes its own
+  `where`, `orderBy`, `limit` and `offset`, and hops on with `.hopTo(…)`.
+- `query.gather(JazzApp.nodes.parent, maxDepth: 5)` reads rows along a relation of a table to
+  itself.
+- `Union(q1, q2)` reads every arm's rows; a row two arms match comes twice.
+- `query.history()`, read with `jazz.all`, gives every version the server accepted, as
+  `Version(row:transactionId:acceptedAt:)`.
+- `query.includeDeleted()` reads deleted rows too; `jazz.restore(T.self, id:)` brings one back.
+- `jazz.upsert(id, newRow)` writes a row with a given id.
+- `jazz.upload(newRow, column:, from: chunks)` streams a large text or bytes value in from an
+  `AsyncSequence<Data>`, and `select(parts: column.part(0..<4096, in: .bytes))` reads it back in
+  pages.
+
 ## Not supported yet
 
-These are refused with `JazzError.notSupported` (or when generating):
+Not supported yet:
 
 - iOS, iPadOS, watchOS and macOS UI apps. The package declares those platforms, but it isn't built
   or tested for them yet, and there are no prebuilt XCFrameworks.
 - Installing the package from a URL: depend on a local checkout by path.
 - A SwiftUI `Binding` for `JazzText`.
-- Connecting as an end user (JWT, device accounts) and session state: open the app as a backend.
-- Files and streams.
-- `hopTo`, `gather`, `union` and history queries.
+- SwiftUI helpers beyond `JazzQuery`: an `@Observable` session, and Keychain storage for device
+  keys. Use `jazz.session` and your own Keychain code.
+- Anonymous (guest) users, as in TypeScript.
+- Subscribing to history queries.
+- Parts of large values inside includes: parts are for root queries.
 - `offset` in an include, and `required` on reverse relations or optional references.
 - Payload enums, nested rows and other column types the bindings can't type: they're refused when
   generating.
