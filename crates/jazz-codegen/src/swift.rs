@@ -506,7 +506,7 @@ impl<'a> Writer<'a> {
                 "    /// Computed from {from} by `JazzApp.Computed.{}`.",
                 c.method
             );
-            let _ = writeln!(out, "    public var {}: {}", c.ident, c.ty);
+            let _ = writeln!(out, "    public internal(set) var {}: {}", c.ident, c.ty);
         }
         for r in &relations {
             if r.to_many {
@@ -543,6 +543,27 @@ impl<'a> Writer<'a> {
             let _ = writeln!(out, "        self.{0} = {0}", c.ident);
         }
         out.push_str("    }\n\n");
+        if !relations.is_empty() {
+            // A row is equal to itself whatever a query included with it
+            // (`watch` diffing, SwiftUI): relations stay out of `==` and `hash`.
+            let mut compared = vec!["id".to_owned()];
+            compared.extend(fields.iter().map(|f| f.ident.clone()));
+            compared.extend(computed.iter().map(|c| c.ident.clone()));
+            let _ = writeln!(
+                out,
+                "    /// Equal by id, columns and computed fields: included relations don't count.\n    public static func == (a: Self, b: Self) -> Swift.Bool {{\n        {}\n    }}\n",
+                compared
+                    .iter()
+                    .map(|x| format!("a.{x} == b.{x}"))
+                    .collect::<Vec<_>>()
+                    .join(" && ")
+            );
+            out.push_str("    public func hash(into hasher: inout Swift.Hasher) {\n");
+            for x in &compared {
+                let _ = writeln!(out, "        hasher.combine({x})");
+            }
+            out.push_str("    }\n\n");
+        }
         coding_keys(&mut out, &fields, true);
         if !relations.is_empty() {
             // The relations' keys join the row's coding keys.
