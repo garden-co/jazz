@@ -1320,23 +1320,29 @@ fn default_fits(column: &crate::values::Column, value: &Value) -> bool {
 /// limit applies to the whole text handed to one prepare, and schema DDL
 /// outgrows Durable Object SQLite's 100 KB.
 pub(crate) fn execute_script(conn: &Connection, script: &str) -> Result<(), Error> {
-    let mut start = 0;
-    for (end, _) in script.match_indices(';') {
-        let statement = &script[start..=end];
-        let text = std::ffi::CString::new(statement)
-            .map_err(|_| Error::new(ErrorCode::Storage, "NUL in SQL"))?;
-        // SAFETY: a NUL-terminated string; `sqlite3_complete` only reads it.
-        // A `;` inside a trigger body or a literal leaves it incomplete.
-        if unsafe { rusqlite::ffi::sqlite3_complete(text.as_ptr()) } != 0 {
-            conn.execute_batch(statement).map_err(storage)?;
-            start = end + 1;
+    // One transaction for the whole script: outside one, every statement
+    // commits (and syncs the file) alone, and a schema of a few hundred
+    // tables then paid a durable commit per table, index and trigger when
+    // its store opened. It also leaves no half-created schema behind.
+    in_savepoint(conn, "jazz_ddl", || {
+        let mut start = 0;
+        for (end, _) in script.match_indices(';') {
+            let statement = &script[start..=end];
+            let text = std::ffi::CString::new(statement)
+                .map_err(|_| Error::new(ErrorCode::Storage, "NUL in SQL"))?;
+            // SAFETY: a NUL-terminated string; `sqlite3_complete` only reads
+            // it. A `;` inside a trigger body or a literal leaves it incomplete.
+            if unsafe { rusqlite::ffi::sqlite3_complete(text.as_ptr()) } != 0 {
+                conn.execute_batch(statement).map_err(storage)?;
+                start = end + 1;
+            }
         }
-    }
-    let rest = &script[start..];
-    if !rest.trim().is_empty() {
-        conn.execute_batch(rest).map_err(storage)?;
-    }
-    Ok(())
+        let rest = &script[start..];
+        if !rest.trim().is_empty() {
+            conn.execute_batch(rest).map_err(storage)?;
+        }
+        Ok(())
+    })
 }
 
 pub(crate) fn rejected(message: impl Into<String>) -> Error {

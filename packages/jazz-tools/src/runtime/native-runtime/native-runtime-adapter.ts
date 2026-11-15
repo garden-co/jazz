@@ -6,7 +6,7 @@ import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
 import { isAuthorityChangedError, upstreamRefusalError } from "../authority-changed-error.js";
 import { CoreTickFailedError, isCoreTickFailedError } from "../core-tick-failed-error.js";
-import { formatUuid, formatUuidAt } from "../hex.js";
+import { formatUuid } from "../hex.js";
 
 export { formatUuid };
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
