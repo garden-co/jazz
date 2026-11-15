@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { Db } from "jazz-tools";
-import { testApp, testPermissions } from "jazz-tools/testing";
 import { createBrowserTestDb } from "../../../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
 import {
   TestCleanup,
@@ -21,6 +20,10 @@ import {
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../jazz.permissions.json" with { type: "json" };
 import { app } from "../../jazz.generated.js";
+import { app as acknowledgementApp } from "./apps/acknowledgement/jazz.generated.js";
+import acknowledgementPermissions from "./apps/acknowledgement/jazz.permissions.json" with { type: "json" };
+import { app as recipientApp } from "./apps/recipient/jazz.generated.js";
+import recipientPermissions from "./apps/recipient/jazz.permissions.json" with { type: "json" };
 import {
   ALBUM_TRACK_LIMIT,
   JazzRecordPlayerStore,
@@ -33,26 +36,13 @@ import { seedDemoLibrary } from "../../src/upload.js";
 const ctx = new TestCleanup();
 afterEach(async () => ctx.cleanup());
 
-const acknowledgementApp = testApp({ tables: { receipts: { columns: { label: "string" } } } });
-const acknowledgementPermissions = testPermissions(acknowledgementApp, {
-  tables: { receipts: { read: "true", insert: "true" } },
-});
+// A one-table app, committed as files with its bindings: browsers can't
+// compile apps (tests/browser/apps/acknowledgement).
 
 // Keep this intentionally separate from RecordPlayer's relational policies:
 // it is the smallest external-JWT receipt for a row routed to a recipient by
 // an application-owned canonical session user rather than by `$createdBy`.
-const recipientApp = testApp({
-  tables: { invitations: { columns: { subject: "uuid", label: "string" } } },
-});
-const recipientPermissions = testPermissions(recipientApp, {
-  tables: {
-    invitations: {
-      read: { anyOf: ["subject = session.user", "label = 'unmatched control branch'"] },
-      insert: "true",
-    },
-  },
-});
-
+// (tests/browser/apps/recipient)
 // The relational control is RecordPlayer itself: a correlated owner path
 // through a referenced playlist, exactly as the app ships it.
 const relationalRecipientApp = app;
