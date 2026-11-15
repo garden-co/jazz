@@ -8,6 +8,8 @@ export type Doc = {
   embedding: Float32Array;
   draftEmbedding: Float32Array | null;
   seed: Float32Array;
+  lat: number;
+  lng: number;
 };
 
 export type DocInsert = {
@@ -15,6 +17,8 @@ export type DocInsert = {
   embedding: Float32Array;
   draftEmbedding?: Float32Array | null;
   seed?: Float32Array;
+  lat: number;
+  lng: number;
 };
 
 interface Types extends AppTypes {
@@ -26,6 +30,8 @@ interface Types extends AppTypes {
       embedding: { kind: "vector"; nullable: false; value: Float32Array };
       draftEmbedding: { kind: "vector"; nullable: true; value: Float32Array };
       seed: { kind: "vector"; nullable: false; value: Float32Array };
+      lat: { kind: "float"; nullable: false; value: number };
+      lng: { kind: "float"; nullable: false; value: number };
     };
     relations: {};
   };
@@ -35,12 +41,12 @@ interface Types extends AppTypes {
 // biome-ignore format: generated JSON
 // prettier-ignore
 export const app = bindApp<Types>({
-  "source": "sha256:c96729bc448df827ab477792768535d62c0557ff8b31c0c55b23e9f794310e48",
+  "source": "sha256:ee3d8a7a8b4eb56096ec2e0e9c548336b83baeec02f60a17bbe9ebc46c98c774",
   "schema": {
-    "current": "c55a2568df46f558e80d9e715d502a3c0356470c4ec2653d3afb2f34000f038a",
+    "current": "29859e00ecde59703bf20a35c66f14bc487c2453fe5ef8e804743c21c77f07fe",
     "schemas": [
       {
-        "hash": "c55a2568df46f558e80d9e715d502a3c0356470c4ec2653d3afb2f34000f038a",
+        "hash": "29859e00ecde59703bf20a35c66f14bc487c2453fe5ef8e804743c21c77f07fe",
         "schema": {
           "tables": {
             "docs": {
@@ -61,6 +67,27 @@ export const app = bindApp<Types>({
                   "default": { "type": "Bytea", "value": [0, 0, 0, 63, 0, 0, 128, 191] },
                   "name": "seed",
                   "nullable": false,
+                },
+                { "column_type": { "type": "Double" }, "name": "lat", "nullable": false },
+                { "column_type": { "type": "Double" }, "name": "lng", "nullable": false },
+              ],
+              "specialised_indexes": [
+                { "kind": { "geo": { "lat": "lat", "lng": "lng" } }, "name": "place" },
+                {
+                  "kind": {
+                    "text": {
+                      "analyzer": "jazz-text/1:en",
+                      "fields": { "title": 1 },
+                      "prefix": true,
+                    },
+                  },
+                  "name": "search",
+                },
+                {
+                  "kind": {
+                    "vector": { "ann": "exact", "column": "embedding", "metric": "cosine" },
+                  },
+                  "name": "similar",
                 },
               ],
             },

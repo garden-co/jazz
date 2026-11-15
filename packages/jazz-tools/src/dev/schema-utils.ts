@@ -1,6 +1,6 @@
 import { columnTypeSignature } from "../runtime/schema-metadata.js";
 import { structuralValuesEqual } from "../runtime/structural-values.js";
-import type { ColumnDescriptor, WasmSchema } from "../drivers/types.js";
+import type { ColumnDescriptor, SpecialisedIndex, WasmSchema } from "../drivers/types.js";
 
 const SHORT_SCHEMA_HASH_LENGTH = 12;
 
@@ -85,6 +85,34 @@ function compositeIndexesEqual(
   return a.length === b.length && a.every((index, position) => index === b[position]);
 }
 
+/** The same specialised indexes, in any order (they are kept by name). */
+function specialisedIndexesEqual(
+  left: readonly SpecialisedIndex[] | undefined,
+  right: readonly SpecialisedIndex[] | undefined,
+): boolean {
+  const canonical = (indexes: readonly SpecialisedIndex[] | undefined) =>
+    (indexes ?? [])
+      .map((index) => [index.name, canonicalJson(index)] as const)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([, json]) => json);
+  const a = canonical(left);
+  const b = canonical(right);
+  return a.length === b.length && a.every((index, position) => index === b[position]);
+}
+
+/** JSON with object keys sorted, so key order never matters. */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, inner: unknown) =>
+    inner && typeof inner === "object" && !Array.isArray(inner)
+      ? Object.fromEntries(
+          Object.entries(inner as Record<string, unknown>).sort(([a], [b]) =>
+            a < b ? -1 : a > b ? 1 : 0,
+          ),
+        )
+      : inner,
+  );
+}
+
 export function tableSchemasEqual(
   left: WasmSchema[string] | undefined,
   right: WasmSchema[string] | undefined,
@@ -107,6 +135,9 @@ export function tableSchemasEqual(
     return false;
   }
   if (left.history !== right.history) {
+    return false;
+  }
+  if (!specialisedIndexesEqual(left.specialised_indexes, right.specialised_indexes)) {
     return false;
   }
 

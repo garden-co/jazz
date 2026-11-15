@@ -7,8 +7,15 @@
         "title": "string",
         "embedding": { "vector": 4 },
         "draftEmbedding": { "vector": 2, "optional": true },
-        "seed": { "vector": 2, "default": [0.5, -1] }
-      }
+        "seed": { "vector": 2, "default": [0.5, -1] },
+        "lat": "float",
+        "lng": "float"
+      },
+      "indexes": [
+        { "name": "place", "geo": { "lat": "lat", "lng": "lng" } },
+        { "name": "search", "text": { "title": 1 }, "analyzer": "jazz-text/1:en", "prefix": true },
+        { "name": "similar", "vector": "embedding", "metric": "cosine" }
+      ]
     }
   }
 }

@@ -51,6 +51,20 @@ describe("wasmSchemasEqual", () => {
     ),
   ) as StructuralHashFixture;
 
+  it("tells schemas apart by their specialised indexes, in any order", () => {
+    const withIndexes = (...names: string[]): WasmSchema => {
+      const schema = schemaWithColumnType({ type: "Text" });
+      schema.values!.specialised_indexes = names.map((name) => ({
+        name,
+        kind: { text: { fields: { value: 1 }, analyzer: "jazz-text/1:en" } },
+      }));
+      return schema;
+    };
+    expect(wasmSchemasEqual(withIndexes("a", "b"), withIndexes("b", "a"))).toBe(true);
+    expect(wasmSchemasEqual(withIndexes("a"), withIndexes("a", "b"))).toBe(false);
+    expect(wasmSchemasEqual(withIndexes("a"), schemaWithColumnType({ type: "Text" }))).toBe(false);
+  });
+
   it("tells latest-only history apart from full history", () => {
     const latest = schemaWithColumnType({ type: "Text" });
     latest.values!.history = "latest";

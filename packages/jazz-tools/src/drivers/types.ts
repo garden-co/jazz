@@ -200,6 +200,22 @@ export interface TableSchema {
   branchBy?: string[];
   /** `"latest"` keeps only each row's latest version; absent keeps full history. */
   history?: "latest";
+  /**
+   * Text, vector and geo indexes (SPEC 20.1), as the engine serializes
+   * them; declared in `jazz.app.json` only.
+   */
+  specialised_indexes?: SpecialisedIndex[];
+}
+
+/** One specialised index of a table (SPEC 20.1), in the engine's JSON. */
+export interface SpecialisedIndex {
+  name: string;
+  kind:
+    | { text: { fields: Record<string, number>; analyzer: string; prefix?: boolean } }
+    | { vector: { column: string; metric: "cosine" | "l2" | "dot"; ann?: "exact" } }
+    | { geo: { lat: string; lng: string } };
+  /** Not maintained on clients (SPEC 20.9). */
+  server_only?: boolean;
 }
 
 export type Schema = Record<string, TableSchema>;
