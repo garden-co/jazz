@@ -34,9 +34,9 @@ export class BrowserWorkerTransportPump {
   private runAgain = false;
   private closed = false;
   private outboundDrainScheduled = false;
-  // At most one synchronous outbound drain per browser task; see
-  // scheduleOutboundDrain().
-  private outboundPostedThisTask = false;
+  // Set by a synchronous outbound post, cleared by the next timer task: at most
+  // one synchronous post until then; see scheduleOutboundDrain().
+  private syncPostAwaitingTimer = false;
   // A MessagePort can deliver several batches before a WASM auxiliary routing
   // promise settles. Keep their wire order: a later semantic frame must not
   // overtake an earlier chunk response that wakes a suspended evaluator.
@@ -153,28 +153,30 @@ export class BrowserWorkerTransportPump {
   // Called by the core whenever it queues a wire frame, possibly from inside a
   // native tick.
   //
-  // The first frame of a task is posted synchronously. A local write commits,
+  // The first frame is posted synchronously. A local write commits,
   // delivers its rows to subscription listeners and only then queues its
   // frame, so a microtask drain would run behind whatever those listeners
   // queued first, e.g. a synchronous React render. The frame would wait out
   // that render before the worker even sees the write.
   //
-  // Later frames in the same task use the microtask drain, so a burst (startup,
-  // a sync catch-up) still goes out as one port message instead of one per
-  // frame.
+  // After a synchronous post, frames use the microtask drain until the next
+  // timer task (`setTimeout(0)`) runs. That is after the current task and its
+  // microtasks, and possibly after other queued tasks too. So a burst (startup,
+  // a sync catch-up) still goes out as at most two port messages per task (the
+  // synchronous one, then the microtask batch) instead of one per frame.
   //
   // Order holds: both paths take every queued frame from the core's FIFO in
   // one `recvWireFrames()` call and post it to the same port, so frames leave
   // in the order the core produced them. The synchronous post only moves the
-  // first batch of the task earlier.
+  // first batch earlier.
   private scheduleOutboundDrain(): void {
     if (this.closed || this.outboundDrainScheduled) return;
-    if (!this.outboundPostedThisTask) {
-      this.outboundPostedThisTask = true;
+    if (!this.syncPostAwaitingTimer) {
+      this.syncPostAwaitingTimer = true;
       // Throttled timers (e.g. a background tab) just keep the microtask path
       // longer, which is the behaviour before this optimisation.
       setTimeout(() => {
-        this.outboundPostedThisTask = false;
+        this.syncPostAwaitingTimer = false;
       }, 0);
       try {
         const frames = normalizeTransportFrames(this.transport.recvWireFrames());

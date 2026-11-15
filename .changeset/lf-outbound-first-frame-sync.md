@@ -2,4 +2,4 @@
 "jazz-tools": patch
 ---
 
-Send a local-first tab's first outbound frame of each task to its worker right away, instead of after the re-render its write triggers, so other clients see local writes sooner.
+Post the first frame a local-first tab or its worker queues to the other side of their port right away, instead of after the work in progress (such as the re-render a write triggers), so other clients see local writes sooner.

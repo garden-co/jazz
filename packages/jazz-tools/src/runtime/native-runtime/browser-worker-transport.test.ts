@@ -575,7 +575,7 @@ describe("BrowserWorkerTransportPump", () => {
     async function settledPump(peer: Transport, sendFrames: (frames: Uint8Array[]) => void) {
       const onError = vi.fn();
       const pump = new BrowserWorkerTransportPump(runtime(peer), peer, sendFrames, onError);
-      // Let the constructor's pump pass and its task flag settle.
+      // Let the constructor's pump pass run and the next timer task clear the flag.
       await new Promise((resolve) => setTimeout(resolve, 0));
       return { pump, onError };
     }
@@ -628,7 +628,7 @@ describe("BrowserWorkerTransportPump", () => {
         await Promise.resolve();
         expect(posted).toEqual([[1], [2, 3], [4]]);
 
-        // A new task posts its first frame synchronously again.
+        // Once the next timer task has run, the next frame is posted synchronously again.
         await new Promise((resolve) => setTimeout(resolve, 0));
         queue(Uint8Array.from([5]));
         queue(Uint8Array.from([6]));
