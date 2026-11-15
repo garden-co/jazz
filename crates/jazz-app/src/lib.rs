@@ -18,6 +18,10 @@
 //! [`Jazz::session`] follows it; [`Session::link`] carries a device account
 //! over to the user's provider sign-in.
 //!
+//! A backend serves its users' clients with an [`Endpoint`]: the app's
+//! `/jazz` handler, as TS `createJazz` serves it, with the app's own
+//! sign-in deciding who each request's user is.
+//!
 //! Not supported yet: includes (nested related rows in one result), reads
 //! inside transactions. A bearer session is renewed by reconnecting with a
 //! fresh bearer, as TypeScript's bearer clients do (in-place renewal is for
@@ -29,6 +33,7 @@ mod auth;
 mod backend;
 mod config;
 mod edit;
+pub mod endpoint;
 mod error;
 mod handle;
 mod large;
@@ -45,6 +50,7 @@ pub use app::AppFiles;
 pub use auth::{Auth, Bearer, DeviceKey, TokenFuture, TokenProvider, TokenReason};
 pub use config::{Backend, Config, Storage};
 pub use edit::TextColumn;
+pub use endpoint::Endpoint;
 pub use error::{Error, Result};
 pub use handle::Jazz;
 pub use large::{JsonColumn, LargeColumn, Page, Splice};
