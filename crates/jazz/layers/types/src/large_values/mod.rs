@@ -492,8 +492,16 @@ impl LogicalValueValidator {
         })
     }
 
+    /// Whether [`Self::push`] checks anything in the bytes it is fed: text
+    /// and JSON values have content rules (UTF-8, UTF-16 length, JSON); a
+    /// bytes value has none, so a caller that only feeds this validator may
+    /// skip reading it.
+    pub fn reads_bytes(&self) -> bool {
+        self.kind != LargeValueKind::Bytes
+    }
+
     pub fn push(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        if self.kind == LargeValueKind::Bytes {
+        if !self.reads_bytes() {
             return Ok(());
         }
 
