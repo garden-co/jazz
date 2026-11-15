@@ -97,6 +97,11 @@ impl Bearer {
     pub(crate) async fn token(&self, reason: TokenReason) -> Result<Option<String>> {
         self.0.token(reason).await
     }
+
+    /// The provider's future for a token, to poll beside other work.
+    pub(crate) fn request(&self, reason: TokenReason) -> TokenFuture {
+        self.0.token(reason)
+    }
 }
 
 impl std::fmt::Debug for Bearer {
@@ -119,8 +124,32 @@ pub(crate) const DEVICE_TOKEN_TTL_SECS: u64 = 3600;
 ///
 /// It reads and writes as `jazz-auth-v1:<base64url>`, the form the TypeScript
 /// client keeps (`exportDeviceKey`), so a key moves between the two.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct DeviceKey([u8; 32]);
+
+/// In constant time: comparing keys tells nothing of where they differ.
+impl PartialEq for DeviceKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0
+            .iter()
+            .zip(other.0.iter())
+            .fold(0u8, |differ, (a, b)| differ | (a ^ b))
+            == 0
+    }
+}
+
+impl Eq for DeviceKey {}
+
+/// The key leaves no copy in memory it frees.
+impl Drop for DeviceKey {
+    fn drop(&mut self) {
+        for byte in &mut self.0 {
+            // SAFETY: `byte` is a valid, aligned, exclusive reference.
+            unsafe { std::ptr::write_volatile(byte, 0) };
+        }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 impl DeviceKey {
     /// A new device account's key, from the operating system's RNG.
@@ -145,19 +174,34 @@ impl DeviceKey {
             Err(_) => {}
         }
         let key = Self::generate()?;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(io)?;
-        }
+        let dir = path
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        std::fs::create_dir_all(dir).map_err(io)?;
+        // Written whole beside it, then linked into place: a concurrent
+        // opener sees no file or the whole key, never a partial one, and
+        // the first link wins.
+        let temp = dir.join(format!(
+            ".{}.{}.tmp",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("device-key"),
+            identity::derive_user_id(&key.0)
+        ));
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        match options.open(path) {
-            Ok(mut file) => {
-                std::io::Write::write_all(&mut file, key.to_string().as_bytes()).map_err(io)?;
-                Ok(key)
-            }
-            // Another process made it first: theirs is the key.
+        let written = options.open(&temp).and_then(|mut file| {
+            std::io::Write::write_all(&mut file, key.to_string().as_bytes())?;
+            file.sync_all()
+        });
+        let linked = written.and_then(|()| std::fs::hard_link(&temp, path));
+        let _ = std::fs::remove_file(&temp);
+        match linked {
+            Ok(()) => Ok(key),
+            // Another opener linked theirs first: theirs is the key.
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 std::fs::read_to_string(path).map_err(io)?.parse()
             }
