@@ -7,16 +7,16 @@ A Go service can be your app's backend. It opens the app from the same `jazz.app
 `jazz.permissions.json` as every other language, with typed bindings generated from them. On start
 it publishes the app's permissions, then acts as one user of the app.
 
-The Go module, `github.com/garden-co/jazz/packages/jazz-go`, wraps Jazz's Rust core through cgo. It
+The Go module, `github.com/garden-co/jazz/packages/jazz-go/v2`, wraps Jazz's Rust core through cgo. It
 uses only the standard library: `context` for every call and channels for subscriptions.
 
 ## Install
 
-Add the module. Each Jazz release tags it as `packages/jazz-go/v0.<release>.0-alpha` (a v0 module,
-so its path has no `/v2`):
+Add the module. Its versions are Jazz's: each release tags it as `packages/jazz-go/v<version>`, so
+its path ends in `/v2`:
 
 ```bash
-go get github.com/garden-co/jazz/packages/jazz-go@v0.65.0-alpha
+go get github.com/garden-co/jazz/packages/jazz-go/v2@v2.0.0-alpha.65
 ```
 
 Building needs cgo (a C compiler) and Jazz's core as a static library, `libjazz_ffi.a`, for your
@@ -43,7 +43,7 @@ tested yet, and Windows is not supported.
 
 ## Generate the bindings
 
-With a `go.mod` that requires `jazz-go` beside `jazz.app.json`, `jazz-tools generate` writes the
+With a `go.mod` that requires `jazz-go/v2` beside `jazz.app.json`, `jazz-tools generate` writes the
 `jazzapp` package to `jazzapp/jazz_app.go`:
 
 ```bash
