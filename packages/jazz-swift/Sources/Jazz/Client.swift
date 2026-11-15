@@ -190,6 +190,18 @@ public final class Client: Sendable {
         }
     }
 
+    /// Rows of `selection`'s columns, decoded into `T` (a `Decodable` with
+    /// those properties, and `id` if it wants it).
+    public func all<R, T: Decodable & Sendable>(_ selection: Selection<R>, as type: T.Type)
+        async throws(JazzError) -> [T]
+    {
+        try await Self.typed {
+            let json = try selection.json()
+            let rows = try await Self.run { try self.handle.all(queryJson: json) }
+            return try Coding.decode([T].self, rows, userInfo)
+        }
+    }
+
     /// The first row `query` matches, if any.
     public func one<R>(_ query: Query<R>) async throws(JazzError) -> R? {
         try await Self.typed {
