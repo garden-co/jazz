@@ -12,6 +12,7 @@ import {
   app as fixtureApp,
   appFile as fixtureAppFile,
   permissions as fixturePermissions,
+  permissionsFile as fixturePermissionsFile,
   wasmSchema as wasmSchemaExample,
 } from "./fixtures/app.js";
 import { jazzAdapter } from "./index.js";
@@ -99,7 +100,7 @@ describe("jazzAdapter", () => {
       appId: server.appId,
       adminSecret: server.adminSecret,
       app: fixtureApp,
-      permissions: fixturePermissions,
+      permissions: fixturePermissionsFile,
     });
     const context = createJazzContext({
       appId: server.appId,
@@ -157,7 +158,7 @@ describe("jazzAdapter", () => {
       appId: server.appId,
       adminSecret: server.adminSecret,
       app: fixtureApp,
-      permissions: fixturePermissions,
+      permissions: fixturePermissionsFile,
     });
     const context = createJazzContext({
       appId: server.appId,
@@ -298,7 +299,7 @@ describe("jazzAdapter", () => {
         appId: server.appId,
         adminSecret: server.adminSecret,
         app: fixtureApp,
-        permissions: fixturePermissions,
+        permissions: fixturePermissionsFile,
       });
 
       context = createJazzContext({
@@ -1170,7 +1171,7 @@ describe("jazzAdapter", () => {
         appId: server.appId,
         adminSecret: server.adminSecret,
         app: fixtureApp,
-        permissions: fixturePermissions,
+        permissions: fixturePermissionsFile,
       });
 
       context = createJazzContext({
@@ -1540,7 +1541,7 @@ describe("jazzAdapter", () => {
         appId: server.appId,
         adminSecret: server.adminSecret,
         app: fixtureApp,
-        permissions: fixturePermissions,
+        permissions: fixturePermissionsFile,
       });
 
       context = createJazzContext({
@@ -1676,7 +1677,7 @@ describe("jazzAdapter", () => {
         appId: server.appId,
         adminSecret: server.adminSecret,
         app: fixtureApp,
-        permissions: fixturePermissions,
+        permissions: fixturePermissionsFile,
       });
 
       context = createJazzContext({
@@ -1743,7 +1744,7 @@ describe("jazzAdapter", () => {
         appId: server.appId,
         adminSecret: server.adminSecret,
         app: fixtureApp,
-        permissions: fixturePermissions,
+        permissions: fixturePermissionsFile,
       });
 
       const ctx1 = createJazzContext({
@@ -1820,7 +1821,7 @@ describe("jazzAdapter", () => {
           appId: server.appId,
           adminSecret: server.adminSecret,
           app: fixtureApp,
-          permissions: fixturePermissions,
+          permissions: fixturePermissionsFile,
         });
         const ctx1 = createJazzContext({
           appId: server.appId,
