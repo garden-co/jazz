@@ -175,7 +175,7 @@ fn a_backend_with_only_the_bindings_loads_what_the_files_load() {
 
 /// Go bindings for each app Go can bind, committed as
 /// `jazzapp/jazz_app.go` beside its `jazz.app.json`; the others are
-/// refused as unsupported (computed fields, transforms, payload enums).
+/// refused as unsupported (computed fields, transforms).
 #[test]
 fn every_go_app_generates_its_committed_go_byte_for_byte() {
     let mut generated_any = 0;
@@ -358,18 +358,6 @@ fn every_app_generates_its_committed_swift_byte_for_byte() {
         assert!(bindings::read(Lang::Swift, &edited).is_err());
     }
     assert!(generated_any);
-}
-
-#[test]
-fn swift_refuses_payload_enums_as_not_supported_yet() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/tasks");
-    let error = generate(
-        Lang::Swift,
-        &std::fs::read(dir.join("jazz.app.json")).unwrap(),
-    )
-    .unwrap_err();
-    assert!(error.is_unsupported());
-    assert!(error.message().contains("not supported yet"), "{error}");
 }
 
 /// The StagePlan Swift example commits its bindings (`jazz-tools generate`

@@ -102,16 +102,6 @@ pub enum ColumnType {
     /// catalogue source round-tripping; ordinary application enums use `Enum`.
     #[doc(hidden)]
     ScalarEnum { name: String, variants: Vec<String> },
-    /// Catalogue-native payload enum with an explicit compiled type name.
-    /// Ordinary application payload enums use `EnumPayload`.
-    #[doc(hidden)]
-    CatalogueEnumPayload {
-        name: String,
-        cases: Vec<EnumCaseDescriptor>,
-    },
-    /// Discriminated enum whose selected case carries a named record payload.
-    /// This is a column type, never a top-level Jazz row union.
-    EnumPayload { cases: Vec<EnumCaseDescriptor> },
     /// 8-byte unsigned timestamp (Unix milliseconds).
     Timestamp,
     /// 8-byte IEEE 754 double-precision float (f64).
@@ -150,13 +140,6 @@ impl ColumnType {
             _ => None,
         }
     }
-}
-
-/// One named payload case of a column-local discriminated enum.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnumCaseDescriptor {
-    pub name: String,
-    pub fields: Vec<ColumnDescriptor>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

@@ -245,14 +245,6 @@ fn hash_value(hasher: &mut jazz_types::sha256::Hasher, value: &Value) {
                 hash_value(hasher, inner);
             }
         }
-        Value::Enum { case, values } => {
-            hasher.update(&[14]);
-            hash_cstr(hasher, case);
-            hasher.update(&(values.len() as u64).to_le_bytes());
-            for inner in values {
-                hash_value(hasher, inner);
-            }
-        }
         Value::Null => {
             hasher.update(&[9]);
         }
@@ -263,19 +255,6 @@ fn hash_value(hasher: &mut jazz_types::sha256::Hasher, value: &Value) {
 fn hash_cstr(hasher: &mut jazz_types::sha256::Hasher, value: &str) {
     hasher.update(value.as_bytes());
     hasher.update(&[0]);
-}
-
-fn hash_enum_payload_cases(hasher: &mut jazz_types::sha256::Hasher, cases: &[EnumCaseDescriptor]) {
-    hasher.update(&(cases.len() as u64).to_le_bytes());
-    for case in cases {
-        hash_cstr(hasher, &case.name);
-        hasher.update(&(case.fields.len() as u64).to_le_bytes());
-        for field in &case.fields {
-            hash_cstr(hasher, field.name.as_str());
-            hash_column_type(hasher, &field.column_type);
-            hasher.update(&[u8::from(field.nullable)]);
-        }
-    }
 }
 
 /// Hash a ColumnType recursively (for Array and Row types).
@@ -312,15 +291,6 @@ fn hash_column_type(hasher: &mut jazz_types::sha256::Hasher, col_type: &ColumnTy
             for variant in variants {
                 hash_cstr(hasher, variant);
             }
-        }
-        ColumnType::CatalogueEnumPayload { name, cases } => {
-            hasher.update(&[15]);
-            hash_cstr(hasher, name);
-            hash_enum_payload_cases(hasher, cases);
-        }
-        ColumnType::EnumPayload { cases } => {
-            hasher.update(&[13]);
-            hash_enum_payload_cases(hasher, cases);
         }
         ColumnType::Timestamp => {
             hasher.update(&[5]);
