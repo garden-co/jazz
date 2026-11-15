@@ -1,19 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
+import type { ColumnTransformMap } from "./column-transforms.js";
 import { applyColumnTransforms } from "./row-transformer.js";
 
 describe("column transform input access", () => {
   it("does not inspect unrelated tables when guarding hopped stored-transform queries", () => {
-    const app = s.defineApp(
+    const app = testApp(
       {
-        sources: s.table({ targetId: s.uuid() }, { target: s.rel("targets", "targetId") }),
-        targets: s.table(
-          { value: s.int().transform({ from: (value) => value, to: (value: number) => value }) },
-          {},
-        ),
-        unrelated: s.table({ text: s.string() }, {}),
+        tables: {
+          sources: {
+            columns: { targetId: "uuid" },
+            relations: { target: { rel: "targets", column: "targetId" } },
+          },
+          targets: { columns: { value: { type: "int", transform: "identity" } } },
+          unrelated: { columns: { text: "string" } },
+        },
+        transforms: { identity: { stored: "int", view: "int" } },
       },
-      { migrations: "none" },
+      {
+        transforms: { identity: { from: (value: number) => value, to: (value: number) => value } },
+      },
     );
     const unrelated = app.wasmSchema.unrelated!;
     const original = Object.getOwnPropertyDescriptor(unrelated, "columns")!;
@@ -43,22 +49,15 @@ describe("column transform input access", () => {
   });
 
   it("reads only declared dependencies when preserving stored context", () => {
-    const app = s.defineApp(
-      {
-        prices: s.table(
-          {
-            amount: s.float().transform({
-              dependsOn: ["unit"],
-              from: (value, context: Readonly<{ unit: number }>) => value / context.unit,
-              to: (value: number, context: Readonly<{ unit: number }>) => value * context.unit,
-            }),
-            unit: s.float(),
-          },
-          {},
-        ),
+    // jazz.app.json transforms are pure (no `dependsOn`), so the stored
+    // context is exercised on the runtime's transform map directly.
+    const prices: ColumnTransformMap = {
+      amount: {
+        dependsOn: ["unit"],
+        from: (value, context) => (value as number) / (context.unit as number),
+        to: (value, context) => (value as number) * (context.unit as number),
       },
-      { migrations: "none" },
-    );
+    };
     const row = {
       amount: 250,
       unit: 100,
@@ -66,7 +65,7 @@ describe("column transform input access", () => {
         throw new Error("unrelated values must not be copied");
       },
     };
-    expect(applyColumnTransforms(row, app.prices._columnTransforms)).toBe(row);
+    expect(applyColumnTransforms(row, prices)).toBe(row);
     expect(row.amount).toBe(2.5);
   });
 });

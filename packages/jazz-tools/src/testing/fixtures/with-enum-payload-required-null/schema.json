@@ -1,0 +1,38 @@
+{
+  "records": {
+    "columns": [
+      {
+        "column_type": {
+          "cases": [
+            {
+              "fields": [
+                {
+                  "column_type": {
+                    "type": "Text"
+                  },
+                  "name": "label",
+                  "nullable": false
+                }
+              ],
+              "name": "ready"
+            }
+          ],
+          "type": "EnumPayload"
+        },
+        "default": {
+          "type": "Enum",
+          "value": {
+            "case": "ready",
+            "values": [
+              {
+                "type": "Null"
+              }
+            ]
+          }
+        },
+        "name": "state",
+        "nullable": false
+      }
+    ]
+  }
+}
