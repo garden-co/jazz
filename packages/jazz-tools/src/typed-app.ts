@@ -1515,14 +1515,18 @@ export type ComputedImpl<TTypes extends SchemaLike> = {
 /**
  * The transforms an app implements (in `jazz.computed.ts`): per name, `from`
  * turns a stored value into the value the app sees, `to` turns it back.
- * Jazz passes `null` through without calling either.
+ *
+ * Null passes through: Jazz never calls a transform with null, so a null
+ * branch is never reached. Either may still return null, so an alpha.64
+ * transform on an optional column, which handled null itself and which
+ * `jazz-tools upgrade` moves here unchanged, keeps typechecking.
  */
 export type TransformImpl<TTransforms extends TransformTypes> = {
   readonly [TName in keyof TTransforms]: TTransforms[TName] extends {
     readonly stored: infer TStored;
     readonly view: infer TView;
   }
-    ? { from(stored: TStored): TView; to(view: TView): TStored }
+    ? { from(stored: TStored): TView | null; to(view: TView): TStored | null }
     : never;
 };
 
