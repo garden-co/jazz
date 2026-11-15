@@ -625,7 +625,9 @@ describe("jazz-tools apps", () => {
     const run = io();
     expect(await runCloudCommand(["apps", "create", "Todo"], run.io)).toBe(0);
     expect(run.stderr()).toBe(
-      "Jazz Cloud is deprecated for new apps; see https://jazz.tools/docs/setup/deployment/own-server\n",
+      "Jazz Cloud is deprecated for new apps; run your backend on Vercel " +
+        "(https://jazz.tools/docs/setup/deployment/vercel) or your own server " +
+        "(https://jazz.tools/docs/setup/deployment/own-server)\n",
     );
   });
 

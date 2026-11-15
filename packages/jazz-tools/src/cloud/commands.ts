@@ -130,9 +130,12 @@ function defaultOpenBrowser(url: string): void {
 }
 
 const CLOUD_DEPRECATED =
-  "Jazz Cloud is deprecated for new apps; see https://jazz.tools/docs/setup/deployment/own-server";
+  "Jazz Cloud is deprecated for new apps; run your backend on Vercel " +
+  "(https://jazz.tools/docs/setup/deployment/vercel) or your own server " +
+  "(https://jazz.tools/docs/setup/deployment/own-server)";
 
 const HELP = `Jazz Cloud commands (deprecated; sign in with your dashboard account):
+${CLOUD_DEPRECATED}
 
   login                         (deprecated) Sign in through the browser (device code)
   logout                        End the session and forget it locally
