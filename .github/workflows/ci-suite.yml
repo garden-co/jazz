@@ -315,14 +315,18 @@ jobs:
         with:
           # The PR's merge commit and its first parent, the base it merges into.
           fetch-depth: 2
+      # Before any setup: a PR that touches nothing the trace guards stops here.
+      - name: Decide whether this PR runs the Next.js trace
+        id: decide
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition next-trace-decide
       - name: Authenticate trusted sccache writer
-        if: inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        if: steps.decide.outputs.run == 'true' && inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
         uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
         with:
           role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
           aws-region: ${{ vars.SCCACHE_REGION }}
       - name: Authenticate trusted sccache reader
-        if: inputs.trusted-cache && !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
+        if: steps.decide.outputs.run == 'true' && inputs.trusted-cache && !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
         uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
         with:
           role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
@@ -343,17 +347,19 @@ jobs:
           CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
         run: echo "TURBO_REMOTE_CACHE_SIGNATURE_KEY=${CACHE_SIGNATURE_KEY}" >> "${GITHUB_ENV}"
       - name: Set up signed Turbo Remote Cache
-        if: inputs.trusted-cache
+        if: steps.decide.outputs.run == 'true' && inputs.trusted-cache
         uses: vercel/setup-turborepo-remote-cache-action@135046f5efcadb17337d9b29b8d5b4035ae64b10 # v1.0.0
         with:
           team: garden-co
           policy: pol_0b019736-e95d-4f60-a5dd-e9415148834c
           audience: https://github.com/garden-co
       - uses: ./.github/actions/setup-blacksmith
+        if: steps.decide.outputs.run == 'true'
         with:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
 
       - name: Run Next.js trace partition
+        if: steps.decide.outputs.run == 'true'
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition next-trace
       - name: Report sccache statistics
         if: always()

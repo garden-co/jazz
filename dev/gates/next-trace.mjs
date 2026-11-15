@@ -3,11 +3,14 @@
 // adopter gate B65-1) with what it needs: the sealed native pair and an
 // admitted jazz-tools build, which it packs into a pnpm Next app.
 //
-// CI's fast scope (ready PRs) runs this partition on every PR; in a
-// pull_request run it stops at once unless the PR touches how a deployed
-// backend reaches jazz-napi (GUARDED_PATHS). The full scope runs the trace in
-// the typescript partition instead. Run locally, it always runs.
+// CI's fast scope (ready PRs) runs the `next-trace-decide` partition first,
+// `next-trace.mjs --decide`: in a pull_request run it says whether the PR
+// touches how a deployed backend reaches jazz-napi (GUARDED_PATHS), and
+// writes `run=true|false` to $GITHUB_OUTPUT so the job's later steps (setup
+// and the `next-trace` partition, this script without a flag) run only then.
+// The full scope runs the trace in the typescript partition instead.
 import { spawnSync } from "node:child_process";
+import { appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 /** What the trace test guards: changes here run it on a ready PR. */
@@ -75,12 +78,13 @@ const STEPS = [
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const root = fileURLToPath(new URL("../..", import.meta.url));
   process.chdir(root);
-  const decision = shouldRun();
-  if (!decision.run) {
-    console.log(`next-trace: skipped, ${decision.why}`);
+  if (process.argv[2] === "--decide") {
+    const decision = shouldRun();
+    console.log(`next-trace: ${decision.run ? "runs" : "skipped"}, ${decision.why}`);
+    if (process.env.GITHUB_OUTPUT)
+      appendFileSync(process.env.GITHUB_OUTPUT, `run=${decision.run}\n`);
     process.exit(0);
   }
-  console.log(`next-trace: running, ${decision.why}`);
   for (const [command, args] of STEPS) {
     const started = Date.now();
     console.log(`next-trace: ${command} ${args.join(" ")}`);
