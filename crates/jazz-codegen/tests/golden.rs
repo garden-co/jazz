@@ -283,3 +283,24 @@ fn kotlin_is_a_cli_language() {
     assert_eq!(Lang::parse("kotlin").unwrap(), Lang::Kotlin);
     assert!(Lang::ALL.contains(&Lang::Kotlin));
 }
+
+/// The StagePlan Kotlin example commits the bindings the generator writes
+/// for StagePlan's files (what `generate --check` checks once Kotlin is on).
+#[test]
+fn the_stage_plan_kotlin_cli_commits_its_bindings_byte_for_byte() {
+    let dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/stage-plan/apps/kotlin-cli");
+    let app_json = std::fs::read(dir.join("jazz.app.json")).unwrap();
+    let generated = generate(Lang::Kotlin, &app_json).unwrap();
+    let path = dir.join(jazz_codegen::kotlin::FILE);
+    if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
+        std::fs::write(&path, &generated).unwrap();
+        return;
+    }
+    assert_eq!(
+        generated,
+        std::fs::read_to_string(&path).unwrap(),
+        "{} differs from what the generator writes; run with JAZZ_UPDATE_FIXTURES=1",
+        path.display()
+    );
+}
