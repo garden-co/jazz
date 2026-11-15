@@ -200,39 +200,14 @@ impl<'a> Writer<'a> {
             nested.push_str("}\n\n");
         }
         nested.push_str(&items);
-        // Extensions (a struct's init and coding keys) are file-scope:
-        // they follow the namespace, as `extension JazzApp.Task`.
-        let mut extensions = String::new();
-        let mut body = String::new();
-        let mut in_extension = false;
         for line in nested.trim_end().lines() {
-            if let Some(rest) = line.strip_prefix("extension ") {
-                in_extension = true;
-                let _ = writeln!(extensions, "\nextension JazzApp.{rest}");
-                continue;
-            }
-            if in_extension {
-                extensions.push_str(line);
-                extensions.push('\n');
-                if line == "}" {
-                    in_extension = false;
-                }
-                continue;
-            }
             if !line.is_empty() {
-                body.push_str("    ");
+                out.push_str("    ");
             }
-            body.push_str(line);
-            body.push('\n');
+            out.push_str(line);
+            out.push('\n');
         }
-        // Drop the blank line each moved extension left behind (only in
-        // the declarations: the embedded file is copied as it is).
-        while body.contains("\n\n\n") {
-            body = body.replace("\n\n\n", "\n\n");
-        }
-        out.push_str(&body);
         out.push_str("}\n");
-        out.push_str(&extensions);
         Ok(out)
     }
 
@@ -336,9 +311,7 @@ impl<'a> Writer<'a> {
             f.doc(&mut out);
             let _ = writeln!(out, "    public var {}: {}", f.ident, f.ty);
         }
-        // `init` and the coding keys go in an extension, so the struct
-        // itself reads as its fields.
-        let _ = writeln!(out, "}}\n\nextension {row} {{");
+        out.push('\n');
         let _ = writeln!(
             out,
             "    public init(id: {RT}.ID{}) {{",
@@ -364,7 +337,7 @@ impl<'a> Writer<'a> {
             f.doc(&mut out);
             let _ = writeln!(out, "    public var {}: {}", f.ident, f.insert_type());
         }
-        let _ = writeln!(out, "}}\n\nextension {new} {{");
+        out.push('\n');
         let p = params(&fields, true);
         let _ = writeln!(out, "    public init({}) {{", p.trim_start_matches(", "));
         for f in &fields {
@@ -386,7 +359,7 @@ impl<'a> Writer<'a> {
             f.doc(&mut out);
             let _ = writeln!(out, "    public var {}: {RT}.Change<{}>", f.ident, f.ty);
         }
-        let _ = writeln!(out, "}}\n\nextension {patch} {{");
+        out.push('\n');
         let p = fields
             .iter()
             .map(|f| format!("{}: {RT}.Change<{}> = .unchanged", f.ident, f.ty))
@@ -859,19 +832,8 @@ mod tests {
         assert!(generated.contains("\n    public struct Task: Jazz.Row {\n"));
         assert!(generated.contains("\n    public struct NewTask: Jazz.Insert {\n"));
         assert!(generated.contains("\n    public enum tasks {\n"));
-        assert!(generated.contains("\nextension JazzApp.Task {\n"));
+        assert!(generated.ends_with("    }\n}\n"));
         assert_eq!(generated.matches("\npublic ").count(), 1, "{generated}");
-    }
-
-    #[test]
-    fn the_embedded_file_keeps_its_blank_lines() {
-        let file = b"{ \"format\": 1,\n\n\n\"tables\": { \"tasks\": { \"columns\": { \"title\": \"string\" } } } }\n";
-        let generated = crate::generate(crate::Lang::Swift, file).unwrap();
-        assert!(generated.contains("{ \"format\": 1,\n\n\n\"tables\""));
-        assert_eq!(
-            read(&generated).unwrap().source,
-            App::load(file).unwrap().source
-        );
     }
 
     #[test]
