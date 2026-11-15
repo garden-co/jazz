@@ -63,3 +63,58 @@ struct TestServerError: Error, CustomStringConvertible {
     let description: String
     init(_ description: String) { self.description = description }
 }
+
+/// The app's Jazz endpoint for end users, as `createJazz` serves it: a
+/// `jazz-app-test-relay` (`cargo build -p jazz-app --features test-relay
+/// --bin jazz-app-test-relay`, or `$JAZZ_TEST_RELAY_BIN`) in front of a
+/// `TestServer`, with a backend having published StagePlan's permissions.
+/// It authenticates `Bearer token-<user>` as `<user>`.
+final class TestRelay {
+    let process = Process()
+    let endpoint: String
+    let backend: StagePlanApp
+
+    init(_ server: TestServer) async throws {
+        let repo = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().appendingPathComponent("../../../../../..").standardized
+        let binary =
+            ProcessInfo.processInfo.environment["JAZZ_TEST_RELAY_BIN"]
+            ?? repo.appendingPathComponent("target/debug/jazz-app-test-relay").path
+        guard FileManager.default.isExecutableFile(atPath: binary) else {
+            if ProcessInfo.processInfo.environment["CI"] != nil {
+                throw TestServerError("no jazz-app-test-relay at \(binary)")
+            }
+            throw XCTSkip("no jazz-app-test-relay at \(binary): cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay")
+        }
+        backend = try await StagePlanApp.open(user: "00000000-0000-4000-8000-0000000000ee", server: server.server)
+        guard let bundle = try await backend.jazz.bundle() else { throw TestServerError("the backend published no bundle") }
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("jazz-relay-\(UUID().uuidString).out")
+        FileManager.default.createFile(atPath: out.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: out)
+        process.executableURL = URL(fileURLWithPath: binary)
+        process.arguments = ["--core", server.server.url, "--app-id", server.server.appId, "--bundle", bundle]
+        var env = ProcessInfo.processInfo.environment
+        env["JAZZ_BACKEND_SECRET"] = server.server.backendSecret
+        env["JAZZ_ADMIN_SECRET"] = server.server.adminSecret
+        process.environment = env
+        process.standardOutput = handle
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        for _ in 0..<200 {
+            if let text = try? String(contentsOf: out, encoding: .utf8),
+                let line = text.split(separator: "\n").first(where: { $0.hasPrefix("http") })
+            {
+                endpoint = String(line)
+                return
+            }
+            try await _Concurrency.Task.sleep(nanoseconds: 50_000_000)
+        }
+        kill(process.processIdentifier, SIGKILL)
+        throw TestServerError("jazz-app-test-relay printed no endpoint")
+    }
+
+    deinit {
+        kill(process.processIdentifier, SIGKILL)
+        process.waitUntilExit()
+    }
+}

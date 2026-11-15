@@ -159,26 +159,68 @@ final class StagePlanTests: XCTestCase {
 
     func testTextEditsMergeWithOthers() async throws {
         let server = try await TestServer()
-        let alice = try await StagePlanApp.open(user: user, server: server.server)
-        let show = try await alice.show(named: "Text")
-        let task = try await alice.jazz.insert(
-            JazzApp.NewTask(showId: show.id, title: "Notes", status: .todo, notes: "Hello world", rank: 1),
-            tier: .global)
-        // A second store of the same user edits the same notes concurrently.
-        let bob = try await StagePlanApp.open(user: user, server: server.server)
-        let seen = try await bob.jazz.one(JazzApp.tasks.query().where(JazzApp.tasks.id.eq(task.id)), tier: .remote)
-        XCTAssertEqual(seen?.notes, "Hello world")
+        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let show = try await app.show(named: "Text")
+        let task = try await app.jazz.insert(
+            JazzApp.NewTask(showId: show.id, title: "Notes", status: .todo, notes: "hello world", rank: 1))
+        // Someone else's change lands first...
+        try await app.jazz.update(task.id, JazzApp.TaskPatch(notes: .set("hello brave world")))
+        // ...then an edit made from the text before it: a plain write would
+        // give "hello world!", editText keeps both.
+        try await app.jazz.editText(JazzApp.Task.self, id: task.id, column: "notes", from: "hello world", to: "hello world!")
+        let merged = try await app.jazz.one(JazzApp.tasks.query().where(JazzApp.tasks.id.eq(task.id)))
+        XCTAssertEqual(merged?.notes, "hello brave world!")
 
-        let aliceNotes = try await alice.jazz.text(task, JazzApp.tasks.notes)
-        try await aliceNotes.insert("brave ", at: 6)
-        try await bob.jazz.editText(JazzApp.Task.self, id: task.id, column: "notes", from: "Hello world", to: "Hello world!")
-        try await alice.jazz.waitForSync(.global)
-        try await bob.jazz.waitForSync(.global)
+        // The same inside a transaction.
+        try await app.jazz.update(task.id, JazzApp.TaskPatch(notes: .set("one two")))
+        try await app.jazz.update(task.id, JazzApp.TaskPatch(notes: .set("one and two")))
+        try await app.jazz.transaction { tx in
+            try await tx.editText(JazzApp.Task.self, id: task.id, column: "notes", from: "one two", to: "one two three")
+        }
+        let inTx = try await app.jazz.one(JazzApp.tasks.query().where(JazzApp.tasks.id.eq(task.id)))
+        XCTAssertEqual(inTx?.notes, "one and two three")
 
-        let merged = try await alice.jazz.one(JazzApp.tasks.query().where(JazzApp.tasks.id.eq(task.id)), tier: .remote)
-        XCTAssertEqual(merged?.notes, "Hello brave world!")
-        try await bob.jazz.close()
-        try await alice.jazz.close()
+        // Client.edit without a patch.
+        try await app.jazz.edit(
+            JazzApp.Task.self, id: task.id,
+            edits: [.text(column: "notes", text: "one and two three!", editedFrom: "one and two three")])
+        let edited = try await app.jazz.one(JazzApp.tasks.query().where(JazzApp.tasks.id.eq(task.id)))
+        XCTAssertEqual(edited?.notes, "one and two three!")
+        try await app.jazz.close()
+    }
+
+    func testJazzTextEditsAndChanges() async throws {
+        let server = try await TestServer()
+        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let show = try await app.show(named: "Handle")
+        let task = try await app.jazz.insert(
+            JazzApp.NewTask(showId: show.id, title: "Notes", status: .todo, notes: "a😀b", rank: 1))
+        let notes = try await app.jazz.text(task, JazzApp.tasks.notes)
+        // Inside the emoji's surrogate pair: refused, nothing written.
+        do {
+            try await notes.insert("X", at: 2)
+            XCTFail("an offset inside a surrogate pair must be refused")
+        } catch {
+            guard case .refused = error else { return XCTFail("\(error)") }
+        }
+        try await notes.insert("X", at: 3)  // after the emoji
+        try await notes.delete(0..<1)
+        XCTAssertEqual(notes.current, "😀Xb")
+
+        var seen: [String] = []
+        for try await text in notes.changes {
+            seen.append(text)
+            if text == "😀Xb!" { break }
+            if seen.count == 1 {
+                // Someone else appends; `changes` delivers the merged text.
+                try await app.jazz.editText(JazzApp.Task.self, id: task.id, column: "notes", from: "😀Xb", to: "😀Xb!")
+            }
+        }
+        XCTAssertEqual(seen.first, "😀Xb")
+        XCTAssertEqual(notes.current, "😀Xb!")
+        let stored = try await app.jazz.one(JazzApp.tasks.query().where(JazzApp.tasks.id.eq(task.id)))
+        XCTAssertEqual(stored?.notes, "😀Xb!")
+        try await app.jazz.close()
     }
 
     func testTheTextSnippet() async throws {
@@ -191,6 +233,27 @@ final class StagePlanTests: XCTestCase {
         XCTAssertEqual(text, "Pack gaffer tape. ")
         let stored = try await app.jazz.one(JazzApp.tasks.query().where(JazzApp.tasks.id.eq(task.id)))
         XCTAssertEqual(stored?.notes, "Pack gaffer tape. ")
+        try await app.jazz.close()
+    }
+
+    /// An edit merged with someone else's change comes back as the merged
+    /// text, never equal to what the handle wrote: it must become current.
+    func testAMergedEchoBecomesCurrent() async throws {
+        let server = try await TestServer()
+        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let show = try await app.show(named: "Echo")
+        let task = try await app.jazz.insert(
+            JazzApp.NewTask(showId: show.id, title: "Notes", status: .todo, notes: "Hello world", rank: 1))
+        let notes = try await app.jazz.text(task, JazzApp.tasks.notes)
+        // Someone else's change is in the store before the handle edits.
+        try await app.jazz.editText(JazzApp.Task.self, id: task.id, column: "notes", from: "Hello world", to: "Hello world!")
+        try await notes.insert("brave ", at: 6)
+        for try await text in notes.changes where text == "Hello brave world!" { break }
+        XCTAssertEqual(notes.current, "Hello brave world!")
+        // An append at the delivered end works.
+        try await notes.insert("?", at: notes.current.utf16.count)
+        let stored = try await app.jazz.one(JazzApp.tasks.query().where(JazzApp.tasks.id.eq(task.id)))
+        XCTAssertEqual(stored?.notes, "Hello brave world!?")
         try await app.jazz.close()
     }
 
@@ -213,5 +276,31 @@ final class StagePlanTests: XCTestCase {
         XCTAssertEqual(strangerUpdates, false)
         try await stranger.jazz.close()
         try await chief.jazz.close()
+    }
+
+    func testUpsertRestoreBundleAndSyncStatus() async throws {
+        let server = try await TestServer()
+        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let show = try await app.show(named: "Upsert")
+        let id = UUID().uuidString.lowercased()
+        let first = try await app.jazz.upsert(id, JazzApp.NewTask(showId: show.id, title: "One", status: .todo, rank: 1))
+        XCTAssertEqual(first.id, id)
+        let second = try await app.jazz.upsert(id, JazzApp.NewTask(showId: show.id, title: "Two", status: .doing, rank: 1))
+        XCTAssertEqual(second.title, "Two")
+        try await app.jazz.delete(second)
+        let gone = try await app.tasks(of: show)
+        XCTAssertEqual(gone.count, 0)
+        let back = try await app.jazz.restore(JazzApp.Task.self, id: id)
+        XCTAssertEqual(back.title, "Two")
+
+        let bundle = try await app.jazz.bundle()
+        XCTAssertNotNil(bundle)
+        try await app.jazz.waitForSync(.global)
+        let status = try await app.jazz.syncStatus()
+        XCTAssertEqual(status.link, .connected)
+        let session = try await app.jazz.sessionState()
+        XCTAssertNil(session, "a backend has no end-user session")
+        XCTAssertTrue(try Jazz.generateDeviceKey().hasPrefix("jazz-auth-v1:"))
+        try await app.jazz.close()
     }
 }
