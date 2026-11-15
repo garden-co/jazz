@@ -88,6 +88,16 @@ public enum JazzApp {
             self.chatId = chatId
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.chatId == b.chatId
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(chatId)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case chatId = "chatId"
@@ -163,6 +173,18 @@ public enum JazzApp {
             self.chatId = chatId
             self.userId = userId
             self.joinCode = joinCode
+        }
+
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.chatId == b.chatId && a.userId == b.userId && a.joinCode == b.joinCode
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(chatId)
+            hasher.combine(userId)
+            hasher.combine(joinCode)
         }
 
         enum CodingKeys: Swift.String, Swift.CodingKey {
@@ -257,6 +279,18 @@ public enum JazzApp {
             self.name = name
             self.isPublic = isPublic
             self.joinCode = joinCode
+        }
+
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.name == b.name && a.isPublic == b.isPublic && a.joinCode == b.joinCode
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(name)
+            hasher.combine(isPublic)
+            hasher.combine(joinCode)
         }
 
         enum CodingKeys: Swift.String, Swift.CodingKey {
@@ -367,6 +401,18 @@ public enum JazzApp {
             self.senderId = senderId
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.chatId == b.chatId && a.text == b.text && a.senderId == b.senderId
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(chatId)
+            hasher.combine(text)
+            hasher.combine(senderId)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case chatId = "chatId"
@@ -463,6 +509,18 @@ public enum JazzApp {
             self.avatar = avatar
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.userId == b.userId && a.name == b.name && a.avatar == b.avatar
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(userId)
+            hasher.combine(name)
+            hasher.combine(avatar)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case userId = "userId"
@@ -555,6 +613,18 @@ public enum JazzApp {
             self.messageId = messageId
             self.userId = userId
             self.emoji = emoji
+        }
+
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.messageId == b.messageId && a.userId == b.userId && a.emoji == b.emoji
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(messageId)
+            hasher.combine(userId)
+            hasher.combine(emoji)
         }
 
         enum CodingKeys: Swift.String, Swift.CodingKey {
@@ -651,6 +721,19 @@ public enum JazzApp {
             self.color = color
             self.width = width
             self.pointsJson = pointsJson
+        }
+
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.canvasId == b.canvasId && a.color == b.color && a.width == b.width && a.pointsJson == b.pointsJson
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(canvasId)
+            hasher.combine(color)
+            hasher.combine(width)
+            hasher.combine(pointsJson)
         }
 
         enum CodingKeys: Swift.String, Swift.CodingKey {
