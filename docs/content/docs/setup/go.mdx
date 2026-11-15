@@ -131,8 +131,6 @@ to keep it in the OS keychain.
 - guest (anonymous) users;
 - history: `jazzapp.Tasks.History()` reads a table's versions at tier `ReadRemote`, but can't
   select columns or be subscribed to yet;
-- writing and filtering by payload enums (enums with fields): they read as sealed interfaces, and a
-  write or an `Eq` on one is refused;
 - nested rows and catalogue enums;
 - subscription deltas carry no positions: `q.Live(ctx, db)` keeps a query's rows in order for you;
 - non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column
