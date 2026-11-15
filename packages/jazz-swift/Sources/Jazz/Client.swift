@@ -18,6 +18,8 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
     case notSupported(String)
     /// A serializable transaction lost to another write: retrying may succeed.
     case conflict(String)
+    /// The calling task was cancelled.
+    case cancelled
 
     public var description: String {
         switch self {
@@ -28,6 +30,7 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         case .permissionDenied(let message): return "permission denied: \(message)"
         case .notSupported(let message): return "not supported yet: \(message)"
         case .conflict(let message): return "conflict: \(message)"
+        case .cancelled: return "cancelled"
         }
     }
 
@@ -36,6 +39,7 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
     static func wrap(_ error: any Error) -> JazzError {
         switch from(error) {
         case let error as JazzError: return error
+        case is CancellationError: return .cancelled
         case let error as DecodingError: return .decoding("\(error)")
         case let error as EncodingError: return .decoding("\(error)")
         case let error: return .io("\(error)")
@@ -153,7 +157,7 @@ struct RawDelta: Decodable {
 }
 
 /// An open app. Every call runs jazz-ffi off the caller's thread.
-public final class Client: @unchecked Sendable {
+public final class Client: Sendable {
     let handle: JazzHandle
     /// The app's `JazzApp.Computed` (immutable, and `Sendable` by its protocol).
     let implementations: (any Sendable)?
