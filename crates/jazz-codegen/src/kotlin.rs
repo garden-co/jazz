@@ -42,18 +42,19 @@ const APP_CLOSE: &str = ").joinToString(\"\")";
 
 /// Type names the bindings or the runtime use unqualified.
 const RESERVED: &[&str] = &[
+    // What the bindings use unqualified: a table of that name would shadow it.
     "Jazz",
     "JazzConfig",
     "Table",
     "Column",
-    "Query",
     "Patch",
-    "Delta",
     "JazzBigInt",
     "JazzBytes",
     "Serializable",
     "SerialName",
+    "ListSerializer",
     "JsonElement",
+    "Suppress",
     "String",
     "Int",
     "Long",
@@ -61,9 +62,26 @@ const RESERVED: &[&str] = &[
     "Boolean",
     "ByteArray",
     "List",
+    // Kotlin's own, which code in the package would read as the table's.
     "Any",
     "Unit",
     "Nothing",
+    "Result",
+    "Pair",
+    "Triple",
+    "Map",
+    "Set",
+    "Array",
+    "Char",
+    "Byte",
+    "Short",
+    "Float",
+    "Number",
+    "Enum",
+    "Comparable",
+    "Throwable",
+    "Exception",
+    "Error",
 ];
 
 const KEYWORDS: &[&str] = &[
