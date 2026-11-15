@@ -41,8 +41,8 @@ impl Authenticator for Bearers {
 
 struct Tokens(&'static str);
 impl TokenProvider for Tokens {
-    fn token(&self, _reason: String) -> Option<String> {
-        Some(format!("token-{}", self.0))
+    fn token(&self, _reason: String) -> Result<Option<String>, jazz_ffi::JazzError> {
+        Ok(Some(format!("token-{}", self.0)))
     }
 }
 
