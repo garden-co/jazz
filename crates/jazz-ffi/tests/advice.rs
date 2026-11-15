@@ -63,6 +63,14 @@ async fn can_answers_as_the_server_would() {
             Some(false)
         );
         assert!(bob.can("shows".into(), "poke".into(), "{}".into()).is_err());
+        assert!(
+            bob.can(
+                "shows".into(),
+                "insert".into(),
+                json!({ "row": { "id": show_id, "name": "x" } }).to_string()
+            )
+            .is_err()
+        );
         alice.shutdown().unwrap();
         bob.shutdown().unwrap();
 

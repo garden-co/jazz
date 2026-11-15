@@ -163,7 +163,9 @@ editedFrom, text}` and `edit {table, id, patch?, edits}`, with `"tx"` and
   server would let this user `read` / `insert` / `update` / `delete`, without
   doing it (TS's `canRead`, …). `insert` takes `row`; `read` and `delete`
   take `id`; `update` takes `id` and an optional `row` patch. `null` (no
-  server, or no decision) means unknown. Not inside a transaction.
+  server, or no decision) means unknown. It is advice: `true` doesn't promise
+  the write will succeed, as the data or permissions may change first. Not
+  inside a transaction.
 - **Upsert and restore:** UniFFI `upsert(table, id, row)` and C ABI
   `upsert {table, id, row}` write the row with this id: an insert if there is
   none, else its columns replaced; `row` is a whole row, as for an insert.
