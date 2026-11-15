@@ -20,7 +20,7 @@ let user = option("--user") ?? "00000000-0000-4000-8000-000000000001"
 let dataDir = option("--data-dir")
 let showName = option("--show") ?? "Opening night"
 
-func printTasks(_ tasks: [StagePlan.Task]) {
+func printTasks(_ tasks: [JazzApp.Task]) {
     for task in tasks {
         print("\(task.id)  \(task.status.rawValue.padding(toLength: 8, withPad: " ", startingAt: 0))\(task.title)")
     }
@@ -40,7 +40,7 @@ do {
         let task = try await app.addTask(args[1], to: show)
         print(task.id)
     case "move"? where args.count == 3:
-        guard let status = TaskStatus(rawValue: args[2]) else {
+        guard let status = JazzApp.TaskStatus(rawValue: args[2]) else {
             throw JazzError.refused("stage must be one of todo, doing, done, blocked")
         }
         try await app.move(args[1], to: status)

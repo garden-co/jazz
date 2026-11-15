@@ -29,34 +29,34 @@ public struct StagePlanApp: Sendable {
     }
 
     /// The user's show named `name`, created (with them as chief) if they have none.
-    public func show(named name: String) async throws -> Show {
+    public func show(named name: String) async throws -> JazzApp.Show {
         let me = try await jazz.account()
         if let show = try await jazz.one(
-            Shows.query().where(Shows.chiefAccount.eq(me), Shows.name.eq(name)))
+            JazzApp.shows.query().where(JazzApp.shows.chiefAccount.eq(me), JazzApp.shows.name.eq(name)))
         {
             return show
         }
         return try await jazz.insert(
-            NewShow(name: name, venue: "TBA", date: "TBA", doors: "TBA", chiefAccount: me))
+            JazzApp.NewShow(name: name, venue: "TBA", date: "TBA", doors: "TBA", chiefAccount: me))
     }
 
     /// The show's tasks, in `rank` order.
-    public func tasks(of show: Show) async throws -> [Task] {
-        try await jazz.all(Tasks.query().where(Tasks.showId.eq(show.id)).orderBy(Tasks.rank))
+    public func tasks(of show: JazzApp.Show) async throws -> [JazzApp.Task] {
+        try await jazz.all(JazzApp.tasks.query().where(JazzApp.tasks.showId.eq(show.id)).orderBy(JazzApp.tasks.rank))
     }
 
     /// Adds a task to the bottom of the show's `todo` stage.
     @discardableResult
-    public func addTask(_ title: String, to show: Show) async throws -> Task {
+    public func addTask(_ title: String, to show: JazzApp.Show) async throws -> JazzApp.Task {
         let last = try await jazz.one(
-            Tasks.query().where(Tasks.showId.eq(show.id)).orderBy(Tasks.rank.desc).limit(1))
+            JazzApp.tasks.query().where(JazzApp.tasks.showId.eq(show.id)).orderBy(JazzApp.tasks.rank.desc).limit(1))
         return try await jazz.insert(
-            NewTask(showId: show.id, title: title, status: .todo, rank: (last?.rank ?? 0) + 1))
+            JazzApp.NewTask(showId: show.id, title: title, status: .todo, rank: (last?.rank ?? 0) + 1))
     }
 
     /// Moves the task to `status`.
-    public func move(_ task: Jazz.ID, to status: TaskStatus) async throws {
-        try await jazz.update(task, TaskPatch(status: .set(status)))
+    public func move(_ task: Jazz.ID, to status: JazzApp.TaskStatus) async throws {
+        try await jazz.update(task, JazzApp.TaskPatch(status: .set(status)))
     }
 }
 

@@ -47,7 +47,8 @@ final class TestServer {
     }
 
     deinit {
-        // Not SIGTERM: the server waits out a graceful shutdown on it.
+        // SIGKILL: after terminate() (SIGTERM), Foundation's waitUntilExit()
+        // was seen hanging here on Linux.
         kill(process.processIdentifier, SIGKILL)
         process.waitUntilExit()
     }
