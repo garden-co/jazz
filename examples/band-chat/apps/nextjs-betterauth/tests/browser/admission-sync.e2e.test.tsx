@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createJazzClient, type Db, type JazzClientConfig } from "jazz-tools";
-import { deployApp } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
 import {
   TestCleanup,
   uniqueDbName,
@@ -12,6 +11,7 @@ import {
   jazzAppUserUrl,
   startJazzApp,
   type JazzServerInfo,
+  deploy as deployApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server";
 import permissions from "../../jazz.permissions.json" with { type: "json" };
 import { app } from "../../jazz.generated";

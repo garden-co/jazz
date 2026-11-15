@@ -3,12 +3,12 @@ import { page, userEvent } from "vitest/browser";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { JazzClientConfig } from "jazz-tools";
-import { deployApp } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
 import {
   getJazzServerInfo,
   jazzAppFetch,
   jazzAppUserUrl,
   startJazzApp,
+  deploy as deployApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server";
 import { memoryAccountStore } from "../../../../../testing/accounts";
 import permissions from "../../jazz.permissions.json" with { type: "json" };
