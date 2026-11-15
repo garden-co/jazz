@@ -6698,6 +6698,124 @@ mod tests {
         assert_eq!(answered, [0, 2, 3, 4], "with {room} bytes of room");
     }
 
+    /// Opens a thin session for `alice` with its output stream.
+    async fn thin_session_for_test(
+        runtime: &crate::runtime::ServerRuntimeHandle,
+        alice: AuthorSubject,
+    ) -> (
+        crate::runtime::ServerSession,
+        crate::runtime::ServerRuntimeFrameStream,
+    ) {
+        let session = runtime
+            .open_thin_session(
+                alice,
+                BTreeMap::new(),
+                None,
+                CommitUnitTrust::TrustedBackend,
+            )
+            .await
+            .unwrap();
+        let stream = runtime.open_wire_stream(session).unwrap();
+        (session, stream)
+    }
+
+    /// The next frames or close on `stream`, within a few seconds.
+    async fn next_output(
+        stream: &mut crate::runtime::ServerRuntimeFrameStream,
+    ) -> Option<Result<usize, jazz::wire::WireError>> {
+        tokio::time::timeout(std::time::Duration::from_secs(10), stream.recv())
+            .await
+            .expect("output or a close")
+            .map(|frames| frames.map(|frames| frames.len()))
+    }
+
+    /// A client that reads nothing while its egress stays at the budget is
+    /// closed once the slow-reader timeout passes, with a retryable
+    /// `Backpressure` error; one that reads is never closed.
+    ///
+    /// ```text
+    /// alice (reads nothing) ── egress full ── timeout ──► Backpressure, Later
+    /// bob   (reads)         ── egress free ─────────────► stays open
+    /// ```
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_stalled_past_the_slow_reader_timeout_is_closed() {
+        use crate::runtime::{
+            EgressLimits, SESSION_QUEUE_BUDGET, ServerRuntimeHandle, StorageConfig,
+        };
+        let runtime = ServerRuntimeHandle::start_with_storage(
+            JazzSchema::new(&private_docs_public_schema()).unwrap(),
+            StorageConfig::InMemory,
+        )
+        .unwrap();
+        runtime
+            .set_egress_limits_for_test(EgressLimits {
+                slow_reader_timeout: std::time::Duration::ZERO,
+                ..EgressLimits::default()
+            })
+            .await;
+        let (alice, mut alice_out) =
+            thin_session_for_test(&runtime, AuthorSubject::for_test_bytes([0xa1; 16])).await;
+        let (bob, _bob_out) =
+            thin_session_for_test(&runtime, AuthorSubject::for_test_bytes([0xb0; 16])).await;
+        runtime.hold_egress_for_test(alice, SESSION_QUEUE_BUDGET);
+        // The first tick starts alice's clock; a later one finds it past.
+        for _ in 0..3 {
+            runtime.request_wire_tick(alice).unwrap();
+            runtime.settle_for_test().await;
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let closed = next_output(&mut alice_out).await.expect("a close frame");
+        let error = closed.expect_err("alice is closed");
+        assert_eq!(
+            (error.code, error.retry),
+            (WireErrorCode::Backpressure, WireRetry::Later),
+            "{error:?}"
+        );
+        assert!(
+            runtime.is_thin_session_for_test(bob).await,
+            "bob stays open"
+        );
+    }
+
+    /// Over the server's egress budget, the session holding the most
+    /// unread output is closed first, and only as many as the rest need.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn past_the_egress_budget_the_biggest_backlog_is_closed_first() {
+        use crate::runtime::{EgressLimits, ServerRuntimeHandle, StorageConfig};
+        let runtime = ServerRuntimeHandle::start_with_storage(
+            JazzSchema::new(&private_docs_public_schema()).unwrap(),
+            StorageConfig::InMemory,
+        )
+        .unwrap();
+        runtime
+            .set_egress_limits_for_test(EgressLimits {
+                egress_budget_bytes: 3 * 1024 * 1024,
+                ..EgressLimits::default()
+            })
+            .await;
+        let (alice, mut alice_out) =
+            thin_session_for_test(&runtime, AuthorSubject::for_test_bytes([0xa1; 16])).await;
+        let (bob, _bob_out) =
+            thin_session_for_test(&runtime, AuthorSubject::for_test_bytes([0xb0; 16])).await;
+        let (carol, _carol_out) =
+            thin_session_for_test(&runtime, AuthorSubject::for_test_bytes([0xc0; 16])).await;
+        runtime.hold_egress_for_test(alice, 3 * 1024 * 1024);
+        runtime.hold_egress_for_test(bob, 1024 * 1024);
+        runtime.hold_egress_for_test(carol, 1024 * 1024);
+        runtime.request_wire_tick(alice).unwrap();
+        runtime.settle_for_test().await;
+        let error = next_output(&mut alice_out)
+            .await
+            .expect("a close frame")
+            .expect_err("alice held the most");
+        assert_eq!(
+            (error.code, error.retry),
+            (WireErrorCode::Backpressure, WireRetry::Later)
+        );
+        assert!(runtime.is_thin_session_for_test(bob).await);
+        assert!(runtime.is_thin_session_for_test(carol).await);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn trusted_backend_thin_connection_reads_as_system() {
         let (state, schema) = private_docs_state().await;

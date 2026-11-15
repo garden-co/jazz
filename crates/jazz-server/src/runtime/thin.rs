@@ -84,6 +84,8 @@ pub(super) struct ThinSession {
     next_subscription: u64,
     output: tokio_mpsc::UnboundedSender<Outbound>,
     egress: Arc<AtomicUsize>,
+    /// Since when its egress has stayed at the budget, unread.
+    stalled: super::StalledSince,
 }
 
 impl ThinSession {
@@ -107,7 +109,29 @@ impl ThinSession {
             next_subscription: 0,
             output,
             egress,
+            stalled: super::StalledSince::default(),
         }
+    }
+
+    /// Whether its egress stayed at the budget, unread, past `timeout`.
+    pub(super) fn stalled_past(
+        &self,
+        now: std::time::Instant,
+        timeout: std::time::Duration,
+    ) -> bool {
+        self.stalled.observe(!self.has_room(), now, timeout)
+    }
+
+    /// Output it holds in server memory: handed to the socket, unread.
+    /// (Its live queries' undelivered events are bounded in the core,
+    /// which coalesces a backlog past its limit.)
+    pub(super) fn undrained(&self) -> usize {
+        self.egress.load(Ordering::Acquire)
+    }
+
+    /// Tell the client its session ends with `error`.
+    pub(super) fn fail(&self, error: jazz::wire::WireError) {
+        let _ = self.output.send((Err(error), 0));
     }
 
     fn has_room(&self) -> bool {

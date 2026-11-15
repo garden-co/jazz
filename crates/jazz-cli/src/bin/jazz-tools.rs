@@ -277,6 +277,29 @@ enum Commands {
         #[arg(long, env = "JAZZ_QUERY_CACHE_BUDGET_BYTES", value_parser = clap::value_parser!(u64))]
         query_cache_budget_bytes: Option<u64>,
 
+        /// Bytes of output one client session may leave unread beyond twice
+        /// its biggest tick before it is closed with a retryable
+        /// `Backpressure` error (the client reconnects and resumes).
+        /// Defaults to 64 MiB.
+        #[arg(long, env = "JAZZ_SESSION_BACKLOG_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
+        session_backlog_bytes: Option<u64>,
+
+        /// Bytes of output one client session may leave unread at most,
+        /// however big its ticks. Defaults to 256 MiB.
+        #[arg(long, env = "JAZZ_SESSION_BACKLOG_MAX_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
+        session_backlog_max_bytes: Option<u64>,
+
+        /// Bytes of unread output all client sessions together may hold.
+        /// Past it, the sessions holding the most are closed first.
+        /// Defaults to a quarter of the memory limit, else 2 GiB.
+        #[arg(long, env = "JAZZ_EGRESS_BUDGET_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
+        egress_budget_bytes: Option<u64>,
+
+        /// Seconds a client session may stay at its egress budget without
+        /// reading before it is closed. Defaults to 300.
+        #[arg(long, env = "JAZZ_SLOW_READER_TIMEOUT_SECS", value_parser = clap::value_parser!(u64).range(1..))]
+        slow_reader_timeout_secs: Option<u64>,
+
         /// Internal testing hook: write the resolved listen port after binding.
         #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
         bound_port_file: Option<String>,
@@ -439,6 +462,10 @@ async fn run() {
             memory_limit_bytes,
             stored_arrangements,
             query_cache_budget_bytes,
+            session_backlog_bytes,
+            session_backlog_max_bytes,
+            egress_budget_bytes,
+            slow_reader_timeout_secs,
             bound_port_file,
             diagnostics_listen,
             diagnostics_token,
@@ -500,6 +527,10 @@ async fn run() {
                         .or_else(jazz_server::resources::detect_memory_limit_bytes),
                     stored_arrangements,
                     query_cache_budget_bytes,
+                    session_backlog_bytes,
+                    session_backlog_max_bytes,
+                    egress_budget_bytes,
+                    slow_reader_timeout_secs,
                 },
             )
             .await

@@ -242,6 +242,16 @@ pub async fn run_until(
     if !limits.stored_arrangements {
         tracing::warn!("--no-stored-arrangements has no effect: SQLite reads stored tables by key");
     }
+    let egress = limits.egress_limits();
+    runtime::set_egress_limits(egress);
+    info!(
+        "Client egress: closes a session past {} MiB undrained (at most {} MiB), {} MiB for all \
+         sessions, or {}s without reading",
+        egress.session_backlog_bytes / (1024 * 1024),
+        egress.session_backlog_max_bytes / (1024 * 1024),
+        egress.egress_budget_bytes / (1024 * 1024),
+        egress.slow_reader_timeout.as_secs()
+    );
     let ceiling = limits.query_cache_ceiling_bytes();
     storage_cache::set_budget(ceiling);
     if let Some(ceiling) = ceiling {
