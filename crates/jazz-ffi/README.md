@@ -110,7 +110,12 @@ columns (`merge: "text"`) take plain string writes.
   positions, so an ordered subscription re-sorts locally. A row that only
   moved is left out.
 
-After the app closes, each open subscription gets one last error, `Closed`
+Every way a subscription ends, other than being cancelled, ends with one
+last error, after which no callback comes: a rejection (`Refused`), or
+`Closed` when the app closes or the stream ends for any other reason (the
+client stopping, the server ending the query). A row that permissions stop
+granting arrives as `removed`; the subscription goes on. After the app
+closes, each open subscription gets one last error, `Closed`
 (kind `"closed"` on the C ABI). `jazz_unsubscribe` returns only once no
 callback is running, so the host may free `ctx` right after. Called from
 inside the callback, it doesn't wait. A subscription may be freed before or
