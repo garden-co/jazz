@@ -277,6 +277,12 @@ impl<'a> Writer<'a> {
         let mut out = String::new();
         // The row.
         let _ = writeln!(out, "/// A row of `{}`.", table.name);
+        if let Some(module) = shadowed_module(&row) {
+            let _ = writeln!(
+                out,
+                "///\n/// In your module this hides `{module}.{row}`: write `{module}.{row}` for that one."
+            );
+        }
         let _ = writeln!(out, "public struct {row}: {RT}.Row {{");
         let _ = writeln!(out, "    public static let table = {table_lit}");
         let _ = writeln!(out, "    public let id: {RT}.ID");
@@ -482,6 +488,19 @@ fn coding_keys(out: &mut String, fields: &[Field<'_>], with_id: bool) {
         );
     }
     out.push_str("    }\n");
+}
+
+/// The module a row type of this name hides in the app's module, if any:
+/// the standard types app code commonly reaches for unqualified.
+fn shadowed_module(name: &str) -> Option<&'static str> {
+    match name {
+        "Task" => Some("_Concurrency"),
+        "Result" | "Error" | "Array" | "Set" | "Dictionary" | "String" | "Character" | "Range"
+        | "Never" | "Optional" => Some("Swift"),
+        "Date" | "Data" | "URL" | "UUID" | "Locale" | "Calendar" | "Notification" | "Process"
+        | "Timer" | "Measurement" | "Operation" | "Thread" => Some("Foundation"),
+        _ => None,
+    }
 }
 
 /// A Swift string literal of `text`.
@@ -794,6 +813,16 @@ mod tests {
             crate::bindings::staleness(&app, crate::Lang::Swift, Some(&generated)).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn a_row_type_hiding_concurrency_task_says_so() {
+        let file =
+            br#"{ "format": 1, "tables": { "tasks": { "columns": { "title": "string" } } } }"#;
+        let generated = crate::generate(crate::Lang::Swift, file).unwrap();
+        assert!(generated.contains(
+            "/// In your module this hides `_Concurrency.Task`: write `_Concurrency.Task` for that one.\npublic struct Task: Jazz.Row {"
+        ));
     }
 
     #[test]

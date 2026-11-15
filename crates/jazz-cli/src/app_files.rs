@@ -77,7 +77,7 @@ pub fn languages(dir: &Path, given: &[Lang]) -> Result<Vec<Selected>, String> {
     if found.is_empty() {
         return Err(format!(
             "{}: nothing beside {APP_FILE} says which language to generate bindings in \
-             (a package.json, the Cargo.toml of a crate depending on jazz-app, or a Package.swift naming jazz-swift); pass --lang",
+             (a package.json, or the Cargo.toml of a crate depending on jazz-app); pass --lang",
             dir.display(),
         ));
     }
