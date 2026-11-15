@@ -1002,9 +1002,6 @@ fn convert_column_type(
     }
 }
 
-/// Enforce the same v1 payload-enum boundary for raw public-schema ingress as
-/// the TypeScript DSL. Schema JSON can bypass the DSL, so this must reject
-/// unsupported layouts before recursive column conversion admits them.
 /// A latest-only table keeps no superseded versions (SPEC 4 §4.9), so a
 /// feature that reads them is refused when the schema compiles.
 fn validate_latest_only(

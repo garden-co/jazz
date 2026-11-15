@@ -1080,10 +1080,6 @@ fn value_json_shape_is_pinned() {
             "missing field `values` at line 1 column 33",
         ),
         (
-            r#"{"type":"Enum","value":{"values":[]}}"#,
-            "missing field `case` at line 1 column 36",
-        ),
-        (
             r#"{"type":"Nope"}"#,
             "unknown variant `Nope`, expected one of `Integer`, `BigInt`, `Double`, `Boolean`, \
              `Text`, `Timestamp`, `Uuid`, `TransactionId`, `Bytea`, `Array`, `Row`, `Enum`, \

@@ -1,12 +1,10 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jazz_types::records::{
-        EnumCase, EnumSchema, EnumValue, OwnedRecord, RecordDescriptor, ValueType,
-    };
+    use jazz_types::records::{OwnedRecord, RecordDescriptor, ValueType};
     use jazz_types::column_schema::{ColumnSchema, ColumnType};
     use crate::model::public_schema::{
-        ColumnDescriptor as PublicColumnDescriptor, ColumnType as PublicColumnType,
+        ColumnType as PublicColumnType,
         SchemaBuilder as PublicSchemaBuilder,
         TableSchemaBuilder as PublicTableSchemaBuilder,
     };
