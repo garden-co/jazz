@@ -47,6 +47,7 @@ export const ciPartitionJobs = Object.freeze({
   "next-trace-decide": "test-next-trace",
   "next-trace": "test-next-trace",
   "react-native": "test-react-native",
+  "jazz-ffi-bindings": "test-jazz-ffi-bindings",
 });
 
 const command = (label, executable, args, options = {}) =>
@@ -178,6 +179,9 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
+    // jazz-ffi's C ABI from a C program linking its staticlib, and the Swift
+    // and Kotlin sources uniffi-bindgen generates (target/jazz-ffi-bindings).
+    command("jazz-ffi C ABI and UniFFI bindings", "bash", ["dev/gates/jazz-ffi.sh"]),
     // Runs after the workspace tests with the same feature selection, so its
     // `cargo nextest list` reuses the test binaries that were just built.
     command("ignored-test inventory", "node", ["dev/gates/ignored-tests.mjs"]),
@@ -308,6 +312,13 @@ export const ciPartitions = Object.freeze({
       "--workspace",
       "--features",
       "jazz/durable-object-limits",
+    ]),
+  ]),
+  // jazz-ffi's generated Kotlin and Swift, compiled with smoke programs and
+  // run against the library (needs a JDK and swiftc: the runner image).
+  "jazz-ffi-bindings": Object.freeze([
+    command("jazz-ffi Kotlin and Swift bindings", "bash", [
+      "dev/gates/jazz-ffi-compile-bindings.sh",
     ]),
   ]),
 });
