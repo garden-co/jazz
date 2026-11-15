@@ -2186,6 +2186,10 @@ pub(crate) struct Client {
     node: [u8; 16],
     connection: u64,
     fates: HashMap<u64, Result<(), Error>>,
+    /// Commits of this store the upstream rejected that no wait has reported
+    /// yet: [`Db::wait_for_pending_writes`] reports them even when they
+    /// settled before it was called (TS `waitForSync`, jazz#5728).
+    unreported_rejections: BTreeSet<u64>,
     /// Fates the upstream gave this replica's commits, counted: each is
     /// progress a read queued behind them makes (see [`Db::settled_upstream`]).
     settled_upstream: u64,
@@ -7600,6 +7604,7 @@ impl Client {
             pending: PendingQueue::default(),
             unsent: Vec::new(),
             fates: HashMap::new(),
+            unreported_rejections: BTreeSet::new(),
             settled_upstream: 0,
             local_fates: HashSet::new(),
             refused: Vec::new(),
@@ -8773,8 +8778,20 @@ impl Db {
             }
     }
 
-    /// Wait for a local transaction's fate at `tier`.
+    /// Wait for a local transaction's fate at `tier`. A rejection it reports
+    /// is reported: a later [`Db::wait_for_pending_writes`] doesn't report
+    /// it again.
     pub async fn wait_for_transaction(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
+        let fate = self.fate(tx, tier).await;
+        if fate.is_err()
+            && let Some(client) = self.inner.borrow_mut().client.as_mut()
+        {
+            client.unreported_rejections.remove(&tx);
+        }
+        fate
+    }
+
+    async fn fate(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
         if !self.waits_upstream(tier) {
             return Ok(tx);
         }
@@ -8818,7 +8835,9 @@ impl Db {
 
     /// Wait until every transaction pending upload when called (recovered
     /// ones included) reaches `tier`, failing with the first the server
-    /// rejected. Writes made after the call are not waited for.
+    /// rejected: of those, and of the commits it rejected earlier that no
+    /// wait has reported yet (jazz#5728). Each rejection is reported once.
+    /// Writes made after the call are not waited for.
     pub async fn wait_for_pending_writes(&self, tier: DurabilityTier) -> Result<(), Error> {
         if !self.waits_upstream(tier) {
             return Ok(());
@@ -8828,10 +8847,29 @@ impl Db {
             let client = inner.client.as_ref().expect("client");
             client.pending.iter().map(|p| p.tx).collect()
         };
+        // Every verdict first, then the earliest failure among them and the
+        // rejections still unreported.
+        let mut failed: Option<(u64, Error)> = None;
         for tx in pending {
-            self.wait_for_transaction(tx, tier).await?;
+            if let Err(error) = self.fate(tx, tier).await
+                && failed.as_ref().is_none_or(|(first, _)| tx < *first)
+            {
+                failed = Some((tx, error));
+            }
         }
-        Ok(())
+        let mut inner = self.inner.borrow_mut();
+        let client = inner.client.as_mut().expect("client");
+        let unreported = std::mem::take(&mut client.unreported_rejections);
+        if let Some(tx) = unreported.first()
+            && failed.as_ref().is_none_or(|(first, _)| tx < first)
+            && let Some(Err(error)) = client.fates.get(tx)
+        {
+            failed = Some((*tx, error.clone()));
+        }
+        match failed {
+            Some((_, error)) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// One-shot read records, answer slots, and queued one-shot requests.
@@ -9617,8 +9655,11 @@ impl Db {
                         if accepted && !global {
                             client.local_fates.insert(tx);
                         }
-                        client.fates.insert(tx, result);
                         // A relayed commit is a session's, not this store's.
+                        if result.is_err() && !relayed {
+                            client.unreported_rejections.insert(tx);
+                        }
+                        client.fates.insert(tx, result);
                         if !relayed {
                             client.settled_upstream += 1;
                         }

@@ -89,6 +89,19 @@ describe("deployed permissions with claims in referenced read policies", () => {
       ).toBe("permission_denied");
       // The denial must not break the session's later writes.
       expect(await outcome(editor.db.insert(app.topics, { title: "later" }))).toBe("accepted");
+
+      // waitForSync reports a refusal that settled before it was called,
+      // even when a later write was accepted (jazz#5728), and only once.
+      editor.db.insert(app.notes, {
+        userId: viewer.userId,
+        topicId: topic.value.id,
+        text: "refused, unwaited",
+      });
+      expect(await outcome(editor.db.insert(app.topics, { title: "accepted after" }))).toBe(
+        "accepted",
+      );
+      await expect(editor.db.waitForSync()).rejects.toMatchObject({ code: "permission_denied" });
+      await editor.db.waitForSync();
     } finally {
       await server.stop();
     }

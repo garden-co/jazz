@@ -343,3 +343,51 @@ fn upload_status_counts_what_awaits_a_verdict_and_what_was_refused() {
     assert_eq!((accepted.pending, accepted.rejected), (0, 1));
     assert_eq!(accepted.last_rejection, Some(last));
 }
+
+/// Alice writes a note of her own, which the authority accepts.
+fn own_note(client: &Db) -> u64 {
+    block_on(client.insert(
+        "notes",
+        BTreeMap::from([
+            ("owner".to_owned(), subject(alice())),
+            ("title".to_owned(), Value::String("mine".into())),
+        ]),
+        InsertOptions::default(),
+    ))
+    .unwrap()
+    .mergeable_tx_id()
+}
+
+/// ```text
+/// alice ──insert(in bob's name)──► core ──✗ refused   (verdict arrives)
+/// alice ──insert(her own)───────► core ──✓ accepted  (verdict arrives)
+/// alice: wait_for_pending_writes(Global) ──► the refusal, once (jazz#5728)
+/// ```
+///
+/// Both verdicts are in before the wait, so nothing is pending when it is
+/// called: the refusal must still be reported, as TS's `waitForSync`
+/// promises for every write committed before the call.
+#[test]
+fn a_sync_wait_reports_a_refusal_that_settled_before_it() {
+    use jazz::tx::DurabilityTier;
+    let server = authority();
+    let client = block_on(Db::open(DbConfig::new(schema(), identity(0xa1, alice())))).unwrap();
+    connect(&client, &server);
+    refused_note(&client, RowUuid::from_bytes([0x12; 16]));
+    own_note(&client);
+    pump(&client, &server);
+
+    let waited = block_on(client.wait_for_pending_writes(DurabilityTier::Global));
+    assert!(
+        waited.is_err(),
+        "the earlier refusal is reported: {waited:?}"
+    );
+    // Reported once: the next wait has nothing to report.
+    block_on(client.wait_for_pending_writes(DurabilityTier::Global)).unwrap();
+
+    // A refusal its own wait already reported isn't reported again.
+    let seq = refused_note(&client, RowUuid::from_bytes([0x13; 16]));
+    pump(&client, &server);
+    assert!(block_on(client.wait_for_transaction(seq, DurabilityTier::Global)).is_err());
+    block_on(client.wait_for_pending_writes(DurabilityTier::Global)).unwrap();
+}
