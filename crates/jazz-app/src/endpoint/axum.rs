@@ -64,6 +64,8 @@ async fn serve(
                         .filter_map(|message| {
                             std::future::ready(match message {
                                 Ok(Message::Binary(data)) => Some(data.to_vec()),
+                                // TS clients send their prelude as text.
+                                Ok(Message::Text(text)) => Some(text.as_bytes().to_vec()),
                                 _ => None,
                             })
                         }),

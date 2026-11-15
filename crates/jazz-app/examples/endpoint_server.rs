@@ -13,13 +13,17 @@
 //! Environment:
 //! - `JAZZ_APP_ID` (a UUID), `JAZZ_CORE_URL` (default `http://localhost:1625`),
 //!   `JAZZ_BACKEND_SECRET`, `JAZZ_ADMIN_SECRET`: the core;
-//! - `JAZZ_JWT_SECRET`, `JAZZ_JWT_ISSUER`: the app's own sign-in, HS256 JWTs
+//! - `APP_JWT_SECRET`, `APP_JWT_ISSUER`: the app's own sign-in, HS256 JWTs
 //!   in `Authorization: Bearer`. The user is `sub`, the claims are the
-//!   token's `claims` object, the answer holds until `exp`;
-//! - `JAZZ_ACCEPT_DEVICE_ACCOUNTS=1`: let device accounts sync too;
+//!   token's `claims` object, the answer holds until `exp`. (Not `JAZZ_*`:
+//!   a core refuses to start with user-auth settings in its environment.);
+//! - `APP_ACCEPT_DEVICE_ACCOUNTS=1`: let device accounts sync too;
 //! - `PORT` (default 4000).
 //!
-//! Clients connect to `http://localhost:$PORT/jazz`.
+//! Clients connect to `http://localhost:$PORT/jazz`. The core and this
+//! server must run with the app id the clients use: a TS client derives it
+//! from its generated bindings, and every account route answers 404 for
+//! another id.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -79,8 +83,8 @@ async fn main() -> jazz_app::Result<()> {
         )),
     )
     .await?;
-    let (secret, issuer) = (env("JAZZ_JWT_SECRET"), env("JAZZ_JWT_ISSUER"));
-    let devices = std::env::var("JAZZ_ACCEPT_DEVICE_ACCOUNTS").is_ok_and(|v| v == "1");
+    let (secret, issuer) = (env("APP_JWT_SECRET"), env("APP_JWT_ISSUER"));
+    let devices = std::env::var("APP_ACCEPT_DEVICE_ACCOUNTS").is_ok_and(|v| v == "1");
     let endpoint = Endpoint::new(&backend, move |request: Request| {
         let answer = match request.bearer() {
             Some(token) => verify(token, secret.as_bytes(), &issuer).map(Answer::User),
