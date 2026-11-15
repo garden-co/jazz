@@ -156,4 +156,41 @@ final class StagePlanTests: XCTestCase {
         try await stranger.jazz.close()
         try await chief.jazz.close()
     }
+
+    func testTextEditsMergeWithOthers() async throws {
+        let server = try await TestServer()
+        let alice = try await StagePlanApp.open(user: user, server: server.server)
+        let show = try await alice.show(named: "Text")
+        let task = try await alice.jazz.insert(
+            JazzApp.NewTask(showId: show.id, title: "Notes", status: .todo, notes: "Hello world", rank: 1),
+            tier: .global)
+        // A second store of the same user edits the same notes concurrently.
+        let bob = try await StagePlanApp.open(user: user, server: server.server)
+        let seen = try await bob.jazz.one(JazzApp.tasks.query().where(JazzApp.tasks.id.eq(task.id)), tier: .remote)
+        XCTAssertEqual(seen?.notes, "Hello world")
+
+        let aliceNotes = try await alice.jazz.text(task, JazzApp.tasks.notes)
+        try await aliceNotes.insert("brave ", at: 6)
+        try await bob.jazz.editText(JazzApp.Task.self, id: task.id, column: "notes", from: "Hello world", to: "Hello world!")
+        try await alice.jazz.waitForSync(.global)
+        try await bob.jazz.waitForSync(.global)
+
+        let merged = try await alice.jazz.one(JazzApp.tasks.query().where(JazzApp.tasks.id.eq(task.id)), tier: .remote)
+        XCTAssertEqual(merged?.notes, "Hello brave world!")
+        try await bob.jazz.close()
+        try await alice.jazz.close()
+    }
+
+    func testTheTextSnippet() async throws {
+        let server = try await TestServer()
+        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let show = try await app.show(named: "Snippet")
+        let task = try await app.jazz.insert(
+            JazzApp.NewTask(showId: show.id, title: "Notes", status: .todo, notes: "", rank: 1))
+        let text = try await DocsSnippets.mergeableText(app.jazz, task: task)
+        XCTAssertEqual(text, "Pack gaffer tape. ")
+        let stored = try await app.jazz.one(JazzApp.tasks.query().where(JazzApp.tasks.id.eq(task.id)))
+        XCTAssertEqual(stored?.notes, "Pack gaffer tape. ")
+        try await app.jazz.close()
+    }
 }
