@@ -394,6 +394,9 @@ async fn c_hosts_link_and_read_a_backends_bundle() {
     })
     .await;
     let _ = bundle;
+    app.stop().await;
+    result.unwrap();
+}
 
 /// Concurrent fetches: `jazz_close` called from inside one token callback
 /// waits for the others still running (not for itself), so the host may
