@@ -95,9 +95,11 @@ runtimes attached to one relay.
 ### Loading and errors
 
 `JazzProvider` renders its children once someone is signed in, `loading` while the session starts
-or switches users, `signedOut` while no one is signed in, and `error` when there is no usable client.
+or switches users, `signedOut` while no one is signed in (also while `signing-out`), and `error` when there is no usable client.
 Anywhere inside it, those views included, `useJazzSession()` gives the session's `status`
-(`"starting"`, `"ready"`, `"signed-out"`, `"transitioning"`, `"error"` or `"closed"`), its `user`,
+(`"starting"`, `"ready"`, `"signed-out"`, `"transitioning"`, `"signing-out"`, `"error"` or
+`"closed"`; `"signing-out"`: signed out, with the user's last writes still to upload, which
+`signOut({ discardUnsynced: true })` gives up, losing them), its `user`,
 its `error` and its operations, such as `retry()`:
 
 ```tsx

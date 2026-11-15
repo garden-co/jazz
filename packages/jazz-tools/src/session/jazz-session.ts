@@ -7,6 +7,7 @@ import {
 } from "./state.js";
 import type { AccountHandle } from "../accounts/state.js";
 import { NoKeptDeviceAccountError } from "./no-kept-device-account-error.js";
+import { JazzSessionOperationError } from "./session-operation-error.js";
 import { exportLocalFirstSecret } from "../accounts/enrollment.js";
 import { createListeners, toError } from "../runtime/util.js";
 
@@ -87,11 +88,25 @@ export interface JazzSessionSnapshot<Client> {
    *   failed and left the client as it was (see `recovery`).
    * - `signed-out`: no one is signed in. `error` may say why.
    * - `transitioning`: signing in, out, or switching users.
+   * - `signing-out`: signed out on this device, but the server hasn't
+   *   taken the signed-out user's last writes yet (offline). Their client
+   *   is closed to the app and keeps uploading; the session tries again
+   *   with backoff and on reconnect (`retry()` tries now), then becomes
+   *   `signed-out`. `error` says why it waits. No one can sign in until
+   *   then: sign-ins and `refresh()` reject with a
+   *   `JazzSessionOperationError` (`reason: "signing-out"`).
    * - `error`: no usable client (startup failed, or a sign-in or reopen
    *   failed). `retry()` tries again.
    * - `closed`: `close()` was called.
    */
-  readonly status: "starting" | "ready" | "signed-out" | "transitioning" | "error" | "closed";
+  readonly status:
+    | "starting"
+    | "ready"
+    | "signed-out"
+    | "transitioning"
+    | "signing-out"
+    | "error"
+    | "closed";
   /** Who the session is signed in as; null when no one is. */
   readonly user: JazzUser | null;
   /** Only while `status` is `ready`. */
@@ -161,6 +176,9 @@ export interface JazzSession<Client> {
    * If your backend can't be asked (offline, or its `authenticate` failed),
    * it rejects and the snapshot shows the failure too: a usable client stays
    * `ready`, with `error` set and `recovery: "action"` (`retry()` asks again).
+   * Refreshes asked while one runs share one more, made after them all; one
+   * asked during a sign-in or link waits for it. While signing out it
+   * rejects (`JazzSessionOperationError`, `reason: "signing-out"`).
    */
   refresh(): Promise<void>;
   /**
@@ -171,7 +189,21 @@ export interface JazzSession<Client> {
    * else, or when signed out and the device keeps no device account.
    */
   exportDeviceKey(): string;
-  signOut(): Promise<void>;
+  /**
+   * Sign out on this device. It takes over from a sign-in, link or refresh
+   * still running: those reject with a `JazzSessionOperationError`
+   * (`reason: "superseded"`), and nothing they finish later signs anyone
+   * back in. Calls while one runs share it. Resolves once signed out here:
+   * if the server can't take the user's last writes yet (offline), the
+   * session is `signing-out` until it has.
+   *
+   * `discardUnsynced: true` doesn't wait for the server: it **loses the
+   * signed-out user's writes the server hasn't confirmed**, wipes their local
+   * data from this device, and signs out at once, to `signed-out`. It also
+   * ends a `signing-out` session (offline) that way, so someone else can
+   * sign in. What the server already has stays there.
+   */
+  signOut(options?: { discardUnsynced?: boolean }): Promise<void>;
   /** Try again after an error: see `snapshot.recovery`. Restarts a failed startup. */
   retry(): Promise<void>;
   /** Shut the client down; the session can't be used after. */
@@ -179,6 +211,24 @@ export interface JazzSession<Client> {
 }
 
 type RefreshingCore = { reauthenticate?(): Promise<void> };
+
+/** An operation holding a session's slot (see `ownJazzSession`). */
+type Busy = {
+  readonly kind: "acting" | "refreshing" | "signing-out";
+  readonly id: number;
+  readonly done: Promise<void>;
+  readonly cancel: (reason: Error) => void;
+  /** Refreshing: the one more refresh that refreshes asked meanwhile share. */
+  next?: Promise<void>;
+};
+type Slot = { readonly kind: "idle" } | Busy;
+const IDLE: Slot = Object.freeze({ kind: "idle" });
+type Failure<Client> = {
+  readonly error?: Error;
+  readonly repeat?: () => Promise<void>;
+  readonly until?: SessionCoreSnapshot<Client>;
+};
+const noop = () => {};
 
 interface SessionInternals<Client> {
   start(): Promise<void>;
@@ -224,14 +274,25 @@ export function ownJazzSession<Config, Client>(
   let pending: Promise<void> | undefined;
   let closing: Promise<void> | undefined;
   let closed = false;
-  let failure: Error | undefined;
-  let manualRetry: (() => Promise<void>) | undefined;
-  // The core as a failed refresh left it. Its failure (and its retry, which
-  // asks the backend again) stands until the core moves on.
-  let refreshFailedAt: SessionCoreSnapshot<Client> | undefined;
-  let actionGeneration = 0;
-  let manualActionPending = false;
-  let pendingSignOuts = 0;
+  /**
+   * The one operation the session runs: a sign-in or link (`acting`), a
+   * `refresh()` (`refreshing`) or a `signOut()` (`signing-out`). Only
+   * `operate` moves it, and an operation's completion counts only while it
+   * still holds the slot (its `id`): one a sign-out (or `close()`) took over
+   * from neither publishes its outcome nor leaves a retry. What may start
+   * while another runs: see `refuse`, `refresh` and `signOut`.
+   */
+  let slot: Slot = IDLE;
+  let lastId = 0;
+  // Sign-outs started: a refresh asked before one never runs after it.
+  let signOuts = 0;
+  /**
+   * The last operation's failure, as the snapshot shows it (`error`, or the
+   * core's own error when unset) and as `retry()` repeats it (`repeat`). A
+   * failed refresh's stands only while the core is as the refresh left it
+   * (`until`).
+   */
+  let failure: Failure<Client> | undefined;
   let retrying: Promise<void> | undefined;
   let lastAccount: AccountHandle | undefined;
   let snapshot: JazzSessionSnapshot<Client> = Object.freeze({
@@ -246,12 +307,8 @@ export function ownJazzSession<Config, Client>(
   function publish(force = false) {
     if (closed && !force) return;
     const current = core?.getSnapshot();
-    if (refreshFailedAt && current !== refreshFailedAt) {
-      refreshFailedAt = undefined;
-      failure = undefined;
-      if (manualRetry === session.refresh) manualRetry = undefined;
-    }
-    const error = failure ?? current?.error;
+    if (failure?.until && current !== failure.until) failure = undefined;
+    const error = failure?.error ?? current?.error;
     const usable = current?.status === "ready" && current.client !== undefined;
     const status: JazzSessionSnapshot<Client>["status"] =
       closed || current?.status === "closed"
@@ -262,8 +319,8 @@ export function ownJazzSession<Config, Client>(
             : "starting"
           : usable
             ? "ready"
-            : current.status === "signed-out"
-              ? "signed-out"
+            : current.status === "signed-out" || current.status === "signing-out"
+              ? current.status
               : current.status === "error" || (error && current.status !== "transitioning")
                 ? "error"
                 : "transitioning";
@@ -309,7 +366,56 @@ export function ownJazzSession<Config, Client>(
     return core;
   };
 
-  /** Run one of the core's sign-in operations, serialized and retryable. */
+  /** Throws unless a sign-in, link or refresh may start now. */
+  const refuse = () => {
+    if (closed) throw new Error("Jazz session is closed");
+    // A sign-out runs, or waits for the server (`signing-out`): no one
+    // signs in until it ends.
+    if (slot.kind === "signing-out" || core?.getSnapshot().status === "signing-out")
+      throw new JazzSessionOperationError("signing-out");
+    if (slot.kind !== "idle") throw new JazzSessionOperationError("pending");
+  };
+
+  /**
+   * The slot's only transition: take it for `work`, and give it back when
+   * `work` settles, if this operation still holds it. A sign-out takes over
+   * with `cancel`: the caller of the operation it took over from gets a
+   * `superseded` rejection at once, and that operation's late completion
+   * changes nothing.
+   */
+  const operate = (
+    kind: Busy["kind"],
+    work: () => Promise<void>,
+    failed: (error: Error) => Failure<Client> | undefined,
+  ): Promise<void> => {
+    if (slot.kind !== "idle") slot.cancel(new JazzSessionOperationError("superseded"));
+    const id = ++lastId;
+    let cancel!: (reason: Error) => void;
+    const cancelled = new Promise<never>((_, reject) => (cancel = reject));
+    cancelled.catch(() => {});
+    let settle!: (outcome: Promise<void>) => void;
+    const done = new Promise<void>((resolve) => (settle = resolve));
+    const held = () => slot.kind !== "idle" && slot.id === id;
+    // Held before `work` starts: the core publishes its transition at once.
+    slot = { kind, id, done, cancel };
+    failure = undefined;
+    settle(
+      (async () => {
+        try {
+          await Promise.race([work(), cancelled]);
+        } catch (cause) {
+          if (held()) failure = failed(toError(cause));
+          throw cause;
+        } finally {
+          if (held()) slot = IDLE;
+          publish();
+        }
+      })(),
+    );
+    return done;
+  };
+
+  /** One of the core's sign-in operations, in the slot, and retryable. */
   const action =
     <Args extends unknown[]>(
       run: (current: SessionCore<Client>, ...args: Args) => Promise<void>,
@@ -317,35 +423,23 @@ export function ownJazzSession<Config, Client>(
     async (...args: Args) => {
       if (!core && pending) await pending;
       const current = requireCore();
-      if (manualActionPending || pendingSignOuts)
-        throw new Error("A Jazz session operation is already pending");
-      const generation = ++actionGeneration;
-      const invoke = async () => {
-        if (closed || generation !== actionGeneration)
-          throw new Error("Jazz session operation was superseded");
-        if (manualActionPending || pendingSignOuts)
-          throw new Error("A Jazz session operation is already pending");
-        manualActionPending = true;
-        manualRetry = undefined;
-        failure = undefined;
-        try {
-          await run(current, ...args);
-          if (generation === actionGeneration) manualRetry = undefined;
-        } catch (cause) {
-          const failed = current.getSnapshot();
-          if (
-            generation === actionGeneration &&
-            failed.error &&
-            (failed.recovery === "action" ||
-              failed.status === "ready" ||
-              failed.status === "signed-out")
-          )
-            manualRetry = invoke;
-          throw cause;
-        } finally {
-          manualActionPending = false;
-          publish();
-        }
+      const invoke = (): Promise<void> => {
+        refuse();
+        return operate(
+          "acting",
+          () => run(current, ...args),
+          () => {
+            // The core shows the error; `retry()` repeats the action while
+            // it left the session where it was.
+            const after = current.getSnapshot();
+            return after.error &&
+              (after.recovery === "action" ||
+                after.status === "ready" ||
+                after.status === "signed-out")
+              ? { repeat: invoke }
+              : undefined;
+          },
+        );
       };
       return invoke();
     };
@@ -375,7 +469,7 @@ export function ownJazzSession<Config, Client>(
         publish();
       })
       .catch((cause) => {
-        failure = toError(cause);
+        failure = { error: toError(cause) };
         publish();
         throw cause;
       })
@@ -386,6 +480,11 @@ export function ownJazzSession<Config, Client>(
     return task;
   };
 
+  /** A refresh started before a sign-out never runs after it. */
+  const unlessSignedOutSince = (since: number) => {
+    if (signOuts !== since) throw new JazzSessionOperationError("superseded");
+  };
+
   const session: JazzSession<Client> = {
     get db() {
       const current = snapshot;
@@ -393,7 +492,7 @@ export function ownJazzSession<Config, Client>(
       if (current.status !== "ready" || !client?.db)
         throw new Error(
           `session.db: there is no Db while the session is ${current.status}` +
-            (current.status === "signed-out"
+            (current.status === "signed-out" || current.status === "signing-out"
               ? ": sign in first (createDeviceAccount(), or your backend's user)"
               : current.status === "starting" || current.status === "transitioning"
                 ? ': wait for status "ready" (subscribe to the session)'
@@ -409,31 +508,51 @@ export function ownJazzSession<Config, Client>(
     restoreDeviceAccount: action((current, key: string) => current.restoreLocalFirst(key)),
     reopenDeviceAccount: action((current) => current.reopenLocalFirst()),
     linkDeviceAccount: action((current) => current.linkWithBackend()),
-    async refresh() {
-      failure = undefined;
-      refreshFailedAt = undefined;
-      if (manualRetry === session.refresh) manualRetry = undefined;
-      try {
-        // Asked while starting: follow the backend once the session exists.
-        if (!core && pending) await pending;
-        const current = requireCore() as SessionCore<Client> & RefreshingCore;
-        if (current.reauthenticate) await current.reauthenticate();
-        else await current.loginWithBackend();
-      } catch (cause) {
-        const after = core?.getSnapshot();
-        // The session shows the failure (or the core's own), and retrying
-        // asks the backend again rather than reopening the old account. A
-        // ready client stays ready (the backend couldn't be asked, so nothing
-        // says its user changed), with the error and `recovery: "action"`.
-        failure = after?.error ? undefined : toError(cause);
-        if (after) {
-          manualRetry = session.refresh;
-          refreshFailedAt = after;
-        }
-        throw cause;
-      } finally {
-        publish();
+    refresh(): Promise<void> {
+      const since = signOuts;
+      // Refreshes asked while one runs share one more, which asks the
+      // backend after them all.
+      if (slot.kind === "refreshing") {
+        const running = slot;
+        running.next ??= running.done
+          .then(noop, noop)
+          .then(() => unlessSignedOutSince(since))
+          .then(() => session.refresh());
+        return running.next;
       }
+      // A refresh waits for an action to finish, then follows the backend.
+      if (slot.kind === "acting")
+        return slot.done
+          .then(noop, noop)
+          .then(() => unlessSignedOutSince(since))
+          .then(() => session.refresh());
+      try {
+        refuse();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return operate(
+        "refreshing",
+        async () => {
+          // Asked while starting: follow the backend once the session exists.
+          if (!core && pending) await pending;
+          const current = requireCore() as SessionCore<Client> & RefreshingCore;
+          if (current.reauthenticate) await current.reauthenticate();
+          else await current.loginWithBackend();
+        },
+        (error) => {
+          const after = core?.getSnapshot();
+          // The session shows the failure (or the core's own), and retrying
+          // asks the backend again rather than reopening the old account. A
+          // ready client stays ready (the backend couldn't be asked, so
+          // nothing says its user changed), with the error and `recovery:
+          // "action"`. It stands until the core moves on.
+          return {
+            ...(after?.error ? {} : { error }),
+            ...(after ? { repeat: session.refresh, until: after } : {}),
+          };
+        },
+      );
     },
     exportDeviceKey() {
       const account = core?.getSnapshot().account;
@@ -446,50 +565,50 @@ export function ownJazzSession<Config, Client>(
         throw new Error("exportDeviceKey(): this session isn't signed in as a device account");
       return exportLocalFirstSecret(account);
     },
-    async signOut() {
+    async signOut(options: { discardUnsynced?: boolean } = {}) {
+      const discard = options.discardUnsynced === true;
+      // A sign-out running: share it, or (discarding) follow it with one
+      // that drops what it would still wait to upload.
+      const join = async (running: Busy) => {
+        if (!discard) return running.done;
+        await running.done.catch(noop);
+        return session.signOut(options);
+      };
+      if (slot.kind === "signing-out") return join(slot);
       if (!core && pending) await pending;
       const current = requireCore();
-      ++pendingSignOuts;
-      const generation = ++actionGeneration;
-      manualRetry = undefined;
-      failure = undefined;
-      try {
-        await current.logout();
-        if (generation === actionGeneration) manualRetry = undefined;
-      } catch (cause) {
-        if (generation === actionGeneration) {
-          manualRetry = session.signOut;
-          failure = toError(cause);
-        }
-        throw cause;
-      } finally {
-        --pendingSignOuts;
-        publish();
-      }
+      // Joined, if one started while this waited for startup.
+      const now = slot as Slot;
+      if (now.kind === "signing-out") return join(now);
+      // Sign-out takes over from any operation running (see `operate`).
+      ++signOuts;
+      return operate(
+        "signing-out",
+        () => current.logout({ discardUnsynced: discard }),
+        (error) => ({ error, repeat: () => session.signOut(options) }),
+      );
     },
     retry() {
       if (closed) return Promise.reject(new Error("Jazz session is closed"));
       if (!core) return start();
       if (retrying) return retrying;
       const current = core;
-      const generation = actionGeneration;
-      failure = undefined;
+      const asked = { id: lastId };
       const task = Promise.resolve()
         .then(async () => {
-          if (closed || generation !== actionGeneration) return;
-          try {
-            if (manualRetry && (snapshot.recovery === "action" || manualRetry === session.refresh))
-              await manualRetry();
-            else {
-              await current.retry();
-              manualRetry = undefined;
-            }
-          } catch (cause) {
-            if (generation === actionGeneration) failure = toError(cause);
-            throw cause;
-          } finally {
-            publish();
-          }
+          // Another operation started meanwhile: it decides what's next.
+          if (closed || lastId !== asked.id) return;
+          const repeat = failure?.repeat;
+          if (repeat && (snapshot.recovery === "action" || repeat === session.refresh))
+            return repeat();
+          // Signing out: try the upload now (the snapshot shows how it went).
+          if (current.getSnapshot().status === "signing-out") return current.retry();
+          refuse();
+          return operate(
+            "acting",
+            () => current.retry(),
+            (error) => ({ error }),
+          );
         })
         .finally(() => {
           if (retrying === task) retrying = undefined;
@@ -500,15 +619,16 @@ export function ownJazzSession<Config, Client>(
     close() {
       if (closing) return closing;
       closed = true;
-      ++actionGeneration;
-      manualRetry = undefined;
+      if (slot.kind !== "idle") slot.cancel(new JazzSessionOperationError("superseded"));
+      slot = IDLE;
+      failure = failure?.error ? { error: failure.error } : undefined;
       publish(true);
       closing = (async () => {
         try {
           await pending?.catch(() => {});
           await core?.close();
         } catch (cause) {
-          failure = toError(cause);
+          failure = { error: toError(cause) };
           publish(true);
           throw cause;
         } finally {

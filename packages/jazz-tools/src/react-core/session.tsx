@@ -160,7 +160,7 @@ function JazzSessionView<Client extends CoreJazzClient>({
     <SessionContext.Provider value={state}>
       {state.status === "ready" && state.client ? (
         <JazzClientProvider client={state.client}>{children}</JazzClientProvider>
-      ) : state.status === "signed-out" ? (
+      ) : state.status === "signed-out" || state.status === "signing-out" ? (
         signedOut
       ) : state.status === "error" ? (
         render(error)

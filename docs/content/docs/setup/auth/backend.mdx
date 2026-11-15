@@ -487,12 +487,42 @@ down gracefully with its writes synced, and only then signs in and opens the new
 - If sign-in fails after shutdown, Jazz reopens the previous account when it can.
 - If sign-in succeeds but the new client fails to start, the new account stays selected and
   `retry()` retries startup without asking your backend again.
-- Overlapping account changes reject with a busy error. Sign-out and close win over in-flight work.
+- The session runs one operation at a time. A sign-in or link while another runs rejects with a
+  `JazzSessionOperationError` (`reason: "pending"`). A `refresh()` during a sign-in or link waits
+  for it, and refreshes asked while one runs share one more.
+- Sign-out and close win over in-flight work: a sign-in, link or refresh still running rejects
+  with `reason: "superseded"`, and nothing it finishes later signs anyone back in. While signing
+  out, sign-ins and `refresh()` reject with `reason: "signing-out"`.
+- If the server can't take the signed-out user's last writes (offline), the sign-out still
+  happens on this device: `signOut()` resolves and the session is `signing-out` until those writes
+  upload. Jazz tries again with backoff and when the connection returns (`retry()` tries now), then
+  the session is `signed-out`. `close()` meanwhile stops the upload: a persistent store keeps the
+  writes for that account's next sign-in.
+- `signOut({ discardUnsynced: true })` signs out without waiting for the server. **It loses that
+  user's writes the server hasn't confirmed**: it wipes their local data from this device, and the
+  session is `signed-out` at once. Call it while `signing-out` (still offline) to give up the upload
+  so someone else can sign in. Writes the server already has stay there, and the device forgets a
+  device account's key with its data, so `reopenDeviceAccount()` can't open it again. Plain
+  `signOut()` never drops writes. In a browser, a store another tab still has open stays for that
+  tab (which may still upload its writes): the session is `signed-out` with an `error` saying so,
+  and `retry()` finishes the wipe once that tab has closed. The pending wipe is kept on the device,
+  so the next page load (or a later sign-in or sign-out in any tab) finishes it too, once no tab
+  has the account open; signing in as that account again cancels it. If the wipe itself fails, it
+  stays pending too: the session is `signed-out` with an `error` saying the data is still on the
+  device, and `retry()` tries again. A tab that signs in as the account while another tab's wipe of
+  it finishes fails with `DiscardedDeviceAccountError` (its key and data are gone); restoring it
+  with its key brings it back. On Node, a persistent store isn't
+  deleted (only its client closes); a memory store keeps nothing.
 
 ### Reactive state
 
 `useJazzSession()` (and `getSnapshot()`/`subscribe()` without a framework) reports `starting`,
-`ready`, `signed-out`, `transitioning`, `error` or `closed`. A client exists only in `ready`.
+`ready`, `signed-out`, `transitioning`, `signing-out`, `error` or `closed`. A client exists only in
+`ready`.
+
+- `signing-out` means signed out on this device while the signed-out user's last writes wait to
+  upload (an offline sign-out; see [Switching accounts](#switching-accounts)). `error` says why it
+  waits, and `<JazzProvider>` shows its `signedOut` view. No one can sign in until it ends.
 
 - A failed operation that leaves the client usable (a refused link, a sign-in that failed while the
   previous account keeps working) keeps the session `ready`, with `error` set and `recovery:

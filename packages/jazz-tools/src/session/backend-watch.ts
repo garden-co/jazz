@@ -1,6 +1,7 @@
 import type { AccountHandle, AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
-import { switchJazzSessionUser, type SessionCore } from "./state.js";
+import { jazzSessionSignOuts, switchJazzSessionUser, type SessionCore } from "./state.js";
+import { JazzSessionOperationError } from "./session-operation-error.js";
 
 const LOCAL_FIRST_ISSUER = "urn:jazz:local-first";
 const SYSTEM_ISSUER = "urn:jazz:system";
@@ -232,6 +233,11 @@ export function watchBackendUser<Client>(
   // A signed-in user the backend said has no account any more, signed in
   // again once: kept per user until the backend says they have one.
   let lostAccount: string | undefined;
+  // Sign-outs this watch made itself, following the backend. The others
+  // (the app's own `signOut()`) supersede checks and refreshes asked before
+  // them: their answer was about the session before the sign-out.
+  let followedSignOuts = 0;
+  const appSignOuts = () => jazzSessionSignOuts(session as SessionCore<unknown>) - followedSignOuts;
   let checking: Promise<void> | undefined;
   // Checks asked for while one runs: a plain one (may sign out), a refused
   // one (only reconnects) and an asked one (the app's auth changed: no
@@ -240,7 +246,9 @@ export function watchBackendUser<Client>(
   // `reauthenticate` callers not yet answered. An asked check takes the ones
   // waiting when it starts, so each is answered by a probe made after it
   // called, and settles them once it has followed (or failed to follow) it.
-  type Waiter = { resolve(): void; reject(error: Error): void };
+  // Each keeps the session's sign-out count as it asked: one a sign-out
+  // came after is superseded, never answered by a check after it.
+  type Waiter = { resolve(): void; reject(error: Error): void; signOuts: number };
   let waiters: Waiter[] = [];
   // Settles once a check that may sign someone in (not a refused one) has
   // followed the backend's answer, or the watch stopped.
@@ -314,10 +322,20 @@ export function watchBackendUser<Client>(
     const attempt = (run: Promise<unknown>) =>
       asked ? run.then(() => {}) : run.then(() => {}, retryLater);
     const busy = () => (asked && !stopped ? "again" : undefined);
+    // A sign-out since this check began takes over: its answer was asked
+    // for the session before it, so following it could sign the user back
+    // in. An asked check (a refresh) fails as superseded, without asking
+    // again; a plain one just ends.
+    const signOutsAtStart = appSignOuts();
+    const signedOutSince = () => appSignOuts() !== signOutsAtStart;
+    const dropped = () => {
+      if (asked) throw new JazzSessionOperationError("superseded");
+    };
     if (quiet(asked)) return busy();
     // Only this account is signed out on the answer this check gets.
     const startedWith = session.getSnapshot().account;
     let signedIn = await ask();
+    if (signedOutSince()) return dropped();
     if (signedIn !== null && "failed" in signedIn) {
       if (!asked) {
         // A 404 has its own retry (see `notFoundAnswer`).
@@ -379,6 +397,7 @@ export function watchBackendUser<Client>(
         const from = session.getSnapshot().account!;
         let switched = true;
         await attempt(switchJazzSessionUser(session, from).then((done) => (switched = done)));
+        if (!switched && signedOutSince()) return dropped();
         // The session moved on while an operation finished: ask again.
         return switched ? undefined : busy();
       }
@@ -405,6 +424,7 @@ export function watchBackendUser<Client>(
         } catch (cause) {
           if (linking === link) linking = undefined;
           if (stopped) return;
+          if (signedOutSince()) return dropped();
           const who = `${signedIn.issuer}\0${signedIn.subject}`;
           if (signedOutMeanwhile(cause) && signedOutLink !== who) {
             signedOutLink = who;
@@ -427,6 +447,7 @@ export function watchBackendUser<Client>(
             cause,
           );
         }
+        if (signedOutSince()) return dropped();
         if (quiet(asked)) return busy();
       }
       return attempt(session.loginWithBackend());
@@ -440,6 +461,7 @@ export function watchBackendUser<Client>(
       // `clearOnSignOut`, is wiped), instead of staying open in memory.
       if (current?.issuer !== LOCAL_FIRST_ISSUER || !startedWith || !options.forgotten) return;
       const forgotten = await options.forgotten(startedWith).catch(() => false);
+      if (signedOutSince()) return dropped();
       if (!forgotten) return;
       if (quiet(asked)) return busy();
       forgottenGuest = true;
@@ -455,6 +477,7 @@ export function watchBackendUser<Client>(
       await new Promise((resolve) => setTimeout(resolve, confirmMs));
       if (quiet()) return;
       signedIn = await ask();
+      if (signedOutSince()) return dropped();
       if (quiet()) return;
       if (signedIn !== null) {
         // Someone is signed in after all (the app refreshed its session):
@@ -469,9 +492,17 @@ export function watchBackendUser<Client>(
     if (session.getSnapshot().account !== startedWith) return busy();
     if (!forgottenGuest) {
       if ((await askSignedOut()) === "keep" || quiet(asked)) return;
+      if (signedOutSince()) return dropped();
       if (session.getSnapshot().account !== startedWith) return busy();
     }
-    return attempt(session.logout());
+    // Following the backend's answer: not a sign-out that supersedes refreshes.
+    // An app `signOut()` that joins this one while it runs isn't counted
+    // either: harmless, since this sign-out already drops every refresh's
+    // late answer the same way.
+    const before = jazzSessionSignOuts(session as SessionCore<unknown>);
+    const signingOut = session.logout();
+    followedSignOuts += jazzSessionSignOuts(session as SessionCore<unknown>) - before;
+    return attempt(signingOut);
   }
   /** The app's `onSignedOut` decision; a hook that fails signs out. */
   async function askSignedOut(): Promise<SignedOutDecision> {
@@ -523,7 +554,17 @@ export function watchBackendUser<Client>(
       };
       return;
     }
-    const batch = asked ? waiters.splice(0) : [];
+    let batch = asked ? waiters.splice(0) : [];
+    if (asked) {
+      const now = appSignOuts();
+      const stale = batch.filter((waiter) => waiter.signOuts !== now);
+      if (stale.length > 0) {
+        settle(stale, new JazzSessionOperationError("superseded"));
+        batch = batch.filter((waiter) => waiter.signOuts === now);
+        // Only refreshes from before a sign-out asked: none is left to answer.
+        if (batch.length === 0) return;
+      }
+    }
     const retriesBefore = retries;
     let retry = false;
     let failure: Error | undefined;
@@ -557,7 +598,13 @@ export function watchBackendUser<Client>(
   }
   const unsubscribe = session.subscribe(() => {
     const snapshot = session.getSnapshot();
-    if (snapshot.status !== "ready" && snapshot.status !== "signed-out") return;
+    // Signing out (its upload pending) is signed out here already.
+    if (
+      snapshot.status !== "ready" &&
+      snapshot.status !== "signed-out" &&
+      snapshot.status !== "signing-out"
+    )
+      return;
     if (snapshot.account === announced) return;
     announced = snapshot.account;
     resetRefusal();
@@ -580,7 +627,10 @@ export function watchBackendUser<Client>(
     reauthenticate() {
       // Never answer as if the session followed the backend when nothing asks it.
       if (stopped) return Promise.reject(stopReason);
-      const done = new Promise<void>((resolve, reject) => waiters.push({ resolve, reject }));
+      const signOuts = appSignOuts();
+      const done = new Promise<void>((resolve, reject) =>
+        waiters.push({ resolve, reject, signOuts }),
+      );
       whenSettled(() => check(false, true));
       return done;
     },

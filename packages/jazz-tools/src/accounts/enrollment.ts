@@ -303,23 +303,36 @@ export function createAccountManagerWithRuntime(options: {
     throw new AccountAuthError("ambiguous_restored_account");
   return new AccountManager(
     {
-      logout() {
+      logout({ keep } = {}) {
         epoch++;
-        const listeners: (() => void)[] = [];
-        for (const handle of issued) {
-          const material = credentials.get(handle);
-          credentials.delete(handle);
-          listeners.push(...(material?.invalidated ?? []));
-        }
-        issued.clear();
-        // Revoke every credential before invoking application/runtime callbacks.
-        for (const listener of listeners) {
-          try {
-            listener();
-          } catch (error) {
-            console.error("Account cleanup failed", error);
+        const revoke = (handles: Iterable<AccountHandle>) => {
+          const listeners: (() => void)[] = [];
+          for (const handle of handles) {
+            const material = credentials.get(handle);
+            credentials.delete(handle);
+            listeners.push(...(material?.invalidated ?? []));
           }
-        }
+          // Revoke every credential before invoking application/runtime callbacks.
+          for (const listener of listeners) {
+            try {
+              listener();
+            } catch (error) {
+              console.error("Account cleanup failed", error);
+            }
+          }
+        };
+        const kept = keep !== undefined && issued.has(keep) ? keep : undefined;
+        const revoked = [...issued].filter((handle) => handle !== kept);
+        issued.clear();
+        revoke(revoked);
+        if (!kept) return;
+        // Kept for a signed-out client's last upload: revoked once it ends.
+        let released = false;
+        return () => {
+          if (released) return;
+          released = true;
+          revoke([kept]);
+        };
       },
       createLocalFirst() {
         const local = options.localFirst.create();

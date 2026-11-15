@@ -34,6 +34,9 @@ async function setup() {
   let linkFailure = false;
   let openFailure = false;
   let probeFailure = false;
+  let probeGate: Promise<void> | undefined;
+  let linkGate: Promise<void> | undefined;
+  let probes = 0;
   let focus: (() => void) | undefined;
   const handles = new Map<string, AccountHandle>();
   const account = (id: string) => {
@@ -66,6 +69,7 @@ async function setup() {
     loginWithBackend: signIn,
     async linkWithBackend() {
       events.push("link");
+      await linkGate;
       if (linkFailure) throw new Error("link unavailable");
       return account("local");
     },
@@ -76,10 +80,12 @@ async function setup() {
       events.push(`open:${selected.id}`);
       if (openFailure) throw new Error("open unavailable");
       return {
-        async shutdown() {
+        async shutdown(options?: { waitForSync?: boolean }) {
           events.push(`flush:${selected.id}`);
           if (unknownShutdownFailure) throw new Error("unknown shutdown failure");
-          if (shutdownFailure) throw new GracefulShutdownSyncError(new Error("offline"));
+          // Offline: only the wait for sync fails, as a Db's does.
+          if (shutdownFailure && options?.waitForSync)
+            throw new GracefulShutdownSyncError(new Error("offline"));
         },
       };
     },
@@ -88,6 +94,8 @@ async function setup() {
       const watch = watchBackendUser(
         owned,
         async () => {
+          probes++;
+          await probeGate;
           if (probeFailure) throw new Error("backend unavailable");
           return backend.user === null ? null : { issuer: "provider", subject: backend.user };
         },
@@ -129,6 +137,24 @@ async function setup() {
       probeFailure = value;
     },
     focus: () => focus?.(),
+    /** Hold the backend's answers until the returned release is called. */
+    holdProbe() {
+      const gate = deferred<void>();
+      probeGate = gate.promise;
+      return () => {
+        probeGate = undefined;
+        gate.resolve();
+      };
+    },
+    holdLink() {
+      const gate = deferred<void>();
+      linkGate = gate.promise;
+      return () => {
+        linkGate = undefined;
+        gate.resolve();
+      };
+    },
+    probes: () => probes,
     failAdmission(value: boolean) {
       admissionFailure = value;
     },
@@ -325,14 +351,14 @@ describe("JazzSession lifecycle", () => {
     const app = ownJazzSession({}, async () => f.session);
     await settle();
     f.failShutdown(true);
-    const client = app.getSnapshot().client;
-    await expect(app.signOut()).rejects.toThrow();
-    // The client is still usable: the session stays ready, with the error.
-    expect(app.getSnapshot()).toMatchObject({ status: "ready", client, recovery: "action" });
+    await app.signOut();
+    // Signed out here; the server's part waits (offline): signing-out.
+    expect(app.getSnapshot()).toMatchObject({ status: "signing-out", recovery: "action" });
+    expect(app.getSnapshot().client).toBeUndefined();
     expect(app.getSnapshot().error).toBeDefined();
     f.failShutdown(false);
     await app.retry();
-    expect(f.events.slice(-2)).toEqual(["flush:one", "logout"]);
+    expect(f.events.slice(-3)).toEqual(["flush:one", "logout", "flush:one"]);
     expect(app.getSnapshot().status).toBe("signed-out");
     await app.close();
   });
@@ -499,17 +525,33 @@ describe("JazzSession lifecycle", () => {
     expect(app.getSnapshot().status).toBe("ready");
     await app.close();
   });
-  it("retries failed unmanaged logout instead of reopening the old account", async () => {
+  it("signs out offline as signing-out, and finishes once the server is back", async () => {
     const f = await setup();
     const app = ownJazzSession({}, async () => f.session);
     await tick();
     await app.createDeviceAccount();
     f.failShutdown(true);
-    await expect(app.signOut()).rejects.toThrow();
-    expect(app.getSnapshot()).toMatchObject({ status: "ready", recovery: "action" });
+    // The local part is done: signing out resolves, and the session says
+    // the server's part (uploading the user's last writes) waits.
+    await app.signOut();
+    expect(app.getSnapshot()).toMatchObject({
+      status: "signing-out",
+      user: null,
+      recovery: "action",
+      error: { name: "GracefulShutdownSyncError" },
+    });
+    expect(app.getSnapshot().client).toBeUndefined();
+    expect(() => app.db).toThrow("signing-out");
+    expect(f.events).toContain("logout");
+    // Still offline: retrying keeps waiting.
+    await expect(app.retry()).rejects.toThrow();
+    expect(app.getSnapshot().status).toBe("signing-out");
+    // The server is back: the upload goes through, and the sign-out ends.
     f.failShutdown(false);
     await app.retry();
-    expect(app.getSnapshot().status).toBe("signed-out");
+    expect(app.getSnapshot()).toMatchObject({ status: "signed-out", user: null });
+    expect(app.getSnapshot().error).toBeUndefined();
+    expect(f.events.filter((event) => event === "open:local")).toHaveLength(1);
     await app.close();
   });
   it("still signs out after an unknown shutdown failure, without reopening the account", async () => {
@@ -552,8 +594,10 @@ it("rejected manual action during logout preserves logout retry", async () => {
   await app.createDeviceAccount();
   f.failShutdown(true);
   const logout = app.signOut();
-  await expect(app.linkDeviceAccount()).rejects.toThrow("already pending");
-  await expect(logout).rejects.toThrow();
+  await expect(app.linkDeviceAccount()).rejects.toMatchObject({ reason: "signing-out" });
+  await logout;
+  await expect(app.linkDeviceAccount()).rejects.toMatchObject({ reason: "signing-out" });
+  expect(app.getSnapshot().status).toBe("signing-out");
   f.failShutdown(false);
   await app.retry();
   expect(app.getSnapshot().status).toBe("signed-out");
@@ -647,5 +691,156 @@ describe("session.db", () => {
     expect(client).toBeDefined();
     await app.close();
     expect(() => app.db).toThrow("while the session is closed");
+  });
+});
+
+describe("JazzSession operation slot", () => {
+  it("drops a refresh a sign-out took over from: its late answer signs no one in", async () => {
+    const f = await setup();
+    const app = ownJazzSession({}, async () => f.session);
+    await settle();
+    await app.createDeviceAccount();
+    // The app signed someone in at its backend; the refresh asks who.
+    f.backend.user = "one";
+    const release = f.holdProbe();
+    const refreshing = app.refresh();
+    const refreshed = expect(refreshing).rejects.toMatchObject({
+      name: "JazzSessionOperationError",
+      reason: "superseded",
+    });
+    await tick();
+    await app.signOut();
+    await refreshed;
+    expect(app.getSnapshot().status).toBe("signed-out");
+    // The answer arrives after the sign-out: it must not resurrect the session.
+    release();
+    await settle();
+    expect(app.getSnapshot()).toMatchObject({ status: "signed-out", user: null });
+    expect(app.getSnapshot().error).toBeUndefined();
+    expect(f.events).not.toContain("admit:one");
+    await app.close();
+  });
+  it("drops an action a sign-out took over from, leaving nothing to retry", async () => {
+    const f = await setup();
+    const app = ownJazzSession({}, async () => f.session);
+    await tick();
+    await app.createDeviceAccount();
+    const release = f.holdLink();
+    const linking = app.linkDeviceAccount();
+    const linked = expect(linking).rejects.toMatchObject({ reason: "superseded" });
+    await tick();
+    expect(f.events).toContain("link");
+    const signingOut = app.signOut();
+    // The caller learns at once that the sign-out took over.
+    await linked;
+    release();
+    await signingOut;
+    expect(app.getSnapshot()).toMatchObject({ status: "signed-out", user: null });
+    expect(app.getSnapshot().error).toBeUndefined();
+    expect(app.getSnapshot().recovery).toBeUndefined();
+    // The link's late completion opened no client after the sign-out.
+    expect(f.events.slice(f.events.indexOf("link"))).not.toContain("open:local");
+    await app.close();
+  });
+  it("refuses sign-ins and refreshes while signing out, and retry() finishes the sign-out", async () => {
+    const f = await setup();
+    const app = ownJazzSession({}, async () => f.session);
+    await tick();
+    await app.createDeviceAccount();
+    f.failShutdown(true);
+    const signingOut = app.signOut();
+    // While the sign-out runs.
+    await expect(app.createDeviceAccount()).rejects.toMatchObject({
+      name: "JazzSessionOperationError",
+      reason: "signing-out",
+    });
+    await expect(app.refresh()).rejects.toMatchObject({ reason: "signing-out" });
+    await signingOut;
+    // While its upload waits for the server.
+    expect(app.getSnapshot().status).toBe("signing-out");
+    await expect(app.reopenDeviceAccount()).rejects.toMatchObject({ reason: "signing-out" });
+    await expect(app.refresh()).rejects.toMatchObject({ reason: "signing-out" });
+    // The refused refresh left the sign-out's failure and retry alone.
+    expect(app.getSnapshot()).toMatchObject({ status: "signing-out", recovery: "action" });
+    f.failShutdown(false);
+    await app.retry();
+    expect(app.getSnapshot().status).toBe("signed-out");
+    await app.createDeviceAccount();
+    expect(app.getSnapshot().status).toBe("ready");
+    await app.close();
+  });
+  it("refuses an action while another runs, and a refresh waits for it", async () => {
+    const f = await setup();
+    const app = ownJazzSession({}, async () => f.session);
+    await settle();
+    await app.createDeviceAccount();
+    const release = f.holdLink();
+    const linking = app.linkDeviceAccount();
+    await tick();
+    await expect(app.createDeviceAccount()).rejects.toMatchObject({ reason: "pending" });
+    const probesBefore = f.probes();
+    const refreshing = app.refresh();
+    await tick();
+    expect(f.probes()).toBe(probesBefore);
+    release();
+    await linking;
+    await refreshing;
+    expect(f.probes()).toBe(probesBefore + 1);
+    await app.close();
+  });
+  it("drops a refresh queued behind a backend check when a sign-out comes first", async () => {
+    const f = await setup();
+    const app = ownJazzSession({}, async () => f.session);
+    await settle();
+    await app.createDeviceAccount();
+    f.backend.user = "one";
+    const release = f.holdProbe();
+    // A focus check is in flight; the refresh queues behind it.
+    f.focus();
+    await tick();
+    const refreshed = expect(app.refresh()).rejects.toMatchObject({ reason: "superseded" });
+    await tick();
+    await app.signOut();
+    release();
+    await refreshed;
+    await settle();
+    expect(app.getSnapshot()).toMatchObject({ status: "signed-out", user: null });
+    expect(f.events).not.toContain("admit:one");
+    await app.close();
+  });
+  it("discards a signing-out user's writes on request, then lets another sign in", async () => {
+    const f = await setup();
+    const app = ownJazzSession({}, async () => f.session);
+    await tick();
+    await app.createDeviceAccount();
+    f.failShutdown(true);
+    // The default stays safe: it waits for the server.
+    await app.signOut();
+    expect(app.getSnapshot().status).toBe("signing-out");
+    await expect(app.createDeviceAccount()).rejects.toMatchObject({ reason: "signing-out" });
+    // Still offline: give the writes up and sign out now.
+    await app.signOut({ discardUnsynced: true });
+    expect(app.getSnapshot()).toMatchObject({ status: "signed-out", user: null });
+    expect(app.getSnapshot().error).toBeUndefined();
+    await app.createDeviceAccount();
+    expect(app.getSnapshot()).toMatchObject({ status: "ready", user: { kind: "device" } });
+    await app.close();
+  });
+  it("coalesces refreshes asked while one runs into one more", async () => {
+    const f = await setup();
+    const app = ownJazzSession({}, async () => f.session);
+    await settle();
+    await app.createDeviceAccount();
+    const probesBefore = f.probes();
+    const release = f.holdProbe();
+    const first = app.refresh();
+    await tick();
+    const second = app.refresh();
+    const third = app.refresh();
+    expect(third).toBe(second);
+    release();
+    await Promise.all([first, second, third]);
+    expect(f.probes()).toBe(probesBefore + 2);
+    await app.close();
   });
 });

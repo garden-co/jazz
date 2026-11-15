@@ -3,11 +3,16 @@ import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import {
   attachSessionCoreConsumer,
   createJazzSessionOwner,
+  PENDING_WIPE_FAILURE_SPACING_MS,
   SESSION_VIEW_ACKNOWLEDGE_TIMEOUT_MS,
   replaceJazzSessionClient,
   switchJazzSessionUser,
 } from "./state.js";
-import type { JWTAuth } from "../accounts/enrollment.js";
+import {
+  createAccountManagerWithRuntime,
+  onAccountInvalidated,
+  type JWTAuth,
+} from "../accounts/enrollment.js";
 import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 import {
   isStoreHeldByAnotherTabError,
@@ -291,15 +296,520 @@ describe("Jazz session lifecycle", () => {
     expect(client.shutdown.mock.calls).toEqual([[{ waitForSync: true }], []]);
     await session.close();
   });
-  it("keeps a sign-out failing while its writes may still upload (an outage)", async () => {
-    const { session, clients, old } = await setup();
-    const client = clients[0]! as (typeof clients)[0] & { db?: unknown };
-    client.db = { getAuthState: () => ({}) };
-    const failure = new GracefulShutdownSyncError(new Error("websocket transport error"));
-    client.shutdown.mockRejectedValueOnce(failure);
-    await expect(session.logout()).rejects.toBe(failure);
-    expect(session.getSnapshot()).toMatchObject({ status: "ready", account: old, error: failure });
+  it("signs out offline, then uploads the signed-out user's writes once the server is back", async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, clients, enrollment, openClient } = await setup();
+      const client = clients[0]! as (typeof clients)[0] & { db?: unknown };
+      let onStatus: ((status: { link: { state: string } }) => void) | undefined;
+      let replaced = false;
+      client.db = {
+        getAuthState: () => ({}),
+        // As a Db reads: unusable once the session marked it replaced.
+        isUsable: () => !replaced,
+        markReplaced: vi.fn(() => (replaced = true)),
+        onSyncStatusChange: (listener: typeof onStatus) => {
+          onStatus = listener;
+          return () => (onStatus = undefined);
+        },
+      };
+      const failure = new GracefulShutdownSyncError(new Error("websocket transport error"));
+      client.shutdown.mockRejectedValue(failure);
+      // The local part is done: the sign-out resolves, and the session
+      // shows that the server's part waits.
+      await session.logout();
+      expect(enrollment.logout).toHaveBeenCalled();
+      expect(session.getSnapshot()).toMatchObject({
+        status: "signing-out",
+        error: failure,
+        recovery: "action",
+      });
+      expect(session.getSnapshot().account).toBeUndefined();
+      expect(session.getSnapshot().client).toBeUndefined();
+      expect(
+        (client.db as { markReplaced: ReturnType<typeof vi.fn> }).markReplaced,
+      ).toHaveBeenCalledWith("signed-out");
+      // Nothing signs in meanwhile, and signing out again joins it.
+      await expect(session.createLocalFirst()).rejects.toMatchObject({
+        name: "JazzSessionOperationError",
+        reason: "signing-out",
+      });
+      await expect(session.loginWithBackend()).rejects.toMatchObject({ reason: "signing-out" });
+      await session.logout();
+      expect(openClient).toHaveBeenCalledTimes(1);
+      // Still offline: the backoff tries again, and it keeps waiting.
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(client.shutdown).toHaveBeenCalledTimes(2);
+      expect(session.getSnapshot().status).toBe("signing-out");
+      // Back online: reconnecting uploads the writes and ends the sign-out.
+      client.shutdown.mockResolvedValue(undefined);
+      onStatus?.({ link: { state: "connected" } });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(client.shutdown).toHaveBeenLastCalledWith({ waitForSync: true });
+      expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+      expect(session.getSnapshot().error).toBeUndefined();
+      expect(onStatus).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(client.shutdown).toHaveBeenCalledTimes(3);
+      await session.createLocalFirst();
+      expect(session.getSnapshot().status).toBe("ready");
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  // As the hosts' account Db does (accounts/context.ts): when its account's
+  // credential is revoked, it stops waiting for sync and tears itself down.
+  async function realEnrollmentSetup(
+    hostOptions: {
+      deleteSignedOutStore?: (
+        account: string,
+        finishing?: { wanted(): boolean; forget(): Promise<void> },
+      ) => Promise<"deleted" | "held" | "cancelled">;
+      pendingDiscards?: {
+        record(account: string): void;
+        clear(account: string): void;
+        list(): string[];
+      };
+    } = {},
+  ) {
+    // The account store's saves, which a test can make fail.
+    const save = { fail: false };
+    let created = 0;
+    const accounts = createAccountManagerWithRuntime({
+      selectionDurability: {
+        selectionChanged() {},
+        settle: async () => {
+          if (save.fail) throw new Error("storage full");
+        },
+      },
+      registry: "https://core.example/apps/test/accounts",
+      localFirst: {
+        create: () => ({
+          // A new device account each time.
+          accountId: `00000000-0000-4000-8000-00000000000${++created}`,
+          identity: { issuer: "urn:jazz:local-first", subject: "local" },
+          auth: "e30.e30.signature",
+        }),
+      },
+    });
+    const net = { online: false };
+    const opened: {
+      torn: boolean;
+      invalidated: boolean;
+      uploaded: boolean;
+      deleted: boolean;
+      shutdown: ReturnType<typeof vi.fn>;
+      db: Record<string, unknown>;
+    }[] = [];
+    const session = await createJazzSessionOwner({
+      accounts,
+      ...hostOptions,
+      openClient: async (account) => {
+        const client = {
+          torn: false,
+          invalidated: false,
+          uploaded: false,
+          deleted: false,
+          db: {
+            getConfig: (): { driver?: { type?: string } } => ({ driver: { type: "persistent" } }),
+            getAuthState: () => ({}),
+            getSyncStatus: () => ({ pendingUploads: client.uploaded ? 0 : 1 }),
+            deleteClientStorage: vi.fn(async () => {
+              client.deleted = true;
+            }),
+            abortGracefulShutdown: () => {},
+          },
+          shutdown: vi.fn(async (options?: { waitForSync?: boolean }) => {
+            // A torn-down client uploads nothing more.
+            if (client.torn) return;
+            if (options?.waitForSync) {
+              if (!net.online)
+                throw new GracefulShutdownSyncError(new Error("websocket transport error"));
+              client.uploaded = true;
+            }
+            client.torn = true;
+          }),
+        };
+        onAccountInvalidated(account, () => {
+          client.invalidated = true;
+          void client.shutdown();
+        });
+        opened.push(client);
+        return client;
+      },
+    });
+    return { session, net, opened, save };
+  }
+  it("keeps a signing-out client's credential until its writes uploaded", async () => {
+    const { session, net, opened } = await realEnrollmentSetup();
+    await session.createLocalFirst();
+    const client = opened.at(-1)!;
+    await session.logout();
+    // Signed out, but the revocation waits for the upload: the client is
+    // still open, not torn down by its account's invalidation.
+    expect(session.getSnapshot().status).toBe("signing-out");
+    expect(client.invalidated).toBe(false);
+    expect(client.torn).toBe(false);
+    await expect(session.retry()).rejects.toBeInstanceOf(GracefulShutdownSyncError);
+    expect(session.getSnapshot().status).toBe("signing-out");
+    net.online = true;
+    await session.retry();
+    expect(client.uploaded).toBe(true);
+    expect(session.getSnapshot().status).toBe("signed-out");
+    // Revoked once the upload ended.
+    expect(client.invalidated).toBe(true);
     await session.close();
+  });
+  it("discards a signing-out user's unsynced writes and signs out, so another can sign in", async () => {
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { session, opened } = await realEnrollmentSetup();
+      await session.createLocalFirst();
+      const client = opened.at(-1)!;
+      await session.logout();
+      expect(session.getSnapshot().status).toBe("signing-out");
+      await session.logout({ discardUnsynced: true });
+      expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+      expect(session.getSnapshot().error).toBeUndefined();
+      expect(client.uploaded).toBe(false);
+      expect(client.deleted).toBe(true);
+      expect(client.torn).toBe(true);
+      expect(client.invalidated).toBe(true);
+      expect(warned).toHaveBeenCalledWith(
+        expect.stringMatching(/wiped 1 write\(s\).*discardUnsynced/),
+      );
+      // Someone else signs in, still offline.
+      await session.createLocalFirst();
+      expect(session.getSnapshot().status).toBe("ready");
+      expect(session.getSnapshot().client).toBe(opened.at(-1));
+      expect(opened.at(-1)).not.toBe(client);
+      await session.close();
+    } finally {
+      warned.mockRestore();
+    }
+  });
+  it("discards unsynced writes on sign-out without waiting for the server", async () => {
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { session, opened } = await realEnrollmentSetup();
+      await session.createLocalFirst();
+      const client = opened.at(-1)!;
+      await session.logout({ discardUnsynced: true });
+      expect(session.getSnapshot().status).toBe("signed-out");
+      expect(client.shutdown).not.toHaveBeenCalledWith({ waitForSync: true });
+      expect(client.deleted).toBe(true);
+      expect(client.torn).toBe(true);
+      await session.close();
+    } finally {
+      warned.mockRestore();
+    }
+  });
+  it("discards a memory client's writes without a wipe, from ready and from signing-out", async () => {
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const from of ["ready", "signing-out"] as const) {
+        const { session, net, opened } = await realEnrollmentSetup();
+        await session.createLocalFirst();
+        const client = opened.at(-1)!;
+        // As Node and React Native's memory driver: nothing to delete, and
+        // deleting throws.
+        client.db.getConfig = () => ({ driver: { type: "memory" } });
+        client.db.deleteClientStorage = vi.fn(async () => {
+          throw new Error("deleteClientStorage() is only available when driver.type='persistent'.");
+        });
+        net.online = false;
+        if (from === "signing-out") {
+          await session.logout();
+          expect(session.getSnapshot().status).toBe("signing-out");
+        }
+        await session.logout({ discardUnsynced: true });
+        expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+        expect(session.getSnapshot().error).toBeUndefined();
+        expect(client.db.deleteClientStorage).not.toHaveBeenCalled();
+        expect(client.torn).toBe(true);
+        await session.close();
+      }
+    } finally {
+      warned.mockRestore();
+    }
+  });
+  it("wipes by account after the client closed, even when the upload finished as discard was asked", async () => {
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const deleteSignedOutStore = vi.fn(async (_account: string) => "deleted" as const);
+      const { session, net, opened } = await realEnrollmentSetup({ deleteSignedOutStore });
+      await session.createLocalFirst();
+      const client = opened.at(-1)!;
+      const account = session.getSnapshot().account!;
+      await session.logout();
+      // The next upload goes through, and finishes just as the app discards.
+      const upload = deferred();
+      client.shutdown.mockImplementationOnce(async (options?: { waitForSync?: boolean }) => {
+        await upload.promise;
+        client.uploaded = !!options?.waitForSync;
+        client.torn = true;
+      });
+      net.online = true;
+      const retrying = session.retry();
+      const discarding = session.logout({ discardUnsynced: true });
+      upload.resolve();
+      await retrying.catch(() => {});
+      await discarding;
+      expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+      expect(session.getSnapshot().error).toBeUndefined();
+      // Through the host, by account, once the client was down: no
+      // delete through a client that may be shutting down.
+      expect(deleteSignedOutStore).toHaveBeenCalledWith(account.id);
+      expect(client.db.deleteClientStorage).not.toHaveBeenCalled();
+      await session.close();
+    } finally {
+      warned.mockRestore();
+    }
+  });
+  it("tells the app when another tab holds off a discard's wipe, and retry() finishes it", async () => {
+    let holder: "held" | "deleted" = "held";
+    const deleteSignedOutStore = vi.fn(async (_account: string) => holder);
+    const { session, opened } = await realEnrollmentSetup({ deleteSignedOutStore });
+    await session.createLocalFirst();
+    const a = session.getSnapshot().account!;
+    const client = opened.at(-1)!;
+    await session.logout({ discardUnsynced: true });
+    // Signed out, but the data stays while that tab has it: the app is told.
+    expect(session.getSnapshot()).toMatchObject({
+      status: "signed-out",
+      recovery: "action",
+      error: { message: expect.stringContaining("another tab still has this account open") },
+    });
+    expect(client.torn).toBe(true);
+    await expect(session.retry()).rejects.toThrow("another tab still has this account open");
+    expect(session.getSnapshot().error).toBeDefined();
+    // That tab closed: retrying wipes it.
+    holder = "deleted";
+    await session.retry();
+    expect(deleteSignedOutStore).toHaveBeenLastCalledWith(a.id, expect.anything());
+    expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+    expect(session.getSnapshot().error).toBeUndefined();
+    await session.close();
+  });
+  it("doesn't bring a held-off discard back after another account's session", async () => {
+    const deleteSignedOutStore = vi.fn(async (_account: string) => "held" as const);
+    const pending = new Set<string>();
+    const pendingDiscards = {
+      record: (account: string) => void pending.add(account),
+      clear: (account: string) => void pending.delete(account),
+      list: () => [...pending],
+    };
+    const { session, net } = await realEnrollmentSetup({ deleteSignedOutStore, pendingDiscards });
+    net.online = true;
+    await session.createLocalFirst();
+    const a = session.getSnapshot().account!;
+    await session.logout({ discardUnsynced: true });
+    expect(session.getSnapshot().error?.message).toContain(
+      "another tab still has this account open",
+    );
+    expect([...pending]).toEqual([a.id]);
+    // B signs in and out while the other tab still has A open.
+    await session.createLocalFirst();
+    expect(session.getSnapshot().account?.id).not.toBe(a.id);
+    await session.logout();
+    expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+    // A's error stays gone: finishing A is the pending entry's, which only
+    // wipes once no tab holds A's store.
+    expect(session.getSnapshot().error).toBeUndefined();
+    expect([...pending]).toEqual([a.id]);
+    for (const [account] of deleteSignedOutStore.mock.calls.slice(1)) expect(account).toBe(a.id);
+    await session.retry();
+    expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+    expect(session.getSnapshot().error).toBeUndefined();
+    await session.close();
+  });
+  it("doesn't wipe a pending account someone signed in as while a pass was busy with another", async () => {
+    // Two discards earlier pages left pending, on a page that starts signed out.
+    const pending = new Set(["discarded-1", "discarded-2"]);
+    const pendingDiscards = {
+      record: (account: string) => void pending.add(account),
+      clear: (account: string) => void pending.delete(account),
+      list: () => [...pending],
+    };
+    const first = deferred();
+    const deleted: string[] = [];
+    const forgotten: string[] = [];
+    const deleteSignedOutStore = vi.fn(
+      async (account: string, finishing?: { wanted(): boolean; forget(): Promise<void> }) => {
+        if (account === "discarded-1") await first.promise;
+        // As the browser host does, inside the store's exclusive lock.
+        if (finishing && !finishing.wanted()) return "cancelled" as const;
+        deleted.push(account);
+        await finishing?.forget();
+        forgotten.push(account);
+        return "deleted" as const;
+      },
+    );
+    const { session } = await realEnrollmentSetup({ deleteSignedOutStore, pendingDiscards });
+    await tick();
+    expect(deleteSignedOutStore).toHaveBeenCalledWith("discarded-1", expect.anything());
+    // Meanwhile another tab signs in as the second account (clearing its
+    // entry), and lets go of its store again.
+    pendingDiscards.clear("discarded-2");
+    first.resolve();
+    await tick();
+    await tick();
+    expect(deleted).toEqual(["discarded-1"]);
+    expect(forgotten).toEqual(["discarded-1"]);
+    expect(pending.size).toBe(0);
+    await session.close();
+  });
+  it("keeps a discard whose wipe fails pending and visible until retry() wipes it", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      let broken = true;
+      const forgotten: string[] = [];
+      const deleteSignedOutStore = vi.fn(
+        async (account: string, finishing?: { wanted(): boolean; forget(): Promise<void> }) => {
+          if (broken) throw new Error("IndexedDB unavailable");
+          if (finishing && !finishing.wanted()) return "cancelled" as const;
+          await finishing?.forget();
+          forgotten.push(account);
+          return "deleted" as const;
+        },
+      );
+      const pending = new Set<string>();
+      const pendingDiscards = {
+        record: (account: string) => void pending.add(account),
+        clear: (account: string) => void pending.delete(account),
+        list: () => [...pending],
+      };
+      const { session } = await realEnrollmentSetup({ deleteSignedOutStore, pendingDiscards });
+      await session.createLocalFirst();
+      const a = session.getSnapshot().account!;
+      await session.logout({ discardUnsynced: true });
+      // Signed out, but the data is still here: the app sees it, and it stays pending.
+      expect(session.getSnapshot()).toMatchObject({
+        status: "signed-out",
+        recovery: "action",
+        error: { message: expect.stringContaining("couldn't wipe the signed-out account's data") },
+      });
+      expect([...pending]).toEqual([a.id]);
+      await expect(session.retry()).rejects.toThrow("couldn't wipe");
+      expect([...pending]).toEqual([a.id]);
+      expect(session.getSnapshot().error).toBeDefined();
+      broken = false;
+      await session.retry();
+      expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+      expect(session.getSnapshot().error).toBeUndefined();
+      expect(pending.size).toBe(0);
+      expect(forgotten).toEqual([a.id]);
+      await session.close();
+    } finally {
+      errors.mockRestore();
+    }
+  });
+  it("stops retrying a failing wipe on its own, but never drops it", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // A discard an earlier page left, whose wipe keeps failing.
+      const pending = new Set(["discarded"]);
+      const pendingDiscards = {
+        record: (account: string) => void pending.add(account),
+        clear: (account: string) => void pending.delete(account),
+        list: () => [...pending],
+      };
+      const deleteSignedOutStore = vi.fn(async (_account: string) => {
+        throw new Error("IndexedDB unavailable");
+      });
+      let now = 1_000_000;
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+      const { session, net } = await realEnrollmentSetup({ deleteSignedOutStore, pendingDiscards });
+      net.online = true;
+      await tick();
+      // Each settled operation runs another pass. Quick passes count once:
+      // a failure that passes can't use the attempts up in seconds.
+      for (let i = 0; i < 3; i++) {
+        await session.createLocalFirst();
+        await tick();
+        await session.logout();
+        await tick();
+      }
+      expect(deleteSignedOutStore).toHaveBeenCalledTimes(7);
+      expect(session.getSnapshot().error).toBeUndefined();
+      // Failures spread over time (at least 10 minutes in all) give up.
+      for (let i = 0; i < 4; i++) {
+        now += PENDING_WIPE_FAILURE_SPACING_MS;
+        await session.createLocalFirst();
+        await tick();
+        await session.logout();
+        await tick();
+      }
+      clock.mockRestore();
+      const calls = deleteSignedOutStore.mock.calls.length;
+      // Still pending, and the signed-out session says so.
+      expect([...pending]).toEqual(["discarded"]);
+      expect(session.getSnapshot()).toMatchObject({
+        status: "signed-out",
+        error: { message: expect.stringContaining("couldn't wipe the signed-out account's data") },
+      });
+      await expect(session.retry()).rejects.toThrow("couldn't wipe");
+      expect(deleteSignedOutStore).toHaveBeenCalledTimes(calls + 1);
+      expect([...pending]).toEqual(["discarded"]);
+      await session.close();
+    } finally {
+      errors.mockRestore();
+      warned.mockRestore();
+    }
+  });
+  it("saves a selection that failed during an offline sign-out on retry, back to signing-out", async () => {
+    const { session, save } = await realEnrollmentSetup();
+    await session.createLocalFirst();
+    save.fail = true;
+    await expect(session.logout()).rejects.toThrow("storage full");
+    expect(session.getSnapshot()).toMatchObject({ status: "error", recovery: "session" });
+    save.fail = false;
+    // Saved now; the upload, still offline, keeps waiting.
+    await expect(session.retry()).rejects.toBeInstanceOf(GracefulShutdownSyncError);
+    expect(session.getSnapshot()).toMatchObject({ status: "signing-out" });
+    await session.close();
+  });
+  it("discards while signing out even when the selection won't save", async () => {
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { session, save, opened } = await realEnrollmentSetup();
+      await session.createLocalFirst();
+      const client = opened.at(-1)!;
+      save.fail = true;
+      await expect(session.logout()).rejects.toThrow("storage full");
+      // The escape hatch still drops the writes and closes the client.
+      await expect(session.logout({ discardUnsynced: true })).rejects.toThrow("storage full");
+      expect(client.deleted).toBe(true);
+      expect(client.torn).toBe(true);
+      expect(session.getSnapshot()).toMatchObject({ status: "error", recovery: "session" });
+      save.fail = false;
+      await session.retry();
+      expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+      await session.createLocalFirst();
+      expect(session.getSnapshot().status).toBe("ready");
+      await session.close();
+    } finally {
+      warned.mockRestore();
+    }
+  });
+  it("tries a pending sign-out's upload on retry, and stops it on close", async () => {
+    const { session, clients } = await setup();
+    const client = clients[0]! as (typeof clients)[0] & { db?: unknown };
+    const abortGracefulShutdown = vi.fn();
+    client.db = { getAuthState: () => ({}), abortGracefulShutdown };
+    const failure = new GracefulShutdownSyncError(new Error("websocket transport error"));
+    client.shutdown.mockRejectedValue(failure);
+    await session.logout();
+    await expect(session.retry()).rejects.toBe(failure);
+    expect(session.getSnapshot().status).toBe("signing-out");
+    client.shutdown.mockResolvedValue(undefined);
+    await session.close();
+    expect(abortGracefulShutdown).toHaveBeenCalled();
+    // Closing shuts it down without waiting for the server.
+    expect(client.shutdown).toHaveBeenLastCalledWith();
+    expect(session.getSnapshot().status).toBe("closed");
   });
   it("failed link reopens old selection and preserves primary error", async () => {
     const { session, clients, enrollment, old } = await setup();
@@ -437,7 +947,9 @@ describe("Jazz session lifecycle", () => {
     let attempted: Promise<void> | undefined;
     const stop = session.subscribe(() => {
       if (!attempted)
-        attempted = expect(session.loginWithBackend()).rejects.toThrow("already pending");
+        attempted = expect(session.loginWithBackend()).rejects.toMatchObject({
+          reason: "signing-out",
+        });
     });
     await session.logout();
     await attempted;

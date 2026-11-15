@@ -35,7 +35,12 @@ export interface AccountSelectionDurability {
 export interface AccountEnrollment<Auth> {
   createLocalFirst(): AccountHandle;
   restoreLocalFirst?(secret: string): AccountHandle;
-  logout?(): void;
+  /**
+   * Revoke every handle this enrollment issued. `keep` stays valid (its
+   * client still uploads a signed-out user's last writes) until the
+   * returned release revokes it too.
+   */
+  logout?(options?: { keep?: AccountHandle }): (() => void) | void;
   /** The Node backend host only: admit this process with the core's backend secret. */
   admitBackend?(auth: BackendAuth): Promise<AccountHandle>;
   loginWithBackend?(): Promise<AccountHandle>;
@@ -170,10 +175,16 @@ export class AccountManager<Auth> {
     });
   }
 
-  logout(): void {
+  /**
+   * Sign out. With `keep`, that handle's credential outlives the sign-out
+   * until the returned release (a `signing-out` session's client still
+   * uploads with it); every other handle is revoked now.
+   */
+  logout(options: { keep?: AccountHandle } = {}): () => void {
     this.generation++;
-    this.enrollment.logout?.();
+    const release = this.enrollment.logout?.(options);
     this.publish({ account: undefined, pending: undefined, error: undefined });
+    return release ?? (() => {});
   }
 
   private async run(

@@ -137,7 +137,9 @@ export const JazzProvider = defineComponent({
           { client: state.client },
           { default: slots.default, fallback: loading },
         );
-      if (state.status === "signed-out") return slots.signedOut?.() ?? null;
+      // Signing out (its upload pending) is signed out on this device.
+      if (state.status === "signed-out" || state.status === "signing-out")
+        return slots.signedOut?.() ?? null;
       // A closed session has no client and never starts again.
       if (state.status === "closed") return slots.closed?.() ?? null;
       if (state.status === "error")
