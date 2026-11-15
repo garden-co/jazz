@@ -2,7 +2,6 @@ package jazz
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"unicode/utf8"
 )
@@ -47,36 +46,20 @@ func boundary(text string, at int) bool {
 	return at == len(text) || utf8.RuneStart(text[at])
 }
 
-// EditText applies edits to column (a mergeable text) of the row of table
-// with id. The edits apply to the text as this app has it now; Jazz merges
-// them with edits others made meanwhile.
+// EditText applies edits, in order, to column (a string column; for a
+// mergeable text, they merge with edits others made meanwhile) of the row
+// of table with id.
 func EditText(ctx context.Context, q Querier, table, id, column string, edits ...TextEdit) error {
-	var row map[string]json.RawMessage
-	query := map[string]any{
-		"table":  table,
-		"where":  []map[string]any{{"column": "id", "op": "eq", "value": id}},
-		"select": []string{column},
+	splices := make([]map[string]any, len(edits))
+	for i, e := range edits {
+		if e.Pos < 0 || e.Delete < 0 {
+			return &Error{Kind: KindRefused, Table: table, Column: column, Message: fmt.Sprintf(
+				"edit %d (at %d, deleting %d) is outside the text", i, e.Pos, e.Delete)}
+		}
+		splices[i] = map[string]any{"pos": e.Pos, "delete": e.Delete, "insert": e.Insert}
 	}
-	if err := q.call(ctx, "one", map[string]any{"query": query}, &row); err != nil {
-		return err
-	}
-	if row == nil {
-		return &Error{Kind: KindRefused, Table: table, Message: fmt.Sprintf("%s has no row %s", table, id)}
-	}
-	var current *string
-	if err := json.Unmarshal(row[column], &current); err != nil {
-		return err
-	}
-	from := ""
-	if current != nil {
-		from = *current
-	}
-	text, err := ApplyEdits(from, edits...)
-	if err != nil {
-		return err
-	}
-	return q.call(ctx, "editText", map[string]any{
-		"table": table, "id": id, "column": column, "editedFrom": from, "text": text,
+	return q.call(ctx, "textEdit", map[string]any{
+		"table": table, "id": id, "column": column, "units": "utf8", "edits": splices,
 	}, nil)
 }
 

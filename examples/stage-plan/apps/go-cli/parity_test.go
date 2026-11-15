@@ -218,8 +218,14 @@ func TestMergeableTextEdits(t *testing.T) {
 	if got := notes(); got != "Check all mics and DI boxes, early" {
 		t.Fatalf("merged: %q", got)
 	}
-	// An offset inside a character is refused before anything is written.
+	// An offset outside the text, or inside a character, is refused.
 	if err := jazzapp.Tasks.EditNotes(ctx, db, task.ID, jazz.Splice(-1, 0, "x")); !errors.Is(err, jazz.ErrRefused) {
-		t.Fatalf("bad offset: %v", err)
+		t.Fatalf("negative offset: %v", err)
+	}
+	if err := jazzapp.Tasks.Update(ctx, db, task.ID, jazzapp.TaskPatch{Notes: jazz.Set(jazz.Ptr("héllo"))}); err != nil {
+		t.Fatal(err)
+	}
+	if err := jazzapp.Tasks.EditNotes(ctx, db, task.ID, jazz.Splice(2, 0, "x")); !errors.Is(err, jazz.ErrRefused) {
+		t.Fatalf("mid-character offset: %v (notes now %q)", err, notes())
 	}
 }
