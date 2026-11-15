@@ -92,8 +92,9 @@ impl JazzHandle {
         Ok(Arc::new(Subscription { inner }))
     }
 
-    /// Closes the app; later calls fail with `Closed`.
-    pub fn close(&self) -> Result<()> {
+    /// Closes the app; later calls fail with `Closed`. Named `shutdown`, not
+    /// `close`, which would clash with Kotlin's `AutoCloseable.close`.
+    pub fn shutdown(&self) -> Result<()> {
         Ok(self.core.close()?)
     }
 }

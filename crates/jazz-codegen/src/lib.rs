@@ -87,15 +87,20 @@ impl Lang {
         match name {
             "ts" | "typescript" => Ok(Lang::TypeScript),
             "rust" | "rs" => Ok(Lang::Rust),
-            "swift" => Ok(Lang::Swift),
+            // The back end is here, but the runtime package isn't released
+            // yet: `swift` is switched on with it (add it to `ALL` too).
+            "swift" => Err(CodegenError::unsupported(
+                "generating Swift bindings is not available yet; supported: ts, rust",
+            )),
             other => Err(CodegenError::unsupported(format!(
-                "generating bindings in `{other}` is not supported yet; supported: ts, rust, swift"
+                "generating bindings in `{other}` is not supported yet; supported: ts, rust"
             ))),
         }
     }
 
-    /// Every language, in the order `jazz-tools generate` handles them.
-    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust, Lang::Swift];
+    /// Every language `jazz-tools generate` handles, in that order. (Swift is
+    /// not available yet: [`Lang::Swift`] is generated only by direct calls.)
+    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust];
 
     /// The file whose presence beside `jazz.app.json` says the app is
     /// written in this language, so `validate` writes its bindings.
@@ -171,5 +176,18 @@ fn refuse_stranded(app: &App) -> Result<(), CodegenError> {
     match app.stranded.as_slice() {
         [] => Ok(()),
         stranded => Err(CodegenError::new(stranded.join("\n"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swift_is_not_available_from_the_cli_yet() {
+        let error = Lang::parse("swift").unwrap_err();
+        assert!(error.is_unsupported());
+        assert!(error.message().contains("not available yet"), "{error}");
+        assert!(!Lang::ALL.contains(&Lang::Swift));
     }
 }

@@ -2053,7 +2053,13 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     default: "full",
   });
   assert.equal(suite.jobs.lint.if, "inputs.scope != 'none'");
-  for (const name of ["test-rust-workspace", "test-storage-compat", "test-ts", "test-react-native"])
+  for (const name of [
+    "test-rust-workspace",
+    "test-storage-compat",
+    "test-ts",
+    "test-react-native",
+    "test-jazz-ffi-bindings",
+  ])
     assert.equal(
       suite.jobs[name].if,
       "inputs.scope == 'full'",
@@ -2064,6 +2070,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     Object.keys(suite.jobs).sort(),
     [
       "lint",
+      "test-jazz-ffi-bindings",
       "test-react-native",
       "test-rust",
       "test-rust-workspace",

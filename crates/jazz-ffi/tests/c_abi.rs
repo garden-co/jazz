@@ -73,6 +73,9 @@ fn wait_for(events: &Events, count: usize) -> Vec<(String, Value)> {
     }
 }
 
+/// Go's path: a local client through `jazz_call`, with a subscription whose
+/// C callback sees the reset delta, then each write, and nothing after
+/// `jazz_unsubscribe`.
 #[test]
 fn a_client_through_the_c_abi() {
     let h = open(&client_config()).unwrap();
@@ -163,6 +166,8 @@ fn a_client_through_the_c_abi() {
     unsafe { jazz_close(h) };
 }
 
+/// Failures store `{kind, message}` JSON in `*err`; NULL handles, methods and
+/// callbacks are refused rather than dereferenced.
 #[test]
 fn errors_come_back_as_json_and_null_is_refused() {
     assert_eq!(open("{").unwrap_err()["kind"], "refused");
@@ -215,6 +220,8 @@ fn errors_come_back_as_json_and_null_is_refused() {
     }
 }
 
+/// Every returned string is owned by the caller and freed exactly once with
+/// `jazz_string_free`.
 #[test]
 fn returned_strings_are_the_callers_to_free() {
     let h = open(&client_config()).unwrap();
@@ -246,6 +253,8 @@ fn returned_strings_are_the_callers_to_free() {
     unsafe { jazz_close(h) };
 }
 
+/// carol's backend, through the C ABI, reads her account, creates a show
+/// she chiefs and reads its tasks under StagePlan's permissions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_backend_through_the_c_abi() {
     let app_id = jazz_app::AppId::random();
