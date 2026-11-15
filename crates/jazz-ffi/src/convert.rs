@@ -275,7 +275,10 @@ fn included_row(include: &IncludeShape, id: Option<ObjectId>, values: Vec<Value>
         let value = values.next().unwrap_or(Value::Null);
         row.insert(name.clone(), to_json(value, Some(column_type)));
     }
-    for nested in &include.shape.includes {
+    // The engine appends a row's nested relations in name order.
+    let mut nested: Vec<&IncludeShape> = include.shape.includes.iter().collect();
+    nested.sort_by(|a, b| a.name.cmp(&b.name));
+    for nested in nested {
         let value = values.next().unwrap_or(Value::Null);
         row.insert(nested.name.clone(), included_json(nested, value));
     }
@@ -332,7 +335,9 @@ impl Relations {
                 } else if let (Some(to_table), Some(via)) = (
                     relation.get("reverse").and_then(Json::as_str),
                     relation.get("relation").and_then(Json::as_str),
-                ) && let Some((_, column)) = forward(to_table, via)
+                ) && let Some((target, column)) = forward(to_table, via)
+                    // A reverse relation reverses a forward one pointing here.
+                    && target == *table
                 {
                     list.push(Relation {
                         name: name.clone(),
@@ -444,6 +449,9 @@ fn level(
         match key.as_str() {
             "where" | "orderBy" | "limit" | "include" | "select" => {}
             "table" | "offset" if root => {}
+            "offset"
+                if matches!(object.get("offset"), Some(Json::Null))
+                    || object.get("offset").and_then(Json::as_u64) == Some(0) => {}
             "offset" => {
                 return Err(unsupported(format!(
                     "\"offset\" in an include ({path}); use \"limit\" or query the table"
@@ -518,7 +526,12 @@ fn level(
     }
 
     // `select`: these columns (and `id`, always) instead of all of them.
-    if let Some(select) = object.get("select").filter(|s| !s.is_null()) {
+    // `"*"` among them selects every column, as no `select` does.
+    let every = object
+        .get("select")
+        .and_then(Json::as_array)
+        .is_some_and(|names| names.iter().any(|n| n == "*"));
+    if let Some(select) = object.get("select").filter(|s| !s.is_null() && !every) {
         let select = select
             .as_array()
             .ok_or_else(|| refused(format!("{path}\"select\" must be an array of column names")))?;
@@ -617,12 +630,21 @@ fn level(
             subquery.nested_arrays = child_parts.includes;
             // As TS's requireIncludes: a required forward relation through
             // a non-null reference keeps only rows whose target is readable.
+            // A forward relation through a `uuid[]` column references many
+            // rows: it reads as an array, as in TS.
+            let reference = column(table, table_name, &relation.column).ok();
+            let many = relation.forward
+                && reference
+                    .as_ref()
+                    .is_some_and(|c| matches!(c.column_type.as_ref(), ColumnType::Array { .. }));
             if required {
-                let nullable = column(table, table_name, &relation.column)
-                    .map(|c| c.nullable)
-                    .unwrap_or(true);
+                let nullable = reference.as_ref().map(|c| c.nullable).unwrap_or(true);
                 if relation.forward && !nullable {
-                    subquery.requirement = q::ArraySubqueryRequirement::AtLeastOne;
+                    subquery.requirement = if many {
+                        q::ArraySubqueryRequirement::MatchCorrelationCardinality
+                    } else {
+                        q::ArraySubqueryRequirement::AtLeastOne
+                    };
                 } else {
                     return Err(unsupported(format!(
                         "\"required\" on {name}: only forward relations through a non-optional column can be required"
@@ -641,7 +663,7 @@ fn level(
             };
             shape.includes.push(IncludeShape {
                 name: name.to_owned(),
-                forward: relation.forward,
+                forward: relation.forward && !many,
                 columns: child_columns,
                 shape: child_shape,
             });
