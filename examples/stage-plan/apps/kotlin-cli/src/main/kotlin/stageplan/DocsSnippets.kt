@@ -11,6 +11,17 @@ import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import tools.jazz.Jazz
 import tools.jazz.JazzConfig
+import tools.jazz.JazzException
+import tools.jazz.JazzRow
+import tools.jazz.ReadTier
+import tools.jazz.WriteTier
+import tools.jazz.include
+import tools.jazz.select
+import jazzapp.Comment
+import jazzapp.Comments
+import jazzapp.NewComment
+import jazzapp.Crew
+import jazzapp.Shows
 import jazzapp.Task
 
 object DocsSnippets {
@@ -132,5 +143,127 @@ object DocsSnippets {
         val assigned = jazz.all(Tasks.where(Tasks.showId eq showId, Tasks.assigneeId.isNotNull()))
         // #endregion where-null-kotlin
         return listOf(blocked, notDone, topTen, later, soundTasks, unassigned, assigned)
+    }
+
+    suspend fun includes(jazz: Jazz, showId: String): List<String> {
+        // #region reading-includes-kotlin
+        // Each task with the crew member it's assigned to and its comments, each
+        // comment with its author: typed by the relations jazz.app.json declares.
+        val tasks: List<JazzRow<Task>> = jazz.all(
+            Tasks.where(Tasks.showId eq showId)
+                .orderBy(Tasks.rank.asc())
+                .include(
+                    Tasks.assignee,
+                    Tasks.comments.orderBy(Comments.body.asc()).include(Comments.author),
+                ),
+        )
+        val lines = tasks.map { task ->
+            val assignee: Crew? = task[Tasks.assignee]
+            val comments = task.rows(Tasks.comments).map { comment ->
+                "${comment[Comments.author]?.name}: ${comment[Comments.body]}"
+            }
+            "${task[Tasks.title]} (${assignee?.name ?: "unassigned"}) $comments"
+        }
+        // #endregion reading-includes-kotlin
+        return lines
+    }
+
+    suspend fun reverseRelation(jazz: Jazz, showId: String): Map<String, Int> {
+        // #region reading-reverse-relation-kotlin
+        // A show's rows with the tasks that point at it (the reverse of `tasks.show`).
+        val shows = jazz.all(Shows.where(Shows.id eq showId).include(Shows.tasks.where(Tasks.status ne TaskStatus.Done)))
+        val openTasks: Map<String, Int> = shows.associate { it[Shows.name] to it[Shows.tasks].size }
+        // #endregion reading-reverse-relation-kotlin
+        return openTasks
+    }
+
+    suspend fun select(jazz: Jazz, showId: String): List<Pair<String, TaskStatus>> {
+        // #region reading-select-kotlin
+        // Only the columns a list needs; `id` comes along always.
+        val rows = jazz.all(Tasks.where(Tasks.showId eq showId).select(Tasks.title, Tasks.status))
+        val titles = rows.map { it[Tasks.title] to it[Tasks.status] }
+        // #endregion reading-select-kotlin
+        return titles
+    }
+
+    suspend fun transaction(jazz: Jazz, showId: String): Boolean {
+        // #region writing-transaction-kotlin
+        // Move the show's first open task to "doing", reading and writing in one
+        // transaction: it commits when the block returns, and rolls back if it throws.
+        val moved: Boolean = jazz.transaction { tx ->
+            val next = tx.one(
+                Tasks.where(Tasks.showId eq showId, Tasks.status eq TaskStatus.Todo).orderBy(Tasks.rank.asc()),
+            ) ?: return@transaction false
+            tx.update(Tasks, next.id) { status(TaskStatus.Doing) }
+            true
+        }
+        // #endregion writing-transaction-kotlin
+        return moved
+    }
+
+    suspend fun writeTier(jazz: Jazz, showId: String): Task {
+        // #region writing-durability-tier-kotlin
+        // Returns once the sync server accepted the write; a write its permissions
+        // refuse throws JazzException.Permission instead of quietly rolling back.
+        val task = jazz.insert(
+            Tasks,
+            NewTask(showId = showId, title = "Strike", status = TaskStatus.Todo, rank = 99.0),
+            tier = WriteTier.Global,
+        )
+        jazz.update(Tasks, task.id, tier = WriteTier.Global) { status(TaskStatus.Doing) }
+        // Or write locally, then wait for everything so far to reach the server.
+        jazz.waitForSync(WriteTier.Global)
+        // #endregion writing-durability-tier-kotlin
+        return task
+    }
+
+    suspend fun readTier(jazz: Jazz, showId: String): List<Task> {
+        // #region reading-durability-tier-kotlin
+        // As the sync server has it, rather than what this process has locally.
+        val tasks = jazz.all(Tasks.where(Tasks.showId eq showId), tier = ReadTier.Remote)
+        // #endregion reading-durability-tier-kotlin
+        return tasks
+    }
+
+    suspend fun requireIncludes(jazz: Jazz, taskId: String): List<JazzRow<Comment>> {
+        // #region reading-require-includes-kotlin
+        // Only comments whose author this user can read: `required()` drops the others,
+        // so `comment[Comments.author]` is there for every row it returns.
+        val comments = jazz.all(Comments.where(Comments.taskId eq taskId).include(Comments.author.required()))
+        // #endregion reading-require-includes-kotlin
+        return comments
+    }
+
+    suspend fun transactionErrors(jazz: Jazz, taskId: String): String {
+        // #region writing-transaction-errors-kotlin
+        // A block that throws rolls the transaction back and rethrows; a commit the
+        // server refuses throws too (at WriteTier.Global), with nothing applied.
+        val outcome = try {
+            jazz.transaction(tier = WriteTier.Global) { tx ->
+                tx.update(Tasks, taskId) { status(TaskStatus.Blocked) }
+                tx.insert(Comments, NewComment(taskId = taskId, authorId = java.util.UUID.randomUUID().toString(), body = "blocked"))
+            }
+            "committed"
+        } catch (e: JazzException.Permission) {
+            "refused: ${e.message}"
+        }
+        // #endregion writing-transaction-errors-kotlin
+        return outcome
+    }
+
+    suspend fun mutationErrors(jazz: Jazz, taskId: String, crewId: String): String {
+        // #region writing-mutation-errors-kotlin
+        // Local-first writes return at once; one the server refuses rolls back later.
+        // To see the refusal, write at WriteTier.Global (or call waitForSync).
+        val result = try {
+            jazz.update(Tasks, taskId, tier = WriteTier.Global) { assigneeId(crewId) }
+            "saved"
+        } catch (e: JazzException.Permission) {
+            "not allowed: ${e.message}"
+        } catch (e: JazzException.Refused) {
+            "invalid: ${e.message}"
+        }
+        // #endregion writing-mutation-errors-kotlin
+        return result
     }
 }

@@ -39,7 +39,7 @@ Including a relation adds the resolved object alongside the foreign-key column&h
 }
 ```
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-includes-ts
@@ -49,6 +49,12 @@ Including a relation adds the resolved object alongside the foreign-key column&h
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-includes-effect
     </include>
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-includes-kotlin
+    </include>
+
   </Tab>
 </Tabs>
 
@@ -83,7 +89,10 @@ Jazz does not generate an inverse or infer names from UUID columns.
     </include>
   </Tab>
   <Tab value="Kotlin">
-    Not in Kotlin yet: see [Not supported yet](/docs/setup/kotlin#not-supported-yet).
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-reverse-relation-kotlin
+    </include>
+
   </Tab>
   <Tab value="Go">
     Not in Go yet: see [Not supported yet](/docs/setup/go#not-supported-yet).
@@ -97,7 +106,7 @@ relation.
 
 Use `select(...)` to narrow a row to `id` plus the columns you pick. You can combine it with `include(...)`, and select within included rows too.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-select-ts
@@ -107,6 +116,12 @@ Use `select(...)` to narrow a row to `id` plus the columns you pick. You can com
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-select-effect
     </include>
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-select-kotlin
+    </include>
+
   </Tab>
 </Tabs>
 
@@ -234,7 +249,7 @@ hidden by permissions. The included field is `null`. A nullable, unset reference
 Use `.requireIncludes()` when every included, non-nullable forward reference must resolve. It drops
 a source row if one of those required targets is unavailable.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-require-includes-ts
@@ -244,6 +259,12 @@ a source row if one of those required targets is unavailable.
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-require-includes-effect
     </include>
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-require-includes-kotlin
+    </include>
+
   </Tab>
 </Tabs>
 

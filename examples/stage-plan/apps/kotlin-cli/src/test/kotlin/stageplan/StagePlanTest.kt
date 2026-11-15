@@ -1,6 +1,12 @@
 package stageplan
 
+import jazzapp.Comments
+import jazzapp.CrewTable
+import jazzapp.NewComment
+import jazzapp.NewCrew
 import jazzapp.TaskStatus
+import kotlinx.coroutines.launch
+import tools.jazz.include
 import jazzapp.Tasks
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
@@ -106,6 +112,47 @@ class StagePlanTest {
     }
 
     @Test
+    fun includes_and_select() = runBlocking {
+        open("user-3").use { jazz ->
+            val me = jazz.account()!!
+            val show = showNamed(jazz, "Encore")
+            val ada = jazz.insert(CrewTable, NewCrew(account = me, name = "Ada"))
+            // Permissions let a task be assigned only to the show's crew.
+            jazz.insert(jazzapp.ShowCrewTable, jazzapp.NewShowCrew(showId = show.id, crewId = ada.id, account = me, role = jazzapp.ShowCrewRole.Chief))
+            val load = addTask(jazz, show, "Load in")
+            addTask(jazz, show, "Sound check")
+            jazz.update(Tasks, load.id) { assigneeId(ada.id) }
+            jazz.insert(Comments, NewComment(taskId = load.id, authorId = ada.id, body = "b: trucks at 9"))
+            jazz.insert(Comments, NewComment(taskId = load.id, authorId = ada.id, body = "a: dock 2"))
+            assertEquals(
+                listOf("Load in (Ada) [Ada: a: dock 2, Ada: b: trucks at 9]", "Sound check (unassigned) []"),
+                DocsSnippets.includes(jazz, show.id),
+            )
+            assertEquals(mapOf("Encore" to 2), DocsSnippets.reverseRelation(jazz, show.id))
+            assertEquals(
+                listOf("Load in" to TaskStatus.Todo, "Sound check" to TaskStatus.Todo),
+                DocsSnippets.select(jazz, show.id).sortedBy { it.first },
+            )
+            // A required include (through a non-optional reference) keeps only rows whose target is readable.
+            val withAuthors = jazz.all(Comments.where(Comments.taskId eq load.id).include(Comments.author.required()))
+            assertEquals(listOf("Ada", "Ada"), withAuthors.map { it[Comments.author]?.name })
+            assertEquals(2, DocsSnippets.requireIncludes(jazz, load.id).size)
+            // Subscriptions deliver included rows, and an update when a related row changes.
+            val seen = kotlinx.coroutines.channels.Channel<List<String?>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+            val job = launch {
+                jazz.watch(Tasks.where(Tasks.showId eq show.id).orderBy(Tasks.rank.asc()).include(Tasks.assignee))
+                    .collect { rows -> seen.send(rows.map { it[Tasks.assignee]?.name }) }
+            }
+            kotlinx.coroutines.withTimeout(30_000) {
+                while (seen.receive() != listOf("Ada", null)) Unit
+                jazz.update(CrewTable, ada.id) { name("Ada L.") }
+                while (seen.receive() != listOf("Ada L.", null)) Unit
+            }
+            job.cancel()
+        }
+    }
+
+    @Test
     fun close_ends_watches_and_later_calls_with_closed(): Unit = runBlocking {
         val jazz = open("user-4")
         val show = showNamed(jazz, "Closing night")
@@ -117,5 +164,40 @@ class StagePlanTest {
         val ended = kotlinx.coroutines.withTimeout(30_000) { watching.await() }
         kotlin.test.assertTrue(ended.exceptionOrNull() is tools.jazz.JazzException.Closed, "$ended")
         kotlin.test.assertFailsWith<tools.jazz.JazzException.Closed> { tasksOf(jazz, show) }
+    }
+
+    @Test
+    fun transactions_tiers_and_permission_errors(): Unit = runBlocking {
+        open("user-5").use { jazz ->
+            val me = jazz.account()!!
+            val show = showNamed(jazz, "Gala")
+            val a = addTask(jazz, show, "A")
+            addTask(jazz, show, "B")
+            // Commits: the first todo moves to doing.
+            assertEquals(true, DocsSnippets.transaction(jazz, show.id))
+            assertEquals(TaskStatus.Doing, jazz.one(Tasks.where(Tasks.id eq a.id))!!.status)
+            // Rolls back when the block throws, and rethrows.
+            val error = kotlin.test.assertFailsWith<IllegalStateException> {
+                jazz.transaction { tx ->
+                    tx.update(Tasks, a.id) { title("renamed") }
+                    assertEquals("renamed", tx.one(Tasks.where(Tasks.id eq a.id))!!.title)
+                    error("changed my mind")
+                }
+            }
+            assertEquals("changed my mind", error.message)
+            assertEquals("A", jazz.one(Tasks.where(Tasks.id eq a.id))!!.title)
+            // Global writes and reads.
+            val strike = DocsSnippets.writeTier(jazz, show.id)
+            assertEquals(TaskStatus.Doing, DocsSnippets.readTier(jazz, show.id).single { it.id == strike.id }.status)
+            // A global write the permissions refuse throws: Ada isn't in the show's crew.
+            val ada = jazz.insert(CrewTable, NewCrew(account = me, name = "Ada"), tier = tools.jazz.WriteTier.Global)
+            kotlin.test.assertFailsWith<tools.jazz.JazzException.Permission> {
+                jazz.update(Tasks, a.id, tier = tools.jazz.WriteTier.Global) { assigneeId(ada.id) }
+            }
+            kotlin.test.assertTrue(DocsSnippets.mutationErrors(jazz, a.id, ada.id).startsWith("not allowed"))
+            kotlin.test.assertTrue(DocsSnippets.transactionErrors(jazz, a.id).startsWith("refused"))
+            // Nothing of the refused transaction applied.
+            kotlin.test.assertTrue(jazz.one(Tasks.where(Tasks.id eq a.id))!!.status != TaskStatus.Blocked)
+        }
     }
 }

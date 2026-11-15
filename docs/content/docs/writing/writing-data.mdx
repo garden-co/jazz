@@ -396,7 +396,18 @@ try {
     </include>
   </Tab>
   <Tab value="Kotlin">
-    Not in Kotlin yet: see [Not supported yet](/docs/setup/kotlin#not-supported-yet).
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-crud-kotlin
+    </include>
+
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-nullable-update-kotlin
+    </include>
+
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-durability-tier-kotlin
+    </include>
+
   </Tab>
   <Tab value="Go">
     Not in Go yet: see [Not supported yet](/docs/setup/go#not-supported-yet).
@@ -496,7 +507,7 @@ A mutation can fail when you call it or while you wait:
   `PersistedWriteRejectedError` on the local-first client, and with a `ThinRemoteError` (code
   `WriteRejected`) on the thin client.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-errors-ts
@@ -506,6 +517,12 @@ A mutation can fail when you call it or while you wait:
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-mutation-errors-effect
     </include>
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-mutation-errors-kotlin
+    </include>
+
   </Tab>
 </Tabs>
 
