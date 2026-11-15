@@ -60,13 +60,13 @@ describe("fresh subscriber first sync", () => {
       }
 
       const reader = await open("reader");
-      let rows: { label: string; body: string }[] | undefined;
+      let rows: ReadonlyArray<Record<string, unknown>> | undefined;
       let error: unknown;
       unsubscribe = reader.subscribe(
         app.docs,
         {
           onUpdate: (next) => {
-            rows = next as typeof rows;
+            rows = next;
           },
           onError: (next) => {
             error = next;
