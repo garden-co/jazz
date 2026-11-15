@@ -1,0 +1,682 @@
+//! The Go back end: `jazzapp/jazz_app.go`, typed bindings over the Go
+//! runtime module (`github.com/garden-co/jazz/packages/jazz-go`, package
+//! `jazz`), which wraps the `jazz-ffi` C ABI through cgo.
+//!
+//! The bindings are their own package, `jazzapp`, in a directory beside
+//! `jazz.app.json` and `go.mod`, so they never depend on the name of the
+//! app's own package. Per table: a row struct (`Todo`) with json tags of
+//! the authored names, an insert struct (`NewTodo`), a patch struct
+//! (`TodoPatch`, whose fields are set one by one) and a table value
+//! (`Todos`) holding its typed columns, its query builder and its writes.
+//! `Open` embeds `jazz.app.json` itself.
+//!
+//! Computed fields and transforms are not supported yet: an app declaring
+//! them is refused (as "unsupported", so `jazz-tools generate` skips Go
+//! with a warning when it only found a `go.mod`).
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
+
+use jazz::tools::public_schema::ColumnType;
+
+use crate::CodegenError;
+use crate::model::{App, Column, Table};
+use crate::names::{pascal, singular};
+
+/// Where the bindings go, relative to `jazz.app.json`.
+pub const FILE: &str = "jazzapp/jazz_app.go";
+
+/// The version of the bindings' shape this generator writes: the second
+/// line records it.
+pub const FORMAT: u32 = 1;
+
+/// The first line, which marks a file as this generator's (and as
+/// generated, for gofmt, golint and `go vet`).
+pub const HEADER: &str =
+    "// Code generated from jazz.app.json by `jazz-tools generate`. DO NOT EDIT.";
+
+/// The Go runtime module's import path.
+pub const MODULE: &str = "github.com/garden-co/jazz/packages/jazz-go";
+
+/// How the format line starts.
+const FORMAT_PREFIX: &str = "// Bindings format ";
+
+/// How the embedded `jazz.app.json` starts: a raw string follows.
+const APP_PREFIX: &str = "const App = ";
+
+/// How the recorded source starts.
+const SOURCE_PREFIX: &str = "const Source = ";
+
+/// A backquote inside the embedded file, which a raw string can't hold.
+const BACKQUOTE: &str = "` + \"`\" + `";
+
+/// Package-level names the bindings declare themselves.
+const RESERVED: &[&str] = &["App", "Source", "Open"];
+
+/// Method names of a table value, which no column may take.
+const TABLE_METHODS: &[&str] = &["Query", "Insert", "Update", "Delete"];
+
+/// Words Go spells in capitals inside a name (`userID`, `avatarURL`).
+const INITIALISMS: &[&str] = &[
+    "api", "css", "dns", "html", "http", "https", "id", "ip", "json", "sql", "ssh", "tcp", "ui",
+    "uri", "url", "utf8", "uuid", "xml",
+];
+
+pub fn generate(app: &App) -> Result<String, CodegenError> {
+    if let Some(transform) = app.transforms.first() {
+        return Err(CodegenError::unsupported(format!(
+            "transform `{}`: transforms are not supported in Go bindings yet",
+            transform.name
+        )));
+    }
+    if let Some((table, computed)) = app
+        .tables
+        .iter()
+        .find_map(|t| t.computed.first().map(|c| (t, c)))
+    {
+        return Err(CodegenError::unsupported(format!(
+            "computed field `{}.{}`: computed fields are not supported in Go bindings yet",
+            table.name, computed.name
+        )));
+    }
+    Writer::new(app)?.write()
+}
+
+/// Whether `go_mod` (a `go.mod`) is a module that uses the Go runtime: it
+/// requires (or replaces) [`MODULE`].
+pub fn is_app_module(go_mod: &str) -> bool {
+    go_mod.lines().any(|line| {
+        let line = line.split("//").next().unwrap_or("").trim();
+        let line = line
+            .strip_prefix("require")
+            .or_else(|| line.strip_prefix("replace"))
+            .map(str::trim)
+            .unwrap_or(line)
+            .trim_start_matches('(')
+            .trim();
+        line.split_whitespace()
+            .next()
+            .is_some_and(|path| path.trim_matches('"') == MODULE)
+    })
+}
+
+struct TableNames {
+    row: String,
+    new: String,
+    patch: String,
+    /// The table value (`Todos`) and its type (`todosTable`).
+    value: String,
+    ty: String,
+}
+
+struct Writer<'a> {
+    app: &'a App,
+    tables: BTreeMap<&'a str, TableNames>,
+    /// Generated enums by Go name: values (Go const name, stored name), and
+    /// what declared them.
+    enums: BTreeMap<String, (Vec<(String, String)>, String)>,
+    /// Every package-level name taken, with what took it.
+    names: BTreeMap<String, String>,
+    uses_json: bool,
+}
+
+/// A column as the bindings hold it.
+struct Field {
+    name: String,
+    ident: String,
+    /// The row's (and a patch's) type: a pointer when nullable.
+    ty: String,
+    /// The type a column's conditions take: never a pointer.
+    value: String,
+    optional_on_insert: bool,
+    nullable: bool,
+}
+
+impl<'a> Writer<'a> {
+    fn new(app: &'a App) -> Result<Self, CodegenError> {
+        let mut writer = Self {
+            app,
+            tables: BTreeMap::new(),
+            enums: BTreeMap::new(),
+            names: RESERVED
+                .iter()
+                .map(|name| (name.to_string(), "a name the bindings use".to_string()))
+                .collect(),
+            uses_json: false,
+        };
+        for table in &app.tables {
+            let row = go_ident(&pascal(&singular(&table.name)), &table.name)?;
+            let mut value = go_ident(&pascal(&table.name), &table.name)?;
+            if value == row {
+                value = format!("{row}Table");
+            }
+            let ty = format!("{}Table", lower_first(&value));
+            let what = format!("table `{}`", table.name);
+            let names = TableNames {
+                new: format!("New{row}"),
+                patch: format!("{row}Patch"),
+                row,
+                value,
+                ty,
+            };
+            for name in [
+                &names.row,
+                &names.new,
+                &names.patch,
+                &names.value,
+                &names.ty,
+            ] {
+                writer.take(name, &what)?;
+            }
+            writer.tables.insert(&table.name, names);
+        }
+        Ok(writer)
+    }
+
+    fn take(&mut self, name: &str, what: &str) -> Result<(), CodegenError> {
+        match self.names.insert(name.to_owned(), what.to_owned()) {
+            Some(other) => Err(CodegenError::unsupported(format!(
+                "{what} and {other} are both the Go name `{name}`"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    fn write(mut self) -> Result<String, CodegenError> {
+        let mut items = String::new();
+        for table in &self.app.tables {
+            items.push_str(&self.table(table)?);
+        }
+
+        let mut out = String::new();
+        let _ = writeln!(out, "{HEADER}");
+        let _ = writeln!(
+            out,
+            "{FORMAT_PREFIX}{FORMAT}. Regenerate it after changing jazz.app.json."
+        );
+        out.push('\n');
+        out.push_str("// Package jazzapp holds the typed bindings of this app's jazz.app.json.\n");
+        out.push_str("package jazzapp\n\n");
+        out.push_str("import (\n\t\"context\"\n");
+        if self.uses_json {
+            out.push_str("\t\"encoding/json\"\n");
+        }
+        let _ = writeln!(out, "\n\tjazz \"{MODULE}\"\n)\n");
+        out.push_str(
+            "// Source is the hash of the jazz.app.json these bindings were generated from.\n",
+        );
+        let _ = writeln!(out, "{SOURCE_PREFIX}{:?}\n", self.app.source);
+        out.push_str("// App is the jazz.app.json these bindings were generated from.\n");
+        let _ = writeln!(
+            out,
+            "{APP_PREFIX}`{}`\n",
+            self.app.file.replace('`', BACKQUOTE)
+        );
+        out.push_str(
+            "// Open opens this app: a client, or a backend when cfg.Permissions is set.\n",
+        );
+        out.push_str("func Open(ctx context.Context, cfg jazz.Config) (*jazz.DB, error) {\n");
+        out.push_str("\tcfg.App = App\n\treturn jazz.Open(ctx, cfg)\n}\n\n");
+        for (name, (values, what)) in &self.enums {
+            let _ = writeln!(out, "// {name} is a value of {what}.");
+            let _ = writeln!(out, "type {name} string\n");
+            let _ = writeln!(out, "// The values of {name}.");
+            out.push_str("const (\n");
+            let width = values.iter().map(|(c, _)| c.len()).max().unwrap_or(0);
+            for (constant, stored) in values {
+                let _ = writeln!(out, "\t{constant:<width$} {name} = {}", go_string(stored));
+            }
+            out.push_str(")\n\n");
+        }
+        out.push_str(&items);
+        // One trailing newline, as gofmt leaves it.
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
+        Ok(out)
+    }
+
+    /// The Go type of a value of `ty`; `name` and `what` name a generated
+    /// enum.
+    fn go_type(&mut self, ty: &ColumnType, name: &str, what: &str) -> Result<String, CodegenError> {
+        Ok(match ty {
+            ColumnType::Integer => "int32".into(),
+            ColumnType::BigInt => "jazz.BigInt".into(),
+            ColumnType::Boolean => "bool".into(),
+            ColumnType::Text | ColumnType::Uuid => "string".into(),
+            ColumnType::Double => "float64".into(),
+            ColumnType::Timestamp => "jazz.Timestamp".into(),
+            ColumnType::Bytea => "[]byte".into(),
+            ColumnType::Json { .. } => {
+                self.uses_json = true;
+                "json.RawMessage".into()
+            }
+            ColumnType::Array { element } => format!("[]{}", self.go_type(element, name, what)?),
+            ColumnType::Enum { variants } => {
+                let mut values = Vec::new();
+                let mut seen = BTreeMap::new();
+                for variant in variants {
+                    let constant = format!("{name}{}", go_ident(&pascal_words(variant), variant)?);
+                    if let Some(other) = seen.insert(constant.clone(), variant.clone()) {
+                        return Err(CodegenError::unsupported(format!(
+                            "{what}: values `{other}` and `{variant}` are both the Go name `{constant}`"
+                        )));
+                    }
+                    values.push((constant, variant.clone()));
+                }
+                self.take(name, what)?;
+                for (constant, _) in &values {
+                    self.take(constant, what)?;
+                }
+                self.enums
+                    .insert(name.to_owned(), (values, what.to_owned()));
+                name.to_owned()
+            }
+            other => {
+                return Err(CodegenError::unsupported(format!(
+                    "{what}: {} values in Go bindings",
+                    type_label(other)
+                )));
+            }
+        })
+    }
+
+    fn field(
+        &mut self,
+        table: &Table,
+        row: &str,
+        column: &Column,
+        ident: String,
+    ) -> Result<Field, CodegenError> {
+        let what = format!("column `{}.{}`", table.name, column.name);
+        let value = self.go_type(&column.ty.ty, &format!("{row}{ident}"), &what)?;
+        let nullable = column.ty.nullable;
+        Ok(Field {
+            name: column.name.clone(),
+            ident,
+            ty: if nullable {
+                format!("*{value}")
+            } else {
+                value.clone()
+            },
+            value,
+            optional_on_insert: column.optional_on_insert(),
+            nullable,
+        })
+    }
+
+    fn table(&mut self, table: &'a Table) -> Result<String, CodegenError> {
+        let names = &self.tables[table.name.as_str()];
+        let (row, new, patch, value, ty) = (
+            names.row.clone(),
+            names.new.clone(),
+            names.patch.clone(),
+            names.value.clone(),
+            names.ty.clone(),
+        );
+        let mut idents: BTreeSet<String> = TABLE_METHODS.iter().map(|m| m.to_string()).collect();
+        idents.insert("ID".into());
+        let mut fields = Vec::new();
+        for column in &table.columns {
+            let ident = go_ident(&pascal_words(&column.name), &column.name)?;
+            if !idents.insert(ident.clone()) {
+                return Err(CodegenError::unsupported(format!(
+                    "`{}.{}` is the Go name `{ident}`, which another column or a method of `{value}` already is",
+                    table.name, column.name
+                )));
+            }
+            fields.push(self.field(table, &row, column, ident)?);
+        }
+
+        let mut out = String::new();
+        let tag = |name: &str, omitempty: bool| {
+            let name = go_tag_name(name);
+            if omitempty {
+                format!("`json:\"{name},omitempty\"`")
+            } else {
+                format!("`json:\"{name}\"`")
+            }
+        };
+
+        // The row.
+        let _ = writeln!(out, "// {row} is a row of `{}`.", table.name);
+        let mut lines = vec![["ID".to_owned(), "string".to_owned(), tag("id", false)]];
+        for f in &fields {
+            lines.push([f.ident.clone(), f.ty.clone(), tag(&f.name, false)]);
+        }
+        write_struct(&mut out, &row, &lines);
+
+        // The insert.
+        let _ = writeln!(
+            out,
+            "// {new} is a row to insert into `{}`: nil fields are null, or take their default.",
+            table.name
+        );
+        let lines: Vec<[String; 3]> = fields
+            .iter()
+            .map(|f| {
+                let ty = if f.optional_on_insert && !f.nullable {
+                    format!("*{}", f.value)
+                } else {
+                    f.ty.clone()
+                };
+                [f.ident.clone(), ty, tag(&f.name, f.optional_on_insert)]
+            })
+            .collect();
+        write_struct(&mut out, &new, &lines);
+
+        // The patch.
+        let _ = writeln!(
+            out,
+            "// {patch} changes the fields of a row of `{}` that are set (jazz.Set).",
+            table.name
+        );
+        let lines: Vec<[String; 3]> = fields
+            .iter()
+            .map(|f| {
+                [
+                    f.ident.clone(),
+                    format!("jazz.Patch[{}]", f.ty),
+                    String::new(),
+                ]
+            })
+            .collect();
+        write_struct(&mut out, &patch, &lines);
+        let _ = writeln!(out, "// MarshalJSON writes the fields that are set.");
+        let _ = writeln!(out, "func (p {patch}) MarshalJSON() ([]byte, error) {{");
+        if fields.is_empty() {
+            out.push_str("\treturn jazz.MarshalPatch()\n}\n\n");
+        } else {
+            out.push_str("\treturn jazz.MarshalPatch(\n");
+            for f in &fields {
+                let _ = writeln!(out, "\t\tp.{}.Entry({}),", f.ident, go_string(&f.name));
+            }
+            out.push_str("\t)\n}\n\n");
+        }
+
+        // The table value: columns, query, writes.
+        let _ = writeln!(
+            out,
+            "// {ty} is the type of {value}: the columns of `{}`, to build conditions and orders from.",
+            table.name
+        );
+        let mut lines = vec![[
+            "ID".to_owned(),
+            format!("jazz.Column[{row}, string]"),
+            String::new(),
+        ]];
+        for f in &fields {
+            lines.push([
+                f.ident.clone(),
+                format!("jazz.Column[{row}, {}]", f.value),
+                String::new(),
+            ]);
+        }
+        write_struct(&mut out, &ty, &lines);
+        let _ = writeln!(out, "// {value} is the table `{}`.", table.name);
+        let _ = writeln!(out, "var {value} = {ty}{{");
+        let width = lines.iter().map(|l| l[0].len() + 1).max().unwrap_or(0);
+        let _ = writeln!(
+            out,
+            "\t{:<width$} jazz.NewColumn[{row}, string](\"id\"),",
+            "ID:"
+        );
+        for f in &fields {
+            let _ = writeln!(
+                out,
+                "\t{:<width$} jazz.NewColumn[{row}, {}]({}),",
+                format!("{}:", f.ident),
+                f.value,
+                go_string(&f.name)
+            );
+        }
+        out.push_str("}\n\n");
+        let table_name = go_string(&table.name);
+        let _ = writeln!(out, "// Query starts a query of `{}`.", table.name);
+        let _ = writeln!(
+            out,
+            "func ({ty}) Query() *jazz.Query[{row}] {{\n\treturn jazz.NewQuery[{row}]({table_name})\n}}\n"
+        );
+        let _ = writeln!(
+            out,
+            "// Insert inserts a row into `{}` and returns it, with its id.",
+            table.name
+        );
+        let _ = writeln!(
+            out,
+            "func ({ty}) Insert(ctx context.Context, db *jazz.DB, row {new}) ({row}, error) {{\n\treturn jazz.Insert[{new}, {row}](ctx, db, {table_name}, row)\n}}\n"
+        );
+        let _ = writeln!(
+            out,
+            "// Update changes the fields patch sets of the row of `{}` with id.",
+            table.name
+        );
+        let _ = writeln!(
+            out,
+            "func ({ty}) Update(ctx context.Context, db *jazz.DB, id string, patch {patch}) error {{\n\treturn db.Update(ctx, {table_name}, id, patch)\n}}\n"
+        );
+        let _ = writeln!(
+            out,
+            "// Delete deletes the row of `{}` with id.",
+            table.name
+        );
+        let _ = writeln!(
+            out,
+            "func ({ty}) Delete(ctx context.Context, db *jazz.DB, id string) error {{\n\treturn db.Delete(ctx, {table_name}, id)\n}}\n"
+        );
+        Ok(out)
+    }
+}
+
+/// A struct whose lines are `[name, type, tag]`, aligned as gofmt aligns
+/// them.
+fn write_struct(out: &mut String, name: &str, lines: &[[String; 3]]) {
+    if lines.is_empty() {
+        let _ = writeln!(out, "type {name} struct{{}}\n");
+        return;
+    }
+    let _ = writeln!(out, "type {name} struct {{");
+    let names = lines.iter().map(|l| l[0].len()).max().unwrap_or(0);
+    let types = lines.iter().map(|l| l[1].len()).max().unwrap_or(0);
+    for [field, ty, tag] in lines {
+        let line = if tag.is_empty() {
+            format!("\t{field:<names$} {ty}")
+        } else {
+            format!("\t{field:<names$} {ty:<types$} {tag}")
+        };
+        let _ = writeln!(out, "{}", line.trim_end());
+    }
+    out.push_str("}\n\n");
+}
+
+fn type_label(ty: &ColumnType) -> &'static str {
+    match ty {
+        ColumnType::TransactionId => "transaction id",
+        ColumnType::Row { .. } => "nested row",
+        ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. } => {
+            "enum-with-payload"
+        }
+        ColumnType::ScalarEnum { .. } => "catalogue enum",
+        _ => "these",
+    }
+}
+
+// ---- reading back ------------------------------------------------------------
+
+/// What committed bindings embed: their format, their source, and the
+/// `jazz.app.json` they were generated from, checked again (its source
+/// must still be what they record).
+pub(crate) fn read(bindings: &str) -> Result<crate::bindings::Recorded, CodegenError> {
+    let refuse = |what: &str| {
+        CodegenError::new(format!(
+            "{FILE}: {what}; regenerate it with `jazz-tools generate`"
+        ))
+    };
+    let bindings = bindings.replace("\r\n", "\n");
+    let mut lines = bindings.lines();
+    if lines.next() != Some(HEADER) {
+        return Err(refuse(
+            "not a file jazz-tools generated (its first line differs)",
+        ));
+    }
+    let format = lines
+        .next()
+        .and_then(|line| line.strip_prefix(FORMAT_PREFIX))
+        .and_then(|rest| rest.split('.').next())
+        .and_then(|n| n.parse::<u32>().ok())
+        .ok_or_else(|| refuse("no `// Bindings format <n>.` second line"))?;
+    let source = bindings
+        .lines()
+        .find_map(|line| line.strip_prefix(SOURCE_PREFIX))
+        .and_then(|literal| serde_json::from_str::<String>(literal.trim()).ok())
+        .ok_or_else(|| refuse("no `const Source`"))?;
+    let at = bindings
+        .find(&format!("{APP_PREFIX}`"))
+        .ok_or_else(|| refuse("no `const App`"))?
+        + APP_PREFIX.len()
+        + 1;
+    let mut rest = &bindings[at..];
+    let mut file = String::new();
+    loop {
+        let end = rest.find('`').ok_or_else(|| refuse("`App` is cut short"))?;
+        file.push_str(&rest[..end]);
+        rest = &rest[end..];
+        match rest.strip_prefix(BACKQUOTE) {
+            Some(after) => {
+                file.push('`');
+                rest = after;
+            }
+            None => break,
+        }
+    }
+    // Regenerating can't repair these: the file is the record of the
+    // version the app last generated against.
+    let unusable = |what: &str| {
+        CodegenError::new(format!(
+            "{FILE}: {what}. Restore it from version control; or delete it and run \
+             `jazz-tools generate` (an edit of `tables` since it was generated then \
+             has no recorded version to migrate from)"
+        ))
+    };
+    if jazz::tools::deployment::artifact::source_hash(file.as_bytes()) != source {
+        return Err(unusable(
+            "its `App` was edited (it no longer matches `Source`)",
+        ));
+    }
+    let app = App::load(file.as_bytes())
+        .map_err(|error| unusable(&format!("its `App` no longer loads ({error})")))?;
+    Ok(crate::bindings::Recorded {
+        source,
+        format,
+        current: app.compiled.current,
+        current_schema: app.compiled.current_schema().clone(),
+    })
+}
+
+// ---- names ------------------------------------------------------------------
+
+/// Words of a camelCase, snake_case or kebab-case name, each capitalised
+/// (initialisms in capitals): `userId` → `UserID`, `in-progress` →
+/// `InProgress`, `HIGH` → `High`.
+fn pascal_words(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut words = Vec::new();
+    let mut word = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_alphanumeric() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            continue;
+        }
+        let boundary = c.is_uppercase()
+            && !word.is_empty()
+            && (chars[i - 1].is_lowercase()
+                || chars[i - 1].is_ascii_digit()
+                || chars.get(i + 1).is_some_and(|next| next.is_lowercase()));
+        if boundary {
+            words.push(std::mem::take(&mut word));
+        }
+        word.extend(c.to_lowercase());
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+        .iter()
+        .map(|w| {
+            if INITIALISMS.contains(&w.as_str()) {
+                w.to_uppercase()
+            } else {
+                pascal(w)
+            }
+        })
+        .collect()
+}
+
+/// An exported Go name derived from `name`.
+fn go_ident(ident: &str, name: &str) -> Result<String, CodegenError> {
+    if ident.is_empty()
+        || !ident.starts_with(|c: char| c.is_ascii_uppercase())
+        || !ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(CodegenError::unsupported(format!(
+            "`{name}` has no exported Go name: it must start with a letter and use only ASCII letters, digits and `_`"
+        )));
+    }
+    Ok(ident.to_owned())
+}
+
+fn lower_first(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_lowercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// A Go string literal (JSON's escapes are Go's).
+fn go_string(text: &str) -> String {
+    serde_json::to_string(text).expect("strings serialize")
+}
+
+/// A name inside a struct tag's backquotes: what `encoding/json` reads
+/// back as the key. A tag can't hold a backquote, `"` or `,`.
+fn go_tag_name(name: &str) -> String {
+    name.to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names() {
+        assert_eq!(pascal_words("isPublic"), "IsPublic");
+        assert_eq!(pascal_words("userId"), "UserID");
+        assert_eq!(pascal_words("user_id"), "UserID");
+        assert_eq!(pascal_words("avatarUrl"), "AvatarURL");
+        assert_eq!(pascal_words("in-progress"), "InProgress");
+        assert_eq!(pascal_words("HIGH"), "High");
+        assert!(go_ident(&pascal_words("2fa"), "2fa").is_err());
+        assert_eq!(lower_first("ChatMembers"), "chatMembers");
+    }
+
+    #[test]
+    fn go_modules_require_the_runtime() {
+        assert!(is_app_module(&format!(
+            "module example.com/todo\n\ngo 1.23\n\nrequire {MODULE} v0.0.0\n"
+        )));
+        assert!(is_app_module(&format!(
+            "module x\n\nrequire (\n\t{MODULE} v0.0.0\n)\n"
+        )));
+        assert!(is_app_module(&format!(
+            "module x\n\nrequire (\n\tgolang.org/x/net v1\n\t{MODULE} v0.0.0 // indirect\n)\n"
+        )));
+        assert!(!is_app_module("module x\n\ngo 1.23\n"));
+        assert!(!is_app_module(&format!(
+            "module x\n// require {MODULE} v0\n"
+        )));
+        assert!(!is_app_module(&format!("module {MODULE}\n")));
+    }
+}

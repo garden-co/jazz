@@ -29,6 +29,7 @@ pub fn read(lang: Lang, bindings: &str) -> Result<Recorded, CodegenError> {
     match lang {
         Lang::TypeScript => read_ts(bindings),
         Lang::Rust => crate::rust::read(bindings),
+        Lang::Go => crate::go::read(bindings),
     }
 }
 
