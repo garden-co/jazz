@@ -101,3 +101,13 @@ describe("generate in a Rust crate", () => {
     }
   });
 });
+
+describe("finding the app's files", () => {
+  it("refuses jazz.app.json in more than one place", async () => {
+    const dir = await project();
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(join(dir, "src"));
+    await writeFile(join(dir, "src", "jazz.app.json"), JSON.stringify(APP));
+    await expect(generateApp({ cwd: dir })).rejects.toThrow(/found jazz\.app\.json in both/);
+  });
+});

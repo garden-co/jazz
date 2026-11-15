@@ -10,7 +10,6 @@ import {
 } from "../backend/create-jazz.js";
 import type { Session } from "../runtime/context.js";
 import type { AppPermissionsFile } from "../backend/create-jazz.js";
-import { testPermissions } from "./test-app.js";
 import type { SchemaSourceInput } from "../schema-source.js";
 import {
   deploy,
@@ -275,7 +274,7 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
         appId: core.appId,
         adminSecret: core.adminSecret,
         app,
-        permissions: testPermissions(app, permissions as never),
+        permissions,
       });
       const ports = servers.map((server) => (server.address() as AddressInfo).port);
       await closeOrigins();
