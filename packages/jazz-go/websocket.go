@@ -26,9 +26,9 @@ import (
 // Limits of the endpoint's sockets.
 const (
 	// wsMaxMessage caps a message (all its fragments): a larger one closes
-	// the socket with 1009. Jazz's sync messages are far smaller; large
-	// values travel in chunks.
-	wsMaxMessage = 32 << 20
+	// the socket with 1009 before it is read, as Jazz's own cap on a sync
+	// message (2 MiB) would after. Large values travel in chunks.
+	wsMaxMessage = 2 << 20
 	// wsIdle is how long a socket may stay silent (no frame of any kind)
 	// before it is dropped; wsPing is how often the server pings it, so a
 	// live client always answers within wsIdle.

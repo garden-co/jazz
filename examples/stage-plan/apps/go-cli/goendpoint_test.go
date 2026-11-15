@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -105,5 +107,37 @@ func TestAGoBackendServesItsEndUsers(t *testing.T) {
 	defer dan.Close()
 	if s, err := dan.Session(ctx); err != nil || s == nil || s.Status != jazz.SignedIn || s.User.Kind != "device" {
 		t.Fatalf("dan: %+v %v", s, err)
+	}
+}
+
+// A token provider that fails (a network blip at the auth provider)
+// doesn't sign the user out; one that answers "" does.
+func TestATokenProviderErrorKeepsTheSession(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	srv, app := goBackend(t)
+	var mu sync.Mutex
+	answer, fail := "token-alice", false
+	alice, err := jazzapp.Open(ctx, jazz.Config{
+		AppID: srv.appID, ServerURL: app.URL + "/jazz", Storage: jazz.StorageMemory,
+		Auth: jazz.Token(func(context.Context, jazz.TokenReason) (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if fail {
+				return "", errors.New("auth provider unreachable")
+			}
+			return answer, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer alice.Close()
+	mu.Lock()
+	fail = true
+	mu.Unlock()
+	alice.Refresh(ctx) // may report the failure; the session must stay
+	if s, err := alice.Session(ctx); err != nil || s == nil || s.Status != jazz.SignedIn {
+		t.Fatalf("after a failed fetch: %+v %v", s, err)
 	}
 }

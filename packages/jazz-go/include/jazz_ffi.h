@@ -128,11 +128,13 @@ void jazz_close(JazzHandle *handle);
 
 /*
  * An end user's token callback: called on a thread of its own (it may
- * block) with reason "connect" | "renew" | "expired" | "refresh"; returns
- * the token as a malloc'ed string (Go: C.CString), which jazz frees, or
- * NULL when no one is signed in.
+ * block) with reason "connect" | "renew" | "expired" | "refresh". Return 0
+ * with *token set to the token as a malloc'ed string (Go: C.CString), which
+ * jazz frees, or to NULL when no one is signed in (the app stops). Return
+ * non-zero when the fetch failed (e.g. a network blip): the session stays
+ * signed in and asks again; *token may hold the failure's message.
  */
-typedef char *(*JazzTokenCallback)(void *ctx, const char *reason);
+typedef int (*JazzTokenCallback)(void *ctx, const char *reason, char **token);
 
 /*
  * Opens an app as an end user signing in with the app's bearer
@@ -172,7 +174,11 @@ typedef char *(*JazzAuthCallback)(void *ctx, const char *request_json);
 typedef void (*JazzSocketMessage)(void *ctx, const unsigned char *data, size_t len);
 typedef void (*JazzSocketClosed)(void *ctx, unsigned short code, const char *reason);
 
-/* options_json: {"basePath"?: "/jazz", "sessionTtlSecs"?} or NULL. */
+/*
+ * options_json: {"basePath"?: "/jazz", "sessionTtlSecs"?, "maxSockets"?
+ * (default 10000; past it a socket closes 1013)} or NULL. A client message
+ * over 2 MiB closes 1009; a refused prelude or sign-in closes 1008.
+ */
 JazzEndpoint *jazz_endpoint_new(JazzHandle *backend, JazzAuthCallback cb, void *ctx,
                                 const char *options_json, char **err);
 /* Answers an HTTP request with a response's JSON. */

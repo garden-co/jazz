@@ -48,6 +48,9 @@ type EndpointOptions struct {
 	BasePath string
 	// SessionTTL is how long a session it vouches for lasts.
 	SessionTTL time.Duration
+	// MaxSockets caps its open sync sockets (more close with 1013); 0
+	// keeps Jazz's default.
+	MaxSockets int
 }
 
 // Endpoint is your backend's Jazz endpoint, TS createJazz's handler: end
@@ -75,6 +78,9 @@ func NewEndpoint(db *DB, auth Authenticate, opts EndpointOptions) (*Endpoint, er
 	}
 	if opts.SessionTTL > 0 {
 		options["sessionTtlSecs"] = int64(opts.SessionTTL / time.Second)
+	}
+	if opts.MaxSockets > 0 {
+		options["maxSockets"] = opts.MaxSockets
 	}
 	text, _ := json.Marshal(options)
 	coptions := C.CString(string(text))
