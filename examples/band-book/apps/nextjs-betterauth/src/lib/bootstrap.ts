@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Db } from "jazz-tools";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { POSITION_STEP } from "./positions";
 import { retryOnConflict } from "./retry";
 import { DEMO_PAGES, DEMO_WORKSPACE_NAME, flattenSeedPages, type SeedBlock } from "./seed";

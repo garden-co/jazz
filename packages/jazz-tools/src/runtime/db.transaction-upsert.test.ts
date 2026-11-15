@@ -1,35 +1,24 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import { createDb } from "./default-create-db.js";
 import type { Db } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 
-const app = s.defineApp(
-  {
-    items: s.table(
-      {
-        title: s.string(),
-        note: s.string().default("default note"),
-        tags: s.array(s.string()).default([]),
+const app = testApp({
+  tables: {
+    items: {
+      columns: {
+        title: "string",
+        note: { type: "string", default: "default note" },
+        tags: { array: "string", default: [] },
       },
-      {},
-    ),
+    },
   },
-  { migrations: "none" },
-);
+});
 
-const requiredArrayApp = s.defineApp(
-  {
-    items: s.table(
-      {
-        title: s.string(),
-        tags: s.array(s.string()),
-      },
-      {},
-    ),
-  },
-  { migrations: "none" },
-);
+const requiredArrayApp = testApp({
+  tables: { items: { columns: { title: "string", tags: { array: "string" } } } },
+});
 
 let db: Db | undefined;
 afterEach(async () => {
@@ -88,7 +77,7 @@ describe.each(["mergeable", "serializable"] as const)("%s transaction upserts", 
 it("requires arrays without defaults on insert instead of synthesizing an empty array", async () => {
   db = await createDb(await localAccountConfig("insert-required-array"));
   expect(() =>
-    // @ts-expect-error - deliberately omit a required field to test runtime validation
+    // Deliberately omit a required field to test runtime validation.
     db!.insert(requiredArrayApp.items, { title: "missing tags" }),
   ).toThrow("missing required column tags");
   await db

@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useAll, useSession } from "jazz-tools/react";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 
 export type ChatPanelProps = {
   chatId: string;

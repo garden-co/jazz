@@ -9,7 +9,6 @@
 import { expect, afterEach } from "vitest";
 import { commands } from "vitest/browser";
 import { Db, type QueryBuilder } from "../../src/runtime/db.js";
-import { type Schema } from "../../src/drivers/types.js";
 import {
   INDEXEDDB_BTREE_METADATA_STORE,
   INDEXEDDB_BTREE_PAGES_STORE,
@@ -19,15 +18,36 @@ import {
 import { setBrowserFollowerProbeTimingForTest } from "../../src/runtime/native-runtime/browser-follower-connection.js";
 import { TestCleanup, uniqueDbName, waitForCondition, waitForQuery } from "./support.js";
 import {
+  deploy,
   getJazzServerInfo,
   jazzCore,
   startJazzApp,
   type JazzServerInfo,
 } from "./testing-server.js";
 import { closeRemoteBrowserDb, waitForRemoteBrowserDbTitle } from "./remote-browser-db.js";
-import { CompiledPermissions, schema as s, migration as m } from "../../src/";
-import { computeSchemaHash, deploy } from "../../src/dev/catalogue.js";
-import { appMigrations } from "../../src/testing/client-migrations.js";
+import type { SchemaSourceInput } from "../../src/schema-source.js";
+import type { TestPermissionsFile } from "../../src/testing/test-app.js";
+import { app, type Todo } from "./apps/worker-bridge/jazz.generated.js";
+import openPermissionsFile from "./apps/worker-bridge/jazz.permissions.json";
+import readOnlyPermissionsFile from "./apps/worker-bridge/read-only.permissions.json";
+import recoveryTerminalPermissionsFile from "./apps/worker-bridge/recovery-terminal.permissions.json";
+import noUpdatePermissionsFile from "./apps/worker-bridge/no-update.permissions.json";
+import noDeletePermissionsFile from "./apps/worker-bridge/no-delete.permissions.json";
+import {
+  app as maintainedIndexedAppFile,
+  type Todo as MaintainedIndexedTodo,
+} from "./apps/worker-bridge-indexed/jazz.generated.js";
+import { app as transactionIdentityAppFile } from "./apps/worker-bridge-transaction-identity/jazz.generated.js";
+import transactionIdentityPermissionsFile from "./apps/worker-bridge-transaction-identity/jazz.permissions.json";
+import { app as nullableAppFile } from "./apps/worker-bridge-nullable/jazz.generated.js";
+import nullablePermissionsFile from "./apps/worker-bridge-nullable/jazz.permissions.json";
+import { app as catalogueAppV1File } from "./apps/worker-bridge-catalogue-v1/jazz.generated.js";
+import cataloguePermissionsV1File from "./apps/worker-bridge-catalogue-v1/jazz.permissions.json";
+import {
+  app as catalogueAppV2File,
+  type Todo as CatalogueTodo,
+} from "./apps/worker-bridge-catalogue-v2/jazz.generated.js";
+import cataloguePermissionsV2File from "./apps/worker-bridge-catalogue-v2/jazz.permissions.json";
 import {
   deserializeBrowserRelayError,
   type BrowserInspectorContext,
@@ -115,223 +135,57 @@ export const LIVENESS_TEST_PROBE_TIMING = { intervalMs: 2_000, replyMs: 2_000 } 
 // Comfortably above one interval plus one reply grace under CI load.
 export const LIVENESS_TEST_SIGNAL_MS = 15_000;
 
-export const schema = {
-  projects: s.table(
-    {
-      name: s.string(),
-    },
-    { todosViaProject: s.reverse("todos", "project") },
-  ),
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-      projectId: s.uuid().optional(),
-      tags: s.array(s.string()).optional(),
-    },
-    { project: s.rel("projects", "projectId") },
-  ),
-};
-
-export type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
+// The apps live under ./apps/worker-bridge*/ (jazz.app.json, with their
+// committed bindings); the permission variants are jazz.permissions.json
+// files beside the main app.
+export { app };
+export type { Todo };
 export const { projects, todos } = app;
-export type Todo = s.RowOf<typeof todos>;
 
 // Keep the maintained-index hydration fixture separate from the broadly used
 // worker-bridge schema: this test must exercise the same two-equality indexed
 // source shape as the native receipt, without changing unrelated test schemas.
-export const maintainedIndexedSchema = {
-  projects: s.table(
-    {
-      name: s.string(),
-    },
-    {},
-  ),
-  todos: s
-    .table(
-      {
-        title: s.string(),
-        done: s.boolean(),
-      },
-      {},
-    )
-    .indexOnly(["title", "done"]),
-};
-export type MaintainedIndexedSchema = s.Schema<typeof maintainedIndexedSchema>;
-export const maintainedIndexedApp: s.App<MaintainedIndexedSchema> = s.defineApp(
-  maintainedIndexedSchema,
-  { migrations: "none" },
-);
+export const maintainedIndexedApp = maintainedIndexedAppFile;
 export const { todos: maintainedIndexedTodos } = maintainedIndexedApp;
-export type MaintainedIndexedTodo = s.RowOf<typeof maintainedIndexedTodos>;
+export type { MaintainedIndexedTodo };
 
-export const transactionIdentitySchema = {
-  projects: s.table(
-    {
-      name: s.string(),
-    },
-    { documentsViaProject: s.reverse("documents", "project") },
-  ),
-  documents: s
-    .table(
-      {
-        branch: s.string(),
-        title: s.string(),
-        projectId: s.uuid(),
-        body: s.string(),
-      },
-      { project: s.rel("projects", "projectId") },
-    )
-    .branchBy("branch"),
-};
-export const transactionIdentityApp = s.defineApp(transactionIdentitySchema, {
-  migrations: "none",
-});
-export const transactionIdentityPermissions = s.definePermissions(
-  transactionIdentityApp,
-  ({ policy }) => [
-    policy.projects.allowRead.always(),
-    policy.projects.allowInsert.always(),
-    policy.projects.allowUpdate.always(),
-    policy.projects.allowDelete.always(),
-    policy.documents.allowRead.always(),
-    policy.documents.allowInsert.always(),
-    policy.documents.allowUpdate.always(),
-    policy.documents.allowDelete.always(),
-  ],
-);
+export const transactionIdentityApp = transactionIdentityAppFile;
+export const transactionIdentityPermissions: TestPermissionsFile =
+  transactionIdentityPermissionsFile;
 
-export const readOnlyPermissions = s.definePermissions(app, ({ policy }) => [
-  policy.projects.allowRead.always(),
-  policy.projects.allowInsert.never(),
-  policy.projects.allowUpdate.never(),
-  policy.projects.allowDelete.never(),
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.never(),
-  policy.todos.allowUpdate.never(),
-  policy.todos.allowDelete.never(),
-]);
+/** Every operation on projects and todos is allowed. */
+export const openPermissions: TestPermissionsFile = openPermissionsFile;
+
+export const readOnlyPermissions: TestPermissionsFile = readOnlyPermissionsFile;
 
 // A single recovered worker restart must be able to settle two former
 // foreground transactions independently: the ordinary todo is admitted,
 // while the marked todo is rejected.  Keeping both outcomes in one authority
 // policy makes the receipt independent of a mid-test policy redeploy.
-export const recoveryTerminalPermissions = s.definePermissions(app, ({ policy }) => [
-  policy.projects.allowRead.always(),
-  policy.projects.allowInsert.always(),
-  policy.projects.allowUpdate.always(),
-  policy.projects.allowDelete.always(),
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.where({ done: false }),
-  policy.todos.allowUpdate.always(),
-  policy.todos.allowDelete.always(),
-]);
+export const recoveryTerminalPermissions: TestPermissionsFile = recoveryTerminalPermissionsFile;
 
-export const noUpdatePermissions = s.definePermissions(app, ({ policy }) => [
-  policy.projects.allowRead.always(),
-  policy.projects.allowInsert.always(),
-  policy.projects.allowUpdate.never(),
-  policy.projects.allowDelete.always(),
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-  policy.todos.allowUpdate.never(),
-  policy.todos.allowDelete.always(),
-]);
+export const noUpdatePermissions: TestPermissionsFile = noUpdatePermissionsFile;
 
-export const noDeletePermissions = s.definePermissions(app, ({ policy }) => [
-  policy.projects.allowRead.always(),
-  policy.projects.allowInsert.always(),
-  policy.projects.allowUpdate.always(),
-  policy.projects.allowDelete.never(),
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-  policy.todos.allowUpdate.always(),
-  policy.todos.allowDelete.never(),
-]);
+export const noDeletePermissions: TestPermissionsFile = noDeletePermissionsFile;
 
-export const nullableSchema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-      description: s.string().optional(),
-    },
-    {},
-  ),
-};
-
-export type NullableSchema = s.Schema<typeof nullableSchema>;
-export const nullableApp: s.App<NullableSchema> = s.defineApp(nullableSchema, {
-  migrations: "none",
-});
-export const nullablePermissions = s.definePermissions(nullableApp, ({ policy }) => [
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-  policy.todos.allowUpdate.always(),
-  policy.todos.allowDelete.always(),
-]);
+export const nullableApp = nullableAppFile;
+export const nullablePermissions: TestPermissionsFile = nullablePermissionsFile;
 
 /** QueryBuilder that selects all todos. */
 export const allTodos: QueryBuilder<Todo> = app.todos;
 
 // A small published schema family used to prove that the persistent worker
 // rehydrates catalogue state, including its migration lens, before a current
-// client issues its first query after reopening.
-export const catalogueSchemaV1 = {
-  todos: s.table(
-    {
-      title: s.string(),
-      completed: s.boolean(),
-    },
-    {},
-  ),
-};
-
-export const catalogueSchemaV2 = {
-  todos: s.table(
-    {
-      title: s.string(),
-      completed: s.boolean(),
-      description: s.string().optional(),
-    },
-    {},
-  ),
-};
-
-const catalogueMigrate = {
-  todos: {
-    description: m.add.string({ default: null }),
-  },
-};
-// Both versions ship the family's lens, as the app's generated module holds it.
-const catalogueMigrations = await appMigrations(catalogueSchemaV1, {
-  to: catalogueSchemaV2,
-  migration: m.defineMigration({
-    from: catalogueSchemaV1,
-    to: catalogueSchemaV2,
-    migrate: catalogueMigrate,
-  }),
-});
-export const catalogueAppV1 = s.defineApp(catalogueSchemaV1, { migrations: catalogueMigrations });
-export const catalogueAppV2 = s.defineApp(catalogueSchemaV2, { migrations: catalogueMigrations });
+// client issues its first query after reopening. V2's jazz.app.json carries
+// V1 as history and the lens adding `description` (default null).
+export const catalogueAppV1 = catalogueAppV1File;
+export const catalogueAppV2 = catalogueAppV2File;
 export const { todos: catalogueTodos } = catalogueAppV2;
-export type CatalogueTodo = s.RowOf<typeof catalogueTodos>;
+export type { CatalogueTodo };
 export const allCatalogueTodos: QueryBuilder<CatalogueTodo> = catalogueAppV2.todos;
 
-export const cataloguePermissionsV1 = s.definePermissions(catalogueAppV1, ({ policy }) => [
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-  policy.todos.allowUpdate.always(),
-  policy.todos.allowDelete.always(),
-]);
-
-export const cataloguePermissionsV2 = s.definePermissions(catalogueAppV2, ({ policy }) => [
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-  policy.todos.allowUpdate.always(),
-  policy.todos.allowDelete.always(),
-]);
+export const cataloguePermissionsV1: TestPermissionsFile = cataloguePermissionsV1File;
+export const cataloguePermissionsV2: TestPermissionsFile = cataloguePermissionsV2File;
 
 /**
  * Structurally valid JWT with a deliberately invalid signature: parses fine on
@@ -456,64 +310,37 @@ export async function publishCatalogueSchemaFamily(scope: string): Promise<JazzS
   const testingServer = await getJazzServerInfo(uniqueDbName(`worker-bridge-${scope}`));
   const { appId, serverUrl, adminSecret } = testingServer;
 
-  const v1 = await deploy({
-    appId,
-    serverUrl,
-    adminSecret,
-    schema: catalogueAppV1.wasmSchema,
-    permissions: cataloguePermissionsV1,
-  });
-
-  const migration = m.defineMigration({
-    fromHash: v1.schema.hash,
-    toHash: await computeSchemaHash(catalogueAppV2.wasmSchema),
-    from: catalogueSchemaV1,
-    to: catalogueSchemaV2,
-    migrate: catalogueMigrate,
-  });
-
   await deploy({
     appId,
     serverUrl,
     adminSecret,
-    schema: catalogueAppV2.wasmSchema,
+    app: catalogueAppV1,
+    permissions: cataloguePermissionsV1,
+  });
+
+  // V2 ships V1 as history with the lens between them, so this publishes the
+  // V1 -> V2 migration with V2.
+  await deploy({
+    appId,
+    serverUrl,
+    adminSecret,
+    app: catalogueAppV2,
     permissions: cataloguePermissionsV2,
-    migration,
   });
 
   return startJazzApp(testingServer, {
-    schema: catalogueAppV2.wasmSchema,
+    schema: catalogueAppV2,
     permissions: cataloguePermissionsV2,
   });
 }
 
 export async function publishSyncServerSchemaAndPermissions(
   scope: string,
-  permissions?: CompiledPermissions,
-  schema?: Schema,
+  permissions?: TestPermissionsFile,
+  schema?: SchemaSourceInput,
 ): Promise<JazzServerInfo> {
   const testingServer = await getJazzServerInfo(uniqueDbName(`worker-bridge-${scope}`));
-  const permissionsToPublish = permissions ?? {
-    todos: {
-      select: { using: { type: "True" } },
-      insert: { with_check: { type: "True" } },
-      update: {
-        using: { type: "True" },
-        with_check: { type: "True" },
-      },
-      delete: { using: { type: "True" } },
-    },
-    projects: {
-      select: { using: { type: "True" } },
-      insert: { with_check: { type: "True" } },
-      update: {
-        using: { type: "True" },
-        with_check: { type: "True" },
-      },
-      delete: { using: { type: "True" } },
-    },
-  };
-  return publishPermissionsForServer(testingServer, permissionsToPublish, schema);
+  return publishPermissionsForServer(testingServer, permissions ?? openPermissions, schema);
 }
 
 /**
@@ -523,11 +350,15 @@ export async function publishSyncServerSchemaAndPermissions(
  */
 export async function publishPermissionsForServer(
   testingServer: JazzServerInfo,
-  permissions: CompiledPermissions,
-  schema?: Schema,
+  permissions: TestPermissionsFile,
+  schema?: SchemaSourceInput,
 ): Promise<JazzServerInfo> {
-  const deployedSchema = schema ?? app.wasmSchema;
-  await deploy({ ...jazzCore(testingServer), schema: deployedSchema, permissions });
+  const deployedSchema = schema ?? app;
+  await deploy({
+    ...jazzCore(testingServer),
+    app: deployedSchema,
+    permissions: permissions,
+  });
   return startJazzApp(testingServer, { schema: deployedSchema, permissions });
 }
 

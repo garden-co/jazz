@@ -1,0 +1,20 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "team_edges": {
+      "columns": { "child_team": "uuid", "parent_team": "uuid" },
+      "relations": {
+        "child_teamRelation": { "rel": "teams", "column": "child_team" },
+        "parent_teamRelation": { "rel": "teams", "column": "parent_team" }
+      }
+    },
+    "teams": {
+      "columns": { "name": "string" },
+      "relations": {
+        "team_edgesViaChild_team": { "reverse": "team_edges", "relation": "child_teamRelation" },
+        "team_edgesViaParent_team": { "reverse": "team_edges", "relation": "parent_teamRelation" }
+      }
+    }
+  }
+}

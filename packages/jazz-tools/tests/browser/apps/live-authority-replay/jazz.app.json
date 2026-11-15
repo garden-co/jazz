@@ -1,0 +1,32 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "authors": {
+      "columns": { "name": "string" },
+      "relations": { "itemsViaAuthor": { "reverse": "items", "relation": "author" } }
+    },
+    "items": {
+      "columns": {
+        "title": "string",
+        "parent_id": "uuid",
+        "author_id": "uuid",
+        "label_id": "uuid"
+      },
+      "relations": {
+        "parent": { "rel": "parents", "column": "parent_id" },
+        "author": { "rel": "authors", "column": "author_id" },
+        "label": { "rel": "labels", "column": "label_id" }
+      }
+    },
+    "labels": {
+      "columns": { "name": "string" },
+      "relations": { "itemsViaLabel": { "reverse": "items", "relation": "label" } }
+    },
+    "parents": {
+      "columns": { "name": "string" },
+      "relations": { "itemsViaParent": { "reverse": "items", "relation": "parent" } }
+    },
+    "unrelated": { "columns": { "value": "string" } }
+  }
+}

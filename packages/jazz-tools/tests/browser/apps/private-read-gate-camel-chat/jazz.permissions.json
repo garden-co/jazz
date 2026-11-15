@@ -1,0 +1,33 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "chatMembers": {
+      "read": "userId = session.identity.subject or exists chatMembers(chatId = this.chatId, userId = session.identity.subject)",
+      "insert": "userId = session.identity.subject",
+      "update": "true",
+      "delete": "userId = session.identity.subject"
+    },
+    "chats": {
+      "read": "isPublic = true or exists chatMembers(chatId = this.id, userId = session.identity.subject) or joinCode = session.claims.join_code",
+      "insert": "createdBy = session.identity.subject",
+      "update": "createdBy = session.identity.subject",
+      "delete": "createdBy = session.identity.subject"
+    },
+    "messages": {
+      "read": "exists chats(id = this.chatId, isPublic = true) or exists chatMembers(chatId = this.chatId, userId = session.identity.subject)",
+      "insert": "exists chatMembers(chatId = this.chatId, userId = session.identity.subject)",
+      "delete": "exists profiles(id = this.senderId, userId = session.identity.subject)"
+    },
+    "profiles": {
+      "read": "true",
+      "insert": "userId = session.identity.subject",
+      "update": "userId = session.identity.subject"
+    },
+    "reactions": {
+      "read": "allowedTo.read(message)",
+      "insert": "userId = session.identity.subject",
+      "delete": "userId = session.identity.subject"
+    }
+  }
+}

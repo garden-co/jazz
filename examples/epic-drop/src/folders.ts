@@ -1,5 +1,6 @@
 import type { Db } from "jazz-tools";
-import { app, MAX_FOLDER_DEPTH } from "../schema.js";
+import { app } from "../jazz.generated.js";
+import { MAX_FOLDER_DEPTH } from "../app-extras.js";
 
 export interface Folder {
   id: string;

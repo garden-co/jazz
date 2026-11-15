@@ -16,5 +16,5 @@
     "noEmit": true,
     "types": ["vite/client"]
   },
-  "include": ["src", "schema.ts", "permissions.ts", "tests"]
+  "include": ["src", "jazz.generated.ts", "tests"]
 }

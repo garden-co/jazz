@@ -3,7 +3,7 @@ import clsx from "clsx";
 import { useAll, useSession } from "jazz-tools/react";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { fireAndReport } from "@/lib/db-write";
-import { app } from "../../../schema.js";
+import { app } from "../../../jazz.generated.js";
 
 function ReactorName({ userId, currentUserId }: { userId: string; currentUserId?: string }) {
   const { data: profiles = [] } = useAll(app.profiles.where({ userId }));

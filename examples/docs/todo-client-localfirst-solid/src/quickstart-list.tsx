@@ -1,6 +1,6 @@
 import { For } from "solid-js";
 import { useAll } from "jazz-tools/solid";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 import { QuickstartItem } from "./quickstart-item.js";
 import { QuickstartAdd } from "./quickstart-add.js";
 

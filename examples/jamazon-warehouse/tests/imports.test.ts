@@ -1,11 +1,18 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const root = join(import.meta.dirname, "..");
 
 /** Everything Next bundles: the routes, the components and the modules they import. */
-const BUNDLED = ["app", "components", "src", "schema.ts", "permissions.ts"];
+const BUNDLED = [
+  "app",
+  "components",
+  "src",
+  "app-extras.ts",
+  "jazz.generated.ts",
+  "jazz.computed.ts",
+].filter((entry) => existsSync(join(root, entry)));
 
 function sources(path: string): string[] {
   if (statSync(path).isFile()) return /\.tsx?$/.test(path) ? [path] : [];

@@ -1,13 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { schema } from "../../src/index.js";
+import { testApp, testPermissions } from "../../src/testing/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = schema.defineApp(
-  {
-    documents: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
-  },
-  { migrations: "none" },
-);
+import { app } from "./apps/documents/jazz.generated.js";
 
 describe("React Native public mutations through the real foreground C ABI", () => {
   it("keeps omitted cells, rejects tombstone upserts, and restores replacement content", async () => {
@@ -186,20 +181,13 @@ it("aborts a failed stream without publishing partial rows and allows the next u
 });
 
 it("applies typed text, bytes, and JSON diffs atomically with replacement cells", async () => {
-  const rich = schema.defineApp(
-    {
-      documents: schema.table(
-        {
-          body: schema.string(),
-          payload: schema.bytes(),
-          metadata: schema.json(),
-          done: schema.boolean(),
-        },
-        {},
-      ),
+  const rich = testApp({
+    tables: {
+      documents: {
+        columns: { body: "string", payload: "bytes", metadata: { json: true }, done: "boolean" },
+      },
     },
-    { migrations: "none" },
-  );
+  });
   await withNativeRelayFixture(rich, {}, async (fixture) => {
     const db = await fixture.createDb();
     const prefix = "a".repeat(70_000);
@@ -279,19 +267,17 @@ it("settles an empty standalone update without changing the row", async () => {
 });
 
 it("preserves branch head/base targets and restores only the selected head", async () => {
-  const branches = schema.defineApp(
-    {
-      documents: schema
-        .table({ branch: schema.string(), title: schema.string(), done: schema.boolean() }, {})
-        .branchBy("branch"),
+  const branches = testApp({
+    tables: {
+      documents: {
+        columns: { branch: "string", title: "string", done: "boolean" },
+        branchBy: ["branch"],
+      },
     },
-    { migrations: "none" },
-  );
+  });
   // Rows a session cannot read are evicted from its replica, so the branch
   // rows need a read policy to stay.
-  const permissions = schema.definePermissions(branches, ({ policy }) => [
-    policy.documents.allowRead.always(),
-  ]);
+  const permissions = testPermissions(branches, { tables: { documents: { read: "true" } } });
   await withNativeRelayFixture(branches, permissions, async (fixture) => {
     const db = await fixture.createDb();
     const row = await db

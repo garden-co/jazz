@@ -1,0 +1,10 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "priorities": {
+      "columns": { "label": "string", "score": { "type": "int", "transform": "priority" } }
+    }
+  },
+  "transforms": { "priority": { "stored": "int", "view": { "enum": ["low", "medium", "high"] } } }
+}

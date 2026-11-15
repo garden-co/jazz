@@ -23,6 +23,12 @@ import { prepareAccountManager, type AccountStore } from "../accounts/persistenc
 import type { AccountHandle } from "../accounts/state.js";
 import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
 import { resolveSchemaSource } from "../schema-source.js";
+import * as jazzNapi from "jazz-napi";
+import {
+  enginePermissions,
+  provideCodegenNapi,
+  type PermissionsFile,
+} from "../dev/codegen-napi.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
@@ -72,7 +78,8 @@ export type JazzClientConfig = Omit<
   /** The app id an existing local-first app's users were created under. */
   scope?: string;
   app: BackendSchemaInput;
-  permissions: NonNullable<BackendContextConfig["permissions"]>;
+  /** The app's `jazz.permissions.json` (or the engine's policies a load returned). */
+  permissions: PermissionsFile | NonNullable<BackendContextConfig["permissions"]>;
   serverUrl: string;
   store?: AccountStore;
   /** Start as a device account (a guest of the main backend). */
@@ -91,7 +98,9 @@ export type JazzClientConfig = Omit<
 };
 
 /** @internal `createJazz`'s own session config: it may admit itself with the core's backend secret. */
-type OpenJazzSessionConfig = Omit<JazzClientConfig, "initial"> & {
+type OpenJazzSessionConfig = Omit<JazzClientConfig, "initial" | "permissions"> & {
+  /** The engine's policies, compiled from the app's jazz.permissions.json. */
+  permissions: NonNullable<BackendContextConfig["permissions"]>;
   /** `"local-first"`: the session core's name for a device account. */
   initial?: "local-first" | BackendAuth;
 };
@@ -297,10 +306,17 @@ export async function createJazzClient(input: JazzClientConfig): Promise<Backend
   // The session core's name for a device account.
   const initial = input.initial === "device" ? ("local-first" as const) : undefined;
   let core!: SessionCore<JazzClient>;
-  const session = await createStartedJazzSession({ ...input, initial }, async (config) => {
-    core = await openJazzSession(config);
-    return core;
-  });
+  // A jazz.permissions.json is checked against the app's bindings by the Rust loader.
+  // Through a static jazz-napi import, so bundlers and file tracers ship it.
+  provideCodegenNapi(jazzNapi);
+  const permissions = await enginePermissions(input.app, input.permissions);
+  const session = await createStartedJazzSession(
+    { ...input, permissions, initial },
+    async (config) => {
+      core = await openJazzSession(config);
+      return core;
+    },
+  );
   const keeps = input.driver.type !== "memory";
   const close = async (options?: BackendClientCloseOptions) => {
     await closeAfterUploads(core, keeps, options);

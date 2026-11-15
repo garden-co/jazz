@@ -1,0 +1,25 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "announcements": { "read": "true", "insert": "true", "update": "true", "delete": "true" },
+    "chat_members": {
+      "read": "user_id = session.user",
+      "insert": "user_id = session.user",
+      "update": "true",
+      "delete": "user_id = session.user"
+    },
+    "chats": {
+      "read": "visibility = 'public' or exists chat_members(chat_id = this.id, user_id = session.user)",
+      "insert": "true",
+      "update": "true",
+      "delete": "true"
+    },
+    "messages": {
+      "read": "exists chats(id = this.chat_id, visibility = 'public') or exists chat_members(chat_id = this.chat_id, user_id = session.user)",
+      "insert": "exists chat_members(chat_id = this.chat_id, user_id = session.user)",
+      "update": "true",
+      "delete": "true"
+    }
+  }
+}

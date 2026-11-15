@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useAll } from "jazz-tools/react";
 import { ChatLayout, ChatMessageList } from "@astryxdesign/core/Chat";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
-import { app, type Conversation } from "@/schema";
+import { app, type Conversation } from "@/jazz.generated";
 import { regenerateReply, requestReply, resumeReply } from "./agent-api";
 import { Composer } from "./composer";
 import { AssistantMessage, UserMessage } from "./messages";

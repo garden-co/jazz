@@ -2,8 +2,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { APP_FILE, PERMISSIONS_FILE } from "./app-files.js";
+import { generateApp } from "./project.js";
 
-const indexPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const tmpBase = join(packageRoot, ".test-tmp");
 
@@ -13,7 +14,7 @@ export function createTempRootTracker() {
   return {
     async create(prefix: string): Promise<string> {
       // Create inside the package so Node's ESM resolver walks up and
-      // finds node_modules for bare-specifier imports in bundled schema files.
+      // finds node_modules for bare-specifier imports (jazz-tools in jazz.generated.ts).
       await mkdir(tmpBase, { recursive: true });
       const rootPath = await mkdtemp(join(tmpBase, prefix));
       roots.push(rootPath);
@@ -41,22 +42,30 @@ export async function getAvailablePort(): Promise<number> {
   });
 }
 
+/** A todos app's `jazz.app.json`: `todos { title: string, done: boolean }`. */
 export function todoSchema(): string {
-  return `
-import { schema as s } from ${JSON.stringify(indexPath)};
-
-const schema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }, {  }),
-};
-
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
-`;
+  return `${JSON.stringify(
+    { format: 1, tables: { todos: { columns: { title: "string", done: "boolean" } } } },
+    null,
+    2,
+  )}\n`;
 }
 
+/** Its `jazz.permissions.json`: anyone may read and insert todos. */
+export function todoPermissions(): string {
+  return `${JSON.stringify(
+    { format: 1, tables: { todos: { read: "true", insert: "true" } } },
+    null,
+    2,
+  )}\n`;
+}
+
+/**
+ * Write the todos app's files into `dir`: `jazz.app.json`,
+ * `jazz.permissions.json`, and the `jazz.generated.ts` generate writes.
+ */
 export async function writeTodoSchema(dir: string): Promise<void> {
-  await writeFile(join(dir, "schema.ts"), todoSchema());
+  await writeFile(join(dir, APP_FILE), todoSchema());
+  await writeFile(join(dir, PERMISSIONS_FILE), todoPermissions());
+  await generateApp({ cwd: dir });
 }

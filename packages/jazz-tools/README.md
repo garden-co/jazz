@@ -11,28 +11,18 @@ This is not a rename-only migration.**
 If you encounter `JAZZ_CLASSIC_API_REMOVED`, stop using Classic examples and read
 the [Jazz 2 overview](https://jazz.tools/docs) or
 [full agent-facing documentation](https://jazz.tools/llms-full.txt).
-For example, define tables rather than CoValues:
+For example, declare tables rather than CoValues, in `jazz.app.json`:
 
-```ts
-import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
-
-export const app = s.defineApp(
-  {
-    todos: s.table(
-      {
-        title: s.string(),
-        done: s.boolean(),
-      },
-      {},
-    ),
-  },
-  { migrations },
-);
+```json
+{
+  "format": 1,
+  "tables": { "todos": { "columns": { "title": "string", "done": "boolean" } } }
+}
 ```
 
-`./migrations` is generated: `jazz-tools validate`, `deploy` and the dev
-plugins write it beside schema.ts, even while an app has a single version.
+`npx jazz-tools generate` checks it (and the app's `jazz.permissions.json`)
+and writes `jazz.generated.ts`, the app's typed bindings:
+`import { app } from "./jazz.generated"`.
 
 Use `db.insert`, `db.all` and `db.subscribeAll` for writes and queries.
 React, Vue and Solid expose reactive reads through `useAll` / `useOne` in their
@@ -91,13 +81,9 @@ intercept separate legacy packages such as `jazz-vue`, `jazz-svelte` or
 ## Usage
 
 ```bash
-npx jazz-tools server
-```
-
-To use a specific prerelease:
-
-```bash
-npx jazz-tools@2.0.0-alpha.0 server
+npx jazz-tools generate          # check jazz.app.json / jazz.permissions.json, write jazz.generated.ts
+npx jazz-tools migrations create --name <name>   # record a schema change
+npx jazz-tools upgrade           # convert an alpha.64 app (schema.ts, permissions.ts, migrations/)
 ```
 
 ## Supported binary targets
@@ -119,83 +105,49 @@ not supported by the React Native entrypoint.
 
 ## Relations
 
-Relations are declared explicitly in the second argument of
-`s.table(columns, relations)`; pass `{}` when a table has none. Store row IDs in
-UUID columns, name a forward relation with `s.rel(targetTable, localColumn)`, and
-name a reverse traversal with `s.reverse(sourceTable, forwardRelation)`. There is
-no suffix convention, generated code, or automatic reverse relation: a UUID column
+Relations are declared explicitly in a table's `relations` in `jazz.app.json`.
+Store row IDs in `uuid` columns (or `{ "array": "uuid" }`), name a forward
+relation with `{ "rel": "<table>", "column": "<column>" }`, and name a reverse
+traversal with `{ "reverse": "<table>", "relation": "<forward relation>" }`.
+There is no suffix convention and no automatic reverse relation: a UUID column
 without a relation declaration stays an ordinary UUID column. See
 [Defining tables](https://jazz.tools/docs/schemas/defining-tables) for the full rules.
 
-### Inferring relation APIs from authored schemas
-
-Keep the schema, app, and permissions in separate modules if helpful. No generated
-relation file or build step is required:
-
-```ts
-// schema.ts
-import { schema as s } from "jazz-tools";
-
-export const schema = s.defineSchema({
-  people: s.table(
-    { name: s.string() },
-    {
-      records: s.reverse("records", "people"),
+```json
+{
+  "format": 1,
+  "tables": {
+    "people": {
+      "columns": { "name": "string" },
+      "relations": { "records": { "reverse": "records", "relation": "people" } }
     },
-  ),
-  records: s.table(
-    {
-      personIds: s.array(s.uuid()),
-      addressId: s.uuid().optional(),
-    },
-    {
-      people: s.rel("people", "personIds"),
-      address: s.rel("people", "addressId"),
-    },
-  ),
-});
+    "records": {
+      "columns": { "personIds": { "array": "uuid" }, "addressId": "uuid?" },
+      "relations": {
+        "people": { "rel": "people", "column": "personIds" },
+        "address": { "rel": "people", "column": "addressId" }
+      }
+    }
+  }
+}
 ```
 
 ```ts
-// app.ts
-import { schema as s } from "jazz-tools";
-import { schema } from "./schema.js";
-import { migrations } from "./migrations/index.js";
+import type { RowOf } from "jazz-tools";
+import { app } from "./jazz.generated";
 
-export const app: s.App<typeof schema> = s.defineApp(schema, { migrations });
 export const recordsWithPeople = app.records.include({ people: true, address: true });
-export type RecordWithPeople = s.RowOf<typeof recordsWithPeople>;
+export type RecordWithPeople = RowOf<typeof recordsWithPeople>;
 // people: Array<{ id: string; name: string }>
 // address: { id: string; name: string } | null
 
 export const peopleWithRecords = app.people.include({ records: true });
 export const relatedPeople = app.records.hopTo("people");
-export const relatedRecords = app.people.hopTo("records");
 ```
-
-```ts
-// permissions.ts
-import { schema as s } from "jazz-tools";
-import { app } from "./app.js";
-
-export default s.definePermissions(app, ({ policy }) => [policy.people.allowRead.where({})]);
-```
-
-The normal `jazz-tools validate --schema-dir .` command loads `schema.ts` and
-`permissions.ts`; permissions can import the independently authored app.
-A raw definition also works: declare `type AppSchema = s.Schema<typeof definition>`
-and `const app: s.App<AppSchema> = s.defineApp(definition, { migrations })`.
 
 `RowOf` preserves scalar/array cardinality. `.requireIncludes()` refines a
 non-nullable scalar reference's included row from `Row | null` to `Row` and
 requires its match; nullable references such as `address` stay nullable. Required
 array includes require all referenced matches and remain arrays. Reverse includes
-remain arrays. These APIs take their relation names directly from the explicit
-`s.rel` / `s.reverse` declarations in the authored schema, so there is no separate catalogue to generate, pass, or check for staleness.
-
-For a smaller typed surface, use
-`s.defineSliceableApp(schema, { migrations }).slice("records", "people")`. Only selected tables
-and relations between them are exposed in TypeScript; references outside a slice
-remain scalar IDs or ID arrays. Slices retain the full structural schema for
-query planning and schema identity. A slice is a typing convenience, not an
-authorization boundary; permission policies still control access.
+remain arrays. Relation names come straight from `jazz.app.json`, through the
+bindings `jazz-tools generate` writes; `generate --check` in CI catches stale ones.

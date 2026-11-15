@@ -1,20 +1,35 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { z } from "zod";
-import { schema as s } from "../../src/index.js";
 import type { Db } from "../../src/runtime/db.js";
+import { app } from "./apps/computed-items/jazz.generated.js";
+import { app as raw } from "./apps/computed-items-stored/jazz.generated.js";
+import { app as safe } from "./apps/computed-rows-stored/jazz.generated.js";
+import { app as hopOutputs } from "./apps/computed-hop-outputs/jazz.generated.js";
+import { app as gatherOutputs } from "./apps/computed-gather-outputs/jazz.generated.js";
+import { app as prototypeConstructor } from "./apps/computed-prototype-constructor/jazz.generated.js";
+import { app as prototypeToString } from "./apps/computed-prototype-tostring/jazz.generated.js";
+import { app as prototypeValueOf } from "./apps/computed-prototype-valueof/jazz.generated.js";
+import { app as fullValues } from "./apps/computed-full-values/jazz.generated.js";
+import { app as constantIdentity } from "./apps/computed-constant-identity/jazz.generated.js";
+import { app as branched } from "./apps/computed-branch/jazz.generated.js";
+import { app as failing } from "./apps/computed-failure/jazz.generated.js";
+import { app as parseCaught } from "./apps/computed-parse-caught/jazz.generated.js";
+import { app as parseWrapped } from "./apps/computed-parse-wrapped/jazz.generated.js";
+import { app as dataStored } from "./apps/computed-data-stored/jazz.generated.js";
+import { app as caughtTransformErrors } from "./apps/computed-caught-transform-errors/jazz.generated.js";
+import { app as asyncCallbacks } from "./apps/computed-async/jazz.generated.js";
+import { app as conditional } from "./apps/computed-conditional/jazz.generated.js";
+import { app as nestedRows } from "./apps/computed-nested-rows/jazz.generated.js";
+import { app as nestedSubscription } from "./apps/computed-nested-subscription/jazz.generated.js";
+import { app as siblings } from "./apps/computed-siblings/jazz.generated.js";
+import { app as rowEnumeration } from "./apps/computed-row-enumeration/jazz.generated.js";
+import { app as invalidUnknown } from "./apps/computed-invalid-unknown/jazz.generated.js";
+import { app as invalidCyclic } from "./apps/computed-invalid-cyclic/jazz.generated.js";
+import { app as invalidMutation } from "./apps/computed-invalid-mutation/jazz.generated.js";
+import { app as invalidAsync } from "./apps/computed-invalid-async/jazz.generated.js";
 
-const stored = s.table({ score: s.int().default(5), text: s.string().default("hello") }, {});
-const items = s.table(stored.columns, {
-  ...stored.relations,
-  priority: s.computed((row): "low" | "high" => (row.score >= 8 ? "high" : "low")),
-  description: s.computed((row) => `${row.id}:${row.text.length}`),
-});
-const definition = {
-  items,
-  baskets: s.table({ itemId: s.uuid() }, { item: s.rel("items", "itemId") }),
-};
-const app = s.defineApp(definition, { migrations: "none" });
-const raw = s.defineApp({ ...definition, items: stored }, { migrations: "none" });
+// Each case's app is committed under ./apps/computed-*/ (jazz.app.json, with
+// its fields in jazz.computed.ts). `computed-items-stored` and
+// `computed-rows-stored` are the same tables without computed fields.
 
 export function testComputedColumns(create: () => Promise<Db>) {
   describe("virtual computed columns", () => {
@@ -92,26 +107,7 @@ export function testComputedColumns(create: () => Promise<Db>) {
     });
 
     it("validates stored output columns against the destination after relationship hops", async () => {
-      const models = s.defineApp(
-        {
-          sources: s.table(
-            { targetId: s.uuid() },
-            {
-              target: s.rel("targets", "targetId"),
-              rank: s.computed(() => 0),
-              title: s.computed(() => "source"),
-            },
-          ),
-          targets: s.table(
-            { rank: s.int(), title: s.string() },
-            {
-              sources: s.reverse("sources", "target"),
-              label: s.computed((row) => row.title.toUpperCase()),
-            },
-          ),
-        },
-        { migrations: "none" },
-      );
+      const models = hopOutputs;
       const db = await open();
       const { value: target } = db.insert(models.targets, { rank: 7, title: "target" });
       const { value: source } = db.insert(models.sources, { targetId: target.id });
@@ -139,19 +135,7 @@ export function testComputedColumns(create: () => Promise<Db>) {
     });
 
     it("uses the gathered output table for stored and computed query guards", async () => {
-      const models = s.defineApp(
-        {
-          sources: s.table(
-            { targetId: s.uuid() },
-            { target: s.rel("targets", "targetId"), rank: s.computed(() => 0) },
-          ),
-          targets: s.table(
-            { rank: s.int(), nextId: s.uuid().optional() },
-            { next: s.rel("targets", "nextId"), doubled: s.computed((row) => row.rank * 2) },
-          ),
-        },
-        { migrations: "none" },
-      );
+      const models = gatherOutputs;
       const db = await open();
       const { value: target } = db.insert(models.targets, { rank: 7, nextId: null });
       const { value: source } = db.insert(models.sources, { targetId: target.id });
@@ -167,18 +151,13 @@ export function testComputedColumns(create: () => Promise<Db>) {
       expect(() => gathered.orderBy("doubled" as never)).toThrow(/cannot be ordered/);
     });
 
-    it.each(["constructor", "toString", "valueOf"] as const)(
+    it.each([
+      ["constructor", prototypeConstructor],
+      ["toString", prototypeToString],
+      ["valueOf", prototypeValueOf],
+    ] as const)(
       "reads and writes a stored %s dependency without using inherited transforms",
-      async (column) => {
-        const models = s.defineApp(
-          {
-            rows: s.table(
-              { constructor: s.string(), toString: s.string(), valueOf: s.string() },
-              { computedValue: s.computed((row) => row[column].toUpperCase()) },
-            ),
-          },
-          { migrations: "none" },
-        );
+      async (column, models) => {
         const db = await open();
         const { value: row } = db.insert(models.rows, {
           constructor: "constructor",
@@ -204,70 +183,8 @@ export function testComputedColumns(create: () => Promise<Db>) {
       },
     );
 
-    it("uses app-facing transformed dependencies and stored contexts independently", async () => {
-      const base = s.table(
-        {
-          amount: s.int().transform({
-            dependsOn: ["factor"],
-            from: (value, context: { readonly factor: number }) => value / context.factor,
-            to: (value: number, context: { readonly factor: string }) =>
-              value * Number(context.factor.slice(1)),
-          }),
-          factor: s
-            .int()
-            .default(100)
-            .transform({
-              from: (value) => `x${value}`,
-              to: (value: string) => Number(value.slice(1)),
-            }),
-        },
-        {},
-      );
-      const columns = s.table(base.columns, {
-        ...base.relations,
-        summary: s.computed((row) => `${row.amount}:${row.factor}`),
-      });
-      const models = s.defineApp(
-        {
-          rows: s.table(columns.columns, {
-            ...columns.relations,
-            nested: s.computed((row) => `[${row.summary}]`),
-          }),
-        },
-        { migrations: "none" },
-      );
-      const db = await open();
-      const { value: row } = db.insert(models.rows, { amount: 2, factor: "x100" });
-      expect(row.nested).toBe("[2:x100]");
-      await expect(db.one(models.rows.where({ id: row.id }).select("nested"))).resolves.toEqual({
-        id: row.id,
-        nested: "[2:x100]",
-      });
-      const unchanged = s.defineApp({ rows: base }, { migrations: "none" });
-      await expect(db.one(unchanged.rows.where({ id: row.id }))).resolves.toEqual({
-        id: row.id,
-        amount: 2,
-        factor: "x100",
-      });
-    });
-
     it("gives computations full values while retaining partial public values", async () => {
-      const models = s.defineApp(
-        {
-          rows: s.table(
-            {
-              text: s.string().transform({
-                from: (value) => value.toUpperCase(),
-                to: (value: string) => value.toLowerCase(),
-              }),
-              json: s.json(z.object({ title: z.string(), extra: z.string() })),
-              bytes: s.bytes(),
-            },
-            { summary: s.computed((row) => `${row.text}:${row.json.extra}:${row.bytes.length}`) },
-          ),
-        },
-        { migrations: "none" },
-      );
+      const models = fullValues;
       const db = await open();
       const { value: row } = db.insert(models.rows, {
         text: "abcdef",
@@ -345,15 +262,7 @@ export function testComputedColumns(create: () => Promise<Db>) {
     });
 
     it("handles constant and id-only fields without returning unrelated columns", async () => {
-      const models = s.defineApp(
-        {
-          rows: s.table(
-            { text: s.string() },
-            { constant: s.computed(() => 42), identity: s.computed((row) => row.id) },
-          ),
-        },
-        { migrations: "none" },
-      );
+      const models = constantIdentity;
       const db = await open();
       const { value: row } = db.insert(models.rows, { text: "hidden" });
       await expect(
@@ -362,17 +271,7 @@ export function testComputedColumns(create: () => Promise<Db>) {
     });
 
     it("retains the selected branch across dependency discovery and preserves null", async () => {
-      const models = s.defineApp(
-        {
-          rows: s
-            .table(
-              { score: s.int().optional(), branch: s.string() },
-              { value: s.computed((row) => row.score ?? -1) },
-            )
-            .branchBy("branch"),
-        },
-        { migrations: "none" },
-      );
+      const models = branched;
       const db = await open();
       const { value: row } = db.insert(
         models.rows,
@@ -407,18 +306,7 @@ export function testComputedColumns(create: () => Promise<Db>) {
 
     it("propagates callback failures without breaking independent reads", async () => {
       const db = await open();
-      const broken = s.defineApp(
-        {
-          rows: s.table(stored.columns, {
-            ...stored.relations,
-            failure: s.computed(() => {
-              throw new Error("computed failure");
-            }),
-          }),
-        },
-        { migrations: "none" },
-      );
-      const safe = s.defineApp({ rows: stored }, { migrations: "none" });
+      const broken = failing;
       const { value: row } = db.insert(safe.rows, {});
       await expect(db.one(broken.rows.where({ id: row.id }).select("failure"))).rejects.toThrow(
         "computed failure",
@@ -430,21 +318,7 @@ export function testComputedColumns(create: () => Promise<Db>) {
       { text: '{"label":"hello"}', expected: { label: "hello" } },
       { text: "plain text", expected: "plain text" },
     ])("retries a caught missing dependency for $text", async ({ text, expected }) => {
-      const models = s.defineApp(
-        {
-          rows: s.table(stored.columns, {
-            parsed: s.computed((row): unknown => {
-              try {
-                return JSON.parse(row.text);
-              } catch {
-                return row.text;
-              }
-            }),
-          }),
-        },
-        { migrations: "none" },
-      );
-      const safe = s.defineApp({ rows: stored }, { migrations: "none" });
+      const models = parseCaught;
       const db = await open();
       const { value: row } = db.insert(safe.rows, { text });
       await expect(db.one(models.rows.select("parsed"))).resolves.toEqual({
@@ -453,49 +327,8 @@ export function testComputedColumns(create: () => Promise<Db>) {
       });
     });
 
-    it("retries a caught missing dependency through an earlier computed field", async () => {
-      const earlier = s.table(stored.columns, {
-        textValue: s.computed((row) => row.text),
-      });
-      const models = s.defineApp(
-        {
-          rows: s.table(earlier.columns, {
-            parsed: s.computed((row): unknown => {
-              try {
-                return JSON.parse(row.textValue);
-              } catch {
-                return row.textValue;
-              }
-            }),
-          }),
-        },
-        { migrations: "none" },
-      );
-      const safe = s.defineApp({ rows: stored }, { migrations: "none" });
-      const db = await open();
-      const { value: row } = db.insert(safe.rows, { text: "plain text" });
-      await expect(db.one(models.rows.select("parsed"))).resolves.toEqual({
-        id: row.id,
-        parsed: "plain text",
-      });
-    });
-
     it("retries missing dependencies when the callback wraps errors", async () => {
-      const models = s.defineApp(
-        {
-          rows: s.table(stored.columns, {
-            parsed: s.computed((row): unknown => {
-              try {
-                return JSON.parse(row.text);
-              } catch (cause) {
-                throw new Error("Invalid JSON", { cause });
-              }
-            }),
-          }),
-        },
-        { migrations: "none" },
-      );
-      const safe = s.defineApp({ rows: stored }, { migrations: "none" });
+      const models = parseWrapped;
       const db = await open();
       const { value: row } = db.insert(safe.rows, { text: '{"valid":true}' });
       await expect(db.one(models.rows.select("parsed"))).resolves.toEqual({
@@ -507,32 +340,9 @@ export function testComputedColumns(create: () => Promise<Db>) {
     });
 
     it("preserves caught transform errors across repeated and separate computed reads", async () => {
-      const readFailure = (row: { readonly data: unknown }) => {
-        try {
-          return row.data;
-        } catch (error) {
-          return error instanceof SyntaxError ? "invalid JSON" : String(error);
-        }
-      };
-      const models = s.defineApp(
-        {
-          rows: s.table(
-            {
-              data: s.string().transform({
-                from: (value): unknown => JSON.parse(value),
-                to: (value: unknown) => JSON.stringify(value) ?? "null",
-              }),
-            },
-            {
-              first: s.computed(readFailure),
-              second: s.computed(readFailure),
-              repeated: s.computed((row) => [readFailure(row), readFailure(row)]),
-            },
-          ),
-        },
-        { migrations: "none" },
-      );
-      const safe = s.defineApp({ rows: s.table({ data: s.string() }, {}) }, { migrations: "none" });
+      // `readFailure` (in jazz.computed.ts) catches the transform's JSON.parse error.
+      const models = caughtTransformErrors;
+      const safe = dataStored;
       const db = await open();
       const { value: row } = db.insert(safe.rows, { data: "bad" });
       for (const selected of [
@@ -549,18 +359,7 @@ export function testComputedColumns(create: () => Promise<Db>) {
     });
 
     it("contains rejected async callbacks in the read error channel", async () => {
-      const models = s.defineApp(
-        {
-          rows: s.table(stored.columns, {
-            missing: s.computed(async (row) => row.score),
-            failing: s.computed(async () => {
-              throw new Error("async callback failure");
-            }),
-          }),
-        },
-        { migrations: "none" },
-      );
-      const safe = s.defineApp({ rows: stored }, { migrations: "none" });
+      const models = asyncCallbacks;
       const db = await open();
       db.insert(safe.rows, {});
       for (const column of ["missing", "failing"] as const) {
@@ -572,15 +371,7 @@ export function testComputedColumns(create: () => Promise<Db>) {
     });
 
     it("discovers conditional dependencies and observes their later updates", async () => {
-      const models = s.defineApp(
-        {
-          rows: s.table(
-            { useLeft: s.boolean(), left: s.int(), right: s.int() },
-            { value: s.computed((row) => (row.useLeft ? row.left : row.right)) },
-          ),
-        },
-        { migrations: "none" },
-      );
+      const models = conditional;
       const db = await open();
       const { value: row } = db.insert(models.rows, { useLeft: true, left: 10, right: 20 });
       let next: ((value: unknown) => void) | undefined;
@@ -624,23 +415,19 @@ export function testComputedColumns(create: () => Promise<Db>) {
     });
 
     it("materialises row references nested in computed results before completing reads", async () => {
-      const models = s.defineApp(
-        {
-          rows: s.table(stored.columns, {
-            wrapper: s.computed((row) => Object.freeze({ nested: [{ saved: row }] })),
-            mapping: s.computed((row) => new Map([[row, row]])),
-            membership: s.computed((row) => new Set([row])),
-          }),
-        },
-        { migrations: "none" },
-      );
+      const models = nestedRows;
+      type Saved = { score: number };
+      type Selected = {
+        wrapper: { nested: [{ saved: Saved }] };
+        mapping: Map<Saved, Saved>;
+        membership: Set<Saved>;
+      };
       const db = await open();
       // Insert through the stored schema so the selected read must discover its inputs.
-      const safe = s.defineApp({ rows: stored }, { migrations: "none" });
       const { value: inserted } = db.insert(safe.rows, {});
-      const selected = await db.one(
+      const selected = (await db.one(
         models.rows.where({ id: inserted.id }).select("wrapper", "mapping", "membership"),
-      );
+      )) as unknown as Selected | null;
       const expected = { id: inserted.id, score: 5, text: "hello" };
       expect(selected!.wrapper.nested[0]!.saved.score).toBe(5);
       expect(selected!.wrapper.nested[0]!.saved).toEqual(expected);
@@ -650,21 +437,13 @@ export function testComputedColumns(create: () => Promise<Db>) {
       expect(value).toBe(key);
       expect([...selected!.membership][0]!.score).toBe(5);
       expect(Object.keys(selected!).sort()).toEqual(["id", "mapping", "membership", "wrapper"]);
-      const immediate = db.insert(models.rows, {}).value;
+      const immediate = db.insert(models.rows, {}).value as unknown as Selected;
       expect(immediate.wrapper.nested[0]!.saved.score).toBe(5);
     });
 
     it("observes dependencies of rows nested in computed subscription results", async () => {
-      const models = s.defineApp(
-        {
-          rows: s.table(stored.columns, {
-            wrapper: s.computed((row) => ({ saved: row })),
-          }),
-        },
-        { migrations: "none" },
-      );
+      const models = nestedSubscription;
       const db = await open();
-      const safe = s.defineApp({ rows: stored }, { migrations: "none" });
       const { value: row } = db.insert(safe.rows, {});
       let next: ((score: number) => void) | undefined;
       let fail: ((error: unknown) => void) | undefined;
@@ -679,7 +458,8 @@ export function testComputedColumns(create: () => Promise<Db>) {
       const stop = db.subscribe(models.rows.where({ id: row.id }).select("wrapper"), {
         onUpdate: (rows) => {
           try {
-            if (rows[0]) next?.(rows[0].wrapper.saved.score);
+            if (rows[0])
+              next?.((rows[0].wrapper as unknown as { saved: { score: number } }).saved.score);
           } catch (error) {
             fail?.(error);
           }
@@ -697,19 +477,8 @@ export function testComputedColumns(create: () => Promise<Db>) {
     });
 
     it("keeps computed siblings out of the callback input row", async () => {
-      const models = s.defineApp(
-        {
-          rows: s.table(stored.columns, {
-            toString: s.computed(() => "custom"),
-            valueOf: s.computed(() => "custom value"),
-            tag: s.computed((row) => row.toString()),
-            original: s.computed((row) => row.valueOf() === row),
-          }),
-        },
-        { migrations: "none" },
-      );
+      const models = siblings;
       const db = await open();
-      const safe = s.defineApp({ rows: stored }, { migrations: "none" });
       const { value: row } = db.insert(safe.rows, {});
       await expect(
         db.one(models.rows.select("toString", "valueOf", "tag", "original")),
@@ -724,17 +493,7 @@ export function testComputedColumns(create: () => Promise<Db>) {
     });
 
     it("supports row enumeration, JSON serialisation and returning a materialised row", async () => {
-      const models = s.defineApp(
-        {
-          rows: s.table(stored.columns, {
-            json: s.computed((row) => JSON.stringify(row)),
-            copy: s.computed((row) => row),
-            keys: s.computed((row) => Object.keys(row).sort()),
-            tag: s.computed((row) => row.toString()),
-          }),
-        },
-        { migrations: "none" },
-      );
+      const models = rowEnumeration;
       const db = await open();
       const { value: row } = db.insert(models.rows, {});
       const expected = { id: row.id, score: 5, text: "hello" };
@@ -780,29 +539,16 @@ export function testComputedColumns(create: () => Promise<Db>) {
 
     it("rejects unknown dependencies, cycles, mutations and asynchronous callbacks at evaluation", async () => {
       const db = await open();
-      const safe = s.defineApp({ rows: stored }, { migrations: "none" });
       const { value: row } = db.insert(safe.rows, {});
+      // Each app's `invalid` (jazz.computed.ts) reads a column `from` doesn't name,
+      // reads itself, writes its row, or returns a promise.
       const cases = [
-        {
-          callback: (value: Readonly<Record<string, unknown>>) => value.missing,
-          error: /unknown.*missing/i,
-        },
-        { callback: (value: Readonly<Record<string, unknown>>) => value.invalid, error: /cyclic/i },
-        {
-          callback: (value: Readonly<Record<string, unknown>>) => {
-            (value as Record<string, unknown>).score = 0;
-          },
-          error: /read.only/i,
-        },
-        { callback: () => Promise.resolve(1), error: /synchronously/ },
+        { broken: invalidUnknown, error: /unknown.*missing/i },
+        { broken: invalidCyclic, error: /cyclic/i },
+        { broken: invalidMutation, error: /read.only/i },
+        { broken: invalidAsync, error: /synchronously/ },
       ];
-      for (const { callback, error } of cases) {
-        const broken = s.defineApp(
-          {
-            rows: s.table(stored.columns, { invalid: s.computed(callback) }),
-          },
-          { migrations: "none" },
-        );
+      for (const { broken, error } of cases) {
         await expect(db.one(broken.rows.where({ id: row.id }).select("invalid"))).rejects.toThrow(
           error,
         );

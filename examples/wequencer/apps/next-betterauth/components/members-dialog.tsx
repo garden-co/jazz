@@ -15,7 +15,7 @@ import { Selector } from "@astryxdesign/core/Selector";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { VStack } from "@astryxdesign/core/VStack";
-import { app, type MemberRole } from "@/schema";
+import { app, type SessionMemberRole as MemberRole } from "@/jazz.generated";
 import { AccountId } from "@/components/account-id";
 import type { PresenceRow } from "@/components/presence-avatars";
 import { ROLE_LABELS } from "@/lib/roles";

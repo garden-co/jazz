@@ -1,7 +1,7 @@
 import { PersistedWriteRejectedError, type Db } from "jazz-tools";
 import type { PolicyTestApp, TestDb } from "jazz-tools/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 import { PRODUCTS } from "../src/catalogue/catalogue";
 import { ids, uuidV5 } from "../src/lib/ids";
 import {

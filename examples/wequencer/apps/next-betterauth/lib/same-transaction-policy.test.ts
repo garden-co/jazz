@@ -10,8 +10,8 @@
 // separately are.
 import { expect, it } from "vitest";
 import { createPolicyTestApp } from "jazz-tools/testing";
-import permissions from "../permissions";
-import { app } from "../schema";
+import permissions from "../jazz.permissions.json" with { type: "json" };
+import { app } from "../jazz.generated";
 
 async function outcome(write: Promise<unknown>) {
   try {
