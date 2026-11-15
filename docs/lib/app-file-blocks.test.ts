@@ -16,8 +16,8 @@ const walk = (dir: string) => {
 };
 walk(root);
 
-const INLINE = /"(tables|columns|relations|defs)": \{ "/;
-const INLINE_TABLE = /^\s*"[\w$]+": \{ "(columns|read|insert|update|delete)"/;
+const INLINE = /"(tables|columns|relations|defs)":\s*\{\s*"/;
+const INLINE_TABLE = /^\s*"[\w$]+":\s*\{\s*"(columns|read|insert|update|delete)"/;
 
 describe("app-file examples", () => {
   it.each(files.map((f) => [path.relative(root, f), f]))(
