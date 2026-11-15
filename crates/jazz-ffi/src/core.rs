@@ -325,9 +325,9 @@ impl Core {
         Ok(row.to_string())
     }
 
-    /// Writes the row with this id: inserts it if there is none, otherwise
-    /// replaces its columns. `row_json` is a whole row, as for an insert
-    /// (TS's `upsert`). Returns the row as stored.
+    /// Writes the row with this id: inserts it if there is none (then
+    /// `row_json` is a whole row, as for an insert), otherwise sets the
+    /// columns `row_json` names (a partial row updates). Returns the row.
     pub fn upsert(
         &self,
         table_name: &str,
@@ -368,7 +368,13 @@ impl Core {
         let id = convert::parse_id(id, "the id")?;
         let table = self.table(table_name)?.clone();
         let cells = match patch_json {
-            Some(patch) => Some(convert::cells(&table, table_name, patch, "the patch")?.1),
+            Some(patch) => {
+                let (named, cells) = convert::cells(&table, table_name, patch, "the patch")?;
+                if named.is_some_and(|named| named != id) {
+                    return Err(refused("a restore's patch cannot name another row's id"));
+                }
+                Some(cells)
+            }
             None => None,
         };
         let name = table_name.to_owned();
