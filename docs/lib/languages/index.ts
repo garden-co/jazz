@@ -49,7 +49,6 @@ export const LANGUAGES: readonly Language[] = [
       lang: "rust",
       symbols: ["TaskStatus", "Task", "NewTask"],
     },
-    setupPage: "setup/rust",
     enabled: true,
   },
   {

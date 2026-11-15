@@ -13,7 +13,6 @@
     "setup/web-client",
     "setup/react-native",
     "setup/backend-client",
-    "setup/rust",
     "setup/swift",
     "setup/kotlin",
     "setup/go",
