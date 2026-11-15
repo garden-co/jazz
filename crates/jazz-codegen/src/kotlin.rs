@@ -417,6 +417,13 @@ impl<'a> Writer<'a> {
             "equals",
             "hashCode",
             "toString",
+            // Top-level packages the initializers name: a property of that
+            // name would hide them there.
+            "kotlin",
+            "kotlinx",
+            "tools",
+            "java",
+            "javax",
         ]
         .into_iter()
         .map(str::to_owned)
