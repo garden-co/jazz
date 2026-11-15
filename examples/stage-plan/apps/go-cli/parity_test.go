@@ -229,3 +229,39 @@ func TestMergeableTextEdits(t *testing.T) {
 		t.Fatalf("mid-character offset: %v (notes now %q)", err, notes())
 	}
 }
+
+func TestPermissionAdvice(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	srv := testServer(t)
+	alice := openTest(t, srv, "alice")
+	bob := openTest(t, srv, "bob")
+	show, err := ensureShow(ctx, alice, "Advice Night")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := addTask(ctx, alice, show.ID, "Load-in")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := alice.WaitForSync(ctx, jazz.WriteGlobal); err != nil {
+		t.Fatal(err)
+	}
+	newTask := jazzapp.NewTask{ShowID: show.ID, Title: "More", Status: jazzapp.TaskStatusTodo, Rank: 2}
+	for _, c := range []struct {
+		name string
+		got  func() (jazz.Advice, error)
+		want jazz.Advice
+	}{
+		{"alice inserts", func() (jazz.Advice, error) { return jazzapp.Tasks.CanInsert(ctx, alice, newTask) }, jazz.Allowed},
+		{"alice updates", func() (jazz.Advice, error) {
+			return jazzapp.Tasks.CanUpdate(ctx, alice, task.ID, jazzapp.TaskPatch{Title: jazz.Set("Load-in early")})
+		}, jazz.Allowed},
+		{"bob inserts", func() (jazz.Advice, error) { return jazzapp.Tasks.CanInsert(ctx, bob, newTask) }, jazz.Denied},
+	} {
+		got, err := c.got()
+		if err != nil || got != c.want {
+			t.Errorf("%s: %q, %v (want %q)", c.name, got, err, c.want)
+		}
+	}
+}
