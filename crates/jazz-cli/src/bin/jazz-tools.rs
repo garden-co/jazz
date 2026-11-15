@@ -335,7 +335,10 @@ fn finish_app_files(result: Result<jazz_cli::app_files::Outcome, String>) -> ! {
     std::process::exit(code)
 }
 
-fn langs(dir: &std::path::Path, names: &[String]) -> Result<Vec<jazz_codegen::Lang>, String> {
+fn langs(
+    dir: &std::path::Path,
+    names: &[String],
+) -> Result<Vec<jazz_cli::app_files::Selected>, String> {
     let given = names
         .iter()
         .map(|name| jazz_codegen::Lang::parse(name).map_err(|error| error.to_string()))

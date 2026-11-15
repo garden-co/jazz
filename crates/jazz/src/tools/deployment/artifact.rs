@@ -565,6 +565,16 @@ pub fn source_hash(file: &[u8]) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
+/// The engine's hash of a schema in its own JSON form (`{ "tables": … }`,
+/// what generated bindings embed per version), its policies dropped as a
+/// deployment drops them: the one schema-hash implementation every
+/// language uses.
+pub fn schema_hash(schema_json: &[u8]) -> Result<SchemaHash, ArtifactError> {
+    let schema: Schema = serde_json::from_slice(schema_json)
+        .map_err(|error| ArtifactError::new(format!("not an engine schema: {error}")))?;
+    Ok(SchemaHash::compute(&structural(schema)))
+}
+
 /// Read a `jazz.app.json` for a client: the schema versions and lenses it
 /// opens along. Its references are checked as [`load`] checks them and
 /// every lens is lowered; the deployment's review of each lens is the
@@ -578,13 +588,17 @@ pub fn load_client(json: &[u8]) -> Result<crate::db::Migrations, ArtifactError> 
     Ok(crate::db::Migrations { schemas, lenses })
 }
 
-/// What a binding's open configuration ships (a `jazz.app.json`, see
-/// [`load_client`]), lowered for a store; none ships nothing.
-pub fn client_migrations(app: Option<&[u8]>) -> Result<crate::db::Migrations, String> {
-    match app {
-        None => Ok(crate::db::Migrations::default()),
-        Some(json) => load_client(json).map_err(|error| error.to_string()),
-    }
+/// [`load_client`], with the current schema: what a client that has no
+/// other copy of the schema opens with.
+pub fn load_client_current(json: &[u8]) -> Result<(Schema, crate::db::Migrations), ArtifactError> {
+    let app_file = read_app(json)?;
+    let history = check_history(&app_file)?;
+    let (schemas, lenses) = lower_client_migrations(history.bundle())
+        .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
+    Ok((
+        history.current_schema().clone(),
+        crate::db::Migrations { schemas, lenses },
+    ))
 }
 
 fn read_app(json: &[u8]) -> Result<app_file::AppFile, ArtifactError> {
@@ -796,6 +810,25 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
             forward: forward.clone(),
         })
         .collect::<Vec<_>>();
+    let schema_of = |hash: &str| {
+        let hash = parse_schema_hash(hash).expect("written above");
+        &schemas
+            .iter()
+            .find(|(h, _)| *h == hash)
+            .expect("named above")
+            .1
+    };
+    for (index, migration) in migrations.iter().enumerate() {
+        if let Some(refusal) = retargeted_reference(
+            schema_of(&migration.from_hash),
+            schema_of(&migration.to_hash),
+            &migration.forward,
+        ) {
+            return Err(ArtifactError::new(format!(
+                "migrations[{index}]: {refusal}"
+            )));
+        }
+    }
     // Every version a client may open must lead to the current one: lenses
     // run both ways, so any chain of migrations connects them. Before
     // alpha.65, `migrations create` wrote no migration when no row needed
@@ -891,9 +924,83 @@ fn rows_pass_unchanged(from: &Schema, to: &Schema) -> bool {
                         c.name == column.name
                             && c.nullable == column.nullable
                             && same_type(&column.column_type, &c.column_type)
+                            && !retargets(column, c)
                     })
                 })
         })
+}
+
+/// Whether a kept column's reference moves from one table to another: its
+/// values would name rows of the old table. Gaining a reference is fine.
+fn retargets(
+    from: &crate::tools::public_schema::ColumnDescriptor,
+    to: &crate::tools::public_schema::ColumnDescriptor,
+) -> bool {
+    matches!((&from.references, &to.references), (Some(a), Some(b)) if a != b)
+}
+
+/// The written migration's first kept column whose reference it moves to
+/// another table, as a refusal.
+fn retargeted_reference(
+    from: &Schema,
+    to: &Schema,
+    forward: &[super::published::PublishTableLens],
+) -> Option<String> {
+    for (name, table) in to.iter() {
+        let lens = forward.iter().find(|l| l.table == name.as_str());
+        if lens.is_some_and(|l| l.added) {
+            continue;
+        }
+        let old_name = lens
+            .and_then(|l| l.renamed_from.clone())
+            .unwrap_or_else(|| name.as_str().to_string());
+        let Some(old) = from.get(&TableName::from(old_name.as_str())) else {
+            continue;
+        };
+        for column in &table.columns.columns {
+            let old_column = lens
+                .and_then(|l| {
+                    l.operations.iter().find_map(|op| match op {
+                        super::published::PublishLensOp::Rename { column: was, value }
+                            if value == column.name_str() =>
+                        {
+                            Some(was.clone())
+                        }
+                        _ => None,
+                    })
+                })
+                .unwrap_or_else(|| column.name_str().to_string());
+            // A reference to a table the migration renames follows it.
+            let followed = |table: &TableName| -> TableName {
+                forward
+                    .iter()
+                    .find(|l| l.renamed_from.as_deref() == Some(table.as_str()))
+                    .map_or(*table, |l| TableName::from(l.table.as_str()))
+            };
+            if let Some(source) = old
+                .columns
+                .columns
+                .iter()
+                .find(|c| c.name_str() == old_column)
+                && matches!(
+                    (&source.references, &column.references),
+                    (Some(a), Some(b)) if followed(a) != *b
+                )
+            {
+                return Some(format!(
+                    "column {name}.{} moves its reference from {} to {}, which is not supported \
+                     yet: its values name rows of {}. Add a new column referencing {} and drop \
+                     this one in a later release",
+                    column.name_str(),
+                    source.references.expect("retargets").as_str(),
+                    column.references.expect("retargets").as_str(),
+                    source.references.expect("retargets").as_str(),
+                    column.references.expect("retargets").as_str(),
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// The identity step between two versions [`rows_pass_unchanged`] relates:

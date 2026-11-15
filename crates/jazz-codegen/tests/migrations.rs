@@ -425,3 +425,31 @@ fn bindings_refuse_a_version_no_migration_leads_from() {
     .unwrap();
     assert!(!created.changed);
 }
+
+#[test]
+fn moving_a_reference_to_another_table_is_not_supported_yet() {
+    let before = r#"{ "a": { "columns": { "x": "string" } }, "b": { "columns": { "x": "string" } }, "notes": { "columns": { "owner": { "type": "uuid", "references": "a" } } } }"#;
+    let after = r#"{ "a": { "columns": { "x": "string" } }, "b": { "columns": { "x": "string" } }, "notes": { "columns": { "owner": { "type": "uuid", "references": "b" } } } }"#;
+    let error = refused(before, after);
+    assert!(
+        error.contains(
+            "Moving the reference of column `notes.owner` from a to b is not supported yet"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_reference_follows_a_renamed_table() {
+    let created = migrate(
+        r#"{ "users": { "columns": { "name": "string" } }, "todos": { "columns": { "owner": { "type": "uuid", "references": "users" } } } }"#,
+        r#"{ "people": { "columns": { "name": "string" } }, "todos": { "columns": { "owner": { "type": "uuid", "references": "people" } } } }"#,
+    );
+    let text = migration(&created);
+    assert!(
+        text.contains(r#""renameTables": { "people": "users" }"#),
+        "{text}"
+    );
+    assert!(created.todos.is_empty(), "{:?}", created.todos);
+    App::load(created.app.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+}

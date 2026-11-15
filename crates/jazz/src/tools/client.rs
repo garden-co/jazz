@@ -420,11 +420,7 @@ impl Forwarder {
         updated_rows: Vec<SubscriptionOutputRow>,
         removed_rows: Vec<RemovedRow>,
     ) -> Result<OrderedRowDelta> {
-        let decoder = Decoder {
-            schema,
-            query: &self.query,
-            db: Some(db),
-        };
+        let decoder = Decoder::new(schema, &self.query, Some(db));
         let mut delta = OrderedRowDelta::default();
         if reset {
             // A reset replaces the whole result: everything held leaves,
@@ -475,12 +471,12 @@ impl Forwarder {
             if let Some(at) = held {
                 self.rows.remove(at);
             }
-            let public = decoder.subscription_row(row)?;
+            // A row that only moved is not decoded.
             delta.updated.push(OrderedUpdated {
-                id: public.id.clone(),
+                id: decoder.key(&row.row)?,
                 old_index: row.previous_index.unwrap_or(row.index),
                 new_index: row.index,
-                row: changed.then_some(public),
+                row: changed.then(|| decoder.subscription_row(row)).transpose()?,
                 splices: row.splices.clone(),
             });
         }
@@ -1255,12 +1251,7 @@ impl JazzClient {
                 .await?
                 .map_err(|error| JazzError::Query(error.to_string()))?
         };
-        Decoder {
-            schema: &self.shared.schema,
-            query: &query,
-            db: None,
-        }
-        .results(&rows)
+        Decoder::new(&self.shared.schema, &query, None).results(&rows)
     }
 
     /// Read a byte range from a bytes or string cell.
@@ -2227,9 +2218,28 @@ struct Decoder<'a> {
     /// Where a delivered row's provenance is read when the query does not
     /// project it.
     db: Option<&'a Db>,
+    /// [`Decoder::fields`], computed once: it is the same for every row.
+    fields: std::cell::OnceCell<Vec<(String, Option<ColumnType>)>>,
 }
 
-impl Decoder<'_> {
+impl<'a> Decoder<'a> {
+    fn new(schema: &'a Schema, query: &'a Query, db: Option<&'a Db>) -> Self {
+        Self {
+            schema,
+            query,
+            db,
+            fields: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn output_fields(&self) -> Result<&[(String, Option<ColumnType>)]> {
+        if let Some(fields) = self.fields.get() {
+            return Ok(fields);
+        }
+        let fields = self.fields()?;
+        Ok(self.fields.get_or_init(|| fields))
+    }
+
     fn table_schema(&self, table: &str) -> Result<&TableSchema> {
         self.schema
             .get(&TableName::new(
@@ -2329,21 +2339,36 @@ impl Decoder<'_> {
     }
 
     fn values(&self, row: &CurrentRow) -> Result<Vec<QueryResultField>> {
-        self.fields()?
-            .into_iter()
+        // A row's cells come in the order of the projection, so each field
+        // is usually the next cell: look there first.
+        let cells: Vec<(&str, Option<&CoreValue>)> = row.cells().collect();
+        let mut next = 0;
+        let mut cell = |name: &str| {
+            let at = match cells.get(next) {
+                Some((cell, _)) if *cell == name => Some(next),
+                _ => cells.iter().position(|(cell, _)| *cell == name),
+            }?;
+            next = at + 1;
+            Some(cells[at].1.cloned().unwrap_or(CoreValue::Nullable(None)))
+        };
+        self.output_fields()?
+            .iter()
             .map(|(name, ty)| {
                 let value = if name == "id" && self.query.aggregate.is_none() {
                     Value::Uuid(ObjectId::from_uuid(row.row_uuid().0))
                 } else {
-                    let value = cell(row, &name).ok_or_else(|| {
+                    let value = cell(name).ok_or_else(|| {
                         JazzError::Query(format!("row is missing projected field {name}"))
                     })?;
-                    match &ty {
+                    match ty {
                         Some(ty) => core_to_public_value_for_column_type(value, ty)?,
                         None => core_to_public_value(value)?,
                     }
                 };
-                Ok(QueryResultField { name, value })
+                Ok(QueryResultField {
+                    name: name.clone(),
+                    value,
+                })
             })
             .collect()
     }
@@ -2388,9 +2413,7 @@ impl Decoder<'_> {
             TransactionId([0; 16]),
             self.provenance(&row.row)?,
         );
-        #[cfg(feature = "testing")]
-        let public = public.with_fields(self.values(&row.row)?);
-        Ok(public)
+        Ok(public.with_fields(self.values(&row.row)?))
     }
 }
 
