@@ -2008,8 +2008,8 @@ struct SessionQueues {
     outbound: RefCell<VecDeque<(Vec<AbiBytes>, usize)>>,
     /// What the session's output holds in memory (see [`Backlog`]).
     backlog: Backlog,
-    /// Since when its egress has stayed at the budget, unread.
-    stalled: StalledSince,
+    /// Whether its client is reading.
+    clock: ReadClock,
     /// Inbound messages the engine may still take in the tick serving this
     /// session.
     budget: std::cell::Cell<usize>,
@@ -2174,7 +2174,7 @@ impl SessionQueues {
             taken: std::cell::Cell::new(0),
             outbound: RefCell::default(),
             backlog: Backlog::new(egress, limits),
-            stalled: StalledSince::default(),
+            clock: ReadClock::default(),
             budget: std::cell::Cell::new(0),
             served: std::cell::Cell::new(false),
             done: std::cell::Cell::new(false),
@@ -2268,10 +2268,22 @@ fn egress_limits() -> EgressLimits {
         .unwrap_or_default()
 }
 
-/// The sessions to close so what they hold fits `budget`, biggest first:
-/// one reader far behind goes before many that keep up.
-fn sessions_to_shed(mut held: Vec<(ServerSession, usize)>, budget: usize) -> Vec<ServerSession> {
-    let mut total: usize = held.iter().map(|(_, bytes)| *bytes).sum();
+/// The stalled sessions to close so what every session holds fits
+/// `budget`, biggest first. `held` lists every session's undrained bytes
+/// and whether it is stalled ([`ReadClock`]): a session that is reading is
+/// never picked, however much it holds, as what it holds is shrinking (and
+/// bounded by its own backlog bound); a stalled one far behind goes before
+/// stalled ones that hold little.
+fn sessions_to_shed(held: Vec<(ServerSession, usize, bool)>, budget: usize) -> Vec<ServerSession> {
+    let mut total: usize = held.iter().map(|(_, bytes, _)| *bytes).sum();
+    if total <= budget {
+        return Vec::new();
+    }
+    let mut held: Vec<(ServerSession, usize)> = held
+        .into_iter()
+        .filter(|(_, _, stalled)| *stalled)
+        .map(|(session, bytes, _)| (session, bytes))
+        .collect();
     held.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.0.cmp(&b.0.0)));
     let mut shed = Vec::new();
     for (session, bytes) in held {
@@ -2284,26 +2296,93 @@ fn sessions_to_shed(mut held: Vec<(ServerSession, usize)>, budget: usize) -> Vec
     shed
 }
 
-/// When a session's egress first reached its budget, while it stays
-/// there: past [`EgressLimits::slow_reader_timeout`] it is closed.
+/// Whether a session's client is reading: from the bytes handed to its
+/// socket side and those its connection has not taken yet, the bytes it
+/// has taken (which it takes as the client reads). A
+/// client that read anything since the last check is reading, however much
+/// it still has to read; one that read nothing while its egress was at the
+/// budget has been stalled since that check. Past
+/// [`EgressLimits::slow_reader_timeout`] stalled, it is closed.
 #[derive(Default)]
-struct StalledSince(std::cell::Cell<Option<std::time::Instant>>);
+struct ReadClock {
+    /// Bytes ever handed to the socket side.
+    handed: std::cell::Cell<u64>,
+    /// Bytes the client had read at the last check (`handed - egress`).
+    read: std::cell::Cell<i128>,
+    stalled_since: std::cell::Cell<Option<std::time::Instant>>,
+}
 
-impl StalledSince {
-    /// Whether the session stalled longer than `timeout`, as of `now`.
-    fn observe(&self, full: bool, now: std::time::Instant, timeout: Duration) -> bool {
-        if !full {
-            self.0.set(None);
-            return false;
+impl ReadClock {
+    /// `bytes` were handed to the socket side.
+    fn handed(&self, bytes: usize) {
+        self.handed.set(self.handed.get() + bytes as u64);
+    }
+
+    /// Check at `now`, with `egress` unread: how long the client has been
+    /// stalled, if it is.
+    fn check(&self, egress: usize, now: std::time::Instant) -> Option<Duration> {
+        let read = i128::from(self.handed.get()) - egress as i128;
+        let reading = read > self.read.replace(read);
+        if reading || egress < SESSION_QUEUE_BUDGET {
+            self.stalled_since.set(None);
+            return None;
         }
-        let since = *self.0.get().get_or_insert(now);
-        self.0.set(Some(since));
-        now.duration_since(since) > timeout
+        let since = *self.stalled_since.get().get_or_insert(now);
+        self.stalled_since.set(Some(since));
+        Some(now.duration_since(since))
+    }
+}
+
+/// How long a session must have read nothing before the egress budget may
+/// close it: output handed over in this tick has not had a chance to be
+/// read yet, so a session that just got a big result is not stalled.
+const STALL_GRACE: Duration = IDLE_TICK;
+
+/// Sessions closed because their client fell behind, by reason, since the
+/// process started: [`egress_sheds`].
+static SHED_SLOW_READER: AtomicU64 = AtomicU64::new(0);
+static SHED_EGRESS_BUDGET: AtomicU64 = AtomicU64::new(0);
+
+/// Sessions closed so far because their client read nothing for longer
+/// than the slow-reader timeout, and because the server's egress budget
+/// was spent while they were stalled.
+pub fn egress_sheds() -> (u64, u64) {
+    (
+        SHED_SLOW_READER.load(Ordering::Relaxed),
+        SHED_EGRESS_BUDGET.load(Ordering::Relaxed),
+    )
+}
+
+/// Why a session was closed for falling behind.
+#[derive(Clone, Copy, Debug)]
+enum ShedReason {
+    SlowReader,
+    EgressBudget,
+}
+
+impl ShedReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SlowReader => "slow_reader",
+            Self::EgressBudget => "egress_budget",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::SlowReader => "it read nothing for longer than the slow-reader timeout",
+            Self::EgressBudget => {
+                "the server's egress budget is spent, and it held the most output of the \
+                 sessions that read nothing"
+            }
+        }
     }
 }
 
 /// How much of a session's output sits in server memory: queued in the
-/// engine and handed to the socket but not yet read off it.
+/// engine, and handed to the socket side but not yet taken by the
+/// connection's writer. (The writer's own queue, at most a few batches
+/// per connection, and kernel buffers are not counted.)
 ///
 /// One tick's output for a session is always taken whole, however large
 /// (a first result is as big as what the client asked for). Output of a
@@ -2313,7 +2392,8 @@ impl StalledSince {
 /// reader that keeps up drains a burst before the next one doubles it,
 /// and one that does not is bounded by about that much.
 struct Backlog {
-    /// Bytes the socket took and the client has not read yet.
+    /// Bytes handed to the socket side that the connection's writer has
+    /// not taken yet.
     egress: Arc<AtomicUsize>,
     /// [`EgressLimits::session_backlog_bytes`] and
     /// [`EgressLimits::session_backlog_max_bytes`].
@@ -2360,11 +2440,14 @@ impl Backlog {
     fn admits(&self) -> bool {
         // Twice the biggest tick, so a burst being drained is not cut off,
         // but never past the ceiling: one huge first result must not let
-        // the session hold several times it for good.
+        // the session hold several times it for good. A burst bigger than
+        // the ceiling still drains, with a floor's worth of room for what
+        // follows it.
+        let peak = self.peak.get();
         let allowed = self
             .floor
-            .max(self.peak.get().saturating_mul(2))
-            .min(self.ceiling);
+            .max(peak.saturating_mul(2))
+            .min(self.ceiling.max(peak.saturating_add(self.floor)));
         self.carried.get() <= allowed
     }
 
@@ -2859,6 +2942,7 @@ impl Owner {
                 continue;
             }
             session.egress.fetch_add(bytes, Ordering::AcqRel);
+            session.queues.clock.handed(bytes);
             if session.output.send((Ok(frames), bytes)).is_err() {
                 gone.push(*id);
             }
@@ -2870,57 +2954,59 @@ impl Owner {
         self.shed_egress();
     }
 
-    /// Close, with `Backpressure`, the sessions that stalled at their egress
-    /// budget past the slow-reader timeout, then the ones holding the most
-    /// output while all of it together is over the server's egress budget.
+    /// Close, with `Backpressure`, the sessions whose client read nothing
+    /// for longer than the slow-reader timeout, then, while all sessions
+    /// together hold more than the server's egress budget, the stalled
+    /// sessions holding the most.
     fn shed_egress(&mut self) {
         let now = std::time::Instant::now();
         let timeout = self.limits.slow_reader_timeout;
-        let full = |egress: &AtomicUsize| egress.load(Ordering::Acquire) >= SESSION_QUEUE_BUDGET;
-        let mut stalled: Vec<ServerSession> = self
-            .sessions
-            .iter()
-            .filter(|(_, session)| {
-                session
-                    .queues
-                    .stalled
-                    .observe(full(&session.egress), now, timeout)
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        stalled.extend(
-            self.thin
-                .iter()
-                .filter(|(_, thin)| thin.stalled_past(now, timeout))
-                .map(|(id, _)| *id),
-        );
-        for session in stalled {
-            self.shed(
-                session,
-                "it read nothing for longer than the slow-reader timeout",
-            );
+        let mut held: Vec<(ServerSession, usize, bool)> = Vec::new();
+        let mut too_slow = Vec::new();
+        for (id, session) in &self.sessions {
+            let stalled = session
+                .queues
+                .clock
+                .check(session.egress.load(Ordering::Acquire), now);
+            if stalled.is_some_and(|stalled| stalled > timeout) {
+                too_slow.push(*id);
+            }
+            let stalled_long = stalled.is_some_and(|stalled| stalled >= STALL_GRACE);
+            held.push((*id, session.queues.backlog.undrained(), stalled_long));
         }
-        let held: Vec<(ServerSession, usize)> = self
-            .sessions
-            .iter()
-            .map(|(id, session)| (*id, session.queues.backlog.undrained()))
-            .chain(self.thin.iter().map(|(id, thin)| (*id, thin.undrained())))
-            .collect();
+        for (id, thin) in &self.thin {
+            let stalled = thin.stalled_for(now);
+            if stalled.is_some_and(|stalled| stalled > timeout) {
+                too_slow.push(*id);
+            }
+            let stalled_long = stalled.is_some_and(|stalled| stalled >= STALL_GRACE);
+            held.push((*id, thin.undrained(), stalled_long));
+        }
+        held.retain(|(id, ..)| !too_slow.contains(id));
+        for session in too_slow {
+            self.shed(session, ShedReason::SlowReader);
+        }
         for session in sessions_to_shed(held, self.limits.egress_budget_bytes) {
-            self.shed(
-                session,
-                "the server's egress budget is spent and it held the most output",
-            );
+            self.shed(session, ShedReason::EgressBudget);
         }
     }
 
     /// Tell `session` it is closed for backpressure, and close it.
-    fn shed(&mut self, session: ServerSession, why: &str) {
+    fn shed(&mut self, session: ServerSession, reason: ShedReason) {
+        match reason {
+            ShedReason::SlowReader => SHED_SLOW_READER.fetch_add(1, Ordering::Relaxed),
+            ShedReason::EgressBudget => SHED_EGRESS_BUDGET.fetch_add(1, Ordering::Relaxed),
+        };
         let error = jazz::db::Error::new(
             jazz::db::ErrorCode::Backpressure,
-            format!("the client fell behind: {why}"),
+            format!("the client fell behind: {}", reason.message()),
         );
-        tracing::warn!(%error, app = self.app.as_deref().unwrap_or("?"), "closing a session that fell behind");
+        tracing::warn!(
+            %error,
+            reason = reason.as_str(),
+            app = self.app.as_deref().unwrap_or("?"),
+            "closing a session that fell behind"
+        );
         let wire = session_closed_error(&error);
         if let Some(owned) = self.sessions.get(&session) {
             let _ = owned.output.send((Err(wire), 0));
@@ -3878,9 +3964,10 @@ mod tests {
         );
     }
 
-    /// The bound follows the biggest tick only up to the ceiling: after a
-    /// first result of 200 MiB, a reader that stops draining is refused at
-    /// 256 MiB, not at twice its first result.
+    /// The bound follows the biggest tick only up to the ceiling, or the
+    /// burst plus a floor's worth when that is more: after a first result
+    /// of 200 MiB, a reader that stops draining is refused past 264 MiB,
+    /// not at twice its first result.
     #[test]
     fn the_backlog_bound_stops_at_the_ceiling() {
         let egress = Arc::new(AtomicUsize::new(0));
@@ -3892,46 +3979,89 @@ mod tests {
         egress.store(burst, Ordering::Release);
         backlog.start_tick();
         assert!(backlog.admits(), "the first result is being drained");
-        egress.store(SESSION_BACKLOG_CEILING + 1, Ordering::Release);
+        egress.store(burst + SESSION_BACKLOG_FLOOR + 1, Ordering::Release);
         backlog.start_tick();
         assert!(
             !backlog.admits(),
-            "past the ceiling it is refused, though under twice its biggest tick"
+            "past the bound it is refused, though under twice its biggest tick"
         );
     }
 
-    /// Over the server's egress budget, the sessions holding the most are
-    /// closed first, only as many as the rest need to fit.
+    /// A burst bigger than the ceiling still drains: the session may hold
+    /// it plus a floor's worth of what follows, but no more.
     #[test]
-    fn the_egress_budget_sheds_the_biggest_backlogs_first() {
+    fn a_burst_over_the_ceiling_drains_with_a_floor_of_room() {
+        let egress = Arc::new(AtomicUsize::new(0));
+        let backlog = Backlog::new(Arc::clone(&egress), &EgressLimits::default());
+        backlog.start_tick();
+        let burst = 300 * 1024 * 1024;
+        backlog.queued(burst);
+        backlog.handed_on(burst);
+        egress.store(burst + SESSION_BACKLOG_FLOOR, Ordering::Release);
+        backlog.start_tick();
+        assert!(backlog.admits(), "the burst and a floor's worth after it");
+        egress.store(burst + SESSION_BACKLOG_FLOOR + 1, Ordering::Release);
+        backlog.start_tick();
+        assert!(!backlog.admits());
+    }
+
+    /// Over the server's egress budget, the stalled sessions holding the
+    /// most are closed first, only as many as the rest need to fit. A
+    /// session that is reading is never picked, however much it holds.
+    #[test]
+    fn the_egress_budget_sheds_the_biggest_stalled_backlogs_first() {
         let held = vec![
-            (ServerSession(1), 10),
-            (ServerSession(2), 500),
-            (ServerSession(3), 40),
-            (ServerSession(4), 300),
+            (ServerSession(1), 10, true),
+            (ServerSession(2), 500, true),
+            (ServerSession(3), 40, true),
+            (ServerSession(4), 300, true),
+            (ServerSession(5), 900, false),
         ];
-        assert_eq!(sessions_to_shed(held.clone(), 1000), Vec::new());
-        assert_eq!(sessions_to_shed(held.clone(), 400), vec![ServerSession(2)]);
+        assert_eq!(sessions_to_shed(held.clone(), 2000), Vec::new());
+        assert_eq!(sessions_to_shed(held.clone(), 1300), vec![ServerSession(2)]);
         assert_eq!(
-            sessions_to_shed(held, 50),
+            sessions_to_shed(held.clone(), 950),
             vec![ServerSession(2), ServerSession(4)]
         );
+        assert_eq!(
+            sessions_to_shed(held, 100),
+            vec![
+                ServerSession(2),
+                ServerSession(4),
+                ServerSession(3),
+                ServerSession(1)
+            ],
+            "the reading session stays, even over budget"
+        );
     }
 
-    /// A session is a slow reader only while it stays at its budget: any
-    /// read under it restarts the clock.
+    /// A client is stalled only while it reads nothing with its egress at
+    /// the budget: a steady slow reader with far more to read than the
+    /// budget is never stalled, and any read restarts the clock.
     #[test]
-    fn the_slow_reader_clock_restarts_when_the_client_reads() {
-        let stalled = StalledSince::default();
+    fn the_read_clock_runs_only_while_the_client_reads_nothing() {
+        let clock = ReadClock::default();
         let start = std::time::Instant::now();
-        let timeout = Duration::from_secs(300);
         let at = |secs| start + Duration::from_secs(secs);
-        assert!(!stalled.observe(true, at(0), timeout));
-        assert!(!stalled.observe(true, at(299), timeout));
-        assert!(!stalled.observe(false, at(300), timeout), "it read");
-        assert!(!stalled.observe(true, at(400), timeout));
-        assert!(!stalled.observe(true, at(700), timeout));
-        assert!(stalled.observe(true, at(701), timeout));
+        let full = SESSION_QUEUE_BUDGET;
+        // A slow reader: each check it read a little, and was refilled.
+        clock.handed(full);
+        for secs in 0..600 {
+            clock.handed(1024);
+            assert_eq!(clock.check(full, at(secs)), None, "it reads at {secs}s");
+        }
+        // It stops reading: stalled from the first check that saw no read.
+        clock.handed(1024);
+        assert_eq!(clock.check(full + 1024, at(600)), Some(Duration::ZERO));
+        assert_eq!(
+            clock.check(full + 1024, at(900)),
+            Some(Duration::from_secs(300))
+        );
+        // One read restarts it.
+        assert_eq!(clock.check(full, at(901)), None);
+        assert_eq!(clock.check(full, at(902)), Some(Duration::ZERO));
+        // Under the budget, nothing waits on it: not stalled.
+        assert_eq!(clock.check(full - 1, at(903)), None);
     }
 
     #[test]

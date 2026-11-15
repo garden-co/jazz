@@ -84,8 +84,8 @@ pub(super) struct ThinSession {
     next_subscription: u64,
     output: tokio_mpsc::UnboundedSender<Outbound>,
     egress: Arc<AtomicUsize>,
-    /// Since when its egress has stayed at the budget, unread.
-    stalled: super::StalledSince,
+    /// Whether its client is reading.
+    clock: super::ReadClock,
 }
 
 impl ThinSession {
@@ -109,20 +109,18 @@ impl ThinSession {
             next_subscription: 0,
             output,
             egress,
-            stalled: super::StalledSince::default(),
+            clock: super::ReadClock::default(),
         }
     }
 
-    /// Whether its egress stayed at the budget, unread, past `timeout`.
-    pub(super) fn stalled_past(
-        &self,
-        now: std::time::Instant,
-        timeout: std::time::Duration,
-    ) -> bool {
-        self.stalled.observe(!self.has_room(), now, timeout)
+    /// How long its client has read nothing with its egress at the
+    /// budget, if it has ([`super::ReadClock`]).
+    pub(super) fn stalled_for(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.clock.check(self.egress.load(Ordering::Acquire), now)
     }
 
-    /// Output it holds in server memory: handed to the socket, unread.
+    /// Output it holds in server memory: handed to the socket side, not yet
+    /// taken by the connection's writer.
     /// (Its live queries' undelivered events are bounded in the core,
     /// which coalesces a backlog past its limit.)
     pub(super) fn undrained(&self) -> usize {
@@ -164,6 +162,7 @@ impl ThinSession {
         }
         let bytes = frames.iter().map(Vec::len).sum::<usize>();
         self.egress.fetch_add(bytes, Ordering::AcqRel);
+        self.clock.handed(bytes);
         self.output.send((Ok(frames), bytes)).is_ok()
     }
 
