@@ -201,12 +201,33 @@ fn refuse_shared_column_changes(
     table: &str,
     from: &TableSchema,
     to: &TableSchema,
+    renamed: &[(String, String)],
 ) -> Result<(), CodegenError> {
     for column in &to.columns.columns {
         let Some(source) = from.columns.columns.iter().find(|c| c.name == column.name) else {
             continue;
         };
         let name = format!("{table}.{}", column.name_str());
+        // A reference to a table the migration renames follows it.
+        let followed = |table: &str| {
+            renamed
+                .iter()
+                .find(|(old, _)| old == table)
+                .map_or(table.to_string(), |(_, new)| new.clone())
+        };
+        if let (Some(from), Some(to)) = (&source.references, &column.references)
+            && followed(from.as_str()) != to.as_str()
+        {
+            return Err(CodegenError::unsupported(format!(
+                "Moving the reference of column `{name}` from {} to {} is not supported yet: its \
+                 values name rows of {}. Add a new column referencing {} next to this one, and \
+                 drop this one in a later release.",
+                from.as_str(),
+                to.as_str(),
+                from.as_str(),
+                to.as_str()
+            )));
+        }
         if source.nullable != column.nullable {
             return Err(CodegenError::unsupported(format!(
                 "Changing column `{name}` from {} to {} is not supported yet. {KEEP_VALUES_ADVICE}",
@@ -271,8 +292,13 @@ fn todo(text: String) -> Json {
 }
 
 /// The column steps for a table both versions have.
-fn table_steps(table: &str, from: &TableSchema, to: &TableSchema) -> Result<Json, CodegenError> {
-    refuse_shared_column_changes(table, from, to)?;
+fn table_steps(
+    table: &str,
+    from: &TableSchema,
+    to: &TableSchema,
+    renamed: &[(String, String)],
+) -> Result<Json, CodegenError> {
+    refuse_shared_column_changes(table, from, to, renamed)?;
     let has = |schema: &TableSchema, name: &str| {
         schema.columns.columns.iter().any(|c| c.name_str() == name)
     };
@@ -540,7 +566,7 @@ pub fn diff(from: &Schema, to: &Schema) -> Result<Vec<(String, Json)>, CodegenEr
         if same_table(&old, &new) {
             continue;
         }
-        migrate.push((name.clone(), table_steps(name, &old, &new)?));
+        migrate.push((name.clone(), table_steps(name, &old, &new, &renames)?));
     }
 
     let mut fields = Vec::new();
