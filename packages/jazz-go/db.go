@@ -3,14 +3,15 @@
 // bindings `jazz-tools generate` writes into a `jazzapp` package beside an
 // app's jazz.app.json and go.mod.
 //
-// Building needs the jazz-ffi static library: `cargo build -p jazz-ffi`
-// in the Jazz repository puts it where this package looks first
-// (target/debug, then target/release); elsewhere, point CGO_LDFLAGS at its
-// directory (`-L<dir>`), which cgo searches before these.
+// Building needs cgo and the jazz-ffi static library, libjazz_ffi.a, for
+// your platform: from the GitHub release (see the Go setup page) or built
+// with `cargo build --release -p jazz-ffi`. Point CGO_LDFLAGS at its
+// directory (`-L<dir>`). Inside the Jazz repository, cgo also finds it in
+// target/debug and target/release. The C header ships in include/.
 package jazz
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../../crates/jazz-ffi/include
+#cgo CFLAGS: -I${SRCDIR}/include
 #cgo LDFLAGS: -L${SRCDIR}/../../target/debug -L${SRCDIR}/../../target/release
 #cgo linux LDFLAGS: -l:libjazz_ffi.a -lm -ldl -lpthread
 #cgo darwin LDFLAGS: -ljazz_ffi -framework CoreFoundation -framework Security -framework SystemConfiguration
