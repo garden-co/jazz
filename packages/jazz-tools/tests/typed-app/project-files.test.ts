@@ -19,6 +19,17 @@ async function project(app: unknown = APP, permissions: unknown = PERMISSIONS): 
 }
 
 describe("generate", () => {
+  it("keeps reformatted bindings, which are still current", async () => {
+    const dir = await project();
+    await generateApp({ cwd: dir });
+    const path = join(dir, "jazz.generated.ts");
+    const reformatted = (await readFile(path, "utf8")).replace(/\n\n/g, "\n\n\n");
+    await writeFile(path, reformatted);
+    await expect(generateApp({ cwd: dir, check: true })).resolves.toMatchObject({ wrote: false });
+    expect((await generateApp({ cwd: dir })).wrote).toBe(false);
+    expect(await readFile(path, "utf8")).toBe(reformatted);
+  });
+
   it("writes jazz.generated.ts, then finds it up to date", async () => {
     const dir = await project();
     expect((await generateApp({ cwd: dir })).wrote).toBe(true);

@@ -133,6 +133,7 @@ describe("virtual computed columns", () => {
 
   // FILES-AS-SOURCE: the DSL refused `indexOnly(["doubled"])` on a computed
   // field ("unknown column"); the loader accepts `"indexes": ["doubled"]`.
+  // @jazz-ignore #5598: the loader does not refuse an index on a computed field yet (jazz#5577)
   it.skip("refuses an index on a computed field", () => {
     expect(() =>
       testApp(

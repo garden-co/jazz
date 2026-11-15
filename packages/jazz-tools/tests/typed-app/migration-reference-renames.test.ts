@@ -126,6 +126,7 @@ describe("migration references through table renames", () => {
   // Jazz's Rust loader doesn't compare reference targets across a migration:
   // it compiles this file to a plain `people` rename lens. Skipped until the
   // loader (or the deploy's lens checks) refuse a changed reference target.
+  // @jazz-ignore #5598: the loader does not refuse a changed reference target yet (jazz#5577)
   it.skip("does not treat a different table as the renamed reference target", () => {
     expect(() =>
       forwardLens(

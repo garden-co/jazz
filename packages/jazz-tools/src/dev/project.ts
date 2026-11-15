@@ -50,7 +50,10 @@ function codeOf(error: unknown): unknown {
 }
 
 /** Check both files as a backend reads them, and the bindings against the app file. */
-async function checkFiles(project: AppProject, check: boolean): Promise<string[]> {
+async function checkFiles(
+  project: AppProject,
+  check: boolean,
+): Promise<{ warnings: string[]; stale: boolean }> {
   if (project.permissions === null) {
     throw new Error(
       `${shown(project, PERMISSIONS_FILE)} is missing. Every app has one, even if only backends read it: ` +
@@ -60,13 +63,16 @@ async function checkFiles(project: AppProject, check: boolean): Promise<string[]
   const loaded = (await loadAppFiles(project.app, project.permissions)) as {
     warnings?: string[];
   };
+  // The bindings are current when their `source` and format match, whatever a
+  // formatter did to them; stale ones are what generate rewrites.
+  let stale = false;
   try {
     await validateBindings(project.app, project.bindings);
   } catch (error) {
-    // Stale bindings are what generate rewrites; `--check` refuses them below.
     if (check || codeOf(error) !== BINDINGS_STALE) throw error;
+    stale = true;
   }
-  return loaded.warnings ?? [];
+  return { warnings: loaded.warnings ?? [], stale };
 }
 
 function shown(project: { dir: string }, file: string): string {
@@ -80,29 +86,31 @@ function shown(project: { dir: string }, file: string): string {
  */
 export async function generateApp(options: GenerateOptions): Promise<GenerateResult> {
   const project = await readAppProject(options.cwd);
-  const warnings = await checkFiles(project, options.check ?? false);
-  const outputs: Array<{ file: string; text: string }> = [
-    { file: GENERATED_FILE, text: await generateTs(project.app) },
-  ];
-  // A Rust crate beside the files (a `jazz-app` backend) gets its bindings too.
-  if (existsSync(join(project.dir, "Cargo.toml"))) {
-    outputs.push({ file: RUST_BINDINGS_FILE, text: await generateRust(project.app) });
-  }
+  const { warnings, stale } = await checkFiles(project, options.check ?? false);
+  const bindings = [GENERATED_FILE];
   let wrote = false;
-  for (const { file, text } of outputs) {
-    const path = join(project.dir, file);
-    const committed = await readFile(path, "utf8").catch(() => null);
-    if (committed === text) continue;
-    if (options.check) {
-      throw new Error(
-        `bindings out of date: ${shown(project, file)} is not what ${APP_FILE} generates. Run \`npx jazz-tools generate\` and commit it.`,
-      );
-    }
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, text);
+  if (stale) {
+    await writeFile(join(project.dir, GENERATED_FILE), await generateTs(project.app));
     wrote = true;
   }
-  return { dir: project.dir, wrote, bindings: outputs.map(({ file }) => file), warnings };
+  // A Rust crate beside the files (a `jazz-app` backend) gets its bindings too.
+  if (existsSync(join(project.dir, "Cargo.toml"))) {
+    bindings.push(RUST_BINDINGS_FILE);
+    const path = join(project.dir, RUST_BINDINGS_FILE);
+    const text = await generateRust(project.app);
+    const committed = await readFile(path, "utf8").catch(() => null);
+    if (committed !== text) {
+      if (options.check) {
+        throw new Error(
+          `bindings out of date: ${shown(project, RUST_BINDINGS_FILE)} is not what ${APP_FILE} generates. Run \`npx jazz-tools generate\` and commit it.`,
+        );
+      }
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, text);
+      wrote = true;
+    }
+  }
+  return { dir: project.dir, wrote, bindings, warnings };
 }
 
 export interface CreateMigrationOptions {
