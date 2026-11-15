@@ -274,7 +274,9 @@ impl Jazz {
 
 fn parked(key: u64) -> Result<Transaction> {
     OPEN.with(|open| open.borrow().1.get(&key).cloned())
-        .ok_or_else(|| crate::Error::Config("the transaction is already committed or rolled back".into()))
+        .ok_or_else(|| {
+            crate::Error::Config("the transaction is already committed or rolled back".into())
+        })
 }
 
 impl OpenTransaction {
@@ -295,11 +297,13 @@ impl OpenTransaction {
     }
 
     pub async fn update<U: Update>(&self, id: ObjectId, update: U) -> Result<()> {
-        self.on(move |tx| async move { tx.update(id, update) }).await
+        self.on(move |tx| async move { tx.update(id, update) })
+            .await
     }
 
     pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
-        self.on(move |tx| async move { tx.upsert(id, new).await }).await
+        self.on(move |tx| async move { tx.upsert(id, new).await })
+            .await
     }
 
     pub async fn delete<T: Table>(&self, id: ObjectId) -> Result<()> {
@@ -307,7 +311,8 @@ impl OpenTransaction {
     }
 
     pub async fn restore<T: Table>(&self, id: ObjectId) -> Result<T> {
-        self.on(move |tx| async move { tx.restore::<T>(id).await }).await
+        self.on(move |tx| async move { tx.restore::<T>(id).await })
+            .await
     }
 
     pub async fn all<T: Table>(&self, query: Query<T>) -> Result<Vec<T>> {
@@ -319,7 +324,8 @@ impl OpenTransaction {
     }
 
     pub async fn get<T: Table>(&self, id: ObjectId) -> Result<Option<T>> {
-        self.on(move |tx| async move { tx.get::<T>(id).await }).await
+        self.on(move |tx| async move { tx.get::<T>(id).await })
+            .await
     }
 
     /// Commits it (if it wrote anything; otherwise there is nothing to
@@ -333,7 +339,11 @@ impl OpenTransaction {
             .with_client(move |client| async move {
                 let tx = OPEN
                     .with(|open| open.borrow_mut().1.remove(&key))
-                    .ok_or_else(|| crate::Error::Config("the transaction is already committed or rolled back".into()))?;
+                    .ok_or_else(|| {
+                        crate::Error::Config(
+                            "the transaction is already committed or rolled back".into(),
+                        )
+                    })?;
                 if tx.wrote.get() {
                     let committed = tx.client.commit_transaction(tx.id)?;
                     settle.settle(&client, Some(committed)).await
