@@ -17,15 +17,14 @@ browsers and apps, and decides who each user is. Other trusted machines reach Ja
 
 <include>../../../partials/install-alpha.mdx</include>
 
-## Get an app ID
+## Find your app ID
 
-Your app ID namespaces your data for storage and sync. Click below to generate one on Jazz Cloud. You also get the secrets your backend needs. Generated apps are unclaimed until you claim them in the dashboard, and unclaimed apps are deleted after 14 days.
-
-<GenerateAppId />
+Jazz Cloud no longer creates new apps. For an existing app, its ID, sync URL and admin secret are in
+the Jazz Cloud dashboard.
 
 ## Connect your backend
 
-Put the generated values in your backend's environment. All of them stay server-side; the browser never needs the app ID or the sync URL, and the admin secret is like a database password:
+Put your app's values in your backend's environment. All of them stay server-side; the browser never needs the app ID or the sync URL, and the admin secret is like a database password:
 
 ```bash title=".env"
 JAZZ_APP_ID="<your app ID>"
