@@ -1,12 +1,22 @@
 // jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
-import { bindApp, type AppTypes, type ComputedImpl, type JsonValue, type TransformImpl } from "jazz-tools";
+import {
+  bindApp,
+  type AppTypes,
+  type ComputedImpl,
+  type JsonValue,
+  type TransformImpl,
+} from "jazz-tools";
 import { computed, transforms } from "./jazz.computed.js";
 
 export type ThingStatus = "todo" | "done";
 export type ThingMaybeStatus = "low" | "high";
-export type ThingEvent = { type: "created"; by: string } | { type: "moved"; to: number; note: string | null; reason: string };
-export type ThingEventInit = { type: "created"; by: string } | { type: "moved"; to: number; note?: string | null; reason?: string };
+export type ThingEvent =
+  | { type: "created"; by: string }
+  | { type: "moved"; to: number; note: string | null; reason: string };
+export type ThingEventInit =
+  | { type: "created"; by: string }
+  | { type: "moved"; to: number; note?: string | null; reason?: string };
 export type ThingMaybeLabel = "x" | "y";
 
 export type Owner = {
@@ -120,7 +130,11 @@ interface Types extends AppTypes {
       status: { kind: "enum"; nullable: false; value: ThingStatus };
       maybeStatus: { kind: "enum"; nullable: true; value: ThingMaybeStatus };
       event: { kind: "enum"; nullable: false; value: ThingEvent };
-      events: { kind: "array"; nullable: false; value: ({ type: "ping"; at: Date | null } | { type: "pong" })[] };
+      events: {
+        kind: "array";
+        nullable: false;
+        value: ({ type: "ping"; at: Date | null } | { type: "pong" })[];
+      };
       statuses: { kind: "array"; nullable: false; value: ("a" | "b")[] };
       data: { kind: "json"; nullable: false; value: JsonValue };
       maybeData: { kind: "json"; nullable: true; value: JsonValue };
@@ -136,7 +150,10 @@ interface Types extends AppTypes {
     };
     computed: {
       summary: { from: { text: string; int: number }; value: string };
-      maybeLabel: { from: { id: string; maybeStatus: ThingMaybeStatus | null; shouted: string }; value: ThingMaybeLabel };
+      maybeLabel: {
+        from: { id: string; maybeStatus: ThingMaybeStatus | null; shouted: string };
+        value: ThingMaybeLabel;
+      };
       score: { from: { float: number }; value: number | null };
     };
     transforms: {

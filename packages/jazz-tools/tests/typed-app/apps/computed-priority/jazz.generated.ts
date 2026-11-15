@@ -28,7 +28,10 @@ interface Types extends AppTypes {
     };
     relations: {};
     computed: {
-      priority: { from: { id: string; score: number; storedPriority: ItemStoredPriority }; value: ItemPriority };
+      priority: {
+        from: { id: string; score: number; storedPriority: ItemStoredPriority };
+        value: ItemPriority;
+      };
     };
     transforms: {
       storedPriority: "priority";
