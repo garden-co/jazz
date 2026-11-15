@@ -1329,6 +1329,87 @@ impl JazzClient {
         ))
     }
 
+    /// Begin a resumable upload of `column`'s value for a row with
+    /// `values`' other cells: feed it with
+    /// [`JazzClient::push_streaming_upload`] piece by piece (as an async
+    /// stream yields them), then [`JazzClient::finish_streaming_upload`].
+    /// Nothing commits until the finish; the value is never held whole.
+    pub fn begin_streaming_upload(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        column: &str,
+    ) -> Result<StreamingUpload> {
+        self.reject_updated_at_override("streaming uploads")?;
+        if self.transaction_id().is_some() {
+            return Err(JazzError::Write(
+                "streaming uploads in a transaction are not supported".into(),
+            ));
+        }
+        let cells = self.core_cells(table, values)?;
+        let upload = self
+            .db()?
+            .begin_streaming_value_upload(table, &cells, column)
+            .map_err(write_error)?;
+        Ok(StreamingUpload {
+            upload,
+            table: table.to_owned(),
+            column: column.to_owned(),
+            cells,
+        })
+    }
+
+    /// Feed the next piece of `upload`.
+    pub async fn push_streaming_upload(
+        &self,
+        upload: &mut StreamingUpload,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.db()?
+            .push_streaming_value_upload(&mut upload.upload, bytes)
+            .await
+            .map_err(write_error)
+    }
+
+    /// Abandon `upload`, releasing what it stored.
+    pub async fn abort_streaming_upload(&self, upload: StreamingUpload) -> Result<()> {
+        self.db()?
+            .abort_streaming_value_upload(upload.upload)
+            .await
+            .map_err(write_error)
+    }
+
+    /// Finish `upload` as `kind` of row `object_id` (a new row's id when
+    /// `None`), committing the row with its streamed value.
+    pub async fn finish_streaming_upload(
+        &self,
+        upload: StreamingUpload,
+        kind: crate::db::StreamingMutationKind,
+        object_id: Option<ObjectId>,
+    ) -> Result<(ObjectId, TransactionId)> {
+        let db = self.db()?;
+        let row = object_id.map_or_else(|| db.next_row_id(), |id| RowUuid(*id.uuid()));
+        let write = db
+            .finish_streaming_value_upload(
+                upload.upload,
+                kind,
+                &upload.table,
+                row,
+                upload.cells,
+                &upload.column,
+                self.write_identity()?,
+                None,
+                None,
+                None,
+            )
+            .await
+            .map_err(write_error)?;
+        Ok((
+            ObjectId::from_uuid(write.row_uuid().0),
+            self.committed(write.mergeable_tx_id()),
+        ))
+    }
+
     /// Create a new row in a table.
     pub fn insert(
         &self,
@@ -1460,6 +1541,43 @@ impl JazzClient {
                 ..Default::default()
             },
         ))
+        .map_err(write_error)?;
+        Ok(Some(self.committed(write.mergeable_tx_id())))
+    }
+
+    /// [`JazzClient::update`] with edits of large-capable columns: a text
+    /// column's [`LargeValueUpdate::TextEdit`] (merged over what this
+    /// store has, as the authority merges), splices within a page, JSON
+    /// replacements by pointer. The patch and the edits apply as one row
+    /// update; a failing edit leaves the row unchanged.
+    pub fn update_with_edits(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        updates: Vec<(String, Value)>,
+        edits: Vec<crate::db::LargeValueUpdate>,
+    ) -> Result<Option<TransactionId>> {
+        let cells = self.core_cells(table, updates.into_iter().collect())?;
+        let updated_at_ms = self.write_updated_at()?;
+        let row = RowUuid(*object_id.uuid());
+        let db = self.db()?;
+        let options = UpdateOptions {
+            identity: self.write_identity()?,
+            updated_at_ms,
+            ..Default::default()
+        };
+        if let Some(transaction_id) = self.open_transaction()? {
+            crate::db::block_on(
+                db.tx_ref(transaction_id)
+                    .update_with_large_value_mutations(table, row, cells, edits, options),
+            )
+            .map_err(write_error)?;
+            self.staged(transaction_id);
+            return Ok(None);
+        }
+        let write = crate::db::block_on(
+            db.update_with_large_value_mutations(table, row, cells, edits, options),
+        )
         .map_err(write_error)?;
         Ok(Some(self.committed(write.mergeable_tx_id())))
     }
@@ -1890,6 +2008,15 @@ impl JazzClient {
             })
             .await?
     }
+}
+
+/// A large value being uploaded piece by piece: see
+/// [`JazzClient::begin_streaming_upload`]. It lives on the client's thread.
+pub struct StreamingUpload {
+    upload: crate::db::StreamingValueUpload,
+    table: String,
+    column: String,
+    cells: BTreeMap<String, CoreValue>,
 }
 
 /// A transaction-scoped client handle.

@@ -340,11 +340,24 @@ pub fn load(app: &[u8], permissions: &[u8]) -> Result<LoadedApp, ArtifactError> 
         .map_err(|error| ArtifactError::new(format!("migrations: {error}")))?;
     check_codegen(&app_file.codegen, history.current_schema())?;
     let relations = app_file.codegen.relations();
+    let computed: expr::ComputedNames = app_file
+        .codegen
+        .tables
+        .iter()
+        .map(|(table, t)| {
+            let names = t.computed.iter().map(|f| f.name.clone()).collect();
+            (table.clone(), names)
+        })
+        .collect();
     let permissions_json = read_format(PERMISSIONS_FILE, permissions)?;
-    let permissions =
-        permissions_file::read(&permissions_json, history.current_schema(), &relations)
-            .map_err(|refusal| ArtifactError::at(PERMISSIONS_FILE, refusal))?;
-    let bundle = compute_bundle(history.current_schema(), &permissions)?;
+    let permissions = permissions_file::read(
+        &permissions_json,
+        history.current_schema(),
+        &relations,
+        &computed,
+    )
+    .map_err(|refusal| ArtifactError::at(PERMISSIONS_FILE, refusal))?;
+    let bundle = compute_bundle(history.current_schema(), &permissions, &computed)?;
     let stranded = history.stranded.clone();
     Ok(LoadedApp {
         history,
@@ -382,7 +395,6 @@ struct BoundSchema {
     migrations: Vec<PublishMigrationRequest>,
     // The runtime's: which columns computed callbacks and transforms take.
     #[serde(default)]
-    #[allow(dead_code)]
     computed: Option<serde_json::Value>,
     #[serde(default)]
     #[allow(dead_code)]
@@ -451,11 +463,34 @@ pub fn load_backend(bound: &[u8], permissions: &[u8]) -> Result<LoadedApp, Artif
     check_codegen(&codegen, history.current_schema())
         .map_err(|e| refuse(e.message().to_string()))?;
     let relations = codegen.relations();
+    // The bindings' `computed`: table → field → the columns it reads.
+    let computed: expr::ComputedNames = bound
+        .schema
+        .computed
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .map(|tables| {
+            tables
+                .iter()
+                .map(|(table, fields)| {
+                    let names = fields
+                        .as_object()
+                        .map(|f| f.keys().cloned().collect())
+                        .unwrap_or_default();
+                    (table.clone(), names)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let permissions_json = read_format(PERMISSIONS_FILE, permissions)?;
-    let permissions =
-        permissions_file::read(&permissions_json, history.current_schema(), &relations)
-            .map_err(|refusal| ArtifactError::at(PERMISSIONS_FILE, refusal))?;
-    let bundle = compute_bundle(history.current_schema(), &permissions)?;
+    let permissions = permissions_file::read(
+        &permissions_json,
+        history.current_schema(),
+        &relations,
+        &computed,
+    )
+    .map_err(|refusal| ArtifactError::at(PERMISSIONS_FILE, refusal))?;
+    let bundle = compute_bundle(history.current_schema(), &permissions, &computed)?;
     Ok(LoadedApp {
         history,
         bundle,
@@ -1025,7 +1060,11 @@ fn identity_lenses(from: &Schema, to: &Schema) -> Vec<super::published::PublishT
 /// The bundle id the server computes when this backend publishes: the
 /// permissions are compiled against the current schema (refusing those
 /// that don't compile), then hashed as the catalogue hashes them.
-fn compute_bundle(current: &Schema, permissions: &Permissions) -> Result<BundleId, ArtifactError> {
+fn compute_bundle(
+    current: &Schema,
+    permissions: &Permissions,
+    computed: &expr::ComputedNames,
+) -> Result<BundleId, ArtifactError> {
     let mut target = current.clone();
     for (name, policies) in permissions {
         target
@@ -1034,8 +1073,21 @@ fn compute_bundle(current: &Schema, permissions: &Permissions) -> Result<BundleI
             .policies = policies.clone();
     }
     let refuse = |error: String| ArtifactError::in_file(PERMISSIONS_FILE, error);
-    let compiled =
-        JazzSchema::new(&target).map_err(|error| refuse(format!("permissions: {error}")))?;
+    let compiled = JazzSchema::new(&target).map_err(|error| {
+        let mut message = format!("permissions: {error}");
+        // The engine checks a relation's `outer.` columns, which the loader
+        // can't place; say so when the one it misses is a computed field.
+        if let Some((_, field)) = error
+            .unknown_column()
+            .filter(|(table, field)| computed.get(*table).is_some_and(|f| f.contains(*field)))
+        {
+            message.push_str(&format!(
+                ": `{field}` is a computed field, which isn't stored, so a permission can't \
+                 read it; write the policy over the columns it's computed from"
+            ));
+        }
+        refuse(message)
+    })?;
     bundle_id(
         &SchemaHash::compute(&structural(compiled.public_schema().clone())),
         &permissions_of(compiled.public_schema()),
@@ -1071,9 +1123,15 @@ fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactErro
                     column,
                 } => {
                     table(&path, other)?;
-                    if !has_column(schema, column) {
+                    let Some(stored) = column_of(schema, column) else {
                         return Err(ArtifactError::new(format!(
                             "{path}: table {name} has no column {column}"
+                        )));
+                    };
+                    if let Some(target) = stored.references.filter(|t| t.as_str() != other) {
+                        return Err(ArtifactError::new(format!(
+                            "{path}: column {column} references {target}, so a relation over it \
+                             leads to {target}, not {other}"
                         )));
                     }
                 }

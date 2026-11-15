@@ -188,6 +188,34 @@ describe("bin integration", () => {
     expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(false);
   });
 
+  it("rejects the removed --strict-provenance flag and points at Jazz's provenance columns", async () => {
+    const { root } = await createWorkspace();
+    await writeAppFiles(root);
+
+    const result = runBin(["generate", "--schema-dir", root, "--strict-provenance"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "--strict-provenance was removed with schema.ts: jazz.app.json's columns are taken as written. Use Jazz's $createdAt, $createdBy, $updatedAt and $updatedBy instead of columns that duplicate them.",
+    );
+    expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(false);
+  });
+
+  it.each(["--fromHash", "--toHash", "--migrations-dir"])(
+    "rejects the removed migrations create flag %s",
+    async (flag) => {
+      const { root } = await createWorkspace();
+      await writeAppFiles(root);
+
+      const result = runBin(["migrations", "create", "--schema-dir", root, flag, "value"]);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        `${flag} was removed: migrations go from the version in jazz.generated.ts to jazz.app.json's tables.`,
+      );
+    },
+  );
+
   it("rejects the removed build alias with a generate hint", async () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root);
