@@ -13,9 +13,14 @@
 //! let mut changes = jazz.subscribe(todos::query()).await?; // a futures::Stream
 //! ```
 //!
+//! Related rows come with a query's rows through `include` (a tuple per
+//! row: `(Todo, Option<Project>)`), and `select` reads only some columns
+//! (a [`Partial`] row); see [`Query::include`] and [`Query::select`].
+//!
 //! Not supported yet: connecting to a sync server as an end user (with a
-//! JWT), includes (nested related rows in one result), reads inside
-//! transactions.
+//! JWT), reads inside transactions, and these query forms the TypeScript
+//! client has: `hopTo`, `gather`, `union`, history (`$history`) and partial
+//! reads of large values.
 
 mod app;
 mod backend;
@@ -23,6 +28,7 @@ mod config;
 mod edit;
 mod error;
 mod handle;
+mod include;
 mod large;
 mod query;
 mod subscription;
@@ -36,8 +42,13 @@ pub use config::{Backend, Config, Storage};
 pub use edit::TextColumn;
 pub use error::{Error, Result};
 pub use handle::Jazz;
+pub use include::{
+    Include, IntoInclude, Nullability, OneInclude, Partial, RefsInclude, Row, Selection, With,
+};
 pub use large::{JsonColumn, LargeColumn, Page, Splice};
-pub use query::{Column, Condition, Many, One, Order, Query, created_at, id, updated_at};
+pub use query::{
+    Column, Condition, Many, NotNull, Nullable, One, Order, Query, Refs, created_at, id, updated_at,
+};
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
 pub use table::{Fields, Implementations, Insert, Table, Update};
 pub use transaction::Transaction;
