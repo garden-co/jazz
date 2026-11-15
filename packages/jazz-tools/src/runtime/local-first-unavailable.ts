@@ -19,6 +19,11 @@ export interface LocalFirstUnavailable {
   readonly expectedFingerprint?: string;
   /** The loaded WASM's fingerprint, when it has one (`wasm-mismatch` only). */
   readonly actualFingerprint?: string;
+  /**
+   * An export the loaded WASM lacks although its fingerprint matches: a
+   * partial build (`wasm-mismatch` only).
+   */
+  readonly missingExport?: string;
   readonly error: Error;
 }
 
@@ -44,13 +49,28 @@ export function describeLocalFirstFailure(error: unknown): LocalFirstUnavailable
   const asError = error instanceof Error ? error : new Error(String(error));
   const mismatch = mismatchOf(error);
   if (mismatch) {
-    const expected = typeof mismatch.expected === "string" ? mismatch.expected : undefined;
-    const actual = typeof mismatch.actual === "string" ? mismatch.actual : undefined;
+    // Fields when the class survived; otherwise its message still says them.
+    const text = String(mismatch.message ?? "");
+    const field = (name: string) =>
+      typeof mismatch[name] === "string" ? (mismatch[name] as string) : undefined;
+    const pair = /expected (\S+?), got (\S+?)\.(?:\s|$)/.exec(text);
+    const expected =
+      field("expected") ??
+      pair?.[1] ??
+      /missing nativeArtifactFingerprint \(expected (\S+?)\)/.exec(text)?.[1];
+    const missingExport =
+      field("missingExport") ??
+      /despite matching fingerprint: missing (\S+?)\.(?:\s|$)/.exec(text)?.[1];
+    // A partial build's own fingerprint is the expected one: not a mismatch to report.
+    const actual = missingExport ? undefined : (field("actual") ?? pair?.[2]);
     return Object.freeze({
       reason: "wasm-mismatch",
-      message: "local-first unavailable: WASM fingerprint mismatch",
+      message: missingExport
+        ? "local-first unavailable: incomplete WASM build"
+        : "local-first unavailable: WASM fingerprint mismatch",
       ...(expected ? { expectedFingerprint: expected } : {}),
       ...(actual ? { actualFingerprint: actual } : {}),
+      ...(missingExport ? { missingExport } : {}),
       error: asError,
     });
   }
@@ -71,9 +91,16 @@ export function localFirstUnavailableWarning(
   running: string,
 ): string {
   if (info.reason !== "wasm-mismatch") return generic;
+  const { expectedFingerprint: expected, actualFingerprint: actual, missingExport } = info;
+  const detail = missingExport
+    ? ` (its fingerprint matches, but it lacks ${missingExport})`
+    : expected && actual
+      ? ` (expected ${expected}, got ${actual})`
+      : expected
+        ? ` (expected ${expected}; the loaded WASM has no fingerprint)`
+        : "";
   return (
-    `Jazz ${info.message} (expected ${info.expectedFingerprint ?? "unknown"}, ` +
-    `got ${info.actualFingerprint ?? "none"}); ${running}, without offline use or local reads. ` +
+    `Jazz ${info.message}${detail}; ${running}, without offline use or local reads. ` +
     "The .wasm this page loaded does not match this jazz-tools build: serve the jazz-wasm " +
     "asset from the same install (check caches and CDNs), reinstall matching Jazz package " +
     "versions, or in the Jazz monorepo rebuild the generated bindings."

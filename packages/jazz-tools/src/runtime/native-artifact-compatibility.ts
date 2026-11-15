@@ -21,6 +21,8 @@ export class NativeArtifactMismatchError extends Error {
     readonly expected: string,
     /** The artifact's own fingerprint; `undefined` when it has none. */
     readonly actual: string | undefined,
+    /** An export a matching-fingerprint but partial artifact lacks. */
+    readonly missingExport?: string,
   ) {
     super(message);
   }
@@ -64,6 +66,7 @@ export function assertNativeArtifactCompatibility(
         kind,
         expected,
         expected,
+        name,
       );
   }
 }
