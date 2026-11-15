@@ -13,6 +13,10 @@ import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import { deploy, startLocalJazzServer, testApp, testPermissions } from "../testing/index.js";
+import { publishLoadedDeployment } from "../dev/catalogue.js";
+import { DeploymentError, publishDeployment } from "../dev/catalogue-api.js";
+import type { PermissionsFile } from "../dev/codegen-napi.js";
+import { boundApp } from "../typed-app.js";
 import {
   createPersistentNapiNativeRuntimeAdapter,
   loadNapiModule,
@@ -155,7 +159,12 @@ const BYTEA_SCHEMA: WasmSchema = {
   },
 };
 
-type TodoServerProject = { wasmSchema: WasmSchema; permissions: CompiledPermissionsMap };
+type TodoServerProject = {
+  wasmSchema: WasmSchema;
+  permissions: CompiledPermissionsMap;
+  /** Its jazz.permissions.json, what a deployment takes. */
+  permissionsFile: PermissionsFile;
+};
 
 let todoServerProjectPromise: Promise<TodoServerProject> | null = null;
 
@@ -163,11 +172,16 @@ let todoServerProjectPromise: Promise<TodoServerProject> | null = null;
 async function loadTodoServerProject(): Promise<TodoServerProject> {
   todoServerProjectPromise ??= (async () => {
     const app = testApp(await readFile(join(TODO_SERVER_SCHEMA_DIR, "jazz.app.json"), "utf8"));
-    const permissions = testPermissions(
-      app,
-      await readFile(join(TODO_SERVER_SCHEMA_DIR, "jazz.permissions.json"), "utf8"),
+    const permissionsText = await readFile(
+      join(TODO_SERVER_SCHEMA_DIR, "jazz.permissions.json"),
+      "utf8",
     );
-    return { wasmSchema: app.wasmSchema, permissions };
+    const permissions = testPermissions(app, permissionsText);
+    return {
+      wasmSchema: app.wasmSchema,
+      permissions,
+      permissionsFile: JSON.parse(permissionsText) as PermissionsFile,
+    };
   })();
   return await todoServerProjectPromise;
 }
@@ -388,7 +402,59 @@ async function deployPolicyGraphPerfFixture(options: {
 }): Promise<void> {
   const { schema } = await loadPolicyGraphPerfSchema("wasmSchema");
   const { permissions } = await loadPolicyGraphPerfSchema("mergedSchema");
-  await deploy({ ...options, app: schema, permissions });
+  await publishRawDeployment(options, await serverSchemaHash(options, schema), schema, permissions);
+}
+
+/**
+ * Publish a raw schema with engine policies as a deployment, as `deploy`
+ * publishes an app's: `hash` is the schema's hash (the server checks it).
+ */
+async function publishRawDeployment(
+  options: { serverUrl: string; appId: string; adminSecret: string },
+  hash: string,
+  schema: WasmSchema,
+  permissions: CompiledPermissionsMap,
+) {
+  return publishLoadedDeployment(options, {
+    deployment: {
+      targetSchemaHash: hash,
+      schemas: [{ hash, schema: { tables: schema } }],
+      migrations: [],
+      permissions,
+    },
+    warnings: [],
+  });
+}
+
+/**
+ * The server's hash of a raw `schema` (with no app files to compile it
+ * from): it names the actual hash when refusing a schema claimed under
+ * another, and stores nothing.
+ */
+async function serverSchemaHash(
+  options: { serverUrl: string; appId: string; adminSecret: string },
+  schema: WasmSchema,
+): Promise<string> {
+  const claimed = "0".repeat(64);
+  try {
+    await publishDeployment(options.serverUrl, options, {
+      targetSchemaHash: claimed,
+      schemas: [{ hash: claimed, schema: { tables: schema } }],
+      migrations: [],
+      permissions: {},
+    });
+  } catch (error) {
+    const actual = (error as DeploymentError).details as { actual?: string } | undefined;
+    if (
+      error instanceof DeploymentError &&
+      error.code === "schema_hash_mismatch" &&
+      actual?.actual
+    ) {
+      return actual.actual;
+    }
+    throw error;
+  }
+  throw new Error("the server took a schema under a made-up hash");
 }
 
 async function settleAsyncSyncWork(): Promise<void> {
@@ -739,7 +805,7 @@ describe("NAPI integration", () => {
         appId,
         adminSecret,
         app: todoServerProject.wasmSchema,
-        permissions: todoServerProject.permissions,
+        permissions: todoServerProject.permissionsFile,
       });
       const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
@@ -938,7 +1004,7 @@ describe("NAPI integration", () => {
         appId,
         adminSecret,
         app: todoServerProject.wasmSchema,
-        permissions: todoServerProject.permissions,
+        permissions: todoServerProject.permissionsFile,
       });
       const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
@@ -1552,7 +1618,8 @@ describe("NAPI integration", () => {
     // then their EDITOR edges to this dropdown.
     const editorOfReachableTeam =
       "exists (from recursive(seed: from team_entry join team as __hop_0 on team_entry.target_id = __hop_0.id where team_entry.team_id = session.user select __hop_0.id as id, step: from team_entry where team_entry.administrator = bool(false) and team_entry.team_id = id(frontier) select team_entry.target_id as id, frontier: id(row), dedupe: (id(row)), maxDepth: 32) join dropdowns_access_edges as __recursive_join_0 on team.id = __recursive_join_0.team_id where __recursive_join_0.resource_id = outer.id and __recursive_join_0.grant_role in [text('EDITOR')] and __recursive_join_0.administrator = bool(false) select __recursive_join_0.id as id)";
-    const permissions = testPermissions(app, {
+    const permissions = {
+      format: 1,
       tables: {
         dropdown_entry: {
           read: "allowedTo.read(dropdowns)",
@@ -1576,7 +1643,7 @@ describe("NAPI integration", () => {
           delete: "true",
         },
       },
-    });
+    };
     const server = await startLocalJazzServer({
       appId,
       backendSecret: "napi-policy_graph-permissions-secret",
@@ -1615,7 +1682,7 @@ describe("NAPI integration", () => {
         appId,
         adminSecret,
         app: todoServerProject.wasmSchema,
-        permissions: todoServerProject.permissions,
+        permissions: todoServerProject.permissionsFile,
       });
       const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
@@ -1700,13 +1767,13 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
-      const { bundle } = await deploy({
-        serverUrl: server.url,
-        appId,
-        adminSecret,
-        app: TEST_SCHEMA,
-        permissions: {},
-      });
+      // TEST_SCHEMA as is, with no permissions; publicUnionApp has its columns.
+      const { bundle } = await publishRawDeployment(
+        { serverUrl: server.url, appId, adminSecret },
+        boundApp(publicUnionApp.wasmSchema)!.schema.current,
+        TEST_SCHEMA,
+        {},
+      );
 
       writerRuntimeData = await createTempRuntimeData("jazz-napi-sync-writer-");
       writerContext = createJazzContext({

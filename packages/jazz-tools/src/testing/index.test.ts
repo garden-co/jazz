@@ -1,4 +1,4 @@
-import { computeSchemaHash } from "../schema-hash.js";
+import { boundApp } from "../typed-app.js";
 import { fetchPublishedBundles } from "../dev/catalogue-api.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -22,6 +22,7 @@ const todosApp = testApp({
   tables: { todos: { columns: { title: "string", done: "boolean", ownerId: "uuid?" } } },
 });
 const todosPermissions = {
+  format: 1,
   tables: {
     todos: {
       read: { anyOf: ["ownerId = session.user", "ownerId = null"] },
@@ -221,10 +222,10 @@ describe("startLocalJazzServer", () => {
           "X-Jazz-Admin-Secret": adminSecret,
         },
         body: JSON.stringify({
-          targetSchemaHash: await computeSchemaHash(todosApp.wasmSchema),
+          targetSchemaHash: boundApp(todosApp.wasmSchema)!.schema.current,
           schemas: [
             {
-              hash: await computeSchemaHash(todosApp.wasmSchema),
+              hash: boundApp(todosApp.wasmSchema)!.schema.current,
               schema: { tables: todosApp.wasmSchema },
             },
           ],
@@ -257,10 +258,10 @@ describe("startLocalJazzServer", () => {
           "X-Jazz-Admin-Secret": "wrong-admin-secret",
         },
         body: JSON.stringify({
-          targetSchemaHash: await computeSchemaHash(todosApp.wasmSchema),
+          targetSchemaHash: boundApp(todosApp.wasmSchema)!.schema.current,
           schemas: [
             {
-              hash: await computeSchemaHash(todosApp.wasmSchema),
+              hash: boundApp(todosApp.wasmSchema)!.schema.current,
               schema: { tables: todosApp.wasmSchema },
             },
           ],
@@ -303,7 +304,7 @@ describe("deploy", () => {
         appId: "00000000-0000-0000-0000-000000000001",
         adminSecret,
         app: todosApp,
-        permissions: todosEnginePermissions,
+        permissions: todosPermissions,
       });
 
       expect(result.schema.hash).toBeTruthy();
@@ -329,7 +330,7 @@ describe("deploy", () => {
         appId: "00000000-0000-0000-0000-000000000001",
         adminSecret: "admin-secret",
         app: todosApp,
-        permissions: todosEnginePermissions,
+        permissions: todosPermissions,
       }),
     ).rejects.toThrow();
   }, 10_000);
@@ -996,7 +997,7 @@ describe("startLocalJazzServer with an app that ships a migration", () => {
     const server = await startLocalJazzServer({
       inMemory: true,
       schema: app,
-      permissions: testPermissions(app, permissions),
+      permissions,
     });
     const { createJazz, remote } = await import("../backend/index.js");
     const jazz = createJazz({
@@ -1033,7 +1034,7 @@ describe("startLocalJazzServer with an app that ships a migration", () => {
       startLocalJazzServer({
         inMemory: true,
         schema: app,
-        permissions: {},
+        permissions: { format: 1, tables: {} },
         trustedWorkload: { issuer: "https://workload.example", audience: "jazz", subject: "ci" },
       }),
     ).rejects.toThrow(/ships migrations is not supported with trustedWorkload yet/);

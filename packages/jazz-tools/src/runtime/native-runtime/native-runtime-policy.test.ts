@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { PolicyExpr, WasmSchema } from "../../drivers/types.js";
 import { writeAppArtifact } from "jazz-napi";
 import { runtimeSchemaJsonReplacer } from "../../drivers/schema-wire.js";
-import { computeSchemaHash } from "../../schema-hash.js";
+import { boundApp } from "../../typed-app.js";
 import {
   mergePermissionsIntoWasmSchema,
   type CompiledPermissionsMap,
@@ -18,14 +18,17 @@ function decode(bytes: Uint8Array): EncodedSchemaSource {
   return JSON.parse(new TextDecoder().decode(bytes)) as EncodedSchemaSource;
 }
 
-/** `permissions` as Jazz's Rust writer renders them in jazz.permissions.json. */
+/**
+ * `permissions` as Jazz's Rust writer renders them in jazz.permissions.json.
+ * `schema` is a bound app's (testApp's), which carries its hash.
+ */
 async function permissionsFileOf(
   schema: WasmSchema,
   permissions: CompiledPermissionsMap,
 ): Promise<string> {
   const tables = mergePermissionsIntoWasmSchema(schema, {});
   const input = {
-    current: await computeSchemaHash(tables),
+    current: boundApp(schema)!.schema.current,
     schemas: [{ tables }],
     permissions,
   };

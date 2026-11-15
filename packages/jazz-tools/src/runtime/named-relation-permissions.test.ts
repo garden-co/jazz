@@ -47,7 +47,8 @@ const app = testApp({
     },
   },
 });
-const permissions = testPermissions(app, {
+const permissionsFile = {
+  format: 1,
   tables: {
     authors: {
       read: "owner = session.user",
@@ -87,7 +88,8 @@ const permissions = testPermissions(app, {
       delete: "allowedTo.delete(grants)",
     },
   },
-});
+};
+const permissions = testPermissions(app, permissionsFile);
 
 it.each(["forward", "reverse"])(
   "enforces named %s inheritance per identity, operation, and row image",
@@ -103,7 +105,7 @@ it.each(["forward", "reverse"])(
         serverUrl: server.url,
         adminSecret,
         app,
-        permissions,
+        permissions: permissionsFile,
       });
       context = createJazzContext({
         bundle,

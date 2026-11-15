@@ -141,7 +141,8 @@ const relatedWriteApp = testApp({
   },
 });
 
-const relatedWritePermissions = testPermissions(relatedWriteApp, {
+const relatedWritePermissionsFile = {
+  format: 1,
   tables: {
     invitations: { insert: "true" },
     playlist_entries: {
@@ -164,7 +165,8 @@ const relatedWritePermissions = testPermissions(relatedWriteApp, {
       update: "$createdBy = session.user",
     },
   },
-});
+};
+const relatedWritePermissions = testPermissions(relatedWriteApp, relatedWritePermissionsFile);
 
 // Teams readable by identity or by a team grant listed in the session's
 // claims; their access rows readable through the target team.
@@ -320,7 +322,7 @@ async function createServerBackedReproContext(
     serverUrl: server.url,
     adminSecret,
     app: reproApp,
-    permissions,
+    permissions: { format: 1, ...permissionsFile },
   });
 
   const { createJazzContext } = await import("../backend/create-jazz-context.js");
@@ -358,7 +360,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
         serverUrl: server.url,
         adminSecret,
         app: relatedWriteApp,
-        permissions: relatedWritePermissions,
+        permissions: relatedWritePermissionsFile,
       });
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
       context = createJazzContext({
