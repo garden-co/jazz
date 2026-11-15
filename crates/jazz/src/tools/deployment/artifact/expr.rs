@@ -436,7 +436,6 @@ const TYPED: &[&str] = &[
     "bool",
     "array",
     "row",
-    "enumcase",
     "json",
 ];
 
@@ -1264,15 +1263,6 @@ impl Parser<'_> {
                 }
                 Value::Row { id, values }
             }
-            "enumcase" => {
-                let (case, _) = self.string_arg()?;
-                let mut values = Vec::new();
-                while self.is_tok(&Tok::Comma) {
-                    self.at += 1;
-                    values.push(self.typed_arg()?);
-                }
-                Value::Enum { case, values }
-            }
             other => {
                 return Err(ExprError::new(
                     start,
@@ -1702,18 +1692,6 @@ impl Parser<'_> {
             self.at += 1;
             let right = self.value_ref()?;
             return Ok(RelationPredicate::Contains { left, right });
-        }
-        if self.is_word("is") {
-            self.at += 1;
-            let (case, _) = self.name("an enum case")?;
-            self.expect(Tok::LParen, "`(` and the payload's condition")?;
-            let payload = self.deeper(|p| p.predicate())?;
-            self.expect(Tok::RParen, "`)`")?;
-            return Ok(RelationPredicate::EnumMatch {
-                column: left,
-                case,
-                payload: Box::new(payload),
-            });
         }
         let op = self.cmp_op()?;
         if self.is_word("null") && matches!(op, CmpOp::Eq | CmpOp::Ne) {
@@ -3014,7 +2992,7 @@ fn value_too_deep(value: &Value, depth: usize) -> bool {
         return true;
     }
     match value {
-        Value::Array(values) | Value::Row { values, .. } | Value::Enum { values, .. } => {
+        Value::Array(values) | Value::Row { values, .. } => {
             values.iter().any(|v| value_too_deep(v, depth + 1))
         }
         _ => false,
@@ -3071,7 +3049,7 @@ fn predicate_too_deep(p: &RelationPredicate, depth: usize) -> bool {
             items.iter().any(|i| predicate_too_deep(i, next))
         }
         RelationPredicate::Not(inner) => predicate_too_deep(inner, next),
-        RelationPredicate::EnumMatch { payload, .. } => predicate_too_deep(payload, next),
+        RelationPredicate::Removed(removed) => match *removed {},
         RelationPredicate::Cmp { right, .. } | RelationPredicate::Contains { right, .. } => {
             value(right)
         }
@@ -3160,11 +3138,6 @@ fn typed_text(value: &Value) -> String {
             }];
             parts.extend(list(values));
             format!("row({})", parts.join(", "))
-        }
-        Value::Enum { case, values } => {
-            let mut parts = vec![quoted(case)];
-            parts.extend(list(values));
-            format!("enumcase({})", parts.join(", "))
         }
         Value::Null => "null".into(),
     }
@@ -3543,7 +3516,7 @@ impl Printer<'_, '_> {
             RelationPredicate::Contains { left, right } => {
                 format!("{} contains {}", column(left)?, value(right)?)
             }
-            RelationPredicate::EnumMatch { .. } => return None,
+            RelationPredicate::Removed(removed) => match *removed {},
         })
     }
 }
@@ -3761,16 +3734,7 @@ fn predicate_text(p: &RelationPredicate, precedence: u8) -> String {
         RelationPredicate::Contains { left, right } => {
             format!("{} contains {}", colref_text(left), value_ref_text(right))
         }
-        RelationPredicate::EnumMatch {
-            column,
-            case,
-            payload,
-        } => format!(
-            "{} is {}({})",
-            colref_text(column),
-            name_text(case),
-            predicate_text(payload, 0)
-        ),
+        RelationPredicate::Removed(removed) => match *removed {},
     }
 }
 

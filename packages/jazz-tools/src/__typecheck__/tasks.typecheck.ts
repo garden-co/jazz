@@ -10,7 +10,9 @@ db.insert(app.tasks, {
   assigneeIds: [],
   dueAt: "2026-01-01",
 });
-app.tasks.where({ status: { in: ["todo", "done"] }, review: { match: { type: "approved" } } });
+app.tasks.where({ status: { in: ["todo", "done"] } });
+// @ts-expect-error enum columns have no `match` operator
+app.tasks.where({ status: { match: { type: "todo" } } });
 app.tasks.where({ dueAt: { gt: new Date() }, score: { gte: 3 } });
 // @ts-expect-error not an enum variant
 app.tasks.where({ status: "nope" });
