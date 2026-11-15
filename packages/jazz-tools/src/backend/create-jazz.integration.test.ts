@@ -373,7 +373,7 @@ describe("createJazz", () => {
     const aliceIdentity = aliceAuth?.peer_identity as string | undefined;
     expect(typeof aliceIdentity).toBe("string");
 
-    // A prelude naming alice, with a device's own token beside an empty `auth`.
+    // A prelude whose credential is outside `auth`.
     forwarded.length = 0;
     const deviceToken = signToken(generateSecret(), { audience: appId });
     const socket = new NodeWebSocket(wsUrl);
@@ -397,7 +397,7 @@ describe("createJazz", () => {
 
     // The prelude is refused outright: never relayed to the core.
     expect(outcome).toBe("closed 1008");
-    // Nothing is forwarded for alice without a credential of hers in `auth`.
+    // Nothing is forwarded unless a credential is present in `auth`.
     const forwardedBare = forwarded.find((p) => {
       const auth = p.auth as Record<string, unknown> | undefined;
       return (

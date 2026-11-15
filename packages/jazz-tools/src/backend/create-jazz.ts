@@ -2580,29 +2580,18 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     // Between the client and this backend only: the core never sees it.
     const renewal = parsed[SESSION_RENEWAL_PRELUDE_FIELD] === 1;
     delete parsed[SESSION_RENEWAL_PRELUDE_FIELD];
-    // Add this backend's secret to a guest's forwarded `auth`, but only to an
-    // `auth` that already carries exactly one client credential (its own
-    // token, or a stated session). A bare secret with neither is the main
-    // backend's own trusted link: a guest's prelude must never become one.
+    // Vouch only for an `auth` that carries exactly one client credential.
     const vouchedAuth = (base: Record<string, unknown>) => {
       const hasToken = base.jwt_token != null;
       const hasSession = base.backend_session != null;
       if (hasToken === hasSession)
-        throw new Error(
-          "createJazz: refusing to vouch for a guest prelude without exactly one credential",
-        );
+        throw new Error("createJazz: a guest prelude must carry exactly one credential");
       return { ...base, backend_secret: core.backendSecret };
     };
     const separateAuth =
       parsed.auth != null && typeof parsed.auth === "object" && !Array.isArray(parsed.auth);
     const auth = (separateAuth ? parsed.auth : parsed) as Record<string, unknown>;
-    // Credentials are read from `auth`. When the client sends a distinct
-    // `auth` object, a top-level credential slot must never stand in for one:
-    // otherwise a credential checked here (a guest's token) could be read off
-    // the top level yet be absent from the `auth` forwarded to the core, so
-    // the core would admit the socket on this backend's own secret — with no
-    // session and the client's chosen `peer_identity`. Drop the top-level
-    // slots so what is checked is exactly what is forwarded.
+    // Credentials are read from `auth` alone; top-level copies are dropped.
     if (separateAuth) {
       for (const field of PRELUDE_CREDENTIAL_FIELDS) delete parsed[field];
     }
