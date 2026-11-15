@@ -57,6 +57,9 @@ impl From<jazz_app::Error> for JazzErrorKind {
             E::Server(_) | E::Panicked(_) => Self::Io(message),
             E::Stopped => Self::Closed,
             E::Jazz(J::ChannelClosed) => Self::Closed,
+            // The authority rejected a write that was waiting for a tier:
+            // a refusal, not a transport failure.
+            E::Jazz(J::Sync(reason)) if reason.contains("was rejected") => Self::Refused(message),
             E::Jazz(J::Query(_) | J::Write(_) | J::Schema(_) | J::Json(_) | J::Identity(_)) => {
                 Self::Refused(message)
             }
