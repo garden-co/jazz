@@ -127,15 +127,28 @@ struct RawDelta: Decodable {
 }
 
 /// An open app. Every call runs jazz-ffi off the caller's thread.
-public final class Client: Sendable {
+public final class Client: @unchecked Sendable {
     let handle: JazzHandle
+    /// The app's `JazzApp.Computed` (immutable, and `Sendable` by its protocol).
+    let implementations: (any Sendable)?
+    var userInfo: [CodingUserInfoKey: Any] {
+        implementations.map { [implementationsKey: $0] } ?? [:]
+    }
 
-    init(handle: JazzHandle) { self.handle = handle }
+    init(handle: JazzHandle, implementations: (any Sendable)?) {
+        self.handle = handle
+        self.implementations = implementations
+    }
 
-    /// Opens `app` (the text of `jazz.app.json`; the bindings' `JazzApp.open` passes it).
-    public static func open(app: String, config: Config) async throws -> Client {
+    /// Opens `app` (the text of `jazz.app.json`; the bindings' `JazzApp.open`
+    /// passes it), with the app's `JazzApp.Computed` if it declares computed
+    /// fields or transforms.
+    public static func open(app: String, config: Config, implementations: (any Sendable)? = nil)
+        async throws -> Client
+    {
         let json = try config.json(app: app)
-        return Client(handle: try await run { try JazzHandle.open(configJson: json) })
+        let handle = try await run { try JazzHandle.open(configJson: json) }
+        return Client(handle: handle, implementations: implementations)
     }
 
     /// The account id of the user a backend acts for (`session.user` in
@@ -151,7 +164,7 @@ public final class Client: Sendable {
     public func all<R>(_ query: Query<R>) async throws -> [R] {
         let json = try query.json()
         let rows = try await Self.run { try self.handle.all(queryJson: json) }
-        return try Coding.decode([R].self, rows)
+        return try Coding.decode([R].self, rows, userInfo)
     }
 
     /// The first row `query` matches, if any.
@@ -160,22 +173,22 @@ public final class Client: Sendable {
         guard let row = try await Self.run({ try self.handle.one(queryJson: json) }) else {
             return nil
         }
-        return try Coding.decode(R.self, row)
+        return try Coding.decode(R.self, row, userInfo)
     }
 
     /// Inserts `row`, returning it as stored (with its `id`).
     @discardableResult
     public func insert<I: Insert>(_ row: I) async throws -> I.Row {
-        let json = try Coding.json(row)
+        let json = try Coding.json(row, userInfo)
         let inserted = try await Self.run {
             try self.handle.insert(table: I.Row.table, rowJson: json)
         }
-        return try Coding.decode(I.Row.self, inserted)
+        return try Coding.decode(I.Row.self, inserted, userInfo)
     }
 
     /// Changes the columns `patch` sets on row `id`.
     public func update<P: Patch>(_ id: Jazz.ID, _ patch: P) async throws {
-        let json = try Coding.json(patch)
+        let json = try Coding.json(patch, userInfo)
         try await Self.run { try self.handle.update(table: P.Row.table, id: id, patchJson: json) }
     }
 
@@ -195,9 +208,11 @@ public final class Client: Sendable {
     /// The deltas of `query`'s result, the first a `reset` with all of it.
     /// Stop iterating (or cancel the task) to unsubscribe.
     public func subscribe<R>(_ query: Query<R>) -> AsyncThrowingStream<Delta<R>, any Error> {
-        raw(query).map { raw in
+        let userInfo = userInfo
+        return raw(query).map { raw in
             Delta(
-                added: try raw.added.map(Self.row), updated: try raw.updated.map(Self.row),
+                added: try raw.added.map { try Self.row($0, userInfo) },
+                updated: try raw.updated.map { try Self.row($0, userInfo) },
                 removed: raw.removed, reset: raw.reset, coalesced: raw.coalesced ?? false)
         }
     }
@@ -206,13 +221,14 @@ public final class Client: Sendable {
     /// Stop iterating (or cancel the task) to unsubscribe.
     public func watch<R>(_ query: Query<R>) -> AsyncThrowingStream<[R], any Error> {
         var rows: [String: [String: JSONValue]] = [:]
+        let userInfo = userInfo
         return raw(query).map { delta in
             if delta.reset { rows = [:] }
             for row in delta.added + delta.updated {
                 if case .string(let id)? = row["id"] { rows[id] = row }
             }
             for id in delta.removed { rows[id] = nil }
-            return try query.sort(Array(rows.values)).map(Self.row)
+            return try query.sort(Array(rows.values)).map { try Self.row($0, userInfo) }
         }
     }
 
@@ -220,8 +236,10 @@ public final class Client: Sendable {
         try await Self.run { try self.handle.shutdown() }
     }
 
-    static func row<R: Row>(_ object: [String: JSONValue]) throws -> R {
-        try Coding.decode(R.self, Coding.json(JSONValue.object(object)))
+    static func row<R: Row>(_ object: [String: JSONValue], _ userInfo: [CodingUserInfoKey: Any])
+        throws -> R
+    {
+        try Coding.decode(R.self, Coding.json(JSONValue.object(object)), userInfo)
     }
 
     func raw<R>(_ query: Query<R>) -> AsyncThrowingStream<RawDelta, any Error> {

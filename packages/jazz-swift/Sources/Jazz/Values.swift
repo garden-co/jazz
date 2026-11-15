@@ -34,6 +34,27 @@ public struct BigInt: Codable, Hashable, Sendable, Comparable, ExpressibleByInte
 public enum Change<Value: Encodable & Sendable>: Sendable {
     case unchanged
     case set(Value)
+
+    /// The same change of a converted value (a transform's stored form).
+    public func map<T>(_ transform: (Value) throws -> T) rethrows -> Change<T> {
+        switch self {
+        case .unchanged: return .unchanged
+        case .set(let value): return .set(try transform(value))
+        }
+    }
+}
+
+/// Where the coders find the app's `JazzApp.Computed` implementation.
+public let implementationsKey = CodingUserInfoKey(rawValue: "jazz.implementations")!
+
+/// The app's computed fields and transforms, as generated bindings read
+/// them while coding rows: what `JazzApp.open(_:computed:)` was given.
+public func implementations<T>(of type: T.Type, in userInfo: [CodingUserInfoKey: Any]) throws -> T {
+    guard let implementations = userInfo[implementationsKey] as? T else {
+        throw JazzError.decoding(
+            "no \(T.self) to compute fields and transforms with: open the app with JazzApp.open(_:computed:)")
+    }
+    return implementations
 }
 
 extension KeyedEncodingContainer {
@@ -65,8 +86,9 @@ public protocol Patch: Encodable, Sendable {
 /// The JSON coding the bindings and jazz-ffi agree on: timestamps as
 /// milliseconds since the epoch, `bytea` as base64.
 enum Coding {
-    static func encoder() -> JSONEncoder {
+    static func encoder(_ userInfo: [CodingUserInfoKey: Any] = [:]) -> JSONEncoder {
         let encoder = JSONEncoder()
+        encoder.userInfo = userInfo
         encoder.outputFormatting = [.sortedKeys]
         encoder.dateEncodingStrategy = .custom { date, encoder in
             var container = encoder.singleValueContainer()
@@ -76,15 +98,16 @@ enum Coding {
         return encoder
     }
 
-    static func decoder() -> JSONDecoder {
+    static func decoder(_ userInfo: [CodingUserInfoKey: Any] = [:]) -> JSONDecoder {
         let decoder = JSONDecoder()
+        decoder.userInfo = userInfo
         decoder.dateDecodingStrategy = .millisecondsSince1970
         decoder.dataDecodingStrategy = .base64
         return decoder
     }
 
-    static func json<T: Encodable>(_ value: T) throws -> String {
-        String(decoding: try encoder().encode(value), as: UTF8.self)
+    static func json<T: Encodable>(_ value: T, _ userInfo: [CodingUserInfoKey: Any] = [:]) throws -> String {
+        String(decoding: try encoder(userInfo).encode(value), as: UTF8.self)
     }
 
     static func value<T: Encodable>(_ value: T) throws -> JSONValue {
@@ -94,9 +117,13 @@ enum Coding {
         return array[0]
     }
 
-    static func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
+    static func decode<T: Decodable>(
+        _ type: T.Type, _ json: String, _ userInfo: [CodingUserInfoKey: Any] = [:]
+    ) throws -> T {
         do {
-            return try decoder().decode(type, from: Data(json.utf8))
+            return try decoder(userInfo).decode(type, from: Data(json.utf8))
+        } catch let error as JazzError {
+            throw error
         } catch {
             throw JazzError.decoding("\(T.self): \(error)")
         }
