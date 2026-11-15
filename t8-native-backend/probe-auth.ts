@@ -13,4 +13,7 @@ for (const kind of ["missing", "expired", "wrong-iss", "bad-sig", "no-sub", "val
   if (!ok) fail = true;
   console.log(`${ok ? "PASS" : "FAIL"} ${kind}: ${r.status} ${body}`);
 }
+// oversized account-route body (> 64 KiB) must be refused with 413, not crash
+{ const r = await fetch(BASE + P, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${await tok("valid")}` }, body: JSON.stringify({ pad: "x".repeat(64 * 1024 + 16) }) }).catch((e) => ({ status: -1 } as any));
+  const ok = r.status === 413; if (!ok) fail = true; console.log(`${ok ? "PASS" : "FAIL"} oversized account body: ${r.status} (expected 413)`); }
 console.log(fail ? "AUTH FAIL" : "AUTH PASS"); process.exit(fail ? 1 : 0);

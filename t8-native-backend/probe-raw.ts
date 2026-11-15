@@ -1,8 +1,8 @@
 // Raw RFC 6455 frame probes (things `ws` can't send): unmasked, reserved bits, unknown opcode, oversized control,
 // text frame, bad close code, and a 64-bit length header just over the cap (only the header is sent).
-// Usage: HOST=127.0.0.1 PORT=<p> WSPATH=/jazz/apps/<id>/ws TOKEN=<jwt> HEALTH=http://127.0.0.1:<p>/healthz CAP=33554432 npx tsx probe-raw.ts
+// Usage: HOST=127.0.0.1 PORT=<p> WSPATH=/jazz/apps/<id>/ws TOKEN=<jwt> HEALTH=http://127.0.0.1:<p>/healthz CAP=2097152 npx tsx probe-raw.ts
 import net from "node:net"; import crypto from "node:crypto";
-const HOST = process.env.HOST ?? "127.0.0.1", PORT = Number(process.env.PORT), PATH = process.env.WSPATH!, TOKEN = process.env.TOKEN, HEALTH = process.env.HEALTH!, CAP = Number(process.env.CAP ?? 33554432);
+const HOST = process.env.HOST ?? "127.0.0.1", PORT = Number(process.env.PORT), PATH = process.env.WSPATH!, TOKEN = process.env.TOKEN, HEALTH = process.env.HEALTH!, CAP = Number(process.env.CAP ?? 2097152);
 const mask = (payload: Buffer, m: Buffer) => Buffer.from(payload.map((b, i) => b ^ m[i % 4]));
 function frame(opcode: number, payload: Buffer, opts: { masked?: boolean; rsv?: number; fin?: boolean; lenOverride?: bigint } = {}) {
   const { masked = true, rsv = 0, fin = true } = opts; const len = opts.lenOverride ?? BigInt(payload.length);
