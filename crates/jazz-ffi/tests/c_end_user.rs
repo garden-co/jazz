@@ -391,6 +391,24 @@ async fn c_hosts_link_and_read_a_backends_bundle() {
         );
         assert_eq!(call(carol, "bundle", json!({})).unwrap(), Value::Null);
         jazz_close(carol);
+
+        // Another device linking the same (already linked) user: the backend
+        // refuses it, a refusal (not I/O).
+        let key = jazz_generate_device_key(&mut err);
+        let other_key = CStr::from_ptr(key).to_str().unwrap().to_owned();
+        jazz_string_free(key);
+        let other = jazz_open(
+            c(&device.replace("PLACEHOLDER", &other_key)).as_ptr(),
+            &mut err,
+        );
+        assert!(!other.is_null());
+        let conflict = call(other, "link", json!({ "bearer": "token-carol" })).unwrap_err();
+        assert_eq!(conflict["kind"], "refused", "{conflict}");
+        assert_eq!(
+            call(other, "session", json!({})).unwrap()["user"]["kind"],
+            "device"
+        );
+        jazz_close(other);
     })
     .await;
     let _ = bundle;
