@@ -30,6 +30,7 @@ pub fn read(lang: Lang, bindings: &str) -> Result<Recorded, CodegenError> {
         Lang::TypeScript => read_ts(bindings),
         Lang::Rust => crate::rust::read(bindings),
         Lang::Swift => crate::swift::read(bindings),
+        Lang::Go => crate::go::read(bindings),
     }
 }
 
