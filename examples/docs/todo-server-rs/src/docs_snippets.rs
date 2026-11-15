@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 
 use ::jazz_app::jazz;
-use ::jazz_app::{Jazz, ObjectId, Order, ReadTier, Subscription, Timestamp};
+use ::jazz_app::{DurabilityTier, Jazz, ObjectId, Order, ReadTier, Subscription, Timestamp};
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use jazz::db::{Db, UpdateOptions};
 use jazz::ids::RowUuid;
@@ -197,15 +197,22 @@ pub async fn write_todo_crud(jazz: &Jazz, existing_id: ObjectId) -> ::jazz_app::
 
 // #region writing-durability-tier-rust
 pub async fn write_todo_with_default_durability(jazz: &Jazz) -> ::jazz_app::Result<ObjectId> {
+    // A plain write returns once it is committed locally, then syncs.
+    let draft = jazz.insert(NewTodo::new("Draft the docs", false)).await?;
+
+    // A durable handle's writes return once the server accepted them, and
+    // fail if it refused them.
     let todo = jazz
+        .durable(DurabilityTier::GlobalServer)
         .insert(NewTodo::new(
             "Write docs with default durability behavior",
             false,
         ))
         .await?;
 
-    // Rust currently does not expose per-write durability tier arguments.
-    // Writes apply locally first, then sync asynchronously to higher tiers.
+    // Or wait until every write so far reached the server.
+    jazz.wait_for_sync().await?;
+    let _ = draft;
     Ok(todo.id)
 }
 // #endregion writing-durability-tier-rust
@@ -216,8 +223,8 @@ pub async fn group_todo_writes(
     existing_todo_id: ObjectId,
 ) -> ::jazz_app::Result<ObjectId> {
     // Committed together if the closure returns `Ok`, rolled back if it
-    // returns `Err`.
-    jazz.transaction(move |tx| {
+    // returns `Err`. Reads inside it see the transaction's snapshot.
+    jazz.transaction(move |tx| async move {
         let created = tx.insert(NewTodo::new("Write transaction docs", false))?;
         tx.update(
             existing_todo_id,

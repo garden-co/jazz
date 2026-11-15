@@ -37,13 +37,15 @@ mod query;
 mod relation;
 mod subscription;
 mod table;
+mod transaction;
 pub mod untyped;
 mod value;
+mod writes;
 
 pub use app::AppFiles;
 pub use config::{Backend, Config, Storage};
 pub use error::{Error, Result};
-pub use handle::{Jazz, Transaction};
+pub use handle::Jazz;
 pub use history::Version;
 pub use include::{Include, IntoInclude, Nullability, OneInclude, Partial, Row, Selection, With};
 pub use query::{
@@ -53,10 +55,11 @@ pub use query::{
 pub use relation::{Hop, Step};
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
 pub use table::{Fields, Implementations, Insert, Table, Update};
+pub use transaction::Transaction;
 pub use value::{ColumnValue, Json, Timestamp};
 
 pub use jazz::account_registry::AccountId;
-pub use jazz::tools::{AppId, ObjectId, ReadTier, TransactionId};
+pub use jazz::tools::{AppId, DurabilityTier, ObjectId, ReadTier, TransactionId};
 
 /// The `jazz` crate, for generated code and [`Jazz::with_client`].
 #[doc(hidden)]
