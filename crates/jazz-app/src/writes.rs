@@ -7,11 +7,10 @@ use crate::error::{Error, Result};
 use crate::handle::Jazz;
 use crate::table::{Insert, Table};
 
-/// What a write does once committed locally: wait for its tier, or note
-/// it for [`Jazz::wait_for_sync`].
+/// What a write does once committed locally: on a [`Jazz::durable`]
+/// handle, wait until it reached that tier.
 pub(crate) struct Settler {
     durability: Option<DurabilityTier>,
-    info: std::sync::Arc<crate::handle::Info>,
 }
 
 impl Settler {
@@ -20,41 +19,28 @@ impl Settler {
         client: &JazzClient,
         written: Option<TransactionId>,
     ) -> Result<()> {
-        let Some(written) = written else {
-            return Ok(());
-        };
-        match self.durability {
-            Some(tier) => wait(client, written, tier, self.info.serverless).await,
-            None => {
-                if !self.info.serverless {
-                    self.info.pending.lock().unwrap().push(written);
-                }
-                Ok(())
-            }
+        match (self.durability, written) {
+            (Some(tier), Some(written)) => Ok(client.wait_for_transaction(written, tier).await?),
+            _ => Ok(()),
         }
     }
-}
-
-async fn wait(
-    client: &JazzClient,
-    written: TransactionId,
-    tier: DurabilityTier,
-    serverless: bool,
-) -> Result<()> {
-    if serverless && tier != DurabilityTier::Local {
-        return Err(Error::Config(format!(
-            "{tier:?} durability is unreachable: the app runs without a server"
-        )));
-    }
-    Ok(client.wait_for_transaction(written, tier).await?)
 }
 
 impl Jazz {
-    pub(crate) fn settler(&self) -> Settler {
-        Settler {
-            durability: self.durability,
-            info: self.info.clone(),
+    /// The settler for a write about to be made: refused before writing
+    /// when its tier is out of reach.
+    pub(crate) fn settler(&self) -> Result<Settler> {
+        if let Some(tier) = self.durability
+            && tier != DurabilityTier::Local
+            && self.info.serverless
+        {
+            return Err(Error::Config(format!(
+                "{tier:?} durability is unreachable: the app runs without a server"
+            )));
         }
+        Ok(Settler {
+            durability: self.durability,
+        })
     }
 
     /// This handle, with writes that return only once they reached `tier`:
@@ -69,29 +55,20 @@ impl Jazz {
         }
     }
 
-    /// Waits until every write made through this app's handles so far has
-    /// reached the server, failing with the first the server rejected.
-    /// Without a server there is nothing to wait for.
+    /// Waits until every write committed so far (through any handle of
+    /// this app) reached the server, failing if the server rejected one, as
+    /// TS's `waitForSync` does. Without a server there is nothing to wait
+    /// for.
     pub async fn wait_for_sync(&self) -> Result<()> {
-        let pending = std::mem::take(&mut *self.info.pending.lock().unwrap());
-        if pending.is_empty() {
-            return Ok(());
-        }
-        let serverless = self.info.serverless;
-        self.with_client(move |client| async move {
-            for written in pending {
-                wait(&client, written, DurabilityTier::GlobalServer, serverless).await?;
-            }
-            Ok(())
-        })
-        .await
+        self.with_client(|client| async move { Ok(client.wait_for_sync().await?) })
+            .await
     }
 
     /// Writes the row with this id: inserts it if there is none, otherwise
     /// replaces the columns `new` sets. Returns the row as stored.
     pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
         let implementations = self.info.implementations.clone();
-        let settle = self.settler();
+        let settle = self.settler()?;
         self.with_client(move |client| async move {
             let cells = new.into_cells(&implementations)?;
             let written = client.upsert(<N::Row as Table>::NAME, *id.uuid(), cells)?;
@@ -103,10 +80,29 @@ impl Jazz {
 
     /// Brings back the deleted row of `T` with this id, as it was.
     pub async fn restore<T: Table>(&self, id: ObjectId) -> Result<T> {
+        self.restore_cells::<T>(id, None).await
+    }
+
+    /// Brings back the deleted row with this id, with `update`'s columns
+    /// replaced.
+    pub async fn restore_with<U: crate::table::Update>(
+        &self,
+        id: ObjectId,
+        update: U,
+    ) -> Result<U::Row> {
+        let cells = update.into_cells(&self.info.implementations)?;
+        self.restore_cells::<U::Row>(id, Some(cells)).await
+    }
+
+    async fn restore_cells<T: Table>(
+        &self,
+        id: ObjectId,
+        cells: Option<Vec<(String, jazz::tools::Value)>>,
+    ) -> Result<T> {
         let implementations = self.info.implementations.clone();
-        let settle = self.settler();
+        let settle = self.settler()?;
         self.with_client(move |client| async move {
-            let written = client.restore(T::NAME, id, None)?;
+            let written = client.restore(T::NAME, id, cells)?;
             settle.settle(&client, written).await?;
             read_back::<T>(&client, id, &implementations).await
         })
