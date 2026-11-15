@@ -1860,6 +1860,29 @@ describe("BrowserConnectionManager in the back/forward cache", () => {
     }
   });
 
+  it("fails what needs the worker, and doesn't reconnect, when the store changed and the reload guard refuses", async () => {
+    const reload = vi.fn();
+    vi.stubGlobal("location", { reload });
+    // The reload guard refuses: the page reloaded for an invalidation moments ago.
+    vi.stubGlobal("sessionStorage", {
+      getItem: () => String(Date.now()),
+      setItem: () => {},
+    });
+    const fixture = await cachedManagerFixture();
+    try {
+      fixture.first.storeChangedSinceLeaving = vi.fn(() => true);
+      fire("pagehide", true);
+      const waiting = fixture.manager.ensureReady("runtime");
+      fire("pageshow", true);
+      await pageCacheForTest.returned();
+      expect(reload).not.toHaveBeenCalled();
+      expect(fixture.createConnection).toHaveBeenCalledOnce();
+      await expect(waiting).rejects.toThrow("back/forward cache: reload the page");
+    } finally {
+      await fixture.finish();
+    }
+  });
+
   it("keeps a connection that can't leave, and opens none when the page returns", async () => {
     const fixture = await cachedManagerFixture(false);
     try {

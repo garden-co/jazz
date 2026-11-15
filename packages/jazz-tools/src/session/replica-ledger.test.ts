@@ -612,6 +612,28 @@ describe("the back/forward cache", () => {
     expect(b.violations).toEqual([]);
   });
 
+  it("a page whose store was wiped while away doesn't reconnect, even when the reload guard refuses", async () => {
+    // The reload guard refuses: the page reloaded for an invalidation moments ago.
+    vi.stubGlobal("sessionStorage", {
+      getItem: () => String(Date.now()),
+      setItem: () => {},
+    });
+    const b = browser();
+    const [cached, other] = [b.tab("A"), b.tab("B")];
+    await b.open(cached, alice);
+    fire("pagehide", true);
+    await b.open(other, alice);
+    await b.signOut(other);
+    expect(b.ledger.get(alice.id)).toBeUndefined();
+    const after: string[] = [];
+    holdAcrossPageCache({ leave: () => {}, return: () => void after.push("connection") });
+    fire("pageshow", true);
+    await pageCacheForTest.returned();
+    expect(reload).not.toHaveBeenCalled();
+    expect(after).toEqual([]);
+    expect(b.ledger.get(alice.id)).toBeUndefined();
+  });
+
   it("a page whose store another tab only opened and closed meanwhile keeps it", async () => {
     const b = browser();
     const [cached, other] = [b.tab("A"), b.tab("B")];
