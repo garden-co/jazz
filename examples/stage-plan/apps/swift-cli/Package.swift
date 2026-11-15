@@ -1,4 +1,4 @@
-// swift-tools-version:5.9
+// swift-tools-version:6.0
 // StagePlan from Swift: a CLI over StagePlan's jazz.app.json and
 // jazz.permissions.json (byte-identical copies of apps/react-localfirst's),
 // with the bindings `jazz-tools generate` wrote in JazzApp.swift.

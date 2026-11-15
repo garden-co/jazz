@@ -53,4 +53,32 @@ final class StagePlanTests: XCTestCase {
         XCTAssertEqual(seen.last?.map(\.title), ["Load in", "Sound check", "Strike"])
         try await jazz.close()
     }
+
+    func testCloseEndsLiveWatches() async throws {
+        let server = try await TestServer()
+        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let show = try await app.show(named: "Closing")
+        let watching = _Concurrency.Task { () -> Swift.Error? in
+            do {
+                for try await _ in app.jazz.watch(JazzApp.tasks.query().where(JazzApp.tasks.showId.eq(show.id))) {}
+                return nil
+            } catch {
+                return error
+            }
+        }
+        try await _Concurrency.Task.sleep(nanoseconds: 200_000_000)
+        try await app.jazz.close()
+        let ended = try await withThrowingTaskGroup(of: Swift.Error??.self) { group in
+            group.addTask { await watching.value }
+            group.addTask {
+                try await _Concurrency.Task.sleep(nanoseconds: 3_000_000_000)
+                return nil  // timed out
+            }
+            let first = try await group.next()!
+            group.cancelAll()
+            return first
+        }
+        guard case .some(let error) = ended else { return XCTFail("the watch didn't end within 3 s of close()") }
+        XCTAssertEqual(error as? JazzError, .closed, "\(String(describing: error))")
+    }
 }

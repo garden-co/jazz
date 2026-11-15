@@ -342,7 +342,18 @@ fn refuses_what_it_cannot_do_by_name() {
         .starts_with("app files")
     );
 
+    let message = refused(JazzHandle::open(
+        json!({ "app": STAGE_PLAN_APP, "permissions": STAGE_PLAN_PERMISSIONS, "appId": nil_uuid(),
+                "backendSecret": "b", "adminSecret": "a", "session": { "subject": "alice" } })
+        .to_string(),
+    ));
+    assert!(message.contains("serverUrl"), "{message}");
+
     let jazz = JazzHandle::open(client_config()).unwrap();
+    // `one` validates the query as given before limiting it to one row.
+    assert!(
+        refused(jazz.one(json!({ "table": "shows", "limit": -1 }).to_string())).contains("limit")
+    );
     let message =
         refused(jazz.all(json!({ "table": "shows", "include": { "tasks": true } }).to_string()));
     assert!(

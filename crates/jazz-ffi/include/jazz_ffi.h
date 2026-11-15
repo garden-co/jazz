@@ -10,8 +10,11 @@
  * and every error it stores in *err, belongs to the caller: free it with
  * jazz_string_free. On failure a function returns NULL and, when err is not
  * NULL, stores {"kind":"refused"|"io"|"closed","message":"..."} in *err
- * (*err is set to NULL on success). Every function is safe to call from any
- * thread and blocks until done.
+ * (*err is set to NULL on success). Functions block until done. Calls on
+ * one handle may come from any threads at once, except jazz_close: no call
+ * on that handle may run concurrently with it or follow it. Likewise no
+ * call may use a subscription concurrently with or after its
+ * jazz_unsubscribe.
  */
 #ifndef JAZZ_FFI_H
 #define JAZZ_FFI_H
@@ -26,7 +29,8 @@ typedef struct JazzSubscription JazzSubscription;
 /*
  * Called on a thread of the subscription's own. kind is "delta" (json is
  * the delta JSON; the first has "reset": true and the full result) or
- * "error" (json is the error JSON; no callback follows). Both strings are
+ * "error" (json is the error JSON, e.g. kind "closed" after jazz_close;
+ * no callback follows). Both strings are
  * valid only during the call. ctx is passed through unchanged and must be
  * usable from that thread.
  */
@@ -57,12 +61,21 @@ char *jazz_call(JazzHandle *handle, const char *method, const char *args_json, c
 JazzSubscription *jazz_subscribe(JazzHandle *handle, const char *query_json, JazzCallback cb,
                                  void *ctx, char **err);
 
-/* Ends and frees a subscription: no callback starts after it returns. */
+/*
+ * Ends and frees a subscription. When it returns, no callback is running
+ * or will start, so cb and ctx may be freed. Called from inside the
+ * callback, it returns without waiting for that callback to finish. A
+ * subscription owns what it needs: free it before or after jazz_close of
+ * its handle. Because it waits, don't call jazz_unsubscribe while holding a
+ * lock the callback takes, or from another subscription's callback that
+ * this one may also unsubscribe: either deadlocks.
+ */
 void jazz_unsubscribe(JazzSubscription *subscription);
 
 /*
- * Closes the app and frees the handle. Open subscriptions end (still free
- * them with jazz_unsubscribe).
+ * Closes the app and frees the handle. Each subscription still open gets a
+ * last "error" callback, {"kind":"closed",...}; free them with
+ * jazz_unsubscribe, before or after this call.
  */
 void jazz_close(JazzHandle *handle);
 

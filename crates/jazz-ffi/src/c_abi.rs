@@ -202,9 +202,7 @@ pub unsafe extern "C" fn jazz_subscribe(
                 let ctx = &ctx;
                 let (kind, json) = match event {
                     Event::Delta(json) => (c"delta", json),
-                    Event::Error(message) => {
-                        (c"error", error_json(&JazzError::Io { reason: message }))
-                    }
+                    Event::Error(error) => (c"error", error_json(&error)),
                 };
                 let json = CString::new(json).unwrap_or_default();
                 // SAFETY: per `jazz_subscribe`'s contract; the strings live
@@ -216,7 +214,10 @@ pub unsafe extern "C" fn jazz_subscribe(
     })
 }
 
-/// Ends and frees a subscription: no callback starts after it returns.
+/// Ends and frees a subscription. When it returns, no callback is running
+/// or will start, so `cb` and `ctx` may be freed; called from inside the
+/// callback, it returns without waiting for that callback. A subscription
+/// owns what it needs: it may be freed before or after `jazz_close`.
 ///
 /// # Safety
 /// `subscription` is NULL or from `jazz_subscribe`, and not yet freed.
@@ -228,12 +229,14 @@ pub unsafe extern "C" fn jazz_unsubscribe(subscription: *mut JazzSubscription) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: per the function's contract.
         let subscription = unsafe { Box::from_raw(subscription) };
-        subscription.0.cancel();
+        subscription.0.cancel_and_wait();
     }));
 }
 
-/// Closes the app and frees the handle. Subscriptions still open end; free
-/// them with `jazz_unsubscribe`.
+/// Closes the app and frees the handle. Each subscription still open gets a
+/// last `"error"` callback with kind `"closed"`; free them with
+/// `jazz_unsubscribe` (before or after this call). No other call on this
+/// handle may run concurrently with, or follow, this one.
 ///
 /// # Safety
 /// `handle` is NULL or from `jazz_open`, and not yet closed.
