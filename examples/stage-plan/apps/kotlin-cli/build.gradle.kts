@@ -41,10 +41,10 @@ tasks.test {
     systemProperty("jna.library.path", ffiLibDir.path)
     // The tests start `jazz-tools server` (cargo build -p jazz-cli --bin jazz-tools).
     environment("JAZZ_TOOLS", System.getenv("JAZZ_TOOLS") ?: repo.resolve("target/debug/jazz-tools").path)
-    // An app endpoint for end users (cargo build -p jazz-ffi --example end_user_endpoint).
+    // The app's endpoint for end users (cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay).
     environment(
-        "JAZZ_END_USER_ENDPOINT",
-        System.getenv("JAZZ_END_USER_ENDPOINT") ?: repo.resolve("target/debug/examples/end_user_endpoint").path,
+        "JAZZ_APP_TEST_RELAY",
+        System.getenv("JAZZ_APP_TEST_RELAY") ?: repo.resolve("target/debug/jazz-app-test-relay").path,
     )
     testLogging { events("passed", "failed"); showStandardStreams = true }
 }

@@ -128,6 +128,32 @@ values inside JSON columns.
   ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-text-edit-kotlin
 </include>
 
+## Hops, unions and history
+
+Follow a relation from a query's rows (`hopTo`); `gather(relation, maxDepth)` follows a self-relation recursively:
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-hop-to-kotlin
+</include>
+
+Combine queries of one table:
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-union-kotlin
+</include>
+
+Read the versions the server accepted ([History](/docs/reading/history)), at `ReadTier.Remote`:
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-history-kotlin
+</include>
+
+Include deleted rows:
+
+<include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
+  ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-include-deleted-kotlin
+</include>
+
 ## Large values
 
 Stream a large text or `bytea` value in, and read back only the part you need:
@@ -154,7 +180,7 @@ view value. Queries compare a transformed column as stored.
 In Kotlin, Jazz doesn't support these yet:
 
 - reading part of a large value inside an include (root queries only);
-- `hopTo`, recursive `gather`, `union` and history queries;
+- subscribing to history queries;
 - guest (anonymous) users;
 - writing enums with payloads (reading them works: a sealed interface per enum); nested rows and
   catalogue enums in bindings;
