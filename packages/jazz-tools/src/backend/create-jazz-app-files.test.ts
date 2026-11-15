@@ -53,7 +53,7 @@ describe("createJazz checks its bindings against the project's jazz.app.json", (
     // The project's file is another schema: jazz.app.json was edited.
     await inProject(notesWithDone);
     await expect(start()).rejects.toThrow(
-      /bindings out of date: jazz\.generated\.ts was generated from another jazz\.app\.json\. Run `npx jazz-tools (generate|validate)`/,
+      /bindings out of date: jazz\.generated\.ts was generated from another jazz\.app\.json\. Run `npx jazz-tools generate`/,
     );
   });
 });

@@ -9,7 +9,7 @@ import {
   loadEnvFile,
   readEnvFiles,
   resolveEnvVar,
-  validate,
+  generate,
 } from "./cli.js";
 import { createAppMigration } from "./dev/project.js";
 import { describe, expect, it } from "vitest";
@@ -185,12 +185,12 @@ describe("resolveEnvVar", () => {
   });
 });
 
-describe("cli validate", () => {
+describe("cli generate", () => {
   // QUESTION: the TS loader warned about (and --strict-provenance refused) a
   // column named like a built-in provenance column (`createdAt` → `$createdAt`),
   // with `s.allowExternalProvenanceName(...)` to opt out. --strict-provenance now
   // throws as removed and says jazz.app.json's loader "always refuses" such
-  // columns, but `validate` accepts `createdAt: "timestamp"` without a warning
+  // columns, but `generate` accepts `createdAt: "timestamp"` without a warning
   // or an error, and the format has no opt-out marker. Which is intended?
   it.skip("warns with an exact Jazz provenance replacement", async () => {
     const { root } = await createWorkspace();
@@ -199,7 +199,7 @@ describe("cli validate", () => {
       { format: 1, tables: { todos: { columns: { title: "string", createdAt: "timestamp" } } } },
       emptyPermissions(),
     );
-    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    const { logs } = await captureConsoleLogs(() => generate({ schemaDir: root }));
     expect(logs.filter((line) => line.includes("built-in $createdAt"))).toHaveLength(1);
   });
 
@@ -207,7 +207,7 @@ describe("cli validate", () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root, todosApp(), emptyPermissions());
 
-    await validate({ schemaDir: root });
+    await generate({ schemaDir: root });
 
     expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(true);
     expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
@@ -220,8 +220,8 @@ describe("cli validate", () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root, migratedTodos("TODO: points needs the value existing rows get."));
 
-    await expect(validate({ schemaDir: root })).rejects.toThrow(
-      "jazz.app.json: 1 unresolved TODO left by `jazz-tools migrations create`; replace each with the value it asks for, then run `jazz-tools validate` again:\n" +
+    await expect(generate({ schemaDir: root })).rejects.toThrow(
+      "jazz.app.json: 1 unresolved TODO left by `jazz-tools migrations create`; replace each with the value it asks for, then run `jazz-tools generate` again:\n" +
         "  migrations[0].migrate.todos.points.default: TODO: points needs the value existing rows get.",
     );
   });
@@ -230,14 +230,14 @@ describe("cli validate", () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root, migratedTodos(1));
 
-    await validate({ schemaDir: root });
+    await generate({ schemaDir: root });
   });
 
   it("refuses a generated migration's TODO and accepts it once filled in", async () => {
     const { root } = await createWorkspace();
     const app = { format: 1, tables: { todos: { columns: { title: "string" } } } };
     await writeAppFiles(root, app, emptyPermissions());
-    await validate({ schemaDir: root });
+    await generate({ schemaDir: root });
     await writeAppFiles(
       root,
       { format: 1, tables: { todos: { columns: { title: "string", points: "int" } } } },
@@ -245,7 +245,7 @@ describe("cli validate", () => {
     );
     const created = await createAppMigration({ cwd: root, name: "add-points" });
     expect(created.todos).toEqual(["migrations[0].migrate.todos.points.default"]);
-    await expect(validate({ schemaDir: root })).rejects.toThrow(
+    await expect(generate({ schemaDir: root })).rejects.toThrow(
       "migrations[0].migrate.todos.points.default: TODO: added required column `points` needs the value existing rows get",
     );
 
@@ -253,14 +253,14 @@ describe("cli validate", () => {
     const written = JSON.parse(await readFile(file, "utf8"));
     written.migrations[0].migrate.todos.points.default = 1;
     await writeFile(file, JSON.stringify(written, null, 2));
-    await validate({ schemaDir: root });
+    await generate({ schemaDir: root });
   });
 
   it("fails when pointed at a directory without jazz.app.json, such as the legacy ./schema shim", async () => {
     const { root, schemaDir } = await createWorkspace();
     await writeAppFiles(root);
 
-    await expect(validate({ schemaDir })).rejects.toThrow(
+    await expect(generate({ schemaDir })).rejects.toThrow(
       `No jazz.app.json in ${schemaDir} (looked in ., src, src/lib).`,
     );
   });
@@ -269,7 +269,7 @@ describe("cli validate", () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root);
 
-    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    const { logs } = await captureConsoleLogs(() => generate({ schemaDir: root }));
 
     expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
     expect(await fileExists(join(root, "permissions.test.ts"))).toBe(false);
@@ -283,23 +283,23 @@ describe("cli validate", () => {
     const srcDir = join(root, "src");
     await writeAppFiles(srcDir);
 
-    await validate({ schemaDir: root });
+    await generate({ schemaDir: root });
 
     expect(await fileExists(join(srcDir, "jazz.generated.ts"))).toBe(true);
     expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(false);
   });
 
-  // QUESTION: validate warned per table with no policies, and per missing
+  // QUESTION: generate warned per table with no policies, and per missing
   // operation ("has no insert policy in permissions.ts …, declare
   // `policy.todos.allowInsert.never()` to silence it"). jazz-napi's loader
   // gives no warning for an absent table or operation (absent is denied, and
   // the format has no "never" to declare it explicitly); only deploy warns,
-  // per table with no policies at all. Should validate keep these warnings?
+  // per table with no policies at all. Should generate keep these warnings?
   it.skip("reports each denied table when jazz.permissions.json grants nothing", async () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root, todosApp(), emptyPermissions());
 
-    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    const { logs } = await captureConsoleLogs(() => generate({ schemaDir: root }));
 
     const warnings = logs.filter((line) =>
       line.includes("has no policies in jazz.permissions.json"),
@@ -312,7 +312,7 @@ describe("cli validate", () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root, booleanTodoApp, { format: 1, tables: { todos: { read: "true" } } });
 
-    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    const { logs } = await captureConsoleLogs(() => generate({ schemaDir: root }));
 
     const warnings = logs.filter((line) => line.includes('table "todos"'));
     expect(warnings).toHaveLength(3);
@@ -325,7 +325,7 @@ describe("cli validate", () => {
       tables: { todos: { read: "true", insert: "false", update: "false", delete: "false" } },
     });
 
-    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    const { logs } = await captureConsoleLogs(() => generate({ schemaDir: root }));
 
     expect(logs.filter((line) => line.includes('table "todos"'))).toEqual([]);
   });
@@ -343,7 +343,7 @@ describe("cli validate", () => {
       },
     );
 
-    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    const { logs } = await captureConsoleLogs(() => generate({ schemaDir: root }));
 
     const warnings = logs.filter((line) => line.includes("policy in jazz.permissions.json"));
     expect(warnings).toHaveLength(1);
@@ -353,7 +353,7 @@ describe("cli validate", () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root, todosApp(), null);
 
-    await expect(validate({ schemaDir: root })).rejects.toThrow(
+    await expect(generate({ schemaDir: root })).rejects.toThrow(
       /jazz\.permissions\.json is missing/,
     );
   });
@@ -362,7 +362,7 @@ describe("cli validate", () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root, todosApp(), { format: 1, tables: { ghosts: { read: "true" } } });
 
-    await expect(validate({ schemaDir: root })).rejects.toThrow(
+    await expect(generate({ schemaDir: root })).rejects.toThrow(
       "jazz.permissions.json: tables.ghosts: jazz.app.json has no table `ghosts`",
     );
   });
@@ -371,7 +371,7 @@ describe("cli validate", () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root, todosApp(), { format: 1, tables: { todos: 123 } });
 
-    await expect(validate({ schemaDir: root })).rejects.toThrow(
+    await expect(generate({ schemaDir: root })).rejects.toThrow(
       "jazz.permissions.json: tables.todos: must be an object with read, insert, update, delete",
     );
   });

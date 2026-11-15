@@ -3,7 +3,7 @@ import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { APP_FILE, PERMISSIONS_FILE } from "./app-files.js";
-import { validateApp } from "./project.js";
+import { generateApp } from "./project.js";
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const tmpBase = join(packageRoot, ".test-tmp");
@@ -62,10 +62,10 @@ export function todoPermissions(): string {
 
 /**
  * Write the todos app's files into `dir`: `jazz.app.json`,
- * `jazz.permissions.json`, and the `jazz.generated.ts` validate generates.
+ * `jazz.permissions.json`, and the `jazz.generated.ts` generate writes.
  */
 export async function writeTodoSchema(dir: string): Promise<void> {
   await writeFile(join(dir, APP_FILE), todoSchema());
   await writeFile(join(dir, PERMISSIONS_FILE), todoPermissions());
-  await validateApp({ cwd: dir });
+  await generateApp({ cwd: dir });
 }

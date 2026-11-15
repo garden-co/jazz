@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { createMigration, validate } from "./cli.js";
+import { createMigration, generate } from "./cli.js";
 import { createCliFixtures } from "../tests/cli/fixtures.js";
 
 const { createWorkspace, captureConsoleLogs } = createCliFixtures(import.meta.url);
@@ -22,14 +22,14 @@ const withTodoNotes = (notes: unknown = "string?"): Tables => ({
  * A project whose `jazz.generated.ts` was generated from `tables`: the
  * version `migrations create` migrates from (what a snapshot was before).
  */
-async function project(tables: Tables, { generate = true } = {}): Promise<string> {
+async function project(tables: Tables, { withBindings = true } = {}): Promise<string> {
   const { root } = await createWorkspace();
   await writeTables(root, tables);
   await writeFile(
     join(root, "jazz.permissions.json"),
     JSON.stringify({ format: 1, tables: {} }, null, 2),
   );
-  if (generate) await captureConsoleLogs(() => validate({ schemaDir: root }));
+  if (withBindings) await captureConsoleLogs(() => generate({ schemaDir: root }));
   return root;
 }
 
@@ -65,10 +65,10 @@ async function create(root: string, name = "change"): Promise<Record<string, unk
 }
 
 describe("cli migrations", () => {
-  // Before an app's first `validate` there are no bindings, so no earlier
+  // Before an app's first `generate` there are no bindings, so no earlier
   // version: nothing to migrate from, and nothing is written.
   it("does not record a migration without a baseline (no jazz.generated.ts yet)", async () => {
-    const root = await project(ROOT_TABLES, { generate: false });
+    const root = await project(ROOT_TABLES, { withBindings: false });
     const before = await readFile(join(root, "jazz.app.json"), "utf8");
     const { result } = await captureConsoleLogs(() =>
       createMigration({ schemaDir: root, name: "first" }),
@@ -86,8 +86,8 @@ describe("cli migrations", () => {
     const baseline = await readFile(join(root, "jazz.generated.ts"), "utf8");
 
     await writeTables(root, withTodoNotes());
-    // validate refuses the edit until a migration records it.
-    await expect(validate({ schemaDir: root })).rejects.toThrow(/migrations create/);
+    // generate refuses the edit until a migration records it.
+    await expect(generate({ schemaDir: root })).rejects.toThrow(/migrations create/);
     expect(await readFile(join(root, "jazz.generated.ts"), "utf8")).toBe(baseline);
 
     const { logs } = await captureConsoleLogs(() =>
@@ -107,7 +107,7 @@ describe("cli migrations", () => {
       },
     ]);
     // With nothing to resolve, the bindings are regenerated too.
-    await expect(validate({ schemaDir: root, check: true })).resolves.toBeUndefined();
+    await expect(generate({ schemaDir: root, check: true })).resolves.toBeUndefined();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -122,16 +122,16 @@ describe("cli migrations", () => {
     );
     // The file is named relative to the working directory.
     expect(logs.join("\n")).toMatch(
-      /Resolve 1 TODO in \S*jazz\.app\.json, then run `jazz-tools validate`:/,
+      /Resolve 1 TODO in \S*jazz\.app\.json, then run `jazz-tools generate`:/,
     );
     expect(logs).toContain("  migrations[0].migrate.todos.points.default");
     // A stub with a TODO is refused until it is resolved.
-    await expect(validate({ schemaDir: root })).rejects.toThrow(/TODO/);
+    await expect(generate({ schemaDir: root })).rejects.toThrow(/TODO/);
   });
 
-  // A migration validate passed used to fail only at deploy (adopter b22):
+  // A migration generate passed used to fail only at deploy (adopter b22):
   // renaming an optional column to a required one.
-  it("refuses in validate a migration that a deploy would refuse, naming the column", async () => {
+  it("refuses in generate a migration that a deploy would refuse, naming the column", async () => {
     const root = await project(withTodoNotes());
     const { notes: _notes, ...kept } = withTodoNotes().todos!.columns;
     await writeTables(root, {
@@ -145,14 +145,14 @@ describe("cli migrations", () => {
         notes: { drop: "string", backwardsDefault: null },
       },
     });
-    await captureConsoleLogs(() => validate({ schemaDir: root }));
+    await captureConsoleLogs(() => generate({ schemaDir: root }));
 
     // The author keeps the values by renaming, but the column's optionality
     // changes with it, which no migration step does.
     const app = await readApp(root);
     app.migrations![0]!.migrate = { todos: { body: { renameFrom: "notes" } } };
     await writeFile(join(root, "jazz.app.json"), JSON.stringify(app, null, 2));
-    await expect(validate({ schemaDir: root })).rejects.toThrow(
+    await expect(generate({ schemaDir: root })).rejects.toThrow(
       /table "todos".*"body" comes out optional but is required/,
     );
   });
@@ -188,8 +188,8 @@ describe("cli migrations", () => {
           '`labels` gains enum variant "ui": existing rows are unchanged, so it needs no step.',
       },
     });
-    // validate runs the checks a deploy runs on the migrations.
-    await captureConsoleLogs(() => validate({ schemaDir: root }));
+    // generate runs the checks a deploy runs on the migrations.
+    await captureConsoleLogs(() => generate({ schemaDir: root }));
 
     // Refusals come from the diff, so they start from a project whose
     // bindings are the three-variant version and has no migration yet: a
@@ -321,7 +321,7 @@ describe("cli migrations", () => {
       type: "bigint",
       merge: "counter",
     });
-    await expect(validate({ schemaDir: root, check: true })).resolves.toBeUndefined();
+    await expect(generate({ schemaDir: root, check: true })).resolves.toBeUndefined();
   });
 
   it("refuses a same-column nullability change instead of emitting a stub", async () => {
