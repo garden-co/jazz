@@ -150,6 +150,22 @@ describe("large values in Inspector answers", () => {
     expect(await refused({ column: "photo", from: photo.length, to: photo.length + 5 })).toMatch(
       /past the end of photo/,
     );
+    // An empty part past the end too; one at the end is the empty value.
+    expect(
+      await refused({ column: "photo", from: photo.length + 5, to: photo.length + 5 }),
+    ).toMatch(/past the end of photo/);
+    expect(
+      (
+        await call({
+          op: "get",
+          table: "entries",
+          id: ID,
+          column: "caption",
+          from: 200_000,
+          to: 200_000,
+        })
+      ).body,
+    ).toMatchObject({ value: "", from: 200_000, to: 200_000 });
     expect(await refused({ column: "count", from: 1, to: 2 })).toMatch(
       /for a bytes or text column/,
     );

@@ -3754,75 +3754,104 @@ fn a_subscribed_range_past_a_shrunk_values_end_clamps_and_lives_on() {
 }
 
 /// #5502 on chunked values a replica reads in part: the clamped range
-/// reads through the shrunk value's tree, and grows back with it.
+/// reads through the shrunk value's tree, and grows back with it. The text
+/// is multi-byte (`é` is one UTF-16 unit and two UTF-8 bytes, `🚀` two
+/// and four), so UTF-16 and UTF-8 bounds differ from char counts.
 #[test]
 fn a_subscribed_range_on_a_replica_clamps_as_a_chunked_value_shrinks() {
     use jazz::query::Part;
     let server = open(0, AuthorSubject::SYSTEM);
     let alice = open(1, user(1));
     connect(&server, &alice, user(1));
-    let body = text(17, LARGE * 4);
+    let chars: Vec<char> = text(17, LARGE * 4)
+        .chars()
+        .enumerate()
+        .map(|(n, c)| match n % 7 {
+            1 => 'é',
+            4 => '🚀',
+            _ => c,
+        })
+        .collect();
+    let body = |n: usize| chars[..n].iter().collect::<String>();
     let blob = text(19, LARGE * 4).into_bytes();
+    let full = chars.len();
     insert(
         &server,
         "docs",
         1,
         vec![
-            ("body", Value::String(body.clone())),
+            ("body", Value::String(body(full))),
             ("blob", Value::Bytes(blob.clone())),
         ],
     );
+    // Window bounds on char boundaries 600_000..600_050, in each unit.
+    let units = |n: usize, utf16: bool| -> u64 {
+        chars[..n]
+            .iter()
+            .map(|c| if utf16 { c.len_utf16() } else { c.len_utf8() } as u64)
+            .sum()
+    };
+    let (lo, hi) = (600_000, 600_050);
+    let utf16_q = Query::from("docs").select(["body"]).select_part(
+        "body",
+        Part::TextUtf16 {
+            from: units(lo, true),
+            to: units(hi, true),
+        },
+    );
+    let utf8_q = Query::from("docs").select(["body"]).select_part(
+        "body",
+        Part::TextUtf8 {
+            from: units(lo, false),
+            to: units(hi, false),
+        },
+    );
     let (from, to) = (700_000_u64, 700_050_u64);
-    let text_q = Query::from("docs")
-        .select(["body"])
-        .select_part("body", Part::TextUtf16 { from, to });
     let bytes_q = Query::from("docs")
         .select(["blob"])
         .select_part("blob", Part::Bytes { from, to });
-    let mut text_s = subscribe(&alice, text_q.clone());
-    let mut bytes_s = subscribe(&alice, bytes_q.clone());
+    let mut utf16_s = subscribe(&alice, utf16_q);
+    let mut utf8_s = subscribe(&alice, utf8_q);
+    let mut bytes_s = subscribe(&alice, bytes_q);
     pump(&server, &[&alice]);
-    let window = |s: &[u8], len: usize| s[from as usize..len.min(to as usize)].to_vec();
-    let as_text = |b: Vec<u8>| Some(Value::String(String::from_utf8(b).unwrap()));
-    assert_eq!(
-        shown(&mut text_s, "body").last(),
-        Some(&as_text(window(body.as_bytes(), body.len())))
-    );
-    assert_eq!(
-        shown(&mut bytes_s, "blob").last(),
-        Some(&Some(Value::Bytes(window(&blob, blob.len()))))
-    );
+    // What the window shows of a body `n` chars long, and of a blob `len`
+    // bytes long.
+    let text_window = |n: usize| Some(Value::String(chars[lo.min(n)..hi.min(n)].iter().collect()));
+    let blob_window = |len: usize| {
+        Some(Value::Bytes(
+            blob[(from as usize).min(len)..(to as usize).min(len)].to_vec(),
+        ))
+    };
+    let check = |n: usize,
+                 len: usize,
+                 utf16_s: &mut SubscriptionStream,
+                 utf8_s: &mut SubscriptionStream,
+                 bytes_s: &mut SubscriptionStream| {
+        assert_eq!(shown(utf16_s, "body").last(), Some(&text_window(n)), "{n}");
+        assert_eq!(shown(utf8_s, "body").last(), Some(&text_window(n)), "{n}");
+        assert_eq!(
+            shown(bytes_s, "blob").last(),
+            Some(&blob_window(len)),
+            "{len}"
+        );
+    };
+    check(full, blob.len(), &mut utf16_s, &mut utf8_s, &mut bytes_s);
 
-    // Shrunk to end inside the window, then before it; both stay chunked.
-    for len in [from as usize + 20, from as usize - 1000] {
-        let short_body = body[..len].to_owned();
-        let short_blob = blob[..len].to_vec();
+    // Shrunk to end inside each window, then before it; all stay chunked.
+    for (n, len) in [
+        (lo + 20, from as usize + 20),
+        (lo - 1000, from as usize - 1000),
+    ] {
         update(
             &server,
             1,
             vec![
-                ("body", Value::String(short_body.clone())),
-                ("blob", Value::Bytes(short_blob.clone())),
+                ("body", Value::String(body(n))),
+                ("blob", Value::Bytes(blob[..len].to_vec())),
             ],
         );
         pump(&server, &[&alice]);
-        let expected = |value: &[u8]| {
-            if len > from as usize {
-                window(value, len)
-            } else {
-                Vec::new()
-            }
-        };
-        assert_eq!(
-            shown(&mut text_s, "body").last(),
-            Some(&as_text(expected(short_body.as_bytes()))),
-            "{len}"
-        );
-        assert_eq!(
-            shown(&mut bytes_s, "blob").last(),
-            Some(&Some(Value::Bytes(expected(&short_blob)))),
-            "{len}"
-        );
+        check(n, len, &mut utf16_s, &mut utf8_s, &mut bytes_s);
     }
 
     // Grown back: the whole window again.
@@ -3830,19 +3859,12 @@ fn a_subscribed_range_on_a_replica_clamps_as_a_chunked_value_shrinks() {
         &server,
         1,
         vec![
-            ("body", Value::String(body.clone())),
+            ("body", Value::String(body(full))),
             ("blob", Value::Bytes(blob.clone())),
         ],
     );
     pump(&server, &[&alice]);
-    assert_eq!(
-        shown(&mut text_s, "body").last(),
-        Some(&as_text(window(body.as_bytes(), body.len())))
-    );
-    assert_eq!(
-        shown(&mut bytes_s, "blob").last(),
-        Some(&Some(Value::Bytes(window(&blob, blob.len()))))
-    );
+    check(full, blob.len(), &mut utf16_s, &mut utf8_s, &mut bytes_s);
 }
 
 /// The direct range read (`Db::read_value_range`) names exact bytes, like

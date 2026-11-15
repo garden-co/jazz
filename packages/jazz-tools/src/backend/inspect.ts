@@ -791,10 +791,17 @@ export function createInspector(deps: InspectorDeps) {
         );
       }
       // A partial select clamps a range past the end of the value
-      // (#5502); a part shorter than asked for ran past it.
+      // (#5502); a part shorter than asked for ran past it. An empty part
+      // is past the end when the unit before it is too.
       const found = await read({ from, to: body.to });
       const length = partLength(found.value);
-      if (length !== undefined && length < body.to - from) {
+      const pastEnd =
+        length !== undefined &&
+        (length < body.to - from ||
+          (from === body.to &&
+            from > 0 &&
+            partLength((await read({ from: from - 1, to: from })).value) === 0));
+      if (pastEnd) {
         throw new InspectError(
           "bad_request",
           `${from}–${body.to} is past the end of ${column} (its size is in its row's $large summary)`,

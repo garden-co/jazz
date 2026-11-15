@@ -613,6 +613,84 @@ describe("createDb in-memory driver", () => {
     ).toThrow(/not supported yet/);
   });
 
+  it("clamps a range on a column a computed column makes it read whole (#5502)", async () => {
+    // The engine reads body and payload whole for `size`, so the selection
+    // is taken from the whole value in TypeScript; it clamps like the engine.
+    const computedApp = s.defineApp(
+      {
+        documents: s.table(
+          { body: s.string(), payload: s.bytes() },
+          {
+            size: s.computed(
+              (row: { body: string; payload: Uint8Array }) => row.body.length + row.payload.length,
+            ),
+          },
+        ),
+      },
+      { migrations: "none" },
+    );
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-whole-read-range-clamp-test")),
+      driver: { type: "memory" },
+    });
+    const bytes = (text: string) => new TextEncoder().encode(text);
+    const { value: inserted } = db.insert(computedApp.documents, {
+      body: "abcdefgh",
+      payload: bytes("abcdefgh"),
+    });
+    await Promise.resolve();
+    const documents = computedApp.documents.where({ id: inserted.id });
+    const queries = {
+      utf16: documents.select({ body: { from: 4, to: 8 } }, "size"),
+      utf8: documents.select({ body: { fromUtf8: 2, toUtf8: 8 } }, "size"),
+      bytes: documents.select({ payload: { from: 2, to: 6 } }, "size"),
+    };
+    const shown = { utf16: [] as unknown[], utf8: [] as unknown[], bytes: [] as unknown[] };
+    const errors: unknown[] = [];
+    const stops = (Object.keys(queries) as Array<keyof typeof queries>).map((key) =>
+      db!.subscribe(queries[key] as typeof queries.utf16, {
+        onUpdate: (rows) => shown[key].push(...rows),
+        onError: (error) => errors.push(error),
+      }),
+    );
+    const settled = async (
+      body: string,
+      want: { utf16: string; utf8: string; bytes: Uint8Array; size: number },
+    ) => {
+      await db!
+        .update(computedApp.documents, inserted.id, { body, payload: bytes(body) })
+        .wait({ tier: "local" });
+      await expect
+        .poll(() => shown.utf16.at(-1))
+        .toEqual({ id: inserted.id, body: want.utf16, size: want.size });
+      await expect
+        .poll(() => shown.utf8.at(-1))
+        .toEqual({ id: inserted.id, body: want.utf8, size: want.size });
+      await expect
+        .poll(() => shown.bytes.at(-1))
+        .toEqual({ id: inserted.id, payload: want.bytes, size: want.size });
+      expect(errors).toEqual([]);
+    };
+
+    await settled("ab", { utf16: "", utf8: "", bytes: bytes(""), size: 4 });
+    expect(await db.all(queries.utf16)).toEqual([{ id: inserted.id, body: "", size: 4 }]);
+    // "abcd🚀" is 6 UTF-16 units and 8 UTF-8 bytes; a byte range may end
+    // inside the emoji, a text range may not.
+    await settled("abcd🚀", {
+      utf16: "🚀",
+      utf8: "cd🚀",
+      bytes: bytes("abcd🚀").slice(2, 6),
+      size: 14,
+    });
+    await settled("abcdefgh", { utf16: "efgh", utf8: "cdefgh", bytes: bytes("cdef"), size: 16 });
+    for (const stop of stops) stop();
+
+    // Inverted ranges still fail, with the reason.
+    await expect(async () =>
+      db!.all(documents.select({ body: { from: 3, to: 1 } }, "size")),
+    ).rejects.toThrow(/ends before it starts/);
+  });
+
   it("refuses splices on a range-selected column that a computed column makes it read whole", async () => {
     const computedApp = s.defineApp(
       {
