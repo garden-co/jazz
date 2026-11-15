@@ -99,6 +99,8 @@ function createMockDb(
         : null,
     })),
     onAuthChanged: vi.fn(() => () => {}),
+    getSyncStatus: vi.fn(() => ({ link: { state: "local-only" } })),
+    onSyncStatusChange: vi.fn(() => () => {}),
     deleteClientStorage: vi.fn(async () => undefined),
     shutdown: vi.fn(async () => undefined),
     getConfig: vi.fn(() => config),
