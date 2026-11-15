@@ -129,10 +129,28 @@ their changes, and `db.Refresh(ctx)` and `db.SignOut(ctx)` do what they say. Kee
 password: `jazz.FileStore` keeps it in a file only its owner can read; implement `jazz.SecretStore`
 to keep it in the OS keychain.
 
+## Serve your app's end users
+
+A Go backend serves the Jazz endpoint its end users' clients (TypeScript, Swift, Kotlin, Go) sign in
+and sync through, as `createJazz` does in TypeScript. `jazz.NewEndpoint` is an `http.Handler`;
+mount it at `/jazz`, and say who a request is for in your `authenticate`:
+
+```go
+endpoint, err := jazz.NewEndpoint(backend, func(r *http.Request) (*jazz.EndpointUser, error) {
+	user, err := verifyBearer(r.Header.Get("Authorization")) // your auth provider
+	if err != nil {
+		return jazz.AnyDeviceAccount, nil // or nil: no one
+	}
+	return &jazz.EndpointUser{UserID: user.ID, ExpiresAt: user.ExpiresAt}, nil
+}, jazz.EndpointOptions{})
+http.Handle("/jazz/", endpoint)
+```
+
+In a route of your own, `endpoint.ForUser(r)` is a handle acting as the request's user (TypeScript's
+`forReqUser`); close it when done.
+
 ## Not supported yet
 
-- serving end users from a Go backend: a Go program can sign in as an end user, but there is no Go
-  equivalent of `createJazz`'s `/jazz` endpoint yet (serve it from a TypeScript backend);
 - guest (anonymous) users;
 - history: `jazzapp.Tasks.History()` reads a table's versions at tier `ReadRemote`, but can't
   select columns or be subscribed to yet;
