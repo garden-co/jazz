@@ -17,6 +17,10 @@
 //! ([`Auth::Device`]) or the app's own bearer ([`Auth::bearer`]), and
 //! [`Jazz::session`] follows it.
 //!
+//! A backend serves its users' clients with an [`Endpoint`]: the app's
+//! `/jazz` handler, as TS `createJazz` serves it, with the app's own
+//! sign-in deciding who each request's user is.
+//!
 //! Not supported yet: includes (nested related rows in one result), reads
 //! inside transactions; linking a device account to a provider account, and
 //! renewing a bearer session in place (a renewed bearer reconnects).
@@ -25,6 +29,7 @@ mod app;
 mod auth;
 mod backend;
 mod config;
+pub mod endpoint;
 mod error;
 mod handle;
 mod query;
@@ -36,6 +41,7 @@ mod value;
 pub use app::AppFiles;
 pub use auth::{Auth, Bearer, DeviceKey, TokenFuture, TokenProvider, TokenReason};
 pub use config::{Backend, Config, Storage};
+pub use endpoint::Endpoint;
 pub use error::{Error, Result};
 pub use handle::{Jazz, Transaction};
 pub use query::{Column, Condition, Many, One, Order, Query, created_at, id, updated_at};
