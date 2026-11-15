@@ -52,6 +52,9 @@ pub(crate) fn open(schema: JazzSchema, node: u8) -> Store {
 }
 
 pub(crate) fn open_as(schema: JazzSchema, node: u8, author: AuthorSubject) -> Store {
+    // Every in-place refresh is also checked against a full run, inside
+    // the engine (declared types included, which no snapshot shows).
+    jazz::db::set_fanout_oracle_for_test(true);
     let dir = tempfile::tempdir().unwrap();
     let path: PathBuf = dir.path().join("store.sqlite");
     let config = DbConfig::new(
@@ -115,8 +118,10 @@ pub(crate) fn subscribe_with(
     }
 }
 
-/// Applies queued deltas to the maintained result.
-pub(crate) fn apply(live: &mut Live) {
+/// Applies queued deltas to the maintained result; returns the ids the
+/// deltas reported as added or updated.
+pub(crate) fn apply(live: &mut Live) -> BTreeSet<RowUuid> {
+    let mut reported = BTreeSet::new();
     while let Some(event) = live.stream.try_next_event() {
         let SubscriptionEvent::Delta {
             reset,
@@ -140,9 +145,11 @@ pub(crate) fn apply(live: &mut Live) {
         let mut placed: Vec<_> = added.iter().chain(updated.iter()).collect();
         placed.sort_by_key(|row| row.index);
         for row in placed {
+            reported.insert(row.row_uuid());
             live.rows.insert(row.index, (row.row_uuid(), owned(row)));
         }
     }
+    reported
 }
 
 pub(crate) fn fresh(db: &Db, live: &Live, opts: ReadOpts) -> Snapshot {
@@ -164,7 +171,7 @@ pub(crate) fn check_with(
     lives
         .iter_mut()
         .map(|live| {
-            apply(live);
+            let _ = apply(live);
             let now = fresh(db, live, opts.clone());
             assert_eq!(
                 live.rows, now,
@@ -1498,6 +1505,107 @@ fn a_self_relation_keeps_its_root_key() {
     assert!(after.woken - before.woken <= 3, "{before:?} -> {after:?}");
 }
 
+// ---- refreshes without a re-run --------------------------------------------
+//
+// A woken result with relations is refreshed in place when the write
+// reached only some of its roots: their rows re-checked by id. In the
+// stores opened here every such refresh is also compared, inside the
+// engine, with a full run (rows, cells and declared types; see
+// `open_as`); here each result is compared
+// with a fresh read after every write, and the counters show which path
+// ran.
+
+/// The fan-out counters' change across `write`, with every result
+/// checked after it, and the ids each result's deltas reported.
+fn refreshed(
+    db: &Db,
+    lives: &mut [Live],
+    what: &str,
+    write: impl FnOnce(),
+) -> (jazz::db::FanoutStats, Vec<BTreeSet<RowUuid>>) {
+    let before = db.fanout_stats();
+    write();
+    let reported: Vec<BTreeSet<RowUuid>> = lives.iter_mut().map(apply).collect();
+    check(db, lives, what);
+    let after = db.fanout_stats();
+    let delta = jazz::db::FanoutStats {
+        groups: after.groups,
+        shared_joins: after.shared_joins - before.shared_joins,
+        woken: after.woken - before.woken,
+        skipped: after.skipped - before.skipped,
+        rechecked: after.rechecked - before.rechecked,
+        reran: after.reran - before.reran,
+        uncorrelated: after.uncorrelated - before.uncorrelated,
+        unevidenced: after.unevidenced - before.unevidenced,
+    };
+    (delta, reported)
+}
+
+/// The message's author, under a name of its own: a relation named as
+/// one of its parent's columns is not correlated (its cell is read by
+/// that name, and the column comes first).
+fn writer() -> ArraySubquery {
+    ArraySubquery::new("writer", "users", "id", "author")
+}
+
+fn by(db: &Db, message: usize, person: usize) {
+    update(
+        db,
+        "messages",
+        id(MESSAGES, message),
+        &[("author", uuid(id(USERS, person)))],
+    );
+}
+
+/// R1. A root write to a result with optional relations re-checks the
+/// written root by id and nests its relations again: the other roots stay
+/// as they were, and nothing re-runs.
+///
+/// ```
+/// thread: messages WHERE chat = 0, writer (users)
+/// writer ──update m1.author = u1──► m1 re-checked, writer [u1]
+/// writer ──rename u1──────────────► m1 nested again
+/// ```
+#[test]
+fn r1_a_root_write_rechecks_a_result_with_relations() {
+    let db = open(chat_schema(None), 1);
+    for u in 0..2 {
+        person(&db, u, &format!("u{u}"));
+    }
+    chat(&db, 0, "c0");
+    for n in 0..3 {
+        message(&db, n, 0, n as i64, None);
+        by(&db, n, 0);
+    }
+    let mut lives = vec![subscribe(
+        &db,
+        "thread",
+        Query::from("messages")
+            .filter(in_chat(0))
+            .order_by("sent_at", OrderDirection::Asc)
+            .array_subquery(writer()),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    let (stats, reported) = refreshed(&db, &mut lives, "m1 changes author", || by(&db, 1, 1));
+    assert_eq!(
+        (stats.reran, stats.rechecked),
+        (0, 1),
+        "a re-check, no re-run: {stats:?}"
+    );
+    assert_eq!(reported[0], BTreeSet::from([id(MESSAGES, 1)]));
+    // What the result holds moved with the re-check: u1 now reaches m1.
+    let (stats, reported) = refreshed(&db, &mut lives, "u1 renamed", || {
+        update(&db, "users", id(USERS, 1), &[("name", text("renamed"))])
+    });
+    assert_eq!(stats.woken, 1, "{stats:?}");
+    assert_eq!(reported[0], BTreeSet::from([id(MESSAGES, 1)]));
+    let (stats, _) = refreshed(&db, &mut lives, "u0 renamed", || {
+        update(&db, "users", id(USERS, 0), &[("name", text("renamed"))])
+    });
+    assert_eq!(stats.woken, 1, "u0 still writes m0 and m2: {stats:?}");
+}
+
 // ---- randomized differentials ----------------------------------------------
 
 struct Rng(u64);
@@ -1829,6 +1937,7 @@ fn seed_world(db: &Db) -> World {
 #[test]
 fn correlated_results_match_one_shot_reads_under_random_writes() {
     let mut totals = [(0u64, 0u64); 2];
+
     for seed in [3, 17, 29, 64, 101] {
         let on = differential_run(seed, true);
         let off = differential_run(seed, false);
