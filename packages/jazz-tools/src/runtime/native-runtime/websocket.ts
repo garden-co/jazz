@@ -321,14 +321,17 @@ export class WebSocketCarrier {
   private closing = false;
   private terminated = false;
   private lastInbound = performance.now();
+  /** Messages received whose handling hasn't finished yet. */
+  private handlingMessages = 0;
   /**
-   * Settles once the messages received so far are handled. A socket's
-   * error and close are reported only then: the HTTP stream hands a
+   * A socket's error and close that came while messages were still being
+   * handled, reported once the last of them is: the HTTP stream hands a
    * backend's last message and its close over in one read, and a refusal
    * (`auth_failed`, say after `jazz.revokeUser`) read after the close would
-   * count as a dropped connection, retried for good.
+   * count as a dropped connection, retried for good. With no message being
+   * handled, they are reported at once, from the event itself.
    */
-  private inbound: Promise<void> = Promise.resolve();
+  private afterMessages: Array<() => void> = [];
   private silenceTimer: ReturnType<typeof setTimeout> | undefined;
   private handshakeTimer: ReturnType<typeof setTimeout> | undefined;
   /** Where to renew this session in place, when it rides on the app's cookie. */
@@ -374,33 +377,34 @@ export class WebSocketCarrier {
         this.close();
       },
     );
-    const afterInbound = (run: () => void) => {
-      // A listener that throws fails as it would in the event itself,
-      // without stopping the messages after it.
-      this.inbound = this.inbound.then(run).catch((error: unknown) => {
-        queueMicrotask(() => {
-          throw error;
-        });
-      });
+    const reportAfterMessages = (run: () => void) => {
+      if (this.handlingMessages === 0) run();
+      else this.afterMessages.push(run);
     };
     this.socket.addEventListener("message", (event) => {
       this.lastInbound = performance.now();
-      const handled = this.handleMessage(event.data).catch((error) => {
-        this.reportTerminal(
-          {
-            code: "protocol_error",
-            retry: "never",
-            message: error instanceof Error ? error.message : String(error),
-          },
-          undefined,
-          false,
-        );
-        this.close();
-      });
-      this.inbound = Promise.all([this.inbound, handled]).then(() => {});
+      this.handlingMessages += 1;
+      void this.handleMessage(event.data)
+        .catch((error) => {
+          this.reportTerminal(
+            {
+              code: "protocol_error",
+              retry: "never",
+              message: error instanceof Error ? error.message : String(error),
+            },
+            undefined,
+            false,
+          );
+          this.close();
+        })
+        .finally(() => {
+          this.handlingMessages -= 1;
+          if (this.handlingMessages > 0) return;
+          for (const run of this.afterMessages.splice(0)) run();
+        });
     });
     this.socket.addEventListener("error", (event) =>
-      afterInbound(() =>
+      reportAfterMessages(() =>
         this.reportTerminal({
           code: "websocket_error",
           retry: "later",
@@ -412,7 +416,7 @@ export class WebSocketCarrier {
     );
     this.socket.addEventListener("close", (event) => {
       const close = websocketCloseDetails(event);
-      afterInbound(() =>
+      reportAfterMessages(() =>
         this.reportTerminal({
           code: "websocket_closed",
           retry: "later",
