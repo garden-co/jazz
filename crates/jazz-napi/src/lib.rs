@@ -267,6 +267,97 @@ pub fn validate_bindings(app_json: String, bindings: Option<String>) -> js::Resu
     }
 }
 
+/// What `generateForDir` / `migrationsCreateForDir` did in an app's directory.
+#[napi(object)]
+pub struct DirOutcome {
+    /// Lines to print.
+    pub notes: Vec<String>,
+    /// Warnings to print.
+    pub warnings: Vec<String>,
+    /// Bindings files written, relative to the directory.
+    pub written: Vec<String>,
+    /// Bindings files already up to date, relative to the directory.
+    pub current: Vec<String>,
+    /// `migrationsCreateForDir`: whether `jazz.app.json` changed.
+    pub changed: bool,
+    /// `migrationsCreateForDir`: JSON paths of the TODOs left to resolve.
+    pub todos: Vec<String>,
+}
+
+/// Options of [`generate_for_dir`] and [`migrations_create_for_dir`].
+#[napi(object)]
+pub struct DirOptions {
+    /// Fail when the files or bindings are stale, and write nothing.
+    pub check: Option<bool>,
+    /// The bindings' languages (`"ts"`, `"rust"`, …); by default each the
+    /// directory's files say the app is written in.
+    pub lang: Option<Vec<String>>,
+    /// The language assumed when nothing in the directory names one and
+    /// no other language's manifest is there (the npm CLI passes `"ts"`).
+    pub fallback: Option<String>,
+}
+
+fn dir_languages(
+    dir: &std::path::Path,
+    options: &Option<DirOptions>,
+) -> js::Result<Vec<jazz_codegen::project::Selected>> {
+    let given = options
+        .as_ref()
+        .and_then(|o| o.lang.clone())
+        .unwrap_or_default()
+        .iter()
+        .map(|name| jazz_codegen::Lang::parse(name))
+        .collect::<std::result::Result<Vec<_>, jazz_codegen::CodegenError>>()
+        .map_err(codegen_error)?;
+    let fallback = options
+        .as_ref()
+        .and_then(|o| o.fallback.as_deref())
+        .map(jazz_codegen::Lang::parse)
+        .transpose()
+        .map_err(codegen_error)?;
+    jazz_codegen::project::languages_or(dir, &given, fallback)
+        .map_err(|error| napi::Error::from_reason(error).into())
+}
+
+fn dir_outcome(outcome: jazz_codegen::project::Outcome) -> DirOutcome {
+    DirOutcome {
+        notes: outcome.notes,
+        warnings: outcome.warnings,
+        written: outcome.written,
+        current: outcome.current,
+        changed: outcome.changed,
+        todos: outcome.todos,
+    }
+}
+
+/// `jazz-tools generate [--check]` in `dir`, the directory of the app's
+/// `jazz.app.json`: the same languages, checks and bytes as the
+/// `jazz-tools` binary, which runs the same code.
+#[napi(js_name = "generateForDir")]
+pub fn generate_for_dir(dir: String, options: Option<DirOptions>) -> js::Result<DirOutcome> {
+    let dir = std::path::Path::new(&dir);
+    let langs = dir_languages(dir, &options)?;
+    let check = options.as_ref().and_then(|o| o.check).unwrap_or(false);
+    jazz_codegen::project::generate(dir, &langs, check)
+        .map(dir_outcome)
+        .map_err(|error| napi::Error::from_reason(error).into())
+}
+
+/// `jazz-tools migrations create --name <name>` in `dir`, as the
+/// `jazz-tools` binary runs it.
+#[napi(js_name = "migrationsCreateForDir")]
+pub fn migrations_create_for_dir(
+    dir: String,
+    name: String,
+    options: Option<DirOptions>,
+) -> js::Result<DirOutcome> {
+    let dir = std::path::Path::new(&dir);
+    let langs = dir_languages(dir, &options)?;
+    jazz_codegen::project::migrations_create(dir, &langs, &name)
+        .map(dir_outcome)
+        .map_err(|error| napi::Error::from_reason(error).into())
+}
+
 /// A codegen refusal, coded as [`artifact_error`] codes the loaders'.
 fn codegen_error(error: jazz_codegen::CodegenError) -> BindingError {
     use jazz::tools::deployment::artifact;
