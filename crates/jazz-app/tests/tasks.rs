@@ -188,7 +188,7 @@ async fn large_values() {
                 ..NewTask::new("Upload", 0, Vec::new())
             },
             tasks::attachment(),
-            std::io::Cursor::new(data.clone()),
+            chunked(&data, 64 * 1024),
         )
         .await
         .unwrap();
@@ -230,4 +230,167 @@ async fn large_values() {
         .meta
         .unwrap();
     assert_eq!(meta.0, serde_json::json!({ "owner": "dev", "tags": ["a"] }));
+}
+
+/// `data` as a stream of `size`-byte chunks.
+fn chunked(
+    data: &[u8],
+    size: usize,
+) -> impl futures::Stream<Item = Result<Vec<u8>, std::convert::Infallible>> + use<> {
+    let chunks: Vec<_> = data.chunks(size).map(|chunk| Ok(chunk.to_vec())).collect();
+    futures::stream::iter(chunks)
+}
+
+/// A slow stream doesn't hold up the client's other calls: each chunk is
+/// stored as it arrives, in its own turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_upload_lets_other_calls_run() {
+    use futures::StreamExt;
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let slow = futures::stream::iter(0..4).then(|i| async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        Ok::<_, std::convert::Infallible>(vec![i as u8; 1024])
+    });
+    let reader = jazz.clone();
+    let (uploaded, read) = tokio::join!(
+        jazz.insert_streaming(
+            NewTask::new("Slow", 0, Vec::new()),
+            tasks::attachment(),
+            slow
+        ),
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let started = std::time::Instant::now();
+            reader.all(tasks::query()).await.unwrap();
+            started.elapsed()
+        }
+    );
+    assert_eq!(uploaded.unwrap().attachment.unwrap().len(), 4 * 1024);
+    assert!(
+        read < std::time::Duration::from_millis(150),
+        "a read waited {read:?}"
+    );
+}
+
+/// What goes wrong with a large value fails cleanly and writes nothing.
+#[tokio::test]
+async fn large_value_errors() {
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+
+    // The stream fails: the upload is abandoned.
+    let failing = futures::stream::iter([Ok(vec![1u8; 10]), Err("disk on fire")]);
+    let failed = jazz
+        .insert_streaming(
+            NewTask::new("Broken", 0, Vec::new()),
+            tasks::attachment(),
+            failing,
+        )
+        .await;
+    assert!(
+        matches!(&failed, Err(Error::Upload(message)) if message == "disk on fire"),
+        "{failed:?}"
+    );
+    assert!(jazz.all(tasks::query()).await.unwrap().is_empty());
+
+    // The streamed column is the stream's to set.
+    let both = jazz
+        .insert_streaming(
+            NewTask {
+                attachment: Some(vec![1, 2, 3]),
+                ..NewTask::new("Both", 0, Vec::new())
+            },
+            tasks::attachment(),
+            chunked(&[4, 5, 6], 2),
+        )
+        .await;
+    assert!(matches!(both, Err(Error::Config(_))), "{both:?}");
+
+    let task = jazz
+        .insert(NewTask {
+            attachment: Some(vec![0; 8]),
+            meta: Some(Json(serde_json::json!({ "owner": "ops" }))),
+            ..NewTask::new("Edits", 0, Vec::new())
+        })
+        .await
+        .unwrap();
+    // A pointer to a member that isn't there.
+    let pointer = jazz
+        .json_set(
+            task.id,
+            tasks::meta(),
+            [("/missing/deep".to_owned(), serde_json::json!(1))],
+        )
+        .await;
+    assert!(pointer.is_err(), "{pointer:?}");
+    // A page past the value's end.
+    let page = jazz
+        .splice(
+            task.id,
+            tasks::attachment(),
+            jazz_app::Page::Bytes { from: 100, to: 200 },
+            vec![jazz_app::Splice {
+                at: 0,
+                delete: 1,
+                insert: vec![9],
+            }],
+        )
+        .await;
+    assert!(page.is_err(), "{page:?}");
+    let unchanged = jazz.get::<Task>(task.id).await.unwrap().unwrap();
+    // In a transaction, with everything it staged.
+    let id = task.id;
+    jazz.transaction(move |tx| async move {
+        tx.json_set(
+            id,
+            tasks::meta(),
+            [("/owner".to_owned(), serde_json::json!("tx"))],
+        )?;
+        tx.splice(
+            id,
+            tasks::attachment(),
+            jazz_app::Page::Bytes { from: 0, to: 8 },
+            vec![jazz_app::Splice {
+                at: 0,
+                delete: 0,
+                insert: vec![1],
+            }],
+        )
+    })
+    .await
+    .unwrap();
+    let edited = jazz.get::<Task>(task.id).await.unwrap().unwrap();
+    assert_eq!(edited.meta.unwrap().0, serde_json::json!({ "owner": "tx" }));
+    assert_eq!(edited.attachment.unwrap()[..2], [1, 0]);
+    assert_eq!(unchanged.attachment, Some(vec![0; 8]));
+    assert_eq!(
+        unchanged.meta.unwrap().0,
+        serde_json::json!({ "owner": "ops" })
+    );
+
+    // Streaming into an existing row, and upserting.
+    let updated = jazz
+        .update_streaming(
+            task.id,
+            bindings::TaskUpdate::default(),
+            tasks::attachment(),
+            chunked(&[7; 5], 2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.attachment, Some(vec![7; 5]));
+    let id = jazz_app::ObjectId::new();
+    let upserted = jazz
+        .upsert_streaming(
+            id,
+            NewTask::new("Upserted", 0, Vec::new()),
+            tasks::attachment(),
+            chunked(&[3; 3], 1),
+        )
+        .await
+        .unwrap();
+    assert_eq!((upserted.id, upserted.attachment), (id, Some(vec![3; 3])));
 }

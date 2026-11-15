@@ -1,16 +1,21 @@
 //! Large values: `bytes`, `string` and `json` cells edited in place, as
-//! TS's `update(…, { applyDiffs })` does, and inserted from a stream, as its
-//! `insertStreaming` does. An edit adds to a chunked cell's bounded edit
-//! tail instead of rewriting it.
+//! TS's `update(…, { applyDiffs })` does, and written from an async stream,
+//! as its `insertStreaming` does. An edit adds to a chunked cell's bounded
+//! edit tail instead of rewriting it.
+//!
+//! Not supported yet: streaming inside a transaction, and edits combined
+//! with whole-column replacements in one update.
 
+use futures_core::Stream;
+use futures_util::StreamExt as _;
 use jazz::db::{JsonSetEdit, LargeValueUpdate};
 pub use jazz::db::{LargeValueUpdatePage as Page, LargeValueUpdateSplice as Splice};
-use jazz::tools::ObjectId;
+use jazz::tools::{ObjectId, StreamingUpload, Value};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::handle::Jazz;
 use crate::query::Column;
-use crate::table::{Insert, Table};
+use crate::table::{Insert, Table, Update};
 use crate::value::{ColumnValue, Json};
 use crate::writes::read_back;
 
@@ -63,7 +68,7 @@ impl Jazz {
     }
 
     async fn apply_edit<T: Table>(&self, id: ObjectId, edit: LargeValueUpdate) -> Result<()> {
-        let settle = self.settler();
+        let settle = self.settler()?;
         self.with_client(move |client| async move {
             let written = client.update_with_edits(T::NAME, id, Vec::new(), vec![edit])?;
             settle.settle(&client, written).await
@@ -71,32 +76,246 @@ impl Jazz {
         .await
     }
 
-    /// Inserts `new` with its bytes column `column` read from `reader`, so a
-    /// large value never has to be in memory at once. Whatever `new` sets
-    /// for `column` is ignored. Not inside transactions.
-    pub async fn insert_streaming<N, V, R>(
+    /// Inserts `new` with its bytes or text column `column` read from
+    /// `chunks`, an async stream, as TS's `insertStreaming` does: the value
+    /// is never held whole. Each chunk is stored as it arrives, between the
+    /// client's other work. `new` must leave `column` unset (`None`, or
+    /// empty for a required column). An error from the stream abandons the
+    /// upload and fails with [`Error::Upload`]. Not inside transactions.
+    pub async fn insert_streaming<N, V, S, B, E>(
         &self,
         new: N,
         column: Column<N::Row, V>,
-        reader: R,
+        chunks: S,
     ) -> Result<N::Row>
     where
         N: Insert,
         V: LargeColumn,
-        R: std::io::Read + Send + 'static,
+        S: Stream<Item = std::result::Result<B, E>>,
+        B: AsRef<[u8]> + Send + 'static,
+        E: std::fmt::Display,
     {
+        let cells = new.into_cells(&self.info.implementations)?;
+        self.stream::<N::Row, _, _, _>(
+            Kind::Insert,
+            None,
+            cells.into_iter().collect(),
+            column.name(),
+            chunks,
+        )
+        .await
+    }
+
+    /// Replaces `column` of the row with this id with `chunks`' bytes, and
+    /// `update`'s other columns, in one row update.
+    pub async fn update_streaming<U, V, S, B, E>(
+        &self,
+        id: ObjectId,
+        update: U,
+        column: Column<U::Row, V>,
+        chunks: S,
+    ) -> Result<U::Row>
+    where
+        U: Update,
+        V: LargeColumn,
+        S: Stream<Item = std::result::Result<B, E>>,
+        B: AsRef<[u8]> + Send + 'static,
+        E: std::fmt::Display,
+    {
+        let cells = update.into_cells(&self.info.implementations)?;
+        self.stream::<U::Row, _, _, _>(Kind::Update, Some(id), cells, column.name(), chunks)
+            .await
+    }
+
+    /// [`Jazz::insert_streaming`] of a row with this id, or
+    /// [`Jazz::update_streaming`] of it when it exists.
+    pub async fn upsert_streaming<N, V, S, B, E>(
+        &self,
+        id: ObjectId,
+        new: N,
+        column: Column<N::Row, V>,
+        chunks: S,
+    ) -> Result<N::Row>
+    where
+        N: Insert,
+        V: LargeColumn,
+        S: Stream<Item = std::result::Result<B, E>>,
+        B: AsRef<[u8]> + Send + 'static,
+        E: std::fmt::Display,
+    {
+        let cells = new.into_cells(&self.info.implementations)?;
+        self.stream::<N::Row, _, _, _>(
+            Kind::Upsert,
+            Some(id),
+            cells.into_iter().collect(),
+            column.name(),
+            chunks,
+        )
+        .await
+    }
+
+    async fn stream<T: Table, S, B, E>(
+        &self,
+        kind: Kind,
+        id: Option<ObjectId>,
+        mut cells: Vec<(String, Value)>,
+        column: &'static str,
+        chunks: S,
+    ) -> Result<T>
+    where
+        S: Stream<Item = std::result::Result<B, E>>,
+        B: AsRef<[u8]> + Send + 'static,
+        E: std::fmt::Display,
+    {
+        // The stream carries the column's value: `new` may only leave it
+        // unset.
+        if let Some(at) = cells.iter().position(|(name, _)| name == column) {
+            match &cells[at].1 {
+                Value::Null => {}
+                Value::Bytea(bytes) if bytes.is_empty() => {}
+                Value::Text(text) if text.is_empty() => {}
+                _ => {
+                    return Err(Error::Config(format!(
+                        "{}.{column} is streamed: leave it unset in the row and pass its value as the stream",
+                        T::NAME
+                    )));
+                }
+            }
+            cells.remove(at);
+        }
+        let settle = self.settler()?;
+        let upload = self
+            .with_client(move |client| async move {
+                let upload =
+                    client.begin_streaming_upload(T::NAME, cells.into_iter().collect(), column)?;
+                Ok(park(upload))
+            })
+            .await?;
+        let mut chunks = std::pin::pin!(chunks);
+        while let Some(chunk) = chunks.next().await {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    let message = error.to_string();
+                    // Releases what the upload stored.
+                    let _ = self
+                        .with_client(move |client| async move {
+                            if let Some(upload) = unpark(upload) {
+                                client.abort_streaming_upload(upload).await?;
+                            }
+                            Ok(())
+                        })
+                        .await;
+                    return Err(Error::Upload(message));
+                }
+            };
+            // One job per chunk: the client's other calls run in between.
+            self.with_client(move |client| async move {
+                let mut parked = unpark(upload).ok_or(Error::Stopped)?;
+                let pushed = client
+                    .push_streaming_upload(&mut parked, chunk.as_ref())
+                    .await;
+                // A failed push closed the upload; it is dropped here.
+                pushed?;
+                repark(upload, parked);
+                Ok(())
+            })
+            .await?;
+        }
         let implementations = self.info.implementations.clone();
-        let settle = self.settler();
-        let name = column.name();
         self.with_client(move |client| async move {
-            let mut cells = new.into_cells(&implementations)?;
-            cells.remove(name);
+            let parked = unpark(upload).ok_or(Error::Stopped)?;
             let (id, written) = client
-                .insert_streaming_value(<N::Row as Table>::NAME, cells, name, reader)
+                .finish_streaming_upload(parked, kind.core(), id)
                 .await?;
             settle.settle(&client, Some(written)).await?;
-            read_back::<N::Row>(&client, id, &implementations).await
+            read_back::<T>(&client, id, &implementations).await
         })
         .await
     }
+}
+
+impl crate::transaction::Transaction {
+    /// [`Jazz::splice`] staged in the transaction.
+    pub fn splice<T: Table, V: LargeColumn>(
+        &self,
+        id: ObjectId,
+        column: Column<T, V>,
+        within: Page,
+        splices: Vec<Splice>,
+    ) -> Result<()> {
+        let edit = LargeValueUpdate::Splice {
+            column: column.name().to_owned(),
+            within,
+            splices,
+        };
+        self.client()
+            .update_with_edits(T::NAME, id, Vec::new(), vec![edit])?;
+        self.wrote();
+        Ok(())
+    }
+
+    /// [`Jazz::json_set`] staged in the transaction.
+    pub fn json_set<T: Table, V: JsonColumn>(
+        &self,
+        id: ObjectId,
+        column: Column<T, V>,
+        edits: impl IntoIterator<Item = (String, serde_json::Value)>,
+    ) -> Result<()> {
+        let edit = LargeValueUpdate::JsonSet {
+            column: column.name().to_owned(),
+            edits: edits
+                .into_iter()
+                .map(|(at, value)| JsonSetEdit { at, value })
+                .collect(),
+        };
+        self.client()
+            .update_with_edits(T::NAME, id, Vec::new(), vec![edit])?;
+        self.wrote();
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Insert,
+    Update,
+    Upsert,
+}
+
+impl Kind {
+    fn core(self) -> jazz::db::StreamingMutationKind {
+        match self {
+            Kind::Insert => jazz::db::StreamingMutationKind::Insert,
+            Kind::Update => jazz::db::StreamingMutationKind::Update,
+            Kind::Upsert => jazz::db::StreamingMutationKind::Upsert,
+        }
+    }
+}
+
+// Uploads in progress live on the client's thread, between the jobs that
+// feed them.
+thread_local! {
+    static UPLOADS: std::cell::RefCell<(u64, std::collections::HashMap<u64, StreamingUpload>)> =
+        Default::default();
+}
+
+fn park(upload: StreamingUpload) -> u64 {
+    UPLOADS.with(|uploads| {
+        let mut uploads = uploads.borrow_mut();
+        uploads.0 += 1;
+        let key = uploads.0;
+        uploads.1.insert(key, upload);
+        key
+    })
+}
+
+fn unpark(key: u64) -> Option<StreamingUpload> {
+    UPLOADS.with(|uploads| uploads.borrow_mut().1.remove(&key))
+}
+
+fn repark(key: u64, upload: StreamingUpload) {
+    UPLOADS.with(|uploads| {
+        uploads.borrow_mut().1.insert(key, upload);
+    });
 }

@@ -31,6 +31,10 @@ pub enum Error {
     #[error("not supported yet: {0}")]
     Unsupported(String),
 
+    /// A streamed value's source failed; the upload was abandoned.
+    #[error("upload: {0}")]
+    Upload(String),
+
     /// The call panicked on the client's thread. The client runs on.
     #[error("the call panicked: {0}")]
     Panicked(String),
