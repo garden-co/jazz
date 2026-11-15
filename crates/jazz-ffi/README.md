@@ -120,6 +120,11 @@ columns (`merge: "text"`) take plain string writes.
   the durability they wait for (`"edge"` is refused). UniFFI: `all_at`,
   `one_at`, `insert_at`, `update_at`, `delete_at`, `subscribe_at`. C ABI:
   `"tier"` in the args, or `{"query", "tier"}` for `jazz_subscribe`.
+- **waitForSync:** UniFFI `wait_for_sync(tier)`, C ABI `waitForSync {tier}`:
+  returns once every write committed so far reaches `tier` (`local` returns
+  at once), and fails if the server refused one. It checks up to the last
+  4096 writes individually; older ones rely on the core wait, which can miss
+  a refusal that is no longer pending until jazz#5728 is fixed.
 - **Contract version:** `"contract": 1 | 2` in the open config (default 1).
   With 2, errors have three more kinds: `permission` (the app's permissions
   refuse it, e.g. a write waiting for global durability), `notSupported`

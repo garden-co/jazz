@@ -1,0 +1,72 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "owners": {
+      "columns": { "name": "string" },
+      "relations": {
+        "things": { "reverse": "things", "relation": "owner" },
+        "coOwned": { "reverse": "things", "relation": "coOwners" }
+      }
+    },
+    "things": {
+      "columns": {
+        "text": "string",
+        "maybeText": "string?",
+        "int": "int",
+        "float": "float",
+        "big": "bigint",
+        "flag": "boolean",
+        "at": "timestamp",
+        "blob": "bytes",
+        "ownerId": "uuid",
+        "reviewerId": "uuid?",
+        "coOwnerIds": { "array": "uuid" },
+        "optionalInt": { "type": "int", "optional": true },
+        "defaultedFloat": { "type": "float", "default": 1.5 },
+        "defaultedNull": { "type": "bigint", "optional": true, "default": null },
+        "counter": { "type": "int", "merge": "counter" },
+        "tags": { "array": "string", "merge": "g-set" },
+        "body": { "type": "string", "merge": "text" },
+        "status": { "enum": ["todo", "done"], "default": "todo" },
+        "maybeStatus": { "enum": ["low", "high"], "optional": true },
+        "event": {
+          "enum": {
+            "created": { "by": "uuid" },
+            "moved": {
+              "to": "int",
+              "note": "string?",
+              "reason": { "type": "string", "default": "none" }
+            }
+          }
+        },
+        "events": {
+          "array": {
+            "enum": { "ping": { "at": "timestamp?" }, "pong": {} }
+          }
+        },
+        "statuses": { "array": { "enum": ["a", "b"] } },
+        "data": { "json": true },
+        "maybeData": { "json": true, "optional": true },
+        "nested": { "array": { "array": "float" } },
+        "shouted": { "type": "string", "transform": "upper" },
+        "maybeShouted": { "type": "string", "optional": true, "transform": "upper" },
+        "stamp": { "type": "timestamp", "transform": "iso" }
+      },
+      "relations": {
+        "owner": { "rel": "owners", "column": "ownerId" },
+        "reviewer": { "rel": "owners", "column": "reviewerId" },
+        "coOwners": { "rel": "owners", "column": "coOwnerIds" }
+      },
+      "computed": {
+        "summary": { "type": "string", "from": ["text", "int"] },
+        "maybeLabel": { "type": { "enum": ["x", "y"] }, "from": ["id", "maybeStatus", "shouted"] },
+        "score": { "type": "float?", "from": ["float"] }
+      }
+    }
+  },
+  "transforms": {
+    "upper": { "stored": "string", "view": "string" },
+    "iso": { "stored": "timestamp", "view": "string" }
+  }
+}
