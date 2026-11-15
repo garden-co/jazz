@@ -82,6 +82,8 @@ public struct Config: Sendable {
     public var backendSecret: String?
     public var adminSecret: String?
     public var session: Session?
+    /// An end user signing in through the app's Jazz endpoint (`serverUrl`).
+    public var auth: Auth?
 
     public init(
         storage: Storage = .memory, appId: String? = nil, serverUrl: String? = nil,
@@ -98,11 +100,22 @@ public struct Config: Sendable {
         self.session = session
     }
 
-    /// A client of the server at `serverUrl`.
+    /// An end user's client: it syncs through the app's Jazz endpoint
+    /// (`serverUrl`, its backend's handler, never the core) as `auth` says.
     public static func client(
-        appId: String, serverUrl: String, storage: Storage = .memory, dataDir: String? = nil
+        appId: String, serverUrl: String, auth: Auth, storage: Storage = .persistent,
+        dataDir: String? = nil
     ) -> Config {
-        Config(storage: storage, appId: appId, serverUrl: serverUrl, dataDir: dataDir)
+        var config = Config(storage: storage, appId: appId, serverUrl: serverUrl, dataDir: dataDir)
+        config.auth = auth
+        return config
+    }
+
+    /// A local-only client: no server.
+    public static func local(appId: String? = nil, storage: Storage = .memory, dataDir: String? = nil)
+        -> Config
+    {
+        Config(storage: storage, appId: appId, dataDir: dataDir)
     }
 
     /// A backend with its `jazz.permissions.json`, acting for `user`.
@@ -129,6 +142,11 @@ public struct Config: Sendable {
         object["dataDir"] = dataDir.map(JSONValue.string)
         object["backendSecret"] = backendSecret.map(JSONValue.string)
         object["adminSecret"] = adminSecret.map(JSONValue.string)
+        switch auth {
+        case .deviceKey(let key)?: object["auth"] = .object(["deviceKey": .string(key)])
+        case .bearer?: object["auth"] = .object(["bearer": .bool(true)])
+        case nil: break
+        }
         if let session {
             object["session"] = .object([
                 "issuer": .string(session.issuer), "subject": .string(session.subject),
@@ -181,7 +199,13 @@ public final class Client: Sendable {
         async throws -> Client
     {
         let json = try config.json(app: app)
-        let handle = try await run { try JazzHandle.open(configJson: json) }
+        let handle: JazzHandle
+        if case .bearer(let tokens)? = config.auth {
+            let provider = Tokens(tokens)
+            handle = try await run { try JazzHandle.openWithTokens(configJson: json, tokens: provider) }
+        } else {
+            handle = try await run { try JazzHandle.open(configJson: json) }
+        }
         return Client(handle: handle, implementations: implementations)
     }
 

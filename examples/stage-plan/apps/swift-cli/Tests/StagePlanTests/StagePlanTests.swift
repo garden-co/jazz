@@ -214,4 +214,30 @@ final class StagePlanTests: XCTestCase {
         try await stranger.jazz.close()
         try await chief.jazz.close()
     }
+
+    func testUpsertRestoreBundleAndSyncStatus() async throws {
+        let server = try await TestServer()
+        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let show = try await app.show(named: "Upsert")
+        let id = UUID().uuidString.lowercased()
+        let first = try await app.jazz.upsert(id, JazzApp.NewTask(showId: show.id, title: "One", status: .todo, rank: 1))
+        XCTAssertEqual(first.id, id)
+        let second = try await app.jazz.upsert(id, JazzApp.NewTask(showId: show.id, title: "Two", status: .doing, rank: 1))
+        XCTAssertEqual(second.title, "Two")
+        try await app.jazz.delete(second)
+        let gone = try await app.tasks(of: show)
+        XCTAssertEqual(gone.count, 0)
+        let back = try await app.jazz.restore(JazzApp.Task.self, id: id)
+        XCTAssertEqual(back.title, "Two")
+
+        let bundle = try await app.jazz.bundle()
+        XCTAssertNotNil(bundle)
+        try await app.jazz.waitForSync(.global)
+        let status = try await app.jazz.syncStatus()
+        XCTAssertFalse(status.link.isEmpty)
+        let session = try await app.jazz.sessionState()
+        XCTAssertNil(session, "a backend has no end-user session")
+        XCTAssertTrue(try Jazz.generateDeviceKey().hasPrefix("jazz-auth-v1:"))
+        try await app.jazz.close()
+    }
 }

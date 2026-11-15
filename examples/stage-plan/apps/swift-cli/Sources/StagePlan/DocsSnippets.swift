@@ -20,17 +20,36 @@ public enum DocsSnippets {
         return jazz
     }
 
-    public static func openClient() async throws -> Jazz.Client {
+    public static func openClient(endpoint: String, appId: String, deviceKey: String?) async throws
+        -> Jazz.Client
+    {
         // #region context-setup-swift-client
+        // An end user's client syncs through your app's Jazz endpoint (its
+        // backend's handler). Sign in with a device account, whose key you
+        // keep in the keychain, or with your own sign-in's bearer token.
+        let auth: Jazz.Auth =
+            if let deviceKey {
+                .deviceKey(deviceKey)  // from Jazz.generateDeviceKey()
+            } else {
+                .bearer { _ in try await MySignIn.currentToken() }
+            }
         let jazz = try await JazzApp.open(
-            .client(
-                appId: "<your app id>",
-                serverUrl: "https://<your sync server>",
-                storage: .persistent,
-                dataDir: FileManager.default.temporaryDirectory.path
-            ))
+            .client(appId: appId, serverUrl: endpoint, auth: auth, storage: .memory))
+        for try await state in jazz.session {
+            if case .signedIn(let user) = state {
+                print("signed in as", user.account)
+                break
+            }
+        }
         // #endregion context-setup-swift-client
         return jazz
+    }
+
+    /// The app's own sign-in, in the docs snippet: the relay used in tests
+    /// accepts `token-<user>`.
+    public enum MySignIn {
+        public nonisolated(unsafe) static var user = "alice"
+        public static func currentToken() async throws -> String? { "token-\(user)" }
     }
 
     public static func oneShot(_ jazz: Jazz.Client, show: JazzApp.Show) async throws
