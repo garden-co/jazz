@@ -12,7 +12,7 @@ import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { shippedMigrations } from "../runtime/client-migrations.js";
 import { deployApp } from "./catalogue.js";
-import { enginePermissions, type PermissionsFile } from "./codegen-napi.js";
+import { enginePermissions, isPermissionsFile, type PermissionsFile } from "./codegen-napi.js";
 
 export { deploy, type DeployOptions } from "./catalogue.js";
 
@@ -117,6 +117,11 @@ export async function startLocalJazzServer(
   // its lenses.
   const shipsMigrations =
     declared !== undefined && (shippedMigrations(declared.schema)?.migrations.length ?? 0) > 0;
+  if (shipsMigrations && !isPermissionsFile(options.permissions)) {
+    throw new Error(
+      "startLocalJazzServer: an app that ships migrations is published as createJazz publishes it, which takes the app's jazz.permissions.json, not compiled policies.",
+    );
+  }
   if (shipsMigrations && options.trustedWorkload !== undefined) {
     throw new Error(
       "startLocalJazzServer: an app that ships migrations is not supported with trustedWorkload yet; start without schema and deploy the app with its admin secret.",
@@ -178,7 +183,7 @@ export async function startLocalJazzServer(
         serverUrl: server.url,
         adminSecret: server.adminSecret,
         app: declared.source,
-        permissions: declared.permissions,
+        permissions: options.permissions as PermissionsFile,
       });
     } catch (error) {
       await server.stop().catch(() => undefined);

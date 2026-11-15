@@ -4,74 +4,74 @@ import { bindApp, type AppTypes } from "jazz-tools";
 
 export type StopStatus = "confirmed" | "tentative" | "cancelled";
 
-export interface BandInvite {
+export type BandInvite = {
   readonly id: string;
   bandId: string;
   code: string;
-}
+};
 
-export interface BandInviteInsert {
+export type BandInviteInsert = {
   bandId: string;
   code: string;
-}
+};
 
-export interface Band {
+export type Band = {
   readonly id: string;
   name: string;
   ownerId: string;
-}
+};
 
-export interface BandInsert {
+export type BandInsert = {
   name: string;
   ownerId: string;
-}
+};
 
-export interface Member {
+export type Member = {
   readonly id: string;
   bandId: string;
   userId: string;
   name: string;
   inviteCode: string | null;
-}
+};
 
-export interface MemberInsert {
+export type MemberInsert = {
   bandId: string;
   userId: string;
   name: string;
   inviteCode?: string | null;
-}
+};
 
-export interface StopNote {
+export type StopNote = {
   readonly id: string;
   stopId: string;
   bandId: string;
   body: string;
-}
+};
 
-export interface StopNoteInsert {
+export type StopNoteInsert = {
   stopId: string;
   bandId: string;
   body: string;
-}
+};
 
-export interface Stop {
+export type Stop = {
   readonly id: string;
   bandId: string;
   venueId: string;
   date: Date;
   status: StopStatus;
   publicDescription: string;
-}
+};
 
-export interface StopInsert {
+export type StopInsert = {
   bandId: string;
   venueId: string;
   date: Date;
   status: StopStatus;
   publicDescription: string;
-}
+};
 
-export interface Venue {
+export type Venue = {
   readonly id: string;
   name: string;
   city: string;
@@ -81,9 +81,9 @@ export interface Venue {
   capacity: number | null;
   ownerId: string;
   bandId: string | null;
-}
+};
 
-export interface VenueInsert {
+export type VenueInsert = {
   name: string;
   city: string;
   country: string;
@@ -92,7 +92,7 @@ export interface VenueInsert {
   capacity?: number | null;
   ownerId: string;
   bandId?: string | null;
-}
+};
 
 interface Types extends AppTypes {
   bandInvites: {

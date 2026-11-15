@@ -2,40 +2,40 @@
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface ProjectMember {
+export type ProjectMember = {
   readonly id: string;
   projectId: string;
   user_id: string;
-}
+};
 
-export interface ProjectMemberInsert {
+export type ProjectMemberInsert = {
   projectId: string;
   user_id: string;
-}
+};
 
-export interface Project {
+export type Project = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface ProjectInsert {
+export type ProjectInsert = {
   name: string;
-}
+};
 
-export interface Task {
+export type Task = {
   readonly id: string;
   title: string;
   done: boolean;
   assignee_id: string | null;
   projectId: string;
-}
+};
 
-export interface TaskInsert {
+export type TaskInsert = {
   title: string;
   done: boolean;
   assignee_id?: string | null;
   projectId: string;
-}
+};
 
 interface Types extends AppTypes {
   projectMembers: {

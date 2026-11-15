@@ -39,10 +39,10 @@ import {
 } from "../runtime/native-runtime/http-stream-socket.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import { checkRunningBindings } from "../dev/app-files.js";
-import { loadBackendApp } from "../dev/codegen-napi.js";
+import { loadBackendApp, type LoadedBackendApp } from "../dev/codegen-napi.js";
 import { boundApp } from "../typed-app.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
-import { deployApp } from "../dev/catalogue.js";
+import { publishLoadedDeployment } from "../dev/catalogue.js";
 import { DeploymentError } from "../dev/catalogue-api.js";
 import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
@@ -1091,22 +1091,23 @@ async function applyBundle(
   options: {
     appId: string;
     adminSecret: string;
-    app: BackendSchemaInput;
-    permissions: CompiledPermissionsMap;
+    /** What the Rust loader built from the app's bindings and jazz.permissions.json. */
+    loaded: LoadedBackendApp;
     allowDroppingHistory?: boolean;
   },
 ): Promise<string> {
   // Published, never activated: this backend's sessions are pinned to its
   // bundle, so deployments of the app serve side by side and a rollback is
   // publishing the older bundle again.
-  const deployed = await deployApp({
-    appId: options.appId,
-    serverUrl: origin,
-    adminSecret: options.adminSecret,
-    app: options.app,
-    permissions: options.permissions,
-    allowDroppingHistory: options.allowDroppingHistory,
-  }).catch((error: unknown) => {
+  const deployed = await publishLoadedDeployment(
+    {
+      appId: options.appId,
+      serverUrl: origin,
+      adminSecret: options.adminSecret,
+      allowDroppingHistory: options.allowDroppingHistory,
+    },
+    options.loaded,
+  ).catch((error: unknown) => {
     // A core without `/bundles` predates per-deployment permissions; it
     // must not be handed a deployment it would activate for every backend.
     if (error instanceof DeploymentError && (error.status === 404 || error.status === 405)) {
@@ -1600,10 +1601,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
 
   /** Publish `next`'s bundle: what it is pinned by. Publishing one already published changes nothing. */
   const publish = async (next: CreateJazzOptions) => {
-    const compiled = await compiledPermissions(next);
+    await compiledPermissions(next);
     return applyBundle(core.serverUrl, {
       ...next,
-      permissions: compiled,
+      loaded: compiled.get(next)!,
       appId,
       adminSecret: core.adminSecret,
     });
@@ -3661,14 +3662,14 @@ export function createTestJazz(options: CreateJazzOptions): Jazz {
 /** The options of `createTestJazz` calls, which skip {@link checkRunningBindings}. */
 const testHarnessOptions = new WeakSet<CreateJazzOptions>();
 
-/** What the Rust loader made of each options' permissions file, once checked. */
-const compiled = new WeakMap<CreateJazzOptions, CompiledPermissionsMap>();
+/** What the Rust loader made of each options' bindings and permissions file, once checked. */
+const compiled = new WeakMap<CreateJazzOptions, LoadedBackendApp>();
 
 /** The checked permissions of options {@link compiledPermissions} has loaded. */
 function compiledPermissionsOf(options: CreateJazzOptions): CompiledPermissionsMap {
   const loaded = compiled.get(options);
   if (!loaded) throw new Error("createJazz: the app's permissions are not loaded yet");
-  return loaded;
+  return loaded.permissions;
 }
 
 /**
@@ -3681,7 +3682,7 @@ function compiledPermissionsOf(options: CreateJazzOptions): CompiledPermissionsM
  */
 async function compiledPermissions(options: CreateJazzOptions): Promise<CompiledPermissionsMap> {
   const cached = compiled.get(options);
-  if (cached) return cached;
+  if (cached) return cached.permissions;
   const bound = boundAppOf(options.app);
   if (!testHarnessOptions.has(options)) await checkRunningBindings(bound.source);
   const permissions = options.permissions as unknown;
@@ -3698,7 +3699,7 @@ async function compiledPermissions(options: CreateJazzOptions): Promise<Compiled
     throw new Error(`createJazz: ${message}`, { cause: error });
   }
   for (const warning of loaded.warnings) console.warn(`jazz: ${warning}`);
-  compiled.set(options, loaded.permissions);
+  compiled.set(options, loaded);
   return loaded.permissions;
 }
 
@@ -3712,8 +3713,12 @@ function boundAppOf(app: BackendSchemaInput) {
   try {
     schema = resolveSchemaSource(app);
   } catch (error) {
+    // A CommonJS-wrapped bindings module says so itself, with its fix.
+    const message = error instanceof Error ? error.message : "";
     throw new Error(
-      'createJazz: `app` must be the app that jazz.generated.ts exports (`import { app } from "./jazz.generated"`).',
+      message.includes("arrived as { default: … }")
+        ? `createJazz: ${message}`
+        : 'createJazz: `app` must be the app that jazz.generated.ts exports (`import { app } from "./jazz.generated"`).',
       { cause: error },
     );
   }

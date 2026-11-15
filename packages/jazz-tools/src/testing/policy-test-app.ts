@@ -302,7 +302,7 @@ export async function createPolicyTestApp(
     serverUrl: server.url,
     adminSecret,
     app,
-    permissions,
+    permissions: permissionsFile as never,
   });
 
   const jazzContext = createJazzContext({

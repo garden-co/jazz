@@ -253,39 +253,52 @@ describe("cli migrations", () => {
     );
   });
 
-  // QUESTION: the TS diff wrote no migration for a schema change that needs
-  // no row transformation (a default added, columns reordered, a merge
-  // strategy changed). The Rust diff (crates/jazz-codegen/src/migrations.rs)
-  // records a version and a migration whose table step is a
-  // "TODO: no migration step was inferred … replace this with {}". Should
-  // `migrations create` still skip these, or is the TODO the intended
-  // behaviour now (each is a new schema hash that needs a lens)?
-  it.skip.each([
+  // A change that needs no row transformation (a default added, columns
+  // reordered, a merge strategy changed) is still a new schema version, so it
+  // gets a migration: the table's step is only a comment saying rows pass
+  // unchanged, with nothing left to resolve.
+  it.each([
     {
       change: "a default added",
+      table: "todos",
       from: { todos: { columns: { title: "string", done: "boolean" } } },
       to: { todos: { columns: { title: "string", done: { type: "boolean", default: false } } } },
     },
     {
       change: "reordered columns",
+      table: "todos",
       from: ROOT_TABLES,
       to: { ...ROOT_TABLES, todos: { columns: { ownerId: "string", title: "string" } } },
     },
     {
       change: "a merge-strategy-only change",
+      table: "counters",
       from: { counters: { columns: { value: "int" } } },
       to: { counters: { columns: { value: { type: "int", merge: "counter" } } } },
     },
-  ] as Array<{ change: string; from: Tables; to: Tables }>)(
-    "needs no reviewed migration for $change, which requires no row transformations",
-    async ({ from, to }) => {
+  ] as Array<{ change: string; table: string; from: Tables; to: Tables }>)(
+    "records $change as a migration whose rows pass unchanged, with no TODO",
+    async ({ table, from, to }) => {
       const root = await project(from);
       await writeTables(root, to);
-      const { result } = await captureConsoleLogs(() =>
+      const { logs } = await captureConsoleLogs(() =>
         createMigration({ schemaDir: root, name: "no-transform" }),
       );
-      expect(result).toBeNull();
-      expect((await readApp(root)).migrations).toBeUndefined();
+      expect(logs.join("\n")).not.toMatch(/TODO/);
+      const app = await readApp(root);
+      const [version] = Object.keys(app.history ?? {});
+      expect(app.migrations).toEqual([
+        {
+          name: "no-transform",
+          from: version,
+          migrate: {
+            [table]: {
+              $comment: expect.stringMatching(/^Rows pass unchanged: only .+ changed\.$/),
+            },
+          },
+        },
+      ]);
+      await expect(generate({ schemaDir: root, check: true })).resolves.toBeUndefined();
     },
   );
 

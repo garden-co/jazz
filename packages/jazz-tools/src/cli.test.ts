@@ -186,24 +186,7 @@ describe("resolveEnvVar", () => {
 });
 
 describe("cli generate", () => {
-  // QUESTION: the TS loader warned about (and --strict-provenance refused) a
-  // column named like a built-in provenance column (`createdAt` → `$createdAt`),
-  // with `s.allowExternalProvenanceName(...)` to opt out. --strict-provenance now
-  // throws as removed and says jazz.app.json's loader "always refuses" such
-  // columns, but `generate` accepts `createdAt: "timestamp"` without a warning
-  // or an error, and the format has no opt-out marker. Which is intended?
-  it.skip("warns with an exact Jazz provenance replacement", async () => {
-    const { root } = await createWorkspace();
-    await writeAppFiles(
-      root,
-      { format: 1, tables: { todos: { columns: { title: "string", createdAt: "timestamp" } } } },
-      emptyPermissions(),
-    );
-    const { logs } = await captureConsoleLogs(() => generate({ schemaDir: root }));
-    expect(logs.filter((line) => line.includes("built-in $createdAt"))).toHaveLength(1);
-  });
-
-  it("validates root jazz.app.json, writing only jazz.generated.ts", async () => {
+  it("checks root jazz.app.json, writing only jazz.generated.ts", async () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root, todosApp(), emptyPermissions());
 
@@ -265,7 +248,7 @@ describe("cli generate", () => {
     );
   });
 
-  it("validates root jazz.app.json and jazz.permissions.json", async () => {
+  it("checks root jazz.app.json and jazz.permissions.json", async () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root);
 
@@ -274,7 +257,7 @@ describe("cli generate", () => {
     expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
     expect(await fileExists(join(root, "permissions.test.ts"))).toBe(false);
     expect(logs.join("\n")).toMatch(
-      /Validated jazz\.app\.json and jazz\.permissions\.json; wrote .*jazz\.generated\.ts\. Commit it\./,
+      /Checked jazz\.app\.json and jazz\.permissions\.json; wrote .*jazz\.generated\.ts\. Commit it\./,
     );
   });
 
@@ -289,35 +272,6 @@ describe("cli generate", () => {
     expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(false);
   });
 
-  // QUESTION: generate warned per table with no policies, and per missing
-  // operation ("has no insert policy in permissions.ts …, declare
-  // `policy.todos.allowInsert.never()` to silence it"). jazz-napi's loader
-  // gives no warning for an absent table or operation (absent is denied, and
-  // the format has no "never" to declare it explicitly); only deploy warns,
-  // per table with no policies at all. Should generate keep these warnings?
-  it.skip("reports each denied table when jazz.permissions.json grants nothing", async () => {
-    const { root } = await createWorkspace();
-    await writeAppFiles(root, todosApp(), emptyPermissions());
-
-    const { logs } = await captureConsoleLogs(() => generate({ schemaDir: root }));
-
-    const warnings = logs.filter((line) =>
-      line.includes("has no policies in jazz.permissions.json"),
-    );
-    expect(warnings).toHaveLength(2);
-  });
-
-  // QUESTION: see "reports each denied table": no per-operation warnings any more.
-  it.skip("warns only for missing operations in partial permissions", async () => {
-    const { root } = await createWorkspace();
-    await writeAppFiles(root, booleanTodoApp, { format: 1, tables: { todos: { read: "true" } } });
-
-    const { logs } = await captureConsoleLogs(() => generate({ schemaDir: root }));
-
-    const warnings = logs.filter((line) => line.includes('table "todos"'));
-    expect(warnings).toHaveLength(3);
-  });
-
   it("treats true and false as explicit policies", async () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root, booleanTodoApp, {
@@ -328,25 +282,6 @@ describe("cli generate", () => {
     const { logs } = await captureConsoleLogs(() => generate({ schemaDir: root }));
 
     expect(logs.filter((line) => line.includes('table "todos"'))).toEqual([]);
-  });
-
-  // QUESTION: see "reports each denied table": no per-operation warnings any more.
-  it.skip("still warns when delete is omitted but update is explicit", async () => {
-    const { root } = await createWorkspace();
-    const owner = "ownerId = session.identity.subject";
-    await writeAppFiles(
-      root,
-      { format: 1, tables: { todos: { columns: { title: "string", ownerId: "string" } } } },
-      {
-        format: 1,
-        tables: { todos: { read: owner, insert: owner, update: { old: owner, new: owner } } },
-      },
-    );
-
-    const { logs } = await captureConsoleLogs(() => generate({ schemaDir: root }));
-
-    const warnings = logs.filter((line) => line.includes("policy in jazz.permissions.json"));
-    expect(warnings).toHaveLength(1);
   });
 
   it("fails when jazz.permissions.json is missing", async () => {

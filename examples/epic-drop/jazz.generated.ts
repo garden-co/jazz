@@ -5,7 +5,7 @@ import { bindApp, type AppTypes } from "jazz-tools";
 export type FolderInviteRole = "viewer" | "editor";
 export type FolderMemberRole = "viewer" | "editor";
 
-export interface File {
+export type File = {
   readonly id: string;
   folder_id: string;
   name: string;
@@ -13,68 +13,68 @@ export interface File {
   size_bytes: number;
   owner_id: string;
   contents: Uint8Array;
-}
+};
 
-export interface FileInsert {
+export type FileInsert = {
   folder_id: string;
   name: string;
   content_type: string;
   size_bytes: number;
   owner_id: string;
   contents: Uint8Array;
-}
+};
 
-export interface FolderInvite {
+export type FolderInvite = {
   readonly id: string;
   folder_id: string;
   code: string;
   role: FolderInviteRole;
-}
+};
 
-export interface FolderInviteInsert {
+export type FolderInviteInsert = {
   folder_id: string;
   code: string;
   role: FolderInviteRole;
-}
+};
 
-export interface FolderMember {
+export type FolderMember = {
   readonly id: string;
   folder_id: string;
   user_id: string;
   role: FolderMemberRole;
   invite_code: string;
   folder_owner_id: string;
-}
+};
 
-export interface FolderMemberInsert {
+export type FolderMemberInsert = {
   folder_id: string;
   user_id: string;
   role: FolderMemberRole;
   invite_code: string;
   folder_owner_id: string;
-}
+};
 
-export interface Folder {
+export type Folder = {
   readonly id: string;
   name: string;
   owner_id: string;
   parent_id: string | null;
-}
+};
 
-export interface FolderInsert {
+export type FolderInsert = {
   name: string;
   owner_id: string;
   parent_id?: string | null;
-}
+};
 
-export interface Profile {
+export type Profile = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface ProfileInsert {
+export type ProfileInsert = {
   name: string;
-}
+};
 
 interface Types extends AppTypes {
   files: {

@@ -6,106 +6,106 @@ export type ActivityKind = "created" | "moved" | "assigned" | "renamed" | "comme
 export type ShowCrewRole = "chief" | "crew";
 export type TaskStatus = "todo" | "doing" | "done" | "blocked";
 
-export interface Activity {
+export type Activity = {
   readonly id: string;
   showId: string;
   taskId: string;
   actorId: string;
   kind: ActivityKind;
   detail: string | null;
-}
+};
 
-export interface ActivityInsert {
+export type ActivityInsert = {
   showId: string;
   taskId: string;
   actorId: string;
   kind: ActivityKind;
   detail?: string | null;
-}
+};
 
-export interface ChecklistItem {
+export type ChecklistItem = {
   readonly id: string;
   title: string;
   done: boolean;
   ownerAccount: string;
-}
+};
 
-export interface ChecklistItemInsert {
+export type ChecklistItemInsert = {
   title: string;
   done: boolean;
   ownerAccount: string;
-}
+};
 
-export interface Comment {
+export type Comment = {
   readonly id: string;
   taskId: string;
   authorId: string;
   body: string;
-}
+};
 
-export interface CommentInsert {
+export type CommentInsert = {
   taskId: string;
   authorId: string;
   body: string;
-}
+};
 
-export interface Crew {
+export type Crew = {
   readonly id: string;
   account: string;
   name: string;
-}
+};
 
-export interface CrewInsert {
+export type CrewInsert = {
   account: string;
   name: string;
-}
+};
 
-export interface ShowCrew {
+export type ShowCrew = {
   readonly id: string;
   showId: string;
   crewId: string;
   account: string;
   role: ShowCrewRole;
   inviteCode: string | null;
-}
+};
 
-export interface ShowCrewInsert {
+export type ShowCrewInsert = {
   showId: string;
   crewId: string;
   account: string;
   role: ShowCrewRole;
   inviteCode?: string | null;
-}
+};
 
-export interface ShowInvite {
+export type ShowInvite = {
   readonly id: string;
   showId: string;
   code: string;
-}
+};
 
-export interface ShowInviteInsert {
+export type ShowInviteInsert = {
   showId: string;
   code: string;
-}
+};
 
-export interface Show {
+export type Show = {
   readonly id: string;
   name: string;
   venue: string;
   date: string;
   doors: string;
   chiefAccount: string;
-}
+};
 
-export interface ShowInsert {
+export type ShowInsert = {
   name: string;
   venue: string;
   date: string;
   doors: string;
   chiefAccount: string;
-}
+};
 
-export interface Task {
+export type Task = {
   readonly id: string;
   showId: string;
   title: string;
@@ -113,16 +113,16 @@ export interface Task {
   assigneeId: string | null;
   notes: string | null;
   rank: number;
-}
+};
 
-export interface TaskInsert {
+export type TaskInsert = {
   showId: string;
   title: string;
   status: TaskStatus;
   assigneeId?: string | null;
   notes?: string | null;
   rank: number;
-}
+};
 
 interface Types extends AppTypes {
   activity: {

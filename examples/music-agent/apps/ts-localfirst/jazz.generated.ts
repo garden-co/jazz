@@ -4,65 +4,65 @@ import { bindApp, type AppTypes } from "jazz-tools";
 
 export type TurnRole = "user" | "assistant" | "tool";
 
-export interface Attachment {
+export type Attachment = {
   readonly id: string;
   turn_id: string;
   filename: string;
   media_type: string;
   payload: Uint8Array;
   byte_length: number;
-}
+};
 
-export interface AttachmentInsert {
+export type AttachmentInsert = {
   turn_id: string;
   filename: string;
   media_type: string;
   payload: Uint8Array;
   byte_length: number;
-}
+};
 
-export interface Conversation {
+export type Conversation = {
   readonly id: string;
   title: string;
   created_at: Date;
-}
+};
 
-export interface ConversationInsert {
+export type ConversationInsert = {
   title: string;
   created_at: Date;
-}
+};
 
-export interface ToolCall {
+export type ToolCall = {
   readonly id: string;
   turn_id: string;
   name: string;
   arguments_json: string;
   result_json: string;
-}
+};
 
-export interface ToolCallInsert {
+export type ToolCallInsert = {
   turn_id: string;
   name: string;
   arguments_json: string;
   result_json: string;
-}
+};
 
-export interface Turn {
+export type Turn = {
   readonly id: string;
   conversation_id: string;
   role: TurnRole;
   ordinal: number;
   body: string;
   created_at: Date;
-}
+};
 
-export interface TurnInsert {
+export type TurnInsert = {
   conversation_id: string;
   role: TurnRole;
   ordinal: number;
   body: string;
   created_at: Date;
-}
+};
 
 interface Types extends AppTypes {
   attachments: {

@@ -1,3 +1,4 @@
+import { commonJsWrapperError } from "../module-interop.js";
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
@@ -1741,27 +1742,32 @@ describe("createJazz", () => {
 
   // An Expo app is a CommonJS package: an ESM backend importing its
   // permissions.ts by default gets the whole module.exports, `{ default }`.
-  // QUESTION: permissions are now jazz.permissions.json, imported as JSON (a
-  // CommonJS require of JSON gives the object itself, no `{ default }`). A
-  // wrapped object is now refused with "`permissions` must be the app's
-  // jazz.permissions.json, imported as JSON", not the "permissions.ts arrived
-  // as { default: … }" message this asserts. Keep (asserting the new message),
-  // or delete?
-  it.skip("names a permissions module imported as CommonJS, not an unknown table `default`", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jazz-cjs-permissions-"));
+  it("names a generated app module imported as CommonJS, not an unknown table `default`", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-cjs-app-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
-    const key = "jazz-tools.test.create-jazz.cjs-permissions";
-    (globalThis as Record<symbol, unknown>)[Symbol.for(key)] = permissions;
-    const file = join(dir, "permissions.js");
+    const key = "jazz-tools.test.create-jazz.cjs-app";
+    (globalThis as Record<symbol, unknown>)[Symbol.for(key)] = app;
+    const file = join(dir, "jazz.generated.js");
     await writeFile(
       file,
       `"use strict";\nObject.defineProperty(exports, "__esModule", { value: true });\nexports.default = globalThis[Symbol.for(${JSON.stringify(key)})];\n`,
     );
-    const wrapped = createRequire(file)(file) as typeof permissions;
-    const jazz = createJazz({ app, permissions: wrapped, store: memory() });
-    cleanups.push(() => jazz.close());
-    await expect(jazz.ready()).rejects.toThrow(
-      /^permissions\.ts arrived as \{ default: … \}.*\{"type": "module"\}/,
+    const wrapped = createRequire(file)(file) as typeof app;
+    const open = async () => {
+      const jazz = createJazz({ app: wrapped, permissions, store: memory() });
+      cleanups.push(() => jazz.close());
+      await jazz.ready();
+    };
+    const error = await open().then(
+      () => undefined,
+      (e: unknown) => e as Error,
+    );
+    expect(error?.message).toMatch(
+      /^createJazz: `app` must be the app that jazz\.generated\.ts exports/,
+    );
+    // The cause names the CommonJS wrapper, not an unknown table `default`.
+    expect((error?.cause as Error | undefined)?.message).toBe(
+      commonJsWrapperError("jazz.generated.ts").message,
     );
   }, 30_000);
 

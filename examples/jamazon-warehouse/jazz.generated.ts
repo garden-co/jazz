@@ -2,7 +2,7 @@
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface BetterAuthAccount {
+export type BetterAuthAccount = {
   readonly id: string;
   accountId: string;
   providerId: string;
@@ -10,18 +10,18 @@ export interface BetterAuthAccount {
   password: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthAccountInsert {
+export type BetterAuthAccountInsert = {
   accountId: string;
   providerId: string;
   userId: string;
   password?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthJwk {
+export type BetterAuthJwk = {
   readonly id: string;
   publicKey: string;
   privateKey: string;
@@ -29,18 +29,18 @@ export interface BetterAuthJwk {
   expiresAt: Date | null;
   alg: string | null;
   crv: string | null;
-}
+};
 
-export interface BetterAuthJwkInsert {
+export type BetterAuthJwkInsert = {
   publicKey: string;
   privateKey: string;
   createdAt: Date;
   expiresAt?: Date | null;
   alg?: string | null;
   crv?: string | null;
-}
+};
 
-export interface BetterAuthSession {
+export type BetterAuthSession = {
   readonly id: string;
   expiresAt: Date;
   token: string;
@@ -49,9 +49,9 @@ export interface BetterAuthSession {
   ipAddress: string | null;
   userAgent: string | null;
   userId: string;
-}
+};
 
-export interface BetterAuthSessionInsert {
+export type BetterAuthSessionInsert = {
   expiresAt: Date;
   token: string;
   createdAt: Date;
@@ -59,9 +59,9 @@ export interface BetterAuthSessionInsert {
   ipAddress?: string | null;
   userAgent?: string | null;
   userId: string;
-}
+};
 
-export interface BetterAuthUser {
+export type BetterAuthUser = {
   readonly id: string;
   name: string;
   email: string;
@@ -69,93 +69,93 @@ export interface BetterAuthUser {
   image: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthUserInsert {
+export type BetterAuthUserInsert = {
   name: string;
   email: string;
   emailVerified: boolean;
   image?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerification {
+export type BetterAuthVerification = {
   readonly id: string;
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerificationInsert {
+export type BetterAuthVerificationInsert = {
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface Customer {
+export type Customer = {
   readonly id: string;
   warehouse_id: string;
   district_id: string;
   name: string;
   balance_cents: number;
-}
+};
 
-export interface CustomerInsert {
+export type CustomerInsert = {
   warehouse_id: string;
   district_id: string;
   name: string;
   balance_cents: number;
-}
+};
 
-export interface Delivery {
+export type Delivery = {
   readonly id: string;
   warehouse_id: string;
   district_id: string;
   order_id: string;
   status: string;
-}
+};
 
-export interface DeliveryInsert {
+export type DeliveryInsert = {
   warehouse_id: string;
   district_id: string;
   order_id: string;
   status: string;
-}
+};
 
-export interface District {
+export type District = {
   readonly id: string;
   warehouse_id: string;
   name: string;
   next_order_number: number;
-}
+};
 
-export interface DistrictInsert {
+export type DistrictInsert = {
   warehouse_id: string;
   name: string;
   next_order_number: number;
-}
+};
 
-export interface Item {
+export type Item = {
   readonly id: string;
   sku: string;
   name: string;
   unit_price_cents: number;
   operator_id: string;
-}
+};
 
-export interface ItemInsert {
+export type ItemInsert = {
   sku: string;
   name: string;
   unit_price_cents: number;
   operator_id: string;
-}
+};
 
-export interface OrderLine {
+export type OrderLine = {
   readonly id: string;
   warehouse_id: string;
   order_id: string;
@@ -163,18 +163,18 @@ export interface OrderLine {
   item_id: string;
   quantity: number;
   amount_cents: number;
-}
+};
 
-export interface OrderLineInsert {
+export type OrderLineInsert = {
   warehouse_id: string;
   order_id: string;
   line_number: number;
   item_id: string;
   quantity: number;
   amount_cents: number;
-}
+};
 
-export interface Order {
+export type Order = {
   readonly id: string;
   warehouse_id: string;
   district_id: string;
@@ -184,9 +184,9 @@ export interface Order {
   total_cents: number;
   idempotency_key: string;
   reserved_lines: string | null;
-}
+};
 
-export interface OrderInsert {
+export type OrderInsert = {
   warehouse_id: string;
   district_id: string;
   customer_id: string;
@@ -195,65 +195,65 @@ export interface OrderInsert {
   total_cents: number;
   idempotency_key: string;
   reserved_lines?: string | null;
-}
+};
 
-export interface Payment {
+export type Payment = {
   readonly id: string;
   warehouse_id: string;
   customer_id: string;
   order_id: string | null;
   amount_cents: number;
   idempotency_key: string;
-}
+};
 
-export interface PaymentInsert {
+export type PaymentInsert = {
   warehouse_id: string;
   customer_id: string;
   order_id?: string | null;
   amount_cents: number;
   idempotency_key: string;
-}
+};
 
-export interface Stock {
+export type Stock = {
   readonly id: string;
   warehouse_id: string;
   item_id: string;
   on_hand: number;
   reorder_level: number;
-}
+};
 
-export interface StockInsert {
+export type StockInsert = {
   warehouse_id: string;
   item_id: string;
   on_hand: number;
   reorder_level: number;
-}
+};
 
-export interface WarehouseOperator {
+export type WarehouseOperator = {
   readonly id: string;
   warehouse_id: string;
   account_id: string;
   name: string;
-}
+};
 
-export interface WarehouseOperatorInsert {
+export type WarehouseOperatorInsert = {
   warehouse_id: string;
   account_id: string;
   name: string;
-}
+};
 
-export interface Warehouse {
+export type Warehouse = {
   readonly id: string;
   name: string;
   region: string;
   operator_id: string;
-}
+};
 
-export interface WarehouseInsert {
+export type WarehouseInsert = {
   name: string;
   region: string;
   operator_id: string;
-}
+};
 
 interface Types extends AppTypes {
   better_auth_account: {
