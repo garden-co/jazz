@@ -58,7 +58,9 @@ pub use jazz::tools::MutationError;
 pub use large::{JsonColumn, LargeColumn, Page, Splice};
 pub use lifecycle::MutationErrors;
 pub use query::{Column, Condition, Many, One, Order, Query, created_at, id, updated_at};
-pub use session::{AuthFailure, Link, Offline, Session, SessionState, SyncStatus, User, UserKind};
+pub use session::{
+    AuthFailure, Link, Offline, Session, SessionState, SyncError, SyncStatus, User, UserKind,
+};
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
 pub use table::{Fields, Implementations, Insert, Table, Update};
 pub use transaction::{OpenTransaction, Transaction};
