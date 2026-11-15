@@ -5,6 +5,7 @@
 //!
 //! Its `authenticate` reads `Authorization: Bearer token-<user>`.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use futures::{SinkExt, StreamExt};
@@ -30,7 +31,28 @@ pub struct Relay {
     pub endpoint: String,
     /// Sockets admitted so far, by who they were for.
     pub admitted: Arc<Mutex<Vec<String>>>,
+    /// Bearers whose sockets the backend refuses, with what it says (the
+    /// client reads `expired`, `revoked` … from it), as `admitPrelude`
+    /// answers an unverified credential.
+    pub refusing: Arc<Mutex<HashMap<String, String>>>,
+    connections: Arc<Mutex<Vec<tokio::task::AbortHandle>>>,
     task: tokio::task::JoinHandle<()>,
+}
+
+impl Relay {
+    /// Drops every open connection, as a backend restart would.
+    pub fn kick(&self) {
+        for connection in self.connections.lock().unwrap().drain(..) {
+            connection.abort();
+        }
+    }
+
+    pub fn refuse(&self, bearer: &str, message: &str) {
+        self.refusing
+            .lock()
+            .unwrap()
+            .insert(bearer.to_owned(), message.to_owned());
+    }
 }
 
 impl Drop for Relay {
@@ -49,29 +71,41 @@ pub async fn start(core: &str, app: AppId, backend_secret: &str, bundle: &str) -
         bundle: bundle.to_owned(),
     };
     let admitted = Arc::new(Mutex::new(Vec::new()));
-    let log = admitted.clone();
+    let refusing = Arc::new(Mutex::new(HashMap::new()));
+    let connections = Arc::new(Mutex::new(Vec::new()));
+    let (log, refused, open) = (admitted.clone(), refusing.clone(), connections.clone());
     let task = tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
-            tokio::spawn(serve(stream, backend.clone(), log.clone()));
+            let connection =
+                tokio::spawn(serve(stream, backend.clone(), log.clone(), refused.clone()));
+            open.lock().unwrap().push(connection.abort_handle());
         }
     });
     Relay {
         endpoint,
         admitted,
+        refusing,
+        connections,
         task,
     }
 }
 
-/// `authenticate`: the user a bearer names.
+/// `authenticate`: the user a bearer names (`token-<user>[.<n>]`).
 fn authenticate(authorization: Option<&str>) -> Option<String> {
-    let user = authorization?.strip_prefix("Bearer token-")?;
+    let token = authorization?.strip_prefix("Bearer token-")?;
+    let user = token.split('.').next()?;
     (!user.is_empty()).then(|| user.to_owned())
 }
 
-async fn serve(stream: TcpStream, backend: Backend, admitted: Arc<Mutex<Vec<String>>>) {
+async fn serve(
+    stream: TcpStream,
+    backend: Backend,
+    admitted: Arc<Mutex<Vec<String>>>,
+    refusing: Arc<Mutex<HashMap<String, String>>>,
+) {
     let mut head = vec![0; 8192];
     let n = loop {
         let n = stream.peek(&mut head).await.unwrap_or(0);
@@ -85,7 +119,7 @@ async fn serve(stream: TcpStream, backend: Backend, admitted: Arc<Mutex<Vec<Stri
     };
     let text = String::from_utf8_lossy(&head[..n]).to_string();
     if text.to_ascii_lowercase().contains("upgrade: websocket") {
-        relay_socket(stream, backend, admitted).await;
+        relay_socket(stream, backend, admitted, refusing).await;
     } else {
         http(stream, &text, backend).await;
     }
@@ -145,7 +179,12 @@ async fn account_of(backend: &Backend, user: &str) -> String {
     response["account"].as_str().unwrap().to_owned()
 }
 
-async fn relay_socket(stream: TcpStream, backend: Backend, admitted: Arc<Mutex<Vec<String>>>) {
+async fn relay_socket(
+    stream: TcpStream,
+    backend: Backend,
+    admitted: Arc<Mutex<Vec<String>>>,
+    refusing: Arc<Mutex<HashMap<String, String>>>,
+) {
     let authorization = Arc::new(Mutex::new(None::<String>));
     let seen = authorization.clone();
     let Ok(mut client) = tokio_tungstenite::accept_hdr_async(
@@ -167,6 +206,22 @@ async fn relay_socket(stream: TcpStream, backend: Backend, admitted: Arc<Mutex<V
         return;
     };
     let authorization = authorization.lock().unwrap().clone();
+    let refusal = authorization
+        .as_deref()
+        .and_then(|header| header.strip_prefix("Bearer "))
+        .and_then(|bearer| refusing.lock().unwrap().get(bearer).cloned());
+    if let Some(message) = refusal {
+        use jazz_app::jazz::wire::{
+            WireError, WireErrorCode, WireFrame, WireRetry, encode_frame,
+            encode_websocket_frame_batch,
+        };
+        let error = WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, message);
+        let frame = encode_frame(&WireFrame::Error(error)).unwrap();
+        let batch = encode_websocket_frame_batch(&[frame]).unwrap();
+        let _ = client.send(Message::Binary(batch.into())).await;
+        let _ = client.close(None).await;
+        return;
+    }
     let Some((prelude, who)) = admit(&backend, &prelude, authorization.as_deref()).await else {
         let _ = client.close(None).await;
         return;
