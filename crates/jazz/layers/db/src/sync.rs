@@ -2304,9 +2304,7 @@ pub(crate) struct Relayed {
 
 /// A session's commit a relay uploads: (session, the commit's id, the rows
 /// it wrote).
-/// Keyed by the session's [`SubscriberId`], not its slot: slots are
-/// reused, and a fate must never reach a later session in the same slot.
-type RelayedFate = (SubscriberId, TxId, Vec<(String, RowUuid, Vec<u8>)>);
+type RelayedFate = (usize, TxId, Vec<(String, RowUuid, Vec<u8>)>);
 
 /// A relayed read's upstream answer: its query, binding, whether it read
 /// deleted rows, its read view, the rows it listed and the seq it is
@@ -2332,8 +2330,7 @@ struct RelayedFetch {
     /// Otherwise it is served from this store once the upstream can no
     /// longer answer, or its wait runs out (`None`: never).
     until: Option<Instant>,
-    /// The session that asked (by acceptance, as slots are reused).
-    session: SubscriberId,
+    session: usize,
     /// The session's `Read`, served locally once the upstream answered.
     message: SyncMessage,
 }
@@ -9646,8 +9643,10 @@ impl Db {
                             client.relay_ready = true;
                             let fate = client.fates.get(&tx).cloned().unwrap_or(Ok(()));
                             let known = client.known;
-                            for (subscriber, session_id, rows) in relayed {
-                                let Some(session) = inner.open_session_mut(subscriber) else {
+                            for (index, session_id, rows) in relayed {
+                                let Some(session) =
+                                    inner.sessions.get_mut(index).filter(|s| s.open)
+                                else {
                                     continue;
                                 };
                                 // Reconcile the writer at settlement even
@@ -10151,33 +10150,16 @@ impl Inner {
         }
     }
 
-    /// The session `subscriber` names, if it is still open: a later
-    /// session in the same slot is not it.
-    fn open_session_mut(&mut self, subscriber: SubscriberId) -> Option<&mut Session> {
-        self.sessions
-            .get_mut(subscriber.slot)
-            .filter(|session| session.open && session.generation == subscriber.generation)
-    }
-
-    /// The handle of the session now in `slot`.
-    fn subscriber_in(&self, slot: usize) -> SubscriberId {
-        SubscriberId {
-            slot,
-            generation: self.sessions[slot].generation,
-        }
-    }
-
-    /// Session `subscriber` closed: what this relay owed it is dropped.
-    /// Only cleanup: what is owed is keyed by acceptance, so a later
-    /// session in its slot is never handed it either way.
-    fn forget_relayed(&mut self, subscriber: SubscriberId) {
+    /// Session `index` closed: what this relay owed it is dropped, so a
+    /// later session in its slot is not handed it.
+    fn forget_relayed(&mut self, index: usize) {
         let Some(client) = self.client.as_mut() else {
             return;
         };
         let answers = &mut client.answers;
         let reads = &mut client.reads;
         client.relayed_fetches.retain(|fetch| {
-            let keep = fetch.session != subscriber;
+            let keep = fetch.session != index;
             if !keep {
                 answers.remove(&fetch.upstream);
                 reads.remove(&fetch.upstream);
@@ -10185,7 +10167,7 @@ impl Inner {
             keep
         });
         for sessions in client.relayed_fates.values_mut() {
-            sessions.retain(|(session, _, _)| *session != subscriber);
+            sessions.retain(|(session, _, _)| *session != index);
         }
         client
             .relayed_fates
@@ -10232,7 +10214,6 @@ impl Inner {
     }
 
     fn relayed_fetches_ready(&mut self, index: usize) -> (Vec<SyncMessage>, Vec<RelayedAnswer>) {
-        let me = self.subscriber_in(index);
         let Some(client) = self.client.as_mut() else {
             return (Vec::new(), Vec::new());
         };
@@ -10247,7 +10228,7 @@ impl Inner {
         let refused_link = client.refused_link().cloned();
         for fetch in std::mem::take(&mut client.relayed_fetches) {
             if let (true, true, Some(error), SyncMessage::Read { id, .. }) = (
-                fetch.session == me,
+                fetch.session == index,
                 fetch.strict,
                 &refused_link,
                 &fetch.message,
@@ -10263,7 +10244,7 @@ impl Inner {
             let answered = matches!(client.answers.get(&fetch.upstream), Some(Some(_)));
             let given_up =
                 !fetch.strict && (!can_wait || fetch.until.is_some_and(|until| now >= until));
-            if fetch.session != me || !answered && !given_up {
+            if fetch.session != index || !answered && !given_up {
                 kept.push(fetch);
                 continue;
             }
@@ -11095,7 +11076,7 @@ impl Db {
                     RemoteReach::REMOTE,
                 );
             }
-            inner.forget_relayed(subscriber);
+            inner.forget_relayed(subscriber.slot);
         }
     }
 
@@ -12540,12 +12521,11 @@ impl Db {
             // it wrote them: shipped at the relay's seqs, they would stand
             // in for them as another writer's. The session gets the version
             // they sit on instead, the base its pending writes replay over.
-            let subscriber = inner.subscriber_in(index);
             let own: HashSet<u64> = inner.client.as_ref().map_or_else(HashSet::new, |client| {
                 client
                     .relayed_fates
                     .iter()
-                    .filter(|(_, sessions)| sessions.iter().any(|(s, _, _)| *s == subscriber))
+                    .filter(|(_, sessions)| sessions.iter().any(|(s, _, _)| *s == index))
                     .map(|(seq, _)| *seq)
                     .collect()
             });
@@ -12734,7 +12714,7 @@ impl Db {
                             RemoteReach::REMOTE,
                         );
                     }
-                    inner.forget_relayed(subscriber);
+                    inner.forget_relayed(index);
                     break;
                 }
             }
@@ -13218,7 +13198,6 @@ impl Db {
                 if let Some(strict) = relay {
                     let prepared = db.prepare_query_bound(&query, binding.clone())?;
                     let mut inner = self.inner.borrow_mut();
-                    let subscriber = inner.subscriber_in(index);
                     let client = inner.client.as_mut().expect("client");
                     let upstream = client.next_id;
                     client.next_id += 1;
@@ -13246,7 +13225,7 @@ impl Db {
                     client.outbox.push(ask.clone());
                     client.relayed_fetches.push(RelayedFetch {
                         upstream,
-                        session: subscriber,
+                        session: index,
                         ask,
                         strict,
                         until: wait.and_then(wait_until),
@@ -13724,13 +13703,12 @@ impl Db {
                             .is_some_and(|c| c.pending.contains(*tx))
                     });
                 if let Some(local) = upload {
-                    let subscriber = inner.subscriber_in(index);
                     let client = inner.client.as_mut().expect("client");
                     client
                         .relayed_fates
                         .entry(local)
                         .or_default()
-                        .push((subscriber, id, rows));
+                        .push((index, id, rows));
                     inner.push_durability_ack(index, SyncMessage::Stored { id });
                 } else {
                     // A replica's own last word (it has no server) orders
