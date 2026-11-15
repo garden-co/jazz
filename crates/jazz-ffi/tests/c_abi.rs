@@ -175,7 +175,7 @@ fn errors_come_back_as_json_and_null_is_refused() {
     let error = call(
         h,
         "all",
-        json!({ "query": { "table": "shows", "include": {} } }),
+        json!({ "query": { "table": "shows", "include": [{ "relation": "tasks", "query": { "offset": 1 } }] } }),
     )
     .unwrap_err();
     assert_eq!(error["kind"], "refused");
