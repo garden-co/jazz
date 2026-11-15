@@ -942,7 +942,8 @@ func (tasksTable) Update(ctx context.Context, db jazz.Querier, id string, patch 
 	return jazz.Update(ctx, db, "tasks", id, patch, opts...)
 }
 
-// EditNotes edits `tasks.notes`, a mergeable text: positions are UTF-8 byte offsets.
+// EditNotes edits `tasks.notes`, a mergeable text: positions are UTF-8 byte offsets, and
+// the edits merge with others made meanwhile.
 func (tasksTable) EditNotes(ctx context.Context, db jazz.Querier, id string, edits ...jazz.TextEdit) error {
 	return jazz.EditText(ctx, db, "tasks", id, "notes", edits...)
 }

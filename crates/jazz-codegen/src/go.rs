@@ -975,7 +975,7 @@ impl<'a> Writer<'a> {
         for (method, column) in &text_edits {
             let _ = writeln!(
                 out,
-                "// {method} edits `{}.{column}`, a mergeable text: positions are UTF-8 byte offsets.",
+                "// {method} edits `{}.{column}`, a mergeable text: positions are UTF-8 byte offsets, and\n// the edits merge with others made meanwhile.",
                 table.name
             );
             let _ = writeln!(

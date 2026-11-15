@@ -175,3 +175,51 @@ func TestWaitForSyncAndPermissionErrors(t *testing.T) {
 		t.Fatalf("bob's write: %v", err)
 	}
 }
+
+func TestMergeableTextEdits(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	srv := testServer(t)
+	db := openTest(t, srv, "alice")
+	show, err := ensureShow(ctx, db, "Text Night")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := jazzapp.Tasks.Insert(ctx, db, jazzapp.NewTask{
+		ShowID: show.ID, Title: "Soundcheck", Status: jazzapp.TaskStatusTodo, Rank: 1,
+		Notes: jazz.Ptr("check mics"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes := func() string {
+		row, err := jazzapp.Tasks.Query().Where(jazzapp.Tasks.ID.Eq(task.ID)).One(ctx, db)
+		if err != nil || row == nil || row.Notes == nil {
+			t.Fatalf("read: %+v %v", row, err)
+		}
+		return *row.Notes
+	}
+	// Edits by byte offset: capitalise, then append.
+	if err := jazzapp.Tasks.EditNotes(ctx, db, task.ID,
+		jazz.Splice(0, 1, "C"), jazz.Splice(len("Check mics"), 0, " and DI boxes")); err != nil {
+		t.Fatal(err)
+	}
+	if got := notes(); got != "Check mics and DI boxes" {
+		t.Fatalf("after edits: %q", got)
+	}
+	// Two writers editing from the same text merge three-way.
+	base := notes()
+	if err := jazz.SetText(ctx, db, "tasks", task.ID, "notes", base, "Check mics and DI boxes, early"); err != nil {
+		t.Fatal(err)
+	}
+	if err := jazz.SetText(ctx, db, "tasks", task.ID, "notes", base, "Check all mics and DI boxes"); err != nil {
+		t.Fatal(err)
+	}
+	if got := notes(); got != "Check all mics and DI boxes, early" {
+		t.Fatalf("merged: %q", got)
+	}
+	// An offset inside a character is refused before anything is written.
+	if err := jazzapp.Tasks.EditNotes(ctx, db, task.ID, jazz.Splice(-1, 0, "x")); !errors.Is(err, jazz.ErrRefused) {
+		t.Fatalf("bad offset: %v", err)
+	}
+}
