@@ -12,7 +12,7 @@ Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;â€
 
 <WhereOperatorsTable />
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Kotlin"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-filters-ts
@@ -55,6 +55,28 @@ Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;â€
     </include>
 
   </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-filters-kotlin
+    </include>
+
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#where-eq-ne-kotlin
+    </include>
+
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#where-numeric-kotlin
+    </include>
+
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#where-contains-kotlin
+    </include>
+
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#where-null-kotlin
+    </include>
+
+  </Tab>
 </Tabs>
 
 ## Sorting
@@ -66,7 +88,7 @@ Sort results with `orderBy(...)`. Pass a column name and optionally `"asc"` or `
   queries.
 </Callout>
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Kotlin"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-sorting-ts
@@ -80,6 +102,12 @@ Sort results with `orderBy(...)`. Pass a column name and optionally `"asc"` or `
   <Tab value="Rust">
     <include cwd lang="rust">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-sorting-rust
+    </include>
+
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-sorting-kotlin
     </include>
 
   </Tab>
@@ -98,7 +126,7 @@ declaration order. `min`, `max` and range filters such as `gt` follow the same o
 deterministic order. If the first sort column is not unique, add `orderBy("id")` as the final
 tie-breaker so page boundaries are stable.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Kotlin"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-pagination-ts
@@ -112,6 +140,12 @@ tie-breaker so page boundaries are stable.
   <Tab value="Rust">
     <include cwd lang="rust">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-pagination-rust
+    </include>
+
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-pagination-kotlin
     </include>
 
   </Tab>

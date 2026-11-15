@@ -56,7 +56,7 @@ export const LANGUAGES: readonly Language[] = [
       lang: "kotlin",
       symbols: ["TaskStatus", "Task", "TaskInsert"],
     },
-    enabled: false,
+    enabled: true,
   },
   {
     label: "Go",
@@ -156,7 +156,9 @@ export function filterLanguageTabs(
     const labels = b.tabs.map((t) => t.label);
     for (const label of labels) {
       if (!order.has(label))
-        throw new Error(`${file}: ${LANGUAGE_TABS_GROUP} tab "${label}" isn't in docs/lib/languages`);
+        throw new Error(
+          `${file}: ${LANGUAGE_TABS_GROUP} tab "${label}" isn't in docs/lib/languages`,
+        );
     }
     for (let i = 1; i < labels.length; i++) {
       if (order.get(labels[i - 1])! > order.get(labels[i])!)
@@ -178,7 +180,9 @@ export function filterLanguageTabs(
       edits.push({ start: b.open.start, end: closeEnd, text: "" });
       return;
     }
-    const open = text.slice(b.open.start, b.open.end).replace(items[0], `items={${JSON.stringify(kept)}}`);
+    const open = text
+      .slice(b.open.start, b.open.end)
+      .replace(items[0], `items={${JSON.stringify(kept)}}`);
     edits.push({ start: b.open.start, end: b.open.end, text: open.replaceAll('","', '", "') });
     for (const tab of b.tabs) {
       if (enabled.has(tab.label)) continue;
@@ -197,4 +201,3 @@ export function filterLanguageTabs(
   }
   return out;
 }
-
