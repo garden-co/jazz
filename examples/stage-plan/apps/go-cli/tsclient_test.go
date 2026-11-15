@@ -16,20 +16,21 @@ import (
 
 // A stock TypeScript client (jazz-tools in Node) signs in through the Go
 // backend's /jazz with a bearer, writes a show at tier global and reads it
-// back; the backend then reads it as that user. JAZZ_TS_CLIENT names a
-// directory with ts-client/client.ts's dependencies installed (jazz-tools,
-// tsx); without it, the test is skipped.
+// back; a Go client signed in as that user then reads it from the server.
+// JAZZ_TS_CLIENT names the script (ts-client/client.ts, placed where
+// jazz-tools and StagePlan's jazz.generated.ts resolve, e.g. in
+// apps/react-localfirst) and JAZZ_TSX the tsx binary; without them, the
+// test is skipped.
 func TestATypeScriptClientSyncsThroughTheGoEndpoint(t *testing.T) {
-	dir := os.Getenv("JAZZ_TS_CLIENT")
-	if dir == "" {
-		t.Skip("JAZZ_TS_CLIENT is unset")
+	script, tsx := os.Getenv("JAZZ_TS_CLIENT"), os.Getenv("JAZZ_TSX")
+	if script == "" || tsx == "" {
+		t.Skip("JAZZ_TS_CLIENT or JAZZ_TSX is unset")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	srv, app := goBackend(t)
-	cmd := exec.CommandContext(ctx, filepath.Join(dir, "node_modules/.bin/tsx"), filepath.Join(dir, "client.ts"),
-		app.URL+"/jazz", "token-carol")
-	cmd.Dir = dir
+	cmd := exec.CommandContext(ctx, tsx, filepath.Base(script), app.URL+"/jazz", "token-carol")
+	cmd.Dir = filepath.Dir(script)
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
 	if err != nil {
