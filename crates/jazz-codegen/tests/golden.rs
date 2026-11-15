@@ -361,7 +361,7 @@ fn every_app_generates_its_committed_swift_byte_for_byte() {
 }
 
 #[test]
-fn swift_refuses_computed_fields_as_not_supported_yet() {
+fn swift_refuses_payload_enums_as_not_supported_yet() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/tasks");
     let error = generate(
         Lang::Swift,
@@ -392,4 +392,30 @@ fn the_stage_plan_go_example_commits_current_bindings() {
         "{} is stale; run with JAZZ_UPDATE_FIXTURES=1",
         path.display()
     );
+}
+
+/// The Jazz Swift package's tests compile and run the bindings of
+/// `tests/apps/computed` (computed fields and transforms) from a copy.
+/// `JAZZ_UPDATE_FIXTURES=1` rewrites it.
+#[test]
+fn the_swift_package_tests_the_computed_bindings() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let app_json = std::fs::read(root.join("tests/apps/computed/jazz.app.json")).unwrap();
+    let generated = generate(Lang::Swift, &app_json).unwrap();
+    let path = root.join("../../packages/jazz-swift/Tests/JazzTests/ComputedApp.swift");
+    if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
+        if path.parent().unwrap().exists() {
+            std::fs::write(&path, &generated).unwrap();
+        }
+        return;
+    }
+    // Absent where the package isn't in the checkout.
+    if let Ok(committed) = std::fs::read_to_string(&path) {
+        assert_eq!(
+            generated,
+            committed,
+            "{} is stale: run with JAZZ_UPDATE_FIXTURES=1",
+            path.display()
+        );
+    }
 }
