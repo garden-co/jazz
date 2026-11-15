@@ -86,7 +86,7 @@ impl JazzHandle {
             &query_json,
             Box::new(move |event| match event {
                 core::Event::Delta(json) => listener.on_delta(json),
-                core::Event::Error(message) => listener.on_error(message),
+                core::Event::Error(error) => listener.on_error(error.to_string()),
             }),
         )?;
         Ok(Arc::new(Subscription { inner }))

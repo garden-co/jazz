@@ -2,13 +2,15 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, Weak, mpsc};
+use std::thread::{JoinHandle, ThreadId};
 
 use futures_executor::block_on;
 use jazz_app::jazz::tools::{ReadTier, Schema, SubscriptionStreamItem, TableSchema, Value};
 use jazz_app::{AppFiles, AppId, Backend, Config, Jazz, Storage};
 use serde_json::Value as Json;
 
+use crate::JazzError;
 use crate::convert;
 use crate::error::{FfiError, Result, refused, unsupported};
 
@@ -18,24 +20,45 @@ const BACKEND_ISSUER: &str = "jazz:backend";
 pub(crate) struct Core {
     jazz: Jazz,
     schema: Arc<Schema>,
+    relations: convert::Relations,
     closed: AtomicBool,
+    /// The open subscriptions, told when the app closes.
+    subscriptions: Mutex<Vec<Weak<Delivery>>>,
 }
 
-/// What a subscription tells its listener.
+/// What a subscription tells its listener. An error is the last event.
 pub(crate) enum Event {
     Delta(String),
-    Error(String),
+    Error(JazzError),
+}
+
+/// The channel to a subscription's delivery thread.
+struct Delivery {
+    active: AtomicBool,
+    events: Mutex<mpsc::Sender<Option<Event>>>,
+}
+
+impl Delivery {
+    fn send(&self, event: Option<Event>) {
+        let _ = self
+            .events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .send(event);
+    }
 }
 
 impl Core {
     pub fn open(config_json: &str) -> Result<Self> {
-        let (files, config) = config(config_json)?;
+        let (files, config, app_text) = config(config_json)?;
         let jazz = block_on(Jazz::open(files, config))?;
         let schema = block_on(jazz.with_client(|client| async move { Ok(client.schema()?) }))?;
         Ok(Self {
             jazz,
             schema: Arc::new(schema),
+            relations: convert::Relations::read(&app_text),
             closed: AtomicBool::new(false),
+            subscriptions: Mutex::new(Vec::new()),
         })
     }
 
@@ -65,24 +88,34 @@ impl Core {
     }
 
     pub fn one(&self, query_json: &str) -> Result<Option<String>> {
-        let mut query = convert::parse(query_json, "the query")?;
-        if let Json::Object(object) = &mut query {
-            object.insert("limit".into(), Json::from(1));
-        }
+        // Validated as given (a bad `limit` is refused), then limited to 1.
+        let (_, mut query, shape) = convert::query(
+            &self.schema,
+            &self.relations,
+            &convert::parse(query_json, "the query")?,
+        )?;
+        query.limit = Some(query.limit.map_or(1, |limit| limit.min(1)));
         Ok(self
-            .rows(&query)?
+            .run_query(shape, query)?
             .into_iter()
             .next()
             .map(|row| row.to_string()))
     }
 
     fn rows(&self, query: &Json) -> Result<Vec<Json>> {
-        let (table_name, query) = convert::query(&self.schema, query)?;
+        let (_, query, shape) = convert::query(&self.schema, &self.relations, query)?;
+        self.run_query(shape, query)
+    }
+
+    fn run_query(
+        &self,
+        shape: convert::Shape,
+        query: jazz_app::jazz::query::Query,
+    ) -> Result<Vec<Json>> {
         let jazz = self.open_jazz()?;
         let results = block_on(jazz.with_client(move |client| async move {
             Ok(client.query(query, ReadTier::LocalFirst).await?)
         }))?;
-        let table = self.table(&table_name)?;
         results
             .into_iter()
             .map(|row| {
@@ -90,7 +123,7 @@ impl Core {
                     .key
                     .row_id()
                     .ok_or_else(|| FfiError::Io("a joined result is not a row".into()))?;
-                Ok(convert::row_json(table, id, row.fields))
+                Ok(convert::row_json(&shape, id, row.fields))
             })
             .collect()
     }
@@ -113,7 +146,7 @@ impl Core {
                     value,
                 })
                 .collect();
-            Ok(convert::row_json(&table, id, fields))
+            Ok(convert::row_json(&convert::Shape::of(table), id, fields))
         }))?;
         Ok(row.to_string())
     }
@@ -154,9 +187,11 @@ impl Core {
         query_json: &str,
         listener: Box<dyn Fn(Event) + Send>,
     ) -> Result<SubscriptionCore> {
-        let (table_name, query) =
-            convert::query(&self.schema, &convert::parse(query_json, "the query")?)?;
-        let table = self.table(&table_name)?.clone();
+        let (_, query, table) = convert::query(
+            &self.schema,
+            &self.relations,
+            &convert::parse(query_json, "the query")?,
+        )?;
         let (events, received) = mpsc::channel::<Option<Event>>();
         let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
         let forward = events.clone();
@@ -167,55 +202,83 @@ impl Core {
             // Forwards on the client's thread until cancelled, the stream
             // ends, or the delivery thread is gone.
             tokio::task::spawn_local(async move {
+                // If the client drops this task without it reaching an end
+                // (its thread winding down), the guard sends `Closed`.
+                let mut forward = EndGuard(Some(forward));
                 let mut cancelled = cancelled;
                 let mut first = true;
                 loop {
                     let item = tokio::select! {
                         item = stream.next() => item,
-                        _ = &mut cancelled => return,
+                        _ = &mut cancelled => {
+                            forward.0 = None;
+                            return;
+                        }
                     };
                     let event = match item {
-                        None => return,
+                        // The stream ended without a rejection (the client
+                        // stopped, or the server ended the query): say so,
+                        // so no host waits for a delta that never comes.
+                        None => Event::Error(JazzError::Closed),
                         Some(SubscriptionStreamItem::Delta(delta)) => {
                             match convert::delta_json(&table, delta, first) {
                                 Ok(json) => Event::Delta(json),
-                                Err(error) => {
-                                    Event::Error(crate::JazzError::from(error).to_string())
-                                }
+                                Err(error) => Event::Error(JazzError::from(error)),
                             }
                         }
                         Some(SubscriptionStreamItem::Rejected { reason }) => {
-                            Event::Error(format!("subscription rejected: {reason:?}"))
+                            Event::Error(JazzError::Refused {
+                                reason: format!("subscription rejected: {reason:?}"),
+                            })
                         }
                     };
                     first = false;
                     let failed = matches!(event, Event::Error(_));
-                    if forward.send(Some(event)).is_err() || failed {
+                    if forward.send(event).is_err() || failed {
+                        forward.0 = None;
                         return;
                     }
                 }
             });
             Ok(())
         }))?;
-        let active = Arc::new(AtomicBool::new(true));
-        let delivering = active.clone();
-        std::thread::Builder::new()
+        let delivery = Arc::new(Delivery {
+            active: AtomicBool::new(true),
+            events: Mutex::new(events),
+        });
+        let delivering = delivery.clone();
+        let thread = std::thread::Builder::new()
             .name("jazz-subscription".into())
             .spawn(move || {
                 while let Ok(Some(event)) = received.recv() {
-                    if !delivering.load(Ordering::Acquire) {
+                    if !delivering.active.load(Ordering::Acquire) {
                         break;
                     }
+                    let last = matches!(event, Event::Error(_));
                     listener(event);
+                    if last {
+                        break;
+                    }
                 }
             })
             .map_err(|error| {
                 FfiError::Io(format!("cannot start the subscription's thread: {error}"))
             })?;
+        let mut subscriptions = self.subscriptions.lock().unwrap_or_else(|e| e.into_inner());
+        subscriptions.retain(|subscription| subscription.strong_count() > 0);
+        subscriptions.push(Arc::downgrade(&delivery));
+        drop(subscriptions);
+        // A close racing this subscribe may have taken the list before the
+        // push: tell this subscription itself. A second `Closed` is never
+        // delivered (an error is the last event).
+        if self.closed.load(Ordering::Acquire) {
+            delivery.send(Some(Event::Error(JazzError::Closed)));
+        }
         Ok(SubscriptionCore {
-            active,
+            delivery,
+            delivery_thread: thread.thread().id(),
+            thread: Mutex::new(Some(thread)),
             cancel: Mutex::new(Some(cancel)),
-            events,
             _jazz: self.jazz.clone(),
         })
     }
@@ -226,15 +289,44 @@ impl Core {
         if self.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
-        block_on(self.jazz.shutdown())?;
+        let result = block_on(self.jazz.shutdown());
+        // Each open subscription's last event: the app closed.
+        let subscriptions =
+            std::mem::take(&mut *self.subscriptions.lock().unwrap_or_else(|e| e.into_inner()));
+        for delivery in subscriptions.iter().filter_map(Weak::upgrade) {
+            delivery.send(Some(Event::Error(JazzError::Closed)));
+        }
+        result?;
         Ok(())
     }
 }
 
+/// A forwarder's sender that, dropped before the forwarder ended on its
+/// own, tells the delivery thread the subscription is over.
+struct EndGuard(Option<mpsc::Sender<Option<Event>>>);
+
+impl EndGuard {
+    fn send(&self, event: Event) -> std::result::Result<(), ()> {
+        match &self.0 {
+            Some(sender) => sender.send(Some(event)).map_err(drop),
+            None => Err(()),
+        }
+    }
+}
+
+impl Drop for EndGuard {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(Some(Event::Error(JazzError::Closed)));
+        }
+    }
+}
+
 pub(crate) struct SubscriptionCore {
-    active: Arc<AtomicBool>,
+    delivery: Arc<Delivery>,
+    delivery_thread: ThreadId,
+    thread: Mutex<Option<JoinHandle<()>>>,
     cancel: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    events: mpsc::Sender<Option<Event>>,
     /// Holds the app open while the subscription lives.
     _jazz: Jazz,
 }
@@ -243,10 +335,23 @@ impl SubscriptionCore {
     /// Ends the subscription: no callback starts after this returns (one
     /// already running finishes). Cancelling again does nothing.
     pub fn cancel(&self) {
-        self.active.store(false, Ordering::Release);
+        self.delivery.active.store(false, Ordering::Release);
         if let Some(cancel) = self.cancel.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = cancel.send(());
-            let _ = self.events.send(None);
+            self.delivery.send(None);
+        }
+    }
+
+    /// [`Self::cancel`], then waits for a callback still running to return,
+    /// so the caller may free what the callback uses. From the callback
+    /// itself (on the delivery thread) it cannot wait, and doesn't.
+    pub fn cancel_and_wait(&self) {
+        self.cancel();
+        if std::thread::current().id() == self.delivery_thread {
+            return;
+        }
+        if let Some(thread) = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = thread.join();
         }
     }
 }
@@ -257,7 +362,7 @@ impl Drop for SubscriptionCore {
     }
 }
 
-fn config(config_json: &str) -> Result<(AppFiles, Config)> {
+fn config(config_json: &str) -> Result<(AppFiles, Config, String)> {
     let Json::Object(config) = convert::parse(config_json, "the config")? else {
         return Err(refused("the config must be a JSON object"));
     };
@@ -328,6 +433,11 @@ fn config(config_json: &str) -> Result<(AppFiles, Config)> {
         result = result.server(url);
     }
     if backend {
+        if result.server_url.is_none() {
+            return Err(refused(
+                "a backend (with \"permissions\") needs \"serverUrl\": the sync server it publishes to",
+            ));
+        }
         let subject = match &session {
             Some(Json::Object(session)) => {
                 if let Some(issuer) = session.get("issuer").filter(|i| !i.is_null())
@@ -360,6 +470,9 @@ fn config(config_json: &str) -> Result<(AppFiles, Config)> {
             "backendSecret, adminSecret and session are for a backend, which needs \"permissions\"",
         ));
     }
-    let files = AppFiles::new(app.into_bytes(), permissions.map(String::into_bytes));
-    Ok((files, result))
+    let files = AppFiles::new(
+        app.clone().into_bytes(),
+        permissions.map(String::into_bytes),
+    );
+    Ok((files, result, app))
 }
