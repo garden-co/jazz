@@ -118,8 +118,9 @@ impl Jazz {
         }
         if config.server_url.is_some() && config.backend.is_none() && config.end_user.is_none() {
             return Err(Error::Unsupported(
-                "connecting to a sync server without a user; open the app as an end user \
-                 (Config::end_user), as a backend (Config::backend) or locally (no server)"
+                "connecting to a sync server as an end user who isn't signed in through \
+                 the app's backend (Config::end_user); open the app as a backend \
+                 (Config::backend) or locally (no server)"
                     .into(),
             ));
         }
