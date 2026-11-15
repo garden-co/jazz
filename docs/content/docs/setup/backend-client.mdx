@@ -97,6 +97,7 @@ fresh token. Jazz calls it for every request and socket, so short-lived tokens j
       return (await response.json()).value as string;
     }
     ```
+
   </Tab>
   <Tab value="Rust">
     A Rust process connects as a scoped machine, one your main backend trusts as a user
@@ -110,6 +111,7 @@ fresh token. Jazz calls it for every request and socket, so short-lived tokens j
 
     A trusted machine (`as: "backend"`) isn't supported in Rust yet. See
     [Language support](/docs/reference/language-support#rust).
+
   </Tab>
   <Tab value="Go">
     Not in Go yet. A Go process can sign in to your backend's `/jazz` as an end user (`jazz.Token`,
