@@ -39,6 +39,9 @@ import {
   sessionTabState,
   runInSessionTab,
   crashSessionTab,
+  leaveSessionTab,
+  returnToSessionTab,
+  pageCacheKeepsSharedWorkerPages,
 } from "./tests/browser/session-tab-node.js";
 import {
   closeRemoteBrowserDb,
@@ -187,7 +190,18 @@ export default defineConfig({
     maxWorkers: browserName === "webkit" ? 1 : 4,
     browser: {
       enabled: true,
-      provider: playwright(),
+      // Playwright turns Chromium's back/forward cache off; the cache tests
+      // (tests/browser/back-forward-cache.test.ts) need it on. Its Firefox
+      // and WebKit builds have it off for good.
+      provider: playwright(
+        browserName === "chromium"
+          ? {
+              launchOptions: {
+                ignoreDefaultArgs: ["--disable-back-forward-cache"],
+              },
+            }
+          : {},
+      ),
       instances: [
         {
           browser: browserName as "chromium" | "firefox" | "webkit",
@@ -251,6 +265,10 @@ export default defineConfig({
         sessionTabRun: async (_context, id, action, title) => runInSessionTab(id, action, title),
         sessionTabClose: async (_context, id) => closeSessionTab(id),
         sessionTabCrash: async (_context, id) => crashSessionTab(id),
+        sessionTabLeave: async (_context, id) => leaveSessionTab(id),
+        sessionTabReturn: async (_context, id) => returnToSessionTab(id),
+        pageCacheKeepsSharedWorkerPages: async ({ context, page }) =>
+          pageCacheKeepsSharedWorkerPages(context, page),
         jazzAppSignUp: async (_context, frontUrl, originUrl, userId) =>
           jazzAppSignUp(frontUrl, originUrl, userId),
         jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),

@@ -996,6 +996,23 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     return this.heldByAnotherSignIn;
   }
 
+  /**
+   * The page is leaving for the back/forward cache: detach from the worker
+   * and let go of the liveness lock, now, so the worker doesn't count the
+   * page as a live tab while it is cached (see `page-cache`). This
+   * connection is closed after; the page opens a new one when it returns.
+   * Declines (`false`) unless connected and idle (see the follower's
+   * `leaveForPageCache`).
+   */
+  leaveForPageCache(): boolean {
+    if (this.closed || this.readyError || !this.connection?.leaveForPageCache()) return false;
+    this.closed = true;
+    this.connection = null;
+    this.worker = null;
+    this.releaseLivenessLock?.();
+    return true;
+  }
+
   async shutdown(): Promise<void> {
     if (this.closed) return;
     this.closed = true;

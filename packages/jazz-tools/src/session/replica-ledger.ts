@@ -1,3 +1,6 @@
+import { reloadAfterStorageInvalidation } from "../runtime/browser-storage-invalidation.js";
+import { holdAcrossPageCache } from "../runtime/page-cache.js";
+
 /**
  * The lifecycle of this browser's per-account local-first stores under
  * `clearOnSignOut` (#5250): which accounts' data may be on the device, who
@@ -223,25 +226,53 @@ export function holdReplicaStore(
   }).hold({ account });
 }
 
+/**
+ * Hold `account`'s lock shared until the returned release is called. While
+ * the page is in the back/forward cache it lets go (see `page-cache`):
+ * `left` runs as it does, and `returned` once it holds the lock again
+ * (`"stop"`: the page reloads instead).
+ */
 async function holdLock(
   locks: Locks | undefined,
   registry: string,
   account: string,
+  pageCache: { left(): void; returned(): void | "stop" },
 ): Promise<() => Promise<void>> {
   if (!locks) return async () => {};
-  let release!: () => void;
-  const released = new Promise<void>((resolve) => (release = resolve));
-  let held!: Promise<unknown>;
-  await new Promise<void>((acquired) => {
-    held = locks.request(lockName(registry, account), { mode: "shared" }, async () => {
-      acquired();
-      await released;
+  let releaseHeld: (() => void) | null = null;
+  let held: Promise<unknown> = Promise.resolve();
+  let released = false;
+  const take = () =>
+    new Promise<void>((acquired) => {
+      const done = new Promise<void>((resolve) => (releaseHeld = resolve));
+      held = locks.request(lockName(registry, account), { mode: "shared" }, async () => {
+        acquired();
+        await done;
+      });
     });
+  await take();
+  const stopHoldingAcrossPageCache = holdAcrossPageCache({
+    leave: () => {
+      if (released || !releaseHeld) return;
+      releaseHeld();
+      releaseHeld = null;
+      pageCache.left();
+    },
+    return: async () => {
+      if (released || releaseHeld) return;
+      await take();
+      // Released meanwhile, or the page left again before it held the lock.
+      if (released || !releaseHeld) return;
+      return pageCache.returned();
+    },
   });
   // Resolves once the lock is gone, not merely asked to go: a wipe that
   // checks right after must not find this tab still holding it.
   return async () => {
-    release();
+    released = true;
+    stopHoldingAcrossPageCache();
+    releaseHeld?.();
+    releaseHeld = null;
     await held.catch(() => {});
   };
 }
@@ -469,7 +500,24 @@ export function replicaLifecycle(options: {
           continue;
         }
         record();
-        const release = await holdLock(locks, registry, account);
+        let recordedWhenLeft = false;
+        const release = await holdLock(locks, registry, account, {
+          left: () => {
+            recordedWhenLeft = ledger.get(account) !== undefined;
+          },
+          // Back from the back/forward cache, holding the store again. Another
+          // tab may have wiped it meanwhile (it signed out as the last tab
+          // out): this page's client still shows what was wiped, so reload,
+          // as after any other external storage invalidation.
+          returned: () => {
+            const now = ledger.get(account);
+            if (now?.wiping || (recordedWhenLeft && now === undefined)) {
+              // Never recorded again: that would keep what the wipe took.
+              return reloadAfterStorageInvalidation() ? "stop" : undefined;
+            }
+            record();
+          },
+        });
         // Again once held: another tab's wipe may have forgotten it before.
         record();
         if (!ledger.get(account)?.wiping) return release;

@@ -79,6 +79,13 @@ export interface BrowserWorkerConnection {
   waitForPendingWrites(): Promise<void>;
   openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort>;
   shutdown(): Promise<void>;
+  /**
+   * Close now, without waiting for the worker, and let go of every page
+   * lock: the page is leaving for the back/forward cache (see `page-cache`).
+   * `false` when it can't (not connected, or an operation waits on the
+   * worker): it stays as it was.
+   */
+  leaveForPageCache?(): boolean;
   /** Present only after an authenticated Inspector control-port attachment. */
   getAuthenticatedInspectorAttachmentPhysicalDbName?(): string | null;
 }

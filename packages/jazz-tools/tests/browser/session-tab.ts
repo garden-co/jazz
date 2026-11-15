@@ -17,6 +17,9 @@ declare module "vitest/internal/browser" {
     sessionTabHoldBackend: (id: string, hold: boolean) => Promise<void>;
     sessionTabClose: (id: string) => Promise<void>;
     sessionTabCrash: (id: string) => Promise<void>;
+    sessionTabLeave: (id: string) => Promise<{ heldWhileAway: string[] }>;
+    sessionTabReturn: (id: string) => Promise<{ restored: boolean; notRestoredReasons: string[] }>;
+    pageCacheKeepsSharedWorkerPages: () => Promise<boolean>;
   }
 }
 
@@ -56,5 +59,12 @@ export async function openSessionTab(
     close: () => commands.sessionTabClose(id),
     /** The tab's page goes away without closing its session (a crash, a discarded tab). */
     crash: () => commands.sessionTabCrash(id),
+    /**
+     * Go to another page, leaving this one in the back/forward cache: the
+     * Jazz page locks its page still holds while it is away.
+     */
+    leave: () => commands.sessionTabLeave(id),
+    /** Go back: whether the page came back from the cache, and why not. */
+    goBack: () => commands.sessionTabReturn(id),
   };
 }
