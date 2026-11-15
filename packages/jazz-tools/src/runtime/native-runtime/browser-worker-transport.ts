@@ -34,6 +34,9 @@ export class BrowserWorkerTransportPump {
   private runAgain = false;
   private closed = false;
   private outboundDrainScheduled = false;
+  // At most one synchronous outbound drain per browser task; see
+  // scheduleOutboundDrain().
+  private outboundPostedThisTask = false;
   // A MessagePort can deliver several batches before a WASM auxiliary routing
   // promise settles. Keep their wire order: a later semantic frame must not
   // overtake an earlier chunk response that wakes a suspended evaluator.
@@ -147,8 +150,46 @@ export class BrowserWorkerTransportPump {
     return auxiliaryFrames.length > 0;
   }
 
+  // Called by the core whenever it queues a wire frame, possibly from inside a
+  // native tick.
+  //
+  // The first frame of a task is posted synchronously. A local write commits,
+  // delivers its rows to subscription listeners and only then queues its
+  // frame, so a microtask drain would run behind whatever those listeners
+  // queued first, e.g. a synchronous React render. The frame would wait out
+  // that render before the worker even sees the write.
+  //
+  // Later frames in the same task use the microtask drain, so a burst (startup,
+  // a sync catch-up) still goes out as one port message instead of one per
+  // frame.
+  //
+  // Order holds: both paths take every queued frame from the core's FIFO in
+  // one `recvWireFrames()` call and post it to the same port, so frames leave
+  // in the order the core produced them. The synchronous post only moves the
+  // first batch of the task earlier.
   private scheduleOutboundDrain(): void {
     if (this.closed || this.outboundDrainScheduled) return;
+    if (!this.outboundPostedThisTask) {
+      this.outboundPostedThisTask = true;
+      // Throttled timers (e.g. a background tab) just keep the microtask path
+      // longer, which is the behaviour before this optimisation.
+      setTimeout(() => {
+        this.outboundPostedThisTask = false;
+      }, 0);
+      try {
+        const frames = normalizeTransportFrames(this.transport.recvWireFrames());
+        if (frames.length > 0) this.sendFrames(frames);
+        return;
+      } catch (error) {
+        // This runs inside the core's send path, so tearing the pump down
+        // here would clear the scheduler while the core is calling it. Report
+        // the error from a microtask instead, as the asynchronous drain would.
+        queueMicrotask(() => {
+          if (!this.closed) this.onError(error);
+        });
+        return;
+      }
+    }
     this.outboundDrainScheduled = true;
     queueMicrotask(() => {
       this.outboundDrainScheduled = false;
