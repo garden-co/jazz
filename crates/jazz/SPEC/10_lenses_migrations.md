@@ -875,7 +875,8 @@ Neither file carries a schema hash or bundle id: loaders compute them.
     must be the column's type).
 - Values are JSON in the column's type: strings for `string`, enums and
   `uuid`, numbers for `int`/`float`, a decimal string for `bigint`, the
-  engine's integer for `timestamp` (an ISO 8601 form is not supported yet),
+  engine's integer for `timestamp`, milliseconds since the Unix epoch (an ISO
+  8601 form is not supported yet),
   base64 for `bytes`, any JSON for `json`, arrays for `array`, objects
   `{"<case>": {...}}` for payload enums, and `null`.
 
@@ -1052,7 +1053,10 @@ Meaning:
   naming its JSON path, as it refuses an outer-row reference outside any
   `exists`. `session.__jazz_outer_row…` is not a session value: the reader
   refuses it.
-- **Session values.** `session.user`, `session.claims.<path>`,
+- **Session values.** `session.user` (the account: `$createdBy =
+session.user` matches rows written through any identity linked to it),
+  `session.identity` (the exact login: `$createdBy.identity =
+session.identity` matches only rows it wrote), `session.claims.<path>`,
   `session.identity.subject`, `session.identity.issuer` and
   `session.authMode`; any other path is refused as a typo.
 - **Comparisons.** A comparison compares a column with a value, a column
@@ -1067,7 +1071,7 @@ Meaning:
   with; one that can't (e.g. `'x'` for an `int`, a non-UUID for a `uuid`) is
   refused. Compared with a session claim, `'…'` is text, `1` an int, `1.5` a
   float. A typed literal (`int(5)`, `text('5')`, `uuid('…')`,
-  `timestamp(1700000000000000)`, `bytes('0aff')`, `array(int(1), int(2))`,
+  `timestamp(1700000000000)`, `bytes('0aff')`, `array(int(1), int(2))`,
   `row(null, text('a'))`, `enumcase('closed', timestamp(5))`) is exactly that
   value, whatever it is compared with; the writer uses one only where a plain
   literal would read back as another value.

@@ -1006,6 +1006,7 @@ impl Parser<'_> {
         let known = matches!(
             parts.as_slice(),
             ["user"]
+                | ["identity"]
                 | ["identity", "subject"]
                 | ["identity", "issuer"]
                 | ["authMode"]
@@ -1021,7 +1022,7 @@ impl Parser<'_> {
         if !known {
             return Err(ExprError::new(
                 (start, end),
-                "a session value is `session.user` or `session.claims.<name>` (or `session.identity.subject`, `session.identity.issuer`, `session.authMode`)",
+                "a session value is `session.user` or `session.claims.<name>` (or `session.identity`, `session.identity.subject`, `session.identity.issuer`, `session.authMode`)",
             )
             .example("session.claims.role = 'admin'"));
         }

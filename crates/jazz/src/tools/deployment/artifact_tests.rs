@@ -274,7 +274,7 @@ fn shared_todos() -> ArtifactInput {
             (
                 "todos".into(),
                 CodegenTable {
-                    relations: BTreeMap::from([("shares".into(), reverse("shares", "todo"))]),
+                    relations: BTreeMap::from([("shares".into(), reverse("shares", "todoRow"))]),
                     computed: vec![ComputedField {
                         name: "shareCount".into(),
                         field_type: FieldType {
@@ -290,7 +290,7 @@ fn shared_todos() -> ArtifactInput {
             (
                 "shares".into(),
                 CodegenTable {
-                    relations: BTreeMap::from([("todo".into(), forward("todos", "todo"))]),
+                    relations: BTreeMap::from([("todoRow".into(), forward("todos", "todo"))]),
                     ts_only: vec![],
                     ..Default::default()
                 },
@@ -436,8 +436,8 @@ fn the_files_read_like_the_dsl() {
     for present in [
         "\"owner\": \"uuid?\"",
         "\"tags\": { \"array\": \"string\" }",
-        "\"todo\": { \"rel\": \"todos\", \"column\": \"todo\" }",
-        "\"shares\": { \"reverse\": \"shares\", \"relation\": \"todo\" }",
+        "\"todoRow\": { \"rel\": \"todos\", \"column\": \"todo\" }",
+        "\"shares\": { \"reverse\": \"shares\", \"relation\": \"todoRow\" }",
         "\"history\": \"latest\"",
         "\"renameFrom\": \"title\"",
     ] {
@@ -449,7 +449,7 @@ fn the_files_read_like_the_dsl() {
     }
     for present in [
         "\"anyOf\": [\"owner = session.user\", \"exists shares(todo = this.id, user = session.user)\"]",
-        "\"read\": \"allowedTo.read(todo)\"",
+        "\"read\": \"allowedTo.read(todoRow)\"",
         "\"delete\": { \"allOf\": [\"owner = session.user\", \"not owner = null\"] }",
     ] {
         assert!(
@@ -520,8 +520,8 @@ fn every_construct_reads_and_prints_back() {
         ),
         ("todos", "exists shares()"),
         ("todos", "allowedTo.read(shares)"),
-        ("shares", "allowedTo.read(todo)"),
-        ("shares", "allowedTo.update(todo, maxDepth: 3)"),
+        ("shares", "allowedTo.read(todoRow)"),
+        ("shares", "allowedTo.update(todoRow, maxDepth: 3)"),
         ("todos", "not owner = session.user"),
         ("todos", "owner = session.user or name = 'x'"),
         (
@@ -633,8 +633,8 @@ fn expression_errors_point_at_the_spot_and_suggest() {
             "two columns of the same row can't be compared",
         ),
         (
-            "exists shares(todo = this.id).todoo(name = 'x')",
-            "unknown relation `todoo` on shares; did you mean `todo`?",
+            "exists shares(todo = this.id).todoRw(name = 'x')",
+            "unknown relation `todoRw` on shares; did you mean `todoRow`?",
         ),
         (
             "outer.owner = session.user",
@@ -706,7 +706,7 @@ fn unknown_keys_are_refused_at_every_level_with_the_nearest() {
     app["tables"]["todos"]["$comment"] = "A to-do".into();
     let mut permissions: serde_json::Value = serde_json::from_str(&written.permissions).unwrap();
     permissions["tables"]["shares"]["read"] =
-        serde_json::json!({"$comment": "Inherited", "where": "allowedTo.read(todo)"});
+        serde_json::json!({"$comment": "Inherited", "where": "allowedTo.read(todoRow)"});
     load(
         app.to_string().as_bytes(),
         permissions.to_string().as_bytes(),
@@ -745,7 +745,7 @@ fn migrations_must_name_versions_and_pass_their_lens_checks() {
 #[test]
 fn relations_must_name_real_columns() {
     let error =
-        edited_app(|v| v["tables"]["shares"]["relations"]["todo"]["column"] = "nope".into());
+        edited_app(|v| v["tables"]["shares"]["relations"]["todoRow"]["column"] = "nope".into());
     assert!(
         error.contains("names column `nope`, which shares doesn't have"),
         "{error}"
@@ -1419,13 +1419,13 @@ fn relation_hops_and_nested_exists_round_trip() {
     let text = printed("todos", &hop);
     assert_eq!(
         text,
-        "exists shares(todo = this.id).todo(owner = session.user)"
+        "exists shares(todo = this.id).todoRow(owner = session.user)"
     );
     // The hop sugar compiles to the same relation.
     assert_eq!(
         read_policy(
             "todos",
-            "exists shares(todo = this.id).todo(owner = session.user)",
+            "exists shares(todo = this.id).todoRow(owner = session.user)",
             serde_json::json!({})
         )
         .unwrap(),
@@ -2018,4 +2018,42 @@ fn version_names_javascript_would_reorder_are_refused() {
             v["migrations"][0]["from"] = name.into();
         });
     }
+}
+
+#[test]
+fn the_exact_login_is_session_identity() {
+    let expr = read_policy(
+        "todos",
+        "$createdBy.identity = session.identity",
+        serde_json::json!({}),
+    )
+    .unwrap();
+    assert_eq!(
+        printed("todos", &expr),
+        "$createdBy.identity = session.identity"
+    );
+    let account = read_policy("todos", "$createdBy = session.user", serde_json::json!({})).unwrap();
+    assert_ne!(expr, account);
+    let error = read_policy(
+        "todos",
+        "$createdBy.identity = session.identty",
+        serde_json::json!({}),
+    )
+    .unwrap_err();
+    assert!(error.contains("`session.identity`"), "{error}");
+}
+
+#[test]
+fn every_history_version_must_lead_to_the_current_one() {
+    let error = edited_app(|v| {
+        v.as_object_mut().unwrap().remove("migrations");
+    });
+    assert!(
+        error.contains("history.00304e9bce65: no migration leads from it to the current `tables`"),
+        "{error}"
+    );
+    let written = write(shared_todos()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    value.as_object_mut().unwrap().remove("migrations");
+    assert!(load_client(value.to_string().as_bytes()).is_err());
 }
