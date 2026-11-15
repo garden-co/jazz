@@ -46,6 +46,9 @@ type Config struct {
 	Computed any `json:"-"`
 	// AdminSecret lets a backend publish the app's schema and permissions.
 	AdminSecret string `json:"adminSecret,omitempty"`
+	// Auth signs an end user in (Token, DeviceAccount, DeviceKey): with
+	// ServerURL set to the app's Jazz endpoint (its backend's /jazz).
+	Auth Auth `json:"-"`
 	// Session is the user a backend acts as. Its Issuer is "jazz:backend"
 	// (left empty, it is set so).
 	Session *Session `json:"session,omitempty"`
@@ -79,9 +82,10 @@ func takeError(err *C.char) error {
 
 // DB is an open app. It is safe for concurrent use.
 type DB struct {
-	mu     sync.RWMutex
-	handle *C.JazzHandle
-	app    any
+	mu       sync.RWMutex
+	handle   *C.JazzHandle
+	app      any
+	provider uint64 // the TokenProvider's id, if any
 }
 
 func (db *DB) computed() any { return db.app }
@@ -94,31 +98,45 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		session.Issuer = BackendIssuer
 		cfg.Session = &session
 	}
+	var auth map[string]any
+	if cfg.Auth != nil {
+		var err error
+		if auth, err = cfg.Auth.authJSON(); err != nil {
+			return nil, err
+		}
+	}
 	config, err := json.Marshal(struct {
 		Config
-		Contract int `json:"contract"`
-	}{cfg, 2})
+		Contract int            `json:"contract"`
+		AuthJSON map[string]any `json:"auth,omitempty"`
+	}{cfg, 2, auth})
 	if err != nil {
 		return nil, err
 	}
 	type opened struct {
-		h   *C.JazzHandle
-		err error
+		h        *C.JazzHandle
+		err      error
+		provider uint64
 	}
 	done := make(chan opened, 1)
 	go func() {
+		if t, ok := cfg.Auth.(tokenAuth); ok {
+			h, provider, err := openUser(string(config), t.provider)
+			done <- opened{h, err, provider}
+			return
+		}
 		text := C.CString(string(config))
 		defer C.free(unsafe.Pointer(text))
 		var cerr *C.char
 		h := C.jazz_open(text, &cerr)
-		done <- opened{h, takeError(cerr)}
+		done <- opened{h: h, err: takeError(cerr)}
 	}()
 	select {
 	case o := <-done:
 		if o.err != nil {
 			return nil, o.err
 		}
-		return &DB{handle: o.h, app: cfg.Computed}, nil
+		return &DB{handle: o.h, app: cfg.Computed, provider: o.provider}, nil
 	case <-ctx.Done():
 		go func() {
 			if o := <-done; o.h != nil {
@@ -136,6 +154,8 @@ func (db *DB) Close() error {
 	if db.handle != nil {
 		C.jazz_close(db.handle)
 		db.handle = nil
+		// The token callback is valid until jazz_close returns.
+		providers.Delete(db.provider)
 	}
 	return nil
 }

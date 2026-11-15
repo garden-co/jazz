@@ -97,6 +97,26 @@ func subscribe[T any](ctx context.Context, db *DB, query any, decode func(event)
 	if err != nil {
 		return nil, err
 	}
+	return stream(ctx, db, decode, func(id uint64) (func(), error) {
+		cquery := C.CString(string(queryJSON))
+		defer C.free(unsafe.Pointer(cquery))
+		var cerr *C.char
+		sub := C.jazz_go_subscribe(db.handle, cquery, C.uintptr_t(id), &cerr)
+		if err := takeError(cerr); err != nil || sub == nil {
+			if err == nil {
+				err = &Error{Kind: KindRefused, Message: "subscribe failed"}
+			}
+			return nil, err
+		}
+		return func() { C.jazz_unsubscribe(sub) }, nil
+	})
+}
+
+// stream runs a jazz-ffi callback stream that start begins (with the id
+// its callbacks get as context) and whose stop func ends it, sending what
+// decode makes of each callback, in order, until ctx is done or decode
+// says the value it made is the last (an error).
+func stream[T any](ctx context.Context, db *DB, decode func(event) (T, bool), start func(id uint64) (func(), error)) (<-chan T, error) {
 	s := &subscriber{wake: make(chan struct{}, 1)}
 	id := nextSubscriber.Add(1)
 	subscribers.Store(id, s)
@@ -107,16 +127,10 @@ func subscribe[T any](ctx context.Context, db *DB, query any, decode func(event)
 		forget()
 		return nil, &Error{Kind: KindClosed, Message: "closed"}
 	}
-	cquery := C.CString(string(queryJSON))
-	var cerr *C.char
-	sub := C.jazz_go_subscribe(db.handle, cquery, C.uintptr_t(id), &cerr)
-	C.free(unsafe.Pointer(cquery))
+	end, err := start(id)
 	db.mu.RUnlock()
-	if err := takeError(cerr); err != nil || sub == nil {
+	if err != nil {
 		forget()
-		if err == nil {
-			err = &Error{Kind: KindRefused, Message: "subscribe failed"}
-		}
 		return nil, err
 	}
 	out := make(chan T)
@@ -126,8 +140,8 @@ func subscribe[T any](ctx context.Context, db *DB, query any, decode func(event)
 			s.mu.Lock()
 			s.closed = true
 			s.mu.Unlock()
-			C.jazz_unsubscribe(sub)
-			// No callback runs after jazz_unsubscribe returns.
+			end()
+			// No callback runs after the stream's end returns.
 			forget()
 		}
 		for {

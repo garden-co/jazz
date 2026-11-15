@@ -13,3 +13,17 @@ static void jazz_go_callback(void* ctx, const char* kind, const char* json) {
 JazzSubscription* jazz_go_subscribe(JazzHandle* h, const char* q, uintptr_t ctx, char** err) {
 	return jazz_subscribe(h, q, jazz_go_callback, (void*)ctx, err);
 }
+
+extern char* jazzGoTokenCallback(uintptr_t ctx, char* reason);
+
+static char* jazz_go_token(void* ctx, const char* reason) {
+	return jazzGoTokenCallback((uintptr_t)ctx, (char*)reason);
+}
+
+JazzHandle* jazz_go_open_user(const char* config, uintptr_t ctx, char** err) {
+	return jazz_open_user(config, jazz_go_token, (void*)ctx, err);
+}
+
+JazzWatch* jazz_go_watch(JazzHandle* h, const char* what, uintptr_t ctx, char** err) {
+	return jazz_watch(h, what, jazz_go_callback, (void*)ctx, err);
+}
