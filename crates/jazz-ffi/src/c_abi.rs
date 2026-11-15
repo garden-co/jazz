@@ -768,7 +768,8 @@ pub unsafe extern "C" fn jazz_endpoint_socket(
     })
 }
 
-/// A binary message from the client. Returns 0, or -1 (with `*err`) once
+/// A message from the client: every data message, binary or text (TS
+/// sends its prelude as text), as its bytes. Returns 0, or -1 (with `*err`) once
 /// the socket has closed.
 ///
 /// # Safety

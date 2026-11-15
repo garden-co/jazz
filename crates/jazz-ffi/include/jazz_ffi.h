@@ -195,7 +195,10 @@ JazzHandle *jazz_endpoint_for_user(JazzEndpoint *endpoint, const char *request_j
 JazzSocket *jazz_endpoint_socket(JazzEndpoint *endpoint, const char *upgrade_json,
                                  JazzSocketMessage on_message, JazzSocketClosed on_close,
                                  void *ctx, char **err);
-/* A binary message from the client: 0, or -1 once the socket closed. */
+/*
+ * A message from the client: pass every data message, binary or text (TS
+ * sends its prelude as text), as its bytes. 0, or -1 once the socket closed.
+ */
 int jazz_socket_push(JazzSocket *socket, const unsigned char *data, size_t len, char **err);
 /* The client's socket closed: ends it, waits for on_close, frees it. */
 void jazz_socket_free(JazzSocket *socket);

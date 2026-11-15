@@ -1,7 +1,8 @@
 //! A backend's `/jazz` endpoint (jazz-app's [`jazz_app::Endpoint`], TS
 //! `createJazz`'s handler) for hosts whose own HTTP server serves it: the
 //! host passes each request in and writes the response out, upgrades the
-//! socket path itself and pumps its WebSocket's binary messages through a
+//! socket path itself and pumps every WebSocket data message (binary or text, as bytes)
+//! through a
 //! [`SocketCore`], and answers "who is this request's user" from its own
 //! sign-in through a callback.
 //!
@@ -249,7 +250,8 @@ pub(crate) struct SocketCore {
 }
 
 impl SocketCore {
-    /// A binary message from the client.
+    /// A message from the client: every data message, binary or text (TS
+    /// sends its prelude as text), as its bytes.
     pub fn push(&self, message: Vec<u8>) -> Result<()> {
         match &*self.incoming.lock().unwrap_or_else(|e| e.into_inner()) {
             Some(sender) => sender
