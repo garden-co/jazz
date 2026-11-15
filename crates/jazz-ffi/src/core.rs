@@ -506,6 +506,7 @@ impl Core {
     /// Waits until every write committed so far reaches `tier`: the client
     /// settles its writes in order, so waiting for the last one is enough.
     pub fn wait_for_sync(&self, tier: DurabilityTier) -> Result<()> {
+        self.reachable(Some(tier))?;
         block_on(self.open_jazz()?.with_client(move |client| async move {
             match LAST_WRITE.with(|last| last.get()) {
                 Some(last) => Ok(client.wait_for_transaction(last, tier).await?),
