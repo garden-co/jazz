@@ -197,17 +197,18 @@ pub fn detach_store_identity(data_dir: &Path) -> Result<(), String> {
         .map_err(storage)?
         .map(|kept| text(BLOB_STORE, kept))
         .transpose()?;
-    for key in [STORE_ID, BLOB_STORE] {
-        file.host_delete(IDENTITY, key).map_err(storage)?;
-    }
-    drop(file);
-    // The secret goes too: the copy mints its own, so tokens the original
-    // issued don't open it.
+    // The files go before the table forgets: a crash in between leaves the
+    // store as it was (detach runs again), never files that bring the old
+    // id back. The secret goes too: the copy mints its own, so tokens the
+    // original issued don't open it.
     for name in [STORE_ID_FILE, BLOB_STORE_FILE, TOKEN_SECRET_FILE] {
         remove_if_present(&data_dir.join(name))?;
     }
     if let Some(inside) = blob_store.as_deref().and_then(blob_dir_inside) {
         remove_if_present(&data_dir.join(inside).join(super::builder::BLOB_OWNER_FILE))?;
+    }
+    for key in [STORE_ID, BLOB_STORE, TOKEN_SECRET] {
+        file.host_delete(IDENTITY, key).map_err(storage)?;
     }
     Ok(())
 }
@@ -215,7 +216,8 @@ pub fn detach_store_identity(data_dir: &Path) -> Result<(), String> {
 /// Make the stopped store in `data_dir` serve `app_id` from its next start:
 /// for a store started with the wrong app id, or one whose app was renamed.
 /// A store refuses any app but its own, and this is the one way to change
-/// it. The users' accounts and identities the store holds stay as they are.
+/// it. Rows and history stay as they are, but local-first guests' accounts
+/// are derived from the app id, so they no longer match after a change.
 ///
 /// Call it under the data dir's lock ([`crate::lock_data_dir`]).
 pub fn set_store_app_id(data_dir: &Path, app_id: &str) -> Result<(), String> {
@@ -228,11 +230,16 @@ pub fn set_store_app_id(data_dir: &Path, app_id: &str) -> Result<(), String> {
     }
     let file = open_file(data_dir)?;
     import_legacy(&file, data_dir)?;
+    // The mirror goes first: a crash before the table changes leaves none,
+    // which the next open makes again, never one that disagrees.
+    let mirrored = data_dir.join(APP_ID_FILE).exists();
+    remove_if_present(&data_dir.join(APP_ID_FILE))?;
     file.host_put_many(IDENTITY, &[(APP_ID.to_vec(), app_id.as_bytes().to_vec())])
         .map_err(storage)?;
+    file.host_delete(IDENTITY, TOKEN_SECRET).map_err(storage)?;
     drop(file);
     // An in-process store keeps the mirror; a server never had one.
-    if data_dir.join(APP_ID_FILE).exists() {
+    if mirrored {
         write_mirror(data_dir, APP_ID_FILE, Some(app_id), false)?;
     }
     Ok(())
@@ -572,6 +579,58 @@ mod tests {
 
     /// Earlier builds of this release kept the secret in the table: the
     /// file takes it over, so tokens stay valid, and the table forgets it.
+    /// A crash between a step and the next leaves a store that opens.
+    #[test]
+    fn set_app_id_and_detach_leave_no_disagreeing_file_at_any_step() {
+        // set-app-id: the mirror is gone before the table changes.
+        let dir = tempfile::tempdir().unwrap();
+        open_store_identity(dir.path(), EMBEDDED).unwrap();
+        std::fs::remove_file(dir.path().join(APP_ID_FILE)).unwrap();
+        let store = open_file(dir.path()).unwrap();
+        store
+            .host_put_many(IDENTITY, &[(APP_ID.to_vec(), b"renamed".to_vec())])
+            .unwrap();
+        drop(store);
+        assert_eq!(
+            open_store_identity(dir.path(), EMBEDDED).unwrap().app_id,
+            "renamed"
+        );
+        // detach: the files are gone before the table forgets.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(BLOB_STORE_FILE), "files\n").unwrap();
+        let original = open_store_identity(dir.path(), EMBEDDED).unwrap();
+        for name in [STORE_ID_FILE, BLOB_STORE_FILE, TOKEN_SECRET_FILE] {
+            std::fs::remove_file(dir.path().join(name)).unwrap();
+        }
+        // Not detached yet, and not broken: it runs again.
+        let reopened = open_store_identity(dir.path(), EMBEDDED).unwrap();
+        assert_eq!(reopened.store_id, original.store_id);
+        detach_store_identity(dir.path()).unwrap();
+        assert_ne!(
+            open_store_identity(dir.path(), EMBEDDED).unwrap().store_id,
+            original.store_id
+        );
+    }
+
+    #[test]
+    fn detach_and_set_app_id_forget_a_secret_an_earlier_build_kept_in_the_table() {
+        for step in [
+            detach_store_identity as fn(&Path) -> Result<(), String>,
+            |dir: &Path| set_store_app_id(dir, "app"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            open_store_identity(dir.path(), server("app")).unwrap();
+            let store = open_file(dir.path()).unwrap();
+            store
+                .host_put_many(IDENTITY, &[(TOKEN_SECRET.to_vec(), b"old".to_vec())])
+                .unwrap();
+            drop(store);
+            step(dir.path()).unwrap();
+            let reader = HostReader::open(&dir.path().join(STORE_FILE), None).unwrap();
+            assert_eq!(reader.get(IDENTITY, TOKEN_SECRET).unwrap(), None);
+        }
+    }
+
     #[test]
     fn a_secret_an_earlier_build_kept_in_the_table_moves_to_its_file() {
         let dir = tempfile::tempdir().unwrap();

@@ -13,12 +13,22 @@ Everything your [main backend](/docs/how-jazz-works#how-a-backend-talks-to-jazz)
 | `jazz.sqlite` (with `-wal` and `-shm`) | Rows, history, schemas, permissions, the index of large-value chunks, and the store's identity: its app id, its own id and where its chunks live |
 | `blobs/`                               | The chunks of large values, unless you chose [another place](/docs/setup/deployment/own-server#large-values)                                     |
 | `app-id`, `store-id`, `blob-store`     | Copies of the identity in `jazz.sqlite`, kept so an earlier release opened on the directory reads the same one                                   |
-| `inspect-token-secret`                 | What [Inspector](/docs/tooling/inspector) tokens are signed with (readable by its owner only)                                                    |
+| `inspect-token-secret`                 | A secret: what [Inspector](/docs/tooling/inspector) agent tokens are signed with (readable by its owner only, never in `jazz.sqlite`)            |
 | `jazz.lock`                            | Held by the running process, so a second one on the same directory is refused                                                                    |
 
 `jazz.sqlite` holds the identity; the files are copies each start rewrites from it. A copy that
 disagrees with `jazz.sqlite` (edited, or from another store) is refused with an error naming both,
 never chosen.
+
+A store keeps the app id it was first started with, and refuses to start for another one. If it was
+first started with the wrong one, or your app's id changed, stop the backend and set it:
+
+```sh
+npx jazz-tools store set-app-id ./data <app id>
+```
+
+Local-first guests' accounts are derived from the app id, so after a change they no longer match
+the ones their devices hold: change it only for a store whose users haven't relied on the old one.
 
 If your chunks are in another directory (`files({ dir })`) or a bucket (`s3()`), they're part of the
 data too.
@@ -26,6 +36,10 @@ data too.
 ## Backing up
 
 Back up the whole directory together, and its chunk directory or bucket prefix with it:
+
+- **Keep `inspect-token-secret` as a secret**, apart from the data if you like: it signs Inspector
+  agent tokens. Restoring `jazz.sqlite` without it revokes every token issued before; a new one is
+  made on the next start.
 
 - **Stop the backend first**, or snapshot the disk it's on atomically (a volume snapshot). Copying
   `jazz.sqlite` while it's being written can give you a copy that doesn't open.
@@ -49,7 +63,11 @@ npx jazz-tools store detach ./staging-data
 ```
 
 Otherwise it claims the original's chunks, and deletes the ones it no longer needs. The copy keeps
-the app id, so it still serves the same app.
+the app id, so it still serves the same app, and gets an `inspect-token-secret` of its own, so agent
+tokens the original issued don't open it.
+
+Apart from that secret and the chunks, `jazz.sqlite` is the whole store: a copy of it opens as the
+same store, for the same app, with its large values where they were.
 
 ## Upgrading between releases
 

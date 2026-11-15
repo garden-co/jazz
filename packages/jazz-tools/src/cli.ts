@@ -283,6 +283,19 @@ function exitOnError(task: Promise<unknown>): void {
   });
 }
 
+/** Run a `store` subcommand, which needs the store stopped. */
+function storeCommand(path: string, run: () => void): void {
+  try {
+    run();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/already open|jazz\.lock/i.test(message)) {
+      throw new Error(`${path} is in use: stop the backend or server using it first.`);
+    }
+    throw error;
+  }
+}
+
 function splitLeadingAppId(args: string[]): { appId?: string; args: string[] } {
   const first = args[0];
   if (!first || first.startsWith("-")) {
@@ -496,7 +509,7 @@ if (isMainModule()) {
     if (subcommand === "detach" && path && rest.length === 0) {
       exitOnError(
         import("jazz-napi").then(({ detachStore }) => {
-          detachStore(resolve(process.cwd(), path));
+          storeCommand(path, () => detachStore(resolve(process.cwd(), path)));
           console.log(
             `${path} is now a store of its own; it claims its large values' place on its next start.`,
           );
@@ -506,7 +519,7 @@ if (isMainModule()) {
       const appId = rest[0]!;
       exitOnError(
         import("jazz-napi").then(({ setStoreAppId }) => {
-          setStoreAppId(resolve(process.cwd(), path), appId);
+          storeCommand(path, () => setStoreAppId(resolve(process.cwd(), path), appId));
           console.log(`${path} serves app ${appId} from its next start.`);
         }),
       );
