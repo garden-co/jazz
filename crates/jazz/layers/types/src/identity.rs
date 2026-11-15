@@ -440,6 +440,12 @@ mod tests {
         );
         assert!(verify_local_first_challenge(&proof, "nonce-2").is_err());
         assert!(verify_local_first_challenge("junk", "nonce-1").is_err());
+        // Another key's signature under this key's name proves nothing.
+        let (public_key, _) = proof.split_once('.').unwrap();
+        let other = sign_local_first_challenge(&[8u8; 32], "nonce-1").unwrap();
+        let (_, other_signature) = other.split_once('.').unwrap();
+        let forged = format!("{public_key}.{other_signature}");
+        assert!(verify_local_first_challenge(&forged, "nonce-1").is_err());
         assert!(sign_local_first_challenge(&seed, "").is_err());
     }
 

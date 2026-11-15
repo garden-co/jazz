@@ -7,15 +7,18 @@
 //! renews credentials for. [`Session`] is its `Send + Clone` face: state and
 //! status as values and streams, and commands sent to the machine.
 
+use std::ops::ControlFlow;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use tokio::time::Instant;
 
 use futures_core::Stream;
 use jazz::account_registry::AccountId;
-use jazz::link::{AuthFailureReason, LinkPhase, LinkStatus};
+use jazz::link::{AuthFailureReason, LinkPhase};
 use jazz::tools::{AppId, JazzClient};
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::auth::{Bearer, DEVICE_TOKEN_TTL_SECS, DeviceKey, TokenReason, jwt_expiry};
+use crate::auth::{Bearer, DEVICE_TOKEN_TTL_SECS, DeviceKey, TokenFuture, TokenReason, jwt_expiry};
 use crate::error::{Error, Result};
 
 /// Why the server refused a credential, as TypeScript's `AuthFailureReason`.
@@ -115,6 +118,10 @@ pub enum UserKind {
 #[non_exhaustive]
 pub struct SyncStatus {
     pub link: Link,
+    /// How many times the server refused the credential: a refusal of a
+    /// renewed one leaves `link` as it was.
+    #[serde(skip)]
+    pub(crate) refusals: u64,
 }
 
 /// The upstream link, as TypeScript's `SyncStatus.link`. Serializes as
@@ -149,10 +156,12 @@ pub enum Offline {
 }
 
 impl SyncStatus {
-    fn of(status: Option<LinkStatus>) -> Self {
-        let Some(status) = status else {
+    fn of(client: &JazzClient) -> Self {
+        let refusals = client.auth_refusals();
+        let Some(status) = client.upstream_status() else {
             return Self {
                 link: Link::LocalOnly,
+                refusals,
             };
         };
         let offline = |reason, retrying| Link::Offline {
@@ -171,7 +180,7 @@ impl SyncStatus {
             }
             LinkPhase::Stopped => offline(Offline::Stopped, false),
         };
-        Self { link }
+        Self { link, refusals }
     }
 }
 
@@ -182,11 +191,11 @@ const STATUS_POLL: Duration = Duration::from_millis(100);
 /// Publishes the client's link status as it changes, until the client's
 /// thread ends.
 pub(crate) fn watch_sync(client: JazzClient) -> watch::Receiver<SyncStatus> {
-    let (sender, receiver) = watch::channel(SyncStatus::of(client.upstream_status()));
+    let (sender, receiver) = watch::channel(SyncStatus::of(&client));
     tokio::task::spawn_local(async move {
         loop {
             tokio::time::sleep(STATUS_POLL).await;
-            let status = SyncStatus::of(client.upstream_status());
+            let status = SyncStatus::of(&client);
             sender.send_if_modified(|current| {
                 let changed = *current != status;
                 *current = status;
@@ -206,17 +215,16 @@ pub(crate) enum Credential {
 impl Credential {
     /// When to renew the credential the client now holds: at 80% of its
     /// life, as the TypeScript client does.
-    fn renew_at(&self, issued: SystemTime) -> Option<SystemTime> {
+    fn renew_in(&self) -> Option<Duration> {
         let lifetime = match self {
             Self::Device { .. } => DEVICE_TOKEN_TTL_SECS,
             Self::Bearer { token, .. } => {
-                let issued_secs = issued.duration_since(UNIX_EPOCH).ok()?.as_secs();
-                jwt_expiry(token)?.saturating_sub(issued_secs)
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+                jwt_expiry(token)?.saturating_sub(now)
             }
         };
         // A bearer about to expire is renewed when the backend refuses it.
-        (lifetime >= MIN_RENEWAL_LIFETIME_SECS)
-            .then(|| issued + Duration::from_secs(lifetime * 4 / 5))
+        (lifetime >= MIN_RENEWAL_LIFETIME_SECS).then(|| Duration::from_secs(lifetime * 4 / 5))
     }
 }
 
@@ -293,8 +301,11 @@ impl Session {
         let linked =
             crate::backend::link(&linking.endpoint, linking.app, bearer, &linking.key).await?;
         if linked.account != device {
+            // The backend has linked the user by now: say so, as the
+            // session stays the device's.
             return Err(Error::Server(format!(
-                "the backend linked account {} instead of the device's {}",
+                "the backend linked its user to account {}, not this device's {}; \
+                 the link stands on the backend, and this session stays the device's",
                 linked.account.0, device.0
             )));
         }
@@ -339,6 +350,10 @@ pub(crate) fn changes<T: Clone + Send + Sync + 'static>(
     ))
 }
 
+/// Stops the client, as [`crate::Jazz::shutdown`] does: when the token
+/// provider signs the user out, nothing may sync as them any more.
+pub(crate) type Stop = Box<dyn FnOnce()>;
+
 /// Starts `user`'s session on the client's thread.
 pub(crate) fn start(
     client: JazzClient,
@@ -346,6 +361,7 @@ pub(crate) fn start(
     credential: Credential,
     endpoint: &str,
     sync: watch::Receiver<SyncStatus>,
+    stop: Stop,
 ) -> Session {
     let linking = match &credential {
         Credential::Device { key, app } => Some(std::sync::Arc::new(Linking {
@@ -362,8 +378,13 @@ pub(crate) fn start(
         user,
         credential,
         state,
-        renew_at: None,
-        renewed_since_live: false,
+        stop: Some(stop),
+        renewal: None,
+        pending: None,
+        streak: 0,
+        failures: 0,
+        live_since: None,
+        refusals: sync.borrow().refusals,
     };
     tokio::task::spawn_local(machine.run(sync, inbox));
     Session {
@@ -373,21 +394,57 @@ pub(crate) fn start(
     }
 }
 
+/// Delay before retry `attempt` (from 0): 1 s doubling, capped at 5 minutes,
+/// as TypeScript's `authRetryDelay`.
+fn auth_retry_delay(attempt: u32) -> Duration {
+    Duration::from_millis((1_000u64 << attempt.min(20)).min(5 * 60_000))
+}
+
+/// A link admitted at least this long ago was not refused on arrival: its
+/// refusal starts a new renewal streak.
+const LIVED: Duration = Duration::from_secs(30);
+
+/// A renewal waiting for its time.
+struct Scheduled {
+    at: Instant,
+    reason: TokenReason,
+}
+
+/// A token the provider is still working on, and who waits for it.
+struct Pending {
+    reason: TokenReason,
+    token: TokenFuture,
+    replies: Vec<oneshot::Sender<Result<()>>>,
+}
+
+/// The session state machine, as the TypeScript client renews
+/// (`accounts/context.ts`, `runtime/auth-renewal-backoff.ts`):
+///
+/// - a credential is renewed at 80% of its life;
+/// - a renewable refusal renews it: at once, then with a backoff for each
+///   refusal in a row (a streak ends once a credential lives), and the
+///   session reads `Expired` from the second;
+/// - a failed renewal (the provider erred) is retried with a backoff;
+/// - a refusal no credential fixes (revoked, disabled) is `Expired` for good;
+/// - a provider that names no one signs out, and stops the client.
+///
+/// The provider's future is polled beside the machine's other inputs, so a
+/// slow provider (an interactive sign-in) never holds up a sign-out.
 struct Machine {
     client: JazzClient,
     user: User,
     credential: Credential,
     state: watch::Sender<SessionState>,
-    renew_at: Option<SystemTime>,
-    /// A fresh credential was given after a refusal and not yet admitted:
-    /// a second refusal is the credential's fault, not its age.
-    renewed_since_live: bool,
-}
-
-/// What renewing found.
-enum Renewed {
-    Renewed,
-    SignedOut,
+    stop: Option<Stop>,
+    renewal: Option<Scheduled>,
+    pending: Option<Pending>,
+    /// Refusals renewed since a credential last lived.
+    streak: u32,
+    /// Failed renewals in a row.
+    failures: u32,
+    live_since: Option<Instant>,
+    /// The refusals seen so far ([`SyncStatus::refusals`]).
+    refusals: u64,
 }
 
 impl Machine {
@@ -396,41 +453,33 @@ impl Machine {
         mut sync: watch::Receiver<SyncStatus>,
         mut inbox: mpsc::UnboundedReceiver<Command>,
     ) {
-        self.renew_at = self.credential.renew_at(SystemTime::now());
+        self.schedule_ahead();
         loop {
-            let until_renewal = self
-                .renew_at
-                .map(|at| at.duration_since(SystemTime::now()).unwrap_or_default());
-            tokio::select! {
+            let at = self.renewal.as_ref().map(|renewal| renewal.at);
+            let flow = tokio::select! {
                 changed = sync.changed() => {
                     if changed.is_err() {
                         return;
                     }
-                    let link = sync.borrow_and_update().link.clone();
-                    if self.on_link(link).await.is_break() {
-                        return;
-                    }
+                    let status = sync.borrow_and_update().clone();
+                    self.on_link(status)
                 }
-                () = sleep(until_renewal) => {
-                    // Ahead of expiry: a failure here is retried on refusal.
-                    match self.renew(TokenReason::Renew).await {
-                        Ok(Renewed::SignedOut) => return self.signed_out(),
-                        Ok(Renewed::Renewed) => {}
-                        Err(_) => self.renew_at = None,
+                () = sleep_until(at), if self.pending.is_none() => {
+                    let Scheduled { reason, .. } = self.renewal.take().expect("scheduled");
+                    // A credential that lived to its renewal ends the streak.
+                    if reason == TokenReason::Renew {
+                        self.streak = 0;
                     }
+                    self.renew(reason, None)
+                }
+                token = poll_pending(&mut self.pending) => {
+                    let Pending { reason, replies, .. } =
+                        self.pending.take().expect("pending");
+                    self.received(reason, token, replies)
                 }
                 command = inbox.recv() => match command {
                     Some(Command::Refresh(reply)) => {
-                        let result = self.renew(TokenReason::Refresh).await;
-                        // The state changes before the caller hears back.
-                        let signed_out = matches!(result, Ok(Renewed::SignedOut));
-                        if signed_out {
-                            self.signed_out();
-                        }
-                        let _ = reply.send(result.map(|_| ()));
-                        if signed_out {
-                            return;
-                        }
+                        self.renew(TokenReason::Refresh, Some(reply))
                     }
                     Some(Command::Linked(user, reply)) => {
                         self.user = user;
@@ -445,22 +494,32 @@ impl Machine {
                         };
                         self.set(linked);
                         let _ = reply.send(());
+                        ControlFlow::Continue(())
                     }
                     Some(Command::SignOut(reply)) => {
-                        self.signed_out();
+                        // The caller stops the client itself.
+                        self.stop = None;
+                        self.sign_out();
                         let _ = reply.send(());
-                        return;
+                        ControlFlow::Break(())
                     }
-                    None => return,
+                    None => ControlFlow::Break(()),
                 },
+            };
+            if flow.is_break() {
+                return;
             }
         }
     }
 
-    async fn on_link(&mut self, link: Link) -> std::ops::ControlFlow<()> {
-        match link {
+    fn on_link(&mut self, status: SyncStatus) -> ControlFlow<()> {
+        // Only a new refusal is acted on: the status stays refused while a
+        // renewal is on its way.
+        let refused = status.refusals > self.refusals;
+        self.refusals = status.refusals;
+        match status.link {
             Link::Connected => {
-                self.renewed_since_live = false;
+                self.live_since.get_or_insert_with(Instant::now);
                 self.set(SessionState::SignedIn {
                     user: self.user.clone(),
                 });
@@ -468,54 +527,165 @@ impl Machine {
             Link::Offline {
                 reason: Offline::Auth(reason),
                 ..
-            } => {
-                if reason.is_renewable() && !self.renewed_since_live {
-                    self.renewed_since_live = true;
-                    match self.renew(TokenReason::Expired).await {
-                        Ok(Renewed::Renewed) => return std::ops::ControlFlow::Continue(()),
-                        Ok(Renewed::SignedOut) => {
-                            self.signed_out();
-                            return std::ops::ControlFlow::Break(());
-                        }
-                        Err(_) => {}
-                    }
+            } if refused => {
+                if self
+                    .live_since
+                    .take()
+                    .is_some_and(|since| since.elapsed() >= LIVED)
+                {
+                    self.streak = 0;
                 }
-                self.set(SessionState::Expired {
-                    user: self.user.clone(),
-                    reason,
-                });
+                // Refused again right after a renewal, or for good.
+                if self.streak > 0 || !reason.is_renewable() {
+                    self.set(SessionState::Expired {
+                        user: self.user.clone(),
+                        reason,
+                    });
+                }
+                if reason.is_renewable() && self.pending.is_none() {
+                    let delay = match self.streak {
+                        0 => Duration::ZERO,
+                        streak => auth_retry_delay(streak - 1),
+                    };
+                    self.streak += 1;
+                    self.renewal = Some(Scheduled {
+                        at: Instant::now() + delay,
+                        reason: TokenReason::Expired,
+                    });
+                }
             }
-            _ => {}
+            Link::Offline { .. } | Link::LocalOnly | Link::Connecting => {}
         }
-        std::ops::ControlFlow::Continue(())
+        ControlFlow::Continue(())
     }
 
-    /// Gives the client a new credential.
-    async fn renew(&mut self, reason: TokenReason) -> Result<Renewed> {
-        let now = SystemTime::now();
-        match &mut self.credential {
+    /// Gives the client a new credential: a device's at once, a bearer's
+    /// once the provider gives it.
+    fn renew(
+        &mut self,
+        reason: TokenReason,
+        reply: Option<oneshot::Sender<Result<()>>>,
+    ) -> ControlFlow<()> {
+        let replies = reply.into_iter().collect();
+        match &self.credential {
             Credential::Device { key, app } => {
-                let token = key.mint(*app, DEVICE_TOKEN_TTL_SECS)?;
-                self.client.update_auth_token(token)?;
+                let renewed = key
+                    .mint(*app, DEVICE_TOKEN_TTL_SECS)
+                    .and_then(|token| Ok(self.client.update_auth_token(token)?));
+                self.renewed(reason, renewed, replies);
+                ControlFlow::Continue(())
             }
-            Credential::Bearer { provider, token } => match provider.token(reason).await? {
-                None => return Ok(Renewed::SignedOut),
-                Some(next) => {
-                    // An unchanged bearer needs no new connection.
-                    if reason.is_fresh() || next != *token {
-                        self.client.update_bearer(next.clone())?;
+            Credential::Bearer { provider, .. } => {
+                match &mut self.pending {
+                    // One request at a time: this caller waits for it too.
+                    Some(pending) => pending.replies.extend(replies),
+                    None => {
+                        self.pending = Some(Pending {
+                            reason,
+                            token: provider.request(reason),
+                            replies,
+                        });
                     }
-                    *token = next;
                 }
-            },
+                ControlFlow::Continue(())
+            }
         }
-        self.renew_at = self.credential.renew_at(now);
-        Ok(Renewed::Renewed)
     }
 
-    fn signed_out(&mut self) {
-        self.renew_at = None;
+    fn received(
+        &mut self,
+        reason: TokenReason,
+        token: Result<Option<String>>,
+        replies: Vec<oneshot::Sender<Result<()>>>,
+    ) -> ControlFlow<()> {
+        let next = match token {
+            Ok(Some(next)) => next,
+            Ok(None) => {
+                self.sign_out();
+                for reply in replies {
+                    let _ = reply.send(Ok(()));
+                }
+                return ControlFlow::Break(());
+            }
+            Err(error) => {
+                self.renewed(reason, Err(error), replies);
+                return ControlFlow::Continue(());
+            }
+        };
+        let Credential::Bearer { token, .. } = &mut self.credential else {
+            unreachable!("only a bearer is requested");
+        };
+        // An unchanged bearer needs no new connection, unless it was asked
+        // for because the last one was refused.
+        let renewed = if reason.is_fresh() || next != *token {
+            self.client.update_bearer(next.clone()).map_err(Error::from)
+        } else {
+            Ok(())
+        };
+        if renewed.is_ok() {
+            *token = next;
+        }
+        self.renewed(reason, renewed, replies);
+        ControlFlow::Continue(())
+    }
+
+    /// After a renewal: the next one ahead of expiry, or a retry.
+    fn renewed(
+        &mut self,
+        reason: TokenReason,
+        result: Result<()>,
+        replies: Vec<oneshot::Sender<Result<()>>>,
+    ) {
+        match result {
+            Ok(()) => {
+                self.failures = 0;
+                // A refusal's renewal is already followed by the link.
+                if self.renewal.is_none() {
+                    self.schedule_ahead();
+                }
+                for reply in replies {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+            Err(error) => {
+                // A failed renewal must not end renewing: the credential
+                // still expires, and nothing else would renew it.
+                self.renewal = Some(Scheduled {
+                    at: Instant::now() + auth_retry_delay(self.failures),
+                    reason: if reason == TokenReason::Renew {
+                        TokenReason::Renew
+                    } else {
+                        TokenReason::Expired
+                    },
+                });
+                self.failures += 1;
+                let message = error.to_string();
+                let mut error = Some(error);
+                for reply in replies {
+                    let error = error
+                        .take()
+                        .unwrap_or_else(|| Error::Server(message.clone()));
+                    let _ = reply.send(Err(error));
+                }
+            }
+        }
+    }
+
+    /// Schedules the renewal at 80% of the credential's life.
+    fn schedule_ahead(&mut self) {
+        self.renewal = self.credential.renew_in().map(|after| Scheduled {
+            at: Instant::now() + after,
+            reason: TokenReason::Renew,
+        });
+    }
+
+    fn sign_out(&mut self) {
+        self.renewal = None;
+        self.pending = None;
         self.set(SessionState::SignedOut);
+        if let Some(stop) = self.stop.take() {
+            stop();
+        }
     }
 
     fn set(&self, state: SessionState) {
@@ -527,9 +697,16 @@ impl Machine {
     }
 }
 
-async fn sleep(duration: Option<Duration>) {
-    match duration {
-        Some(duration) => tokio::time::sleep(duration).await,
+async fn sleep_until(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn poll_pending(pending: &mut Option<Pending>) -> Result<Option<String>> {
+    match pending {
+        Some(pending) => pending.token.as_mut().await,
         None => std::future::pending().await,
     }
 }
