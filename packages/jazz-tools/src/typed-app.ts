@@ -101,11 +101,13 @@ type ColumnOf<
 > = Extract<ColumnsOf<TSchema, TTable>[TColumn], ColumnTypes>;
 
 // Simplified, so the generated interfaces read as plain object types.
-export type TableRow<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
-  string extends keyof TableTypesOf<TSchema, TTable>["row"]
-    ? // An index-signature row (a test's loose app): simplifying would drop `id`.
-      TableTypesOf<TSchema, TTable>["row"] & { id: string }
-    : Simplify<TableTypesOf<TSchema, TTable>["row"] & { id: string }>;
+export type TableRow<
+  TSchema extends SchemaLike,
+  TTable extends TableName<TSchema>,
+> = string extends keyof TableTypesOf<TSchema, TTable>["row"]
+  ? // An index-signature row (a test's loose app): simplifying would drop `id`.
+    TableTypesOf<TSchema, TTable>["row"] & { id: string }
+  : Simplify<TableTypesOf<TSchema, TTable>["row"] & { id: string }>;
 
 export type TableInit<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Simplify<
   TableTypesOf<TSchema, TTable>["insert"]
@@ -126,7 +128,13 @@ type StreamingColumnName<TSchema extends SchemaLike, TTable extends string> = {
  * replaced by an asynchronous source; every other column retains its ordinary
  * insert type and required/defaulted status.
  */
-export type TableStreamingInit<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
+export type TableStreamingInit<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
+  // A test's loose app: any column may be the streamed one.
+  string extends StreamingColumnName<TSchema, TTable>
+    ? TableInit<TSchema, TTable>
+    : StrictTableStreamingInit<TSchema, TTable>;
+
+type StrictTableStreamingInit<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
   [TColumn in StreamingColumnName<TSchema, TTable>]: Simplify<
     Omit<TableInit<TSchema, TTable>, TColumn> & {
       [TStreamed in TColumn]-?: StreamingValueSource;
@@ -135,7 +143,12 @@ export type TableStreamingInit<TSchema extends SchemaLike, TTable extends TableN
 }[StreamingColumnName<TSchema, TTable>];
 
 /** Streaming update/upsert input with one required streamed scalar. */
-export type TableStreamingUpdate<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
+export type TableStreamingUpdate<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
+  string extends StreamingColumnName<TSchema, TTable>
+    ? Partial<TableInit<TSchema, TTable>>
+    : StrictTableStreamingUpdate<TSchema, TTable>;
+
+type StrictTableStreamingUpdate<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
   [TColumn in StreamingColumnName<TSchema, TTable>]: Simplify<
     Partial<Omit<TableInit<TSchema, TTable>, TColumn>> & {
       [TStreamed in TColumn]-?: StreamingValueSource;
@@ -1603,7 +1616,9 @@ function currentTables(
   }
   // A version's schema is the engine's serde form, `{ tables }`.
   const engine = current.schema as { tables?: WasmSchema };
-  const tables: WasmSchema = structuredClone(schema.tables ?? engine.tables ?? (engine as WasmSchema));
+  const tables: WasmSchema = structuredClone(
+    schema.tables ?? engine.tables ?? (engine as WasmSchema),
+  );
   for (const [table, entries] of Object.entries(relations ?? {})) {
     const tableSchema = tables[table];
     if (!tableSchema) {
@@ -1655,7 +1670,7 @@ function columnTransforms(
       tableTransforms(table)[field] = {
         computed: true,
         rowColumns: Object.freeze([...from]),
-        from: (_value, dependencies) => compute(dependencies),
+        from: (_value, row) => compute(row),
         to: () => {
           throw new TypeError(`Computed field "${field}" is read-only.`);
         },

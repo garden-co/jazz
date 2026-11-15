@@ -27,10 +27,8 @@ describe("schema fixtures", () => {
       type: "Text",
       value: JSON.stringify({ createdBy: "alice" }),
     });
-    expect(column("todos", "avatar")?.default).toEqual({
-      type: "Bytea",
-      value: new Uint8Array([0, 1, 255]),
-    });
+    // The engine's JSON form; inserts write it as the bytes 00 01 ff.
+    expect(column("todos", "avatar")?.default).toEqual({ type: "Bytea", value: [0, 1, 255] });
     expect(column("counters", "count")?.merge_strategy).toBe("Counter");
   });
 

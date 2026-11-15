@@ -5,7 +5,10 @@ import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 
 const app = testApp({ tables: { docs: { columns: { label: "string", body: "string" } } } });
-const permissions = { tables: { docs: { read: "true", insert: "true", update: "true" } } };
+const permissions = {
+  format: 1,
+  tables: { docs: { read: "true", insert: "true", update: "true" } },
+};
 
 // The memory driver uses WASM in Node; the sync server uses NAPI.
 it.each([

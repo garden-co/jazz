@@ -992,7 +992,7 @@ describe("startLocalJazzServer with an app that ships a migration", () => {
         },
       ],
     });
-    const permissions = { tables: { notes: { read: "true", insert: "true" } } };
+    const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
     const server = await startLocalJazzServer({
       inMemory: true,
       schema: app,
