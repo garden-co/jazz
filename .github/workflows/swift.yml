@@ -51,10 +51,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/swift" && tar xzf swift.tgz -C "$RUNNER_TEMP/swift" --strip-components=1
           echo "$RUNNER_TEMP/swift/usr/bin" >> "$GITHUB_PATH"
       - run: swift --version
-      - name: The committed Swift bindings are current
-        run: cargo test -p jazz-codegen --test golden -- swift
       - name: Build jazz-tools (the example's tests start its server)
         run: cargo build -p jazz-cli --bin jazz-tools
+      - name: The committed Swift bindings are current
+        run: target/debug/jazz-tools generate --check --dir examples/stage-plan/apps/swift-cli
       - name: Build libjazz_ffi and the UniFFI Swift sources
         run: packages/jazz-swift/scripts/build-ffi.sh
       - name: Jazz Swift package tests
