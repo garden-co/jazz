@@ -33,6 +33,16 @@ describe("browser store generation", () => {
     expect(browserStoreGenerationChanged("db-a", recorded)).toBe(true);
   });
 
+  it("counts as changed once localStorage, which worked when the tab left, throws", () => {
+    const recorded = browserStoreGeneration("db-a");
+    vi.stubGlobal("localStorage", {
+      getItem: () => {
+        throw new Error("SecurityError");
+      },
+    });
+    expect(browserStoreGenerationChanged("db-a", recorded)).toBe(true);
+  });
+
   it("can't tell without localStorage, and says unchanged", () => {
     vi.stubGlobal("localStorage", undefined);
     const recorded = browserStoreGeneration("db-a");

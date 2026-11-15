@@ -243,6 +243,9 @@ export function deleteBrowserStore(
     }
     port.addEventListener("message", onMessage);
     port.start();
+    // Before as well as after: a tab coming back while the delete runs must
+    // not reconnect to it. A delete that deletes nothing costs it a reload.
+    renewBrowserStoreGeneration(dbName);
     port.postMessage({
       type: "delete-store",
       dbName,
@@ -1021,11 +1024,16 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
    * page as a live tab while it is cached (see `page-cache`). This
    * connection is closed after; the page opens a new one when it returns.
    * Declines (`false`) unless connected and idle (see the follower's
-   * `leaveForPageCache`).
+   * `leaveForPageCache`), or without localStorage to tell, on return,
+   * whether the store was reset meanwhile.
    */
   leaveForPageCache(): boolean {
-    if (this.closed || this.readyError || !this.connection?.leaveForPageCache()) return false;
-    this.storeGenerationWhenLeft = browserStoreGeneration(this.dbName);
+    if (this.closed || this.readyError || !this.connection) return false;
+    // Without localStorage a tab coming back couldn't tell a reset store:
+    // it keeps its connection and its locks, as before.
+    const generation = browserStoreGeneration(this.dbName);
+    if (generation === null || !this.connection.leaveForPageCache()) return false;
+    this.storeGenerationWhenLeft = generation;
     this.closed = true;
     this.connection = null;
     this.worker = null;
@@ -1068,7 +1076,14 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
 
   async deleteStorage(): Promise<{ pendingUploads?: number } | void> {
     await this.ready();
-    return this.connection?.deleteStorage();
+    // Before as well as after (see `storeChangedSinceLeaving`): a tab coming
+    // back mid-delete reloads rather than reconnect to what is going.
+    renewBrowserStoreGeneration(this.dbName);
+    try {
+      return await this.connection?.deleteStorage();
+    } finally {
+      renewBrowserStoreGeneration(this.dbName);
+    }
   }
 
   async storePendingUploads(): Promise<number | undefined> {

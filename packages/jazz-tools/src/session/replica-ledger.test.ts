@@ -672,6 +672,41 @@ describe("the back/forward cache", () => {
     }
   });
 
+  it("a page whose store a wipe still holds past the patience reloads instead of reconnecting", async () => {
+    vi.useFakeTimers();
+    try {
+      const b = browser();
+      const cached = b.tab("A");
+      await b.open(cached, alice);
+      fire("pagehide", true);
+      await vi.advanceTimersByTimeAsync(0);
+      // Another page's wipe: marked, under the exclusive lock, its delete blocked.
+      let endWipe!: () => void;
+      const wiping = b.locks.view("B").request(
+        aliceLock,
+        { mode: "exclusive", ifAvailable: true },
+        () =>
+          new Promise<void>((resolve) => {
+            b.ledger.markWiping(alice.id, true);
+            endWipe = resolve;
+          }),
+      );
+      const after: string[] = [];
+      holdAcrossPageCache({ leave: () => {}, return: () => void after.push("connection") });
+      expect(b.locks.isExclusive(aliceLock)).toBe(true);
+      expect(b.ledger.get(alice.id)?.wiping).toBe(true);
+      fire("pageshow", true);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await pageCacheForTest.returned();
+      expect(reload).toHaveBeenCalledOnce();
+      expect(after).toEqual([]);
+      endWipe();
+      await wiping;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("a page that left again before it held the store again lets go of it", async () => {
     const b = browser();
     const [cached, wiper] = [b.tab("A"), b.tab("B")];

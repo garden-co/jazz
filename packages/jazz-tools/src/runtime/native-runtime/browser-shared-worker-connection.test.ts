@@ -817,6 +817,11 @@ describe("browser SharedWorker realm identity", () => {
     // Firefox caches no page that holds a Web Lock, and the worker would
     // count a cached page as a live tab.
     const requests: Array<{ name: string; release?: Promise<unknown> }> = [];
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+    });
     vi.stubGlobal("navigator", {
       locks: {
         request: (name: string, callback: () => Promise<unknown>) => {
@@ -841,8 +846,29 @@ describe("browser SharedWorker realm identity", () => {
       expect(port.closed).toBe(true);
       await expect(requests[0]!.release).resolves.toBeUndefined();
       expect(connection.leaveForPageCache()).toBe(false);
+      expect(connection.storeChangedSinceLeaving()).toBe(false);
+      // Another tab resets the store meanwhile.
+      storage.clear();
+      expect(connection.storeChangedSinceLeaving()).toBe(true);
       // Closed already: shutdown waits for nothing.
       await connection.shutdown();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps its connection and its lock without localStorage to tell a reset store on return", async () => {
+    vi.stubGlobal("localStorage", undefined);
+    try {
+      const { connection, port, sent } = runtimeBootstrapFixture();
+      port.emit({ type: "runtime-ready" });
+      await expect(connection.ready()).resolves.toBeUndefined();
+      expect(connection.leaveForPageCache()).toBe(false);
+      expect(port.closed).toBe(false);
+      const shutdown = connection.shutdown();
+      await Promise.resolve();
+      port.emit({ type: "result", id: sent.find((message) => message.type === "close")?.id });
+      await shutdown;
     } finally {
       vi.unstubAllGlobals();
     }

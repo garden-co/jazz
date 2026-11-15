@@ -236,18 +236,29 @@ async function holdLock(
   locks: Locks | undefined,
   registry: string,
   account: string,
-  pageCache: { left(): void; returned(): void | "stop" },
+  pageCache: {
+    left(): void;
+    returned(): void | "stop";
+    /** Past the re-take patience, the lock not held yet: `"stop"` keeps the page from reconnecting. */
+    stillWaiting(): void | "stop";
+  },
 ): Promise<() => Promise<void>> {
   if (!locks) return async () => {};
+  // Set from the request on (a page that leaves meanwhile lets it go once granted).
   let releaseHeld: (() => void) | null = null;
+  /** The lock is granted, not merely asked for. */
+  let granted = false;
   let held: Promise<unknown> = Promise.resolve();
   let released = false;
   const take = () =>
     new Promise<void>((acquired) => {
+      granted = false;
       const done = new Promise<void>((resolve) => (releaseHeld = resolve));
       held = locks.request(lockName(registry, account), { mode: "shared" }, async () => {
+        granted = true;
         acquired();
         await done;
+        granted = false;
       });
     });
   await take();
@@ -269,10 +280,17 @@ async function holdLock(
       // One that doesn't let go must not keep this page from reconnecting:
       // past the patience the next holder goes on, and this one still checks
       // the store once it holds the lock.
+      // (Unless that page is wiping this store: then this one reloads.)
       let patience: ReturnType<typeof setTimeout> | undefined;
       return Promise.race([
         held,
-        new Promise<void>((resolve) => (patience = setTimeout(resolve, RETAKE_PATIENCE_MS))),
+        new Promise<void | "stop">(
+          (resolve) =>
+            (patience = setTimeout(
+              () => resolve(released || granted ? undefined : pageCache.stillWaiting()),
+              RETAKE_PATIENCE_MS,
+            )),
+        ),
       ]).finally(() => clearTimeout(patience));
     },
   });
@@ -513,6 +531,10 @@ export function replicaLifecycle(options: {
         }
         record();
         let recordedWhenLeft = false;
+        const wipedSinceLeft = () => {
+          const now = ledger.get(account);
+          return !!now?.wiping || (recordedWhenLeft && now === undefined);
+        };
         const release = await holdLock(locks, registry, account, {
           left: () => {
             recordedWhenLeft = ledger.get(account) !== undefined;
@@ -522,12 +544,19 @@ export function replicaLifecycle(options: {
           // out): this page's client still shows what was wiped, so reload,
           // as after any other external storage invalidation.
           returned: () => {
-            const now = ledger.get(account);
-            if (now?.wiping || (recordedWhenLeft && now === undefined)) {
+            if (wipedSinceLeft()) {
               // Never recorded again: that would keep what the wipe took.
               return reloadAfterStorageInvalidation() ? "stop" : undefined;
             }
             record();
+          },
+          // A wipe that outlasts the patience (a blocked IndexedDB delete)
+          // still holds the lock: reconnecting would replay this page's
+          // writes into a store no ledger entry names, which nothing wipes.
+          stillWaiting: () => {
+            if (!wipedSinceLeft()) return;
+            reloadAfterStorageInvalidation();
+            return "stop";
           },
         });
         // Again once held: another tab's wipe may have forgotten it before.

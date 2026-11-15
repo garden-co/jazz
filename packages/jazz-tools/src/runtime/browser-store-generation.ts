@@ -39,6 +39,7 @@ export function browserStoreGenerationChanged(dbName: string, recorded: string |
   try {
     return globalThis.localStorage?.getItem(key(dbName)) !== recorded;
   } catch {
-    return false;
+    // Storage that worked when the tab left and fails now: assume the worst.
+    return true;
   }
 }
