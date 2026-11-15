@@ -494,6 +494,17 @@ impl LaneDied {
 /// (`EX_SOFTWARE`): its orchestrator restarts it.
 const FATAL_EXIT_CODE: i32 = 70;
 
+static BEFORE_FATAL_EXIT: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// Run `hook` right before the server process exits on a fatal error (a
+/// dead large-value lane), after the fatal error is logged: for the host
+/// to flush what it buffers, such as its OTLP log exporter's batch, which
+/// `std::process::exit` would otherwise drop with the fatal line. Set once
+/// per process; returns false (and keeps the first) if one is set already.
+pub fn set_before_fatal_exit(hook: fn()) -> bool {
+    BEFORE_FATAL_EXIT.set(hook).is_ok()
+}
+
 /// A thread that runs chunk I/O and hands each outcome to `finish` on the
 /// store thread.
 struct Lane {
@@ -1228,6 +1239,10 @@ impl StoreLoop {
             lane = died.lane,
             "large-value chunk lane died; the server exits"
         );
+        // The line above is only buffered for OTLP export: flush it.
+        if let Some(hook) = BEFORE_FATAL_EXIT.get() {
+            hook();
+        }
         #[cfg(not(test))]
         std::process::exit(FATAL_EXIT_CODE);
         #[cfg(test)]
@@ -4276,6 +4291,11 @@ mod tests {
     /// store's fault and stops the runtime instead of exiting the process.
     #[test]
     fn a_dead_chunk_io_lane_is_fatal_for_the_server() {
+        // The only test that sets the process-wide hook.
+        static FLUSHED: AtomicBool = AtomicBool::new(false);
+        assert!(set_before_fatal_exit(
+            || FLUSHED.store(true, Ordering::SeqCst)
+        ));
         let dir = tempfile::tempdir().unwrap();
         let blobs = tempfile::tempdir().unwrap();
         let chunk_store = Arc::new(PanicsOnFirstPut {
@@ -4312,6 +4332,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         };
         assert!(chunk_store.panicked.load(Ordering::SeqCst));
+        assert!(
+            FLUSHED.load(Ordering::SeqCst),
+            "the host's flush ran before the exit"
+        );
         assert!(
             fault.starts_with("large-value chunk lane died; the server exits")
                 && fault.contains("lane chunk-io")
