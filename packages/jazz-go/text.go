@@ -87,3 +87,22 @@ func SetText(ctx context.Context, q Querier, table, id, column, editedFrom, text
 		"table": table, "id": id, "column": column, "editedFrom": editedFrom, "text": text,
 	}, nil)
 }
+
+// JSONSet sets the value at a JSON pointer (RFC 6901, e.g. "/links/0")
+// inside a json column, leaving the rest of the document as it is.
+type JSONSet struct {
+	At    string `json:"at"`
+	Value any    `json:"value"`
+}
+
+// EditJSON applies sets to column (a json column) of the row of table
+// with id: concurrent sets to other paths of the document merge.
+func EditJSON(ctx context.Context, q Querier, table, id, column string, sets ...JSONSet) error {
+	if sets == nil {
+		sets = []JSONSet{}
+	}
+	return q.call(ctx, "edit", map[string]any{
+		"table": table, "id": id,
+		"edits": []map[string]any{{"kind": "jsonSet", "column": column, "edits": sets}},
+	}, nil)
+}
