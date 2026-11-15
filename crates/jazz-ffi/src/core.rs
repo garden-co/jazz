@@ -516,11 +516,12 @@ impl Core {
             return Ok(());
         }
         block_on(self.open_jazz()?.with_client(|client| async move {
+            // Taken first, so a refusal is reported by one call only.
+            let writes = UNSYNCED.with(|unsynced| std::mem::take(&mut *unsynced.borrow_mut()));
             // Every pending write reaches the server (or is refused)...
             client.wait_for_sync().await?;
             // ...and each write since the last sync is checked on its own:
             // a refusal followed by an accepted write still fails here.
-            let writes = UNSYNCED.with(|unsynced| std::mem::take(&mut *unsynced.borrow_mut()));
             for write in writes {
                 client
                     .wait_for_transaction(write, DurabilityTier::GlobalServer)
@@ -599,13 +600,34 @@ async fn settle(
     tier: Option<DurabilityTier>,
 ) -> jazz_app::Result<()> {
     if let Some(committed) = committed {
-        UNSYNCED.with(|unsynced| unsynced.borrow_mut().push(committed));
-        if let Some(tier) = tier {
-            client.wait_for_transaction(committed, tier).await?;
+        match tier {
+            // Confirmed by the server: nothing for waitForSync to check.
+            Some(DurabilityTier::GlobalServer) => {
+                client
+                    .wait_for_transaction(committed, DurabilityTier::GlobalServer)
+                    .await?;
+            }
+            tier => {
+                UNSYNCED.with(|unsynced| {
+                    let mut unsynced = unsynced.borrow_mut();
+                    // Bounded for hosts that never call waitForSync: the
+                    // oldest unchecked writes are left to the core's wait.
+                    if unsynced.len() >= MAX_UNSYNCED {
+                        unsynced.remove(0);
+                    }
+                    unsynced.push(committed);
+                });
+                if let Some(tier) = tier {
+                    client.wait_for_transaction(committed, tier).await?;
+                }
+            }
         }
     }
     Ok(())
 }
+
+/// How many unchecked writes waitForSync remembers.
+const MAX_UNSYNCED: usize = 4096;
 
 thread_local! {
     /// The writes this app's client committed since its last waitForSync.
