@@ -226,6 +226,11 @@ impl Core {
         convert::table(&self.schema, name)
     }
 
+    /// The permissions bundle a backend published and is pinned to.
+    pub fn bundle(&self) -> Result<Option<String>> {
+        Ok(self.open_jazz()?.bundle().map(str::to_owned))
+    }
+
     /// The account of the user a backend acts as (`session.user`).
     pub fn account(&self) -> Result<Option<String>> {
         Ok(self
@@ -731,6 +736,20 @@ impl Core {
             .ok_or_else(|| refused("refresh is for an end user's app (\"auth\")"))?;
         block_on(session.refresh())?;
         Ok(())
+    }
+
+    /// Links this device account to the user's account with the app's
+    /// own sign-in (`bearer`, a token from it): the session becomes that
+    /// user's, on the device's account. Returns the user as JSON.
+    pub fn link(&self, bearer: &str) -> Result<String> {
+        let session = self
+            .open_jazz()?
+            .session()
+            .cloned()
+            .ok_or_else(|| refused("link is for an end user's app (\"auth\")"))?;
+        let bearer = bearer.to_owned();
+        let user = block_on(async move { session.link(&bearer).await })?;
+        Ok(serde_json::to_string(&user).unwrap_or_default())
     }
 
     /// Signs the end user out and closes the app.

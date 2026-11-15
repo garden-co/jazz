@@ -246,6 +246,8 @@ pub unsafe extern "C" fn jazz_call(
                 core.refresh()?;
                 "null".into()
             }
+            "link" => core.link(&string("bearer")?)?,
+            "bundle" => Json::from(core.bundle()?).to_string(),
             "signOut" => {
                 core.sign_out()?;
                 "null".into()
