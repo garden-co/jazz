@@ -98,9 +98,14 @@ impl JazzCore {
             })?;
             let path = std::path::Path::new(&data_dir);
             dir_lock = Some(lock_data_dir(path)?);
-            let identity = jazz_server::open_store_identity(path, opts.app_id.as_deref())
-                .map_err(|error| napi::Error::from_reason(format!("JazzCore: {error}")))?;
-            token_secret = Some(identity.token_secret);
+            let identity = jazz_server::open_store_identity(
+                path,
+                jazz_server::IdentityOpen::Embedded {
+                    app_id: opts.app_id.as_deref(),
+                },
+            )
+            .map_err(|error| napi::Error::from_reason(format!("JazzCore: {error}")))?;
+            token_secret = identity.token_secret;
             (
                 StorageBackend::Persistent {
                     path: data_dir.into(),

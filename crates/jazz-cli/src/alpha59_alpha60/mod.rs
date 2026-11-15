@@ -270,7 +270,14 @@ async fn run(args: &Args) -> Result<Json, String> {
     // The store keeps the app id in its own file, spelled as given: it runs
     // as the alpha.59 app, so its guests' and users' accounts stay theirs,
     // without the app naming the id.
-    jazz_server::open_store_identity(&args.data_dir, Some(&args.app_id_text))?;
+    // Held until the import is done: no backend may open the store meanwhile.
+    let _lock = jazz_server::lock_data_dir(&args.data_dir).map_err(|error| error.to_string())?;
+    jazz_server::open_store_identity(
+        &args.data_dir,
+        jazz_server::IdentityOpen::Server {
+            app_id: &args.app_id_text,
+        },
+    )?;
 
     let built = ServerBuilder::new(args.app_id)
         .with_storage(StorageBackend::Persistent {

@@ -86,7 +86,7 @@ pub enum BlobStore {
 }
 
 /// In a blob directory: the id of the data directory that owns it.
-const BLOB_OWNER_FILE: &str = "owner";
+pub(super) const BLOB_OWNER_FILE: &str = "owner";
 
 pub struct ServerBuilder {
     app_id: AppId,
@@ -225,7 +225,9 @@ impl ServerBuilder {
                 refuse_pre_sqlite_data_dir(path)?;
                 Some(super::identity::open_store_identity(
                     path,
-                    Some(&self.app_id.to_string()),
+                    super::identity::IdentityOpen::Server {
+                        app_id: &self.app_id.to_string(),
+                    },
                 )?)
             }
             StorageBackend::InMemory => None,
@@ -251,9 +253,18 @@ impl ServerBuilder {
                 .kv(super::identity::IDENTITY)?
                 .write_many(&[(
                     super::identity::BLOB_STORE.to_vec(),
-                    record.contents.into_bytes(),
+                    record.contents.trim_end().as_bytes().to_vec(),
                 )])
                 .map_err(|error| format!("record the blob store: {error}"))?;
+            if let (StorageBackend::Persistent { path }, Some(identity)) =
+                (&self.storage_backend, &identity)
+            {
+                super::identity::mirror_blob_store(
+                    path,
+                    &identity.store_id,
+                    record.contents.trim_end(),
+                )?;
+            }
         }
         store.set_app(self.app_id.to_string());
         let (catalogue_store, latest_catalogue_schema) = self.build_catalogue_store(&store)?;
@@ -444,8 +455,8 @@ struct BlobStorePlan {
     record: Option<BlobStoreRecord>,
 }
 
-/// A store's blob-store record (`blob_store` in its identity), written once
-/// the store has opened.
+/// A store's blob-store record (`blob_store` in its identity, and the
+/// `blob-store` mirror's contents), written once the store has opened.
 struct BlobStoreRecord {
     contents: String,
 }
@@ -497,7 +508,9 @@ fn plan_blob_store(
     }
     Ok(BlobStorePlan {
         blob_dir,
-        record: Some(BlobStoreRecord { contents: wanted }),
+        record: Some(BlobStoreRecord {
+            contents: format!("{wanted}\n"),
+        }),
     })
 }
 
@@ -679,10 +692,40 @@ fn temporary_beside(path: &Path) -> PathBuf {
     path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()))
 }
 
+/// Write `path` so that a crash leaves either the old file or the whole
+/// new one: a synced temporary file renamed into place, then the directory
+/// synced. A `private` file is readable by its owner alone.
+pub(super) fn write_durably(path: &Path, contents: &[u8], private: bool) -> Result<(), String> {
+    let temporary = temporary_beside(path);
+    let written = write_synced_with(&temporary, contents, private).and_then(|()| {
+        std::fs::rename(&temporary, path)
+            .map_err(|e| format!("rename {}: {e}", temporary.display()))
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written?;
+    sync_dir(path.parent().unwrap_or(Path::new(".")))
+}
+
 fn write_synced(path: &Path, contents: &[u8]) -> Result<(), String> {
+    write_synced_with(path, contents, false)
+}
+
+fn write_synced_with(path: &Path, contents: &[u8], private: bool) -> Result<(), String> {
     use std::io::Write;
-    let mut file =
-        std::fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    let mut file = options
+        .open(path)
+        .map_err(|e| format!("create {}: {e}", path.display()))?;
     let written = file
         .write_all(contents)
         .and_then(|()| file.sync_all())
@@ -763,10 +806,9 @@ fn log_auth_config(auth_config: &AuthConfig) {
 mod tests {
     use super::*;
 
-    /// What the store in `dir` holds as its identity.
-    fn identity_of(dir: &Path) -> super::super::identity::StoreIdentity {
-        super::super::identity::open_store_identity(dir, None).expect("store identity")
-    }
+    /// What earlier releases kept beside a store, and stores still mirror.
+    const BLOB_STORE_MARKER: &str = "blob-store";
+    const STORE_ID_FILE: &str = "store-id";
     use crate::server::catalogue::CatalogueStore;
     use jazz::tools::AppId;
 
@@ -921,13 +963,16 @@ mod tests {
             .expect("sqlite")
             .shutdown()
             .await;
-        assert!(identity_of(data_dir.path()).blob_store.is_none());
+        assert!(!data_dir.path().join(BLOB_STORE_MARKER).exists());
         start(files())
             .await
             .expect("sqlite to files")
             .shutdown()
             .await;
-        assert_eq!(identity_of(data_dir.path()).blob_store.unwrap(), "files");
+        assert_eq!(
+            std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap(),
+            "files\n"
+        );
         start(files()).await.expect("files again").shutdown().await;
 
         for other in [
@@ -977,11 +1022,11 @@ mod tests {
                 .expect("start")
                 .shutdown()
                 .await;
-            let id = identity_of(data_dir.path()).store_id;
-            let marker = identity_of(data_dir.path()).blob_store.unwrap();
+            let id = std::fs::read_to_string(data_dir.path().join(STORE_ID_FILE)).unwrap();
+            let marker = std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap();
             assert_eq!(
                 marker,
-                format!("s3 http://127.0.0.1:9 jazz/jazz/{}/", id.trim())
+                format!("s3 http://127.0.0.1:9 jazz/jazz/{}/\n", id.trim())
             );
             recorded.push(marker);
         }
@@ -1100,9 +1145,9 @@ mod tests {
             .expect("start")
             .shutdown()
             .await;
-        let id = identity_of(data_dir.path()).store_id;
-        let marker = identity_of(data_dir.path()).blob_store.unwrap();
-        assert_eq!(marker, format!("vercel-blob abc/jazz/{}/", id.trim()));
+        let id = std::fs::read_to_string(data_dir.path().join(STORE_ID_FILE)).unwrap();
+        let marker = std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap();
+        assert_eq!(marker, format!("vercel-blob abc/jazz/{}/\n", id.trim()));
     }
 
     #[tokio::test]
@@ -1143,8 +1188,8 @@ mod tests {
             .shutdown()
             .await;
         assert_eq!(
-            identity_of(data_dir.path()).blob_store.unwrap(),
-            "s3 http://127.0.0.1:9 jazz/a/"
+            std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap(),
+            "s3 http://127.0.0.1:9 jazz/a/\n"
         );
         start(bucket("a/"))
             .await
@@ -1182,7 +1227,10 @@ mod tests {
             .expect("default spelled out")
             .shutdown()
             .await;
-        assert_eq!(identity_of(data_dir.path()).blob_store.unwrap(), "files");
+        assert_eq!(
+            std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap(),
+            "files\n"
+        );
         start(data_dir.path().join("x/../blobs"))
             .await
             .expect("default through ..")
@@ -1207,7 +1255,7 @@ mod tests {
             },
         )
         .expect("plan");
-        assert_eq!(plan.record.expect("a record").contents, "files");
+        assert_eq!(plan.record.expect("a record").contents, "files\n");
     }
 
     #[test]
@@ -1221,7 +1269,12 @@ mod tests {
                 let (data, blob) = (dir.path().to_path_buf(), blobs.path().to_path_buf());
                 let start = start.clone();
                 std::thread::spawn(move || {
-                    let id = identity_of(&data).store_id;
+                    let id = super::super::identity::open_store_identity(
+                        &data,
+                        super::super::identity::IdentityOpen::Server { app_id: "claims" },
+                    )
+                    .unwrap()
+                    .store_id;
                     start.wait();
                     (id.clone(), claim_blob_dir(&id, &blob).is_ok())
                 })
@@ -1250,10 +1303,10 @@ mod tests {
                 .expect("a record to write")
                 .contents
         };
-        assert_eq!(plan(data_dir.path().join("large")), "files large");
+        assert_eq!(plan(data_dir.path().join("large")), "files large\n");
         assert_eq!(
             plan(outside.path().to_path_buf()),
-            format!("files {}", absolute(outside.path()).unwrap().display())
+            format!("files {}\n", absolute(outside.path()).unwrap().display())
         );
     }
 
@@ -1276,7 +1329,7 @@ mod tests {
         let error = start(&second).await.err().expect("second refused");
         assert!(error.contains("belongs to another data dir"), "{error}");
         assert!(
-            identity_of(second.path()).blob_store.is_none(),
+            !second.path().join(BLOB_STORE_MARKER).exists(),
             "a refused start records nothing"
         );
         start(&first).await.expect("first again").shutdown().await;

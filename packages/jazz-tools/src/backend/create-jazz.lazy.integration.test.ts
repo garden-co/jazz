@@ -67,9 +67,7 @@ describe("createJazz, opened on first use", () => {
     expect(rows.find((todo) => todo.title === "next")?.id).toBe(second.value.id);
     await expect(first.wait({ tier: "global" })).resolves.toEqual(first.value);
     expect(jazz.appId).toMatch(/^[0-9a-f-]{36}$/);
-    // The store keeps its app id in its own file.
-    expect(await readdir(path)).toContain("jazz.sqlite");
-    expect(await readdir(path)).not.toContain("app-id");
+    expect(await readdir(path)).toContain("app-id");
 
     // Once open, the db is the backend's own.
     const after = jazz.db.insert(app.todos, { title: "after", owner });
@@ -352,8 +350,6 @@ describe("createJazz, opened on first use", () => {
     const answered = await fetch(`${origin}/jazz/apps/any/schemas`);
     expect(await answered.text()).not.toBe("app route");
     expect(jazz.appId).toMatch(/^[0-9a-f-]{36}$/);
-    // The store keeps its app id in its own file.
-    expect(await readdir(path)).toContain("jazz.sqlite");
-    expect(await readdir(path)).not.toContain("app-id");
+    expect(await readdir(path)).toContain("app-id");
   }, 60_000);
 });

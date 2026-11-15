@@ -32,7 +32,10 @@ pub(crate) use catalogue_storage::CatalogueStorage;
 pub use embedded::{
     EmbeddedOutgoing, EmbeddedServer, EmbeddedSocketPeer, EmbeddedSocketSender, OpenSocketRefused,
 };
-pub use identity::{StoreIdentity, detach_store_identity, open_store_identity};
+pub use identity::{
+    IdentityOpen, RecordedIdentity, StoreIdentity, detach_store_identity, open_store_identity,
+    read_store_identity,
+};
 pub use shutdown::{ShutdownController, ShutdownPhase, WebSocketEntryRefused};
 #[cfg(feature = "embedded-server")]
 pub use testing::{JazzServer, JazzServerBuilder, ServerDataDir, TEST_JWT_ISSUER};

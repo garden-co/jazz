@@ -83,8 +83,10 @@ already claimed.
 The store records its choice in its `jazz.sqlite`. You can move an existing directory
 from `"sqlite"` to `files()` or `s3()` later; any other switch is not supported yet and refuses to
 start, so treat it as a one-way choice. A blob directory belongs to exactly one data directory, so two data directories can't share
-one. To copy a data directory, run `npx jazz-tools store detach <path>` on the copy and give it its own
-blob directory or prefix before it first starts, or it claims the original's.
+one. To copy a data directory, run `npx jazz-tools store detach <path>` on the stopped copy before it
+first starts, or it claims the original's chunks. A `blobs/` directory copied inside it becomes the
+copy's own; a blob directory outside it, or a prefix, is the original's, so give the copy its own (a
+copied chunk directory without its `owner` file, or a new `s3()` prefix).
 
 History keeps every version of a row, so deleting rows doesn't free their large values, and there
 is no way to erase them yet. Expect blob storage to only grow.

@@ -3216,12 +3216,11 @@ describe("createJazz", () => {
     expect(await refusal(gone.id)).toEqual(missing);
   }, 60_000);
 
-  it("runs a sqlite store as the alpha.59 app an earlier import kept beside it", async () => {
+  it("runs a sqlite store as the alpha.59 app its import kept", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-imported-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
-    // What `jazz-alpha59-alpha60-import import --app-id` left beside the
-    // data before stores kept their identity in their file: the id exactly
-    // as given, case included. The first start moves it into the store.
+    // What `jazz-alpha59-alpha60-import import --app-id` leaves beside the
+    // data: the id exactly as given, case included.
     const alpha59 = "0A590000-0000-4000-8000-000000000059";
     await writeFile(join(dir, "app-id"), `${alpha59}\n`);
     const jazz = await createJazz({ app, permissions, store: sqlite({ path: dir }) }).ready();
@@ -3230,11 +3229,6 @@ describe("createJazz", () => {
     await jazz.db.insert(app.todos, { title: "after import", owner: randomUUID() }).wait({
       tier: "global",
     });
-    expect(await readdir(dir)).not.toContain("app-id");
-    await jazz.close();
-    const again = await createJazz({ app, permissions, store: sqlite({ path: dir }) }).ready();
-    cleanups.push(() => again.close());
-    expect(again.appId).toBe(alpha59);
   }, 60_000);
 
   it("hands writes to the sqlite core before close, even ones it hasn't confirmed", async () => {

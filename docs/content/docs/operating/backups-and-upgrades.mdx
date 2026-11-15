@@ -12,11 +12,13 @@ Everything your [main backend](/docs/how-jazz-works#how-a-backend-talks-to-jazz)
 | :------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `jazz.sqlite` (with `-wal` and `-shm`) | Rows, history, schemas, permissions, the index of large-value chunks, and the store's identity: its app id, its own id and where its chunks live |
 | `blobs/`                               | The chunks of large values, unless you chose [another place](/docs/setup/deployment/own-server#large-values)                                     |
+| `app-id`, `store-id`, `blob-store`     | Copies of the identity in `jazz.sqlite`, kept so an earlier release opened on the directory reads the same one                                   |
+| `inspect-token-secret`                 | What [Inspector](/docs/tooling/inspector) tokens are signed with (readable by its owner only)                                                    |
 | `jazz.lock`                            | Held by the running process, so a second one on the same directory is refused                                                                    |
 
-Stores from before alpha.64 kept their identity in `app-id`, `store-id`, `blob-store` and
-`inspect-token-secret` files beside `jazz.sqlite`. The first start on a newer release moves them
-into `jazz.sqlite` and deletes them.
+`jazz.sqlite` holds the identity; the files are copies each start rewrites from it. A copy that
+disagrees with `jazz.sqlite` (edited, or from another store) is refused with an error naming both,
+never chosen.
 
 If your chunks are in another directory (`files({ dir })`) or a bucket (`s3()`), they're part of the
 data too.

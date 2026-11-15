@@ -148,19 +148,16 @@ impl Report {
     }
 }
 
-/// What the imported store holds as its identity. Verify never creates a
-/// store: a data dir without one was not imported.
-fn imported_identity(data_dir: &std::path::Path) -> Result<jazz_server::StoreIdentity, String> {
-    if !data_dir.join("jazz.sqlite").exists() {
-        return Err(format!("{} holds no imported store", data_dir.display()));
-    }
-    jazz_server::open_store_identity(data_dir, None)
+/// What the imported store records, read without writing to it or minting
+/// anything: a data dir without a store was not imported.
+fn imported_identity(data_dir: &std::path::Path) -> Result<jazz_server::RecordedIdentity, String> {
+    jazz_server::read_store_identity(data_dir)
 }
 
 /// The import keeps `--app-id` in the store exactly as given; verify
 /// checks against the same id.
 fn check_app_id(data_dir: &std::path::Path, app_id: &str) -> Result<(), String> {
-    let kept = imported_identity(data_dir)?.app_id;
+    let kept = imported_identity(data_dir)?.app_id.unwrap_or_default();
     if kept != app_id {
         return Err(format!(
             "--app-id {app_id} is not the id {} was imported with ({kept})",
@@ -682,7 +679,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let id = "0a590000-0000-4000-8000-000000000059";
         assert!(check_app_id(dir.path(), id).is_err(), "no store, no import");
-        jazz_server::open_store_identity(dir.path(), Some(id)).unwrap();
+        jazz_server::open_store_identity(
+            dir.path(),
+            jazz_server::IdentityOpen::Server { app_id: id },
+        )
+        .unwrap();
         check_app_id(dir.path(), id).unwrap();
         let refused = check_app_id(dir.path(), &id.to_uppercase()).unwrap_err();
         assert!(refused.contains("is not the id"), "{refused}");
@@ -697,7 +698,11 @@ mod tests {
             if let Some(marker) = marker {
                 std::fs::write(dir.path().join("blob-store"), marker).unwrap();
             }
-            jazz_server::open_store_identity(dir.path(), None).unwrap();
+            jazz_server::open_store_identity(
+                dir.path(),
+                jazz_server::IdentityOpen::Server { app_id: "app" },
+            )
+            .unwrap();
             dir
         };
         let dir = with_marker(None);
