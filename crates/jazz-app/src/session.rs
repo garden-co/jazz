@@ -226,6 +226,16 @@ const MIN_RENEWAL_LIFETIME_SECS: u64 = 30;
 enum Command {
     Refresh(oneshot::Sender<Result<()>>),
     SignOut(oneshot::Sender<()>),
+    /// The device account was linked: the session is now this user's.
+    Linked(User, oneshot::Sender<()>),
+}
+
+/// What linking a device account needs: where the app's backend is, and
+/// the key that proves the account.
+struct Linking {
+    endpoint: String,
+    app: AppId,
+    key: DeviceKey,
 }
 
 /// An end user's session with the app: `Send + Clone`, from
@@ -234,6 +244,8 @@ enum Command {
 pub struct Session {
     state: watch::Receiver<SessionState>,
     commands: mpsc::UnboundedSender<Command>,
+    /// A device account's, which can be linked.
+    linking: Option<std::sync::Arc<Linking>>,
 }
 
 impl std::fmt::Debug for Session {
@@ -263,6 +275,42 @@ impl Session {
             .send(Command::Refresh(reply))
             .map_err(|_| Error::Stopped)?;
         done.await.map_err(|_| Error::Stopped)?
+    }
+
+    /// Links this device account to the user the app's backend names from
+    /// `bearer` (TypeScript's `linkDeviceAccount`), so the account and its
+    /// data carry over to their provider sign-in: opening with
+    /// [`crate::Auth::bearer`] for that user reaches the same account. The
+    /// session is then that user's ([`UserKind::Backend`]); this client
+    /// keeps syncing on the device key, unless the backend revokes it on
+    /// linking (`guestKeyAfterLink: "revoke"`), when the session expires and
+    /// the app reopens with the bearer.
+    pub async fn link(&self, bearer: &str) -> Result<User> {
+        let linking = self.linking.as_ref().ok_or_else(|| {
+            Error::Config("only a device account's session links (Auth::Device)".into())
+        })?;
+        let device = linking.key.account(linking.app);
+        let linked =
+            crate::backend::link(&linking.endpoint, linking.app, bearer, &linking.key).await?;
+        if linked.account != device {
+            return Err(Error::Server(format!(
+                "the backend linked account {} instead of the device's {}",
+                linked.account.0, device.0
+            )));
+        }
+        let user = User {
+            account: linked.account,
+            issuer: linked.identity.issuer,
+            subject: linked.identity.subject,
+            claims: linked.claims,
+            kind: UserKind::Backend,
+        };
+        let (reply, done) = oneshot::channel();
+        self.commands
+            .send(Command::Linked(user.clone(), reply))
+            .map_err(|_| Error::Stopped)?;
+        done.await.map_err(|_| Error::Stopped)?;
+        Ok(user)
     }
 
     /// Stops renewing and reports `SignedOut`. [`crate::Jazz::sign_out`]
@@ -296,8 +344,17 @@ pub(crate) fn start(
     client: JazzClient,
     user: User,
     credential: Credential,
+    endpoint: &str,
     sync: watch::Receiver<SyncStatus>,
 ) -> Session {
+    let linking = match &credential {
+        Credential::Device { key, app } => Some(std::sync::Arc::new(Linking {
+            endpoint: endpoint.to_owned(),
+            app: *app,
+            key: key.clone(),
+        })),
+        Credential::Bearer { .. } => None,
+    };
     let (state, receiver) = watch::channel(SessionState::SignedIn { user: user.clone() });
     let (commands, inbox) = mpsc::unbounded_channel();
     let machine = Machine {
@@ -312,6 +369,7 @@ pub(crate) fn start(
     Session {
         state: receiver,
         commands,
+        linking,
     }
 }
 
@@ -373,6 +431,20 @@ impl Machine {
                         if signed_out {
                             return;
                         }
+                    }
+                    Some(Command::Linked(user, reply)) => {
+                        self.user = user;
+                        let linked = match self.state.borrow().clone() {
+                            SessionState::Expired { reason, .. } => SessionState::Expired {
+                                user: self.user.clone(),
+                                reason,
+                            },
+                            _ => SessionState::SignedIn {
+                                user: self.user.clone(),
+                            },
+                        };
+                        self.set(linked);
+                        let _ = reply.send(());
                     }
                     Some(Command::SignOut(reply)) => {
                         self.signed_out();
