@@ -46,7 +46,7 @@ final class StagePlanTests: XCTestCase {
         let v7 = try await DocsSnippets.oneShot(jazz, show: show).count
         XCTAssertEqual(v7, 2)
         try await DocsSnippets.nullableUpdate(jazz, task: load)
-        let results = try await DocsSnippets.whereOperators(jazz, show: show)
+        let results = try await DocsSnippets.whereOperators(jazz)
         XCTAssertEqual(results.map(\.count), [0, 2, 2, 1, 2, 0])
         let seen = try await DocsSnippets.subscriptions(jazz, show: show)
         XCTAssertEqual(seen.first?.map(\.title), ["Load in", "Sound check"])

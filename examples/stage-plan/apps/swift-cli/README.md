@@ -19,4 +19,4 @@ swift test                                              # the slice and the docs
 ```
 
 Left out because the Swift bindings don't support them yet: `tasks.notes`
-(mergeable text), and relations and includes (tasks are queried by `showId`).
+(mergeable text), and relations and includes (tasks are queried by `showId`). The generated types are inside `JazzApp`: `JazzApp.Task`, `JazzApp.tasks.query()`..
