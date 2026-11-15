@@ -172,4 +172,33 @@ async fn text_edits_merge() {
         .await
         .unwrap();
     assert_eq!(notes().await, "bye now");
+
+    // A column without "merge": "text" is refused.
+    let plain = jazz
+        .edit_text(task.id, tasks::title(), "Notes", "Renamed")
+        .await;
+    assert!(plain.is_err(), "{plain:?}");
+    // A row that isn't there.
+    let missing = jazz
+        .edit_text(jazz_app::ObjectId::new(), tasks::notes(), "", "x")
+        .await;
+    assert!(
+        matches!(missing, Err(Error::NotFound { .. })),
+        "{missing:?}"
+    );
+    // A stale base at the other end merges too: the edit keeps the other
+    // writer's change at the start.
+    jazz.update(
+        task.id,
+        bindings::TaskUpdate {
+            notes: Some(Some("well, bye now".into())),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    jazz.edit_text(task.id, tasks::notes(), "bye now", "bye now, friend")
+        .await
+        .unwrap();
+    assert_eq!(notes().await, "well, bye now, friend");
 }
