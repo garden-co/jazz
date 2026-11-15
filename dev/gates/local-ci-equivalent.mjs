@@ -44,6 +44,7 @@ export const ciPartitionJobs = Object.freeze({
   "storage-compat": "test-storage-compat",
   "durable-object-limits": "test-storage-compat",
   typescript: "test-ts",
+  "next-trace": "test-next-trace",
   "react-native": "test-react-native",
 });
 
@@ -234,6 +235,13 @@ export const ciPartitions = Object.freeze({
       "node",
       "dev/gates/example-bindings.mjs",
     ]),
+  ]),
+  // The Next.js trace test (B65-1) alone, for ready PRs that touch how a
+  // backend reaches jazz-napi. In a PR it stops at once when the diff
+  // touches none of that; the typescript partition runs it too, inside the
+  // jazz-tools package's `test`.
+  "next-trace": Object.freeze([
+    command("Next.js trace of a createJazz route", "node", ["dev/gates/next-trace.mjs"]),
   ]),
   "react-native": Object.freeze([
     // React Native's bridge is deliberately opt-in. This producer must be

@@ -2060,10 +2060,14 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
       `${name} must run only in the full scope`,
     );
   assert.equal(suite.jobs["test-rust"].if, "always() && inputs.scope == 'full'");
+  // The Next.js trace test (B65-1) on ready PRs; it stops at once unless the
+  // PR touches the paths dev/gates/next-trace.mjs guards.
+  assert.equal(suite.jobs["test-next-trace"].if, "inputs.scope == 'fast'");
   assert.deepEqual(
     Object.keys(suite.jobs).sort(),
     [
       "lint",
+      "test-next-trace",
       "test-react-native",
       "test-rust",
       "test-rust-workspace",
