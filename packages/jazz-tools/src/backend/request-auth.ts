@@ -114,3 +114,26 @@ export function localFirstSessionFromToken(token: string, appId: string): Sessio
   localFirstProofs.set(session, { token, appId });
   return session;
 }
+
+/**
+ * The device-account proof a plain HTTP request carries: a local-first
+ * token as `Authorization: Bearer` (what `db.getLocalFirstIdentityProof()`
+ * mints), or null for any other credential or none. Not verified here.
+ */
+export function deviceProofOf(request: Request): string | null {
+  const match = request.headers.get("authorization")?.match(/^Bearer\s+(\S+)$/i);
+  const token = match?.[1];
+  if (!token) return null;
+  return parseJwtPayload(token)?.iss === LOCAL_FIRST_JWT_ISSUER ? token : null;
+}
+
+/**
+ * The session of a device account whose `token` the caller verified (its
+ * signature, issuer, audience and expiry proved `subject`), on the account
+ * the core admitted it as.
+ */
+export function deviceAccountSession(token: string, subject: string, account: string): Session {
+  const session = localFirstSessionFromVerifiedProof(requireJwtPayload(token), subject);
+  session.account_id = account;
+  return session;
+}
