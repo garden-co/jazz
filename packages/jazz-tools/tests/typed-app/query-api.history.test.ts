@@ -161,8 +161,11 @@ describe("TS Query API history", () => {
     expectTypeOf(rows[0]!.$acceptedAt).toEqualTypeOf<Date>();
     expectTypeOf(rows[0]!.$transactionId).toEqualTypeOf<TxId>();
     expect(rows[0]!.$acceptedAt).toBeInstanceOf(Date);
-    expect(rows[0]!.$acceptedAt.getTime()).toBeGreaterThanOrEqual(startedAt);
-    expect(rows[0]!.$acceptedAt.getTime()).toBeLessThanOrEqual(Date.now());
+    // The server's clock stamps it; allow it to run a little apart from
+    // this process's (a position may also run ahead under load).
+    const skewMs = 5_000;
+    expect(rows[0]!.$acceptedAt.getTime()).toBeGreaterThanOrEqual(startedAt - skewMs);
+    expect(rows[0]!.$acceptedAt.getTime()).toBeLessThanOrEqual(Date.now() + skewMs);
     const latest = watch(app.$history.notes.where({ id: note.id }).select("$acceptedAt"));
     await expect.poll(latest).toEqual([{ id: note.id, $acceptedAt: rows[0]!.$acceptedAt }]);
     expect(typeof rows[0]!.$transactionId).toBe("string");

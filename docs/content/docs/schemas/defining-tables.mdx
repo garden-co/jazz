@@ -134,9 +134,11 @@ See [Relationships](/docs/schemas/relationships) for more.
 
 ## Indexes
 
-By default every column gets a single-column index. List `indexes` to choose: a name is a
-single-column index, an array of names a composite index, which may end in `$createdAt` or
-`$updatedAt`. Once any single names are listed, only those columns get single-column indexes.
+A table has the indexes you list in its `indexes`, plus one on each relation column, which Jazz
+always indexes. A column name in the list declares a single-column index on that column, and an
+array of names a composite index, which may end in `$createdAt` or `$updatedAt`. Queries can filter
+and sort by any column; an index on the columns they use lets them read only the matching rows
+instead of the whole table.
 
 ```json title="jazz.app.json"
 {
@@ -150,8 +152,10 @@ single-column index, an array of names a composite index, which may end in `$cre
 }
 ```
 
-Indexes are part of the schema version, so changing them is a schema change: `generate` asks for
-a migration, and `migrations create` writes an empty step for the table (rows pass unchanged).
+Adding, removing or changing single-column indexes needs no migration: run `generate`, and the new
+bindings use them. Composite indexes are part of the schema version, so changing one is a schema
+change: `generate` asks for a migration, and `migrations create` writes an empty step for the table
+(rows pass unchanged). See [Migrations](/docs/schemas/migrations#changes-that-keep-every-row).
 
 ## Latest-only tables
 
@@ -172,7 +176,9 @@ as editor presence or cursors, keep only each row's latest version with `"histor
 ```
 
 A latest-only table can't be read through `history`, at a snapshot or in a serializable
-transaction, and can't use `branchBy`, text-merging columns or values too large to store inline.
+transaction, and can't use `branchBy`, text-merging columns or values too large to store inline:
+over 64 KiB, a write fails with "a value over 65536 bytes in latest-only table `presence` is not
+supported yet".
 Concurrent writes can overwrite one another, and Jazz can't report whether a write overwrote a
 change the writer hadn't seen. On a client, queries involving latest-only tables may show their
 newest values alongside older data from other tables. For example, a cursor position may briefly be
@@ -183,6 +189,20 @@ row's earlier versions the next time that row is written; those versions can't b
 first deployment that does it must pass `allowDroppingHistory: true` to `createJazz`. A row that
 already holds a value too large to store inline keeps it, but can't be written with such a value
 again.
+
+Rows in a latest-only table usually come and go, so delete the stale ones yourself, for example
+presence rows that haven't been refreshed for a minute:
+
+```ts
+const cutoff = new Date(Date.now() - 60_000);
+for (const row of await db.all(app.presence.where({ $updatedAt: { lt: cutoff } }))) {
+  db.delete(app.presence, row.id);
+}
+```
+
+For an ephemeral payload larger than 64 KiB, there's no latest-only option yet: split it into rows
+under the limit, or keep it in an ordinary table and accept its history (deleting a row doesn't free
+its large values).
 
 Each write follows the history settings of the client's schema. If you roll back to a schema that
 keeps full history, writes using that schema stop deleting old versions. However, once a table has
@@ -195,8 +215,21 @@ guarantee its history is complete.
 
 ## The generated bindings
 
-`jazz-tools generate` writes `jazz.generated.ts` from `jazz.app.json`. It exports the typed `app`
-you pass to queries, mutations, and subscriptions throughout your application code:
+`jazz-tools generate` writes typed bindings from `jazz.app.json`, in your app's language: a row
+type and an insert type per table, and an enum type per enum column. For StagePlan's `tasks` table
+(the [StagePlan example](https://github.com/garden-co/jazz/tree/main/examples/stage-plan)):
+
+<Tabs groupId="jazz-environment" items={["TypeScript"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <BindingsExcerpt language="TypeScript" />
+  </Tab>
+</Tabs>
+
+The rest of this section is about the TypeScript bindings; each language's setup page covers its
+own.
+
+In TypeScript, the bindings are `jazz.generated.ts`. It exports the typed `app` you pass to
+queries, mutations, and subscriptions throughout your application code:
 
 ```ts title="app.ts"
 import { app, type Todo } from "./jazz.generated";
