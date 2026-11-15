@@ -92,9 +92,7 @@ describe("dev catalogue runtime schema identity", () => {
 describe("dev catalogue push behavior", () => {
   // Was: deploy({ schemaDir }) from schema.ts/permissions.ts (catalogue-project.ts,
   // removed). The app and its permissions now come from the files; the
-  // schemaFile, permissions-loaded/-published events and the per-operation
-  // "has no insert policy" warning went with it (deploy warns only for a
-  // table with no policy at all).
+  // schemaFile and the permissions-loaded/-published events went with it.
   it.each(["initial", "permissions", "unchanged"])(
     "deploy reports %s publication without separate push requests",
     async (kind) => {
@@ -138,6 +136,53 @@ describe("dev catalogue push behavior", () => {
       });
     },
   );
+
+  it("deploy warns for each table jazz.permissions.json gives no policy, not for explicit false", async () => {
+    const { deploy } = await import("./catalogue.js");
+    const app = testApp({
+      tables: {
+        notes: { columns: { body: "string" } },
+        drafts: { columns: { body: "string" } },
+        audit: { columns: { body: "string" } },
+        todos: { columns: { title: "string" } },
+      },
+    });
+    const hash = boundApp(app.wasmSchema)!.schema.current;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) =>
+        input.endsWith("/migrations/graph")
+          ? new Response(
+              JSON.stringify({ schemas: [], migrations: [], latestBundleSchemaHash: null }),
+            )
+          : new Response(
+              JSON.stringify({ changed: true, published: { schemas: [hash], migrations: [] } }),
+            ),
+      ),
+    );
+    const result = await deploy({
+      appId: APP_ID,
+      serverUrl: SERVER_URL,
+      adminSecret: ADMIN_SECRET,
+      app,
+      permissions: {
+        format: 1,
+        tables: {
+          // Listed with nothing allowed: still no policy.
+          drafts: {},
+          // Only the backend uses it, and the file says so.
+          audit: { read: "false", insert: "false", update: "false", delete: "false" },
+          todos: { read: "true", insert: "false", update: "false", delete: "false" },
+        },
+      },
+    });
+    const warning = (table: string) =>
+      `table "${table}" has no policies in jazz.permissions.json, so users can't read, insert, update or delete its rows. ` +
+      "Your backend isn't checked when it acts as the system, so if only it uses this table, that's fine: " +
+      `write \`"${table}": { "read": "false" }\` to say so and silence this warning. ` +
+      "Don't add allow rules just to silence it.";
+    expect(result.warnings).toEqual([warning("drafts"), warning("notes")]);
+  });
 
   it("deploy rejects policies compiled against an outdated schema before contacting the server", async () => {
     const { deploy } = await import("./catalogue.js");

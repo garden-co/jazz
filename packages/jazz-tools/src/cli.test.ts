@@ -26,11 +26,6 @@ const {
 } = createCliFixtures(import.meta.url);
 
 /** `todos` with a title and a done flag. */
-const booleanTodoApp = {
-  format: 1,
-  tables: { todos: { columns: { title: "string", done: "boolean" } } },
-};
-
 describe("loadDotEnv", () => {
   it("merges values from .env into the supplied env object", async () => {
     await mkdir(tmpBase, { recursive: true });
@@ -270,18 +265,6 @@ describe("cli generate", () => {
 
     expect(await fileExists(join(srcDir, "jazz.generated.ts"))).toBe(true);
     expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(false);
-  });
-
-  it("treats true and false as explicit policies", async () => {
-    const { root } = await createWorkspace();
-    await writeAppFiles(root, booleanTodoApp, {
-      format: 1,
-      tables: { todos: { read: "true", insert: "false", update: "false", delete: "false" } },
-    });
-
-    const { logs } = await captureConsoleLogs(() => generate({ schemaDir: root }));
-
-    expect(logs.filter((line) => line.includes('table "todos"'))).toEqual([]);
   });
 
   it("fails when jazz.permissions.json is missing", async () => {

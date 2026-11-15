@@ -1742,6 +1742,21 @@ describe("createJazz", () => {
 
   // An Expo app is a CommonJS package: an ESM backend importing its
   // permissions.ts by default gets the whole module.exports, `{ default }`.
+  it.each([
+    ["no permissions", undefined],
+    ["the engine's compiled policies", clientPermissions],
+    ["a non-object", "./jazz.permissions.json"],
+  ])("refuses %s as `permissions`, naming jazz.permissions.json", async (_case, given) => {
+    const open = async () => {
+      const jazz = createJazz({ app, permissions: given as never, store: memory() });
+      cleanups.push(() => jazz.close());
+      await jazz.ready();
+    };
+    await expect(open()).rejects.toThrow(
+      'createJazz: `permissions` must be the app\'s jazz.permissions.json, imported as JSON: `import permissions from "./jazz.permissions.json" with { type: "json" }`.',
+    );
+  });
+
   it("names a generated app module imported as CommonJS, not an unknown table `default`", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-cjs-app-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
