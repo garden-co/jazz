@@ -15,7 +15,7 @@ result is bound back into that SQL. They never use SQLite's FTS5, R*Tree,
 loadable extensions, custom SQL functions or virtual tables. Those are
 missing on some targets (FTS5 and R*Tree are compiled out of the browser
 WASM; the Turso engine has neither and no `create_function`; Durable Objects
-allow FTS5 and R*Tree but no custom functions or modules), and an engine
+allow FTS5 and R\*Tree but no custom functions or modules), and an engine
 feature on some nodes and a fallback on others would match and rank
 differently. Every node runs the same code, so the same rows and the same
 query give the same matches in the same order everywhere. That is required,
@@ -71,11 +71,11 @@ named error.
 ]
 ```
 
-| kind key | value                                         | other keys                                                                 |
-| -------- | --------------------------------------------- | -------------------------------------------------------------------------- |
-| `text`   | string column → integer weight 1–15           | `analyzer` (20.10.1, required), `prefix` (default `false`), `serverOnly`   |
-| `vector` | a `vector` column                             | `metric`: `cosine`, `l2` or `dot` (required); `ann`: `exact` (default, only value accepted now); `serverOnly` |
-| `geo`    | `{ "lat": <f64 column>, "lng": <f64 column> }` (degrees, WGS84) | `serverOnly`                                             |
+| kind key | value                                                           | other keys                                                                                                    |
+| -------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `text`   | string column → integer weight 1–15                             | `analyzer` (20.10.1, required), `prefix` (default `false`), `serverOnly`                                      |
+| `vector` | a `vector` column                                               | `metric`: `cosine`, `l2` or `dot` (required); `ann`: `exact` (default, only value accepted now); `serverOnly` |
+| `geo`    | `{ "lat": <f64 column>, "lng": <f64 column> }` (degrees, WGS84) | `serverOnly`                                                                                                  |
 
 The artifact is the only place indexes are declared; generated bindings
 for each language read them from it. The JSON Schema in
@@ -135,11 +135,11 @@ included.
 
 Shadow rows reference indexed rows by the current table's `rid`. Per kind:
 
-| kind   | tables                                                                                                      |
-| ------ | ----------------------------------------------------------------------------------------------------------- |
+| kind   | tables                                                                                                                                |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------- |
 | text   | `__terms(tid INTEGER PRIMARY KEY, term TEXT UNIQUE, n INTEGER)`; `__post(tid, rid, impact INTEGER)`, indexed `(tid, rid)` and `(rid)` |
-| vector | `__vec(rid INTEGER PRIMARY KEY, v BLOB)` (normalized for `cosine`)                                            |
-| geo    | `__geo(rid INTEGER PRIMARY KEY, cell INTEGER, x REAL, y REAL, z REAL)`, indexed `(cell)`                       |
+| vector | `__vec(rid INTEGER PRIMARY KEY, v BLOB)` (normalized for `cosine`)                                                                    |
+| geo    | `__geo(rid INTEGER PRIMARY KEY, cell INTEGER, x REAL, y REAL, z REAL)`, indexed `(cell)`                                              |
 
 `__terms.n` counts postings and exists to drop dead terms; it is never read by
 a query (20.7). Fixtures in `SPEC/fixtures/ix/` pin each encoding's bytes
@@ -229,8 +229,9 @@ common table expression; the root is `t JOIN ix USING (rid)`, and every other
 clause, the read policy included, applies to `t` unchanged.
 
 **Text** is pure SQL. Rust analyzes the query text into terms (20.10.1),
-looks up their `tid`s and binds them as a JSON array. The last term, with
-`prefix`, matches every term in its range (`term >= ?a AND term < ?b`).
+looks up their `tid`s and binds them as a JSON array. With `prefix`, the
+last word is one slot matching its whole-word term or every term in its
+range (`term = ?exact OR (term >= ?lo AND term < ?hi)`, 20.10.1).
 
 ```sql
 WITH q(tid, slot) AS (SELECT ... FROM json_each(?)),
@@ -262,7 +263,7 @@ in two phases:
      `SCAN`;
    - _whole replica_ on a client, where the table holds only replicated rows:
      every row of `__vec`, under the same cap.
-   Rust reads those vectors, scores them (20.10.2) and keeps the best `k`.
+     Rust reads those vectors, scores them (20.10.2) and keeps the best `k`.
 2. **Rows.** The `k` pairs `(rid, score)` are bound as one JSON array, and the
    statement runs with `ix` as `json_each` over it, so filters, policy,
    includes and order apply as above.
@@ -355,25 +356,52 @@ answer arrives.
 ### 20.10.1 Text
 
 An **analyzer** turns a field's string into terms. `jazz-text/1:<lang>`,
-`lang` one of `en`, `simple`:
+`lang` one of `en`, `simple`, is defined by its steps and by tables fixed in
+Jazz at Unicode 16.0.0, never the toolchain's or the platform's Unicode
+version:
 
-1. Split into words with `jazz-text`'s plain-text unit segmentation; keep
-   units containing a letter or digit.
-2. Lowercase (Unicode simple case folding).
-3. Fold diacritics with the table `jazz-text/fold/1` (Latin, Greek and
-   Cyrillic decompositions; other characters unchanged).
-4. For `en`, stem with the Snowball English (Porter 2) algorithm.
-5. Drop terms longer than 64 bytes.
+1. Split into words with `jazz-text`'s plain-text unit segmentation
+   (`plain_units`). Keep the word runs, and the units that are one
+   standalone letter or digit: an ideograph, a kana or a Thai, Lao, Myanmar
+   or Khmer letter, which `jazz-text` cuts one per unit, so these scripts are
+   searched by character. Punctuation, symbols, emoji and spaces are dropped.
+   Two word runs with a single `'` or `’` between them are one word (`don't`,
+   `O’Neill`). Other separators split, so `e-mail`, `3.14` and `snake_case`
+   are two words each.
+2. Lowercase with Unicode simple case folding (CaseFolding.txt, statuses C
+   and S). `ẞ` folds to `ß`, every sigma to `σ`, and `İ`, which has no simple
+   folding, is left to step 3.
+3. Fold with the table `jazz-text/fold/1`. A Latin, Greek or Cyrillic letter
+   becomes its canonical decomposition without combining diacritical marks
+   (U+0300–U+036F), case-folded (`é` → `e`, `ά` → `α`, `ё` → `е`, `й` → `и`,
+   `İ` → `i`). A few letters fold by hand: `ß` → `ss`, `æ` → `ae`, `œ` →
+   `oe`, `ĳ` → `ij`, `ø` → `o`, `ł` → `l`, `đ` → `d`, `ħ` → `h`, `ŀ` → `l`,
+   `ı` → `i`, `ŧ` → `t`, `ƀ` → `b`. The Latin ligatures (U+FB00–U+FB06) and
+   the fullwidth Latin letters and digits fold to ASCII. Combining marks
+   (U+0300–U+036F, U+1AB0–U+1AFF, U+1DC0–U+1DFF, U+20D0–U+20FF,
+   U+FE20–U+FE2F) and variation selectors are dropped, so precomposed and
+   decomposed spellings meet. `’` becomes `'`. Other characters are
+   unchanged.
+4. For `en`, stem with the Snowball English (Porter 2) algorithm of Snowball
+   v3.2.0 (`algorithms/english.sbl`), which also strips possessives (`'s`,
+   `s'`).
+5. Drop terms longer than 64 bytes of UTF-8.
 
 There are no stop words: AND semantics make them harmless, and dropping
 them breaks queries made only of them.
 
 Query text is analyzed the same way; a query matches a row when every term
-occurs in at least one field (prefix: the last query term, unstemmed,
-matches any indexed term starting with it).
+occurs in at least one field. Repeated query terms count once. With
+`prefix`, the last query word is not a term but a prefix slot: it matches an
+indexed term equal to the word analyzed as a whole word (so a fully typed
+`running` meets the stem `run`), or any indexed term starting with the word
+folded but unstemmed (steps 1–3), compared as UTF-8 bytes. A partly typed
+word whose stem is shorter than what has been typed (`runn`) matches only
+once completed. A query with no terms and no prefix after analysis is
+refused (20.4).
 
 The impact of a term in a field with weight `w`, frequency `f` and field
-length `L` terms is
+length `L` terms (after step 5) is
 
 ```text
 impact = min(255, floor(w * 16 * (f * 2.2) / (f + 1.2 * (0.25 + 0.75 * L / 32))))
@@ -381,7 +409,12 @@ impact = min(255, floor(w * 16 * (f * 2.2) / (f + 1.2 * (0.25 + 0.75 * L / 32)))
 
 computed in binary64 in that order; per row a term's impact is the sum over
 its fields, capped at 255. It is BM25's term-frequency part with a fixed
-reference length of 32 terms and no corpus term weight.
+reference length of 32 terms and no corpus term weight. A term occurring
+once in a field of more than about 1 200 terms has impact 0 at weight 1. It
+still matches, but adds nothing to the score.
+
+The fixtures in `SPEC/fixtures/ix/text/` pin the terms, postings and query
+terms of both analyzers, byte for byte.
 
 ### 20.10.2 Vector
 
@@ -389,11 +422,11 @@ reference length of 32 terms and no corpus term weight.
 divided by its L2 norm in f64 and rounded to f32 (a zero vector is
 refused at admission for a `cosine` index). Scores:
 
-| metric   | score (smaller is better)           |
-| -------- | ----------------------------------- |
-| `l2`     | `Σ (aᵢ − bᵢ)²`                       |
-| `cosine` | `−Σ aᵢ bᵢ` over normalized vectors   |
-| `dot`    | `−Σ aᵢ bᵢ`                           |
+| metric   | score (smaller is better)          |
+| -------- | ---------------------------------- |
+| `l2`     | `Σ (aᵢ − bᵢ)²`                     |
+| `cosine` | `−Σ aᵢ bᵢ` over normalized vectors |
+| `dot`    | `−Σ aᵢ bᵢ`                         |
 
 `Nearest { k }` keeps the `k` best candidates by `(score, id)`. Ann kinds
 (`ivf`, then graph-based) are later versions of this kind; they choose
