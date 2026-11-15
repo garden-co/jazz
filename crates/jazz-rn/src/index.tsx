@@ -13,11 +13,11 @@ export {
   encodeNativeForegroundCommand,
   executeNativeRelayCommand,
   installNativeForegroundRuntime,
-} from "./relay";
+} from './relay';
 export type {
   NativeForegroundCommand,
   NativeForegroundResponse,
   NativeForegroundRuntime,
   NativeForegroundRuntimeFactory,
   NativeRelayAbiRange,
-} from "./relay";
+} from './relay';

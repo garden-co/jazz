@@ -3,99 +3,64 @@
 /** Owned native stream state, never serialised into JavaScript memory. */
 export declare class E2EeSodiumStream {
   /** Without a header starts encryption; a supplied header starts decryption. */
-  constructor(key: Uint8Array, header?: Uint8Array | undefined | null);
+  constructor(key: Uint8Array, header?: Uint8Array | undefined | null)
   /** Public, non-secret stream header. */
-  get header(): Uint8Array;
+  get header(): Uint8Array
   /** Encrypts one bounded record; final records must be empty. */
-  push(message: Uint8Array, context: Uint8Array, finalRecord: boolean): Uint8Array;
+  push(message: Uint8Array, context: Uint8Array, finalRecord: boolean): Uint8Array
   /** Returns plaintext only after authenticating the record. */
-  pull(ciphertext: Uint8Array, context: Uint8Array): E2EeSodiumStreamRecord;
+  pull(ciphertext: Uint8Array, context: Uint8Array): E2EeSodiumStreamRecord
   /** Wipes stream keys immediately; also called on drop. */
-  dispose(): void;
+  dispose(): void
 }
-export type E2eeSodiumStream = E2EeSodiumStream;
+export type E2eeSodiumStream = E2EeSodiumStream
 
 export declare class JazzCore {
   /** Open the core's storage and serve it in this process. */
-  static open(options: {
-    appId: string;
-    backendSecret: string;
-    adminSecret: string;
-    dataDir?: string;
-    inMemory?: boolean;
-    blobs?: "files" | "s3" | "sqlite";
-    blobsDir?: string;
-    s3Bucket?: string;
-    s3Region?: string;
-    s3Endpoint?: string;
-    s3Prefix?: string;
-    telemetryCollectorUrl?: string;
-  }): Promise<JazzCore>;
+  static open(options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; telemetryCollectorUrl?: string }): Promise<JazzCore>
   /**
    * Route one HTTP request. `url` is the path and query, as the core's
    * router sees them (`/apps/<appId>/...` or `/health`).
    */
-  handle(
-    method: string,
-    url: string,
-    headers: Array<Array<string>>,
-    body: Buffer,
-  ): Promise<JazzCoreResponse>;
+  handle(method: string, url: string, headers: Array<Array<string>>, body: Buffer): Promise<JazzCoreResponse>
   /**
    * Start a sync session over a socket the host upgraded. `onEvent` gets
    * each message for the client and, last, the close.
    */
-  openSocket(
-    headers: Array<Array<string>>,
-    onEvent: (err: Error | null, event: JazzCoreSocketEvent) => void,
-  ): JazzCoreSocket;
+  openSocket(headers: Array<Array<string>>, onEvent: (err: Error | null, event: JazzCoreSocketEvent) => void): JazzCoreSocket
   /**
    * Start a sync session for a client in this process. Unlike
    * `openSocket` it has no handshake deadline: the client's Hello waits on
    * this event loop, which synchronous work can hold for seconds.
    */
-  openInProcessSocket(
-    onEvent: (err: Error | null, event: JazzCoreSocketEvent) => void,
-  ): JazzCoreSocket;
+  openInProcessSocket(onEvent: (err: Error | null, event: JazzCoreSocketEvent) => void): JazzCoreSocket
   /** Close every session and the storage. */
-  close(): Promise<void>;
+  close(): Promise<void>
 }
 
 /** The host's handle on one session. */
 export declare class JazzCoreSocket {
   /** Pass one binary message from the client. False once the session ended. */
-  send(data: Uint8Array): boolean;
+  send(data: Uint8Array): boolean
   /**
    * `send`, resolving once the session has read enough of the messages
    * before it. A host that awaits it before reading more from its client
    * holds a fast client back instead of queueing all it sends.
    */
-  sendWithRoom(data: Uint8Array): Promise<boolean>;
+  sendWithRoom(data: Uint8Array): Promise<boolean>
   /** The client's socket closed. */
-  close(): void;
+  close(): void
 }
 
 export declare class JazzServer {
-  static start(options: {
-    appId: string;
-    backendSecret?: string;
-    adminSecret?: string;
-    port?: number;
-    host?: string;
-    dataDir?: string;
-    inMemory?: boolean;
-    telemetryCollectorUrl?: string;
-    schema?: Buffer | Uint8Array | number[];
-    maxConnectionsPerUser?: number;
-    trustedWorkload?: { issuer: string; audience: string; subject: string };
-  }): Promise<JazzServer>;
-  get appId(): string;
-  get url(): string;
-  get port(): number;
-  get dataDir(): string;
-  get backendSecret(): string;
-  get adminSecret(): string;
-  stop(): Promise<void>;
+  static start(options: { appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; maxConnectionsPerUser?: number; trustedWorkload?: { issuer: string; audience: string; subject: string } }): Promise<JazzServer>
+  get appId(): string
+  get url(): string
+  get port(): number
+  get dataDir(): string
+  get backendSecret(): string
+  get adminSecret(): string
+  stop(): Promise<void>
 }
 
 export declare class NapiDb {
@@ -106,303 +71,169 @@ export declare class NapiDb {
    * independent feature list, so a package cannot advertise a codec this
    * native artifact cannot decode.
    */
-  wireFeatures(): number;
-  requestInsertPermissionAdvice(
-    table: string,
-    cells: Uint8Array,
-    author?: Uint8Array | undefined | null,
-    claims?: JsonValue | undefined | null,
-  ): string | PendingNativePermissionAdvice;
-  requestReadPermissionAdvice(
-    table: string,
-    rowId: Uint8Array,
-    author?: Uint8Array | undefined | null,
-    claims?: JsonValue | undefined | null,
-  ): string | PendingNativePermissionAdvice;
-  requestUpdatePermissionAdvice(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    author?: Uint8Array | undefined | null,
-    claims?: JsonValue | undefined | null,
-  ): string | PendingNativePermissionAdvice;
-  requestDeletePermissionAdvice(
-    table: string,
-    rowId: Uint8Array,
-    author?: Uint8Array | undefined | null,
-    claims?: JsonValue | undefined | null,
-  ): string | PendingNativePermissionAdvice;
+  wireFeatures(): number
+  requestInsertPermissionAdvice(table: string, cells: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
+  requestReadPermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
+  requestUpdatePermissionAdvice(table: string, rowId: Uint8Array, patch: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
+  requestDeletePermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
   /** Admit a verified local-first account for this backend runtime only. */
-  admitLocalFirstSession(token: string, appId: string, claimedAuthor: string): void;
-  insert(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write;
-  insertInTransaction(
-    openTransactionId: string,
-    table: string,
-    cells: Uint8Array,
-    options?: InsertOptions | undefined | null,
-  ): Uint8Array;
-  update(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    options?: UpdateOptions | undefined | null,
-  ): Write;
-  updateInTransaction(
-    openTransactionId: string,
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    options?: UpdateOptions | undefined | null,
-  ): void;
+  admitLocalFirstSession(token: string, appId: string, claimedAuthor: string): void
+  insert(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
+  insertInTransaction(openTransactionId: string, table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Uint8Array
+  update(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
+  updateInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): void
   /**
    * Binding-only entrypoint for typed partial-value updates staged inside
    * an open transaction. The transaction's bound identity authors them.
    */
-  updateLargeValuesInTransaction(
-    openTransactionId: string,
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    mutations: JsonValue,
-    updatedAtMs?: number | undefined | null,
-  ): void;
+  updateLargeValuesInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, patch: Uint8Array, mutations: JsonValue, updatedAtMs?: number | undefined | null): void
   /**
    * Binding-only entrypoint for typed partial-value updates. The public
    * TypeScript API validates column-kind-specific descriptors before they
    * reach this encoded boundary.
    */
-  updateLargeValues(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    mutations: JsonValue,
-    updatedAtMs?: number | undefined | null,
-  ): Write;
-  upsert(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    options?: UpsertOptions | undefined | null,
-  ): Write;
-  upsertInTransaction(
-    openTransactionId: string,
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    options?: UpsertOptions | undefined | null,
-  ): void;
-  delete(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): Write;
-  deleteInTransaction(
-    openTransactionId: string,
-    table: string,
-    rowId: Uint8Array,
-    options?: DeleteOptions | undefined | null,
-  ): void;
-  restore(
-    table: string,
-    rowId: Uint8Array,
-    cells?: Uint8Array | undefined | null,
-    options?: RestoreOptions | undefined | null,
-  ): Write;
-  restoreInTransaction(
-    openTransactionId: string,
-    table: string,
-    rowId: Uint8Array,
-    cells?: Uint8Array | undefined | null,
-    options?: RestoreOptions | undefined | null,
-  ): void;
-  beginStreamingMutation(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    column: string,
-    mutation?: string | undefined | null,
-    author?: Uint8Array | undefined | null,
-    attribution?: Uint8Array | undefined | null,
-    updatedAtMs?: number | undefined | null,
-    head?: JsonValue | undefined | null,
-    base?: JsonValue | undefined | null,
-    transaction?: string | undefined | null,
-  ): StreamingMutation;
-  static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb;
+  updateLargeValues(table: string, rowId: Uint8Array, patch: Uint8Array, mutations: JsonValue, updatedAtMs?: number | undefined | null): Write
+  upsert(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): Write
+  upsertInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): void
+  delete(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): Write
+  deleteInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): void
+  restore(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): Write
+  restoreInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): void
+  beginStreamingMutation(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null, transaction?: string | undefined | null): StreamingMutation
+  static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
   /**
    * Open a deliberate backend runtime. Unlike the public raw-open entrypoint,
    * this explicit ABI derives the canonical system author.
    */
-  static openMemoryAsBackend(schema: Uint8Array, config: Uint8Array): NapiDb;
+  static openMemoryAsBackend(schema: Uint8Array, config: Uint8Array): NapiDb
   /**
    * Open with a verified Jazz self-signed client identity. This is a
    * separate ABI entrypoint deliberately: a new client cannot accidentally
    * hand proof bytes to an old constructor, and an old client cannot enter
    * the proof-bearing path.
    */
-  static openMemoryWithSelfSignedProof(
-    schema: Uint8Array,
-    config: Uint8Array,
-    token: string,
-    appId: string,
-    claimedAuthor: string,
-  ): NapiDb;
+  static openMemoryWithSelfSignedProof(schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
   /** Open the durable store in directory `data_path` (one SQLite file). */
-  static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb;
+  static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
   /**
    * Open a deliberate persistent backend runtime. This is intentionally a
    * distinct ABI from the public raw-open entrypoint.
    */
-  static openPersistentAsBackend(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb;
-  static openPersistentWithSelfSignedProof(
-    dataPath: string,
-    schema: Uint8Array,
-    config: Uint8Array,
-    token: string,
-    appId: string,
-    claimedAuthor: string,
-  ): NapiDb;
+  static openPersistentAsBackend(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
+  static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
   /**
    * Register and return a typed view backed by this same runtime owner,
    * of an app shipping `migrations` (its bundle as JSON).
    */
-  registerSchema(schema: Uint8Array, migrations?: Uint8Array | undefined | null): NapiDb;
+  registerSchema(schema: Uint8Array, migrations?: Uint8Array | undefined | null): NapiDb
   /** Begin one owner-wide transaction. */
-  beginTransaction(
-    openTransactionId: string,
-    kind: string,
-    author?: Uint8Array | undefined | null,
-    attribution?: Uint8Array | undefined | null,
-  ): void;
+  beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null): void
   /** Commit an owner-wide transaction by id and optional kind. */
-  commitTransaction(openTransactionId: string, kind?: string | undefined | null): Write;
+  commitTransaction(openTransactionId: string, kind?: string | undefined | null): Write
   /** Roll back an owner-wide open transaction by id. */
-  rollbackTransaction(openTransactionId: string): void;
+  rollbackTransaction(openTransactionId: string): void
   /**
    * The host's tick callback: called with `"immediate"` whenever there
    * is sync work (a local write to upload, frames to apply).
    */
-  setTickScheduler(callback: (err: Error | null, arg: string) => void): void;
+  setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   /** Register a callback for rejected writes that no active wait consumed. */
-  onMutationError(callback: (event: any) => void): void;
+  onMutationError(callback: (event: any) => void): void
   /**
    * Decode, prepare, and execute one read inside Rust. Query-plan ownership
    * never crosses the language boundary.
    */
-  all(
-    query: Uint8Array,
-    opts?: { tier?: string; include_deleted?: boolean; sync?: boolean } | undefined | null,
-    openTransactionId?: string | undefined | null,
-    author?: Uint8Array | undefined | null,
-    claims?: JsonValue | undefined | null,
-  ): Uint8Array | PendingNativeRead;
+  all(query: Uint8Array, opts?: { tier?: string; include_deleted?: boolean; sync?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
   /** Bind receipt-correlation claims to this client's own admitted identity. */
-  setSessionClaims(claims?: Record<string, unknown> | undefined | null): void;
+  setSessionClaims(claims?: Record<string, unknown> | undefined | null): void
   /** Set the claims reads and writes as `author` are checked with. */
-  setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void;
+  setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   /**
    * Exact local state for the write-merge bridge: the row as stored,
    * deleted or not. Write authorization remains at the mutation boundary;
    * this is not a query.
    */
-  localCurrentRow(table: string, rowId: Uint8Array): Uint8Array;
+  localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
   /**
    * The Inspector's `explain`: for each of `rows` (uuid strings) of
    * `table`, which clauses of its read policy (the arms of its top-level
    * `Or`) hold for `author` with `claims`.
    */
-  explainReadClauses(
-    table: string,
-    rows: Array<string>,
-    author: Uint8Array,
-    claims?: JsonValue | undefined | null,
-  ): ExplainedReadClauses;
+  explainReadClauses(table: string, rows: Array<string>, author: Uint8Array, claims?: JsonValue | undefined | null): ExplainedReadClauses
   /** A pool that pooled subscriptions are read through, all in one call. */
-  createSubscriptionPool(): SubscriptionPool;
-  subscribe(
-    query: Uint8Array,
-    opts?: { tier?: string; include_deleted?: boolean } | undefined | null,
-    author?: Uint8Array | undefined | null,
-    claims?: JsonValue | undefined | null,
-  ): Subscription;
+  createSubscriptionPool(): SubscriptionPool
+  subscribe(query: Uint8Array, opts?: { tier?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Subscription
   /** Apply received frames and send what is due on every link. */
-  tick(): void;
+  tick(): void
   /** Configure Jazz-owned upload ingress and unpublished-tree expiry limits. */
-  setLargeValueStagingPolicy(
-    incomingBytesPerWindow: number,
-    windowMs: number,
-    maxAgeMs?: number | undefined | null,
-  ): void;
+  setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
   /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
-  evictExpiredStagedLargeValues(): number;
+  evictExpiredStagedLargeValues(): number
   /**
    * This store's uploads: how many still wait for the server's verdict
    * and since when, and what the server refused since it opened
    * (`{ pending, oldestPendingAt, rejected, lastRejection }`).
    */
-  uploadStatus(): JsonValue;
+  uploadStatus(): JsonValue
   /**
    * The optimistic in-memory side of a client/worker pair: its
    * subscriptions open with the worker's answer.
    */
-  setNonDurableClient(): void;
+  setNonDurableClient(): void
   /**
    * Report what the host knows about the path to the authoritative server
    * (`"none" | "attempting" | "live" | "failed"`; the TypeScript names
    * `"connecting" | "connected" | "unavailable"` are accepted as aliases).
    * Drives only local-first reads that wait for the server on first load.
    */
-  setRemoteLinkHint(state: string): void;
+  setRemoteLinkHint(state: string): void
   /**
    * A fresh upstream link machine for this runtime's server connection;
    * `seed` drives its retry jitter.
    */
-  createUpstreamLink(seed: number): UpstreamLink;
+  createUpstreamLink(seed: number): UpstreamLink
   /**
    * The slow-query report due now: one line per slow query shape,
    * naming `app`: the first at once, then at most every 10 seconds. The caller
    * writes each line with `console.warn`.
    */
-  takeSlowQueryReport(app?: string | undefined | null): Array<string>;
+  takeSlowQueryReport(app?: string | undefined | null): Array<string>
   /**
    * Report query runs of at least `ms` milliseconds (default 50); 0
    * turns the slow-query log off.
    */
-  setSlowQueryThresholdMs(ms: number): void;
+  setSlowQueryThresholdMs(ms: number): void
   /**
    * Connect to the server over byte frames the host carries: each frame
    * is one postcard `SyncMessage`.
    */
-  connectUpstream(): Transport;
+  connectUpstream(): Transport
   /**
    * Connect after the carrier accepted the server Hello. Negotiated
    * features must be compiled in; the rest of the session context
    * (authority endpoints, epochs) has no counterpart on SQLite's sync, so
    * this is otherwise [`Self::connect_upstream`].
    */
-  connectUpstreamWithSession(
-    protocolVersion: number,
-    features: number,
-    remoteNode: Buffer,
-    remoteEpoch: bigint,
-    localNode: Buffer,
-    localEpoch: bigint,
-  ): Transport;
+  connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
   /**
    * The newest transaction time this database handed out under its node
    * (a `TxTime` is the commit seq). A leased node's next holder seeds it
    * through `seedForegroundTxTimeHighWater`.
    */
-  foregroundTxTimeHighWater(): bigint;
+  foregroundTxTimeHighWater(): bigint
   /**
    * Continue after a previous holder of this node: no transaction time at
    * or below `high_water` is reused.
    */
-  seedForegroundTxTimeHighWater(highWater: bigint): void;
+  seedForegroundTxTimeHighWater(highWater: bigint): void
   /** Capture a snapshot reference, as its persisted string's bytes. */
-  captureSnapshot(): Uint8Array | PendingNativeRead;
+  captureSnapshot(): Uint8Array | PendingNativeRead
   /**
    * Complete once every local write so far reached `tier`. Commits are in
    * the SQLite file when their write call returns, so only `global` waits.
    */
-  waitForPendingWrites(tier: string): Uint8Array | PendingNativeRead;
-  close(): Promise<undefined>;
+  waitForPendingWrites(tier: string): Uint8Array | PendingNativeRead
+  close(): Promise<undefined>
 }
 
 /**
@@ -411,9 +242,9 @@ export declare class NapiDb {
  * thread.
  */
 export declare class PendingNativePermissionAdvice {
-  poll(): string | null;
+  poll(): string | null
   /** Stop waiting; a late answer is ignored. */
-  cancel(): void;
+  cancel(): void
 }
 
 /**
@@ -423,8 +254,8 @@ export declare class PendingNativePermissionAdvice {
  * transport makes progress instead of blocking Node.
  */
 export declare class PendingNativeRead {
-  poll(): Uint8Array | null;
-  cancel(): void;
+  poll(): Uint8Array | null
+  cancel(): void
 }
 
 /**
@@ -434,21 +265,21 @@ export declare class PendingNativeRead {
  */
 export declare class ServedCore {
   /** Start the controlled shutdown: refuse new work, drain, then close. */
-  stop(): void;
+  stop(): void
   /**
    * Resolves once the core has stopped; rejects if it failed. Only one
    * caller may wait.
    */
-  closed(): Promise<void>;
+  closed(): Promise<void>
 }
 
 /** A large value uploaded in chunks, then published as one row mutation. */
 export declare class StreamingMutation {
-  push(chunk: Uint8Array): void;
-  finish(): Write;
+  push(chunk: Uint8Array): void
+  finish(): Write
   /** Stage the value's row mutation in the transaction it began in. */
-  finishInTransaction(): void;
-  abort(): boolean;
+  finishInTransaction(): void
+  abort(): boolean
 }
 
 export declare class Subscription {
@@ -456,14 +287,14 @@ export declare class Subscription {
    * Every event available now; empty until the next tick or local write
    * has something to deliver.
    */
-  readAll(): Array<SubscriptionEvent>;
-  drain(): Array<SubscriptionEvent>;
+  readAll(): Array<SubscriptionEvent>
+  drain(): Array<SubscriptionEvent>
   /**
    * Move this subscription's stream into `pool`, which then reads it in
    * [`SubscriptionPool::drain`]. Returns the id its batches carry.
    */
-  joinPool(pool: SubscriptionPool): number;
-  close(): boolean;
+  joinPool(pool: SubscriptionPool): number
+  close(): boolean
 }
 
 /**
@@ -472,15 +303,15 @@ export declare class Subscription {
  * `readAll` call per subscription.
  */
 export declare class SubscriptionPool {
-  constructor();
+  constructor()
   /**
    * The events of every pooled subscription that has any now, by id.
    * Subscriptions with nothing are left out. A closed or failed stream
    * leaves the pool after its batch.
    */
-  drain(): Array<SubscriptionBatch>;
+  drain(): Array<SubscriptionBatch>
   /** Pooled subscriptions still open. */
-  get size(): number;
+  get size(): number
 }
 
 /**
@@ -492,27 +323,27 @@ export declare class Transport {
    * SQLite's sync has no auxiliary chunk lane: large-value chunks travel
    * as ordinary sync messages, so every frame belongs to the ordinary lane.
    */
-  routeAuxiliaryWireFrame(frame: Uint8Array): Uint8Array | null;
-  recvAuxiliaryWireFrames(): Array<Uint8Array>;
-  auxiliaryReceiveTimeoutMs(): number | null;
-  expireAuxiliaryReceive(): void;
-  auxiliaryOutboundReady(): boolean;
-  sendWireFrame(frame: Uint8Array): void;
-  sendWireFrames(frames: Array<Uint8Array>): void;
-  recvWireFrames(): Array<Uint8Array>;
+  routeAuxiliaryWireFrame(frame: Uint8Array): Uint8Array | null
+  recvAuxiliaryWireFrames(): Array<Uint8Array>
+  auxiliaryReceiveTimeoutMs(): number | null
+  expireAuxiliaryReceive(): void
+  auxiliaryOutboundReady(): boolean
+  sendWireFrame(frame: Uint8Array): void
+  sendWireFrames(frames: Array<Uint8Array>): void
+  recvWireFrames(): Array<Uint8Array>
   /**
    * Tick the database this link belongs to: apply received frames, send
    * what is due. Returns the number of frames waiting to be sent.
    */
-  tick(): number;
+  tick(): number
   /**
    * Why the database dropped this upstream link on its own, with the
    * core's stable `code` (`authority_changed` for a server whose store
    * was recreated), or `null` while the link stands. The host stops the
    * link with it rather than retry.
    */
-  upstreamRefusal(): UpstreamRefusal | null;
-  close(): boolean;
+  upstreamRefusal(): UpstreamRefusal | null
+  close(): boolean
 }
 
 /**
@@ -522,176 +353,146 @@ export declare class Transport {
  */
 export declare class UpstreamLink {
   /** `seed` drives the retry jitter. */
-  constructor(seed: number);
+  constructor(seed: number)
   /**
    * Apply one input observed at `now_ms`; returns the actions, events and
    * status as JSON.
    */
-  handle(nowMs: number, input: string): string;
+  handle(nowMs: number, input: string): string
 }
-export type NapiUpstreamLink = UpstreamLink;
+export type NapiUpstreamLink = UpstreamLink
 
 export declare class Write {
-  get txId(): string;
-  get payload(): Uint8Array;
-  get rowId(): Uint8Array;
-  writeState(): JsonValue;
+  get txId(): string
+  get payload(): Uint8Array
+  get rowId(): Uint8Array
+  writeState(): JsonValue
   /**
    * Resolve once the write reached `tier`: at once for `none` and
    * `local` (the commit is in the store when the write call returns), on
    * the server's acceptance for `global`, rejecting if it refused.
    */
-  wait(tier: string, observeOnly?: boolean | undefined | null): Promise<undefined>;
-  close(): boolean;
+  wait(tier: string, observeOnly?: boolean | undefined | null): Promise<undefined>
+  close(): boolean
 }
 
 /** The anchor at `position` (UTF-16 code units) of `text`. */
-export declare function captureTextAnchor(
-  text: string,
-  version: number | undefined | null,
-  position: number,
-  side: JsonValue,
-): JsonValue;
+export declare function captureTextAnchor(text: string, version: number | undefined | null, position: number, side: JsonValue): JsonValue
 
 /** The range `start..end` (UTF-16 code units) of `text`. */
-export declare function captureTextRange(
-  text: string,
-  version: number | undefined | null,
-  start: number,
-  end: number,
-): JsonValue;
+export declare function captureTextRange(text: string, version: number | undefined | null, start: number, end: number): JsonValue
 
 /**
  * Check an app's shipped migrations (the `ClientMigrations` JSON) leading
  * to the schema hash `target` as a deployment to a new authority would,
  * without opening a database. `jazz-tools validate` runs it.
  */
-export declare function checkClientMigrations(migrations: string, target: string): void;
+export declare function checkClientMigrations(migrations: string, target: string): void
 
 /**
  * The options the generated TS bindings pass to `bindApp` (`{ source,
  * schema, relations }`, without the computed and transform callbacks), as
  * JSON text, for tests that define an app inline.
  */
-export declare function compileApp(appJson: string): string;
+export declare function compileApp(appJson: string): string
 
 /** What `migrationsCreate` wrote. */
 export interface CreatedMigration {
   /** The new `jazz.app.json` text. */
-  app: string;
+  app: string
   /** Whether a version and migration were added. */
-  changed: boolean;
+  changed: boolean
   /** JSON paths of the `"TODO: …"` strings left for the author. */
-  todos: Array<string>;
+  todos: Array<string>
   /**
    * Why nothing was written, when it isn't simply that nothing changed
    * (an index-only edit).
    */
-  note?: string;
+  note?: string
 }
 
 export interface DeleteOptions {
-  author?: Uint8Array;
-  attribution?: Uint8Array;
-  head?: JsonValue;
-  base?: JsonValue;
-  updatedAtMs?: number;
+  author?: Uint8Array
+  attribution?: Uint8Array
+  head?: JsonValue
+  base?: JsonValue
+  updatedAtMs?: number
 }
 
 /** Authenticates before returning plaintext; rejects short or invalid ciphertext. */
-export declare function e2eeSodiumDecrypt(
-  key: Uint8Array,
-  nonce: Uint8Array,
-  aad: Uint8Array,
-  ciphertext: Uint8Array,
-): Uint8Array;
+export declare function e2eeSodiumDecrypt(key: Uint8Array, nonce: Uint8Array, aad: Uint8Array, ciphertext: Uint8Array): Uint8Array
 
 /** Encrypts with XChaCha20-Poly1305-IETF, returning ciphertext and its appended tag. */
-export declare function e2eeSodiumEncrypt(
-  key: Uint8Array,
-  nonce: Uint8Array,
-  aad: Uint8Array,
-  plaintext: Uint8Array,
-): Uint8Array;
+export declare function e2eeSodiumEncrypt(key: Uint8Array, nonce: Uint8Array, aad: Uint8Array, plaintext: Uint8Array): Uint8Array
 
 /** Computes the protocol's 32-byte keyed BLAKE2b digest with a 32-byte key. */
-export declare function e2eeSodiumHash(key: Uint8Array, input: Uint8Array): Uint8Array;
+export declare function e2eeSodiumHash(key: Uint8Array, input: Uint8Array): Uint8Array
 
 /** Generates a device keypair using libsodium's system RNG. */
-export declare function e2eeSodiumKeyPair(): SodiumDeviceKeyPair;
+export declare function e2eeSodiumKeyPair(): SodiumDeviceKeyPair
 
 /** Returns a fresh 24-byte XChaCha20 nonce from libsodium's system RNG. */
-export declare function e2eeSodiumNonce(): Uint8Array;
+export declare function e2eeSodiumNonce(): Uint8Array
 
 /** Opens a sealed box, returning plaintext only after successful authentication. */
-export declare function e2eeSodiumOpen(
-  publicKey: Uint8Array,
-  privateKey: Uint8Array,
-  ciphertext: Uint8Array,
-): Uint8Array;
+export declare function e2eeSodiumOpen(publicKey: Uint8Array, privateKey: Uint8Array, ciphertext: Uint8Array): Uint8Array
 
 /** Seals plaintext to a device; this does not authenticate a sender identity. */
-export declare function e2eeSodiumSeal(publicKey: Uint8Array, plaintext: Uint8Array): Uint8Array;
+export declare function e2eeSodiumSeal(publicKey: Uint8Array, plaintext: Uint8Array): Uint8Array
 
 /** Produces a detached Ed25519 signature; rejects inconsistent secret-key material. */
-export declare function e2eeSodiumSign(privateKey: Uint8Array, message: Uint8Array): Uint8Array;
+export declare function e2eeSodiumSign(privateKey: Uint8Array, message: Uint8Array): Uint8Array
 
 /** Generates independent Ed25519 keys, or reconstructs them from an exact 32-byte seed. */
-export declare function e2eeSodiumSigningKeyPair(
-  seed?: Uint8Array | undefined | null,
-): SodiumDeviceKeyPair;
+export declare function e2eeSodiumSigningKeyPair(seed?: Uint8Array | undefined | null): SodiumDeviceKeyPair
 
 /** One authenticated stream record. */
 export interface E2EeSodiumStreamRecord {
-  message: Uint8Array;
-  finalRecord: boolean;
+  message: Uint8Array
+  finalRecord: boolean
 }
 
 /** Verifies a detached Ed25519 signature; malformed sizes return false. */
-export declare function e2eeSodiumVerify(
-  publicKey: Uint8Array,
-  message: Uint8Array,
-  signature: Uint8Array,
-): boolean;
+export declare function e2eeSodiumVerify(publicKey: Uint8Array, message: Uint8Array, signature: Uint8Array): boolean
 
 /** The Inspector's `explain`: how many clauses the read policy has, and the rows found. */
 export interface ExplainedReadClauses {
-  clauses: number;
-  rows: Array<ExplainedReadRow>;
+  clauses: number
+  rows: Array<ExplainedReadRow>
 }
 
 /** One row of the Inspector's `explain`: whether each read-policy clause holds. */
 export interface ExplainedReadRow {
-  id: string;
-  holds: Array<boolean>;
+  id: string
+  holds: Array<boolean>
 }
 
 /**
  * The bindings for `appJson` (a `jazz.app.json` text) in `lang` (`"ts"`):
  * the whole `jazz.generated.ts`.
  */
-export declare function generate(lang: string, appJson: string): string;
+export declare function generate(lang: string, appJson: string): string
 
 export interface InsertOptions {
-  rowId?: Uint8Array;
-  author?: Uint8Array;
-  attribution?: Uint8Array;
-  branch?: JsonValue;
-  updatedAtMs?: number;
+  rowId?: Uint8Array
+  author?: Uint8Array
+  attribution?: Uint8Array
+  branch?: JsonValue
+  updatedAtMs?: number
 }
 
 export interface JazzCoreResponse {
-  status: number;
-  headers: Array<Array<string>>;
-  body: Buffer;
+  status: number
+  headers: Array<Array<string>>
+  body: Buffer
 }
 
 export interface JazzCoreSocketEvent {
   /** `"message"` or `"close"`. */
-  kind: string;
-  data?: Uint8Array;
-  code?: number;
-  reason?: string;
+  kind: string
+  data?: Uint8Array
+  code?: number
+  reason?: string
 }
 
 /**
@@ -702,14 +503,15 @@ export interface JazzCoreSocketEvent {
  * declarations, so the package must define that name for TypeScript
  * consumers.
  */
-export type JsonValue = any;
+export type JsonValue =
+  any
 
 /**
  * Read and check an app's `jazz.app.json` (`app`) and
  * `jazz.permissions.json` (`permissions`) as a backend does. Returns the
  * current schema hash and the bundle id the two files make.
  */
-export declare function loadAppArtifact(app: string, permissions: string): JsonValue;
+export declare function loadAppArtifact(app: string, permissions: string): JsonValue
 
 /**
  * Read and check a backend's `jazz.permissions.json` (`permissions`)
@@ -718,47 +520,31 @@ export declare function loadAppArtifact(app: string, permissions: string): JsonV
  * deployed backend that has the bindings but not `jazz.app.json`. Same
  * result and checks as `loadAppArtifact`.
  */
-export declare function loadBackendApp(schema: string, permissions: string): JsonValue;
+export declare function loadBackendApp(schema: string, permissions: string): JsonValue
 
 /**
  * Write the migration from the version the committed bindings
  * (`bindings`, `jazz.generated.ts`'s text, or null when there are none) were
  * generated from to `appJson`'s edited `tables`, named `name`.
  */
-export declare function migrationsCreate(
-  appJson: string,
-  bindings: string | undefined | null,
-  name: string,
-): CreatedMigration;
+export declare function migrationsCreate(appJson: string, bindings: string | undefined | null, name: string): CreatedMigration
 
-export declare function mintLocalFirstToken(
-  seedB64: string,
-  audience: string,
-  ttlSeconds: number,
-): string;
+export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
 
 /** Exact build/ABI fingerprint for the generated native artifact. */
-export declare function nativeArtifactFingerprint(): string;
+export declare function nativeArtifactFingerprint(): string
 
 /** Where `anchor` lands in `text`: `{ position, confidence, ambiguous }`. */
-export declare function resolveTextAnchor(
-  anchor: JsonValue,
-  text: string,
-  version?: number | undefined | null,
-): JsonValue;
+export declare function resolveTextAnchor(anchor: JsonValue, text: string, version?: number | undefined | null): JsonValue
 
 /** Where `range` lands in `text`: `{ start, end, confidence, ambiguous }`. */
-export declare function resolveTextRange(
-  range: JsonValue,
-  text: string,
-  version?: number | undefined | null,
-): JsonValue;
+export declare function resolveTextRange(range: JsonValue, text: string, version?: number | undefined | null): JsonValue
 
 export interface RestoreOptions {
-  author?: Uint8Array;
-  attribution?: Uint8Array;
-  branch?: JsonValue;
-  updatedAtMs?: number;
+  author?: Uint8Array
+  attribution?: Uint8Array
+  branch?: JsonValue
+  updatedAtMs?: number
 }
 
 /**
@@ -766,13 +552,13 @@ export interface RestoreOptions {
  * policies dropped as a deployment drops them, as 64 hex characters. Not
  * [`schema_source_hash`], which hashes the `jazz.app.json` file.
  */
-export declare function schemaHash(engineSchemaJson: string): string;
+export declare function schemaHash(engineSchemaJson: string): string
 
 /**
  * `"sha256:<hex>"` of a `jazz.app.json` text, CRLF read as LF: the
  * `source` generated bindings record.
  */
-export declare function schemaSourceHash(appJson: string): string;
+export declare function schemaSourceHash(appJson: string): string
 
 /**
  * Serve a production core (the `jazz_server::run` shell: connection and
@@ -780,120 +566,89 @@ export declare function schemaSourceHash(appJson: string): string;
  * process at a time: the cores would share the process's storage cache
  * budget, so a second call fails until the first core has stopped.
  */
-export declare function serveCore(options: {
-  appId: string;
-  port: number;
-  dataDir: string;
-  blobs:
-    | { kind: "sqlite" }
-    | { kind: "files"; dir?: string }
-    | {
-        kind: "s3";
-        bucket?: string;
-        region?: string;
-        endpoint?: string;
-        prefix?: string;
-        roleFromWorkload?: boolean;
-        environment?: string;
-      }
-    | {
-        kind: "vercel-blob";
-        storeId?: string;
-        prefix?: string;
-        tokenFromWorkload?: boolean;
-        environment?: string;
-      };
-  trustedWorkload?: { issuer: string; audience: string; subject: string };
-  backendSecret?: string;
-  adminSecret?: string;
-  shutdownTimeoutSecs?: number;
-  maxConnections?: number;
-  memoryLimitBytes?: number;
-}): ServedCore;
+export declare function serveCore(options: { appId: string; port: number; dataDir: string; blobs: { kind: "sqlite" } | { kind: "files"; dir?: string } | { kind: "s3"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: "vercel-blob"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }): ServedCore
 
 /** Owned libsodium device encryption keys. */
 export interface SodiumDeviceKeyPair {
-  publicKey: Uint8Array;
-  privateKey: Uint8Array;
+  publicKey: Uint8Array
+  privateKey: Uint8Array
 }
 
 /** One subscription's share of a [`SubscriptionPool::drain`]. */
 export interface SubscriptionBatch {
   /** The id [`Subscription::join_pool`] returned. */
-  id: number;
+  id: number
   /** The events available now, oldest first. */
-  events: Array<SubscriptionEvent>;
+  events: Array<SubscriptionEvent>
   /**
    * Set when the stream failed after `events`; the stream has left the
    * pool. Other subscriptions in the same drain are unaffected.
    */
-  error?: SubscriptionBatchError;
+  error?: SubscriptionBatchError
 }
 
 export interface SubscriptionBatchError {
-  message: string;
+  message: string
   /** The stable core error code, or the napi status name. */
-  code: string;
+  code: string
 }
 
 export interface SubscriptionClosedEvent {
-  type: "closed";
+  type: 'closed'
 }
 
 export interface SubscriptionDeltaEvent {
-  type: "delta";
-  reset: boolean;
-  delta: Uint8Array;
+  type: 'delta'
+  reset: boolean
+  delta: Uint8Array
   /** Always empty: SQLite subscriptions deliver whole-row deltas. */
-  terminalOperations: Array<never>;
-  settled: boolean;
-  tier: "None" | "Local" | "Global";
+  terminalOperations: Array<never>
+  settled: boolean
+  tier: 'None' | 'Local' | 'Global'
 }
 
 export type SubscriptionEvent =
-  | SubscriptionDeltaEvent
-  | SubscriptionRejectedEvent
-  | SubscriptionClosedEvent;
+  SubscriptionDeltaEvent | SubscriptionRejectedEvent | SubscriptionClosedEvent
 
 export interface SubscriptionRejectedEvent {
-  type: "rejected";
-  reason: SubscriptionServerFailureReason;
+  type: 'rejected'
+  reason: SubscriptionServerFailureReason
 }
 
 /** Why the server refused a subscription. */
 export interface SubscriptionServerFailureReason {
-  type: "ServerFailure";
+  type: 'ServerFailure'
   /** The server's reason. */
-  code: string;
+  code: string
   /**
    * The rejection's core error code (`"authority_changed"`, …), as a
    * thrown core error's `code`.
    */
-  errorCode: string;
+  errorCode: string
 }
 
 export interface UpdateOptions {
-  author?: Uint8Array;
-  attribution?: Uint8Array;
-  head?: JsonValue;
-  base?: JsonValue;
-  updatedAtMs?: number;
+  author?: Uint8Array
+  attribution?: Uint8Array
+  head?: JsonValue
+  base?: JsonValue
+  updatedAtMs?: number
 }
 
 export interface UpsertOptions {
-  author?: Uint8Array;
-  attribution?: Uint8Array;
-  head?: JsonValue;
-  base?: JsonValue;
-  updatedAtMs?: number;
+  author?: Uint8Array
+  attribution?: Uint8Array
+  head?: JsonValue
+  base?: JsonValue
+  updatedAtMs?: number
 }
 
 /** Why the database dropped an upstream link (see `Transport.upstreamRefusal`). */
 export interface UpstreamRefusal {
   /** The core's stable error code. */
-  code: string;
+  code: string
   /** What the core said, as an error's message. */
-  message: string;
+  message: string
 }
 
 /**
@@ -904,23 +659,17 @@ export interface UpstreamRefusal {
  * copy of that version), or `JAZZ_BINDINGS_STALE` when regenerating is
  * enough (including when there are none).
  */
-export declare function validateBindings(
-  appJson: string,
-  bindings?: string | undefined | null,
-): void;
+export declare function validateBindings(appJson: string, bindings?: string | undefined | null): void
 
 /** Validate a schema and its embedded permissions without opening a database. */
-export declare function validateSchema(schema: Uint8Array): void;
+export declare function validateSchema(schema: Uint8Array): void
 
-export declare function verifyLocalFirstIdentityProof(
-  token: string | undefined | null,
-  expectedAudience: string,
-): VerifyTokenResult;
+export declare function verifyLocalFirstIdentityProof(token: string | undefined | null, expectedAudience: string): VerifyTokenResult
 
 export interface VerifyTokenResult {
-  ok: boolean;
-  id: string;
-  error?: string;
+  ok: boolean
+  id: string
+  error?: string
 }
 
 /**
@@ -929,12 +678,12 @@ export interface VerifyTokenResult {
  * [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput) as
  * JSON): the files' only writer, which refuses what a reader would.
  */
-export declare function writeAppArtifact(input: string): WrittenAppFiles;
+export declare function writeAppArtifact(input: string): WrittenAppFiles
 
 /** An app's two files, as [`write_app_artifact`] renders them. */
 export interface WrittenAppFiles {
   /** `jazz.app.json`, which the app and its clients ship. */
-  app: string;
+  app: string
   /** `jazz.permissions.json`, which only its backends read. */
-  permissions: string;
+  permissions: string
 }
