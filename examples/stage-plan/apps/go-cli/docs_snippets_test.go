@@ -195,6 +195,60 @@ func unassign(ctx context.Context, db *jazz.DB, taskID string) error {
 
 // #endregion writing-nullable-update-go
 
+// #region reading-reverse-relation-go
+func showWithItsTasks(ctx context.Context, db *jazz.DB, showID string) (*jazzapp.Show, error) {
+	// Included relations fill the row's relation fields: Show.Tasks here.
+	return jazzapp.Shows.Query().
+		Where(jazzapp.Shows.ID.Eq(showID)).
+		Include(jazzapp.Shows.Tasks.With(
+			jazzapp.Tasks.Query().OrderBy(jazzapp.Tasks.Rank.Asc()),
+		)).
+		One(ctx, db)
+}
+
+// #endregion reading-reverse-relation-go
+
+// #region writing-transaction-go
+func addTwoTasks(ctx context.Context, db *jazz.DB, showID string) error {
+	// Commits when the function returns nil; an error or a panic rolls
+	// every write in it back.
+	return db.Tx(ctx, func(tx *jazz.Tx) error {
+		for i, title := range []string{"Load-in", "Line check"} {
+			if _, err := jazzapp.Tasks.Insert(ctx, tx, jazzapp.NewTask{
+				ShowID: showID, Title: title, Status: jazzapp.TaskStatusTodo, Rank: float64(i + 1),
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// #endregion writing-transaction-go
+
+// #region reading-durability-tier-go
+func tasksFromTheServer(ctx context.Context, db *jazz.DB, showID string) ([]jazzapp.Task, error) {
+	// ReadRemote waits for the server's result; the default reads locally.
+	return jazzapp.Tasks.Query().
+		Where(jazzapp.Tasks.ShowID.Eq(showID)).
+		Tier(jazz.ReadRemote).
+		All(ctx, db)
+}
+
+// #endregion reading-durability-tier-go
+
+// #region writing-durability-tier-go
+func addTaskDurably(ctx context.Context, db *jazz.DB, showID string) error {
+	// Returns once the sync server has the task (or refuses it: then the
+	// error is jazz.ErrPermission).
+	_, err := jazzapp.Tasks.Insert(ctx, db, jazzapp.NewTask{
+		ShowID: showID, Title: "Soundcheck", Status: jazzapp.TaskStatusTodo, Rank: 1,
+	}, jazz.WaitFor(jazz.WriteGlobal))
+	return err
+}
+
+// #endregion writing-durability-tier-go
+
 func TestDocsSnippets(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -249,6 +303,19 @@ func TestDocsSnippets(t *testing.T) {
 	}
 	if err := unassign(ctx, db, byRank[0].ID); err != nil {
 		t.Fatal(err)
+	}
+
+	if err := addTwoTasks(ctx, db, show.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := addTaskDurably(ctx, db, show.ID); err != nil {
+		t.Fatal(err)
+	}
+	if remote, err := tasksFromTheServer(ctx, db, show.ID); err != nil || len(remote) != 6 {
+		t.Fatalf("remote: %d, %v", len(remote), err)
+	}
+	if withTasks, err := showWithItsTasks(ctx, db, show.ID); err != nil || withTasks == nil || len(withTasks.Tasks) != 6 {
+		t.Fatalf("show with tasks: %+v, %v", withTasks, err)
 	}
 
 	// The subscription snippet returns once a task is done.
