@@ -3,9 +3,10 @@
 //!
 //! Per table: a `Codable` row struct (`Todo`), an insert struct (`NewTodo`)
 //! and a patch struct (`TodoPatch`), with lowerCamelCase properties mapped
-//! to the authored names by `CodingKeys`, and a namespace (`Todos`) with the
+//! to the authored names by `CodingKeys`, and a namespace (`todos`) with the
 //! table's query and typed columns, which build the query JSON jazz-ffi
-//! reads. `JazzApp` embeds `jazz.app.json` itself and opens it.
+//! reads. Everything sits inside `public enum JazzApp`, which also embeds
+//! `jazz.app.json` and opens it: `JazzApp.Todo`, `JazzApp.todos.query()`.
 //!
 //! Not supported yet, and refused with what to do: computed fields and
 //! transforms (no Swift implementations can be passed to jazz-ffi yet).
@@ -45,6 +46,9 @@ const SOURCE_PREFIX: &str = "    public static let source = ";
 
 /// The runtime module.
 const RT: &str = "Jazz";
+
+/// What `JazzApp` declares itself, besides the generated types.
+const MEMBERS: &[&str] = &["source", "app", "open"];
 
 /// Type names the bindings or their imports declare.
 const RESERVED: &[&str] = &[
@@ -117,19 +121,27 @@ impl<'a> Writer<'a> {
                 .map(|name| (name.to_string(), "a name the bindings use".to_string()))
                 .collect(),
         };
+        let mut namespaces = BTreeMap::new();
         for table in &app.tables {
             let row = type_ident(&pascal(&singular(&table.name)), &table.name)?;
-            let mut namespace = type_ident(&pascal(&table.name), &table.name)?;
-            if namespace == row {
-                namespace = format!("{row}Table");
+            // The table's namespace is its lowerCamelCase name, like a Rust
+            // module: `JazzApp.tasks.query()`, `JazzApp.tasks.rank`.
+            let namespace = value_ident(&table.name)?;
+            let bare = namespace.trim_matches('`').to_owned();
+            if MEMBERS.contains(&bare.as_str()) {
+                return Err(CodegenError::unsupported(format!(
+                    "table `{}` is the Swift name `JazzApp.{bare}`, which the bindings use themselves",
+                    table.name
+                )));
+            }
+            if let Some(other) = namespaces.insert(bare.clone(), table.name.clone()) {
+                return Err(CodegenError::unsupported(format!(
+                    "tables `{other}` and `{}` are both the Swift name `JazzApp.{bare}`",
+                    table.name
+                )));
             }
             let what = format!("table `{}`", table.name);
-            for name in [
-                row.clone(),
-                format!("New{row}"),
-                format!("{row}Patch"),
-                namespace.clone(),
-            ] {
+            for name in [row.clone(), format!("New{row}"), format!("{row}Patch")] {
                 writer.take_type(&name, &what)?;
             }
             writer.tables.insert(
@@ -159,7 +171,6 @@ impl<'a> Writer<'a> {
         for table in &self.app.tables {
             items.push_str(&self.table(table)?);
         }
-        items.push_str(&self.open());
 
         let mut out = String::new();
         let _ = writeln!(out, "{HEADER}");
@@ -169,18 +180,34 @@ impl<'a> Writer<'a> {
         );
         out.push_str("// swift-format-ignore-file\n\n");
         out.push_str("import Foundation\nimport Jazz\n\n");
+        out.push_str(
+            "/// The app: its `jazz.app.json`, opening it, and a type per table and enum,\n\
+             /// all inside this namespace so table names never hide Swift's own types\n\
+             /// (`JazzApp.Task`, not `Task`).\n",
+        );
+        out.push_str(&JAZZ_APP_OPEN[1..]);
+        out.push_str(&self.open());
+        let mut nested = String::new();
         for (name, (cases, what)) in &self.enums {
-            let _ = writeln!(out, "/// The values of {what}.");
+            let _ = writeln!(nested, "/// The values of {what}.");
             let _ = writeln!(
-                out,
+                nested,
                 "public enum {name}: Swift.String, Swift.Codable, Swift.Sendable, Swift.Hashable, Swift.CaseIterable {{"
             );
             for (case, stored) in cases {
-                let _ = writeln!(out, "    case {case} = {}", swift_string(stored));
+                let _ = writeln!(nested, "    case {case} = {}", swift_string(stored));
             }
-            out.push_str("}\n\n");
+            nested.push_str("}\n\n");
         }
-        out.push_str(&items);
+        nested.push_str(&items);
+        for line in nested.trim_end().lines() {
+            if !line.is_empty() {
+                out.push_str("    ");
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str("}\n");
         Ok(out)
     }
 
@@ -277,12 +304,6 @@ impl<'a> Writer<'a> {
         let mut out = String::new();
         // The row.
         let _ = writeln!(out, "/// A row of `{}`.", table.name);
-        if let Some(module) = shadowed_module(&row) {
-            let _ = writeln!(
-                out,
-                "///\n/// In your module this hides `{module}.{row}`: write `{module}.{row}` for that one."
-            );
-        }
         let _ = writeln!(out, "public struct {row}: {RT}.Row {{");
         let _ = writeln!(out, "    public static let table = {table_lit}");
         let _ = writeln!(out, "    public let id: {RT}.ID");
@@ -399,6 +420,8 @@ impl<'a> Writer<'a> {
         Ok(out)
     }
 
+    /// `JazzApp`'s own members, first: the recorded source, the embedded
+    /// file and `open`.
     fn open(&self) -> String {
         let mut out = String::new();
         let hashes = "#".repeat(longest_hash_run(&self.app.file) + 1);
@@ -406,8 +429,6 @@ impl<'a> Writer<'a> {
         if !file.ends_with('\n') {
             file.push('\n');
         }
-        out.push_str("/// The app: its `jazz.app.json`, and opening it.\n");
-        out.push_str(&JAZZ_APP_OPEN[1..]);
         out.push_str(
             "    /// `sha256:…` of the `jazz.app.json` these bindings were generated from.\n",
         );
@@ -422,7 +443,7 @@ impl<'a> Writer<'a> {
         );
         let _ = writeln!(
             out,
-            "    public static func open(_ config: {RT}.Config) async throws -> {RT}.Client {{\n        try await {RT}.Client.open(app: app, config: config)\n    }}\n}}"
+            "    public static func open(_ config: {RT}.Config) async throws -> {RT}.Client {{\n        try await {RT}.Client.open(app: app, config: config)\n    }}\n"
         );
         out
     }
@@ -488,19 +509,6 @@ fn coding_keys(out: &mut String, fields: &[Field<'_>], with_id: bool) {
         );
     }
     out.push_str("    }\n");
-}
-
-/// The module a row type of this name hides in the app's module, if any:
-/// the standard types app code commonly reaches for unqualified.
-fn shadowed_module(name: &str) -> Option<&'static str> {
-    match name {
-        "Task" => Some("_Concurrency"),
-        "Result" | "Error" | "Array" | "Set" | "Dictionary" | "String" | "Character" | "Range"
-        | "Never" | "Optional" => Some("Swift"),
-        "Date" | "Data" | "URL" | "UUID" | "Locale" | "Calendar" | "Notification" | "Process"
-        | "Timer" | "Measurement" | "Operation" | "Thread" => Some("Foundation"),
-        _ => None,
-    }
 }
 
 /// A Swift string literal of `text`.
@@ -816,13 +824,23 @@ mod tests {
     }
 
     #[test]
-    fn a_row_type_hiding_concurrency_task_says_so() {
+    fn everything_is_inside_jazz_app() {
         let file =
             br#"{ "format": 1, "tables": { "tasks": { "columns": { "title": "string" } } } }"#;
         let generated = crate::generate(crate::Lang::Swift, file).unwrap();
-        assert!(generated.contains(
-            "/// In your module this hides `_Concurrency.Task`: write `_Concurrency.Task` for that one.\npublic struct Task: Jazz.Row {"
-        ));
+        assert!(generated.contains("\npublic enum JazzApp {\n"));
+        assert!(generated.contains("\n    public struct Task: Jazz.Row {\n"));
+        assert!(generated.contains("\n    public struct NewTask: Jazz.Insert {\n"));
+        assert!(generated.contains("\n    public enum tasks {\n"));
+        assert!(generated.ends_with("    }\n}\n"));
+        assert_eq!(generated.matches("\npublic ").count(), 1, "{generated}");
+    }
+
+    #[test]
+    fn a_table_named_like_a_jazz_app_member_is_refused() {
+        let file = br#"{ "format": 1, "tables": { "app": { "columns": { "title": "string" } } } }"#;
+        let error = crate::generate(crate::Lang::Swift, file).unwrap_err();
+        assert!(error.is_unsupported(), "{error}");
     }
 
     #[test]
