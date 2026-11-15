@@ -5,7 +5,7 @@
  * `jazz.app.json`. Both go through Jazz's Rust loader and generator
  * (jazz-napi), the same code the `jazz` binary runs. Node only.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import {
@@ -19,7 +19,6 @@ import {
   BINDINGS_STALE,
   compileApp,
   generateRust,
-  generateKotlin,
   generateTs,
   loadAppFiles,
   migrationsCreate,
@@ -47,31 +46,6 @@ export interface GenerateResult {
 
 /** Where a Rust crate beside jazz.app.json keeps its generated bindings. */
 export const RUST_BINDINGS_FILE = join("src", "jazz_app.rs");
-export const KOTLIN_BINDINGS_FILE = join("src", "main", "kotlin", "JazzApp.kt");
-
-/**
- * Whether `dir` is a Kotlin app: a `build.gradle.kts` beside its files that
- * depends on the `jazz-kotlin` runtime (as `Lang::Kotlin` detects it).
- */
-function isKotlinApp(dir: string): boolean {
-  const path = join(dir, "build.gradle.kts");
-  if (!existsSync(path)) return false;
-  return readFileSync(path, "utf8")
-    .split("\n")
-    .map((line) => line.split("//")[0])
-    .some((line) => line.includes(':jazz-kotlin"') || line.includes(":jazz-kotlin:"));
-}
-
-/** The bindings besides TS an app in `dir` gets: Rust for a crate, Kotlin for a Gradle app. */
-function nativeBindings(
-  dir: string,
-): Array<{ file: string; generate: (app: string) => Promise<string> }> {
-  const out = [];
-  if (existsSync(join(dir, "Cargo.toml")))
-    out.push({ file: RUST_BINDINGS_FILE, generate: generateRust });
-  if (isKotlinApp(dir)) out.push({ file: KOTLIN_BINDINGS_FILE, generate: generateKotlin });
-  return out;
-}
 
 function codeOf(error: unknown): unknown {
   return (error as { code?: unknown } | null)?.code;
@@ -121,9 +95,9 @@ function shown(project: { dir: string }, file: string): string {
  */
 export async function generateApp(options: GenerateOptions): Promise<GenerateResult> {
   const project = await readAppProject(options.cwd);
-  const native = nativeBindings(project.dir);
-  // A Rust or Kotlin app without TS bindings gets only its own.
-  const ts = native.length === 0 || project.bindings !== null;
+  const crate = existsSync(join(project.dir, "Cargo.toml"));
+  // A Rust-only app (a crate without TS bindings) gets only its Rust ones.
+  const ts = !crate || project.bindings !== null;
   const { warnings, stale } = await checkFiles(project, options.check ?? false, ts);
   const bindings: string[] = [];
   let wrote = false;
@@ -134,16 +108,16 @@ export async function generateApp(options: GenerateOptions): Promise<GenerateRes
       wrote = true;
     }
   }
-  // A Rust crate (a `jazz-app` backend) or a Kotlin app beside the files gets its bindings too.
-  for (const lang of native) {
-    bindings.push(lang.file);
-    const path = join(project.dir, lang.file);
-    const text = await lang.generate(project.app);
+  // A Rust crate beside the files (a `jazz-app` backend) gets its bindings too.
+  if (crate) {
+    bindings.push(RUST_BINDINGS_FILE);
+    const path = join(project.dir, RUST_BINDINGS_FILE);
+    const text = await generateRust(project.app);
     const committed = await readFile(path, "utf8").catch(() => null);
     if (committed !== text) {
       if (options.check) {
         throw new Error(
-          `bindings out of date: ${shown(project, lang.file)} is not what ${APP_FILE} generates. Run \`npx jazz-tools generate\` and commit it.`,
+          `bindings out of date: ${shown(project, RUST_BINDINGS_FILE)} is not what ${APP_FILE} generates. Run \`npx jazz-tools generate\` and commit it.`,
         );
       }
       await mkdir(dirname(path), { recursive: true });
@@ -188,9 +162,8 @@ export async function createAppMigration(
   await writeFile(join(project.dir, APP_FILE), created.app);
   if (created.todos.length === 0) {
     await writeFile(join(project.dir, GENERATED_FILE), await generateTs(created.app));
-    for (const lang of nativeBindings(project.dir)) {
-      await mkdir(dirname(join(project.dir, lang.file)), { recursive: true });
-      await writeFile(join(project.dir, lang.file), await lang.generate(created.app));
+    if (existsSync(join(project.dir, "Cargo.toml"))) {
+      await writeFile(join(project.dir, RUST_BINDINGS_FILE), await generateRust(created.app));
     }
   }
   return { dir: project.dir, changed: true, todos: created.todos };

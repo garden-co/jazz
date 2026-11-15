@@ -108,11 +108,6 @@ export async function generateRust(appJson: string): Promise<string> {
   return (await codegen()).generate("rust", appJson);
 }
 
-/** `src/main/kotlin/JazzApp.kt` (the `jazz-kotlin` runtime's bindings) for `appJson`. */
-export async function generateKotlin(appJson: string): Promise<string> {
-  return (await codegen()).generate("kotlin", appJson);
-}
-
 /** `"sha256:<hex>"` of `appJson`, with CRLF read as LF: what the bindings' `source` holds. */
 export async function schemaSourceHash(appJson: string): Promise<string> {
   return (await codegen()).schemaSourceHash(appJson);
