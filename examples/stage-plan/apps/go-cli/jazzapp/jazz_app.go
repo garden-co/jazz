@@ -7,7 +7,7 @@ package jazzapp
 import (
 	"context"
 
-	jazz "github.com/garden-co/jazz/packages/jazz-go"
+	jazz "github.com/garden-co/jazz/packages/jazz-go/v2"
 )
 
 // Source is the hash of the jazz.app.json these bindings were generated from.
