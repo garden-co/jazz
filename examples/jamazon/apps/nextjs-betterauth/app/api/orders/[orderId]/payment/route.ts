@@ -1,4 +1,4 @@
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { backend } from "@/src/server/backend";
 import { CheckoutError, settlePayment, startPayment } from "@/src/server/orders";
 import { configuredPaymentProvider } from "@/src/server/payments";

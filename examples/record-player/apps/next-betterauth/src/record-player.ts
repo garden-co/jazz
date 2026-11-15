@@ -1,5 +1,5 @@
 import type { Db, StreamingValueSource } from "jazz-tools";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 
 export type InvitationRole = "listener" | "editor";
 

@@ -1,22 +1,30 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
-import { deploy, startLocalJazzServer, startTestJazz, type TestJazz } from "../testing/index.js";
+import {
+  deploy,
+  startLocalJazzServer,
+  startTestJazz,
+  testApp,
+  type TestJazz,
+} from "../testing/index.js";
 
 describe("inserting with every optional column omitted through the native backend", () => {
   it("creates the row and syncs it to another session", async () => {
-    const app = s.defineApp(
-      {
-        notes: s.table({ label: s.string().optional(), rank: s.int().optional() }, {}),
-        posters: s.table({ title: s.string().optional(), metadata: s.json().optional() }, {}),
+    const app = testApp({
+      tables: {
+        notes: { columns: { label: "string?", rank: "int?" } },
+        posters: { columns: { title: "string?", metadata: { json: true, optional: true } } },
       },
-      { migrations: "none" },
-    );
+    });
     const server = await startLocalJazzServer({ appId: randomUUID(), inMemory: true });
     // Each session is an app's own Jazz (createJazz) in front of the core.
     const sessions: TestJazz[] = [];
     const openSession = async () => {
-      const session = await startTestJazz({ app, permissions: {}, core: server });
+      const session = await startTestJazz({
+        app,
+        permissions: { format: 1, tables: {} },
+        core: server,
+      });
       sessions.push(session);
       return session.jazz.db;
     };
@@ -25,8 +33,8 @@ describe("inserting with every optional column omitted through the native backen
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schema: app,
-        permissions: {},
+        app,
+        permissions: { format: 1, tables: {} },
       });
       const writer = await openSession();
 

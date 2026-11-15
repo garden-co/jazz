@@ -1,0 +1,12 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "tasks": {
+      "columns": { "title": "string", "score": "int" },
+      "computed": {
+        "priority": { "type": { "enum": ["low", "medium", "high"] }, "from": ["score"] }
+      }
+    }
+  }
+}

@@ -1,0 +1,94 @@
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
+// Bindings format 1. Formatters may reformat this file, except `app` below.
+import { bindApp, type AppTypes } from "jazz-tools";
+
+export type Document = {
+  readonly id: string;
+  branch: string;
+  title: string;
+  projectId: string;
+  body: string;
+};
+
+export type DocumentInsert = {
+  branch: string;
+  title: string;
+  projectId: string;
+  body: string;
+};
+
+export type Project = {
+  readonly id: string;
+  name: string;
+};
+
+export type ProjectInsert = {
+  name: string;
+};
+
+interface Types extends AppTypes {
+  documents: {
+    row: Document;
+    insert: DocumentInsert;
+    columns: {
+      branch: { kind: "string"; nullable: false; value: string };
+      title: { kind: "string"; nullable: false; value: string };
+      projectId: { kind: "uuid"; nullable: false; value: string };
+      body: { kind: "string"; nullable: false; value: string };
+    };
+    relations: {
+      project: { one: "projects"; nullable: false };
+    };
+  };
+  projects: {
+    row: Project;
+    insert: ProjectInsert;
+    columns: {
+      name: { kind: "string"; nullable: false; value: string };
+    };
+    relations: {
+      documentsViaProject: { many: "documents" };
+    };
+  };
+}
+
+// The compiled schema, as JSON that jazz-tools reads back: formatters leave it as it is.
+// biome-ignore format: generated JSON
+// prettier-ignore
+export const app = bindApp<Types>({
+  "source": "sha256:0be842e778ef2467ec9f34e61ea6fba18124ca7466233a33dce64423cd413eb2",
+  "schema": {
+    "current": "d7cb9c958eb68c7d657e84a34c2cc0c49f0682195b19a1c54a95e0cdd6879502",
+    "schemas": [
+      {
+        "hash": "d7cb9c958eb68c7d657e84a34c2cc0c49f0682195b19a1c54a95e0cdd6879502",
+        "schema": {
+          "tables": {
+            "documents": {
+              "branchBy": ["branch"],
+              "columns": [
+                { "column_type": { "type": "Text" }, "name": "branch", "nullable": false },
+                { "column_type": { "type": "Text" }, "name": "title", "nullable": false },
+                {
+                  "column_type": { "type": "Uuid" },
+                  "name": "projectId",
+                  "nullable": false,
+                  "references": "projects",
+                },
+                { "column_type": { "type": "Text" }, "name": "body", "nullable": false },
+              ],
+            },
+            "projects": {
+              "columns": [{ "column_type": { "type": "Text" }, "name": "name", "nullable": false }],
+            },
+          },
+        },
+      },
+    ],
+    "migrations": [],
+  },
+  "relations": {
+    "documents": { "project": { "one": "projects", "column": "projectId" } },
+    "projects": { "documentsViaProject": { "many": "documents", "relation": "project" } },
+  },
+});

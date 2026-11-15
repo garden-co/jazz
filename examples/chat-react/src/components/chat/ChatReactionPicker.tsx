@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { fireAndReport } from "@/lib/db-write";
-import { app } from "../../../schema.js";
+import { app } from "../../../jazz.generated.js";
 
 interface ReactionPickerProps {
   onPick: (emoji: string) => void;

@@ -941,14 +941,6 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.ownerRuntime;
   }
 
-  readCanEstablishAbsence(sessionJson?: string, transaction?: OpenTransactionId): boolean {
-    if (this.closed || this.ownerRuntime.closed) return false;
-    const context = this.nativeReadContext(
-      readSession(sessionJson),
-      transaction ? this.pendingTxs.get(transaction) : undefined,
-    );
-    return context.kind !== "session-authority";
-  }
   private readonly readAuthorizationHost: ReadAuthorizationHost;
   private readonly subscriptions = new Map<number, SubscriptionState>();
   /** Pooled native subscriptions, by pool id: one native call reads them all. */

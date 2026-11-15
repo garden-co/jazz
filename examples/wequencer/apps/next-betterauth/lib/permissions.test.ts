@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
-import permissions from "../permissions";
-import { app } from "../schema";
+import permissions from "../jazz.permissions.json" with { type: "json" };
+import { app } from "../jazz.generated";
 import { stepRow } from "./session-setup";
 
 let testApp: PolicyTestApp;

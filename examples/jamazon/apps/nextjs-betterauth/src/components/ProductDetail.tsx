@@ -14,7 +14,7 @@ import { Link } from "@astryxdesign/core/Link";
 import NextLink from "next/link";
 import { useState } from "react";
 import { MAX_LINE_QUANTITY } from "@/src/store/limits";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { useCart } from "@/src/store/cart";
 import { formatMoney } from "@/src/store/pricing";
 import { Page } from "./Page";

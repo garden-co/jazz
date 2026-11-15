@@ -1,0 +1,19 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "scenarios": {
+      "columns": { "name": "string", "base_scenario_id": "uuid?" },
+      "relations": {
+        "base_scenario": { "rel": "scenarios", "column": "base_scenario_id" },
+        "scenariosViaBase_scenario": { "reverse": "scenarios", "relation": "base_scenario" },
+        "tasksViaScenario": { "reverse": "tasks", "relation": "scenario" }
+      }
+    },
+    "tasks": {
+      "columns": { "scenario_id": "uuid", "title": "string" },
+      "relations": { "scenario": { "rel": "scenarios", "column": "scenario_id" } },
+      "branchBy": ["scenario_id"]
+    }
+  }
+}

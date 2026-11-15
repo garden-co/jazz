@@ -90,7 +90,7 @@ from `jazz-tools/client`, without a `client` loader.
   <Tab value="TypeScript">
     ```ts title="app.ts"
     import { createJazzClient } from "jazz-tools/client";
-    import { app } from "./schema";
+    import { app } from "./jazz.generated";
 
     const session = await createJazzClient({ serverUrl: "/jazz" });
     // After your own sign-in or sign-out, ask your backend again.

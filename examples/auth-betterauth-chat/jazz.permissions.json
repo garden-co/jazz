@@ -23,18 +23,23 @@
       "delete": "false"
     },
     "messages": {
-      "read": { "anyOf": ["true", "true"] },
-      "insert": { "anyOf": [{ "allOf": ["true", "session.claims.role = 'admin'"] }, "true"] },
+      "read": { "anyOf": ["chat_id = 'announcements'", "chat_id = 'chat-01'"] },
+      "insert": {
+        "anyOf": [
+          { "allOf": ["chat_id = 'announcements'", "session.claims.role = 'admin'"] },
+          "chat_id = 'chat-01'"
+        ]
+      },
       "update": {
         "anyOf": [
-          { "allOf": ["true", "session.claims.role = 'admin'"] },
-          { "allOf": ["true", "$createdBy.account = session.user"] }
+          { "allOf": ["chat_id = 'announcements'", "session.claims.role = 'admin'"] },
+          { "allOf": ["chat_id = 'chat-01'", "$createdBy.account = session.user"] }
         ]
       },
       "delete": {
         "anyOf": [
-          { "allOf": ["true", "session.claims.role = 'admin'"] },
-          { "allOf": ["true", "$createdBy.account = session.user"] }
+          { "allOf": ["chat_id = 'announcements'", "session.claims.role = 'admin'"] },
+          { "allOf": ["chat_id = 'chat-01'", "$createdBy.account = session.user"] }
         ]
       }
     }

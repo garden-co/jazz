@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { translateQuery } from "../../../../../packages/jazz-tools/src/runtime/query-adapter.js";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 import {
   ALBUM_TRACK_LIMIT,
   JazzRecordPlayerStore,

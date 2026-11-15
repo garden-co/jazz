@@ -1,6 +1,6 @@
 import { createJazzClient, type AccountStore, type Db } from "jazz-tools";
 import jazzWasmModule from "jazz-wasm/pkg/jazz_wasm_bg.wasm";
-import { app } from "./schema.js";
+import { app } from "./jazz.generated.js";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {

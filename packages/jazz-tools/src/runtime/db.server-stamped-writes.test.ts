@@ -1,6 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
+import { testApp } from "../testing/test-app.js";
 import { createDb } from "./default-create-db.js";
 import type { Db } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
@@ -13,12 +12,11 @@ import { createClient, mintLocalFirstTokenInJs } from "../thin/index.js";
 // future", and an edit made offline is stamped when it syncs, after the edits
 // it overwrites (SPEC 4, INV-HIST-8: the write the server accepts last wins).
 
-const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
-const permissions = definePermissions(app, ({ policy }) => {
-  policy.notes.allowRead.always();
-  policy.notes.allowInsert.always();
-  policy.notes.allowUpdate.always();
-});
+const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
+const permissions = {
+  format: 1,
+  tables: { notes: { read: "true", insert: "true", update: "true" } },
+};
 
 const HOUR_MS = 60 * 60 * 1000;
 

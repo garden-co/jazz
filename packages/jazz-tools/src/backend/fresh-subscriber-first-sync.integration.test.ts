@@ -3,20 +3,18 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { schema as s } from "../index.js";
-import { startTestJazz } from "../testing/index.js";
+import { startTestJazz, testApp, testPermissions } from "../testing/index.js";
 import { createJazzClient } from "./index.js";
 
-const app = s.defineApp(
-  {
-    docs: s.table({ label: s.string(), body: s.string() }, {}),
+const app = testApp({
+  tables: {
+    docs: { columns: { label: "string", body: "string" } },
   },
-  { migrations: "none" },
-);
-const permissions = s.definePermissions(app, ({ policy }) => {
-  policy.docs.allowRead.always();
-  policy.docs.allowInsert.always();
 });
+const permissions = {
+  format: 1,
+  tables: { docs: { read: "true", insert: "true" } },
+};
 
 describe("fresh subscriber first sync", () => {
   // Applying a first result of a few MB spans more than one bounded evaluation
@@ -38,7 +36,7 @@ describe("fresh subscriber first sync", () => {
       const session = await createJazzClient({
         appId: settings.appId,
         app,
-        permissions,
+        permissions: testPermissions(app, permissions),
         serverUrl: server.url,
         driver: { type: "persistent", dataPath: join(directory, name) },
         initial: "device",
@@ -62,7 +60,7 @@ describe("fresh subscriber first sync", () => {
       }
 
       const reader = await open("reader");
-      let rows: { label: string; body: string }[] | undefined;
+      let rows: ReadonlyArray<Record<string, unknown>> | undefined;
       let error: unknown;
       unsubscribe = reader.subscribe(
         app.docs,

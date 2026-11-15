@@ -10,6 +10,7 @@ import {
   stopJazzServerByUrl,
   jazzServerTransportControlCommands,
   jazzAppFront,
+  jazzTestDeployment,
   jazzAppRequest,
   jazzAppUser,
   jazzAppBackendInsert,
@@ -121,6 +122,8 @@ export default defineConfig({
           insertConnectedPeer(id, table, row),
         posterShopCloseConnectedPeer: async (_context, id) => closeConnectedPeer(id),
         jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
+        jazzTestDeployment: async (_context, bound, permissions) =>
+          jazzTestDeployment(bound, permissions),
         jazzAppUser: async (_context, frontUrl, userId, claims) =>
           jazzAppUser(frontUrl, userId, claims),
         jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),

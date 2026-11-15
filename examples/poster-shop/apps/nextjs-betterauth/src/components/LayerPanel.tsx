@@ -14,7 +14,7 @@ import {
 import { useAll } from "jazz-tools/react";
 import { ChevronDown, ChevronUp, Eye, EyeOff, Lock, LockOpen, Pencil, Plus } from "lucide-react";
 import { useState } from "react";
-import { app, type Layer } from "@/schema";
+import { app, type Layer } from "@/jazz.generated";
 import { nextZIndex, reorder } from "@/src/lib/poster";
 
 /** Layers, top-most first, as in most design tools. */

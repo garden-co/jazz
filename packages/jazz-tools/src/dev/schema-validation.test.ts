@@ -1,17 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import type { SessionContext } from "../permissions/index.js";
+import { testApp, testPermissions } from "../testing/index.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { loadWasmModuleForTest } from "../runtime/testing/wasm-runtime-test-utils.js";
 
+// Each policy is compiled (by Jazz's loader) against an app it fits, then
+// handed to the binding with a schema it no longer fits: the binding's own
+// check is what these tests cover.
 describe.each(["native", "wasm"])("%s schema validation binding", (runtime) => {
   it("accepts a matching policy and rejects the same policy after its column is removed", async () => {
     const binding =
       runtime === "native" ? await import("jazz-napi") : await loadWasmModuleForTest();
-    const app = s.defineApp({ notes: s.table({ owner: s.string() }, {}) }, { migrations: "none" });
-    const permissions = s.definePermissions(app, ({ policy, session }) => {
-      policy.notes.allowRead.where({ owner: session.identity.subject });
+    const app = testApp({ tables: { notes: { columns: { owner: "string" } } } });
+    const permissions = testPermissions(app, {
+      tables: { notes: { read: "owner = session.identity.subject" } },
     });
     expect(() =>
       binding.validateSchema(
@@ -19,8 +21,10 @@ describe.each(["native", "wasm"])("%s schema validation binding", (runtime) => {
       ),
     ).not.toThrow();
 
-    const wrongType = s.definePermissions(app, ({ policy, session }) => {
-      policy.notes.allowRead.where({ owner: session.user });
+    // session.user compared with a string column: compiled where owner is a uuid.
+    const uuidOwner = testApp({ tables: { notes: { columns: { owner: "uuid" } } } });
+    const wrongType = testPermissions(uuidOwner, {
+      tables: { notes: { read: "owner = session.user" } },
     });
     expect(() =>
       binding.validateSchema(
@@ -30,12 +34,17 @@ describe.each(["native", "wasm"])("%s schema validation binding", (runtime) => {
       "session.user has type uuid, but column owner has type string: session.user is the account's id, so store it in an s.uuid() column",
     );
 
-    const linked = s.defineApp(
-      { boards: s.table({}, {}), members: s.table({ boardId: s.uuid() }, {}) },
-      { migrations: "none" },
-    );
-    const withoutRelation = s.definePermissions(linked, ({ policy }) => {
-      policy.members.allowInsert.where((m) => policy.boards.exists.where({ id: m.boardId }));
+    // An exists on boards' ids, compiled where members.boardId is a reference.
+    const boardsTables = (relations: object) => ({
+      tables: {
+        boards: { columns: {} },
+        members: { columns: { boardId: "uuid" }, relations },
+      },
+    });
+    const linked = testApp(boardsTables({}));
+    const withRelation = testApp(boardsTables({ board: { rel: "boards", column: "boardId" } }));
+    const withoutRelation = testPermissions(withRelation, {
+      tables: { members: { insert: "exists boards(id = this.boardId)" } },
     });
     expect(() =>
       binding.validateSchema(
@@ -45,10 +54,7 @@ describe.each(["native", "wasm"])("%s schema validation binding", (runtime) => {
       'column members.boardId is matched against the ids of boards, but it is not declared as a reference: declare it on members, for example `<relation>: s.rel("boards", "boardId")`',
     );
 
-    const changed = s.defineApp(
-      { notes: s.table({ title: s.string() }, {}) },
-      { migrations: "none" },
-    );
+    const changed = testApp({ tables: { notes: { columns: { title: "string" } } } });
     expect(() =>
       binding.validateSchema(
         encodeSchema(mergePermissionsIntoWasmSchema(changed.wasmSchema, permissions)),
@@ -59,50 +65,52 @@ describe.each(["native", "wasm"])("%s schema validation binding", (runtime) => {
   it("accepts reachable_via(...).seeded_by(...) seeded from session references", async () => {
     const binding =
       runtime === "native" ? await import("jazz-napi") : await loadWasmModuleForTest();
-    const app = s.defineApp(
-      {
-        projects: s.table({ label: s.string() }, {}),
-        teams: s.table({ name: s.string() }, {}),
-        resource_access_edges: s.table(
-          { resource: s.uuid(), team: s.uuid() },
-          { resourceRelation: s.rel("projects", "resource"), teamRelation: s.rel("teams", "team") },
-        ),
-        team_team_edges: s.table(
-          { child_team: s.uuid(), parent_team: s.uuid() },
-          {
-            child_teamRelation: s.rel("teams", "child_team"),
-            parent_teamRelation: s.rel("teams", "parent_team"),
+    const app = testApp({
+      tables: {
+        projects: { columns: { label: "string" } },
+        teams: { columns: { name: "string" } },
+        resource_access_edges: {
+          columns: { resource: "uuid", team: "uuid" },
+          relations: {
+            resourceRelation: { rel: "projects", column: "resource" },
+            teamRelation: { rel: "teams", column: "team" },
           },
-        ),
-        user_team_edges: s.table(
-          { user_id: s.uuid(), user_sub: s.string(), team: s.uuid() },
-          { teamRelation: s.rel("teams", "team") },
-        ),
+        },
+        team_team_edges: {
+          columns: { child_team: "uuid", parent_team: "uuid" },
+          relations: {
+            child_teamRelation: { rel: "teams", column: "child_team" },
+            parent_teamRelation: { rel: "teams", column: "parent_team" },
+          },
+        },
+        user_team_edges: {
+          columns: { user_id: "uuid", user_sub: "string", team: "uuid" },
+          relations: { teamRelation: { rel: "teams", column: "team" } },
+        },
       },
-      { migrations: "none" },
-    );
-    const seededFrom = (userColumn: string, from: (session: SessionContext) => unknown) =>
-      s.definePermissions(app, ({ policy, session }) => {
-        policy.projects.allowRead.where(
-          policy.exists(
-            policy.projects
-              .reachable_via(
-                "resource_access_edges",
-                "resource",
-                "team",
-                session.user,
-                "team_team_edges",
-                "child_team",
-                "parent_team",
-              )
-              .seeded_by("user_team_edges", userColumn, from(session) as never, "team"),
-          ),
-        );
+    });
+    // What the DSL's reachable_via(...).seeded_by(...) compiled to: teams
+    // reachable from the session's seed rows, joined to the access edges.
+    // The seed and step are parenthesised: a bare `select … as id,` would
+    // read the next `step:` as another select column.
+    const seededFrom = (seed: string) =>
+      testPermissions(app, {
+        tables: {
+          projects: {
+            read:
+              "exists (from recursive(" +
+              `seed: from (from user_team_edges where user_team_edges.${seed} select user_team_edges.team as id), ` +
+              "step: from (from team_team_edges where team_team_edges.child_team = id(frontier) select team_team_edges.parent_team as id), " +
+              "frontier: id(row), dedupe: (id(row)), maxDepth: 8) " +
+              "join resource_access_edges as access on id = access.team " +
+              "where access.resource = id(outer))",
+          },
+        },
       });
 
     for (const permissions of [
-      seededFrom("user_id", (session) => session.user),
-      seededFrom("user_sub", (session) => session.claims["sub"]),
+      seededFrom("user_id = session.user"),
+      seededFrom("user_sub = session.claims.sub"),
     ]) {
       expect(() =>
         binding.validateSchema(
@@ -110,8 +118,5 @@ describe.each(["native", "wasm"])("%s schema validation binding", (runtime) => {
         ),
       ).not.toThrow();
     }
-    expect(() => seededFrom("user_sub", () => "sub")).toThrow(
-      "seeded_by(...) takes a session reference",
-    );
   });
 });

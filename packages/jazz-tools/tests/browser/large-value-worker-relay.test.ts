@@ -8,8 +8,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { Db } from "../../src/runtime/db.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import { schema as s } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
 import {
   TestCleanup,
   createBrowserTestDb as createDb,
@@ -18,67 +16,16 @@ import {
   waitForQuery,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
+import { deploy, getJazzServerInfo, startJazzApp } from "./testing-server.js";
+import { app } from "./apps/large-value-relay/jazz.generated.js";
+import permissions from "./apps/large-value-relay/jazz.permissions.json";
+import { app as transactionApp } from "./apps/large-value-relay-transaction/jazz.generated.js";
+import transactionPermissions from "./apps/large-value-relay-transaction/jazz.permissions.json";
 
-const app = s.defineApp(
-  {
-    values: s.table(
-      {
-        name: s.string(),
-        text: s.string().optional(),
-        bytes: s.bytes().optional(),
-        control: s.boolean(),
-      },
-      {},
-    ),
-  },
-  { migrations: "none" },
-);
-
-const permissions = s.definePermissions(app, ({ policy }) => [
-  policy.values.allowRead.always(),
-  policy.values.allowInsert.always(),
-  policy.values.allowUpdate.always(),
-  policy.values.allowDelete.always(),
-]);
-
-// This deliberately keeps the ordinary write API: `body` crosses the
+// transactionApp (apps/large-value-relay-transaction) deliberately keeps the ordinary write API: `body` crosses the
 // automatic 64 KiB promotion boundary during one user transaction which also
 // authors a referenced project. It is distinct from the streaming receipts
 // below, which each create one row in their own transaction.
-const transactionApp = s.defineApp(
-  {
-    projects: s.table(
-      {
-        name: s.string(),
-      },
-      { documentsViaProject: s.reverse("documents", "project") },
-    ),
-    documents: s
-      .table(
-        {
-          branch: s.string(),
-          title: s.string(),
-          projectId: s.uuid(),
-          body: s.string(),
-        },
-        { project: s.rel("projects", "projectId") },
-      )
-      .branchBy("branch"),
-  },
-  { migrations: "none" },
-);
-
-const transactionPermissions = s.definePermissions(transactionApp, ({ policy }) => [
-  policy.projects.allowRead.always(),
-  policy.projects.allowInsert.always(),
-  policy.projects.allowUpdate.always(),
-  policy.projects.allowDelete.always(),
-  policy.documents.allowRead.always(),
-  policy.documents.allowInsert.always(),
-  policy.documents.allowUpdate.always(),
-  policy.documents.allowDelete.always(),
-]);
 
 describe("browser persistent-worker large-value relay", () => {
   const cleanup = new TestCleanup();
@@ -102,10 +49,10 @@ describe("browser persistent-worker large-value relay", () => {
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: app.wasmSchema,
-      permissions,
+      app,
+      permissions: permissions,
     });
-    const server = await startJazzApp(core, { schema: app.wasmSchema, permissions });
+    const server = await startJazzApp(core, { schema: app, permissions });
 
     const secret = generateAuthSecret();
     const writer = await withTimeout(
@@ -202,11 +149,11 @@ describe("browser persistent-worker large-value relay", () => {
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: transactionApp.wasmSchema,
+      app: transactionApp,
       permissions: transactionPermissions,
     });
     const server = await startJazzApp(core, {
-      schema: transactionApp.wasmSchema,
+      schema: transactionApp,
       permissions: transactionPermissions,
     });
 

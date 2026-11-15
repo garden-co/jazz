@@ -1,4 +1,4 @@
-import type { BlockKind, IssuePriority, IssueStatus } from "@/schema";
+import type { BlockKind, IssuePriority, IssueStatus } from "@/jazz.generated";
 
 /**
  * The demo workspace every new account starts with. It is plain data so the

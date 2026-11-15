@@ -1,0 +1,23 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "rows": {
+      "columns": {
+        "score": "int?",
+        "branch": "string"
+      },
+      "branchBy": [
+        "branch"
+      ],
+      "computed": {
+        "value": {
+          "type": "int",
+          "from": [
+            "score"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -77,7 +77,7 @@ that each case wakes what its fix promises, and every result without the fix
 
 `src/deep_room.rs` measures BandChat where real chats spend their time: deep
 in one room's history, in a room list of a hundred rooms, and on read state.
-Its schema and policies mirror the app's `schema.ts` and `permissions.ts`: the
+Its schema and policies mirror the app's `jazz.app.json` and `jazz.permissions.json`: the
 room list reads each room's newest message instead of a `lastActivityAt` that
 members bump, and each member's read marker, one "read up to" row per room
 updated in place, is readable by co-members (check marks and "Read by").

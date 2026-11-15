@@ -1,5 +1,6 @@
 import type { Db } from "jazz-tools";
-import { app, type FolderRole } from "../schema.js";
+import { app } from "../jazz.generated.js";
+import { type FolderRole } from "../app-extras.js";
 
 export interface Invite {
   folderId: string;

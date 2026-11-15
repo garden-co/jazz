@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PersistedWriteRejectedError, type Db } from "jazz-tools";
 import { createPolicyTestApp, type PolicyTestApp, type TestDb } from "jazz-tools/testing";
-import permissions from "../../permissions.js";
-import { app, REORDER_LEVEL_CAP } from "../../schema.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
+import { app } from "../../jazz.generated.js";
+import { REORDER_LEVEL_CAP } from "../../app-extras.js";
 import { isDefinitiveRejection } from "../../src/write-errors.js";
 import {
   CheckoutCancelledError,

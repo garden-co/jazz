@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useAll } from "jazz-tools/react";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 export function defaultName(userId: string): string {
   return `Guest ${userId.replace(/-/g, "").slice(-4).toUpperCase()}`;
