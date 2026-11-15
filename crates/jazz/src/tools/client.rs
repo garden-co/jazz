@@ -117,7 +117,7 @@ struct Shared {
     /// keeps nor re-opens a link until it turns false.
     upstream_paused: watch::Sender<bool>,
     /// The credential the next connection attempt presents.
-    credentials: watch::Sender<AuthConfig>,
+    credentials: watch::Sender<Credentials>,
     /// No server is configured, so nothing can confirm a write past Local.
     serverless: bool,
     /// The upstream link is a trusted backend or admin link, which may
@@ -529,6 +529,15 @@ async fn drive(shared: Weak<Shared>, work: Arc<Notify>) {
     }
 }
 
+/// What a connection attempt presents: its prelude's credentials, and the
+/// `Authorization` header of its upgrade (an app's own bearer, which the
+/// app's backend checks before it states the session to the core).
+#[derive(Clone, Default)]
+struct Credentials {
+    auth: AuthConfig,
+    authorization: Option<String>,
+}
+
 /// Drives the shared upstream link machine ([`UpstreamLink`]): this task owns
 /// the socket and the timer, the machine decides when to connect, back off,
 /// wait for a new credential or stop.
@@ -541,7 +550,7 @@ async fn keep_upstream(
     mut request: NativeTransportRequest,
     mut keeper: LinkKeeper,
     mut paused: watch::Receiver<bool>,
-    mut credentials: watch::Receiver<AuthConfig>,
+    mut credentials: watch::Receiver<Credentials>,
 ) {
     let mut connecting: Option<(AttemptId, NativeTransportFuture)> = None;
     let mut timer: Option<(TimerToken, std::pin::Pin<Box<tokio::time::Sleep>>)> = None;
@@ -639,7 +648,9 @@ async fn keep_upstream(
                 if changed.is_err() {
                     return;
                 }
-                request.auth = credentials.borrow_and_update().clone();
+                let next = credentials.borrow_and_update().clone();
+                request.auth = next.auth;
+                request.authorization = next.authorization;
                 LinkInput::CredentialUpdated
             }
         };
@@ -750,7 +761,7 @@ impl JazzClient {
     /// use [`Self::connect_with_native_transport`] from their process or
     /// binding composition crate.
     pub async fn connect(context: AppContext) -> Result<Self> {
-        Self::connect_inner(context, None).await
+        Self::connect_inner(context, None, None).await
     }
 
     /// Connect using a transport selected at a native composition point.
@@ -758,12 +769,32 @@ impl JazzClient {
         context: AppContext,
         connector: Arc<dyn NativeTransportConnector>,
     ) -> Result<Self> {
-        Self::connect_inner(context, Some(connector)).await
+        Self::connect_inner(context, Some(connector), None).await
+    }
+
+    /// Connect as a user of an app whose backend (`createJazz`) signs its
+    /// users in with the app's own bearer token: the token travels as
+    /// `Authorization: Bearer` on the upgrade, and `context.backend_session`
+    /// states the user it names (with the account the backend's sign-in
+    /// returned). The backend checks the one against the other and vouches
+    /// for the session to the core; the client holds no backend secret.
+    pub async fn connect_with_native_transport_bearer(
+        context: AppContext,
+        connector: Arc<dyn NativeTransportConnector>,
+        bearer: String,
+    ) -> Result<Self> {
+        if context.backend_session.is_none() {
+            return Err(JazzError::Connection(
+                "a bearer connection states the user's session (backend_session)".to_owned(),
+            ));
+        }
+        Self::connect_inner(context, Some(connector), Some(format!("Bearer {bearer}"))).await
     }
 
     async fn connect_inner(
         context: AppContext,
         connector: Option<Arc<dyn NativeTransportConnector>>,
+        authorization: Option<String>,
     ) -> Result<Self> {
         let has_server = !context.server_url.is_empty();
         let connector = match (has_server, connector) {
@@ -779,7 +810,11 @@ impl JazzClient {
         };
         // A core governs a stated session only by the bundle it is pinned
         // to, and refuses one without: say so here, not as a refusal later.
-        if has_server && context.backend_session.is_some() && context.bundle.is_none() {
+        if has_server
+            && context.backend_session.is_some()
+            && authorization.is_none()
+            && context.bundle.is_none()
+        {
             return Err(JazzError::Connection(
                 "a backend_session needs `bundle`: the published permissions bundle \
                  (as deploying the app returns it) its user is checked by"
@@ -822,17 +857,20 @@ impl JazzClient {
             work: work.clone(),
             progress,
             upstream_paused: watch::channel(false).0,
-            credentials: watch::channel(AuthConfig {
-                // With the backend secret, a client's own proof is the
-                // backend relaying that client (a local-first guest).
-                jwt_token: if context.backend_session.is_some() {
-                    None
-                } else {
-                    context.jwt_token.clone()
+            credentials: watch::channel(Credentials {
+                auth: AuthConfig {
+                    // With the backend secret, a client's own proof is the
+                    // backend relaying that client (a local-first guest).
+                    jwt_token: if context.backend_session.is_some() {
+                        None
+                    } else {
+                        context.jwt_token.clone()
+                    },
+                    backend_secret: context.backend_secret.clone(),
+                    admin_secret: context.admin_secret.clone(),
+                    backend_session: stated_session(&context, authorization.is_some())?,
                 },
-                backend_secret: context.backend_secret.clone(),
-                admin_secret: context.admin_secret.clone(),
-                backend_session: stated_session(&context)?,
+                authorization: authorization.clone(),
             })
             .0,
             serverless: connector.is_none(),
@@ -852,13 +890,14 @@ impl JazzClient {
             let wake = work.clone();
             let paused = shared.upstream_paused.subscribe();
             let mut credentials = shared.credentials.subscribe();
+            let initial = credentials.borrow_and_update().clone();
             let request = NativeTransportRequest {
                 requested_link: NativeTransportLink::OrdinarySession,
                 server_url: context.server_url.clone(),
                 app_id: context.app_id,
                 peer_identity: identity.author,
-                auth: credentials.borrow_and_update().clone(),
-                authorization: None,
+                auth: initial.auth,
+                authorization: initial.authorization,
                 bundle: context.bundle.clone(),
                 wake: Arc::new(move || wake.notify_one()),
             };
@@ -1679,9 +1718,30 @@ impl JazzClient {
                 "only a client with a bearer-authenticated server can update its token".to_owned(),
             ));
         }
+        if self.shared.credentials.borrow().authorization.is_some() {
+            return Err(JazzError::Connection(
+                "a bearer-connected client updates its bearer (update_bearer)".to_owned(),
+            ));
+        }
         self.shared
             .credentials
-            .send_modify(|auth| auth.jwt_token = Some(jwt_token));
+            .send_modify(|credentials| credentials.auth.jwt_token = Some(jwt_token));
+        Ok(())
+    }
+
+    /// Present a new app bearer upstream, on a client connected with
+    /// [`Self::connect_with_native_transport_bearer`]. A live link reconnects
+    /// with it; a link whose bearer the backend refused connects again.
+    pub fn update_bearer(&self, bearer: String) -> Result<()> {
+        self.shared.ensure_open()?;
+        if self.shared.credentials.borrow().authorization.is_none() {
+            return Err(JazzError::Connection(
+                "only a client connected with a bearer can update it".to_owned(),
+            ));
+        }
+        self.shared.credentials.send_modify(|credentials| {
+            credentials.authorization = Some(format!("Bearer {bearer}"));
+        });
         Ok(())
     }
 
@@ -1976,11 +2036,19 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
 }
 
 /// The session a backend client states for its user, as the core reads it.
-fn stated_session(context: &AppContext) -> Result<Option<serde_json::Value>> {
+/// The session the prelude states: on the backend secret, or (`bearer`) on
+/// the word of the app's bearer, which the app's backend checks it against.
+fn stated_session(context: &AppContext, bearer: bool) -> Result<Option<serde_json::Value>> {
     let Some(session) = context.backend_session.as_ref() else {
         return Ok(None);
     };
-    if context.backend_secret.is_none() || context.admin_secret.is_some() {
+    if bearer {
+        if context.backend_secret.is_some() || context.admin_secret.is_some() {
+            return Err(JazzError::Connection(
+                "a session stated on a bearer carries no backend or admin secret".to_owned(),
+            ));
+        }
+    } else if context.backend_secret.is_none() || context.admin_secret.is_some() {
         return Err(JazzError::Connection(
             "a backend_session is stated with the backend secret alone".to_owned(),
         ));

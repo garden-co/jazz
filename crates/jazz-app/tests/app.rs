@@ -265,8 +265,8 @@ async fn a_backend_publishes_its_bundle_and_acts_as_its_user() {
 #[tokio::test]
 async fn refuses_what_it_cannot_do() {
     let app_id = AppId::random();
-    let as_user = Jazz::open(files(), Config::new(app_id).server("http://localhost:1")).await;
-    assert!(matches!(as_user, Err(Error::Unsupported(_))), "{as_user:?}");
+    let as_nobody = Jazz::open(files(), Config::new(app_id).server("http://localhost:1")).await;
+    assert!(matches!(as_nobody, Err(Error::Config(_))), "{as_nobody:?}");
 
     let backend = Backend::new("b", "a", "u");
     let serverless = Jazz::open(files(), Config::new(app_id).backend(backend.clone())).await;

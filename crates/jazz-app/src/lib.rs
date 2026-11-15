@@ -13,25 +13,33 @@
 //! let mut changes = jazz.subscribe(todos::query()).await?; // a futures::Stream
 //! ```
 //!
-//! Not supported yet: connecting to a sync server as an end user (with a
-//! JWT), includes (nested related rows in one result), reads inside
-//! transactions.
+//! An end user's client ([`Config::user`]) signs in with a device account
+//! ([`Auth::Device`]) or the app's own bearer ([`Auth::bearer`]), and
+//! [`Jazz::session`] follows it.
+//!
+//! Not supported yet: includes (nested related rows in one result), reads
+//! inside transactions; linking a device account to a provider account, and
+//! renewing a bearer session in place (a renewed bearer reconnects).
 
 mod app;
+mod auth;
 mod backend;
 mod config;
 mod error;
 mod handle;
 mod query;
+mod session;
 mod subscription;
 mod table;
 mod value;
 
 pub use app::AppFiles;
+pub use auth::{Auth, Bearer, DeviceKey, TokenFuture, TokenProvider};
 pub use config::{Backend, Config, Storage};
 pub use error::{Error, Result};
 pub use handle::{Jazz, Transaction};
 pub use query::{Column, Condition, Many, One, Order, Query, created_at, id, updated_at};
+pub use session::{AuthFailure, Link, Offline, Session, SessionState, SyncStatus, User, UserKind};
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
 pub use table::{Fields, Implementations, Insert, Table, Update};
 pub use value::{ColumnValue, Json, Timestamp};
