@@ -1,11 +1,15 @@
 ---
 title: Go Backend
-description: "Open a Jazz app from Go with the jazz-go module and typed bindings generated from jazz.app.json."
+description: "Run your Jazz app's backend in Go: publish its permissions, serve its end users at /jazz, with typed bindings generated from jazz.app.json."
+languageTabs: backend
 ---
 
-A Go service can be your app's backend. It opens the app from the same `jazz.app.json` and
-`jazz.permissions.json` as every other language, with typed bindings generated from them. On start
-it publishes the app's permissions, then acts as one user of the app.
+A Go service can be your app's main backend, the Go equivalent of TypeScript's `createJazz`. It opens
+the app from the same `jazz.app.json` and `jazz.permissions.json` as every other language, with typed
+bindings generated from them; on start it publishes the app's permissions to the sync server, and it
+serves the app's Jazz endpoint at `/jazz`, through which your end users' clients (TypeScript, Swift,
+Kotlin, Go) sign in and sync. Its own reads and writes run as the backend's session user, the
+`Subject` it opens with.
 
 The Go module, `github.com/garden-co/jazz/packages/jazz-go/v2`, wraps Jazz's Rust core through cgo. It
 uses only the standard library: `context` for every call and channels for subscriptions.
@@ -99,7 +103,8 @@ returns at once, but the call still runs to its end, so a write may still apply.
 exits, call `db.Close()`.
 
 A backend that syncs needs the sync server's URL, its admin secret (`AdminSecret`, to publish the
-permissions) and its backend secret (`BackendSecret`, to vouch for the user it acts as). Like every
+permissions) and its backend secret (`BackendSecret`, to vouch for its session user and for the end
+users its endpoint signs in). Like every
 backend, give it no HTTP surface that callers can reach without your own authentication.
 
 The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Go tab
@@ -150,6 +155,14 @@ In a route of your own, `endpoint.ForUser(r)` is a handle acting as the request'
 `forReqUser`); close it when done.
 
 ## Not supported yet
+
+What TypeScript's main backend (`createJazz`) does that Go's doesn't yet:
+
+- `jazz.revokeUser` (ending a user's sessions) and the `refresh` hook;
+- trusted backend clients (`backendClients`);
+- linking a device account to a user (the endpoint's `backend-link` routes);
+
+And in reading and writing:
 
 - guest (anonymous) users;
 - history: `jazzapp.Tasks.History()` reads a table's versions at tier `ReadRemote`, but can't
