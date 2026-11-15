@@ -1952,6 +1952,12 @@ impl JazzClient {
         self.shared.db.set_slow_query_threshold(threshold);
     }
 
+    /// This client's uploads: commits awaiting the server's verdict (since
+    /// when), and those it refused since the client opened.
+    pub fn upload_status(&self) -> crate::db::UploadStatus {
+        self.shared.db.upload_status()
+    }
+
     /// How many times the server has refused this client's credential. A
     /// refusal of a renewed credential leaves [`Self::upstream_status`] as
     /// it was; this tells the two apart.
