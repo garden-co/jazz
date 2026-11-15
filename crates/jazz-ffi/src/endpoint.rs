@@ -161,6 +161,16 @@ impl EndpointCore {
         Ok(response_json(response))
     }
 
+    /// Stops the client the endpoint acts as users with (`for_user`).
+    pub fn shutdown(&self) -> Result<()> {
+        let endpoint = self.endpoint.clone();
+        block_on(
+            self.jazz
+                .with_client(move |_| async move { endpoint.shutdown().await }),
+        )?;
+        Ok(())
+    }
+
     /// A handle acting as the request's user (TS `forReqUser`).
     pub fn for_user(&self, request_json: &str) -> Result<Core> {
         let request = request(request_json)?;

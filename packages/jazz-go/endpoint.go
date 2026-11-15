@@ -183,6 +183,13 @@ func (e *Endpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	C.free(unsafe.Pointer(path))
 	e.mu.RUnlock()
 	if socket && isUpgrade(r) {
+		if status, why := checkUpgrade(r); status != 0 {
+			if status == http.StatusUpgradeRequired {
+				w.Header().Set("Sec-WebSocket-Version", "13")
+			}
+			http.Error(w, why, status)
+			return
+		}
 		e.serveSocket(w, r)
 		return
 	}
@@ -238,17 +245,17 @@ func (e *Endpoint) serveSocket(w http.ResponseWriter, r *http.Request) {
 	C.free(unsafe.Pointer(cup))
 	if err := takeError(cerr); err != nil || s == nil {
 		sockets.Delete(id)
-		conn.close(1011, "jazz endpoint refused the socket")
+		conn.close(wsInternalError, "jazz endpoint refused the socket")
 		return
 	}
 	defer func() {
 		C.jazz_socket_free(s) // waits for on_close
 		sockets.Delete(id)
-		conn.conn.Close()
 	}()
 	for {
 		message, err := conn.readMessage()
 		if err != nil {
+			conn.fail(err)
 			return
 		}
 		if len(message) == 0 {
