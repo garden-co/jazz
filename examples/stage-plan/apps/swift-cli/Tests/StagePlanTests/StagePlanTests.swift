@@ -81,4 +81,25 @@ final class StagePlanTests: XCTestCase {
         guard case .some(let error) = ended else { return XCTFail("the watch didn't end within 3 s of close()") }
         XCTAssertEqual(error as? JazzError, .closed, "\(String(describing: error))")
     }
+
+    func testIncludesAndSelect() async throws {
+        let server = try await TestServer()
+        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let show = try await app.show(named: "Includes")
+        for title in ["Load in", "Sound check", "Doors", "Strike"] {
+            try await app.addTask(title, to: show)
+        }
+        let (withTasks, withShow) = try await DocsSnippets.includes(app.jazz, show: show)
+        XCTAssertEqual(withTasks?.tasks?.map(\.title), ["Load in", "Sound check", "Doors"])
+        XCTAssertEqual(withShow.count, 4)
+        XCTAssertTrue(withShow.allSatisfy { $0.show?.id == show.id })
+        // Without include, relations are nil.
+        let plain = try await app.tasks(of: show)
+        XCTAssertNil(plain.first?.show)
+        let plainShow = try await app.jazz.one(JazzApp.shows.query().where(JazzApp.shows.id.eq(show.id)))
+        XCTAssertNil(plainShow?.tasks)
+        let titles = try await DocsSnippets.select(app.jazz, show: show)
+        XCTAssertEqual(titles.map(\.title), ["Load in", "Sound check", "Doors", "Strike"])
+        try await app.jazz.close()
+    }
 }
