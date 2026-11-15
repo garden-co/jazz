@@ -44,18 +44,10 @@ vouch for the user it acts as. Keep both on the server.
 The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Rust tab
 for each example. `examples/todo-server-rs` in the repository is a complete service.
 
-**Device accounts need the app id your clients derive.** A TypeScript client names no app: it
-derives the app id from its `serverUrl`, the UUIDv5, in the DNS namespace, of the endpoint URL as
-the client resolves it (origin and path, `ws(s)` read as `http(s)`, no trailing slash, such as
-`https://app.example.com/jazz`). Your endpoint serves its app under any app id in the path, so users
-who sign in with your app's own auth (a bearer token or cookie) just work. A device account's
-token, though, is signed for the derived id: to let device accounts in, run the core under that id,
-or, when the id is fixed, as an app's on Jazz Cloud is, set your clients' `scope` to it
-(`<JazzProvider config={{ serverUrl: "/jazz", scope: "<app id>" }}>`).
-
-```rust
-// The URL your clients sync with, exactly as they resolve it.
-let app_id = AppId::from_name("https://app.example.com/jazz");
-```
+**Device accounts: set your clients' `scope` to the backend's app id.** Your endpoint serves its
+app under any app id in the path, so users who sign in with your app's own auth (a bearer token or
+cookie) just work. A device account's token, though, is signed for the app id the client uses, which
+a TypeScript client derives from its `serverUrl` unless you give it one. To let device accounts in,
+give it the backend's: `<JazzProvider config={{ serverUrl: "/jazz", scope: "<app id>" }}>`.
 
 What Rust's backend doesn't do yet is listed in [Language support](/docs/reference/language-support#rust).
