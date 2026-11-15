@@ -4,7 +4,7 @@ An Axum REST + SSE service over a Jazz app, written in Rust with the `jazz-app` 
 
 ## What it demonstrates
 
-- **The app is its files.** `jazz.app.json` declares the tables (and their history and migrations), and `jazz.permissions.json` declares who may do what. `src/jazz_app.rs` holds the typed bindings that `jazz-tools validate` generates from `jazz.app.json`. All three are committed, and there is no schema code to run.
+- **The app is its files.** `jazz.app.json` declares the tables (and their history and migrations), and `jazz.permissions.json` declares who may do what. `src/jazz_app.rs` holds the typed bindings that `jazz-tools generate` generates from `jazz.app.json`. All three are committed, and there is no schema code to run.
 - **Typed bindings.** `jazz_app::Todo`, `NewTodo` and `TodoUpdate`, plus `todos::query()`, `todos::done().eq(false)` and `todos::todos_via_parent().of(id)`.
 - **A `Send + Clone` handle.** `jazz_app::open(config)` returns a `jazz_app::Jazz`. The handle lives directly in Axum's router state, while the client runs on a thread of its own.
 - **Running as the app's backend**, as `createJazz` does:
@@ -28,10 +28,10 @@ From `jazz.app.json`:
 ```bash
 # Edit the tables in jazz.app.json, then:
 npx jazz-tools migrations create --name <name>   # resolve any "TODO: …" it writes
-npx jazz-tools validate                          # checks the files, regenerates src/jazz_app.rs
+npx jazz-tools generate                          # checks the files, regenerates src/jazz_app.rs
 ```
 
-Commit `jazz.app.json` and `src/jazz_app.rs`. The `bindings_are_current` test fails while the bindings are stale. To generate the bindings at build time instead of committing them, call `jazz_codegen::rust::build()` from a `build.rs` and `include!` its output (see that function's docs).
+Commit `jazz.app.json` and `src/jazz_app.rs`. In CI, `npx jazz-tools generate --check` refuses stale files, and so does this example's `bindings_are_current` test. To generate the bindings at build time instead of committing them, call `jazz_codegen::rust::build()` from a `build.rs` and `include!` its output (see that function's docs).
 
 ## Running locally
 

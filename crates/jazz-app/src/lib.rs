@@ -1,6 +1,6 @@
 //! A typed Rust client for a Jazz app, opened from its `jazz.app.json`.
 //!
-//! Bindings generated from `jazz.app.json` (`jazz-tools validate`, or
+//! Bindings generated from `jazz.app.json` (`jazz-tools generate`, or
 //! `jazz_codegen` in a `build.rs`) give each table a row struct, an insert
 //! struct, an update struct and a module of typed columns, relations and
 //! queries, and an `open` that embeds the app's schema. This crate is what

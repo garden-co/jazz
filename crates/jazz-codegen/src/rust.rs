@@ -7,7 +7,7 @@
 //! relations. A `Computed` trait declares the app's computed fields and
 //! transforms, so a missing implementation is a compile error. `open`
 //! embeds `jazz.app.json` itself: the Rust runtime reads it with the same
-//! loader `jazz validate` runs, and a backend checks its
+//! loader `jazz generate` runs, and a backend checks its
 //! `jazz.permissions.json` against it.
 //!
 //! The output is committed by default; [`build`] generates it from a
@@ -27,7 +27,7 @@ pub const FILE: &str = "src/jazz_app.rs";
 
 /// The first line, which marks a file as this generator's.
 pub const HEADER: &str =
-    "// jazz_app.rs: generated from jazz.app.json by `jazz-tools validate`. Do not edit.";
+    "// jazz_app.rs: generated from jazz.app.json by `jazz-tools generate`. Do not edit.";
 
 /// The runtime crate, as an absolute path: the bindings' own module is
 /// usually named `jazz_app` too.
@@ -61,7 +61,7 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
 /// }
 /// ```
 ///
-/// Committing `src/jazz_app.rs`, as `jazz-tools validate` writes it, is the
+/// Committing `src/jazz_app.rs`, as `jazz-tools generate` writes it, is the
 /// recommended default.
 pub fn build() -> Result<(), CodegenError> {
     let var = |name: &str| {
@@ -168,7 +168,7 @@ impl<'a> Writer<'a> {
         let _ = writeln!(out, "{HEADER}");
         out.push_str("// Regenerate it after changing jazz.app.json.\n");
         // Committed as generated: `cargo fmt` leaves it be, so
-        // `validate --check` doesn't find it stale. (Stable Rust takes
+        // `generate --check` doesn't find it stale. (Stable Rust takes
         // rustfmt's skip only in this form.)
         out.push_str("#![cfg_attr(rustfmt, rustfmt_skip)]\n");
         out.push_str("#![allow(dead_code, clippy::all)]\n\n");

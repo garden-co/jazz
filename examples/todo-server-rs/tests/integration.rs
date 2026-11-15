@@ -283,7 +283,7 @@ async fn writes_resync_through_the_server() {
     server.shutdown().await;
 }
 
-/// The committed bindings are what `jazz-tools validate` generates from
+/// The committed bindings are what `jazz-tools generate` generates from
 /// the committed jazz.app.json.
 #[test]
 fn bindings_are_current() {
@@ -291,7 +291,7 @@ fn bindings_are_current() {
     assert_eq!(
         jazz_app::SOURCE,
         jazz_app_source(&app),
-        "src/jazz_app.rs is stale: run `npx jazz-tools validate`"
+        "src/jazz_app.rs is stale: run `npx jazz-tools generate`"
     );
 }
 

@@ -2,7 +2,7 @@
 //!
 //! The app is `jazz.app.json` (its tables) and `jazz.permissions.json`
 //! (who may do what). `src/jazz_app.rs` holds the typed bindings
-//! `jazz-tools validate` generates from `jazz.app.json`; the service opens
+//! `jazz-tools generate` generates from `jazz.app.json`; the service opens
 //! the app as its backend with them (see `main.rs`).
 
 pub mod jazz_app;
