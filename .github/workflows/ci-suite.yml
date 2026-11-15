@@ -249,6 +249,17 @@ jobs:
           test -z "$(gofmt -l packages/jazz-go examples/stage-plan/apps/go-cli)"
           (cd packages/jazz-go && go vet ./...)
           (cd examples/stage-plan/apps/go-cli && go vet ./...)
+      - name: go vet the jazz-codegen Go goldens
+        run: |
+          # Each committed golden, as the jazzapp package of a module of its own.
+          for dir in crates/jazz-codegen/tests/apps/*/jazzapp crates/jazz-codegen/tests/go-apps/*/jazzapp; do
+            [ -d "${dir}" ] || continue
+            module="$(mktemp -d)"
+            mkdir "${module}/jazzapp"
+            cp "${dir}/jazz_app.go" "${module}/jazzapp/"
+            printf 'module example.com/golden\n\ngo 1.22\n\nrequire github.com/garden-co/jazz/packages/jazz-go v0.0.0\n\nreplace github.com/garden-co/jazz/packages/jazz-go => %s/packages/jazz-go\n' "${GITHUB_WORKSPACE}" > "${module}/go.mod"
+            (cd "${module}" && go vet ./... && test -z "$(gofmt -l .)") || { echo "::error::${dir} fails go vet or gofmt"; exit 1; }
+          done
       - name: Test the Go runtime and the StagePlan Go example
         run: |
           (cd packages/jazz-go && go test ./...)

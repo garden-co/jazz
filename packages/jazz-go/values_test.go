@@ -2,6 +2,8 @@ package jazz
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 )
 
@@ -48,5 +50,28 @@ func TestPatchAndValues(t *testing.T) {
 	}
 	if ts := Timestamp(1700000000123); TimestampOf(ts.Time()) != ts {
 		t.Fatal("timestamp round trip")
+	}
+}
+
+type floatRow struct {
+	ID   string   `json:"id"`
+	Rank float64  `json:"rank"`
+	Opt  *float64 `json:"opt"`
+	Tags []string `json:"tags"`
+}
+
+func TestNullInANonPointerFieldIsRefused(t *testing.T) {
+	var row floatRow
+	err := decodeRow("tasks", json.RawMessage(`{"id":"a","rank":null}`), &row)
+	var jerr *Error
+	if !errors.As(err, &jerr) || jerr.Kind != "refused" || !strings.Contains(jerr.Message, "tasks.rank") {
+		t.Fatalf("null rank: %v", err)
+	}
+	if err := decodeRow("tasks", json.RawMessage(`{"id":"a","rank":1.5,"opt":null,"tags":null}`), &row); err != nil || row.Rank != 1.5 || row.Opt != nil {
+		t.Fatalf("nullable fields: %+v %v", row, err)
+	}
+	d, err := decodeDelta[floatRow]("tasks", `{"added":[],"updated":[{"id":"a","rank":null}],"removed":[],"reset":false}`)
+	if err == nil {
+		t.Fatalf("a delta with a null rank: %+v", d)
 	}
 }

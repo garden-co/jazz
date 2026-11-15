@@ -122,8 +122,10 @@ func (q *Query[R]) Subscribe(ctx context.Context, db *DB) (<-chan Delta[R], erro
 				var d Delta[R]
 				if e.kind == "error" {
 					d.Err = parseError(e.json)
-				} else if err := json.Unmarshal([]byte(e.json), &d); err != nil {
+				} else if decoded, err := decodeDelta[R](q.table, e.json); err != nil {
 					d = Delta[R]{Err: err}
+				} else {
+					d = decoded
 				}
 				select {
 				case out <- d:
