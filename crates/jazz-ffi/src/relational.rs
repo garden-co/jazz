@@ -9,7 +9,7 @@
 //! - `{ "table", "where"?, "gather": { "relation", "maxDepth"? } }`: the seed
 //!   rows and every row reached along a self relation (default depth 10).
 //! - `{ "union": [Q, ...], "orderBy"?, "limit"?, "offset"? }`: every arm's
-//!   rows (arms read one table, with `where` only).
+//!   rows, each once (arms read one table, with `where` only).
 //! - `{ "table", "history": true, "where"?, "orderBy"?, "limit"? }`: the
 //!   table's versions, each row with `"$history": { "transactionId",
 //!   "acceptedAt" }`.
@@ -29,6 +29,8 @@ pub(crate) struct Lowered {
     pub reads_deleted: bool,
     pub shape: Shape,
     pub history: bool,
+    /// A union: a row its arms both match comes once.
+    pub union: bool,
 }
 
 /// Whether `query_json` is one of these queries.
@@ -201,7 +203,9 @@ pub(crate) fn lower(schema: &Schema, relations: &Relations, json: &Json) -> Resu
         if include_deleted {
             query = query.include_deleted();
         }
-        return finish(query, Shape::of(table), false);
+        let mut lowered = finish(query, Shape::of(table), false)?;
+        lowered.union = true;
+        return Ok(lowered);
     }
 
     let name = top
@@ -398,6 +402,7 @@ fn finish(query: untyped::Query, shape: Shape, history: bool) -> Result<Lowered>
         reads_deleted,
         shape,
         history,
+        union: false,
     })
 }
 
@@ -432,4 +437,12 @@ pub(crate) fn row(lowered: &Lowered, result: QueryResult) -> Result<Json> {
         object.insert("$history".into(), Json::Object(history));
     }
     Ok(row)
+}
+
+/// The rows of a union, each once (by id, in order: the first stays).
+pub(crate) fn distinct(rows: Vec<Json>) -> Vec<Json> {
+    let mut seen = std::collections::HashSet::new();
+    rows.into_iter()
+        .filter(|row| seen.insert(row.get("id").cloned().unwrap_or(Json::Null).to_string()))
+        .collect()
 }
