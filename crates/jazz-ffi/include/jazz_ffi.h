@@ -138,7 +138,10 @@ typedef int (*JazzTokenCallback)(void *ctx, const char *reason, char **token);
 /*
  * Opens an app as an end user signing in with the app's bearer
  * ("auth": {"bearer": true}); cb and ctx stay valid, from any thread, until
- * jazz_close returns. ("auth": {"deviceKey": ...} opens with jazz_open.)
+ * jazz_close (or a "signOut" call) returns: that waits for a fetch in
+ * progress, and then the callback is never called again. Called from inside
+ * the callback, jazz_close returns at once and the callback stops once that
+ * call returns. ("auth": {"deviceKey": ...} opens with jazz_open.)
  */
 JazzHandle *jazz_open_user(const char *config_json, JazzTokenCallback cb, void *ctx,
                            char **err);

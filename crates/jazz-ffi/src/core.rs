@@ -982,6 +982,8 @@ impl Core {
         }
         block_on(jazz.sign_out())?;
         self.closed.store(true, Ordering::Release);
+        // Signed out, the app has ended: no token callback after this.
+        self.run_close_hook();
         Ok(())
     }
 
@@ -1043,17 +1045,24 @@ impl Core {
         *self.close_hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
 
-    pub fn close(&self) -> Result<()> {
-        if self.closed.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-        if let Some(hook) = self
+    /// Runs the close hook if it hasn't run (whichever way the app ends).
+    fn run_close_hook(&self) {
+        let hook = self
             .close_hook
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
+            .take();
+        if let Some(hook) = hook {
             hook();
+        }
+    }
+
+    pub fn close(&self) -> Result<()> {
+        // Even when signing out already ended the app: the host's callbacks
+        // stop here.
+        self.run_close_hook();
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return Ok(());
         }
         // Open transactions roll back while their client still runs.
         let _ = block_on(self.jazz.with_client(|_| async {
