@@ -324,7 +324,9 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
   );
   if (result.todos.length > 0) {
     console.log("");
-    console.log(`Resolve ${result.todos.length} TODO${result.todos.length === 1 ? "" : "s"} in ${file}, then run \`jazz-tools generate\`:`);
+    console.log(
+      `Resolve ${result.todos.length} TODO${result.todos.length === 1 ? "" : "s"} in ${file}, then run \`jazz-tools generate\`:`,
+    );
     for (const todo of result.todos) console.log(`  ${todo}`);
   } else {
     console.log("Review the migration, then commit jazz.app.json and jazz.generated.ts.");
@@ -354,8 +356,12 @@ function isMainModule(): boolean {
 function printHelp(): void {
   console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
   console.log("\nCommands:");
-  console.log("  generate              Check jazz.app.json and jazz.permissions.json and write jazz.generated.ts");
-  console.log("                        (--check: write nothing, fail if the bindings are out of date; for CI)");
+  console.log(
+    "  generate              Check jazz.app.json and jazz.permissions.json and write jazz.generated.ts",
+  );
+  console.log(
+    "                        (--check: write nothing, fail if the bindings are out of date; for CI)",
+  );
   console.log("  migrations create     Record a schema change in jazz.app.json (--name <name>)");
   console.log("  migrations graph      Visualize the full migration graph");
   console.log(
