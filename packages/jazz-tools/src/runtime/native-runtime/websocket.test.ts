@@ -1200,7 +1200,7 @@ describe("websocket frame carrier", () => {
       let socket: MessageWebSocket | undefined;
       const errors: Array<{ code: string }> = [];
       const terminals: Array<{ code: string }> = [];
-      new WebSocketCarrier({
+      const carrier = new WebSocketCarrier({
         endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
         peerIdentity: new Uint8Array(16),
         onFrame: () => {},
@@ -1214,6 +1214,8 @@ describe("websocket frame carrier", () => {
           }
         },
       });
+      // Refused before hello, readiness rejects: nothing here waits on it.
+      carrier.ready().catch(() => {});
       socket!.emitMessage(encodeWebSocketFrameBatch(frames));
       socket!.emitClose({ code: 1008, reason: "session revoked" });
       return { errors, terminals };
