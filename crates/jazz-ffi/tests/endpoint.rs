@@ -314,7 +314,10 @@ async fn an_expired_answer_is_no_one() {
     result.unwrap();
 }
 
-struct Recorder(std::sync::mpsc::Sender<(Option<Vec<u8>>, Option<(u16, String)>)>);
+/// A socket event: a message for the client, or its close.
+type SocketEvent = (Option<Vec<u8>>, Option<(u16, String)>);
+
+struct Recorder(std::sync::mpsc::Sender<SocketEvent>);
 impl SocketListener for Recorder {
     fn on_message(&self, message: Vec<u8>) {
         let _ = self.0.send((Some(message), None));
