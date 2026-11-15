@@ -503,7 +503,9 @@ down gracefully with its writes synced, and only then signs in and opens the new
   tab (which may still upload its writes): the session is `signed-out` with an `error` saying so,
   and `retry()` finishes the wipe once that tab has closed. The pending wipe is kept on the device,
   so the next page load (or a later sign-in or sign-out in any tab) finishes it too, once no tab
-  has the account open; signing in as that account again cancels it. On Node, a persistent store isn't
+  has the account open; signing in as that account again cancels it. If the wipe itself fails, it
+  stays pending too: the session is `signed-out` with an `error` saying the data is still on the
+  device, and `retry()` tries again. On Node, a persistent store isn't
   deleted (only its client closes); a memory store keeps nothing.
 
 ### Reactive state

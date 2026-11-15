@@ -659,6 +659,91 @@ describe("Jazz session lifecycle", () => {
     expect(pending.size).toBe(0);
     await session.close();
   });
+  it("keeps a discard whose wipe fails pending and visible until retry() wipes it", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      let broken = true;
+      const forgotten: string[] = [];
+      const deleteSignedOutStore = vi.fn(
+        async (account: string, finishing?: { wanted(): boolean; forget(): Promise<void> }) => {
+          if (broken) throw new Error("IndexedDB unavailable");
+          if (finishing && !finishing.wanted()) return "cancelled" as const;
+          await finishing?.forget();
+          forgotten.push(account);
+          return "deleted" as const;
+        },
+      );
+      const pending = new Set<string>();
+      const pendingDiscards = {
+        record: (account: string) => void pending.add(account),
+        clear: (account: string) => void pending.delete(account),
+        list: () => [...pending],
+      };
+      const { session } = await realEnrollmentSetup({ deleteSignedOutStore, pendingDiscards });
+      await session.createLocalFirst();
+      const a = session.getSnapshot().account!;
+      await session.logout({ discardUnsynced: true });
+      // Signed out, but the data is still here: the app sees it, and it stays pending.
+      expect(session.getSnapshot()).toMatchObject({
+        status: "signed-out",
+        recovery: "action",
+        error: { message: expect.stringContaining("couldn't wipe the signed-out account's data") },
+      });
+      expect([...pending]).toEqual([a.id]);
+      await expect(session.retry()).rejects.toThrow("couldn't wipe");
+      expect([...pending]).toEqual([a.id]);
+      expect(session.getSnapshot().error).toBeDefined();
+      broken = false;
+      await session.retry();
+      expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+      expect(session.getSnapshot().error).toBeUndefined();
+      expect(pending.size).toBe(0);
+      expect(forgotten).toEqual([a.id]);
+      await session.close();
+    } finally {
+      errors.mockRestore();
+    }
+  });
+  it("stops retrying a failing wipe on its own, but never drops it", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // A discard an earlier page left, whose wipe keeps failing.
+      const pending = new Set(["discarded"]);
+      const pendingDiscards = {
+        record: (account: string) => void pending.add(account),
+        clear: (account: string) => void pending.delete(account),
+        list: () => [...pending],
+      };
+      const deleteSignedOutStore = vi.fn(async (_account: string) => {
+        throw new Error("IndexedDB unavailable");
+      });
+      const { session, net } = await realEnrollmentSetup({ deleteSignedOutStore, pendingDiscards });
+      net.online = true;
+      await tick();
+      // Each settled operation runs another pass.
+      for (let i = 0; i < 3; i++) {
+        await session.createLocalFirst();
+        await tick();
+        await session.logout();
+        await tick();
+      }
+      expect(deleteSignedOutStore).toHaveBeenCalledTimes(5);
+      // Still pending, and the signed-out session says so.
+      expect([...pending]).toEqual(["discarded"]);
+      expect(session.getSnapshot()).toMatchObject({
+        status: "signed-out",
+        error: { message: expect.stringContaining("couldn't wipe the signed-out account's data") },
+      });
+      await expect(session.retry()).rejects.toThrow("couldn't wipe");
+      expect(deleteSignedOutStore).toHaveBeenCalledTimes(6);
+      expect([...pending]).toEqual(["discarded"]);
+      await session.close();
+    } finally {
+      errors.mockRestore();
+      warned.mockRestore();
+    }
+  });
   it("saves a selection that failed during an offline sign-out on retry, back to signing-out", async () => {
     const { session, save } = await realEnrollmentSetup();
     await session.createLocalFirst();
