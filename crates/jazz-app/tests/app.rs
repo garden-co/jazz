@@ -110,7 +110,17 @@ async fn typed_reads_and_writes_locally() {
     jazz.delete::<Todo>(bread.id).await.unwrap();
     assert_eq!(jazz.get::<Todo>(bread.id).await.unwrap(), None);
 
-    jazz.shutdown().await.unwrap();
+    // Shutting down lets the calls already made finish.
+    let slow = jazz.with_client(|_| async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        Ok(42)
+    });
+    let (slow, stopped) = tokio::join!(slow, async {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        jazz.shutdown().await
+    });
+    assert_eq!(slow.unwrap(), 42);
+    stopped.unwrap();
     assert!(matches!(
         jazz.all(todos::query()).await,
         Err(Error::Stopped)
@@ -230,6 +240,9 @@ async fn a_backend_publishes_its_bundle_and_acts_as_its_user() {
     // A second backend publishing the same files gets the same bundle.
     let reader = Jazz::open(files(), config("alice")).await.unwrap();
     assert_eq!(reader.bundle(), Some(bundle.as_str()));
+    // Both resolve Alice's one account.
+    assert!(writer.account().is_some());
+    assert_eq!(reader.account(), writer.account());
 
     let written = writer.insert(new_todo("Synced")).await.unwrap();
     let seen = tokio::time::timeout(Duration::from_secs(10), async {

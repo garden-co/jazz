@@ -47,14 +47,17 @@ const SOURCE_PREFIX: &str = "pub const SOURCE: &str = ";
 const RT: &str = "::jazz_app";
 
 /// Type names the bindings declare themselves.
-const RESERVED: &[&str] = &[
-    "Computed",
-    "Implementations",
-    "Option",
-    "Vec",
-    "String",
-    "Self",
-];
+const RESERVED: &[&str] = &["Computed", "Implementations", "Self"];
+
+// The prelude names the bindings use, fully qualified: a table may be the
+// Rust type `Box` (`boxes`) or `Option` (`options`).
+const OPTION: &str = "::std::option::Option";
+const SOME: &str = "::std::option::Option::Some";
+const NONE: &str = "::std::option::Option::None";
+const OK: &str = "::std::result::Result::Ok";
+const STRING: &str = "::std::string::String";
+const VEC: &str = "::std::vec::Vec";
+const BOX: &str = "::std::boxed::Box";
 
 pub fn generate(app: &App) -> Result<String, CodegenError> {
     Writer::new(app)?.write()
@@ -179,7 +182,10 @@ impl<'a> Writer<'a> {
 
         let mut out = String::new();
         let _ = writeln!(out, "{HEADER}");
-        let _ = writeln!(out, "{FORMAT_PREFIX}{FORMAT}. Regenerate it after changing jazz.app.json.");
+        let _ = writeln!(
+            out,
+            "{FORMAT_PREFIX}{FORMAT}. Regenerate it after changing jazz.app.json."
+        );
         // Committed as generated: `cargo fmt` leaves it be, so
         // `generate --check` doesn't find it stale. (Stable Rust takes
         // rustfmt's skip only in this form.)
@@ -220,14 +226,14 @@ impl<'a> Writer<'a> {
             ColumnType::Integer => "i32".into(),
             ColumnType::BigInt => "i64".into(),
             ColumnType::Boolean => "bool".into(),
-            ColumnType::Text => "String".into(),
+            ColumnType::Text => STRING.into(),
             ColumnType::Double => "f64".into(),
             ColumnType::Timestamp => format!("{RT}::Timestamp"),
             ColumnType::Uuid => format!("{RT}::ObjectId"),
-            ColumnType::Bytea => "Vec<u8>".into(),
+            ColumnType::Bytea => format!("{VEC}<u8>"),
             ColumnType::Json { .. } => format!("{RT}::Json"),
             ColumnType::Array { element } => {
-                format!("Vec<{}>", self.rust_type(element, name, what)?)
+                format!("{VEC}<{}>", self.rust_type(element, name, what)?)
             }
             ColumnType::Enum { variants } => {
                 let mut rust = Vec::new();
@@ -268,7 +274,7 @@ impl<'a> Writer<'a> {
     ) -> Result<String, CodegenError> {
         let inner = self.rust_type(&ty.ty, name, what)?;
         Ok(if ty.nullable {
-            format!("Option<{inner}>")
+            format!("{OPTION}<{inner}>")
         } else {
             inner
         })
@@ -356,7 +362,7 @@ impl<'a> Writer<'a> {
         let _ = writeln!(out, "pub struct {update} {{");
         for field in &fields {
             field.doc(&mut out);
-            let _ = writeln!(out, "    pub {}: Option<{}>,", field.ident, field.view);
+            let _ = writeln!(out, "    pub {}: {OPTION}<{}>,", field.ident, field.view);
         }
         out.push_str("}\n\n");
 
@@ -403,7 +409,7 @@ impl<'a> Writer<'a> {
                 args.join(", ")
             );
         }
-        out.push_str("        Ok(Self {\n            id: row.id(),\n");
+        let _ = writeln!(out, "        {OK}(Self {{\n            id: row.id(),");
         for field in &fields {
             let _ = writeln!(out, "            {},", field.ident);
         }
@@ -428,7 +434,7 @@ impl<'a> Writer<'a> {
         let _ = writeln!(out, "    type Row = {row};\n");
         let _ = writeln!(
             out,
-            "    fn into_cells(\n        self,\n        {implementations}: &{RT}::Implementations,\n    ) -> {RT}::Result<::std::collections::HashMap<String, {value}>> {{"
+            "    fn into_cells(\n        self,\n        {implementations}: &{RT}::Implementations,\n    ) -> {RT}::Result<::std::collections::HashMap<{STRING}, {value}>> {{"
         );
         if uses_impl {
             out.push_str("        let computed = &implementations.get::<Implementations>()?.0;\n");
@@ -439,7 +445,7 @@ impl<'a> Writer<'a> {
             if field.has_default() {
                 let _ = writeln!(
                     out,
-                    "        if let Some(value) = self.{} {{\n            cells.insert({:?}.to_owned(), {stored});\n        }}",
+                    "        if let {SOME}(value) = self.{} {{\n            cells.insert({:?}.to_owned(), {stored});\n        }}",
                     field.ident, field.name
                 );
             } else {
@@ -450,29 +456,29 @@ impl<'a> Writer<'a> {
                 );
             }
         }
-        out.push_str("        Ok(cells)\n    }\n}\n\n");
+        let _ = write!(out, "        {OK}(cells)\n    }}\n}}\n\n");
 
         // Update.
         let _ = writeln!(out, "impl {RT}::Update for {update} {{");
         let _ = writeln!(out, "    type Row = {row};\n");
         let _ = writeln!(
             out,
-            "    fn into_cells(\n        self,\n        {implementations}: &{RT}::Implementations,\n    ) -> {RT}::Result<Vec<(String, {value})>> {{"
+            "    fn into_cells(\n        self,\n        {implementations}: &{RT}::Implementations,\n    ) -> {RT}::Result<{VEC}<({STRING}, {value})>> {{"
         );
         if uses_impl {
             out.push_str("        let computed = &implementations.get::<Implementations>()?.0;\n");
         }
-        out.push_str("        let mut cells = Vec::new();\n");
+        let _ = writeln!(out, "        let mut cells = {VEC}::new();");
         for field in &fields {
             let _ = writeln!(
                 out,
-                "        if let Some(value) = self.{} {{\n            cells.push(({:?}.to_owned(), {}));\n        }}",
+                "        if let {SOME}(value) = self.{} {{\n            cells.push(({:?}.to_owned(), {}));\n        }}",
                 field.ident,
                 field.name,
                 field.stored_value("value")
             );
         }
-        out.push_str("        Ok(cells)\n    }\n}\n\n");
+        let _ = write!(out, "        {OK}(cells)\n    }}\n}}\n\n");
 
         // The table's module.
         let _ = writeln!(
@@ -573,7 +579,7 @@ impl<'a> Writer<'a> {
             "/// What the app's code computes: each computed field `jazz.app.json`\n\
              /// declares, and each transform both ways. [`open`] takes an implementation.\n",
         );
-        out.push_str("pub trait Computed: Send + Sync + 'static {\n");
+        out.push_str("pub trait Computed: ::std::marker::Send + ::std::marker::Sync + 'static {\n");
         let mut fns = BTreeSet::new();
         for table in &self.app.tables {
             let row = self.row(&table.name).to_owned();
@@ -628,7 +634,10 @@ impl<'a> Writer<'a> {
         }
         let trimmed = out.trim_end().to_owned();
         let mut out = trimmed;
-        out.push_str("\n}\n\nstruct Implementations(Box<dyn Computed>);\n\n");
+        let _ = write!(
+            out,
+            "\n}}\n\nstruct Implementations({BOX}<dyn Computed>);\n\n"
+        );
         Ok(out)
     }
 
@@ -661,12 +670,12 @@ impl<'a> Writer<'a> {
         if self.has_computed {
             let _ = writeln!(
                 out,
-                "pub async fn open(config: {RT}::Config, computed: impl Computed) -> {RT}::Result<{RT}::Jazz> {{\n    {RT}::Jazz::open_with(\n        {RT}::AppFiles::new(APP, None),\n        config,\n        {RT}::Implementations::new(Implementations(Box::new(computed))),\n    )\n    .await\n}}"
+                "pub async fn open(config: {RT}::Config, computed: impl Computed) -> {RT}::Result<{RT}::Jazz> {{\n    {RT}::Jazz::open_with(\n        {RT}::AppFiles::new(APP, {NONE}),\n        config,\n        {RT}::Implementations::new(Implementations({BOX}::new(computed))),\n    )\n    .await\n}}"
             );
         } else {
             let _ = writeln!(
                 out,
-                "pub async fn open(config: {RT}::Config) -> {RT}::Result<{RT}::Jazz> {{\n    {RT}::Jazz::open({RT}::AppFiles::new(APP, None), config).await\n}}"
+                "pub async fn open(config: {RT}::Config) -> {RT}::Result<{RT}::Jazz> {{\n    {RT}::Jazz::open({RT}::AppFiles::new(APP, {NONE}), config).await\n}}"
             );
         }
         out
@@ -698,7 +707,7 @@ impl Field {
         let nullable = column.ty.nullable;
         let wrap = |ty: String| {
             if nullable {
-                format!("Option<{ty}>")
+                format!("{OPTION}<{ty}>")
             } else {
                 ty
             }
@@ -735,7 +744,7 @@ impl Field {
 
     fn insert_type(&self) -> String {
         if self.has_default() {
-            format!("Option<{}>", self.view)
+            format!("{OPTION}<{}>", self.view)
         } else {
             self.view.clone()
         }
@@ -765,9 +774,10 @@ impl Field {
 }
 
 fn type_has_default(ty: &str) -> bool {
-    ty.starts_with("Option<")
-        || ty.starts_with("Vec<")
-        || matches!(ty, "i32" | "i64" | "bool" | "String" | "f64")
+    ty.starts_with(OPTION)
+        || ty.starts_with(VEC)
+        || ty == STRING
+        || matches!(ty, "i32" | "i64" | "bool" | "f64")
 }
 
 fn computed_fn(table: &Table, computed: &Computed) -> Result<String, CodegenError> {
@@ -815,7 +825,9 @@ pub(crate) fn read(bindings: &str) -> Result<crate::bindings::Recorded, CodegenE
     };
     let mut lines = bindings.lines();
     if lines.next() != Some(HEADER) {
-        return Err(refuse("not a file jazz-tools generated (its first line differs)"));
+        return Err(refuse(
+            "not a file jazz-tools generated (its first line differs)",
+        ));
     }
     let format = lines
         .next()

@@ -10,19 +10,19 @@ pub const SOURCE: &str = "sha256:699e59c15aba1594d609960183f0700bbce87edd058e057
 #[derive(Debug, Clone, PartialEq)]
 pub struct Project {
     pub id: ::jazz_app::ObjectId,
-    pub name: String,
+    pub name: ::std::string::String,
 }
 
 /// A new row of `projects`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct NewProject {
-    pub name: String,
+    pub name: ::std::string::String,
 }
 
 /// Changes to a row of `projects`: a `None` field leaves its column as it is.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ProjectUpdate {
-    pub name: Option<String>,
+    pub name: ::std::option::Option<::std::string::String>,
 }
 
 impl ::jazz_app::Table for Project {
@@ -31,8 +31,8 @@ impl ::jazz_app::Table for Project {
     type Update = ProjectUpdate;
 
     fn decode(row: &mut ::jazz_app::Fields<'_>) -> ::jazz_app::Result<Self> {
-        let name = row.take::<String>("name")?;
-        Ok(Self {
+        let name = row.take::<::std::string::String>("name")?;
+        ::std::result::Result::Ok(Self {
             id: row.id(),
             name,
         })
@@ -49,11 +49,11 @@ impl ::jazz_app::Insert for NewProject {
     fn into_cells(
         self,
         _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::collections::HashMap<String, ::jazz_app::jazz::tools::Value>> {
+    ) -> ::jazz_app::Result<::std::collections::HashMap<::std::string::String, ::jazz_app::jazz::tools::Value>> {
         let mut cells = ::std::collections::HashMap::new();
         let value = self.name;
         cells.insert("name".to_owned(), ::jazz_app::ColumnValue::into_value(value));
-        Ok(cells)
+        ::std::result::Result::Ok(cells)
     }
 }
 
@@ -63,12 +63,12 @@ impl ::jazz_app::Update for ProjectUpdate {
     fn into_cells(
         self,
         _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<Vec<(String, ::jazz_app::jazz::tools::Value)>> {
-        let mut cells = Vec::new();
-        if let Some(value) = self.name {
+    ) -> ::jazz_app::Result<::std::vec::Vec<(::std::string::String, ::jazz_app::jazz::tools::Value)>> {
+        let mut cells = ::std::vec::Vec::new();
+        if let ::std::option::Option::Some(value) = self.name {
             cells.push(("name".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
         }
-        Ok(cells)
+        ::std::result::Result::Ok(cells)
     }
 }
 
@@ -83,7 +83,7 @@ pub mod projects {
     }
 
     /// Column `name`.
-    pub fn name() -> ::jazz_app::Column<Project, String> {
+    pub fn name() -> ::jazz_app::Column<Project, ::std::string::String> {
         ::jazz_app::Column::new("name")
     }
 
@@ -97,31 +97,31 @@ pub mod projects {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Todo {
     pub id: ::jazz_app::ObjectId,
-    pub title: String,
+    pub title: ::std::string::String,
     pub done: bool,
-    pub description: Option<String>,
-    pub parent: Option<::jazz_app::ObjectId>,
-    pub project: Option<::jazz_app::ObjectId>,
+    pub description: ::std::option::Option<::std::string::String>,
+    pub parent: ::std::option::Option<::jazz_app::ObjectId>,
+    pub project: ::std::option::Option<::jazz_app::ObjectId>,
 }
 
 /// A new row of `todos`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct NewTodo {
-    pub title: String,
+    pub title: ::std::string::String,
     pub done: bool,
-    pub description: Option<String>,
-    pub parent: Option<::jazz_app::ObjectId>,
-    pub project: Option<::jazz_app::ObjectId>,
+    pub description: ::std::option::Option<::std::string::String>,
+    pub parent: ::std::option::Option<::jazz_app::ObjectId>,
+    pub project: ::std::option::Option<::jazz_app::ObjectId>,
 }
 
 /// Changes to a row of `todos`: a `None` field leaves its column as it is.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TodoUpdate {
-    pub title: Option<String>,
-    pub done: Option<bool>,
-    pub description: Option<Option<String>>,
-    pub parent: Option<Option<::jazz_app::ObjectId>>,
-    pub project: Option<Option<::jazz_app::ObjectId>>,
+    pub title: ::std::option::Option<::std::string::String>,
+    pub done: ::std::option::Option<bool>,
+    pub description: ::std::option::Option<::std::option::Option<::std::string::String>>,
+    pub parent: ::std::option::Option<::std::option::Option<::jazz_app::ObjectId>>,
+    pub project: ::std::option::Option<::std::option::Option<::jazz_app::ObjectId>>,
 }
 
 impl ::jazz_app::Table for Todo {
@@ -130,12 +130,12 @@ impl ::jazz_app::Table for Todo {
     type Update = TodoUpdate;
 
     fn decode(row: &mut ::jazz_app::Fields<'_>) -> ::jazz_app::Result<Self> {
-        let title = row.take::<String>("title")?;
+        let title = row.take::<::std::string::String>("title")?;
         let done = row.take::<bool>("done")?;
-        let description = row.take::<Option<String>>("description")?;
-        let parent = row.take::<Option<::jazz_app::ObjectId>>("parent")?;
-        let project = row.take::<Option<::jazz_app::ObjectId>>("project")?;
-        Ok(Self {
+        let description = row.take::<::std::option::Option<::std::string::String>>("description")?;
+        let parent = row.take::<::std::option::Option<::jazz_app::ObjectId>>("parent")?;
+        let project = row.take::<::std::option::Option<::jazz_app::ObjectId>>("project")?;
+        ::std::result::Result::Ok(Self {
             id: row.id(),
             title,
             done,
@@ -156,7 +156,7 @@ impl ::jazz_app::Insert for NewTodo {
     fn into_cells(
         self,
         _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<::std::collections::HashMap<String, ::jazz_app::jazz::tools::Value>> {
+    ) -> ::jazz_app::Result<::std::collections::HashMap<::std::string::String, ::jazz_app::jazz::tools::Value>> {
         let mut cells = ::std::collections::HashMap::new();
         let value = self.title;
         cells.insert("title".to_owned(), ::jazz_app::ColumnValue::into_value(value));
@@ -168,7 +168,7 @@ impl ::jazz_app::Insert for NewTodo {
         cells.insert("parent".to_owned(), ::jazz_app::ColumnValue::into_value(value));
         let value = self.project;
         cells.insert("project".to_owned(), ::jazz_app::ColumnValue::into_value(value));
-        Ok(cells)
+        ::std::result::Result::Ok(cells)
     }
 }
 
@@ -178,24 +178,24 @@ impl ::jazz_app::Update for TodoUpdate {
     fn into_cells(
         self,
         _implementations: &::jazz_app::Implementations,
-    ) -> ::jazz_app::Result<Vec<(String, ::jazz_app::jazz::tools::Value)>> {
-        let mut cells = Vec::new();
-        if let Some(value) = self.title {
+    ) -> ::jazz_app::Result<::std::vec::Vec<(::std::string::String, ::jazz_app::jazz::tools::Value)>> {
+        let mut cells = ::std::vec::Vec::new();
+        if let ::std::option::Option::Some(value) = self.title {
             cells.push(("title".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
         }
-        if let Some(value) = self.done {
+        if let ::std::option::Option::Some(value) = self.done {
             cells.push(("done".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
         }
-        if let Some(value) = self.description {
+        if let ::std::option::Option::Some(value) = self.description {
             cells.push(("description".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
         }
-        if let Some(value) = self.parent {
+        if let ::std::option::Option::Some(value) = self.parent {
             cells.push(("parent".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
         }
-        if let Some(value) = self.project {
+        if let ::std::option::Option::Some(value) = self.project {
             cells.push(("project".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
         }
-        Ok(cells)
+        ::std::result::Result::Ok(cells)
     }
 }
 
@@ -210,7 +210,7 @@ pub mod todos {
     }
 
     /// Column `title`.
-    pub fn title() -> ::jazz_app::Column<Todo, String> {
+    pub fn title() -> ::jazz_app::Column<Todo, ::std::string::String> {
         ::jazz_app::Column::new("title")
     }
 
@@ -220,17 +220,17 @@ pub mod todos {
     }
 
     /// Column `description`.
-    pub fn description() -> ::jazz_app::Column<Todo, Option<String>> {
+    pub fn description() -> ::jazz_app::Column<Todo, ::std::option::Option<::std::string::String>> {
         ::jazz_app::Column::new("description")
     }
 
     /// Column `parent`.
-    pub fn parent() -> ::jazz_app::Column<Todo, Option<::jazz_app::ObjectId>> {
+    pub fn parent() -> ::jazz_app::Column<Todo, ::std::option::Option<::jazz_app::ObjectId>> {
         ::jazz_app::Column::new("parent")
     }
 
     /// Column `project`.
-    pub fn project() -> ::jazz_app::Column<Todo, Option<::jazz_app::ObjectId>> {
+    pub fn project() -> ::jazz_app::Column<Todo, ::std::option::Option<::jazz_app::ObjectId>> {
         ::jazz_app::Column::new("project")
     }
 
@@ -282,5 +282,5 @@ pub const APP: &str = r#"{
 /// `jazz.permissions.json`) first publishes the app's permissions bundle
 /// and pins the session it acts in to it.
 pub async fn open(config: ::jazz_app::Config) -> ::jazz_app::Result<::jazz_app::Jazz> {
-    ::jazz_app::Jazz::open(::jazz_app::AppFiles::new(APP, None), config).await
+    ::jazz_app::Jazz::open(::jazz_app::AppFiles::new(APP, ::std::option::Option::None), config).await
 }

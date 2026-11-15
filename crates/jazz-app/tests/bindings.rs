@@ -55,7 +55,10 @@ fn committed_bindings_read_back() {
         );
 
         let edited = committed.replacen("\"format\": 1", "\"format\":  1", 1);
-        assert!(jazz_codegen::bindings::read(Lang::Rust, &edited).is_err(), "an edited APP");
+        assert!(
+            jazz_codegen::bindings::read(Lang::Rust, &edited).is_err(),
+            "an edited APP"
+        );
     }
     let foreign = "// some other file\n";
     assert!(jazz_codegen::bindings::read(Lang::Rust, foreign).is_err());
