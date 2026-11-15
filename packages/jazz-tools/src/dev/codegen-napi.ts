@@ -42,20 +42,59 @@ interface CodegenNapi {
 
 let napi: Promise<CodegenNapi> | undefined;
 
+/**
+ * Hand over the jazz-napi a backend imports statically. createJazz and the
+ * backend sessions call this with their own `import * as … from "jazz-napi"`,
+ * a specifier bundlers and file tracers (Next.js, Vercel's nft) follow, so a
+ * deployed backend ships the addon. The fallback below is for tooling: a
+ * specifier they can't follow, so a browser bundle that reaches this module
+ * through the isomorphic catalogue never pulls the native addon in.
+ */
+export function provideCodegenNapi(module: unknown): void {
+  provided ??= checkedCodegen(module);
+}
+
+/** The tooling fallback's import, replaceable so a test can make it fail as a deployed bundle's would. */
+let importFallback = (specifier: string): Promise<unknown> =>
+  import(/* @vite-ignore */ /* webpackIgnore: true */ specifier);
+
+/**
+ * Tests only: make the fallback import fail (or answer) as `load` does, as it
+ * fails in a Next.js/Vercel bundle where the bare specifier doesn't resolve.
+ * Returns a restore function.
+ */
+export function replaceCodegenFallbackForTests(
+  load: (specifier: string) => Promise<unknown>,
+): () => void {
+  const previous = importFallback;
+  importFallback = load;
+  napi = undefined;
+  return () => {
+    importFallback = previous;
+    napi = undefined;
+  };
+}
+
+/** The backend's statically imported jazz-napi; wins over the fallback, whatever ran first. */
+let provided: CodegenNapi | undefined;
+
+function checkedCodegen(module: unknown): CodegenNapi {
+  const loaded = module as Partial<CodegenNapi>;
+  if (typeof loaded.generate !== "function" || typeof loaded.loadBackendApp !== "function") {
+    throw new Error(
+      "This jazz-napi build has no code generator: install jazz-napi at the same version as jazz-tools.",
+    );
+  }
+  return loaded as CodegenNapi;
+}
+
 async function codegen(): Promise<CodegenNapi> {
+  if (provided) return provided;
   // A specifier bundlers can't follow: this module is Node only, and a browser
   // bundle that reaches it (through the isomorphic catalogue) must not pull in
   // the native addon.
   const specifier = "jazz-napi";
-  napi ??= import(/* @vite-ignore */ /* webpackIgnore: true */ specifier).then((module) => {
-    const loaded = module as unknown as Partial<CodegenNapi>;
-    if (typeof loaded.generate !== "function") {
-      throw new Error(
-        "This jazz-napi build has no code generator: install jazz-napi at the same version as jazz-tools.",
-      );
-    }
-    return loaded as CodegenNapi;
-  });
+  napi ??= importFallback(specifier).then(checkedCodegen);
   return napi;
 }
 

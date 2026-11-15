@@ -6,6 +6,7 @@ import type { Http2SecureServer, Http2Server } from "node:http2";
 import type { Duplex } from "node:stream";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import * as jazzNapi from "jazz-napi";
 import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
 import { registerInProcessTransport } from "../runtime/in-process-transport.js";
 import { accountAppId, localFirstAccountId } from "../accounts/local-first.js";
@@ -39,7 +40,7 @@ import {
 } from "../runtime/native-runtime/http-stream-socket.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import { checkRunningBindings } from "../dev/app-files.js";
-import { loadBackendApp, type LoadedBackendApp } from "../dev/codegen-napi.js";
+import { loadBackendApp, provideCodegenNapi, type LoadedBackendApp } from "../dev/codegen-napi.js";
 import { boundApp } from "../typed-app.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import { publishLoadedDeployment } from "../dev/catalogue.js";
@@ -3684,6 +3685,9 @@ async function compiledPermissions(options: CreateJazzOptions): Promise<Compiled
   const cached = compiled.get(options);
   if (cached) return cached.permissions;
   const bound = boundAppOf(options.app);
+  // Jazz's loader through a static jazz-napi import, so bundlers and file
+  // tracers (Next.js, Vercel) ship the addon with the backend.
+  provideCodegenNapi(jazzNapi);
   if (!testHarnessOptions.has(options)) await checkRunningBindings(bound.source);
   const permissions = options.permissions as unknown;
   if (!isRecord(permissions) || typeof permissions.format !== "number") {

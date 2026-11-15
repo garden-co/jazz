@@ -23,7 +23,12 @@ import { prepareAccountManager, type AccountStore } from "../accounts/persistenc
 import type { AccountHandle } from "../accounts/state.js";
 import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
 import { resolveSchemaSource } from "../schema-source.js";
-import { enginePermissions, type PermissionsFile } from "../dev/codegen-napi.js";
+import * as jazzNapi from "jazz-napi";
+import {
+  enginePermissions,
+  provideCodegenNapi,
+  type PermissionsFile,
+} from "../dev/codegen-napi.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
@@ -302,6 +307,8 @@ export async function createJazzClient(input: JazzClientConfig): Promise<Backend
   const initial = input.initial === "device" ? ("local-first" as const) : undefined;
   let core!: SessionCore<JazzClient>;
   // A jazz.permissions.json is checked against the app's bindings by the Rust loader.
+  // Through a static jazz-napi import, so bundlers and file tracers ship it.
+  provideCodegenNapi(jazzNapi);
   const permissions = await enginePermissions(input.app, input.permissions);
   const session = await createStartedJazzSession(
     { ...input, permissions, initial },
