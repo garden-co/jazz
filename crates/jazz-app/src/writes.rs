@@ -112,7 +112,7 @@ pub(crate) async fn read_back<T: Table>(
     id: ObjectId,
     implementations: &crate::table::Implementations,
 ) -> Result<T> {
-    let query = crate::query::Query::<T>::all().id(id).into_untyped();
+    let query = crate::query::Query::<T>::all().id(id).into_untyped()?;
     let row = client
         .query(query, jazz::tools::ReadTier::LocalFirst)
         .await?

@@ -28,11 +28,11 @@ fn not_supported_is_its_own_kind_from_contract_2() {
         matches!(&v1, Err(JazzError::Refused { reason }) if reason.starts_with("not supported yet")),
         "{v1:?}"
     );
-    let opened =
-        JazzHandle::open(json!({ "app": STAGE_PLAN_APP, "jwt": "x", "contract": 2 }).to_string());
+    // An edge tier is NotSupported at open-free call sites too.
+    let edge = v2_client().insert_at("shows".into(), show(nil_uuid()), "edge".into());
     assert!(
-        matches!(opened, Err(JazzError::NotSupported { .. })),
-        "{opened:?}"
+        matches!(edge, Err(JazzError::NotSupported { .. })),
+        "{edge:?}"
     );
 }
 
