@@ -104,6 +104,24 @@ export class BrowserConnectionManager extends ConnectionManager {
       this.host.runtimeSource.acquireBrowserForegroundNodeLease(this.host.config));
   }
 
+  /**
+   * The Db takes no new work: it drains for a graceful shutdown, or its
+   * teardown started. Waits for readiness end early then.
+   */
+  private get dbStopping(): boolean {
+    return this.host.phase !== "open" || this.host.draining;
+  }
+
+  /**
+   * The Db's teardown started: final (see `DbPhase`). Only then does this
+   * manager stop recovering its worker connection. While the Db merely
+   * drains, the connection keeps recovering: the drain's upload needs it,
+   * and a failed drain leaves the Db open with a working connection.
+   */
+  private get dbClosing(): boolean {
+    return this.host.phase !== "open";
+  }
+
   override getClient(schema: WasmSchema): JazzClient {
     if (this.shutdownStarted) throw new Error("Browser connection manager is shut down");
     if (this.storageResetError) throw this.storageResetError;
@@ -133,7 +151,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       !connection ||
       this.pageAway ||
       this.shutdownStarted ||
-      this.host.isShuttingDown ||
+      this.dbStopping ||
       this.storageReset ||
       this.recoverableConnectionFailure ||
       this.configurationAdmissionRetry ||
@@ -166,7 +184,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     const away = this.pageAway;
     if (!away) return;
     this.pageAway = null;
-    if (this.shutdownStarted || this.host.isShuttingDown || !this.browserConnectionInput) {
+    if (this.shutdownStarted || this.dbClosing || !this.browserConnectionInput) {
       away.reopen(null);
       return;
     }
@@ -320,7 +338,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (this.heldPatienceTimer !== null || this.heldTooLong) return;
     this.heldPatienceTimer = setTimeout(() => {
       this.heldPatienceTimer = null;
-      if (this.shutdownStarted || this.host.isShuttingDown) return;
+      if (this.shutdownStarted || this.dbClosing) return;
       // Still waiting: the other tab is frozen in the background, or never
       // follows (another build). Say so, and fail what waits, so the app can
       // ask the user to close it; the retries go on.
@@ -362,7 +380,7 @@ export class BrowserConnectionManager extends ConnectionManager {
           this.connection === failed &&
           !this.heldTooLong &&
           !this.shutdownStarted &&
-          !this.host.isShuttingDown &&
+          !this.dbStopping &&
           !signal?.aborted
         )
           return;
@@ -384,7 +402,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (
       this.workerRecoveryTimer !== null ||
       this.shutdownStarted ||
-      this.host.isShuttingDown ||
+      this.dbClosing ||
       this.storageReset ||
       // A tab the inspector attached recovers only on an explicit call, but
       // waiting for another tab's sign-in is no failure of its own.
@@ -399,7 +417,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         if (
           this.connection !== failed ||
           this.shutdownStarted ||
-          this.host.isShuttingDown ||
+          this.dbClosing ||
           this.storageReset
         )
           return;
@@ -428,7 +446,7 @@ export class BrowserConnectionManager extends ConnectionManager {
   }
 
   async ensureReady(requirement: ConnectionRequirement, signal?: AbortSignal): Promise<void> {
-    if (this.host.isShuttingDown || signal?.aborted) return;
+    if (this.dbStopping || signal?.aborted) return;
     const reset = this.storageReset;
     // Capture before yielding: callers already waiting on a rejected attempt
     // must see that rejection, even if a later API call starts a replacement.
@@ -436,7 +454,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     const retry = connection !== null && this.observedConfigurationAdmissionFailure === connection;
     await reset;
     if (this.storageResetError) throw this.storageResetError;
-    if (this.host.isShuttingDown || signal?.aborted) return;
+    if (this.dbStopping || signal?.aborted) return;
     // Between a retry's shutdown of the refused connection and its
     // replacement there is none: wait for the replacement.
     connection ??=
@@ -444,7 +462,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       (await this.pageAway?.reopened) ??
       (await this.configurationAdmissionRetry);
     if (retry && connection) connection = await this.retryConfigurationAdmission(connection);
-    if (this.host.isShuttingDown || signal?.aborted) return;
+    if (this.dbStopping || signal?.aborted) return;
     for (;;) {
       try {
         await (connection ? this.readinessByConnection.get(connection) : this.connectionReady);
@@ -455,7 +473,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         if (connection && this.admissionRefused(connection) && !signal?.aborted) {
           if (this.heldTooLong) throw new StoreHeldByAnotherTabError(undefined, { cause: error });
           await this.replacementOf(connection, signal);
-          if (this.host.isShuttingDown || this.shutdownStarted || signal?.aborted) return;
+          if (this.dbStopping || this.shutdownStarted || signal?.aborted) return;
           connection = this.connection ?? (await this.configurationAdmissionRetry);
           continue;
         }
@@ -469,16 +487,16 @@ export class BrowserConnectionManager extends ConnectionManager {
       }
     }
     await this.connectionReady;
-    if (this.host.isShuttingDown) return;
+    if (this.dbStopping) return;
     if (this.connectionError) throw this.connectionError;
     if (requirement !== "runtime") {
       for (;;) {
         while (this.disconnected) {
           await this.waitForReconnect(signal);
-          if (this.host.isShuttingDown || signal?.aborted) return;
+          if (this.dbStopping || signal?.aborted) return;
         }
         await this.transportTransition;
-        if (!this.disconnected || this.host.isShuttingDown || signal?.aborted) break;
+        if (!this.disconnected || this.dbStopping || signal?.aborted) break;
       }
     }
     if (this.host.config.serverUrl && requirement === "server") {
@@ -493,7 +511,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (failed !== this.connection) return Promise.resolve(this.connection);
     const retry = (async () => {
       await failed.shutdown();
-      if (this.host.isShuttingDown || failed !== this.connection) return null;
+      if (this.dbClosing || failed !== this.connection) return null;
       this.connection = null;
       this.connectionReady = null;
       this.connectionError = null;
