@@ -172,7 +172,7 @@ Cloud; a Rust or Go backend connects to the same sync URL with the same admin se
 
     **Open the app.**
     <include cwd lang="go" meta='title="main.go"'>
-      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#context-setup-go-backend
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#backend-open-go
     </include>
 
     Writes are local-first: a write the server's permissions refuse returns no error. It is never
@@ -319,19 +319,16 @@ your own routes, like `jazz.forReqUser(request)`:
     and sync through, as `createJazz` does in TypeScript. `jazz.NewEndpoint` is an `http.Handler`;
     mount it at `/jazz`, and say who a request is for in your `authenticate`:
 
-    ```go
-    endpoint, err := jazz.NewEndpoint(backend, func(r *http.Request) (*jazz.EndpointUser, error) {
-    	user, err := verifyBearer(r.Header.Get("Authorization")) // your auth provider
-    	if err != nil {
-    		return jazz.AnyDeviceAccount, nil // or nil: no one
-    	}
-    	return &jazz.EndpointUser{UserID: user.ID, ExpiresAt: user.ExpiresAt}, nil
-    }, jazz.EndpointOptions{})
-    http.Handle("/jazz/", endpoint)
-    ```
+    <include cwd lang="go" meta='title="main.go"'>
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#backend-serve-go
+    </include>
 
     In a route of your own, `endpoint.ForUser(r)` is a handle acting as the request's user (TypeScript's
     `forReqUser`); close it when done.
+
+    <include cwd lang="go" meta='title="main.go"'>
+      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#backend-for-user-go
+    </include>
   </Tab>
 </Tabs>
 
