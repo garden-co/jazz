@@ -18,14 +18,13 @@ import {
 import { setBrowserFollowerProbeTimingForTest } from "../../src/runtime/native-runtime/browser-follower-connection.js";
 import { TestCleanup, uniqueDbName, waitForCondition, waitForQuery } from "./support.js";
 import {
-  compileTestPermissions,
+  deploy,
   getJazzServerInfo,
   jazzCore,
   startJazzApp,
   type JazzServerInfo,
 } from "./testing-server.js";
 import { closeRemoteBrowserDb, waitForRemoteBrowserDbTitle } from "./remote-browser-db.js";
-import { deploy } from "../../src/dev/catalogue.js";
 import type { SchemaSourceInput } from "../../src/schema-source.js";
 import type { TestPermissionsFile } from "../../src/testing/test-app.js";
 import { app, type Todo } from "./apps/worker-bridge/jazz.generated.js";
@@ -316,7 +315,7 @@ export async function publishCatalogueSchemaFamily(scope: string): Promise<JazzS
     serverUrl,
     adminSecret,
     app: catalogueAppV1,
-    permissions: await compileTestPermissions(catalogueAppV1, cataloguePermissionsV1),
+    permissions: cataloguePermissionsV1,
   });
 
   // V2 ships V1 as history with the lens between them, so this publishes the
@@ -326,7 +325,7 @@ export async function publishCatalogueSchemaFamily(scope: string): Promise<JazzS
     serverUrl,
     adminSecret,
     app: catalogueAppV2,
-    permissions: await compileTestPermissions(catalogueAppV2, cataloguePermissionsV2),
+    permissions: cataloguePermissionsV2,
   });
 
   return startJazzApp(testingServer, {
@@ -358,7 +357,7 @@ export async function publishPermissionsForServer(
   await deploy({
     ...jazzCore(testingServer),
     app: deployedSchema,
-    permissions: await compileTestPermissions(deployedSchema, permissions),
+    permissions: permissions,
   });
   return startJazzApp(testingServer, { schema: deployedSchema, permissions });
 }

@@ -6,10 +6,11 @@ import {
   type TestJazz,
 } from "../../src/testing/index.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
 import { bindApp, type BoundApp } from "../../src/typed-app.js";
 import { resolveSchemaSource } from "../../src/schema-source.js";
-import { testPermissions, type TestPermissionsFile } from "../../src/testing/test-app.js";
+import type { TestPermissionsFile } from "../../src/testing/test-app.js";
+import { loadBackendApp } from "../../src/dev/codegen-napi.js";
+import type { LoadedDeployment } from "../../src/dev/catalogue.js";
 import {
   createTransportControl,
   type TransportControl,
@@ -101,15 +102,20 @@ function rebind(bound: BoundApp): WasmSchema {
 }
 
 /**
- * The engine's policies for `permissions` (a `jazz.permissions.json`),
- * checked against the app whose bindings passed `bound` to `bindApp`, as a
- * backend checks them. The browser can't load jazz-napi, which compiles them.
+ * What `deploy` publishes for the app whose bindings passed `bound` to
+ * `bindApp` and `permissions` (its `jazz.permissions.json`), as Jazz's Rust
+ * loader builds it. The browser can't load jazz-napi, so it publishes this
+ * with `publishLoadedDeployment`.
  */
-export function jazzTestPermissions(
+export async function jazzTestDeployment(
   bound: BoundApp,
   permissions: TestPermissionsFile,
-): CompiledPermissionsMap {
-  return testPermissions(rebind(bound), permissions);
+): Promise<LoadedDeployment> {
+  const { deployment, warnings } = await loadBackendApp(
+    bound,
+    JSON.stringify({ format: 1, ...permissions }),
+  );
+  return { deployment, warnings };
 }
 
 /**

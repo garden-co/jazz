@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { generateAuthSecret, type Db } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
 import type { TestPermissionsFile } from "../../src/testing/test-app.js";
 import {
   TestCleanup,
@@ -11,7 +10,7 @@ import {
 } from "./support.js";
 import { app, type Org } from "./apps/include-subscriptions/jazz.generated.js";
 import permissions from "./apps/include-subscriptions/jazz.permissions.json";
-import { compileTestPermissions, getJazzServerInfo, startJazzApp } from "./testing-server.js";
+import { deploy, getJazzServerInfo, startJazzApp } from "./testing-server.js";
 
 // The app (apps/include-subscriptions): orgs, their todos, user checks and
 // check notes, every table open to every user.
@@ -381,7 +380,7 @@ async function publishSchemaAndPermissions(
   permissions: TestPermissionsFile,
 ): Promise<string> {
   const core = { appId, serverUrl, adminSecret };
-  await deploy({ ...core, app, permissions: await compileTestPermissions(app, permissions) });
+  await deploy({ ...core, app, permissions: permissions });
   // Clients sync through the app's backend; return its URL.
   return (await startJazzApp(core, { schema: app, permissions })).serverUrl;
 }

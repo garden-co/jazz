@@ -1,6 +1,5 @@
 import { afterEach, expect, it } from "vitest";
 import { generateAuthSecret, ReadTier } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
 import { TestCleanup, createBrowserTestDb, uniqueDbName, waitForCondition } from "./support.js";
 import { openBrowserSessionCore as createJazzClient } from "../../src/session/create-jazz-session.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
@@ -8,7 +7,7 @@ import { isThinDb } from "../../src/runtime/local-first-upgrade.js";
 import { app } from "./apps/worker-remote-tiers/jazz.generated.js";
 import permissions from "./apps/worker-remote-tiers/jazz.permissions.json";
 import {
-  compileTestPermissions,
+  deploy,
   createJazzServerTransportControl,
   getJazzServerInfo,
   jazzAppFetch,
@@ -69,7 +68,7 @@ it("waits for a tab's firstLoadRemoteWaitMs in its worker, then shows the worker
     serverUrl: coreUrl,
     adminSecret,
     app,
-    permissions: await compileTestPermissions(app, permissions),
+    permissions: permissions,
   });
   const { serverUrl } = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
@@ -144,7 +143,7 @@ it("holds a tab's Global wait for a write made after its worker published an out
     serverUrl: coreUrl,
     adminSecret,
     app,
-    permissions: await compileTestPermissions(app, permissions),
+    permissions: permissions,
   });
   const { serverUrl } = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
@@ -205,7 +204,7 @@ it("holds a tab's Global wait armed before its worker published an outage", asyn
     serverUrl: coreUrl,
     adminSecret,
     app,
-    permissions: await compileTestPermissions(app, permissions),
+    permissions: permissions,
   });
   const { serverUrl } = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
@@ -270,7 +269,7 @@ it("holds a session's Global wait through its worker's outage after a reload", a
     serverUrl: coreUrl,
     adminSecret,
     app,
-    permissions: await compileTestPermissions(app, permissions),
+    permissions: permissions,
   });
   const backend = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },

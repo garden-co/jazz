@@ -80,7 +80,7 @@ it("resumes strict remote reads and Global write waits after native reconnect", 
       serverUrl: server.url,
       adminSecret: server.adminSecret,
       app,
-      permissions,
+      permissions: permissionsFile,
     });
     backend = await startTestJazz({ core: server, app, permissions: permissionsFile });
     await withNativeRelayFixture(
@@ -167,7 +167,7 @@ it("keeps local work usable while remote read tiers recover from an established 
       serverUrl: server.url,
       adminSecret: server.adminSecret,
       app,
-      permissions,
+      permissions: permissionsFile,
     });
     const initial = {
       appId: server.appId,
@@ -255,7 +255,7 @@ it("shows local rows at the deadline when a live server has not answered", async
       serverUrl: server.url,
       adminSecret: server.adminSecret,
       app,
-      permissions,
+      permissions: permissionsFile,
     });
     const nativeOptions = async (userId: string) => ({
       appId: server.appId,

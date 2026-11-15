@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createAccountManager } from "../../src/accounts/create-account-manager.js";
 import { generateAuthSecret, type Db, type QueryBuilder } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
 import type { SchemaSourceInput } from "../../src/schema-source.js";
 import type { TestPermissionsFile } from "../../src/testing/test-app.js";
 import { openJazzClient } from "../../src/web/create-jazz-client.js";
@@ -27,7 +26,7 @@ import {
 } from "./apps/private-read-gate-created-by/jazz.generated.js";
 import createdByPermissions from "./apps/private-read-gate-created-by/jazz.permissions.json";
 import {
-  compileTestPermissions,
+  deploy,
   getJazzServerInfo,
   jazzAppUser,
   startJazzApp,
@@ -848,7 +847,7 @@ async function publishSchemaAndPermissions(
   await deploy({
     ...core,
     app: appSchema,
-    permissions: await compileTestPermissions(appSchema, permissions),
+    permissions: permissions,
   });
   return startJazzApp(core, { schema: appSchema, permissions });
 }

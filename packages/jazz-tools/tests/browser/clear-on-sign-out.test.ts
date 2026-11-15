@@ -1,5 +1,4 @@
 import { afterEach, expect, it } from "vitest";
-import { deploy } from "../../src/dev/catalogue.js";
 import { openBrowserSessionCore as createJazzClient } from "../../src/session/create-jazz-session.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
 import { resolveDefaultPersistentDbName } from "../../src/runtime/db.js";
@@ -9,7 +8,7 @@ import { vfsPages, vfsPath } from "./idb-vfs.js";
 import { app } from "./apps/clear-on-sign-out/jazz.generated.js";
 import permissions from "./apps/clear-on-sign-out/jazz.permissions.json";
 import {
-  compileTestPermissions,
+  deploy,
   getJazzServerInfo,
   jazzAppFetch,
   jazzAppUserUrl,
@@ -39,7 +38,7 @@ it("wipes a user signed out while no page was open from IndexedDB on the next lo
     serverUrl: coreUrl,
     adminSecret,
     app,
-    permissions: await compileTestPermissions(app, permissions),
+    permissions: permissions,
   });
   const backend = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
