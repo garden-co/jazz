@@ -297,7 +297,7 @@ final class StagePlanTests: XCTestCase {
         XCTAssertNotNil(bundle)
         try await app.jazz.waitForSync(.global)
         let status = try await app.jazz.syncStatus()
-        XCTAssertFalse(status.link.isEmpty)
+        XCTAssertEqual(status.link, .connected)
         let session = try await app.jazz.sessionState()
         XCTAssertNil(session, "a backend has no end-user session")
         XCTAssertTrue(try Jazz.generateDeviceKey().hasPrefix("jazz-auth-v1:"))
