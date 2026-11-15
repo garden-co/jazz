@@ -17,7 +17,8 @@
         "type": "string?",
         "dueAt": { "type": "timestamp", "optional": true, "transform": "isoDate" },
         "tags": { "array": "string" },
-        "meta": { "json": true, "optional": true }
+        "meta": { "json": true, "optional": true },
+        "notes": { "type": "string", "optional": true, "merge": "text" }
       },
       "computed": { "urgent": { "type": "boolean", "from": ["score", "priority"] } }
     }
