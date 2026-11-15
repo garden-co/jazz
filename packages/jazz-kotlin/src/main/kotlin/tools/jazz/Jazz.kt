@@ -35,6 +35,9 @@ internal fun openReflectively(className: String, config: String): Native {
     }
 }
 
+/** What jazz-ffi's `JazzError::Closed` reads as in a subscription's error. */
+internal const val CLOSED_MESSAGE: String = "the app is closed"
+
 /** The JSON settings rows, inserts and patches go through. */
 public val jazzJson: Json = Json {
     ignoreUnknownKeys = true
@@ -169,7 +172,10 @@ public class Jazz internal constructor(
                         ),
                     )
                 },
-                onError = { message -> close(JazzException.Subscription(message)) },
+                onError = { message ->
+                    // jazz-ffi ends every open subscription with its Closed error when the app closes.
+                    close(if (message == CLOSED_MESSAGE) JazzException.Closed() else JazzException.Subscription(message))
+                },
             )
             }
             awaitClose()
@@ -181,7 +187,11 @@ public class Jazz internal constructor(
     private fun <Row : Any> decode(query: Query<Row>, row: JsonObject): Row =
         jazzJson.decodeFromJsonElement(query.rowSerializer, prepareRow(query.source, query.includes, row, implementations))
 
-    /** Closes the app; later calls fail with [JazzException.Closed]. */
+    /**
+     * Closes the app: open subscriptions (and `watch`es) end with
+     * [JazzException.Closed], and so do later calls. Closing again does
+     * nothing, so `use {}` and an explicit `close()` mix.
+     */
     override fun close(): Unit = native.close()
 
     private suspend fun <T> io(block: () -> T): T = withContext(Dispatchers.IO) { block() }

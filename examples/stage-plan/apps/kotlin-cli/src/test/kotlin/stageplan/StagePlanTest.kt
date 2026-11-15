@@ -150,4 +150,18 @@ class StagePlanTest {
             job.cancel()
         }
     }
+
+    @Test
+    fun close_ends_watches_and_later_calls_with_closed(): Unit = runBlocking {
+        val jazz = open("user-4")
+        val show = showNamed(jazz, "Closing night")
+        val seen = kotlinx.coroutines.channels.Channel<Int>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        val watching = async { runCatching { jazz.watch(Tasks.where(Tasks.showId eq show.id)).collect { seen.send(it.size) } } }
+        kotlinx.coroutines.withTimeout(30_000) { seen.receive() }
+        jazz.close()
+        jazz.close()
+        val ended = kotlinx.coroutines.withTimeout(30_000) { watching.await() }
+        kotlin.test.assertTrue(ended.exceptionOrNull() is tools.jazz.JazzException.Closed, "$ended")
+        kotlin.test.assertFailsWith<tools.jazz.JazzException.Closed> { tasksOf(jazz, show) }
+    }
 }
