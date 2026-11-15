@@ -128,6 +128,11 @@ row the query matches with the backend's authority, whether that user may read i
 the table's read policy allowed it. The clauses are the parts of the policy's top-level `or` (or the
 entries of an `anyOf`), so each alternative becomes one; they're shown as text such as `owner = session.user`.
 
+A clause that reads through a parent row (`allowedTo.read("project")`) also names the parent each row
+points to and that row's own verdict, one level deep: explain the parent's table to go further. Only
+such clauses at the top of the policy are followed, not ones nested inside an `allOf`, and parents in a
+table an agent token sees with redacted columns are left out.
+
 ```bash title="Terminal"
 npx jazz-tools inspect explain '{"table":"expenses"}' --as <user> --claims '{"role":"manager"}'
 ```

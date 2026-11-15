@@ -220,7 +220,28 @@ export interface InspectExplainAnswer {
    * redacted columns in this one: a clause's verdict tells about what it
    * reads.
    */
-  rows: { id: string; allowed: boolean; by?: number[]; row: Record<string, unknown> }[];
+  rows: {
+    id: string;
+    allowed: boolean;
+    by?: number[];
+    row: Record<string, unknown>;
+    /**
+     * For each inherited clause ("the row <column> points to allows read"),
+     * by its index: the parent row this row points to, whether `as` may read
+     * it, and by which of the parent table's clauses (see `inherited`). `id`
+     * is null when the row points nowhere. One level: explain the parent's
+     * table for its own parents.
+     */
+    via?: Record<number, { id: string | null; allowed: boolean; by?: number[] }>;
+  }[];
+  /**
+   * For each inherited clause, by its index: the parent table it reads and
+   * that table's read-policy clauses, which a row's `via` refers to.
+   */
+  inherited?: Record<
+    number,
+    { table: string; column: string; clauses: { index: number; text?: string }[] }
+  >;
   /** More rows matched than this answer carries. */
   truncated: boolean;
   /** Set when the table has no read policy (every row is denied). */
