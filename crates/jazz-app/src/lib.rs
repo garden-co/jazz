@@ -15,11 +15,13 @@
 //!
 //! An end user's client ([`Config::user`]) signs in with a device account
 //! ([`Auth::Device`]) or the app's own bearer ([`Auth::bearer`]), and
-//! [`Jazz::session`] follows it.
+//! [`Jazz::session`] follows it; [`Session::link`] carries a device account
+//! over to the user's provider sign-in.
 //!
 //! Not supported yet: includes (nested related rows in one result), reads
-//! inside transactions; linking a device account to a provider account, and
-//! renewing a bearer session in place (a renewed bearer reconnects).
+//! inside transactions. A bearer session is renewed by reconnecting with a
+//! fresh bearer, as TypeScript's bearer clients do (in-place renewal is for
+//! cookie sessions).
 
 mod advice;
 mod app;

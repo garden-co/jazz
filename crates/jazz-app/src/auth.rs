@@ -227,6 +227,11 @@ impl DeviceKey {
         local_first_account_id(*app.uuid(), &self.user_id())
     }
 
+    /// A proof of this key for one challenge a server issued.
+    pub(crate) fn sign_challenge(&self, challenge: &str) -> Result<String> {
+        identity::sign_local_first_challenge(&self.0, challenge).map_err(Error::Config)
+    }
+
     /// A self-signed proof of this key for `app`, valid for `ttl_secs`.
     pub(crate) fn mint(&self, app: AppId, ttl_secs: u64) -> Result<String> {
         identity::mint_jazz_self_signed_token(
