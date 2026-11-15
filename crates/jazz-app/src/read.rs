@@ -7,7 +7,7 @@ use std::time::Duration;
 use jazz::db::{FirstLoad, ReadOpts};
 use jazz::tools::ReadTier;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::handle::{Jazz, decode_result};
 use crate::include::Row;
 use crate::query::{Column, Query};
@@ -32,21 +32,38 @@ impl ReadOptions {
 
     /// Reads local data first, but waits up to `wait` for the server's
     /// answer before the first result (TS's `firstLoadRemoteWaitMs`).
-    /// Offline, or once `wait` passed, it answers locally.
+    /// Offline, or once `wait` passed, it answers locally. Only for
+    /// local-first reads: with [`ReadOptions::tier`] `Remote`, which waits for
+    /// the server anyway, the read is refused.
     pub fn wait_for_remote(mut self, wait: Duration) -> Self {
         self.first_load_remote_wait = Some(wait);
         self
     }
 
     /// A subscription's updated rows also carry `column`'s changes as
-    /// splices from the value the previous update showed (TS's `splices`):
-    /// see [`crate::Updated::splices`]. One-shot reads ignore it.
+    /// splices from the value the previous update showed: see
+    /// [`crate::Updated::splices`]. One-shot reads ignore it. TS's runtime
+    /// has the same option, but internal (not part of its public API).
     pub fn splices<T, V: ColumnValue>(mut self, column: Column<T, V>) -> Self {
         self.splices.push(column.name().to_owned());
         self
     }
 
-    fn into_core(self) -> ReadOpts {
+    /// The core's read options, refusing what can't be answered: a remote
+    /// read with nobody to ask, or a remote read told to wait for remote.
+    fn into_core(self, serverless: bool) -> Result<ReadOpts> {
+        if self.tier == Some(ReadTier::Remote) {
+            if self.first_load_remote_wait.is_some() {
+                return Err(Error::Config(
+                    "wait_for_remote is for local-first reads; a Remote read waits for the server anyway".into(),
+                ));
+            }
+            if serverless {
+                return Err(Error::Config(
+                    "a Remote read needs a server; this app runs without one".into(),
+                ));
+            }
+        }
         let mut opts = ReadOpts::for_read_tier(self.tier.unwrap_or(ReadTier::LocalFirst));
         if let Some(wait) = self.first_load_remote_wait {
             opts.first_load = FirstLoad::WaitForRemote {
@@ -54,7 +71,7 @@ impl ReadOptions {
             };
         }
         opts.splices = self.splices;
-        opts
+        Ok(opts)
     }
 }
 
@@ -66,7 +83,7 @@ impl Jazz {
         options: ReadOptions,
     ) -> Result<Vec<T>> {
         let query = query.into_untyped();
-        let opts = options.into_core();
+        let opts = options.into_core(self.info.serverless)?;
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {
             let rows = client.query_with_opts(query, opts).await?;
@@ -84,7 +101,7 @@ impl Jazz {
         options: ReadOptions,
     ) -> Result<Subscription<T>> {
         let query = query.into_untyped();
-        let opts = options.into_core();
+        let opts = options.into_core(self.info.serverless)?;
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {

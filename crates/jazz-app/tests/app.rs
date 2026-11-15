@@ -481,3 +481,83 @@ async fn query_helpers() {
     ids.sort_by_key(|id| *id.uuid());
     assert_eq!(by_id.iter().map(|t| t.id).collect::<Vec<_>>(), ids);
 }
+
+/// Read options against a server: a fresh store's plain local-first read
+/// has nothing yet, `wait_for_remote` waits for the server's answer, and a
+/// `Remote` read asks the server. What can't be answered is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_options_with_a_server() {
+    use jazz_app::ReadOptions;
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .expect("start a Jazz server");
+    let permissions = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/todos/jazz.permissions.json"
+    ))
+    .unwrap();
+    let open = || {
+        bindings::open(
+            Config::new(app_id).server(server.base_url()).backend(
+                Backend::new(server.backend_secret(), server.admin_secret(), "alice")
+                    .permissions(permissions.clone()),
+            ),
+        )
+    };
+    let writer = open().await.unwrap();
+    let written = writer
+        .durable(jazz_app::DurabilityTier::GlobalServer)
+        .insert(new_todo("on the server"))
+        .await
+        .unwrap();
+
+    let fresh = open().await.unwrap();
+    assert!(
+        fresh.all(todos::query()).await.unwrap().is_empty(),
+        "a fresh store has nothing locally yet"
+    );
+    let waited = fresh
+        .all_with_options(
+            todos::query(),
+            ReadOptions::default().wait_for_remote(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(waited, vec![written.clone()]);
+
+    let remote = open().await.unwrap();
+    let asked = remote
+        .all_with_options(
+            todos::query(),
+            ReadOptions::default().tier(ReadTier::Remote),
+        )
+        .await
+        .unwrap();
+    assert_eq!(asked, vec![written]);
+
+    let both = remote
+        .all_with_options(
+            todos::query(),
+            ReadOptions::default()
+                .tier(ReadTier::Remote)
+                .wait_for_remote(Duration::from_secs(1)),
+        )
+        .await;
+    assert!(matches!(both, Err(Error::Config(_))), "{both:?}");
+    let local = bindings::open(Config::new(AppId::random())).await.unwrap();
+    let nobody = local
+        .all_with_options(
+            todos::query(),
+            ReadOptions::default().tier(ReadTier::Remote),
+        )
+        .await;
+    assert!(matches!(nobody, Err(Error::Config(_))), "{nobody:?}");
+
+    for jazz in [writer, fresh, remote] {
+        jazz.shutdown().await.unwrap();
+    }
+    server.shutdown().await;
+}

@@ -33,6 +33,7 @@ pub struct Added<T> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Updated<T> {
     pub id: ObjectId,
     pub old_index: usize,
@@ -46,7 +47,10 @@ pub struct Updated<T> {
 }
 
 /// One edit of a large value in a subscription update: replace `delete`
-/// units at `at` with `insert` (bytes, or UTF-8 for text).
+/// bytes at byte offset `at` with `insert` (UTF-8 for text). Text edits
+/// also carry the same edit in UTF-16 code units (`at_utf16`,
+/// `delete_utf16`), for hosts whose strings count those (Swift, Kotlin,
+/// JavaScript).
 pub use jazz::db::LargeValueDeltaSplice as ValueSplice;
 
 #[derive(Debug, Clone, PartialEq)]
