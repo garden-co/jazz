@@ -14,7 +14,7 @@ struct AppComputed: JazzApp.Computed {
 }
 
 final class ComputedTests: XCTestCase {
-    let userInfo: [CodingUserInfoKey: Any] = [implementationsKey: AppComputed()]
+    let userInfo: [CodingUserInfoKey: any Sendable] = [implementationsKey: AppComputed()]
 
     func testRowsComputeFieldsAndViewTransformedColumns() throws {
         let json = #"{"id":"t1","title":"Load in","score":7,"dueAt":0}"#

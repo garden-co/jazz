@@ -21,6 +21,17 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         }
     }
 
+    /// Any failure as a `JazzError`: jazz-ffi's errors by kind, coding
+    /// errors as `decoding`.
+    static func wrap(_ error: any Error) -> JazzError {
+        switch from(error) {
+        case let error as JazzError: return error
+        case let error as DecodingError: return .decoding("\(error)")
+        case let error as EncodingError: return .decoding("\(error)")
+        case let error: return .io("\(error)")
+        }
+    }
+
     static func from(_ error: any Error) -> any Error {
         guard let error = error as? JazzFFI.JazzError else { return error }
         switch error {
@@ -131,9 +142,7 @@ public final class Client: @unchecked Sendable {
     let handle: JazzHandle
     /// The app's `JazzApp.Computed` (immutable, and `Sendable` by its protocol).
     let implementations: (any Sendable)?
-    var userInfo: [CodingUserInfoKey: Any] {
-        implementations.map { [implementationsKey: $0] } ?? [:]
-    }
+    var userInfo: [CodingUserInfoKey: any Sendable] { Self.userInfo(implementations) }
 
     init(handle: JazzHandle, implementations: (any Sendable)?) {
         self.handle = handle
@@ -144,6 +153,12 @@ public final class Client: @unchecked Sendable {
     /// passes it), with the app's `JazzApp.Computed` if it declares computed
     /// fields or transforms.
     public static func open(app: String, config: Config, implementations: (any Sendable)? = nil)
+        async throws(JazzError) -> Client
+    {
+        try await typed { try await openUntyped(app: app, config: config, implementations: implementations) }
+    }
+
+    static func openUntyped(app: String, config: Config, implementations: (any Sendable)?)
         async throws -> Client
     {
         let json = try config.json(app: app)
@@ -153,64 +168,78 @@ public final class Client: @unchecked Sendable {
 
     /// The account id of the user a backend acts for (`session.user` in
     /// permissions). A client has none: this throws `refused`.
-    public func account() async throws -> Jazz.ID {
-        guard let account = try await Self.run({ try self.handle.account() }) else {
-            throw JazzError.refused("account() needs a backend acting for a user (`Config.backend(…, user:)`)")
+    public func account() async throws(JazzError) -> Jazz.ID {
+        try await Self.typed {
+            guard let account = try await Self.run({ try self.handle.account() }) else {
+                throw JazzError.refused("account() needs a backend acting for a user (`Config.backend(…, user:)`)")
+            }
+            return account
         }
-        return account
     }
 
     /// Every row `query` matches.
-    public func all<R>(_ query: Query<R>) async throws -> [R] {
-        let json = try query.json()
-        let rows = try await Self.run { try self.handle.all(queryJson: json) }
-        return try Coding.decode([R].self, rows, userInfo)
+    public func all<R>(_ query: Query<R>) async throws(JazzError) -> [R] {
+        try await Self.typed {
+            let json = try query.json()
+            let rows = try await Self.run { try self.handle.all(queryJson: json) }
+            return try Coding.decode([R].self, rows, userInfo)
+        }
     }
 
     /// The first row `query` matches, if any.
-    public func one<R>(_ query: Query<R>) async throws -> R? {
-        let json = try query.json()
-        guard let row = try await Self.run({ try self.handle.one(queryJson: json) }) else {
-            return nil
+    public func one<R>(_ query: Query<R>) async throws(JazzError) -> R? {
+        try await Self.typed {
+            let json = try query.json()
+            guard let row = try await Self.run({ try self.handle.one(queryJson: json) }) else {
+                return nil
+            }
+            return try Coding.decode(R.self, row, userInfo)
         }
-        return try Coding.decode(R.self, row, userInfo)
     }
 
     /// Inserts `row`, returning it as stored (with its `id`).
     @discardableResult
-    public func insert<I: Insert>(_ row: I) async throws -> I.Row {
-        let json = try Coding.json(row, userInfo)
-        let inserted = try await Self.run {
-            try self.handle.insert(table: I.Row.table, rowJson: json)
+    public func insert<I: Insert>(_ row: I) async throws(JazzError) -> I.Row {
+        try await Self.typed {
+            let json = try Coding.json(row, userInfo)
+            let inserted = try await Self.run {
+                try self.handle.insert(table: I.Row.table, rowJson: json)
+            }
+            return try Coding.decode(I.Row.self, inserted, userInfo)
         }
-        return try Coding.decode(I.Row.self, inserted, userInfo)
     }
 
     /// Changes the columns `patch` sets on row `id`.
-    public func update<P: Patch>(_ id: Jazz.ID, _ patch: P) async throws {
-        let json = try Coding.json(patch, userInfo)
-        try await Self.run { try self.handle.update(table: P.Row.table, id: id, patchJson: json) }
+    public func update<P: Patch>(_ id: Jazz.ID, _ patch: P) async throws(JazzError) {
+        try await Self.typed {
+            let json = try Coding.json(patch, userInfo)
+            try await Self.run { try self.handle.update(table: P.Row.table, id: id, patchJson: json) }
+        }
     }
 
     /// Changes the columns `patch` sets on `row`.
-    public func update<P: Patch>(_ row: P.Row, _ patch: P) async throws {
+    public func update<P: Patch>(_ row: P.Row, _ patch: P) async throws(JazzError) {
         try await update(row.id, patch)
     }
 
-    public func delete<R: Row>(_ type: R.Type, id: Jazz.ID) async throws {
-        try await Self.run { try self.handle.delete(table: R.table, id: id) }
+    public func delete<R: Row>(_ type: R.Type, id: Jazz.ID) async throws(JazzError) {
+        try await Self.typed {
+            try await Self.run { try self.handle.delete(table: R.table, id: id) }
+        }
     }
 
-    public func delete<R: Row>(_ row: R) async throws {
+    public func delete<R: Row>(_ row: R) async throws(JazzError) {
         try await delete(R.self, id: row.id)
     }
 
     /// The deltas of `query`'s result, the first a `reset` with all of it.
-    /// Stop iterating (or cancel the task) to unsubscribe.
+    /// Stop iterating (or cancel the task) to unsubscribe. It fails with a
+    /// `JazzError`.
     public func subscribe<R>(_ query: Query<R>) -> AsyncThrowingStream<Delta<R>, any Error> {
-        let userInfo = userInfo
+        let implementations = implementations
         return raw(query).map { raw in
-            Delta(
+            let userInfo = Self.userInfo(implementations)
+            return Delta(
                 added: try raw.added.map { try Self.row($0, userInfo) },
                 updated: try raw.updated.map { try Self.row($0, userInfo) },
                 removed: raw.removed, reset: raw.reset, coalesced: raw.coalesced ?? false)
@@ -218,25 +247,45 @@ public final class Client: @unchecked Sendable {
     }
 
     /// `query`'s whole result each time it changes, in its `orderBy` order.
-    /// Stop iterating (or cancel the task) to unsubscribe.
+    /// Stop iterating (or cancel the task) to unsubscribe. It fails with a
+    /// `JazzError`.
     public func watch<R>(_ query: Query<R>) -> AsyncThrowingStream<[R], any Error> {
-        var rows: [String: [String: JSONValue]] = [:]
-        let userInfo = userInfo
-        return raw(query).map { delta in
-            if delta.reset { rows = [:] }
-            for row in delta.added + delta.updated {
-                if case .string(let id)? = row["id"] { rows[id] = row }
+        let implementations = implementations
+        let upstream = raw(query)
+        return AsyncThrowingStream { continuation in
+            let task = _Concurrency.Task {
+                var rows: [String: [String: JSONValue]] = [:]
+                let userInfo = Self.userInfo(implementations)
+                do {
+                    for try await delta in upstream {
+                        if delta.reset { rows = [:] }
+                        for row in delta.added + delta.updated {
+                            if case .string(let id)? = row["id"] { rows[id] = row }
+                        }
+                        for id in delta.removed { rows[id] = nil }
+                        continuation.yield(
+                            try query.sort(Array(rows.values)).map { try Self.row($0, userInfo) })
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: JazzError.wrap(error))
+                }
             }
-            for id in delta.removed { rows[id] = nil }
-            return try query.sort(Array(rows.values)).map { try Self.row($0, userInfo) }
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 
-    public func close() async throws {
-        try await Self.run { try self.handle.shutdown() }
+    public func close() async throws(JazzError) {
+        try await Self.typed {
+            try await Self.run { try self.handle.shutdown() }
+        }
     }
 
-    static func row<R: Row>(_ object: [String: JSONValue], _ userInfo: [CodingUserInfoKey: Any])
+    static func userInfo(_ implementations: (any Sendable)?) -> [CodingUserInfoKey: any Sendable] {
+        implementations.map { [implementationsKey: $0] } ?? [:]
+    }
+
+    static func row<R: Row>(_ object: [String: JSONValue], _ userInfo: [CodingUserInfoKey: any Sendable])
         throws -> R
     {
         try Coding.decode(R.self, Coding.json(JSONValue.object(object)), userInfo)
@@ -250,8 +299,17 @@ public final class Client: @unchecked Sendable {
                 let subscription = try handle.subscribe(queryJson: json, listener: listener)
                 continuation.onTermination = { _ in subscription.cancel() }
             } catch {
-                continuation.finish(throwing: JazzError.from(error))
+                continuation.finish(throwing: JazzError.wrap(error))
             }
+        }
+    }
+
+    /// `body`'s failures as `JazzError`s.
+    static func typed<T>(_ body: () async throws -> T) async throws(JazzError) -> T {
+        do {
+            return try await body()
+        } catch {
+            throw JazzError.wrap(error)
         }
     }
 
@@ -285,14 +343,17 @@ final class Listener: SubscriptionListener, @unchecked Sendable {
     }
 
     func onError(message: String) {
-        continuation.finish(throwing: JazzError.io(message))
+        // A subscription's last error after close is jazz-ffi's `Closed`,
+        // which reaches the listener as its message (crates/jazz-ffi/README.md).
+        continuation.finish(
+            throwing: message == "the app is closed" ? JazzError.closed : JazzError.io(message))
     }
 }
 
 extension AsyncThrowingStream where Failure == any Error {
     /// The stream with `transform` applied to each element, ending on its first error.
-    func map<T: Sendable>(_ transform: @escaping (Element) throws -> T)
-        -> AsyncThrowingStream<T, any Error>
+    func map<T: Sendable>(_ transform: @escaping @Sendable (Element) throws -> T)
+        -> AsyncThrowingStream<T, any Error> where Element: Sendable
     {
         let upstream = self
         return AsyncThrowingStream<T, any Error> { continuation in
@@ -303,7 +364,7 @@ extension AsyncThrowingStream where Failure == any Error {
                     }
                     continuation.finish()
                 } catch {
-                    continuation.finish(throwing: error)
+                    continuation.finish(throwing: JazzError.wrap(error))
                 }
             }
             continuation.onTermination = { _ in task.cancel() }

@@ -86,7 +86,7 @@ public protocol Patch: Encodable, Sendable {
 /// The JSON coding the bindings and jazz-ffi agree on: timestamps as
 /// milliseconds since the epoch, `bytea` as base64.
 enum Coding {
-    static func encoder(_ userInfo: [CodingUserInfoKey: Any] = [:]) -> JSONEncoder {
+    static func encoder(_ userInfo: [CodingUserInfoKey: any Sendable] = [:]) -> JSONEncoder {
         let encoder = JSONEncoder()
         encoder.userInfo = userInfo
         encoder.outputFormatting = [.sortedKeys]
@@ -98,7 +98,7 @@ enum Coding {
         return encoder
     }
 
-    static func decoder(_ userInfo: [CodingUserInfoKey: Any] = [:]) -> JSONDecoder {
+    static func decoder(_ userInfo: [CodingUserInfoKey: any Sendable] = [:]) -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.userInfo = userInfo
         decoder.dateDecodingStrategy = .millisecondsSince1970
@@ -106,7 +106,7 @@ enum Coding {
         return decoder
     }
 
-    static func json<T: Encodable>(_ value: T, _ userInfo: [CodingUserInfoKey: Any] = [:]) throws -> String {
+    static func json<T: Encodable>(_ value: T, _ userInfo: [CodingUserInfoKey: any Sendable] = [:]) throws -> String {
         String(decoding: try encoder(userInfo).encode(value), as: UTF8.self)
     }
 
@@ -118,7 +118,7 @@ enum Coding {
     }
 
     static func decode<T: Decodable>(
-        _ type: T.Type, _ json: String, _ userInfo: [CodingUserInfoKey: Any] = [:]
+        _ type: T.Type, _ json: String, _ userInfo: [CodingUserInfoKey: any Sendable] = [:]
     ) throws -> T {
         do {
             return try decoder(userInfo).decode(type, from: Data(json.utf8))
