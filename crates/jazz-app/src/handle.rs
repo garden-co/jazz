@@ -73,6 +73,8 @@ pub(crate) struct Info {
     pub(crate) implementations: Implementations,
     /// No server: nothing confirms a write past the local store.
     pub(crate) serverless: bool,
+    /// Where the local store lives, for [`Jazz::delete_client_storage`].
+    pub(crate) storage_dir: Option<std::path::PathBuf>,
     /// An end user's session ([`Config::user`]).
     pub(crate) session: Option<UserSession>,
     pub(crate) sync: watch::Receiver<SyncStatus>,
@@ -194,6 +196,16 @@ impl Jazz {
             ));
         }
         let serverless = config.server_url.is_none();
+        let storage_dir = match &config.storage {
+            Storage::Dir(dir) => Some(dir.clone()),
+            Storage::Memory => None,
+        };
+        // Held until the client has stopped: `delete_client_storage` won't
+        // pull the store from under this app.
+        let store = storage_dir
+            .as_deref()
+            .map(crate::lifecycle::StoreDir::hold)
+            .transpose()?;
         let opened_with = config
             .backend
             .is_some()
@@ -206,7 +218,7 @@ impl Jazz {
                 // The session stops the client through this, without keeping
                 // it alive: it stops with its last handle all the same.
                 let stopper = commands.downgrade();
-                move || run(files, config, link, receiver, ready, stopper)
+                move || run(files, config, link, store, receiver, ready, stopper)
             })
             .map_err(|error| Error::Config(format!("cannot start the client thread: {error}")))?;
         let Opened {
@@ -223,6 +235,7 @@ impl Jazz {
                 account,
                 implementations,
                 serverless,
+                storage_dir,
                 session,
                 sync,
                 backend,
@@ -486,10 +499,12 @@ fn run(
     files: AppFiles,
     config: Config,
     link: Link,
+    store: Option<crate::lifecycle::StoreDir>,
     mut commands: mpsc::UnboundedReceiver<Command>,
     ready: oneshot::Sender<Result<Opened>>,
     stopper: mpsc::WeakUnboundedSender<Command>,
 ) {
+    let client_serverless = config.server_url.is_none();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -503,17 +518,22 @@ fn run(
         }
     };
     let local = tokio::task::LocalSet::new();
-    local.block_on(&runtime, async move {
+    let stopped = local.block_on(&runtime, async move {
         let (client, opened) = match connect(files, config, link, stopper).await {
             Ok(opened) => opened,
             Err(error) => {
                 let _ = ready.send(Err(error));
-                return;
+                return None;
             }
         };
         if ready.send(Ok(opened)).is_err() {
             let _ = client.shutdown().await;
-            return;
+            return None;
+        }
+        // Refused writes no durable wait claimed go to `mutation_errors`.
+        if !client_serverless {
+            client.track_mutation_errors();
+            tokio::task::spawn_local(crate::lifecycle::report_mutation_errors(client.clone()));
         }
         // Jobs run as local tasks, so a slow one never holds up the rest.
         // Subscription forwarders are spawned by their jobs and are not in
@@ -563,20 +583,34 @@ fn run(
             jobs.abort_all();
             while jobs.join_next().await.is_some() {}
         }
+        // No job is left: roll back the transactions still open while the
+        // client runs, so none is dropped with the thread's locals.
+        crate::transaction::roll_back_parked();
         let result = client.shutdown().await;
-        let failure = result.as_ref().err().map(ToString::to_string);
-        let mut replies = stopped.into_iter();
-        if let Some(first) = replies.next() {
-            let _ = first.send(result.map_err(Error::from));
-        }
-        // Every other caller learns the same outcome.
-        for reply in replies {
-            let _ = reply.send(match &failure {
-                None => Ok(()),
-                Some(error) => Err(Error::Server(format!("shutting down: {error}"))),
-            });
-        }
+        Some((result, stopped))
     });
+    // The store's connections close with the last clone of the client, and
+    // the tasks holding clones go with the `LocalSet`: only once both are
+    // gone is the store closed, for `delete_client_storage` to remove (a
+    // file it unlinks while SQLite still maps it is a SIGBUS).
+    drop(local);
+    drop(runtime);
+    drop(store);
+    let Some((result, stopped)) = stopped else {
+        return;
+    };
+    let failure = result.as_ref().err().map(ToString::to_string);
+    let mut replies = stopped.into_iter();
+    if let Some(first) = replies.next() {
+        let _ = first.send(result.map_err(Error::from));
+    }
+    // Every other caller learns the same outcome.
+    for reply in replies {
+        let _ = reply.send(match &failure {
+            None => Ok(()),
+            Some(error) => Err(Error::Server(format!("shutting down: {error}"))),
+        });
+    }
 }
 
 pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {

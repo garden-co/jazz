@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use bindings::{NewProject, NewTodo, Todo, projects, todos};
 use futures::{SinkExt, StreamExt};
-use jazz_app::endpoint::{Admitted, Answer, AuthUser, Endpoint, Request};
+use jazz_app::endpoint::{Admitted, Answer, AuthUser, Endpoint, GuestKeyAfterLink, Request};
 use jazz_app::{
     AppFiles, AppId, Auth, Backend, Config, DeviceKey, DurabilityTier, Error, Jazz, ReadTier,
     SessionState, TokenReason,
@@ -521,7 +521,7 @@ async fn the_endpoint_refuses_what_it_should() {
     let app = App::start().await;
     let sign_in = app.path("accounts/backend-sign-in");
 
-    // HTTP: no one signed in, wrong methods, other apps, not yet supported.
+    // HTTP: no one signed in (also for linking), wrong methods, other apps.
     let response = app.endpoint.handle(Request::new("POST", &sign_in)).await;
     assert_eq!(
         (response.status, response.text_body().as_str()),
@@ -548,10 +548,25 @@ async fn the_endpoint_refuses_what_it_should() {
         json!({ "issuer": "jazz:backend", "subject": "carol" })
     );
     assert_eq!(signed_in["claims"], json!({ "role": "member" }));
+    // Another app id in the path (a TS client derives one from its
+    // endpoint URL) is served as this endpoint's own app, as by createJazz.
     let other = format!("/jazz/apps/{}/accounts/backend-sign-in", AppId::random());
+    let served = app
+        .endpoint
+        .handle(Request::new("POST", &other).header("authorization", "Bearer token-carol"))
+        .await;
+    assert_eq!(served.status, 200);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&served.body).unwrap()["identity"]["subject"],
+        json!("carol")
+    );
+    assert!(
+        app.endpoint
+            .is_socket(&format!("/jazz/apps/{}/ws", AppId::random()))
+    );
     assert_eq!(
         app.endpoint
-            .handle(Request::new("POST", other))
+            .handle(Request::new("POST", "/jazz/apps//accounts/backend-sign-in"))
             .await
             .status,
         404
@@ -559,7 +574,7 @@ async fn the_endpoint_refuses_what_it_should() {
     let link = app.path("accounts/backend-link");
     assert_eq!(
         app.endpoint.handle(Request::new("POST", link)).await.status,
-        501
+        401
     );
     assert_eq!(
         app.endpoint
@@ -606,6 +621,90 @@ async fn the_endpoint_refuses_what_it_should() {
     );
     let forged = serde_json::to_vec(&json!({ "auth": { "jwt_token": "a.b.c" } })).unwrap();
     assert_eq!(app.endpoint.admits(&as_carol, &forged).await.unwrap(), None);
+    app.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_device_account_links_to_the_user_who_signs_up() {
+    let app = App::start().await;
+    let key = DeviceKey::generate().unwrap();
+    let device = Jazz::open(client_files(), app.user(Auth::Device(key.clone())))
+        .await
+        .unwrap();
+    let written = device
+        .insert(NewTodo::new("Before signing up", false))
+        .await
+        .unwrap();
+    let session = device.session().unwrap().clone();
+
+    // Dana signs up with the app's own auth, and keeps her device's data.
+    let dana = session
+        .link("token-dana")
+        .await
+        .expect("link the device account");
+    assert_eq!(dana.account, key.account(app.app_id));
+    assert_eq!(dana.subject, "dana");
+    assert!(matches!(
+        session.link("not-a-token").await,
+        Err(Error::SignedOut)
+    ));
+
+    // Signed in with her bearer elsewhere, she reaches the same account.
+    let laptop = Jazz::open(client_files(), app.user(bearer("token-dana")))
+        .await
+        .unwrap();
+    assert_eq!(laptop.account(), Some(dana.account));
+    let seen = eventually(async || {
+        let rows = laptop
+            .all_with(todos::query(), ReadTier::Remote)
+            .await
+            .unwrap();
+        (!rows.is_empty()).then_some(rows)
+    })
+    .await;
+    assert_eq!(seen, vec![written]);
+
+    // A challenge links only its own user, and only with a proof of it.
+    let as_erin = |route: &str| {
+        Request::new("POST", app.path(route)).header("authorization", "Bearer token-erin")
+    };
+    let issued = app
+        .endpoint
+        .handle(as_erin("accounts/backend-link/challenge"))
+        .await;
+    assert_eq!(issued.status, 200);
+    let challenge = serde_json::from_slice::<Value>(&issued.body).unwrap()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let with = |body: Value| {
+        let mut request = as_erin("accounts/backend-link");
+        request.body = serde_json::to_vec(&body).unwrap();
+        request
+    };
+    let forged = app
+        .endpoint
+        .handle(with(json!({ "challenge": challenge, "proof": "a.b" })))
+        .await;
+    assert_eq!(forged.status, 401);
+    let as_frank = Request {
+        headers: vec![("authorization".into(), "Bearer token-frank".into())],
+        ..with(json!({ "challenge": challenge, "proof": "a.b" }))
+    };
+    let foreign = app.endpoint.handle(as_frank).await;
+    assert_eq!(
+        (foreign.status, foreign.text_body().as_str()),
+        (400, "invalid_link_challenge")
+    );
+    let tampered = format!("{challenge}x");
+    let tampered = app
+        .endpoint
+        .handle(with(json!({ "challenge": tampered, "proof": "a.b" })))
+        .await;
+    assert_eq!(tampered.status, 400);
+
+    laptop.shutdown().await.unwrap();
+    device.shutdown().await.unwrap();
     app.stop().await;
 }
 
@@ -917,9 +1016,175 @@ async fn malformed_and_oversized_input_is_refused_and_the_endpoint_serves_on() {
     app.stop().await;
 }
 
+/// A device key's seed, from its `jazz-auth-v1:` form.
+fn seed_of(key: &DeviceKey) -> [u8; 32] {
+    use base64::Engine as _;
+    let text = key.to_string();
+    let encoded = text
+        .strip_prefix("jazz-auth-v1:")
+        .unwrap()
+        .trim_end_matches('=');
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .unwrap()
+        .try_into()
+        .unwrap()
+}
+
+fn sign(seed: &[u8; 32], challenge: &str) -> String {
+    jazz_app::jazz::tools::identity::sign_local_first_challenge(seed, challenge).unwrap()
+}
+
+/// A link challenge `endpoint` issues for `user`.
+async fn challenge_for(app: &App, endpoint: &Endpoint, user: &str) -> String {
+    let issued = endpoint
+        .handle(
+            Request::new("POST", app.path("accounts/backend-link/challenge"))
+                .header("authorization", format!("Bearer token-{user}")),
+        )
+        .await;
+    assert_eq!(issued.status, 200);
+    assert!(
+        issued
+            .headers
+            .contains(&("cache-control".into(), "no-store".into())),
+        "a challenge is never cached"
+    );
+    serde_json::from_slice::<Value>(&issued.body).unwrap()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Links the device with `seed` to `user`, proving it on `proven` and
+/// presenting `presented`.
+async fn link_as(
+    app: &App,
+    endpoint: &Endpoint,
+    user: &str,
+    seed: &[u8; 32],
+    proven: &str,
+    presented: &str,
+) -> jazz_app::endpoint::Response {
+    let mut request = Request::new("POST", app.path("accounts/backend-link"))
+        .header("authorization", format!("Bearer token-{user}"));
+    request.body = serde_json::to_vec(&json!({
+        "challenge": presented,
+        "proof": sign(seed, proven),
+    }))
+    .unwrap();
+    endpoint.handle(request).await
+}
+
+async fn link(app: &App, endpoint: &Endpoint, user: &str, seed: &[u8; 32]) -> (u16, Value) {
+    let challenge = challenge_for(app, endpoint, user).await;
+    let response = link_as(app, endpoint, user, seed, &challenge, &challenge).await;
+    let body = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
+    (response.status, body)
+}
+
+/// By default (TS's `keep`), a key that linked can link a second user into
+/// its account; with `Revoke` it is retired once it linked, so it can't,
+/// and the first link still answers on a retry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_linked_key_links_a_second_user_unless_the_endpoint_revokes_it() {
+    let app = App::start().await;
+
+    // Keep: the second user joins the device's account.
+    let key = DeviceKey::generate().unwrap();
+    let seed = seed_of(&key);
+    let (status, first) = link(&app, &app.endpoint, "lena", &seed).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        first["account"],
+        json!(key.account(app.app_id).0.to_string())
+    );
+    let (status, second) = link(&app, &app.endpoint, "max", &seed).await;
+    assert_eq!(status, 200, "keep lets a linked key link again");
+    assert_eq!(second["account"], first["account"]);
+
+    // Revoke: the key links once.
+    let revoking = app
+        .endpoint
+        .clone()
+        .guest_key_after_link(GuestKeyAfterLink::Revoke);
+    let key = DeviceKey::generate().unwrap();
+    let seed = seed_of(&key);
+    let (status, first) = link(&app, &revoking, "nia", &seed).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        first["account"],
+        json!(key.account(app.app_id).0.to_string())
+    );
+    let (status, _) = link(&app, &revoking, "otto", &seed).await;
+    assert_eq!(status, 409, "a revoked key links no second user");
+    let other = Request::new("POST", app.path("accounts/backend-user"))
+        .header("authorization", "Bearer token-otto");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&revoking.handle(other).await.body).unwrap()["account"],
+        Value::Null,
+        "otto has no account"
+    );
+    // A retry of nia's link (its answer lost) still answers.
+    let (status, again) = link(&app, &revoking, "nia", &seed).await;
+    assert_eq!(status, 200);
+    assert_eq!(again["account"], first["account"]);
+    app.stop().await;
+}
+
+/// An expired challenge, and a proof made over another challenge, link
+/// nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_or_mismatched_challenge_links_nothing() {
+    use base64::Engine as _;
+    use hmac::Mac as _;
+    let app = App::start().await;
+    let seed = seed_of(&DeviceKey::generate().unwrap());
+
+    // A proof over challenge A, presented with challenge B.
+    let a = challenge_for(&app, &app.endpoint, "pia").await;
+    let b = challenge_for(&app, &app.endpoint, "pia").await;
+    let response = link_as(&app, &app.endpoint, "pia", &seed, &a, &b).await;
+    assert_eq!(
+        (response.status, response.text_body().as_str()),
+        (401, "invalid_local_first_proof")
+    );
+
+    // A challenge signed with the endpoint's own key, but expired.
+    let key = {
+        let mut mac =
+            hmac::Hmac::<sha2::Sha256>::new_from_slice(app.server.admin_secret().as_bytes())
+                .unwrap();
+        mac.update(format!("jazz-link-challenge-v1\0{}", app.app_id).as_bytes());
+        mac.finalize().into_bytes().to_vec()
+    };
+    let signed = |exp: u64| {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            json!({ "v": 1, "sub": "pia", "nonce": jazz_app::ObjectId::new().to_string(), "exp": exp })
+                .to_string(),
+        );
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&key).unwrap();
+        mac.update(payload.as_bytes());
+        let mac =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        format!("{payload}.{mac}")
+    };
+    let expired = signed(now() - 1);
+    let response = link_as(&app, &app.endpoint, "pia", &seed, &expired, &expired).await;
+    assert_eq!(
+        (response.status, response.text_body().as_str()),
+        (400, "invalid_link_challenge")
+    );
+    // Its fresh twin links: only the expiry refused it.
+    let fresh = signed(now() + 60);
+    let response = link_as(&app, &app.endpoint, "pia", &seed, &fresh, &fresh).await;
+    assert_eq!(response.status, 200);
+    app.stop().await;
+}
+
 /// A TS client's socket: its prelude as a text frame, shaped as TS's
 /// `encodeWebSocketPrelude` writes it (auth repeated beside `auth`, with
-/// `sub`), its bearer on the upgrade. It is admitted and stays open.
+/// `sub`), its bearer on the upgrade. It is admitted.
 async fn a_ts_shaped_socket_is_admitted(app: &App, ws: &str) {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
     let token = jwt("tess", JWT_ISSUER, now() + 3600, JWT_KEY);
@@ -1012,5 +1277,39 @@ async fn the_axum_router_admits_a_ts_clients_text_prelude() {
     let served = tokio::spawn(async move { axum::serve(listener, router).await });
     a_ts_shaped_socket_is_admitted(&app, &ws).await;
     served.abort();
+    app.stop().await;
+}
+
+/// A client that names another app id (a TS client derives its own from
+/// the endpoint URL) signs in and syncs: the endpoint serves its own app.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_naming_another_app_id_syncs_with_the_endpoints_app() {
+    let app = App::start().await;
+    let derived = AppId::random();
+    assert_ne!(derived, app.app_id);
+    let uma = Jazz::open(
+        client_files(),
+        Config::new(derived)
+            .server(&app.url)
+            .user(bearer("token-uma")),
+    )
+    .await
+    .expect("sign in through the endpoint under another app id");
+    let todo = uma
+        .durable(DurabilityTier::GlobalServer)
+        .insert(NewTodo::new("Under a derived id", false))
+        .await
+        .unwrap();
+    let seen = eventually(async || {
+        let rows = app
+            .backend
+            .all_with(todos::query(), ReadTier::Remote)
+            .await
+            .unwrap();
+        (!rows.is_empty()).then_some(rows)
+    })
+    .await;
+    assert_eq!(seen, vec![todo]);
+    uma.shutdown().await.unwrap();
     app.stop().await;
 }
