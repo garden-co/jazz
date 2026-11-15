@@ -80,15 +80,6 @@ fn hops_unions_and_deleted_rows() {
         ], "orderBy": [{ "column": "title" }] }),
     );
     assert_eq!(names(&union, "title"), ["Rig", "Tent"]);
-    // A row two arms match comes once.
-    let overlapping = rows(
-        &jazz,
-        json!({ "union": [
-            { "table": "tasks", "where": [{ "column": "showId", "op": "eq", "value": gala }] },
-            { "table": "tasks", "where": [{ "column": "id", "op": "eq", "value": rig }] },
-        ] }),
-    );
-    assert_eq!(names(&overlapping, "title"), ["Doors", "Rig"]);
 
     jazz.delete("tasks".into(), rig.clone()).unwrap();
     assert!(

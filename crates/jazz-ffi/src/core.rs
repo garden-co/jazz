@@ -320,15 +320,10 @@ impl Core {
             read.read_view.include_deleted = reads_deleted;
             Ok(client.query_with_opts(core_query, read).await?)
         }))?;
-        let rows = results
+        results
             .into_iter()
             .map(|row| crate::relational::row(&lowered, row))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(if lowered.union {
-            crate::relational::distinct(rows)
-        } else {
-            rows
-        })
+            .collect()
     }
 
     fn run_query(
