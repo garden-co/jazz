@@ -27,6 +27,7 @@
 //! fresh bearer, as TypeScript's bearer clients do (in-place renewal is for
 //! cookie sessions).
 
+mod advice;
 mod app;
 mod auth;
 mod backend;
@@ -44,6 +45,7 @@ mod transaction;
 mod value;
 mod writes;
 
+pub use advice::Advice;
 pub use app::AppFiles;
 pub use auth::{Auth, Bearer, DeviceKey, TokenFuture, TokenProvider, TokenReason};
 pub use config::{Backend, Config, Storage};
