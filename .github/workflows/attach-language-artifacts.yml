@@ -89,6 +89,17 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request' && github.sha || inputs.ref || format('v{0}', inputs.version) }}
 
+      # A real run attaches to v<version> only what v<version> holds: `ref`
+      # may only name that commit.
+      - name: Check the ref is the release tag
+        if: env.DRY_RUN != 'true'
+        run: |
+          git fetch --depth=1 origin "refs/tags/v${VERSION}:refs/tags/v${VERSION}"
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse "v${VERSION}^{commit}")" ]; then
+            echo "::error::ref must be empty or name v${VERSION}'s commit for a real run"
+            exit 1
+          fi
+
       - uses: ./.github/actions/setup-build
         with:
           setup-node: "false"
@@ -124,7 +135,8 @@ jobs:
           cp target/release/libjazz_ffi.a "target/release/${SHARED}" "${stage}/"
           cp crates/jazz-ffi/include/jazz_ffi.h "${stage}/include/"
           cp "${RUNNER_TEMP}/LINK_FLAGS" "${stage}/LINK_FLAGS"
-          tar -C "${stage}" -czf "dist/libjazz_ffi-${PLATFORM}.tar.gz" .
+          # Packed (reproducibly) on Linux by the checksums job.
+          mv "${stage}" "dist/libjazz_ffi-${PLATFORM}"
           git rev-parse HEAD > "dist/source-${PLATFORM}.txt"
           # The Kotlin jar's copy, stripped, where JNA looks for it.
           mkdir -p "natives/${JNA}"
@@ -143,14 +155,13 @@ jobs:
             target/release/uniffi-bindgen generate \
               --library target/release/libjazz_ffi.so \
               --language "${language}" --no-format \
-              --out-dir "${RUNNER_TEMP}/jazz-ffi-bindings/${language}"
+              --out-dir "dist/jazz-ffi-bindings/${language}"
           done
-          tar -C "${RUNNER_TEMP}/jazz-ffi-bindings" -czf dist/jazz-ffi-bindings.tar.gz .
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-ffi-${{ matrix.platform }}
-          path: dist/*
+          path: dist
           if-no-files-found: error
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -202,10 +213,55 @@ jobs:
           path: kotlin-dist/*
           if-no-files-found: warn
 
+  # Read-only: packs the assets reproducibly and checksums them, for the
+  # attach job (a real run) or as the dry run's result.
+  pack:
+    name: Pack and checksum
+    needs: [build, kotlin]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-*
+          merge-multiple: true
+          path: built
+
+      - name: Pack, check sources, checksum
+        run: |
+          set -euo pipefail
+          for source in built/source-*.txt; do
+            cmp "${source}" built/source-linux-x86_64.txt
+          done
+          mkdir -p dist
+          # Reproducible: sorted, no owners, one fixed mtime.
+          pack() {
+            tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='@0' \
+              -C "$1" -cf - . | gzip -n > "$2"
+          }
+          for dir in built/libjazz_ffi-*/; do
+            name="$(basename "${dir}")"
+            pack "${dir}" "dist/${name}.tar.gz"
+          done
+          pack built/jazz-ffi-bindings dist/jazz-ffi-bindings.tar.gz
+          shopt -s nullglob
+          cp built/jazz-kotlin-*.jar built/jazz-kotlin-*.aar dist/ 2>/dev/null || true
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: language-artifacts
+          path: dist/*
+          if-no-files-found: error
+
+  # The only job with a write token: a dispatched, non-dry run.
   attach:
     name: Attach to v${{ inputs.version }}
-    needs: [build, kotlin]
-    runs-on: ubuntu-latest
+    needs: pack
+    if: github.event_name == 'workflow_dispatch' && !inputs.dry-run
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
       contents: write
@@ -215,24 +271,12 @@ jobs:
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          pattern: jazz-*
-          merge-multiple: true
+          name: language-artifacts
           path: dist
 
-      - name: Checksums and source
-        working-directory: dist
-        run: |
-          for source in source-*.txt; do
-            cmp "${source}" source-linux-x86_64.txt
-          done
-          rm source-*.txt
-          shopt -s nullglob
-          sha256sum libjazz_ffi-*.tar.gz jazz-ffi-bindings.tar.gz jazz-kotlin-*.jar jazz-kotlin-*.aar > SHA256SUMS
-          cat SHA256SUMS
-          ls -l
-
-      - name: Refuse a published release
-        if: env.DRY_RUN != 'true'
+      # Checked right before uploading: replacing assets is safe only on a
+      # draft.
+      - name: Upload to the draft release
         run: |
           if ! is_draft=$(gh release view "v${VERSION}" --json isDraft --jq .isDraft); then
             echo "::error::No release v${VERSION}; create its draft with the GitHub release workflow first."
@@ -242,15 +286,4 @@ jobs:
             echo "::error::v${VERSION} is published; its language assets are never replaced."
             exit 1
           fi
-
-      # Replacing assets is safe only on a draft, which the step above checked.
-      - name: Upload
-        if: env.DRY_RUN != 'true'
-        run: gh release upload "v${VERSION}" dist/* --clobber
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: env.DRY_RUN == 'true'
-        with:
-          name: language-artifacts-dry-run
-          path: dist/*
-          if-no-files-found: error
+          gh release upload "v${VERSION}" dist/* --clobber
