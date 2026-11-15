@@ -213,6 +213,47 @@ jobs:
           test "${WORKSPACE_RESULT}" = success
           test "${STORAGE_COMPAT_RESULT}" = success
 
+  # The Go bindings (packages/jazz-go over crates/jazz-ffi's C ABI) and
+  # the StagePlan Go example: their bindings are current, and their tests
+  # (which open the app as a backend on a memory store) pass on Linux.
+  test-go:
+    if: inputs.scope == 'full'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      GO_VERSION: "1.23.4"
+      GO_SHA256: 6924efde5de86fe277676e929dc9917d466efa02fb934197bc2eba35d5680971
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-blacksmith
+      - name: Install Go
+        run: |
+          curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz
+          echo "${GO_SHA256}  /tmp/go.tgz" | sha256sum -c -
+          tar -C /usr/local -xzf /tmp/go.tgz
+          echo /usr/local/go/bin >> "${GITHUB_PATH}"
+      - name: Build jazz-ffi and jazz-tools
+        run: |
+          cargo build -p jazz-ffi
+          cargo build -p jazz-cli --bin jazz-tools
+      - name: StagePlan Go bindings are current
+        working-directory: examples/stage-plan/apps/go-cli
+        run: ../../../../target/debug/jazz-tools generate --check
+      - name: gofmt and go vet
+        run: |
+          test -z "$(gofmt -l packages/jazz-go examples/stage-plan/apps/go-cli)"
+          (cd packages/jazz-go && go vet ./...)
+          (cd examples/stage-plan/apps/go-cli && go vet ./...)
+      - name: Test the Go runtime and the StagePlan Go example
+        run: |
+          (cd packages/jazz-go && go test ./...)
+          (cd examples/stage-plan/apps/go-cli && go test -v ./...)
+
   test-ts:
     if: inputs.scope == 'full'
     runs-on: blacksmith-16vcpu-ubuntu-2404
