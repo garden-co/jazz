@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import { createAccountDbWithRuntimeSource } from "../accounts/context.js";
 import { createAccountManager } from "../accounts/create-account-manager.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
@@ -19,12 +19,13 @@ class PreparationSource extends DefaultRuntimeSource {
   }
 }
 
-const app = s.defineApp(
-  {
-    documents: s.table({ payload: s.bytes(), label: s.string().default("untitled") }, {}),
+const app = testApp({
+  tables: {
+    documents: {
+      columns: { payload: "bytes", label: { type: "string", default: "untitled" } },
+    },
   },
-  { migrations: "none" },
-);
+});
 let db: Db;
 let source: PreparationSource;
 beforeEach(async () => {
