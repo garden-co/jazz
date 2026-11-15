@@ -8,8 +8,10 @@ let config = #"{"app": ""# + app.replacingOccurrences(of: "\"", with: "\\\"") + 
 let jazz = try JazzHandle.open(configJson: config)
 let row = try jazz.insert(table: "todos", rowJson: #"{"title": "milk", "rank": 1.5}"#)
 precondition(row.contains(#""title":"milk""#), row)
-precondition(try jazz.all(queryJson: #"{"table": "todos"}"#).contains("milk"))
-precondition(try jazz.account() == nil)
+let all = try jazz.all(queryJson: #"{"table": "todos"}"#)
+precondition(all.contains("milk"), all)
+let account = try jazz.account()
+precondition(account == nil)
 do {
     _ = try jazz.all(queryJson: #"{"table": "nope"}"#)
     preconditionFailure("expected Refused")
@@ -17,4 +19,8 @@ do {
     precondition(reason.contains("no table nope"), reason)
 }
 try jazz.shutdown()
+do {
+    _ = try jazz.all(queryJson: #"{"table": "todos"}"#)
+    preconditionFailure("expected Closed")
+} catch JazzError.Closed {}
 print("jazz_ffi Swift: ok")
