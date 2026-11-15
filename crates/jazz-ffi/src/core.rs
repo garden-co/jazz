@@ -364,6 +364,7 @@ impl Core {
         let (tx, tier) = (opts.tx, opts.write_tier);
         block_on(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
+            let edits = whole_pages(&client, &name, id, edits).await?;
             let committed = client.update_with_edits(&name, id, cells, edits)?;
             mark_wrote(tx);
             settle(&client, committed, tier).await
@@ -545,7 +546,10 @@ impl Core {
     /// writes are durable locally once they return, so `Local` has nothing
     /// to wait for; `GlobalServer` waits for the server to have them all
     /// and fails if it rejected one (the core's `wait_for_sync`, as TS's
-    /// `waitForSync`). Without a server there is nothing to wait for.
+    /// `waitForSync`). Without a server there is nothing to wait for. It
+    /// checks up to the last 4096 writes individually; older ones rely on
+    /// the core wait, which (until jazz#5728) can miss a refusal that is
+    /// not among the writes still pending.
     pub fn wait_for_sync(&self, tier: DurabilityTier) -> Result<()> {
         if tier == DurabilityTier::Local {
             self.open_jazz()?;
@@ -623,6 +627,82 @@ impl Drop for EndGuard {
     }
 }
 
+/// Resolves splice pages given as the whole value to the value's current
+/// length, read as the edit's writer sees it.
+async fn whole_pages(
+    client: &JazzClient,
+    table: &str,
+    id: jazz_app::ObjectId,
+    edits: Vec<jazz_app::jazz::db::LargeValueUpdate>,
+) -> jazz_app::Result<Vec<jazz_app::jazz::db::LargeValueUpdate>> {
+    use jazz_app::jazz::db::{LargeValueUpdate, LargeValueUpdatePage as Page};
+    use jazz_app::jazz::query as q;
+    let mut resolved = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let LargeValueUpdate::Splice {
+            column,
+            within,
+            splices,
+        } = edit
+        else {
+            resolved.push(edit);
+            continue;
+        };
+        let to = match &within {
+            Page::Bytes { to, .. } | Page::TextUtf8 { to, .. } | Page::TextUtf16 { to, .. } => *to,
+        };
+        if to != convert::WHOLE_VALUE {
+            resolved.push(LargeValueUpdate::Splice {
+                column,
+                within,
+                splices,
+            });
+            continue;
+        }
+        let mut query = q::Query::from(table);
+        query.filters.push(q::eq(
+            q::col("id"),
+            q::lit(jazz_app::jazz::records::Value::Uuid(*id.uuid())),
+        ));
+        query.select = Some(vec![column.clone()]);
+        let rows = client.query(query, ReadTier::LocalOnly).await?;
+        let value = rows
+            .into_iter()
+            .next()
+            .and_then(|row| row.fields.into_iter().find(|f| f.name == column))
+            .map(|field| field.value)
+            .ok_or_else(|| jazz_app::Error::Config(format!("no {table} row {id}")))?;
+        let len = |page: &Page| -> u64 {
+            match (&value, page) {
+                (Value::Text(text), Page::TextUtf16 { .. }) => text.encode_utf16().count() as u64,
+                (Value::Text(text), _) => text.len() as u64,
+                (Value::Bytea(bytes), _) => bytes.len() as u64,
+                _ => 0,
+            }
+        };
+        let within = match within {
+            page @ Page::Bytes { .. } => Page::Bytes {
+                from: 0,
+                to: len(&page),
+            },
+            page @ Page::TextUtf8 { .. } => Page::TextUtf8 {
+                from: 0,
+                to: len(&page),
+            },
+            page @ Page::TextUtf16 { .. } => Page::TextUtf16 {
+                from: 0,
+                to: len(&page),
+            },
+        };
+        resolved.push(LargeValueUpdate::Splice {
+            column,
+            within,
+            splices,
+        });
+    }
+    Ok(resolved)
+}
+
 fn take_tx(tx: u64) -> jazz_app::Result<(JazzTransaction, bool)> {
     TRANSACTIONS
         .with(|t| t.borrow_mut().0.remove(&tx))
@@ -649,9 +729,9 @@ async fn settle(
                     // Bounded for hosts that never call waitForSync: the
                     // oldest unchecked writes are left to the core's wait.
                     if unsynced.len() >= MAX_UNSYNCED {
-                        unsynced.remove(0);
+                        unsynced.pop_front();
                     }
-                    unsynced.push(committed);
+                    unsynced.push_back(committed);
                 });
                 if let Some(tier) = tier {
                     client.wait_for_transaction(committed, tier).await?;
@@ -667,8 +747,8 @@ const MAX_UNSYNCED: usize = 4096;
 
 thread_local! {
     /// The writes this app's client committed since its last waitForSync.
-    static UNSYNCED: RefCell<Vec<jazz_app::jazz::tools::TransactionId>> =
-        const { RefCell::new(Vec::new()) };
+    static UNSYNCED: RefCell<std::collections::VecDeque<jazz_app::jazz::tools::TransactionId>> =
+        const { RefCell::new(std::collections::VecDeque::new()) };
 }
 
 pub(crate) struct SubscriptionCore {
