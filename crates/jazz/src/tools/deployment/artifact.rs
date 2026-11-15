@@ -120,7 +120,7 @@ impl ArtifactError {
     }
 }
 
-const REGENERATE: &str = "regenerate it with `jazz-tools validate`";
+const REGENERATE: &str = "regenerate it with `jazz-tools generate`";
 
 // ============================================================================
 // Codegen metadata
@@ -278,6 +278,23 @@ impl LoadedApp {
         self.history.client_migrations()
     }
 
+    /// The body a backend `POST`s to `/apps/<id>/admin/bundles` at startup
+    /// (the server's `DeployRequest`, camelCase): the same deployment as
+    /// [`LoadedApp::deployment_request`], with migrations in their published
+    /// form.
+    pub fn deployment_body(&self, allow_dropping_history: bool) -> serde_json::Value {
+        serde_json::json!({
+            "targetSchemaHash": self.history.current.to_string(),
+            "schemas": self.history.schemas.iter().map(|(hash, schema)| PublishedSchema {
+                hash: hash.to_string(),
+                schema: schema.clone(),
+            }).collect::<Vec<_>>(),
+            "migrations": self.history.migrations,
+            "permissions": self.permissions,
+            "allowDroppingHistory": allow_dropping_history,
+        })
+    }
+
     /// What a backend publishes at startup.
     pub fn deployment_request(&self, allow_dropping_history: bool) -> DeploymentRequest {
         let schemas = self.history.schemas.clone();
@@ -338,6 +355,106 @@ pub fn load(app: &[u8], permissions: &[u8]) -> Result<LoadedApp, ArtifactError> 
             .into_iter()
             .map(|w| format!("{APP_FILE}: {w}"))
             .collect(),
+    })
+}
+
+/// The compiled app generated bindings embed (`{ schema, relations }`, the
+/// options they pass to `bindApp`), as a deployed backend has it when
+/// `jazz.app.json` isn't on disk.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoundApp {
+    schema: BoundSchema,
+    relations: BTreeMap<String, BTreeMap<String, BoundRelation>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoundSchema {
+    current: String,
+    schemas: Vec<PublishedSchema>,
+    migrations: Vec<PublishMigrationRequest>,
+    // The runtime's: which columns computed callbacks and transforms take.
+    #[serde(default)]
+    #[allow(dead_code)]
+    computed: Option<serde_json::Value>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    transforms: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum BoundRelation {
+    One { one: String, column: String },
+    Many { many: String, relation: String },
+}
+
+/// Read and check a backend's permissions against the compiled app its
+/// generated bindings embed (JSON of `{ schema, relations }`), with every
+/// check [`load`] runs: each schema matches its hash, the lenses pass a
+/// deployment's checks, the relations resolve and every policy compiles.
+pub fn load_backend(bound: &[u8], permissions: &[u8]) -> Result<LoadedApp, ArtifactError> {
+    let refuse = |message: String| {
+        ArtifactError::new(format!(
+            "the bindings' compiled app: {message}; regenerate them with `jazz-tools generate`"
+        ))
+    };
+    let bound: BoundApp =
+        serde_json::from_slice(bound).map_err(|error| refuse(error.to_string()))?;
+    let current = parse_schema_hash(&bound.schema.current).map_err(refuse)?;
+    let mut schemas = Vec::new();
+    for entry in bound.schema.schemas {
+        let hash = parse_schema_hash(&entry.hash).map_err(refuse)?;
+        let schema = structural(entry.schema);
+        if SchemaHash::compute(&schema) != hash {
+            return Err(refuse(format!("schema {hash} doesn't match its content")));
+        }
+        schemas.push((hash, schema));
+    }
+    if !schemas.iter().any(|(hash, _)| *hash == current) {
+        return Err(refuse(format!("no schema {current}, the current one")));
+    }
+    let history = History {
+        current,
+        schemas,
+        migrations: bound.schema.migrations,
+    };
+    check_decoded_client_migrations(history.bundle(), history.current)
+        .map_err(|error| refuse(format!("migrations: {error}")))?;
+    let mut codegen = Codegen::default();
+    for (table, relations) in bound.relations {
+        let entry = codegen.tables.entry(table).or_default();
+        for (name, relation) in relations {
+            entry.relations.insert(
+                name,
+                match relation {
+                    BoundRelation::One { one, column } => {
+                        CodegenRelation::Forward { table: one, column }
+                    }
+                    BoundRelation::Many { many, relation } => CodegenRelation::Reverse {
+                        table: many,
+                        relation,
+                    },
+                },
+            );
+        }
+    }
+    codegen.tables.retain(|_, t| !t.relations.is_empty());
+    check_codegen(&codegen, history.current_schema())
+        .map_err(|e| refuse(e.message().to_string()))?;
+    let relations = codegen.relations();
+    let permissions_json = read_format(PERMISSIONS_FILE, permissions)?;
+    let permissions =
+        permissions_file::read(&permissions_json, history.current_schema(), &relations)
+            .map_err(|refusal| ArtifactError::at(PERMISSIONS_FILE, refusal))?;
+    let bundle = compute_bundle(history.current_schema(), &permissions)?;
+    Ok(LoadedApp {
+        history,
+        bundle,
+        permissions,
+        codegen,
+        warnings: Vec::new(),
     })
 }
 
@@ -507,7 +624,7 @@ fn refuse_todos(root: &Json) -> Result<(), ArtifactError> {
         .collect();
     Err(ArtifactError::new(format!(
         "{} unresolved TODO{} left by `jazz-tools migrations create`; replace each with \
-         the value it asks for, then run `jazz-tools validate` again:\n{}",
+         the value it asks for, then run `jazz-tools generate` again:\n{}",
         todos.len(),
         if todos.len() == 1 { "" } else { "s" },
         list.join("\n")

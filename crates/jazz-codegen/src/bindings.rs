@@ -9,24 +9,32 @@ use jazz::tools::deployment::published::{PublishedSchema, parse_schema_hash};
 use jazz::tools::public_schema::{Schema, SchemaHash};
 
 use crate::model::App;
-use crate::{CodegenError, ts};
+use crate::{CodegenError, Lang, ts};
 
 /// What committed bindings record of the app they were generated from.
 #[derive(Debug, Clone)]
 pub struct Recorded {
     /// `sha256:…` of the `jazz.app.json` they were generated from.
     pub source: String,
+    /// The bindings format (e.g. [`ts::FORMAT`]) they were written in.
+    pub format: u32,
     /// That file's current schema.
     pub current: SchemaHash,
     pub current_schema: Schema,
 }
 
-/// Read what generated bindings embed. Only a module this generator wrote
-/// is read; anything else is refused with what to do.
-pub fn read(bindings: &str) -> Result<Recorded, CodegenError> {
+/// Read what bindings generated in `lang` embed. Only a file this
+/// generator wrote is read; anything else is refused with what to do.
+pub fn read(lang: Lang, bindings: &str) -> Result<Recorded, CodegenError> {
+    match lang {
+        Lang::TypeScript => read_ts(bindings),
+    }
+}
+
+fn read_ts(bindings: &str) -> Result<Recorded, CodegenError> {
     let refuse = |what: &str| {
         CodegenError::new(format!(
-            "{}: {what}; regenerate it with `jazz-tools validate`",
+            "{}: {what}; regenerate it with `jazz-tools generate`",
             ts::FILE
         ))
     };
@@ -35,6 +43,13 @@ pub fn read(bindings: &str) -> Result<Recorded, CodegenError> {
             "not a module jazz-tools generated (its first line differs)",
         ));
     }
+    let format = bindings
+        .lines()
+        .nth(1)
+        .and_then(|line| line.strip_prefix("// Bindings format "))
+        .and_then(|rest| rest.split('.').next())
+        .and_then(|n| n.parse::<u32>().ok())
+        .ok_or_else(|| refuse("no `// Bindings format <n>.` second line"))?;
     let call = bindings
         .find(ts::BIND_APP)
         .ok_or_else(|| refuse("no `export const app = bindApp<…>(…)`"))?;
@@ -75,6 +90,7 @@ pub fn read(bindings: &str) -> Result<Recorded, CodegenError> {
         return Err(refuse("the current schema doesn't match its hash"));
     }
     Ok(Recorded {
+        format,
         source,
         current,
         current_schema,
@@ -160,28 +176,34 @@ pub enum Staleness {
     /// `tables` changed since the bindings were generated and no migration
     /// leads from that version: `migrations create` is needed.
     SchemaChanged,
-    /// The file changed otherwise: regenerating is enough.
+    /// The file changed otherwise, or another Jazz version wrote them:
+    /// regenerating is enough. (Formatting doesn't make bindings stale:
+    /// only their `source` and format count.)
     OutOfDate,
 }
 
 impl Staleness {
-    pub fn message(&self) -> String {
+    pub fn message(&self, lang: Lang) -> String {
         match self {
-            Staleness::Missing => format!("no {}: run `jazz-tools validate`", ts::FILE),
+            Staleness::Missing => format!("no {}: run `jazz-tools generate`", lang.file()),
             Staleness::SchemaChanged => "the schema changed since the last version: run \
                  `jazz-tools migrations create --name <name>`"
                 .into(),
-            Staleness::OutOfDate => "bindings out of date: run `jazz-tools validate`".into(),
+            Staleness::OutOfDate => "bindings out of date: run `jazz-tools generate`".into(),
         }
     }
 }
 
-/// Whether `bindings` (the committed module, if any) fit `app`.
-pub fn staleness(app: &App, bindings: Option<&str>) -> Result<Option<Staleness>, CodegenError> {
+/// Whether `bindings` (the committed file in `lang`, if any) fit `app`.
+pub fn staleness(
+    app: &App,
+    lang: Lang,
+    bindings: Option<&str>,
+) -> Result<Option<Staleness>, CodegenError> {
     let Some(bindings) = bindings else {
         return Ok(Some(Staleness::Missing));
     };
-    let recorded = read(bindings)?;
+    let recorded = read(lang, bindings)?;
     if !app
         .compiled
         .schemas
@@ -190,7 +212,7 @@ pub fn staleness(app: &App, bindings: Option<&str>) -> Result<Option<Staleness>,
     {
         return Ok(Some(Staleness::SchemaChanged));
     }
-    if recorded.source != app.source {
+    if recorded.source != app.source || recorded.format != lang.format() {
         return Ok(Some(Staleness::OutOfDate));
     }
     Ok(None)
