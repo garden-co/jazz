@@ -1960,6 +1960,7 @@ dependencies = [
  "futures-util",
  "jazz",
  "jazz-alpha59-alpha60-dump",
+ "jazz-codegen",
  "jazz-native-transport",
  "jazz-otel",
  "jazz-server",
@@ -1983,6 +1984,15 @@ dependencies = [
  "tracing-subscriber",
  "tungstenite",
  "uuid",
+]
+
+[[package]]
+name = "jazz-codegen"
+version = "0.1.0"
+dependencies = [
+ "jazz",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2178,6 +2188,7 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "jazz",
+ "jazz-codegen",
  "jazz-native-relay",
  "jazz-otel",
  "jazz-server",
