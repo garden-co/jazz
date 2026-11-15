@@ -76,6 +76,16 @@ public enum JazzApp {
             self.name = name
         }
 
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.name == b.name
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(name)
+        }
+
         enum CodingKeys: Swift.String, Swift.CodingKey {
             case id
             case name = "name"
@@ -148,6 +158,18 @@ public enum JazzApp {
             self.body = body
             self.pinned = pinned
             self.folderId = folderId
+        }
+
+        /// Equal by id, columns and computed fields: included relations don't count.
+        public static func == (a: Self, b: Self) -> Swift.Bool {
+            a.id == b.id && a.body == b.body && a.pinned == b.pinned && a.folderId == b.folderId
+        }
+
+        public func hash(into hasher: inout Swift.Hasher) {
+            hasher.combine(id)
+            hasher.combine(body)
+            hasher.combine(pinned)
+            hasher.combine(folderId)
         }
 
         enum CodingKeys: Swift.String, Swift.CodingKey {

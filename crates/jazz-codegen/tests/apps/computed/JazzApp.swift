@@ -161,9 +161,9 @@ public enum JazzApp {
         public var score: Swift.Int
         public var dueAt: Swift.String?
         /// Computed from `score` by `JazzApp.Computed.tasksPriority`.
-        public var priority: TaskPriority
+        public internal(set) var priority: TaskPriority
         /// Computed from `title`, `dueAt` by `JazzApp.Computed.tasksLabel`.
-        public var label: Swift.String?
+        public internal(set) var label: Swift.String?
 
         public init(id: Jazz.ID, title: Swift.String, score: Swift.Int, dueAt: Swift.String?, priority: TaskPriority, label: Swift.String?) {
             self.id = id
