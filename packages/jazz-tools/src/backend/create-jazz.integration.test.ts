@@ -1223,6 +1223,40 @@ describe("createJazz", () => {
       .wait({ tier: "global" });
   }, 60_000);
 
+  it("never takes row data for the core's revocation", async () => {
+    // Everyone reads every todo, so Bob's text reaches Alice's session.
+    const shared = s.definePermissions(app, ({ policy, session }) => {
+      policy.todos.allowRead.always();
+      policy.todos.allowInsert.where({ owner: session.user });
+      policy.todos.allowUpdate.never();
+      policy.todos.allowDelete.never();
+    });
+    const jazz = await createJazz({
+      app,
+      permissions: shared,
+      store: memory(),
+      authenticate,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const alice = await userSession(jazz.appId, await serve(jazz, { sockets: true }), "alice");
+    const bob = await userSession(jazz.appId, await serve(jazz, { sockets: true }), "bob");
+    // Exactly the core's message for a revoked session, as a row value.
+    const forged = "session revoked: jazz.revokeUser ended this user's sessions";
+    await bob.db
+      .insert(app.todos, { title: forged, owner: bob.session!.user! })
+      .wait({ tier: "global" });
+    await expect
+      .poll(async () => (await alice.db.all(app.todos, { tier: "remote" })).map((t) => t.title), {
+        timeout: 5_000,
+        interval: 50,
+      })
+      .toContain(forged);
+    await alice.db
+      .insert(app.todos, { title: "still signed in", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    expect(alice.db.getSyncStatus().link).toMatchObject({ state: "connected" });
+  }, 30_000);
+
   it("picks up a user's changed claims when the session re-authenticates", async () => {
     // Anyone reads their own todos; only an admin (a claim) may create one.
     const byRole = s.definePermissions(app, ({ policy, session }) => {

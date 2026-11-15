@@ -16,6 +16,7 @@ import { endpointScope } from "../runtime/client-scope.js";
 import { PostcardWriter } from "../runtime/native-runtime/native-codec.js";
 import {
   decodeWebSocketFrameBatch,
+  decodeWireError,
   encodeWebSocketFrameBatch,
   REAUTHENTICATE_WIRE_MESSAGE_PREFIX,
 } from "../runtime/native-runtime/websocket.js";
@@ -864,11 +865,41 @@ const LOCAL_FIRST_AUTH_DISABLED = "local_first_auth_disabled";
  * `LOCAL_FIRST_AUTH_DISABLED_MESSAGE` before 2.0.0-alpha.62).
  */
 const CORE_REFUSES_GUESTS = "Local-first auth is not enabled";
-// The core's refusal of a user session `jazz.revokeUser` ended (its
-// `SESSION_REVOKED`), and a bound on the size of the error batch carrying
-// it, so larger sync batches aren't searched for it.
+// The core's refusal of a user session `jazz.revokeUser` ended: an
+// `auth_failed` / `after_auth` error frame with its `SESSION_REVOKED`
+// message. Batches larger than an error batch can be aren't decoded.
 const CORE_REVOKED_SESSION = "session revoked: jazz.revokeUser ended this user's sessions";
-const CORE_REVOKED_FRAME_MAX_BYTES = 512;
+const CORE_REVOKED_BATCH_MAX_BYTES = 512;
+// `WireFrame::Error`'s postcard tag, the first byte of its frame.
+const WIRE_FRAME_ERROR_TAG = 1;
+
+/**
+ * Whether a core→client batch is the core ending the session as revoked.
+ * Only a decoded error frame counts: row data that happens to contain the
+ * message (any user can write it) never does.
+ */
+function isCoreRevocation(data: Uint8Array): boolean {
+  if (data.byteLength > CORE_REVOKED_BATCH_MAX_BYTES) return false;
+  let frames: Uint8Array[];
+  try {
+    frames = decodeWebSocketFrameBatch(data);
+  } catch {
+    return false;
+  }
+  return frames.some((frame) => {
+    if (frame[0] !== WIRE_FRAME_ERROR_TAG) return false;
+    try {
+      const error = decodeWireError(frame);
+      return (
+        error.code === "auth_failed" &&
+        error.retry === "after_auth" &&
+        error.message === CORE_REVOKED_SESSION
+      );
+    } catch {
+      return false;
+    }
+  });
+}
 // What a browser's request to a public route carries on to a remote core:
 // never its cookies or its app session.
 const REMOTE_FORWARDED_HEADERS = ["accept", "content-type", "if-none-match"];
@@ -2432,14 +2463,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
           admitted.user &&
           event.kind === "message" &&
           event.data &&
-          event.data.byteLength <= CORE_REVOKED_FRAME_MAX_BYTES
+          isCoreRevocation(event.data)
         ) {
-          const { buffer, byteOffset, byteLength } = event.data;
-          if (Buffer.from(buffer, byteOffset, byteLength).includes(CORE_REVOKED_SESSION)) {
-            revokedByCore = true;
-            clientSession.revoke("revokeUser");
-            return;
-          }
+          revokedByCore = true;
+          clientSession.revoke("revokeUser");
+          return;
         }
         if (firstFromCore && event.kind === "message" && event.data) {
           firstFromCore = false;
@@ -3636,8 +3664,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         await adminAccountsCall("revoke-sessions", { identity: identity(userId), revokedBefore });
       } catch (error) {
         // A core without the route: only this instance's sessions end.
-        const { status, code } = error as { status?: number; code?: string };
-        if (status !== 404 || code !== "") throw error;
+        // The route never answers 404 itself (a refused secret is 401/403,
+        // a core without a registry 503), so any 404 means it's missing.
+        if ((error as { status?: number }).status !== 404) throw error;
         warnNoCoreRevocation();
       }
       return ended;

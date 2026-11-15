@@ -32,6 +32,18 @@ enum Request {
     Close(mpsc::Sender<Result<(), String>>),
 }
 
+/// A session revocation the registry recorded: `principal`'s sessions
+/// authenticated before `before_ms` (Unix ms) are revoked.
+#[derive(Clone, Debug)]
+pub(crate) struct SessionsRevoked {
+    pub(crate) principal: Principal,
+    pub(crate) before_ms: u64,
+}
+
+/// Revocations a slow subscriber may fall behind by before it re-checks its
+/// own user in the registry instead.
+const REVOCATIONS_BUFFERED: usize = 256;
+
 pub(crate) struct AccountRegistryOwner {
     sender: mpsc::Sender<Request>,
     closed: std::sync::atomic::AtomicBool,
@@ -39,10 +51,12 @@ pub(crate) struct AccountRegistryOwner {
     /// watch closes (and every subscriber re-checks and fails closed) if that
     /// thread exits for any reason, including a panic.
     changes: tokio::sync::watch::Receiver<u64>,
-    /// Like `changes`, for session revocations alone: live user sessions
-    /// watch this one, so sign-ups and links don't send every socket to the
-    /// owner thread.
-    revocations: tokio::sync::watch::Receiver<u64>,
+    /// Session revocations as they are recorded: the user and the mark in
+    /// force. Template receiver: the only sender lives on the owner thread,
+    /// so subscribers see the channel close if that thread exits. Live user
+    /// sessions filter by their own user, so a revocation costs other users'
+    /// sessions nothing (no registry lookup).
+    revocations: tokio::sync::broadcast::Receiver<SessionsRevoked>,
     #[cfg(test)]
     failpoint: Failpoint,
 }
@@ -52,7 +66,8 @@ impl AccountRegistryOwner {
     pub(crate) fn open(storage: HostSql) -> Result<Self, String> {
         let (sender, receiver) = mpsc::channel();
         let (notify, changes) = tokio::sync::watch::channel(0u64);
-        let (notify_revocation, revocations) = tokio::sync::watch::channel(0u64);
+        let (notify_revocation, revocations) =
+            tokio::sync::broadcast::channel(REVOCATIONS_BUFFERED);
         let (ready, opened) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("jazz-account-registry".into())
@@ -109,9 +124,16 @@ impl AccountRegistryOwner {
                         Request::RevokeSessions(principal, before_ms, response) => {
                             let result = registry.revoke_sessions(&principal, before_ms);
                             // As for commands: an `Unavailable` failure may
-                            // come after the write committed.
-                            notify_revocation
-                                .send_modify(|revision| *revision = revision.wrapping_add(1));
+                            // come after the write committed, so the user's
+                            // live sessions end on it too.
+                            let before_ms = match &result {
+                                Ok(in_force) => *in_force,
+                                Err(_) => before_ms,
+                            };
+                            let _ = notify_revocation.send(SessionsRevoked {
+                                principal,
+                                before_ms,
+                            });
                             let _ = response.send(result);
                         }
                         Request::SessionsRevokedBefore(principal, response) => {
@@ -166,11 +188,11 @@ impl AccountRegistryOwner {
         changes
     }
 
-    /// Session revocations, as `subscribe` gives registry changes.
-    pub(crate) fn subscribe_revocations(&self) -> tokio::sync::watch::Receiver<u64> {
-        let mut revocations = self.revocations.clone();
-        revocations.mark_unchanged();
-        revocations
+    /// Session revocations recorded from now on.
+    pub(crate) fn subscribe_revocations(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<SessionsRevoked> {
+        self.revocations.resubscribe()
     }
 
     /// End `principal`'s sessions authenticated before `before_ms`; returns

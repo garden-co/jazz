@@ -257,6 +257,77 @@ fn unix_now_ms() -> u64 {
         })
 }
 
+/// What a backend-stated user session listens to for `jazz.revokeUser`
+/// (compare [`AccountWatch`]).
+enum RevocationWatch {
+    /// Not a stated user session, or no registry: nothing to hear.
+    Unwatched,
+    /// Every recorded revocation, filtered to this session's user.
+    Registry {
+        revocation: SessionRevocation,
+        revocations: tokio::sync::broadcast::Receiver<crate::server::accounts::SessionsRevoked>,
+    },
+}
+
+/// Why [`RevocationWatch::wake`] returned.
+enum RevocationWake {
+    /// This session's user was revoked after it was authenticated.
+    Revoked,
+    /// Revocations were missed (the subscriber fell behind): look the user
+    /// up in the registry.
+    Recheck,
+    /// The registry owner is gone: fail closed.
+    RegistryGone,
+}
+
+impl RevocationWatch {
+    /// Subscribe *before* the admission's revocation check.
+    fn subscribe(
+        revocation: Option<SessionRevocation>,
+        accounts: Option<&crate::server::accounts::AccountRegistryOwner>,
+    ) -> Self {
+        match (revocation, accounts) {
+            (Some(revocation), Some(registry)) => Self::Registry {
+                revocation,
+                revocations: registry.subscribe_revocations(),
+            },
+            _ => Self::Unwatched,
+        }
+    }
+
+    /// Wait for a revocation that concerns this session. Other users'
+    /// revocations are skipped without a registry lookup, so a revocation
+    /// (or a transient registry failure while recording one) ends only the
+    /// revoked user's sessions.
+    async fn wake(&mut self) -> RevocationWake {
+        let Self::Registry {
+            revocation,
+            revocations,
+        } = self
+        else {
+            return std::future::pending().await;
+        };
+        loop {
+            match revocations.recv().await {
+                Ok(revoked) => {
+                    if revoked.principal == revocation.principal
+                        && revoked.before_ms > revocation.authenticated_at_ms
+                    {
+                        return RevocationWake::Revoked;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    return RevocationWake::Recheck;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    *self = Self::Unwatched;
+                    return RevocationWake::RegistryGone;
+                }
+            }
+        }
+    }
+}
+
 /// Whether `revocation`'s session is still admitted: no revocation mark for
 /// its user is past the time it was authenticated.
 async fn session_not_revoked(
@@ -1232,10 +1303,8 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     // A user session the backend stated watches session revocations alone,
     // subscribed before its first check for the same reason.
     let session_revocation = admission.revocation.clone();
-    let mut revocations = session_revocation
-        .as_ref()
-        .and(state.accounts.as_ref())
-        .map(|registry| registry.subscribe_revocations());
+    let mut revocations =
+        RevocationWatch::subscribe(session_revocation.clone(), state.accounts.as_ref());
     let admitted = match account_still_admitted(&state, account_identity).await {
         Ok(()) => session_not_revoked(&state, session_revocation.as_ref()).await,
         refused => refused,
@@ -1302,20 +1371,18 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         tokio::select! {
             _ = &mut writer_terminal => break,
             // `jazz.revokeUser`, from any backend instance: an idle session
-            // ends at once too, not on its next message. A closed watch (the
-            // registry owner is gone) fails the lookup, and the session ends.
-            _ = async {
-                match &mut revocations {
-                    Some(revocations) => {
-                        let _ = revocations.changed().await;
+            // ends at once too, not on its next message.
+            wake = revocations.wake() => {
+                let refused = match wake {
+                    RevocationWake::Revoked => Err(super::accounts::AdmissionError::Revoked),
+                    RevocationWake::Recheck => {
+                        session_not_revoked(&state, session_revocation.as_ref()).await
                     }
-                    None => std::future::pending().await,
-                }
-            } => {
-                if let Some(revocations) = &mut revocations {
-                    revocations.borrow_and_update();
-                }
-                if let Err(error) = session_not_revoked(&state, session_revocation.as_ref()).await {
+                    RevocationWake::RegistryGone => {
+                        Err(super::accounts::AdmissionError::Unavailable)
+                    }
+                };
+                if let Err(error) = refused {
                     queue_ws_error(&writer_tx, error.into_wire());
                     break;
                 }
