@@ -262,8 +262,9 @@ impl JazzHandle {
         })())
     }
 
-    /// Writes the row with this id: inserts it, or replaces its columns.
-    /// `row_json` is a whole row, as for an insert. Returns the row.
+    /// Writes the row with this id: a new id inserts (`row_json` then holds
+    /// every required column), an existing one sets the columns `row_json`
+    /// names. Returns the row.
     pub fn upsert(&self, table: String, id: String, row_json: String) -> Result<String> {
         self.core.surface(
             self.core

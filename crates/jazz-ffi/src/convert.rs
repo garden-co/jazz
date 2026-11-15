@@ -586,6 +586,17 @@ fn level(
                 chosen.push(name.to_owned());
             }
         }
+        // A column read in part and also whole is ambiguous: refused.
+        if let Some(both) = parts.partial.iter().find(|part| {
+            select
+                .iter()
+                .any(|entry| entry.as_str() == Some(part.column.as_str()))
+        }) {
+            return Err(refused(format!(
+                "{path}select names {} both whole and in part",
+                both.column
+            )));
+        }
         if !every {
             parts.select = Some(chosen);
         }
