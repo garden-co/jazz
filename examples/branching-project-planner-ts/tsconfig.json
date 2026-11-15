@@ -6,5 +6,5 @@
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["src", "schema.ts", "permissions.ts"]
+  "include": ["src", "jazz.generated.ts"]
 }

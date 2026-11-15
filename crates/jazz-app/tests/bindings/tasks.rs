@@ -1,10 +1,10 @@
 // jazz_app.rs: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 1. Regenerate it after changing jazz.app.json.
+// Bindings format 2. Regenerate it after changing jazz.app.json.
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(dead_code, clippy::all)]
 
 /// The `jazz.app.json` these bindings were generated from.
-pub const SOURCE: &str = "sha256:c2e939bfae37d7cc77d7ad26ad13f5532e06e6768f9ad0d6a28ab7195fdf62e7";
+pub const SOURCE: &str = "sha256:1c1db189429eef6aba3a44f8859e504af087390619f4a24125495f51d224eae4";
 
 /// The values of column `tasks.priority`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -28,20 +28,35 @@ pub enum TaskPriority {
 pub struct Box {
     pub id: ::jazz_app::ObjectId,
     pub label: ::std::string::String,
+    pub query: ::std::option::Option<::std::string::String>,
     pub task: ::std::option::Option<::jazz_app::ObjectId>,
 }
 
-/// A new row of `boxes`.
-#[derive(Debug, Clone, PartialEq, Default)]
+/// A new row of `boxes`: [`NewBox::new`] takes the columns it requires.
+#[derive(Debug, Clone, PartialEq)]
 pub struct NewBox {
     pub label: ::std::string::String,
+    pub query: ::std::option::Option<::std::string::String>,
     pub task: ::std::option::Option<::jazz_app::ObjectId>,
+}
+
+impl NewBox {
+    /// A new row with the columns it requires, in this order: `label`. The others
+    /// are left out; set them with `NewBox { column: …, ..NewBox::new(…) }`.
+    pub fn new(label: impl ::std::convert::Into<::std::string::String>) -> Self {
+        Self {
+            label: label.into(),
+            query: ::std::option::Option::None,
+            task: ::std::option::Option::None,
+        }
+    }
 }
 
 /// Changes to a row of `boxes`: a `None` field leaves its column as it is.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BoxUpdate {
     pub label: ::std::option::Option<::std::string::String>,
+    pub query: ::std::option::Option<::std::option::Option<::std::string::String>>,
     pub task: ::std::option::Option<::std::option::Option<::jazz_app::ObjectId>>,
 }
 
@@ -52,10 +67,12 @@ impl ::jazz_app::Table for Box {
 
     fn decode(row: &mut ::jazz_app::Fields<'_>) -> ::jazz_app::Result<Self> {
         let label = row.take::<::std::string::String>("label")?;
+        let query = row.take::<::std::option::Option<::std::string::String>>("query")?;
         let task = row.take::<::std::option::Option<::jazz_app::ObjectId>>("task")?;
         ::std::result::Result::Ok(Self {
             id: row.id(),
             label,
+            query,
             task,
         })
     }
@@ -75,6 +92,8 @@ impl ::jazz_app::Insert for NewBox {
         let mut cells = ::std::collections::HashMap::new();
         let value = self.label;
         cells.insert("label".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        let value = self.query;
+        cells.insert("query".to_owned(), ::jazz_app::ColumnValue::into_value(value));
         let value = self.task;
         cells.insert("task".to_owned(), ::jazz_app::ColumnValue::into_value(value));
         ::std::result::Result::Ok(cells)
@@ -91,6 +110,9 @@ impl ::jazz_app::Update for BoxUpdate {
         let mut cells = ::std::vec::Vec::new();
         if let ::std::option::Option::Some(value) = self.label {
             cells.push(("label".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+        }
+        if let ::std::option::Option::Some(value) = self.query {
+            cells.push(("query".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
         }
         if let ::std::option::Option::Some(value) = self.task {
             cells.push(("task".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
@@ -109,9 +131,19 @@ pub mod boxes {
         ::jazz_app::Query::all()
     }
 
+    /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
+    pub fn id() -> ::jazz_app::Column<Box, ::jazz_app::ObjectId> {
+        ::jazz_app::id()
+    }
+
     /// Column `label`.
     pub fn label() -> ::jazz_app::Column<Box, ::std::string::String> {
         ::jazz_app::Column::new("label")
+    }
+
+    /// Column `query`.
+    pub fn query_column() -> ::jazz_app::Column<Box, ::std::option::Option<::std::string::String>> {
+        ::jazz_app::Column::new("query")
     }
 
     /// Column `task`.
@@ -132,12 +164,14 @@ pub struct Task {
     pub due_at: ::std::option::Option<::std::string::String>,
     pub tags: ::std::vec::Vec<::std::string::String>,
     pub meta: ::std::option::Option<::jazz_app::Json>,
+    pub notes: ::std::option::Option<::std::string::String>,
+    pub attachment: ::std::option::Option<::std::vec::Vec<u8>>,
     /// Computed from `score`, `priority`.
     pub urgent: bool,
 }
 
-/// A new row of `tasks`.
-#[derive(Debug, Clone, PartialEq, Default)]
+/// A new row of `tasks`: [`NewTask::new`] takes the columns it requires.
+#[derive(Debug, Clone, PartialEq)]
 pub struct NewTask {
     pub title: ::std::string::String,
     /// `None` stores the column's default.
@@ -148,6 +182,26 @@ pub struct NewTask {
     pub due_at: ::std::option::Option<::std::string::String>,
     pub tags: ::std::vec::Vec<::std::string::String>,
     pub meta: ::std::option::Option<::jazz_app::Json>,
+    pub notes: ::std::option::Option<::std::string::String>,
+    pub attachment: ::std::option::Option<::std::vec::Vec<u8>>,
+}
+
+impl NewTask {
+    /// A new row with the columns it requires, in this order: `title`, `score`, `tags`. The others
+    /// are left out; set them with `NewTask { column: …, ..NewTask::new(…) }`.
+    pub fn new(title: impl ::std::convert::Into<::std::string::String>, score: impl ::std::convert::Into<i32>, tags: impl ::std::convert::Into<::std::vec::Vec<::std::string::String>>) -> Self {
+        Self {
+            title: title.into(),
+            priority: ::std::option::Option::None,
+            score: score.into(),
+            r#type: ::std::option::Option::None,
+            due_at: ::std::option::Option::None,
+            tags: tags.into(),
+            meta: ::std::option::Option::None,
+            notes: ::std::option::Option::None,
+            attachment: ::std::option::Option::None,
+        }
+    }
 }
 
 /// Changes to a row of `tasks`: a `None` field leaves its column as it is.
@@ -161,6 +215,8 @@ pub struct TaskUpdate {
     pub due_at: ::std::option::Option<::std::option::Option<::std::string::String>>,
     pub tags: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
     pub meta: ::std::option::Option<::std::option::Option<::jazz_app::Json>>,
+    pub notes: ::std::option::Option<::std::option::Option<::std::string::String>>,
+    pub attachment: ::std::option::Option<::std::option::Option<::std::vec::Vec<u8>>>,
 }
 
 impl ::jazz_app::Table for Task {
@@ -177,6 +233,8 @@ impl ::jazz_app::Table for Task {
         let due_at = row.take::<::std::option::Option<::jazz_app::Timestamp>>("dueAt")?.map(|stored| computed.iso_date_view(stored));
         let tags = row.take::<::std::vec::Vec<::std::string::String>>("tags")?;
         let meta = row.take::<::std::option::Option<::jazz_app::Json>>("meta")?;
+        let notes = row.take::<::std::option::Option<::std::string::String>>("notes")?;
+        let attachment = row.take::<::std::option::Option<::std::vec::Vec<u8>>>("attachment")?;
         let urgent = computed.tasks_urgent(score.clone(), priority.clone());
         ::std::result::Result::Ok(Self {
             id: row.id(),
@@ -187,6 +245,8 @@ impl ::jazz_app::Table for Task {
             due_at,
             tags,
             meta,
+            notes,
+            attachment,
             urgent,
         })
     }
@@ -220,6 +280,10 @@ impl ::jazz_app::Insert for NewTask {
         cells.insert("tags".to_owned(), ::jazz_app::ColumnValue::into_value(value));
         let value = self.meta;
         cells.insert("meta".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        let value = self.notes;
+        cells.insert("notes".to_owned(), ::jazz_app::ColumnValue::into_value(value));
+        let value = self.attachment;
+        cells.insert("attachment".to_owned(), ::jazz_app::ColumnValue::into_value(value));
         ::std::result::Result::Ok(cells)
     }
 }
@@ -254,6 +318,12 @@ impl ::jazz_app::Update for TaskUpdate {
         if let ::std::option::Option::Some(value) = self.meta {
             cells.push(("meta".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
         }
+        if let ::std::option::Option::Some(value) = self.notes {
+            cells.push(("notes".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+        }
+        if let ::std::option::Option::Some(value) = self.attachment {
+            cells.push(("attachment".to_owned(), ::jazz_app::ColumnValue::into_value(value)));
+        }
         ::std::result::Result::Ok(cells)
     }
 }
@@ -266,6 +336,11 @@ pub mod tasks {
     /// Every row of `tasks`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<Task> {
         ::jazz_app::Query::all()
+    }
+
+    /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
+    pub fn id() -> ::jazz_app::Column<Task, ::jazz_app::ObjectId> {
+        ::jazz_app::id()
     }
 
     /// Column `title`.
@@ -302,6 +377,16 @@ pub mod tasks {
     pub fn meta() -> ::jazz_app::Column<Task, ::std::option::Option<::jazz_app::Json>> {
         ::jazz_app::Column::new("meta")
     }
+
+    /// Column `notes`.
+    pub fn notes() -> ::jazz_app::Column<Task, ::std::option::Option<::std::string::String>> {
+        ::jazz_app::Column::new("notes")
+    }
+
+    /// Column `attachment`.
+    pub fn attachment() -> ::jazz_app::Column<Task, ::std::option::Option<::std::vec::Vec<u8>>> {
+        ::jazz_app::Column::new("attachment")
+    }
 }
 
 /// What the app's code computes: each computed field `jazz.app.json`
@@ -325,7 +410,7 @@ pub const APP: &str = r#"{
   "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
   "format": 1,
   "tables": {
-    "boxes": { "columns": { "label": "string", "task": { "type": "uuid", "optional": true, "references": "tasks" } } },
+    "boxes": { "columns": { "label": "string", "query": "string?", "task": { "type": "uuid", "optional": true, "references": "tasks" } } },
     "tasks": {
       "columns": {
         "title": "string",
@@ -334,7 +419,9 @@ pub const APP: &str = r#"{
         "type": "string?",
         "dueAt": { "type": "timestamp", "optional": true, "transform": "isoDate" },
         "tags": { "array": "string" },
-        "meta": { "json": true, "optional": true }
+        "meta": { "json": true, "optional": true },
+        "notes": { "type": "string", "optional": true, "merge": "text" },
+        "attachment": "bytes?"
       },
       "computed": { "urgent": { "type": "boolean", "from": ["score", "priority"] } }
     }

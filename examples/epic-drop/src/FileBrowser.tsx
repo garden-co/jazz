@@ -15,7 +15,7 @@ import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { useToast } from "@astryxdesign/core/Toast";
 import { TopNav, TopNavHeading } from "@astryxdesign/core/TopNav";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 import { fileTableQuery } from "./file-list-query.js";
 import { FolderIndex } from "./folders.js";
 import { readFileBlob, saveBlob } from "./large-values.js";

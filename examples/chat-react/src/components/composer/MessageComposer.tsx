@@ -6,7 +6,7 @@ import { Editor, type EditorHandle } from "@/components/editor/Editor";
 import { Button } from "@/components/ui/button";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { waitForWrite } from "@/lib/db-write";
-import { app } from "../../../schema.js";
+import { app } from "../../../jazz.generated.js";
 import { DurabilityTier } from "jazz-tools";
 
 interface MessageComposerProps {

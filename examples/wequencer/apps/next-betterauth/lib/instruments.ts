@@ -1,4 +1,4 @@
-import type { Instrument } from "@/schema";
+import type { TrackInstrument as Instrument } from "@/jazz.generated";
 
 export const MAX_TRACKS = 16;
 export const MAX_STEPS = 64;

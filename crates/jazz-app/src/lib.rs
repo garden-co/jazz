@@ -23,26 +23,33 @@
 mod app;
 mod backend;
 mod config;
+mod edit;
 mod end_user;
 mod error;
 mod handle;
+mod large;
 mod query;
 mod subscription;
 mod table;
+mod transaction;
 mod value;
+mod writes;
 
 pub use app::AppFiles;
 pub use config::{Backend, Config, Storage};
+pub use edit::TextColumn;
 pub use end_user::{EndUser, TokenFuture};
 pub use error::{Error, Result};
-pub use handle::{Jazz, Transaction};
-pub use query::{Column, Condition, Many, One, Order, Query};
+pub use handle::Jazz;
+pub use large::{JsonColumn, LargeColumn, Page, Splice};
+pub use query::{Column, Condition, Many, One, Order, Query, created_at, id, updated_at};
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
 pub use table::{Fields, Implementations, Insert, Table, Update};
+pub use transaction::Transaction;
 pub use value::{ColumnValue, Json, Timestamp};
 
 pub use jazz::account_registry::AccountId;
-pub use jazz::tools::{AppId, ObjectId, ReadTier};
+pub use jazz::tools::{AppId, DurabilityTier, ObjectId, ReadTier};
 
 /// The `jazz` crate, for generated code and [`Jazz::with_client`].
 #[doc(hidden)]

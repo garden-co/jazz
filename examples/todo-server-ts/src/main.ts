@@ -17,8 +17,8 @@ import {
   type Db,
   type JazzStore,
 } from "jazz-tools/backend";
-import { app as schemaApp } from "../schema.js";
-import permissions from "../permissions.js";
+import { app as schemaApp } from "../jazz.generated.js";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 // ============================================================================
 // Types
 // ============================================================================

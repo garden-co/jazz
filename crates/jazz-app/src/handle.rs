@@ -11,10 +11,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use futures_util::FutureExt as _;
 use jazz::account_registry::AccountId;
 use jazz::tools::{
-    AppContext, AppId, ClientStorage, JazzClient, ObjectId, QueryResult, ReadTier, Session,
-    TableName,
+    AppContext, AppId, ClientStorage, DurabilityTier, JazzClient, ObjectId, QueryResult, ReadTier,
+    Session, TableName, TransactionId,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -29,7 +30,7 @@ use crate::table::{self, Implementations, Insert, Table, Update};
 
 type Job = Box<dyn FnOnce(JazzClient) -> Pin<Box<dyn Future<Output = ()>>> + Send>;
 
-enum Command {
+pub(crate) enum Command {
     Run(Job),
     Shutdown(oneshot::Sender<Result<()>>),
 }
@@ -48,14 +49,19 @@ const BACKEND_ISSUER: &str = "jazz:backend";
 /// (including those held by subscriptions) is dropped.
 #[derive(Clone)]
 pub struct Jazz {
-    commands: mpsc::UnboundedSender<Command>,
-    info: Arc<Info>,
+    pub(crate) commands: mpsc::UnboundedSender<Command>,
+    pub(crate) info: Arc<Info>,
+    /// The tier this handle's writes wait for ([`Jazz::durable`]); `None`
+    /// returns once a write is committed locally.
+    pub(crate) durability: Option<DurabilityTier>,
 }
 
-struct Info {
+pub(crate) struct Info {
     bundle: Option<String>,
     account: Option<AccountId>,
-    implementations: Implementations,
+    pub(crate) implementations: Implementations,
+    /// No server: nothing confirms a write past the local store.
+    pub(crate) serverless: bool,
 }
 
 impl std::fmt::Debug for Jazz {
@@ -114,6 +120,7 @@ impl Jazz {
                     .into(),
             ));
         }
+        let serverless = config.server_url.is_none();
         let (commands, receiver) = mpsc::unbounded_channel();
         let (ready, opened) = oneshot::channel();
         std::thread::Builder::new()
@@ -127,7 +134,9 @@ impl Jazz {
                 bundle,
                 account,
                 implementations,
+                serverless,
             }),
+            durability: None,
         })
     }
 
@@ -153,13 +162,32 @@ impl Jazz {
         let (reply, answer) = oneshot::channel();
         let job: Job = Box::new(move |client| {
             Box::pin(async move {
-                let _ = reply.send(job(client).await);
+                // A panic in the job is its caller's error, not the end of
+                // the client: the other jobs and the client run on.
+                // Calling `job` happens inside the guard too: a closure
+                // that panics before returning its future is caught.
+                let result = std::panic::AssertUnwindSafe(async move { job(client).await })
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|panic| Err(Error::Panicked(panic_message(&*panic))));
+                let _ = reply.send(result);
             })
         });
         self.commands
             .send(Command::Run(job))
             .map_err(|_| Error::Stopped)?;
         answer.await.map_err(|_| Error::Stopped)?
+    }
+
+    /// Sends `job` to the client's thread without waiting for it: for
+    /// cleanups that must run even when nobody awaits them (from `Drop`).
+    pub(crate) fn fire<F, Fut>(&self, job: F)
+    where
+        F: FnOnce(JazzClient) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + 'static,
+    {
+        let job: Job = Box::new(move |client| Box::pin(job(client)));
+        let _ = self.commands.send(Command::Run(job));
     }
 
     /// Every row `query` matches, reading local data first.
@@ -190,61 +218,40 @@ impl Jazz {
         self.one(Query::<T>::all().id(id)).await
     }
 
-    /// Inserts a row, committing it locally. Returns it as stored.
+    /// Inserts a row. Returns it as stored, once committed locally (or, on
+    /// a [`Jazz::durable`] handle, once it reached that tier).
+    ///
+    /// Like every write, it is sent to the client's thread when called:
+    /// dropping the returned future doesn't undo or cancel it.
     pub async fn insert<N: Insert>(&self, new: N) -> Result<N::Row> {
         let implementations = self.info.implementations.clone();
-        self.with_client(move |client| async move { insert(&client, new, &implementations) })
-            .await
+        let settle = self.settler()?;
+        self.with_client(move |client| async move {
+            let (row, written) = insert(&client, new, &implementations)?;
+            settle.settle(&client, written).await?;
+            Ok(row)
+        })
+        .await
     }
 
     /// Updates the row with this id.
     pub async fn update<U: Update>(&self, id: ObjectId, update: U) -> Result<()> {
         let implementations = self.info.implementations.clone();
+        let settle = self.settler()?;
         self.with_client(move |client| async move {
             let cells = update.into_cells(&implementations)?;
-            client.update(<U::Row as Table>::NAME, id, cells)?;
-            Ok(())
+            let written = client.update(<U::Row as Table>::NAME, id, cells)?;
+            settle.settle(&client, written).await
         })
         .await
     }
 
     /// Deletes the row of `T` with this id.
     pub async fn delete<T: Table>(&self, id: ObjectId) -> Result<()> {
+        let settle = self.settler()?;
         self.with_client(move |client| async move {
-            client.delete(T::NAME, id)?;
-            Ok(())
-        })
-        .await
-    }
-
-    /// Runs `writes` in a serializable transaction: committed if it returns
-    /// `Ok` (and wrote anything), rolled back if it returns `Err`.
-    pub async fn transaction<F, R>(&self, writes: F) -> Result<R>
-    where
-        F: FnOnce(&Transaction) -> Result<R> + Send + 'static,
-        R: Send + 'static,
-    {
-        let implementations = self.info.implementations.clone();
-        self.with_client(move |client| async move {
-            let transaction = Transaction {
-                inner: client.begin_transaction()?,
-                wrote: std::cell::Cell::new(false),
-                implementations,
-            };
-            match writes(&transaction) {
-                Ok(result) => {
-                    if transaction.wrote.get() {
-                        transaction.inner.commit()?;
-                    } else {
-                        transaction.inner.rollback()?;
-                    }
-                    Ok(result)
-                }
-                Err(error) => {
-                    transaction.inner.rollback()?;
-                    Err(error)
-                }
-            }
+            let written = client.delete(T::NAME, id)?;
+            settle.settle(&client, written).await
         })
         .await
     }
@@ -289,41 +296,15 @@ impl Jazz {
     }
 }
 
-/// Writes staged in a [`Jazz::transaction`].
-pub struct Transaction {
-    inner: jazz::tools::JazzTransaction,
-    wrote: std::cell::Cell<bool>,
-    implementations: Implementations,
-}
-
-impl Transaction {
-    pub fn insert<N: Insert>(&self, new: N) -> Result<N::Row> {
-        let row = insert(self.inner.client(), new, &self.implementations)?;
-        self.wrote.set(true);
-        Ok(row)
-    }
-
-    pub fn update<U: Update>(&self, id: ObjectId, update: U) -> Result<()> {
-        let cells = update.into_cells(&self.implementations)?;
-        self.inner.update(<U::Row as Table>::NAME, id, cells)?;
-        self.wrote.set(true);
-        Ok(())
-    }
-
-    pub fn delete<T: Table>(&self, id: ObjectId) -> Result<()> {
-        self.inner.delete(T::NAME, id)?;
-        self.wrote.set(true);
-        Ok(())
-    }
-}
-
-fn insert<N: Insert>(
+/// Inserts `new`, returning it as stored and its write (none when staged in
+/// a transaction).
+pub(crate) fn insert<N: Insert>(
     client: &JazzClient,
     new: N,
     implementations: &Implementations,
-) -> Result<N::Row> {
+) -> Result<(N::Row, Option<TransactionId>)> {
     let name = <N::Row as Table>::NAME;
-    let (id, values, _) = client.insert(name, new.into_cells(implementations)?)?;
+    let (id, values, written) = client.insert(name, new.into_cells(implementations)?)?;
     let schema = client.schema()?;
     let table = schema
         .get(&TableName::new(name))
@@ -338,10 +319,13 @@ fn insert<N: Insert>(
             value,
         })
         .collect();
-    table::decode(id, fields, implementations)
+    Ok((table::decode(id, fields, implementations)?, written))
 }
 
-fn decode_result<T: Table>(row: QueryResult, implementations: &Implementations) -> Result<T> {
+pub(crate) fn decode_result<T: Table>(
+    row: QueryResult,
+    implementations: &Implementations,
+) -> Result<T> {
     let id = row.key.row_id().ok_or_else(|| Error::Decode {
         table: T::NAME,
         message: "a joined result is not a row".into(),
@@ -445,6 +429,14 @@ fn run(
             });
         }
     });
+}
+
+pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic without a message".to_owned())
 }
 
 type Opened = (Option<String>, Option<AccountId>);

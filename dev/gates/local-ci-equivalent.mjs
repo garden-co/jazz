@@ -44,7 +44,10 @@ export const ciPartitionJobs = Object.freeze({
   "storage-compat": "test-storage-compat",
   "durable-object-limits": "test-storage-compat",
   typescript: "test-ts",
+  "next-trace-decide": "test-next-trace",
+  "next-trace": "test-next-trace",
   "react-native": "test-react-native",
+  "jazz-ffi-bindings": "test-jazz-ffi-bindings",
 });
 
 const command = (label, executable, args, options = {}) =>
@@ -176,6 +179,9 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
+    // jazz-ffi's C ABI from a C program linking its staticlib, and the Swift
+    // and Kotlin sources uniffi-bindgen generates (target/jazz-ffi-bindings).
+    command("jazz-ffi C ABI and UniFFI bindings", "bash", ["dev/gates/jazz-ffi.sh"]),
     // Runs after the workspace tests with the same feature selection, so its
     // `cargo nextest list` reuses the test binaries that were just built.
     command("ignored-test inventory", "node", ["dev/gates/ignored-tests.mjs"]),
@@ -237,6 +243,26 @@ export const ciPartitions = Object.freeze({
       "run",
       "typecheck",
     ]),
+    // A stale or missing jazz.generated.ts otherwise shows only when a backend
+    // starts: `jazz-tools generate --check` in every example app, with the
+    // CLI and the sealed jazz-napi this partition built.
+    command("example bindings", "node", [
+      "dev/gates/run-correctness-consumer.mjs",
+      "--",
+      "node",
+      "dev/gates/example-bindings.mjs",
+    ]),
+  ]),
+  // Whether a ready PR runs the Next.js trace test (B65-1): it touches how a
+  // backend reaches jazz-napi. Writes `run=true|false` to $GITHUB_OUTPUT for
+  // the test-next-trace job's later steps; outside a PR it always says run.
+  "next-trace-decide": Object.freeze([
+    command("Next.js trace decision", "node", ["dev/gates/next-trace.mjs", "--decide"]),
+  ]),
+  // The Next.js trace test alone. The typescript partition runs it too,
+  // inside the jazz-tools package's `test`.
+  "next-trace": Object.freeze([
+    command("Next.js trace of a createJazz route", "node", ["dev/gates/next-trace.mjs"]),
   ]),
   "react-native": Object.freeze([
     // React Native's bridge is deliberately opt-in. This producer must be
@@ -298,6 +324,13 @@ export const ciPartitions = Object.freeze({
       "--workspace",
       "--features",
       "jazz/durable-object-limits",
+    ]),
+  ]),
+  // jazz-ffi's generated Kotlin and Swift, compiled with smoke programs and
+  // run against the library (needs a JDK and swiftc: the runner image).
+  "jazz-ffi-bindings": Object.freeze([
+    command("jazz-ffi Kotlin and Swift bindings", "bash", [
+      "dev/gates/jazz-ffi-compile-bindings.sh",
     ]),
   ]),
 });

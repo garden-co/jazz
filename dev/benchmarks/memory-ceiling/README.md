@@ -103,8 +103,8 @@ An adapter is a module next to the app, default-exporting:
 ```ts
 export default {
   name: "big-label",
-  app,          // the app's `defineApp(...)`
-  permissions,  // the app's `definePermissions(...)`
+  app,          // the `app` from the app's jazz.generated.ts
+  permissions,  // the app's jazz.permissions.json, imported as JSON
   scenarios: {
     labels: {
       unit: "labels",                    // what the ceiling is counted in

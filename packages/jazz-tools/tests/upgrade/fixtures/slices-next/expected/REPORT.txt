@@ -1,0 +1,26 @@
+Wrote:
+  jazz.app.json
+  app-extras.ts
+  jazz.generated.ts
+  app/demo.html
+  app/page.tsx
+  lib/backend.ts
+  tsconfig.json
+Deleted:
+  migrations/index.ts
+  permissions.ts
+  schema.ts
+Rewrote:
+  app/demo.html:5: ../schema.js → ../jazz.generated.js
+  app/page.tsx:1: @/schema → @/jazz.generated + @/app-extras
+  app/page.tsx:3: full.slice("cards") → full (schema slicing is gone)
+  lib/backend.ts:3: @/schema → @/jazz.generated
+  lib/backend.ts:4: permissions now come from jazz.permissions.json
+  lib/backend.ts:8: s.InsertOf<typeof app.cards> → CardInsert
+  lib/backend.ts:9: s.RowOf<typeof app.boards> → Board
+  lib/backend.ts:2: dropped the schema DSL import
+  tsconfig.json: include "schema.ts" → "jazz.generated.ts"
+  tsconfig.json: dropped "permissions.ts" from include
+  tsconfig.json: "resolveJsonModule": true, for the jazz.permissions.json import
+Notes:
+  Dropped `slices` (app, boardsOnly) from jazz.app.json: schema slicing is gone.

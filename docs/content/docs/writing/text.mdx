@@ -13,21 +13,24 @@ keeps both changes.
 Opt a string column into a text merge strategy. Use Markdown for prose unless you have a reason not
 to:
 
-```ts title="schema.ts"
-import { schema as s } from "jazz-tools";
-
-const schema = {
-  notes: s.table(
-    {
-      title: s.string(), // one value: a concurrent edit replaces it whole
-      body: s.string().merge("markdown"),
-    },
-    {},
-  ),
-};
+```json title="jazz.app.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "notes": {
+      "columns": {
+        "title": "string",
+        "body": { "type": "string", "merge": "markdown" }
+      }
+    }
+  }
+}
 ```
 
-`merge("text")` and `merge("html")` are the other two strategies. They differ in which pieces a
+`title` keeps one value: a concurrent edit replaces it whole. `body` merges.
+
+`"merge": "text"` and `"merge": "html"` are the other two strategies. They differ in which pieces a
 merge keeps whole: words and punctuation for all three, plus markup runs and link targets for
 Markdown, and whole tags and entities for HTML. See
 [Column types](/docs/schemas/column-types#mergeable-text-columns) for the full rules and for optional
@@ -95,7 +98,7 @@ const found = anchors.resolveRange(range, latestBody);
 // found.start, found.end, found.confidence, found.ambiguous
 ```
 
-- Anchors and ranges are plain JSON, so store them in a `s.json()` column next to the text, or send
+- Anchors and ranges are plain JSON, so store them in a `{ "json": true }` column next to the text, or send
   them as presence.
 - `confidence` falls as the text under them changes, and `ambiguous` says another place matched
   about as well. When confidence is very low, the text is gone: show the comment as orphaned rather

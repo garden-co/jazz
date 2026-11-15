@@ -10,9 +10,22 @@ After [user-owned data](/docs/recipes/access-control/user-owned-data), the next 
 
 Add a `todoShares` table that records which user has access to which todo.
 
-<include cwd lang="ts" meta='title="schema.ts"'>
-  ../examples/docs/todo-client-localfirst-react/src/shared-access-snippets.tsx#shared-schema
-</include>
+```json title="jazz.app.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "todos": {
+      "columns": { "title": "string", "done": "boolean" },
+      "relations": { "shares": { "reverse": "todoShares", "relation": "todo" } }
+    },
+    "todoShares": {
+      "columns": { "todoId": "uuid", "user_id": "uuid", "can_edit": "boolean" },
+      "relations": { "todo": { "rel": "todos", "column": "todoId" } }
+    }
+  }
+}
+```
 
 ## Permissions
 
@@ -20,11 +33,48 @@ The creator can do everything. Share recipients get read access, and optionally 
 A share row is readable by its recipient and by the todo's creator, who needs it to list and revoke
 access.
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-client-localfirst-react/src/shared-access-snippets.tsx#shared-permissions
-</include>
+```json title="jazz.permissions.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "todos": {
+      "read": {
+        "anyOf": [
+          "$createdBy.account = session.user",
+          "exists todoShares(todoId = this.id, user_id = session.user)"
+        ]
+      },
+      "insert": "true",
+      "update": {
+        "anyOf": [
+          "$createdBy.account = session.user",
+          "exists todoShares(todoId = this.id, user_id = session.user, can_edit = true)"
+        ]
+      },
+      "delete": "$createdBy.account = session.user"
+    },
+    "todoShares": {
+      "insert": {
+        "$comment": "Only the todo creator can manage shares.",
+        "where": "exists todos(id = this.todoId, $createdBy.account = session.user)"
+      },
+      "read": {
+        "$comment": "The recipient sees their share, and the todo's creator sees every share of it, so they can list who has access and revoke it.",
+        "where": {
+          "anyOf": [
+            "user_id = session.user",
+            "exists todos(id = this.todoId, $createdBy.account = session.user)"
+          ]
+        }
+      },
+      "delete": "exists todos(id = this.todoId, $createdBy.account = session.user)"
+    }
+  }
+}
+```
 
-See [Declarative Permissions](/docs/schemas/policies) for more on `exists.where`, `anyOf`, and `allOf`.
+See [Declarative Permissions](/docs/schemas/policies) for more on `exists`, `anyOf`, and `allOf`.
 
 ## Granting access
 

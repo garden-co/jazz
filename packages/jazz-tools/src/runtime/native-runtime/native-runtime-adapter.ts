@@ -941,14 +941,6 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.ownerRuntime;
   }
 
-  readCanEstablishAbsence(sessionJson?: string, transaction?: OpenTransactionId): boolean {
-    if (this.closed || this.ownerRuntime.closed) return false;
-    const context = this.nativeReadContext(
-      readSession(sessionJson),
-      transaction ? this.pendingTxs.get(transaction) : undefined,
-    );
-    return context.kind !== "session-authority";
-  }
   private readonly readAuthorizationHost: ReadAuthorizationHost;
   private readonly subscriptions = new Map<number, SubscriptionState>();
   /** Pooled native subscriptions, by pool id: one native call reads them all. */
@@ -2475,6 +2467,12 @@ export class NativeRuntimeAdapter implements Runtime {
       hasStagedMutations: false,
     });
     return id;
+  }
+
+  hasStagedTransactionWrites(openTransactionId: OpenTransactionId): boolean | undefined {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.hasStagedTransactionWrites(openTransactionId);
+    return this.pendingTxs.get(openTransactionId)?.hasStagedMutations;
   }
 
   commitTransaction(openTransactionId: OpenTransactionId): TxId {
@@ -5125,10 +5123,11 @@ function updatedAtMsFromWriteContext(writeContext?: string | null): number | und
  * The explicit `$updatedAt` a write names (a backfill or import), or
  * `null` for an ordinary write. An ordinary write carries no time: the
  * replica's clock stamps it while it is pending, and the authority's clock
- * stamps it when it accepts it, so `$updatedAt` and `$acceptedAt` are the
- * acceptance time, not the device clock at authoring (an offline edit
- * synced later is stamped when it syncs), and a device with a fast clock
- * is not refused for writing in the future.
+ * stamps it when it accepts it, so its `$updatedAt` is the acceptance
+ * time, not the device clock at authoring (an offline edit synced later is
+ * stamped when it syncs), and a device with a fast clock is not refused
+ * for writing in the future. `$acceptedAt` is always the acceptance time,
+ * read from the version's accepted position, whatever `$updatedAt` says.
  */
 export function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
   return updatedAtMsFromWriteContext(writeContext) ?? null;

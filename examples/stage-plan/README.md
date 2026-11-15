@@ -21,6 +21,7 @@ StagePlan is the Jazz example for two things:
 | [`apps/react-localfirst`](apps/react-localfirst)         | React, Vite, device accounts, Astryx with the Jazz theme                   |
 | [`apps/sveltekit-hybrid`](apps/sveltekit-hybrid)         | SvelteKit, Jazz in the app, device-account guest then Better Auth          |
 | [`apps/ts-effect-betterauth`](apps/ts-effect-betterauth) | TypeScript and Effect, no UI framework, Jazz in a Hono server, Better Auth |
+| [`apps/rust-cli`](apps/rust-cli)                         | Rust, a CLI on `jazz-app` as the app's backend, acting as one user         |
 
 ## Run it
 
@@ -47,7 +48,7 @@ to edit offline; the changes reach the other profile when you turn it back on.
 
 ## Who can do what
 
-Permissions live in [`permissions.ts`](apps/react-localfirst/permissions.ts)
+Permissions live in [`jazz.permissions.json`](apps/react-localfirst/jazz.permissions.json)
 and are enforced by the server.
 
 | Person                             | Show and board | Tasks                                 | Invite link and crew list                       |

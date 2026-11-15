@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 /** `size_bytes` is a 32-bit integer column. */
 export const MAX_FILE_BYTES = 2 ** 31 - 1;

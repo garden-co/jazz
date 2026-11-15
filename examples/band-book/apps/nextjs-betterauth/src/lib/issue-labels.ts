@@ -1,4 +1,4 @@
-import type { IssuePriority, IssueStatus } from "@/schema";
+import type { IssuePriority, IssueStatus } from "@/jazz.generated";
 
 export const ISSUE_STATUSES: IssueStatus[] = ["backlog", "todo", "in_progress", "done"];
 export const ISSUE_PRIORITIES: IssuePriority[] = ["none", "low", "medium", "high", "urgent"];

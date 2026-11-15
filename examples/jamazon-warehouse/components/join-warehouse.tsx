@@ -8,7 +8,7 @@ import { Selector } from "@astryxdesign/core/Selector";
 import { VStack } from "@astryxdesign/core/Stack";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { useState } from "react";
-import type { Warehouse } from "@/schema";
+import type { Warehouse } from "@/jazz.generated";
 import { bootstrap } from "./console";
 
 /**

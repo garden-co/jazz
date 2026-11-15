@@ -1,21 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { expect, it, onTestFinished } from "vitest";
-import { schema as s } from "../index.js";
-import { startTestJazz } from "../testing/index.js";
+import { startTestJazz, testApp } from "../testing/index.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 
-const app = s.defineApp(
-  {
-    docs: s.table({ label: s.string(), body: s.string() }, {}),
-  },
-  { migrations: "none" },
-);
-const permissions = s.definePermissions(app, ({ policy }) => {
-  policy.docs.allowRead.always();
-  policy.docs.allowInsert.always();
-  policy.docs.allowUpdate.always();
-});
+const app = testApp({ tables: { docs: { columns: { label: "string", body: "string" } } } });
+const permissions = {
+  format: 1,
+  tables: { docs: { read: "true", insert: "true", update: "true" } },
+};
 
 // The memory driver uses WASM in Node; the sync server uses NAPI.
 it.each([

@@ -13,8 +13,7 @@
   },
   "include": [
     "constants.ts",
-    "schema.ts",
-    "permissions.ts",
+    "jazz.generated.ts",
     "src",
     "server",
     "tests",

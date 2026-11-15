@@ -4,7 +4,7 @@ import { ClickableCard } from "@astryxdesign/core/ClickableCard";
 import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { useRouter } from "next/navigation";
-import type { Product, Stock } from "@/schema";
+import type { Product, Stock } from "@/jazz.generated";
 import { formatMoney } from "@/src/store/pricing";
 import { ProductArt } from "./ProductArt";
 import { StockBadge } from "./StockBadge";

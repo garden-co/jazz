@@ -493,6 +493,7 @@ fn printed(table: &str, expr: &PolicyExpr) -> String {
         schema: loaded.current_schema(),
         relations: &relations,
         defs: &defs,
+        computed: &expr::ComputedNames::new(),
     };
     expr::print(expr, &context, table).unwrap()
 }
@@ -1104,11 +1105,13 @@ fn every_policy_variant() -> PolicyExpr {
             via_column: "todo".into(),
             max_depth: None,
         },
+        // No `max_depth`: the engine drops one on reverse inheritance, so the
+        // file refuses it (`policies_the_dsl_and_the_engine_refused_are_refused`).
         PolicyExpr::InheritsReferencing {
             operation: Operation::Select,
             source_table: "shares".into(),
             via_column: "user".into(),
-            max_depth: Some(1),
+            max_depth: None,
         },
         PolicyExpr::And(vec![PolicyExpr::Not(Box::new(PolicyExpr::False))]),
         PolicyExpr::Or(vec![]),
@@ -1300,7 +1303,7 @@ fn through_the_permissions_file(expr: &PolicyExpr) -> TablePolicies {
     let text = json::print(&file);
     only_strings(&file, &text);
     let reread = json::parse(text.as_bytes()).unwrap();
-    let read = permissions_file::read(&reread, &current, &relations)
+    let read = permissions_file::read(&reread, &current, &relations, &Default::default())
         .unwrap_or_else(|e| panic!("{e:?}\n{text}"));
     assert_eq!(read[&TableName::from("todos")], policies, "{text}");
     policies
@@ -1633,6 +1636,7 @@ fn epic_drops_hop_prints_as_a_hop() {
         schema: &schema,
         relations: &relations,
         defs: &defs,
+        computed: &expr::ComputedNames::new(),
     };
     let text = expr::print(&hop, &context, "files").unwrap();
     assert_eq!(
@@ -1672,8 +1676,13 @@ fn epic_drops_hop_prints_as_a_hop() {
         "{text}"
     );
     assert!(!text.contains("__hop"), "{text}");
-    let read = permissions_file::read(&json::parse(text.as_bytes()).unwrap(), &schema, &relations)
-        .unwrap_or_else(|e| panic!("{e:?}\n{text}"));
+    let read = permissions_file::read(
+        &json::parse(text.as_bytes()).unwrap(),
+        &schema,
+        &relations,
+        &Default::default(),
+    )
+    .unwrap_or_else(|e| panic!("{e:?}\n{text}"));
     assert_eq!(read[&TableName::from("files")], policies, "{text}");
 }
 
@@ -2212,7 +2221,16 @@ fn every_committed_app_file_fits_its_json_schema() {
         (PERMISSIONS_FILE, "jazz.permissions.schema.json"),
     ] {
         let validator = jsonschema::validator_for(&json_schema(schema)).unwrap();
-        let files = committed(file);
+        // `jazz-tools upgrade`'s input fixtures are alpha.64 apps on purpose:
+        // their files carry alpha.63's `tsOnly`, which upgrade converts. What
+        // upgrade writes from them (`expected/`) is checked like any app.
+        let legacy = repo_root().join("packages/jazz-tools/tests/upgrade/fixtures");
+        let files: Vec<_> = committed(file)
+            .into_iter()
+            .filter(|path| {
+                !path.starts_with(&legacy) || path.components().any(|c| c.as_os_str() == "expected")
+            })
+            .collect();
         assert!(files.len() > 10, "{file}: {files:?}");
         for path in files {
             let text = std::fs::read_to_string(&path).unwrap();
@@ -2370,6 +2388,7 @@ fn recursive_relations_with_several_selected_columns_print_and_read_back() {
         schema: loaded.current_schema(),
         relations: &relations,
         defs: &defs,
+        computed: &expr::ComputedNames::new(),
     };
     let text = "exists (from recursive(seed: from todos where todos.owner = session.user select todos.id as id, todos.name as name, step: from todos where todos.id = id(frontier) order by todos.name, todos.id select todos.id as id, todos.name as name, frontier: id(row), dedupe: (id(row)), maxDepth: 3) where todos.id = outer.id)";
     let ast = expr::parse(text).unwrap_or_else(|e| panic!("{}", e.render(text)));
@@ -2452,4 +2471,204 @@ fn an_index_names_a_stored_column() {
     edited_app_loads(|v| {
         v["tables"]["todos"]["indexes"] = serde_json::json!(["owner", ["owner", "$createdAt"]])
     });
+}
+
+/// What the TS permissions compiler (and the engine behind it) refused, the
+/// loader refuses too, naming the spot.
+#[test]
+fn policies_the_dsl_and_the_engine_refused_are_refused() {
+    let refused = |table: &str, source: &str, expected: &str| {
+        let error = read_policy(table, source, serde_json::json!({}))
+            .expect_err(source)
+            .to_string();
+        assert!(error.contains(expected), "{source}:\n{error}");
+        error
+    };
+    // `maxDepth` on a reverse relation was dropped by the engine; the TS
+    // DSL refused it. Both spellings, pointing at the bound.
+    for source in [
+        "allowedTo.read(shares, maxDepth: 3)",
+        "allowedTo.read(via shares.todo, maxDepth: 3)",
+    ] {
+        let error = refused(
+            "todos",
+            source,
+            "`allowedTo` along a reverse relation takes no `maxDepth`; omit it",
+        );
+        let caret = error
+            .lines()
+            .find(|l| l.trim_start().starts_with('^'))
+            .unwrap();
+        assert_eq!(caret.trim(), "^", "{error}");
+        assert_eq!(
+            caret.find('^'),
+            error
+                .lines()
+                .find(|l| l.contains(source))
+                .unwrap()
+                .find('3')
+        );
+    }
+    read_policy("todos", "allowedTo.read(shares)", serde_json::json!({})).unwrap();
+    read_policy(
+        "shares",
+        "allowedTo.read(todoRow, maxDepth: 3)",
+        serde_json::json!({}),
+    )
+    .unwrap();
+    // A bad `maxDepth`.
+    refused(
+        "shares",
+        "allowedTo.read(todoRow, maxDepth: -1)",
+        "`maxDepth` takes a whole number",
+    );
+    refused(
+        "shares",
+        "allowedTo.read(todoRow, maxDepth: 1.5)",
+        "`maxDepth` takes a whole number",
+    );
+    refused(
+        "shares",
+        "allowedTo.read(todoRow, maxDepth: x)",
+        "expected `maxDepth: <number>`",
+    );
+    refused(
+        "todos",
+        "exists (from recursive(seed: from todos where todos.owner = session.user, step: from todos where todos.id = id(frontier) select todos.id as id, frontier: id(row), dedupe: (id(row)), maxDepth: 65) where todos.id = outer.id)",
+        "`maxDepth` 65 exceeds the cap of 64 for a recursive relation",
+    );
+    // Inheriting through a column that references no table.
+    refused(
+        "shares",
+        "allowedTo.read(via user)",
+        "INHERITS via_column 'user' has no FK reference",
+    );
+    // Session values compare for equality only.
+    for op in [">", "<", ">=", "<="] {
+        refused(
+            "todos",
+            &format!("session.claims.level {op} 3"),
+            "core schema policies only support Eq/Ne SessionCmp operators yet",
+        );
+    }
+    // Inheritance inside `exists`.
+    refused(
+        "todos",
+        "exists shares(todo = this.id, allowedTo.read(todoRow))",
+        "core schema policies do not support Inherits",
+    );
+    // Non-finite floats.
+    for literal in ["'NaN'", "'inf'", "'-inf'"] {
+        refused(
+            "todos",
+            &format!("session.claims.x = double({literal})"),
+            "floating-point literals must be finite numbers",
+        );
+    }
+    // The writer refuses an engine policy the file can't say rather than
+    // drop its bound.
+    let mut input = shared_todos();
+    input.permissions.insert(
+        TableName::from("todos"),
+        TablePolicies {
+            select: OperationPolicy::using(PolicyExpr::InheritsReferencing {
+                operation: Operation::Select,
+                source_table: "shares".into(),
+                via_column: "todo".into(),
+                max_depth: Some(3),
+            }),
+            ..Default::default()
+        },
+    );
+    let error = write(input).unwrap_err();
+    assert!(error.is_unsupported(), "{error}");
+    assert!(error.to_string().contains("takes no `maxDepth`"), "{error}");
+}
+
+/// The relation checks `load` runs on the current tables.
+#[test]
+fn relations_must_lead_where_they_say() {
+    let error =
+        edited_app(|v| v["tables"]["todos"]["relations"]["shares"]["reverse"] = "sharez".into());
+    assert!(
+        error.contains("tables.todos.relations.shares: the current schema has no table sharez; did you mean `shares`?"),
+        "{error}"
+    );
+    let error =
+        edited_app(|v| v["tables"]["todos"]["relations"]["shares"]["relation"] = "todoRw".into());
+    assert!(
+        error.contains(
+            "tables.todos.relations.shares: shares has no forward relation todoRw to todos"
+        ),
+        "{error}"
+    );
+    // A reverse relation whose forward one leads to another table.
+    let error = edited_app(|v| {
+        v["tables"]["shares"]["relations"]["owner"] =
+            serde_json::json!({ "rel": "shares", "column": "user" });
+        v["tables"]["todos"]["relations"]["shares"]["relation"] = "owner".into();
+    });
+    assert!(
+        error.contains(
+            "tables.todos.relations.shares: shares has no forward relation owner to todos"
+        ),
+        "{error}"
+    );
+    let error =
+        edited_app(|v| v["tables"]["shares"]["relations"]["todoRow"]["rel"] = "todoz".into());
+    assert!(error.contains("todoz"), "{error}");
+}
+
+#[test]
+fn a_relation_leads_where_its_column_references() {
+    // `shares.todo` references todos; a relation over it can't lead elsewhere.
+    let error = edited_app(|v| {
+        v["tables"]["shares"]["columns"]["todo"] =
+            serde_json::json!({ "type": "uuid?", "references": "todos" });
+        v["tables"]["shares"]["relations"]["todoRow"]["rel"] = "shares".into();
+    });
+    assert!(
+        error.contains(
+            "tables.shares.relations.todoRow: column todo references todos, so a relation over it leads to todos, not shares"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_policy_reading_a_computed_field_is_told_it_is_computed() {
+    let error = edited_permissions(|v| {
+        v["tables"]["todos"]["read"] = "shareCount = 1".into();
+    });
+    assert!(
+        error.contains(
+            "unknown column `shareCount` in todos: `shareCount` is a computed field, which isn't \
+             stored, so a permission can't read it; write the policy over the columns it's \
+             computed from"
+        ),
+        "{error}"
+    );
+    // A plain unknown column keeps the nearest-name hint.
+    let error = edited_permissions(|v| {
+        v["tables"]["todos"]["read"] = "nmae = 'x'".into();
+    });
+    assert!(
+        error.contains("unknown column `nmae` in todos; did you mean `name`?"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_relation_policy_reading_a_computed_outer_field_is_told_it_is_computed() {
+    let error = edited_permissions(|v| {
+        v["tables"]["todos"]["read"] = "exists (from shares where todo = outer.shareCount)".into();
+    });
+    assert!(
+        error.contains(
+            "unknown column todos.shareCount: `shareCount` is a computed field, which isn't \
+             stored, so a permission can't read it; write the policy over the columns it's \
+             computed from"
+        ),
+        "{error}"
+    );
 }

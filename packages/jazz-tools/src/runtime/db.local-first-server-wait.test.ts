@@ -1,17 +1,13 @@
 import { expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
+import { testApp } from "../testing/test-app.js";
 import { ReadTier } from "./client.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { startTestJazz } from "../testing/index.js";
 import { createTransportControl } from "./testing/transport-control.js";
 
-const app = s.defineApp({ entries: s.table({ title: s.string() }, {}) }, { migrations: "none" });
-const permissions = definePermissions(app, ({ policy }) => {
-  policy.entries.allowRead.always();
-  policy.entries.allowInsert.always();
-});
+const app = testApp({ tables: { entries: { columns: { title: "string" } } } });
+const permissions = { format: 1, tables: { entries: { read: "true", insert: "true" } } };
 
 it("opens a client with local rows on the server's answer when it arrives in time", async () => {
   const server = await startTestJazz({
