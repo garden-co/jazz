@@ -19,6 +19,7 @@
 
 mod app;
 mod backend;
+mod branch;
 mod config;
 mod error;
 mod handle;
@@ -30,6 +31,7 @@ mod value;
 mod writes;
 
 pub use app::AppFiles;
+pub use branch::{Branch, BranchView, OnBranch, Snapshot};
 pub use config::{Backend, Config, Storage};
 pub use error::{Error, Result};
 pub use handle::Jazz;

@@ -28,10 +28,10 @@ use tokio::sync::{Notify, mpsc, oneshot, watch};
 use uuid::Uuid;
 
 use crate::db::{
-    CurrentRow, Db, DbConfig, DbIdentity, DeleteOptions, Error as CoreError, FileOptions,
-    FirstLoad, InsertOptions, ReadOpts, RemoteLinkHint, RemovedRow, RestoreOptions,
+    CurrentRow, Db, DbConfig, DbIdentity, DeleteOptions, Error as CoreError, ExactWriteTarget,
+    FileOptions, FirstLoad, InsertOptions, ReadOpts, RemoteLinkHint, RemovedRow, RestoreOptions,
     SubscriptionEvent, SubscriptionOutputRow, SubscriptionStream as CoreSubscriptionStream,
-    UpdateOptions, UpsertOptions, Upstream, WireTransportAdapter, WriteIdentity,
+    UpdateOptions, UpsertOptions, Upstream, WireTransportAdapter, WriteIdentity, WriteTarget,
 };
 use crate::ids::{AuthorSubject, NodeUuid, RowUuid};
 use crate::link::{
@@ -47,6 +47,7 @@ use crate::model::public_schema::{
 };
 use crate::model::transaction::{OpenTransactionId, TransactionId};
 use crate::object::{ObjectId, OutputOccurrenceId, ResultKey};
+use crate::protocol::{BranchSelector, BranchViewBase, ReadViewSourceSpec, SnapshotRef};
 use crate::query::Query;
 use crate::records::Value as CoreValue;
 use crate::schema::history;
@@ -91,6 +92,9 @@ const PRE_SQLITE_STORE: &str = "jazz-core.rocksdb";
 pub struct JazzClient {
     /// Write metadata applied to mutations issued through this client.
     write_context: Option<WriteContext>,
+    /// The branch view this client reads and writes through
+    /// ([`JazzClient::on_branch`]); `None` is the root branch.
+    branch: Option<BranchScope>,
     shared: Rc<Shared>,
 }
 
@@ -98,9 +102,17 @@ impl Clone for JazzClient {
     fn clone(&self) -> Self {
         Self {
             write_context: self.write_context.clone(),
+            branch: self.branch.clone(),
             shared: self.shared.clone(),
         }
     }
+}
+
+/// A live branch head over an optional live or frozen base.
+#[derive(Clone, Debug)]
+struct BranchScope {
+    head: BranchSelector,
+    base: Option<BranchViewBase>,
 }
 
 struct Shared {
@@ -898,6 +910,7 @@ impl JazzClient {
         }
         Ok(Self {
             write_context: None,
+            branch: None,
             shared,
         })
     }
@@ -1175,6 +1188,7 @@ impl JazzClient {
         opts: ReadOpts,
     ) -> Result<CoreSubscriptionStream> {
         let prepared = self.prepare(query)?;
+        let opts = self.branch_opts(opts);
         let session = self.session_identity()?;
         let db = self.db()?;
         crate::db::block_on(async {
@@ -1199,7 +1213,9 @@ impl JazzClient {
     /// read: the server's settled result once it arrives.
     pub async fn query_with_opts(&self, query: Query, opts: ReadOpts) -> Result<Vec<QueryResult>> {
         let read = with_history_identity(&query);
+        let opts = self.branch_opts(opts);
         let rows = if let Some(transaction_id) = self.open_transaction()? {
+            self.reject_branch("a read inside a transaction")?;
             let prepared = self.prepare(&read)?;
             let db = self.db()?;
             // A client's serializable read hydrates from the authority,
@@ -1266,6 +1282,7 @@ impl JazzClient {
         column: &str,
         range: std::ops::Range<u64>,
     ) -> Result<Vec<u8>> {
+        self.reject_branch("a byte-range read")?;
         if let Some(context) = &self.write_context {
             if context.transaction_id.is_some() {
                 return Err(JazzError::Query(
@@ -1302,6 +1319,7 @@ impl JazzClient {
         R: std::io::Read + Send + 'static,
     {
         self.reject_updated_at_override("streaming inserts")?;
+        self.reject_branch("a streaming insert")?;
         if let Some(context) = &self.write_context {
             if context.transaction_id.is_some() {
                 return Err(JazzError::Write(
@@ -1347,6 +1365,7 @@ impl JazzClient {
         let row_values = self.ordered_values(table, &values)?;
         let cells = self.core_cells(table, values)?;
         let row_id = object_id.into().map(RowUuid);
+        let target = self.exact_target(table)?;
         let db = self.db()?;
         if let Some(transaction_id) = self.open_transaction()? {
             let write = crate::db::block_on(db.tx_ref(transaction_id).insert(
@@ -1355,6 +1374,7 @@ impl JazzClient {
                 InsertOptions {
                     row_id,
                     identity: self.write_identity()?,
+                    target: target.clone(),
                     ..Default::default()
                 },
             ))
@@ -1368,6 +1388,7 @@ impl JazzClient {
             InsertOptions {
                 row_id,
                 identity: self.write_identity()?,
+                target,
                 ..Default::default()
             },
         ))
@@ -1389,6 +1410,7 @@ impl JazzClient {
         let cells = self.core_cells(table, values)?;
         let updated_at_ms = self.write_updated_at()?;
         let row = RowUuid(object_id);
+        let target = self.view_target();
         let db = self.db()?;
         if let Some(transaction_id) = self.open_transaction()? {
             crate::db::block_on(db.tx_ref(transaction_id).upsert(
@@ -1398,6 +1420,7 @@ impl JazzClient {
                 UpsertOptions {
                     identity: self.write_identity()?,
                     updated_at_ms,
+                    target: target.clone(),
                     ..Default::default()
                 },
             ))
@@ -1412,6 +1435,7 @@ impl JazzClient {
             UpsertOptions {
                 identity: self.write_identity()?,
                 updated_at_ms,
+                target,
                 ..Default::default()
             },
         ))
@@ -1432,6 +1456,7 @@ impl JazzClient {
         let cells = self.core_cells(table, updates.into_iter().collect())?;
         let updated_at_ms = self.write_updated_at()?;
         let row = RowUuid(*object_id.uuid());
+        let target = self.view_target();
         let db = self.db()?;
         if let Some(transaction_id) = self.open_transaction()? {
             crate::db::block_on(db.tx_ref(transaction_id).update(
@@ -1441,6 +1466,7 @@ impl JazzClient {
                 UpdateOptions {
                     identity: self.write_identity()?,
                     updated_at_ms,
+                    target: target.clone(),
                     ..Default::default()
                 },
             ))
@@ -1455,6 +1481,7 @@ impl JazzClient {
             UpdateOptions {
                 identity: self.write_identity()?,
                 updated_at_ms,
+                target,
                 ..Default::default()
             },
         ))
@@ -1469,6 +1496,7 @@ impl JazzClient {
     pub fn delete(&self, table: &str, object_id: ObjectId) -> Result<Option<TransactionId>> {
         self.reject_updated_at_override("deletes")?;
         let row = RowUuid(*object_id.uuid());
+        let target = self.view_target();
         let db = self.db()?;
         if let Some(transaction_id) = self.open_transaction()? {
             crate::db::block_on(db.tx_ref(transaction_id).delete(
@@ -1476,6 +1504,7 @@ impl JazzClient {
                 row,
                 DeleteOptions {
                     identity: self.write_identity()?,
+                    target: target.clone(),
                     ..Default::default()
                 },
             ))
@@ -1488,6 +1517,7 @@ impl JazzClient {
             row,
             DeleteOptions {
                 identity: self.write_identity()?,
+                target,
                 ..Default::default()
             },
         ))
@@ -1510,6 +1540,7 @@ impl JazzClient {
             .transpose()?;
         let updated_at_ms = self.write_updated_at()?;
         let row = RowUuid(*object_id.uuid());
+        let target = self.exact_target(table)?;
         let db = self.db()?;
         if let Some(transaction_id) = self.open_transaction()? {
             crate::db::block_on(db.tx_ref(transaction_id).restore(
@@ -1519,6 +1550,7 @@ impl JazzClient {
                 RestoreOptions {
                     identity: self.write_identity()?,
                     updated_at_ms,
+                    target: target.clone(),
                     ..Default::default()
                 },
             ))
@@ -1533,6 +1565,7 @@ impl JazzClient {
             RestoreOptions {
                 identity: self.write_identity()?,
                 updated_at_ms,
+                target,
                 ..Default::default()
             },
         ))
@@ -1732,8 +1765,173 @@ impl JazzClient {
     pub fn with_write_context(&self, write_context: WriteContext) -> JazzClient {
         JazzClient {
             write_context: Some(write_context),
+            branch: self.branch.clone(),
             shared: self.shared.clone(),
         }
+    }
+
+    /// This client, reading and writing through the branch view `head`
+    /// over `base`, as TS's `branch` and `base` options do.
+    ///
+    /// Reads see `head`'s rows, falling back to `base`'s (live, or frozen at
+    /// a snapshot); `head`'s deletions hide inherited rows. Updates, upserts
+    /// and deletes land in `head`, copying an inherited row there first.
+    /// Inserts and restores land in `head`'s coordinate for the table: its
+    /// values of the table's `branchBy` columns (an unbranched table's rows
+    /// are shared by every branch, so they land in the root).
+    ///
+    /// Build the selectors with [`JazzClient::branch_selector`]. Reads inside a transaction,
+    /// streaming inserts and byte-range reads through a branch are not
+    /// supported yet, and fail.
+    pub fn on_branch(&self, head: BranchSelector, base: Option<BranchViewBase>) -> JazzClient {
+        JazzClient {
+            write_context: self.write_context.clone(),
+            branch: Some(BranchScope { head, base }),
+            shared: self.shared.clone(),
+        }
+    }
+
+    /// The schema's branch columns: every table's `branchBy` columns,
+    /// sorted. A selector for a read, update, upsert or delete names each.
+    pub fn branch_columns(&self) -> Vec<String> {
+        let mut columns: Vec<String> = self
+            .shared
+            .schema
+            .values()
+            .flat_map(|table| table.branch_by.iter().map(|by| by.as_str().to_owned()))
+            .collect();
+        columns.sort();
+        columns.dedup();
+        columns
+    }
+
+    /// A branch selector from values of every branch column
+    /// ([`JazzClient::branch_columns`]), as TS's qualified `branch`. Each
+    /// value is converted to its column's type (`Integer` for an `i32`
+    /// column given an `i64`, say).
+    pub fn branch_selector(
+        &self,
+        values: impl IntoIterator<Item = (String, Value)>,
+    ) -> Result<BranchSelector> {
+        let expected = self.branch_columns();
+        let mut selector = BranchSelector::default();
+        for (name, value) in values {
+            let column = self
+                .shared
+                .schema
+                .values()
+                .filter(|table| table.branch_by.iter().any(|by| by.as_str() == name))
+                .find_map(|table| table.columns.column(&name))
+                .ok_or_else(|| JazzError::Schema(format!("{name} is not a branch column")))?;
+            let value = match public_to_core_value_for_column(value, column)? {
+                CoreValue::Nullable(Some(value)) => *value,
+                CoreValue::Nullable(None) => {
+                    return Err(JazzError::Schema(format!(
+                        "branch column {name} cannot be null"
+                    )));
+                }
+                value => value,
+            };
+            if selector
+                .values
+                .insert(
+                    name.clone(),
+                    crate::protocol::BranchColumnValue::from(value),
+                )
+                .is_some()
+            {
+                return Err(JazzError::Schema(format!("the branch names {name} twice")));
+            }
+        }
+        if !selector.values.keys().eq(expected.iter()) {
+            return Err(JazzError::Schema(format!(
+                "a branch must give exactly the branch columns: {}",
+                if expected.is_empty() {
+                    "none (no table has branchBy)".to_owned()
+                } else {
+                    expected.join(", ")
+                }
+            )));
+        }
+        Ok(selector)
+    }
+
+    /// Capture this database's local read frontier, for a frozen branch
+    /// base ([`BranchViewBase::snapshot`]), as TS's `captureSnapshot`.
+    ///
+    /// It includes the writes committed locally so far, accepted by the
+    /// server or not, and none made later. Persist it with
+    /// [`SnapshotRef::to_persisted`]; reading at it later needs the same
+    /// dataset with enough history retained.
+    pub async fn capture_snapshot(&self) -> Result<SnapshotRef> {
+        let db = self.db()?;
+        self.shared
+            .settle(db.capture_snapshot())
+            .await?
+            .map_err(|error| JazzError::Query(error.to_string()))
+    }
+
+    /// The write target of an update, upsert or delete.
+    fn view_target(&self) -> WriteTarget {
+        match &self.branch {
+            None => WriteTarget::Root,
+            Some(scope) => WriteTarget::BranchView {
+                head: scope.head.clone(),
+                base: scope.base.clone(),
+            },
+        }
+    }
+
+    /// The write target of an insert or restore into `table`: the head's
+    /// values of the table's branch columns.
+    fn exact_target(&self, table: &str) -> Result<ExactWriteTarget> {
+        let Some(scope) = &self.branch else {
+            return Ok(ExactWriteTarget::Root);
+        };
+        let branch_by = &self.table_schema(table)?.branch_by;
+        if branch_by.is_empty() {
+            return Ok(ExactWriteTarget::Root);
+        }
+        let values = branch_by
+            .iter()
+            .map(|column| {
+                scope
+                    .head
+                    .values
+                    .get(column.as_str())
+                    .map(|value| (column.as_str().to_owned(), value.clone()))
+                    .ok_or_else(|| {
+                        JazzError::Write(format!(
+                            "the branch does not name {table}'s branch column {}",
+                            column.as_str()
+                        ))
+                    })
+            })
+            .collect::<Result<_>>()?;
+        Ok(ExactWriteTarget::Branch(BranchSelector { values }))
+    }
+
+    /// `opts`, reading through this client's branch view unless they name
+    /// another source.
+    fn branch_opts(&self, mut opts: ReadOpts) -> ReadOpts {
+        if let Some(scope) = &self.branch
+            && matches!(opts.read_view.source, ReadViewSourceSpec::Current)
+        {
+            opts.read_view.source = ReadViewSourceSpec::BranchView {
+                head: scope.head.clone(),
+                base: scope.base.clone(),
+            };
+        }
+        opts
+    }
+
+    fn reject_branch(&self, operation: &str) -> Result<()> {
+        if self.branch.is_some() {
+            return Err(JazzError::Query(format!(
+                "{operation} through a branch is not supported yet"
+            )));
+        }
+        Ok(())
     }
 
     /// Create a session-scoped client for backend operations.

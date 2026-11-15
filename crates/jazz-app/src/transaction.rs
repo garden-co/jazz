@@ -30,6 +30,19 @@ pub struct Transaction {
 }
 
 impl Transaction {
+    pub(crate) fn client(&self) -> &JazzClient {
+        &self.client
+    }
+
+    /// This transaction, writing through `client` (the same transaction,
+    /// scoped to a branch, say).
+    pub(crate) fn with_client(&self, client: JazzClient) -> Transaction {
+        Transaction {
+            client,
+            ..self.clone()
+        }
+    }
+
     pub fn insert<N: Insert>(&self, new: N) -> Result<N::Row> {
         let (row, _) = insert(&self.client, new, &self.implementations)?;
         self.wrote.set(true);
