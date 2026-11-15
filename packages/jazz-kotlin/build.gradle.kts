@@ -56,19 +56,6 @@ val generateUniffi by tasks.registering(Exec::class) {
         "generate", "--library", ffiLib.path, "--language", "kotlin", "--no-format",
         "--out-dir", uniffiOut.get().asFile.path,
     )
-    // Until jazz-ffi renames them: UniFFI's Kotlin can't have a method
-    // `close` (every object is AutoCloseable) or an error field `message`
-    // (Throwable has one), so name them `shutdown` and `reason` here.
-    doLast {
-        fileTree(uniffiOut).matching { include("**/*.kt") }.forEach { file ->
-            val text = file.readText()
-            val patched = text
-                .replace("fun `close`()", "fun `shutdown`()")
-                .replace("`message`", "`reason`")
-                .replace("get() = \"message=\${ `reason` }\"", "get() = `reason`")
-            if (patched != text) file.writeText(patched)
-        }
-    }
 }
 
 if (withFfi) {
