@@ -107,6 +107,10 @@ name = "integration"
 path = "tests/integration/main.rs"
 
 [[test]]
+name = "worker_path"
+path = "tests/worker_path/main.rs"
+
+[[test]]
 name = "durable_file"
 path = "tests/durable_file.rs"
 

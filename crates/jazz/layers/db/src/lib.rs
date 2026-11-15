@@ -50,7 +50,11 @@ pub mod options;
 pub mod slow;
 #[cfg(feature = "sql-trace")]
 mod sql_trace;
+#[cfg(all(feature = "sqlite", any(test, feature = "testing")))]
+pub mod test_worker;
 pub mod values;
+#[cfg(all(test, feature = "sqlite"))]
+mod worker_path_tests;
 
 #[cfg(feature = "testing")]
 pub use large::full_materializations_for_test;
