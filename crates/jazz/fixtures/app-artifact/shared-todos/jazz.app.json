@@ -12,7 +12,7 @@
         "name": "string",
         "owner": "uuid?",
         "tags": { "array": "string" },
-        "status": { "enum": { "open": {}, "done": { "at": "timestamp" } }, "optional": true },
+        "status": { "enum": ["open", "done"], "optional": true },
         "meta": { "json": { "type": "object" }, "optional": true, "transform": "jsonText" }
       },
       "relations": { "shares": { "reverse": "shares", "relation": "todoRow" } },
@@ -40,10 +40,7 @@
         "todos": {
           "name": { "renameFrom": "title" },
           "tags": { "add": { "array": "string" }, "default": [] },
-          "status": {
-            "add": { "enum": { "open": {}, "done": { "at": "timestamp" } } },
-            "default": null
-          },
+          "status": { "add": { "enum": ["open", "done"] }, "default": null },
           "meta": { "add": { "json": { "type": "object" } }, "default": null }
         }
       }

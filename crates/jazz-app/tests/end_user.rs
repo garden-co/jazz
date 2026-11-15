@@ -299,6 +299,17 @@ async fn an_end_user_needs_someone_signed_in_and_the_apps_endpoint() {
     )
     .await;
     assert!(matches!(plain, Err(Error::Config(_))), "{plain:?}");
+    let plain_socket = Jazz::open(
+        client_files(),
+        Config::new(app.app_id)
+            .server("ws://todos.example/jazz")
+            .user(Auth::Device(DeviceKey::generate().unwrap())),
+    )
+    .await;
+    assert!(
+        matches!(plain_socket, Err(Error::Config(_))),
+        "{plain_socket:?}"
+    );
 
     let local = Jazz::open(
         client_files(),
