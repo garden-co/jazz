@@ -187,7 +187,6 @@ export interface Runtime {
   /** Capture behind earlier owner operations without waiting for server acceptance. */
   captureSnapshot?(): Promise<SnapshotRef>;
   readonly preparationOwner?: object;
-  readCanEstablishAbsence?(sessionJson?: string, transaction?: OpenTransactionId): boolean;
   /** @internal Live reachability of the upstream server, for read scheduling only. */
   remoteLinkState?(): RemoteLinkState;
   /** @internal Observe {@link Runtime.remoteLinkState} changes. */
@@ -1298,17 +1297,6 @@ export class JazzClient {
   /** @internal Shared across schema clients attached to one runtime owner. */
   preparationOwner(): object {
     return this.runtime.preparationOwner ?? this.runtime;
-  }
-
-  /** @internal An empty policy-filtered result does not establish that a row is absent. */
-  readCanEstablishAbsence(session?: Session, transaction?: OpenTransactionId): boolean {
-    const effective = session ?? this.resolvedSession;
-    return (
-      this.runtime.readCanEstablishAbsence?.(
-        effective ? JSON.stringify(serializeRuntimeSession(effective)) : undefined,
-        transaction,
-      ) ?? false
-    );
   }
 
   onMutationError(listener: (event: MutationErrorEvent) => void): void {

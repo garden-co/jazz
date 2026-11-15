@@ -183,16 +183,6 @@ const teamClaimsPermissions: TestPermissionsFile = {
   },
 };
 
-/**
- * TODO(files-as-source): the gather (`policy.teams.gather`) policies of the
- * skipped tests below have no readable spelling yet: the Rust writer prints a
- * `recursive(...)` relation that doesn't parse back (JAZZ_APP_FILES_UNSUPPORTED,
- * "expected `as`"). Their DSL source is kept in a comment on each test.
- */
-function blockedOnGatherSpelling(): never {
-  throw new Error("blocked: gather policies have no jazz.permissions.json spelling yet");
-}
-
 const REPRO_ISSUER = "https://issuer.example";
 const reproUser = (subject: string) => localFirstAccountId("permission-repro", subject);
 
@@ -499,127 +489,73 @@ describe("runtime permission repros for recursive gather and qualified predicate
     expect(sortGrantRoles(grants)).toEqual(["manager", "viewer"]);
   });
 
-  // Was `it.fails` (a known-failing repro). Blocked (see blockedOnGatherSpelling).
-  // The DSL permissions were:
-  // ({ policy, session, allOf }) => {
-  // const reachableTeams = policy.teams.gather({
-  //   start: {
-  //     "user_team_edges.user_id": session.user,
-  //   },
-  //   step: ({ current }) =>
-  //     policy.team_team_edges
-  //       .where({
-  //         child_team: current,
-  //         administrator: false,
-  //       })
-  //       .hopTo("parent_teamRelation"),
-  //   maxDepth: 8,
-  // });
-  //
-  // return [
-  //   policy.teams.allowRead.where((team) =>
-  //     allOf([
-  //       { route_key: "base-direct" },
-  //       policy.user_team_edges.exists.where({
-  //         user_id: session.user,
-  //         team: team.id,
-  //       }),
-  //     ]),
-  //   ),
-  //   policy.teams.allowRead.where((team) =>
-  //     allOf([
-  //       { route_key: "relation-direct" },
-  //       policy.exists(
-  //         policy.user_team_edges.where({ user_id: session.user }).hopTo("teamRelation").where({
-  //           id: team.id,
-  //         }),
-  //       ),
-  //     ]),
-  //   ),
-  //   policy.teams.allowRead.where({
-  //     route_key: "qualified-predicate",
-  //     "user_team_edges.user_id": session.user,
-  //   }),
-  //   policy.teams.allowRead.where((team) =>
-  //     allOf([
-  //       { route_key: "gather-target" },
-  //       policy.exists(
-  //         reachableTeams.where({
-  //           id: team.id,
-  //         }),
-  //       ),
-  //     ]),
-  //   ),
-  //   policy.teams.allowRead.where((team) =>
-  //     allOf([
-  //       { route_key: "grant-target" },
-  //       policy.exists(
-  //         reachableTeams.hopTo("team_access_edgesViaTeam").where({
-  //           "team_access_edges.target_team": team.id,
-  //           grant_role: { in: ["viewer", "editor", "manager"] },
-  //           administrator: false,
-  //         }),
-  //       ),
-  //     ]),
-  //   ),
-  // ];
-  // }
-  it.skip("supports the full alpha.33 grant-closure repro end to end", async () => {
-    const context = await createReproContext(blockedOnGatherSpelling());
-
-    seedScenario(context);
-
-    const aliceDb = context.forSession(
-      {
-        user_id: "alice",
-        account_id: reproUser("alice"),
-        claims: {},
-        issuer: "https://issuer.example",
-        authMode: "external",
+  // A known-failing repro in .64 (`it.fails`): its gather seeds on a join
+  // (teams ⋈ user_team_edges), which the engine refuses in policies. The
+  // "grant-target" rule hops from the same gather and is refused the same way.
+  it("refuses the alpha.33 grant-closure gather, whose seed is a join", () => {
+    const reachableTeams =
+      "from recursive(seed: from teams join user_team_edges as __join_0 on teams.id = __join_0.team " +
+      "where __join_0.user_id = session.user, " +
+      "step: from team_team_edges where team_team_edges.administrator = bool(false) " +
+      "and team_team_edges.child_team = id(frontier) select team_team_edges.parent_team as id, " +
+      "frontier: id(row), dedupe: (id(row)), maxDepth: 8)";
+    const permissions = {
+      tables: {
+        teams: {
+          read: {
+            anyOf: [
+              {
+                allOf: [
+                  "route_key = 'base-direct'",
+                  "exists user_team_edges(user_id = session.user, team = this.id)",
+                ],
+              },
+              {
+                allOf: [
+                  "route_key = 'relation-direct'",
+                  "exists user_team_edges(user_id = session.user).teamRelation(id = this.id)",
+                ],
+              },
+              "exists (from teams join user_team_edges as __join_0 on teams.id = __join_0.team where teams.route_key = text('qualified-predicate') and __join_0.user_id = session.user where teams.id = id(outer))",
+              {
+                allOf: [
+                  "route_key = 'gather-target'",
+                  `exists (${reachableTeams} where teams.id = outer.id)`,
+                ],
+              },
+            ],
+          },
+        },
       },
-      reproApp,
-    );
+    };
 
-    const names = (await aliceDb.all(reproApp.teams.where({}))).map((team) => team.name).sort();
-    expect(names).toEqual(
-      [
-        "Direct Membership",
-        "Incident Desk",
-        "Operations",
-        "Qualified Predicate",
-        "Relation Membership",
-      ].sort(),
+    expect(() => testPermissions(reproApp, permissions)).toThrow(
+      "Gather seeds other than a filtered table scan are not supported in policies yet",
     );
   });
 
-  // Blocked (see blockedOnGatherSpelling). The DSL permissions were:
-  //   const permissions = definePermissions(doubleRefReproApp, ({ policy, session }) => {
-  //     const directTeams = policy.team_entry.where({ user_id: session.user }).hopTo("target");
-  //     const reachableTeams = policy.teams.gather({
-  //       start: directTeams,
-  //       step: ({ current }) =>
-  //         policy.team_entry.where({ team_id: current, administrator: false }).hopTo("target"),
-  //       maxDepth: 8,
-  //     });
-  //
-  //     return [
-  //       policy.dropdowns.allowRead.where((dropdown) =>
-  //         policy.exists(
-  //           reachableTeams.hopTo("dropdowns_access_edgesViaTeam").where({
-  //             "dropdowns_access_edges.resource_id": dropdown.id,
-  //             grant_role: { in: ["viewer"] },
-  //             administrator: false,
-  //           }),
-  //         ),
-  //       ),
-  //     ];
-  //   });
-  it.skip("evaluates explicit gather seeds through a same-table double-ref edge", async () => {
+  it("evaluates explicit gather seeds through a same-table double-ref edge", async () => {
     const appId = randomUUID();
     const userTeamId = randomUUID();
     const dataRoot = await mkdtemp(join(tmpdir(), "jazz-double-ref-permissions-repro-"));
     const dataPath = join(dataRoot, "runtime.db");
-    const permissions = testPermissions(doubleRefReproApp, blockedOnGatherSpelling());
+    const permissions = testPermissions(doubleRefReproApp, {
+      tables: {
+        dropdowns: {
+          // Teams reachable from the user's own entries along `target`, then
+          // their viewer edges to this dropdown.
+          read:
+            "exists (from recursive(seed: from team_entry join teams as __hop_0 on team_entry.target_id = __hop_0.id " +
+            "where team_entry.user_id = session.user select __hop_0.id as id, " +
+            "step: from team_entry where team_entry.administrator = bool(false) " +
+            "and team_entry.team_id = id(frontier) select team_entry.target_id as id, " +
+            "frontier: id(row), dedupe: (id(row)), maxDepth: 8) " +
+            "join dropdowns_access_edges as __recursive_join_0 on teams.id = __recursive_join_0.team_id " +
+            "where __recursive_join_0.resource_id = outer.id and __recursive_join_0.grant_role in [text('viewer')] " +
+            "and __recursive_join_0.administrator = bool(false) select __recursive_join_0.id as id)",
+        },
+      },
+    });
     const { createJazzContext } = await import("../backend/create-jazz-context.js");
     const context = createJazzContext({
       appId,
