@@ -41,6 +41,10 @@ PASS alice reads note + 200 KB photo
 PASS bob sees nothing
 SMOKE PASS
 expo export -p web exit=0
+===== t7-enum-cases
+validate --check exit=0
+PASS ticket without kind round-trips
+SMOKE PASS
 ===== t1 fixture store (.64 data)
 PASS existing .64 store opens; alice still sees her task
 SMOKE PASS

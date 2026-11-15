@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Re-run every app's baseline: install, validate --check, smoke test. Usage: ./run-all.sh [jazz-tools version or tarball dir]
 cd "$(dirname "$0")"
-for a in t1-migrations:8601 t2-computed:8602 t3-permissions:8603 t6-import-style:8606; do
+for a in t1-migrations:8601 t2-computed:8602 t3-permissions:8603 t6-import-style:8606 t7-enum-cases:8607; do
   d=${a%%:*}; p=${a##*:}
   echo "===== $d"
   (cd $d && pnpm install >/dev/null 2>&1 && npx jazz-tools validate --check >/tmp/vc-$d.log 2>&1; echo "validate --check exit=$?")

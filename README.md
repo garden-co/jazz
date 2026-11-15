@@ -14,4 +14,6 @@ Shared pieces: `_common/server.ts` (Hono + createJazz + sqlite, bearer `user|cla
 | t5-expo | 8605 | Expo SDK 58 app (CJS) with shared schema in `jazz/` (`{"type":"module"}`), extensionless `./migrations` import (Metro), backend in `server/` via shim re-exports, `s.bytes()`; web export + local-first web check (`web-smoke.mjs`, run from a dir with playwright) |
 | t6-import-style | 8606 | tables in separate modules (`src/db/tables/*`), `schema` imported as `schema` and as `jz`, **`defineSliceableApp` + `.slice()`** (slicing is removed in .65), permissions via `definePermissions` from `jazz-tools/permissions` in `src/db/access.ts`, root `permissions.ts` is a re-export, barrel `src/db/index.ts` re-exporting from `../../schema.js`; 2 versions |
 
+| t7-enum-cases | 8607 | a **payload enum** (`s.enum({bug:{...},feature:{...}})`, removed in .65): `upgrade` must REFUSE with a clear error naming `tickets.kind` and write no partial files; baseline smoke covers only a row without a kind (jazz#5621) |
+
 Baseline on 2.0.0-alpha.64 (npm): see BASELINE.md.
