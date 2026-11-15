@@ -33,13 +33,13 @@ func openAsBackend(ctx context.Context, appID, serverURL, userID string) (*jazz.
 // #endregion context-setup-go-backend
 
 // #region context-setup-go-client
-func openAsClient(ctx context.Context, serverURL, appID string) (*jazz.DB, error) {
-	// A client keeps its rows in dataDir and syncs them with the server.
+func openLocally(ctx context.Context, appID, dataDir string) (*jazz.DB, error) {
+	// Without permissions and a server, the app is a local client: its rows
+	// stay in dataDir. (Syncing as an end user isn't supported in Go yet.)
 	return jazzapp.Open(ctx, jazz.Config{
-		AppID:     appID,
-		ServerURL: serverURL,
-		Storage:   jazz.StoragePersistent,
-		DataDir:   "./jazz-data",
+		AppID:   appID,
+		Storage: jazz.StoragePersistent,
+		DataDir: dataDir,
 	})
 }
 
@@ -62,8 +62,8 @@ func printBoard(ctx context.Context, db *jazz.DB, showID string) error {
 // #endregion reading-oneshot-go
 
 // #region reading-subscriptions-go
-func watchBoard(ctx context.Context, db *jazz.DB, showID string) error {
-	// Cancelling ctx unsubscribes and closes the channel.
+func waitUntilDone(ctx context.Context, db *jazz.DB, showID string) error {
+	// Cancelling ctx (here, by returning) unsubscribes and closes the channel.
 	ctx, unsubscribe := context.WithCancel(ctx)
 	defer unsubscribe()
 	deltas, err := jazzapp.Tasks.Query().
@@ -77,12 +77,14 @@ func watchBoard(ctx context.Context, db *jazz.DB, showID string) error {
 			return delta.Err
 		}
 		// The first delta is Reset, with every task in Added.
-		fmt.Println(len(delta.Added), "added,", len(delta.Updated), "updated,", len(delta.Removed), "removed")
-		if len(delta.Added) > 0 && delta.Added[0].Status == jazzapp.TaskStatusDone {
-			unsubscribe()
+		for _, task := range append(delta.Added, delta.Updated...) {
+			if task.Status == jazzapp.TaskStatusDone {
+				fmt.Println("done:", task.Title)
+				return nil
+			}
 		}
 	}
-	return nil
+	return ctx.Err()
 }
 
 // #endregion reading-subscriptions-go
@@ -249,29 +251,23 @@ func TestDocsSnippets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A subscription sees its first result, then a change.
-	sub, stop := context.WithCancel(ctx)
-	defer stop()
-	deltas, err := jazzapp.Tasks.Query().Where(jazzapp.Tasks.ShowID.Eq(show.ID)).Subscribe(sub, db)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first := <-deltas
-	if first.Err != nil || !first.Reset || len(first.Added) != 3 {
-		t.Fatalf("first delta: %+v", first)
-	}
+	// The subscription snippet returns once a task is done.
+	waited := make(chan error, 1)
+	go func() { waited <- waitUntilDone(ctx, db, show.ID) }()
+	time.Sleep(200 * time.Millisecond)
 	if err := moveTask(ctx, db, byRank[2].ID, jazzapp.TaskStatusDone); err != nil {
 		t.Fatal(err)
 	}
-	for delta := range deltas {
-		if delta.Err != nil {
-			t.Fatal(delta.Err)
-		}
-		if len(delta.Updated) > 0 || delta.Reset {
-			break
-		}
+	if err := <-waited; err != nil {
+		t.Fatal(err)
 	}
-	stop()
-	for range deltas {
+
+	// A local client opens the app on a store of its own.
+	client, err := openLocally(ctx, srv.appID, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

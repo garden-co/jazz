@@ -53,8 +53,9 @@ Commit `jazzapp/jazz_app.go` and import it as `<your module>/jazzapp`. Per table
 Writes are local-first: a write the server's permissions refuse returns no error. It is never
 synced, and other users never see it.
 
-A `*jazz.DB` is safe for concurrent use. Every call takes a `context.Context`; a cancelled context
-returns at once. Before the process exits, call `db.Close()`.
+A `*jazz.DB` is safe for concurrent use. Every call takes a `context.Context`. A cancelled context
+returns at once, but the call still runs to its end, so a write may still apply. Before the process
+exits, call `db.Close()`.
 
 A backend that syncs needs the sync server's URL, its admin secret (`AdminSecret`, to publish the
 permissions) and its backend secret (`BackendSecret`, to vouch for the user it acts as). Like every
@@ -75,7 +76,9 @@ command-line app.
 - transactions;
 - durability tiers (reads and writes use the defaults);
 - subscription deltas carry no positions: re-sort an `OrderBy` subscription's rows yourself;
-- non-finite doubles (`NaN`, `±Inf`) read back as `null`: a nullable `float` column reads them as
-  `nil`, and a non-nullable one as `0`;
-- connecting as an end user with a JWT;
+- non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column
+  reads them as `nil`, and reading a non-nullable one fails with a `*jazz.Error` that names the
+  column. In a subscription, such a row ends it with an error delta;
+- syncing as an end user (with a JWT): without a backend's permissions and secrets, the app opens
+  as a local client only;
 - a published, tagged Go module, and Windows builds.

@@ -1,14 +1,15 @@
 //! The one error type both surfaces report.
 
-/// What a call failed with.
+/// What a call failed with. The field is `reason`, not `message`: in
+/// Kotlin, `message` would clash with `Throwable.message`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, uniffi::Error)]
 pub enum JazzError {
     /// Validation, permissions, or something not supported yet.
-    #[error("{message}")]
-    Refused { message: String },
+    #[error("{reason}")]
+    Refused { reason: String },
     /// Storage, the network or the sync server failed.
-    #[error("{message}")]
-    Io { message: String },
+    #[error("{reason}")]
+    Io { reason: String },
     /// The app was closed.
     #[error("the app is closed")]
     Closed,
@@ -27,8 +28,8 @@ pub(crate) enum JazzErrorKind {
 impl From<JazzErrorKind> for JazzError {
     fn from(kind: JazzErrorKind) -> Self {
         match kind {
-            JazzErrorKind::Refused(message) => Self::Refused { message },
-            JazzErrorKind::Io(message) => Self::Io { message },
+            JazzErrorKind::Refused(reason) => Self::Refused { reason },
+            JazzErrorKind::Io(reason) => Self::Io { reason },
             JazzErrorKind::Closed => Self::Closed,
         }
     }

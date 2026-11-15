@@ -3,15 +3,15 @@
 // bindings `jazz-tools generate` writes into a `jazzapp` package beside an
 // app's jazz.app.json and go.mod.
 //
-// Building needs the jazz-ffi static library: `cargo build --release -p
-// jazz-ffi` in the Jazz repository puts it where this package looks
-// (target/release); elsewhere, point CGO_LDFLAGS at its directory
-// (`-L<dir>`).
+// Building needs the jazz-ffi static library: `cargo build -p jazz-ffi`
+// in the Jazz repository puts it where this package looks first
+// (target/debug, then target/release); elsewhere, point CGO_LDFLAGS at its
+// directory (`-L<dir>`), which cgo searches before these.
 package jazz
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../crates/jazz-ffi/include
-#cgo LDFLAGS: -L${SRCDIR}/../../target/release -L${SRCDIR}/../../target/debug
+#cgo LDFLAGS: -L${SRCDIR}/../../target/debug -L${SRCDIR}/../../target/release
 #cgo linux LDFLAGS: -l:libjazz_ffi.a -lm -ldl -lpthread
 #cgo darwin LDFLAGS: -ljazz_ffi -framework CoreFoundation -framework Security -framework SystemConfiguration
 #include <stdlib.h>
@@ -166,7 +166,8 @@ func (db *DB) Close() error {
 
 // call runs jazz_call(method, args) and decodes its result into out.
 // Calls block in Jazz; a cancelled ctx returns at once and the call's
-// result is dropped.
+// result is dropped, but the call itself runs to its end: a write may
+// still apply.
 func (db *DB) call(ctx context.Context, method string, args any, out any) error {
 	argsJSON, err := json.Marshal(args)
 	if err != nil {

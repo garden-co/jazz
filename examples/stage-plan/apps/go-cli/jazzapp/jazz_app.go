@@ -179,8 +179,8 @@ func (p ActivityPatch) MarshalJSON() ([]byte, error) {
 	)
 }
 
-// activityTableTable is the type of ActivityTable: the columns of `activity`, to build conditions and orders from.
-type activityTableTable struct {
+// activityTable is the type of ActivityTable: the columns of `activity`, to build conditions and orders from.
+type activityTable struct {
 	ID      jazz.Column[Activity, string]
 	ShowID  jazz.Column[Activity, string]
 	TaskID  jazz.Column[Activity, string]
@@ -190,7 +190,7 @@ type activityTableTable struct {
 }
 
 // ActivityTable is the table `activity`.
-var ActivityTable = activityTableTable{
+var ActivityTable = activityTable{
 	ID:      jazz.NewColumn[Activity, string]("id"),
 	ShowID:  jazz.NewColumn[Activity, string]("showId"),
 	TaskID:  jazz.NewColumn[Activity, string]("taskId"),
@@ -200,22 +200,22 @@ var ActivityTable = activityTableTable{
 }
 
 // Query starts a query of `activity`.
-func (activityTableTable) Query() *jazz.Query[Activity] {
+func (activityTable) Query() *jazz.Query[Activity] {
 	return jazz.NewQuery[Activity]("activity")
 }
 
 // Insert inserts a row into `activity` and returns it, with its id.
-func (activityTableTable) Insert(ctx context.Context, db *jazz.DB, row NewActivity) (Activity, error) {
+func (activityTable) Insert(ctx context.Context, db *jazz.DB, row NewActivity) (Activity, error) {
 	return jazz.Insert[NewActivity, Activity](ctx, db, "activity", row)
 }
 
 // Update changes the fields patch sets of the row of `activity` with id.
-func (activityTableTable) Update(ctx context.Context, db *jazz.DB, id string, patch ActivityPatch) error {
+func (activityTable) Update(ctx context.Context, db *jazz.DB, id string, patch ActivityPatch) error {
 	return db.Update(ctx, "activity", id, patch)
 }
 
 // Delete deletes the row of `activity` with id.
-func (activityTableTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
+func (activityTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
 	return db.Delete(ctx, "activity", id)
 }
 
@@ -380,37 +380,37 @@ func (p CrewPatch) MarshalJSON() ([]byte, error) {
 	)
 }
 
-// crewTableTable is the type of CrewTable: the columns of `crew`, to build conditions and orders from.
-type crewTableTable struct {
+// crewTable is the type of CrewTable: the columns of `crew`, to build conditions and orders from.
+type crewTable struct {
 	ID      jazz.Column[Crew, string]
 	Account jazz.Column[Crew, string]
 	Name    jazz.Column[Crew, string]
 }
 
 // CrewTable is the table `crew`.
-var CrewTable = crewTableTable{
+var CrewTable = crewTable{
 	ID:      jazz.NewColumn[Crew, string]("id"),
 	Account: jazz.NewColumn[Crew, string]("account"),
 	Name:    jazz.NewColumn[Crew, string]("name"),
 }
 
 // Query starts a query of `crew`.
-func (crewTableTable) Query() *jazz.Query[Crew] {
+func (crewTable) Query() *jazz.Query[Crew] {
 	return jazz.NewQuery[Crew]("crew")
 }
 
 // Insert inserts a row into `crew` and returns it, with its id.
-func (crewTableTable) Insert(ctx context.Context, db *jazz.DB, row NewCrew) (Crew, error) {
+func (crewTable) Insert(ctx context.Context, db *jazz.DB, row NewCrew) (Crew, error) {
 	return jazz.Insert[NewCrew, Crew](ctx, db, "crew", row)
 }
 
 // Update changes the fields patch sets of the row of `crew` with id.
-func (crewTableTable) Update(ctx context.Context, db *jazz.DB, id string, patch CrewPatch) error {
+func (crewTable) Update(ctx context.Context, db *jazz.DB, id string, patch CrewPatch) error {
 	return db.Update(ctx, "crew", id, patch)
 }
 
 // Delete deletes the row of `crew` with id.
-func (crewTableTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
+func (crewTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
 	return db.Delete(ctx, "crew", id)
 }
 
@@ -453,8 +453,8 @@ func (p ShowCrewPatch) MarshalJSON() ([]byte, error) {
 	)
 }
 
-// showCrewTableTable is the type of ShowCrewTable: the columns of `showCrew`, to build conditions and orders from.
-type showCrewTableTable struct {
+// showCrewTable is the type of ShowCrewTable: the columns of `showCrew`, to build conditions and orders from.
+type showCrewTable struct {
 	ID         jazz.Column[ShowCrew, string]
 	ShowID     jazz.Column[ShowCrew, string]
 	CrewID     jazz.Column[ShowCrew, string]
@@ -464,7 +464,7 @@ type showCrewTableTable struct {
 }
 
 // ShowCrewTable is the table `showCrew`.
-var ShowCrewTable = showCrewTableTable{
+var ShowCrewTable = showCrewTable{
 	ID:         jazz.NewColumn[ShowCrew, string]("id"),
 	ShowID:     jazz.NewColumn[ShowCrew, string]("showId"),
 	CrewID:     jazz.NewColumn[ShowCrew, string]("crewId"),
@@ -474,22 +474,22 @@ var ShowCrewTable = showCrewTableTable{
 }
 
 // Query starts a query of `showCrew`.
-func (showCrewTableTable) Query() *jazz.Query[ShowCrew] {
+func (showCrewTable) Query() *jazz.Query[ShowCrew] {
 	return jazz.NewQuery[ShowCrew]("showCrew")
 }
 
 // Insert inserts a row into `showCrew` and returns it, with its id.
-func (showCrewTableTable) Insert(ctx context.Context, db *jazz.DB, row NewShowCrew) (ShowCrew, error) {
+func (showCrewTable) Insert(ctx context.Context, db *jazz.DB, row NewShowCrew) (ShowCrew, error) {
 	return jazz.Insert[NewShowCrew, ShowCrew](ctx, db, "showCrew", row)
 }
 
 // Update changes the fields patch sets of the row of `showCrew` with id.
-func (showCrewTableTable) Update(ctx context.Context, db *jazz.DB, id string, patch ShowCrewPatch) error {
+func (showCrewTable) Update(ctx context.Context, db *jazz.DB, id string, patch ShowCrewPatch) error {
 	return db.Update(ctx, "showCrew", id, patch)
 }
 
 // Delete deletes the row of `showCrew` with id.
-func (showCrewTableTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
+func (showCrewTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
 	return db.Delete(ctx, "showCrew", id)
 }
 

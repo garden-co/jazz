@@ -159,29 +159,37 @@ func (q *Query[R]) MarshalJSON() ([]byte, error) {
 
 // All is every row the query matches.
 func (q *Query[R]) All(ctx context.Context, db *DB) ([]R, error) {
-	var rows []R
-	if err := db.call(ctx, "all", map[string]any{"query": q}, &rows); err != nil {
+	var raws []json.RawMessage
+	if err := db.call(ctx, "all", map[string]any{"query": q}, &raws); err != nil {
 		return nil, err
 	}
-	if rows == nil {
-		rows = []R{}
-	}
-	return rows, nil
+	return decodeRows[R](q.table, raws)
 }
 
 // One is the first row the query matches, or nil if none does.
 func (q *Query[R]) One(ctx context.Context, db *DB) (*R, error) {
-	var row *R
-	if err := db.call(ctx, "one", map[string]any{"query": q}, &row); err != nil {
+	var raw json.RawMessage
+	if err := db.call(ctx, "one", map[string]any{"query": q}, &raw); err != nil {
 		return nil, err
 	}
-	return row, nil
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var row R
+	if err := decodeRow(q.table, raw, &row); err != nil {
+		return nil, err
+	}
+	return &row, nil
 }
 
 // Insert inserts row (an insert struct N) into table and returns the
 // inserted row R, with its id.
 func Insert[N, R any](ctx context.Context, db *DB, table string, row N) (R, error) {
 	var inserted R
-	err := db.call(ctx, "insert", map[string]any{"table": table, "row": row}, &inserted)
+	var raw json.RawMessage
+	if err := db.call(ctx, "insert", map[string]any{"table": table, "row": row}, &raw); err != nil {
+		return inserted, err
+	}
+	err := decodeRow(table, raw, &inserted)
 	return inserted, err
 }
