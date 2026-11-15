@@ -213,14 +213,14 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Generate, compile and run jazz-ffi's Kotlin and Swift bindings
-        run: bash dev/gates/jazz-ffi-compile-bindings.sh
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition jazz-ffi-bindings
 
   # Branch protection requires this stable check name. It aggregates the Rust
   # correctness jobs and stays red whenever any dependency fails or is cancelled.
   # test-storage-compat also runs the bounded differential oracle partition.
   test-rust:
     if: always() && inputs.scope == 'full'
-    needs: [test-rust-workspace, test-storage-compat]
+    needs: [test-rust-workspace, test-storage-compat, test-jazz-ffi-bindings]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 2
     permissions:
@@ -230,9 +230,11 @@ jobs:
         env:
           WORKSPACE_RESULT: ${{ needs.test-rust-workspace.result }}
           STORAGE_COMPAT_RESULT: ${{ needs.test-storage-compat.result }}
+          JAZZ_FFI_BINDINGS_RESULT: ${{ needs.test-jazz-ffi-bindings.result }}
         run: |
           test "${WORKSPACE_RESULT}" = success
           test "${STORAGE_COMPAT_RESULT}" = success
+          test "${JAZZ_FFI_BINDINGS_RESULT}" = success
 
   # The Go bindings (packages/jazz-go over crates/jazz-ffi's C ABI) and
   # the StagePlan Go example: their bindings are current, and their tests

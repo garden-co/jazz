@@ -199,12 +199,43 @@ pub(crate) fn to_json(value: Value, column_type: Option<&ColumnType>) -> Json {
     }
 }
 
-/// A row as `{ "id": …, "<column>": … }`, with the table's columns only.
-pub(crate) fn row_json(table: &TableSchema, id: ObjectId, fields: Vec<QueryResultField>) -> Json {
+/// What a query's rows hold: its table's columns and, nested under their
+/// relation names, the rows of its includes.
+#[derive(Debug, Clone)]
+pub(crate) struct Shape {
+    pub table: TableSchema,
+    pub includes: Vec<IncludeShape>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct IncludeShape {
+    /// The relation's name: the key of its rows in the parent row.
+    pub name: String,
+    /// A forward relation holds one row or `null`; a reverse one an array.
+    pub forward: bool,
+    /// The included rows' values come in this order, then their includes'.
+    pub columns: Vec<(String, ColumnType)>,
+    pub shape: Shape,
+}
+
+impl Shape {
+    pub(crate) fn of(table: TableSchema) -> Self {
+        Self {
+            table,
+            includes: Vec::new(),
+        }
+    }
+}
+
+/// A row as `{ "id": …, "<column>": …, "<relation>": … }`.
+pub(crate) fn row_json(shape: &Shape, id: ObjectId, fields: Vec<QueryResultField>) -> Json {
     let mut row = Map::new();
     row.insert("id".into(), Json::String(id.to_string()));
     for field in fields {
-        if let Some(column) = table
+        if let Some(include) = shape.includes.iter().find(|i| i.name == field.name) {
+            row.insert(field.name, included_json(include, field.value));
+        } else if let Some(column) = shape
+            .table
             .columns
             .columns
             .iter()
@@ -214,6 +245,114 @@ pub(crate) fn row_json(table: &TableSchema, id: ObjectId, fields: Vec<QueryResul
         }
     }
     Json::Object(row)
+}
+
+fn included_json(include: &IncludeShape, value: Value) -> Json {
+    let rows: Vec<Json> = match value {
+        Value::Array(rows) => rows
+            .into_iter()
+            .filter_map(|row| match row {
+                Value::Row { id, values } => Some(included_row(include, id, values)),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    if include.forward {
+        rows.into_iter().next().unwrap_or(Json::Null)
+    } else {
+        Json::Array(rows)
+    }
+}
+
+fn included_row(include: &IncludeShape, id: Option<ObjectId>, values: Vec<Value>) -> Json {
+    let mut row = Map::new();
+    if let Some(id) = id {
+        row.insert("id".into(), Json::String(id.to_string()));
+    }
+    let mut values = values.into_iter();
+    for (name, column_type) in &include.columns {
+        let value = values.next().unwrap_or(Value::Null);
+        row.insert(name.clone(), to_json(value, Some(column_type)));
+    }
+    for nested in &include.shape.includes {
+        let value = values.next().unwrap_or(Value::Null);
+        row.insert(nested.name.clone(), included_json(nested, value));
+    }
+    Json::Object(row)
+}
+
+/// A table's relations as `jazz.app.json` declares them.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Relations(std::collections::HashMap<String, Vec<Relation>>);
+
+#[derive(Debug, Clone)]
+pub(crate) struct Relation {
+    pub name: String,
+    pub to_table: String,
+    /// Forward: this table's column referencing the target's id. Reverse:
+    /// the target table's column referencing this table's id.
+    pub column: String,
+    pub forward: bool,
+}
+
+impl Relations {
+    /// From the text of `jazz.app.json` (already checked by the loader).
+    pub(crate) fn read(app: &str) -> Self {
+        let Ok(app) = serde_json::from_str::<Json>(app) else {
+            return Self::default();
+        };
+        let tables = app.get("tables").and_then(Json::as_object);
+        let forward = |table: &str, name: &str| -> Option<(String, String)> {
+            let relation = tables?.get(table)?.get("relations")?.get(name)?;
+            Some((
+                relation.get("rel")?.as_str()?.to_owned(),
+                relation.get("column")?.as_str()?.to_owned(),
+            ))
+        };
+        let mut relations = std::collections::HashMap::new();
+        for (table, spec) in tables.into_iter().flatten() {
+            let mut list = Vec::new();
+            for (name, relation) in spec
+                .get("relations")
+                .and_then(Json::as_object)
+                .into_iter()
+                .flatten()
+            {
+                if let (Some(to_table), Some(column)) = (
+                    relation.get("rel").and_then(Json::as_str),
+                    relation.get("column").and_then(Json::as_str),
+                ) {
+                    list.push(Relation {
+                        name: name.clone(),
+                        to_table: to_table.to_owned(),
+                        column: column.to_owned(),
+                        forward: true,
+                    });
+                } else if let (Some(to_table), Some(via)) = (
+                    relation.get("reverse").and_then(Json::as_str),
+                    relation.get("relation").and_then(Json::as_str),
+                ) && let Some((_, column)) = forward(to_table, via)
+                {
+                    list.push(Relation {
+                        name: name.clone(),
+                        to_table: to_table.to_owned(),
+                        column,
+                        forward: false,
+                    });
+                }
+            }
+            relations.insert(table.clone(), list);
+        }
+        Self(relations)
+    }
+
+    fn get(&self, table: &str, name: &str) -> Option<&Relation> {
+        self.0
+            .get(table)?
+            .iter()
+            .find(|relation| relation.name == name)
+    }
 }
 
 /// A row's given id, if any, and its cells by column name.
@@ -255,63 +394,109 @@ pub(crate) fn parse(text: &str, what: &str) -> Result<Json> {
         .map_err(|error| refused(format!("{what} is not valid JSON: {error}")))
 }
 
-/// The query JSON as an engine query, and its table's name.
-pub(crate) fn query(schema: &Schema, query_json: &Json) -> Result<(String, q::Query)> {
+/// The query JSON as an engine query, its table's name, and the shape of
+/// its rows.
+pub(crate) fn query(
+    schema: &Schema,
+    relations: &Relations,
+    query_json: &Json,
+) -> Result<(String, q::Query, Shape)> {
     let Json::Object(object) = query_json else {
         return Err(refused("the query must be a JSON object"));
     };
-    for key in object.keys() {
-        match key.as_str() {
-            "table" | "where" | "orderBy" | "limit" | "offset" => {}
-            "include" | "includes" | "select" | "relations" => {
-                return Err(unsupported(format!(
-                    "{key} in a query (nested related rows); query the related table by its reference column"
-                )));
-            }
-            other => return Err(refused(format!("the query has an unknown key {other:?}"))),
-        }
-    }
     let table_name = object
         .get("table")
         .and_then(Json::as_str)
         .ok_or_else(|| refused("the query needs a \"table\""))?;
-    let table = table(schema, table_name)?;
     let mut query = q::Query::from(table_name);
+    let mut parts = Parts::default();
+    let shape = level(schema, relations, table_name, object, "", true, &mut parts)?;
+    query.filters = parts.filters;
+    query.order_by = parts.order_by;
+    query.limit = parts.limit;
+    query.offset = parts.offset;
+    query.select = parts.select;
+    query.array_subqueries = parts.includes;
+    Ok((table_name.to_owned(), query, shape))
+}
+
+/// One level of a query: the root, or an include's child query.
+#[derive(Default)]
+struct Parts {
+    filters: Vec<Predicate>,
+    order_by: Vec<q::OrderBy>,
+    limit: Option<usize>,
+    offset: usize,
+    select: Option<Vec<String>>,
+    includes: Vec<q::ArraySubquery>,
+}
+
+fn level(
+    schema: &Schema,
+    relations: &Relations,
+    table_name: &str,
+    object: &Map<String, Json>,
+    path: &str,
+    root: bool,
+    parts: &mut Parts,
+) -> Result<Shape> {
+    for key in object.keys() {
+        match key.as_str() {
+            "where" | "orderBy" | "limit" | "include" | "select" => {}
+            "table" | "offset" if root => {}
+            "offset" => {
+                return Err(unsupported(format!(
+                    "\"offset\" in an include ({path}); use \"limit\" or query the table"
+                )));
+            }
+            "includes" | "relations" => {
+                return Err(refused(format!(
+                    "{path}{key}: unknown key; nested related rows are \"include\""
+                )));
+            }
+            other => {
+                return Err(refused(format!(
+                    "the query has an unknown key {path}{other:?}"
+                )));
+            }
+        }
+    }
+    let table = table(schema, table_name)?;
 
     if let Some(conditions) = object.get("where").filter(|w| !w.is_null()) {
         let conditions = conditions
             .as_array()
-            .ok_or_else(|| refused("\"where\" must be an array of conditions"))?;
+            .ok_or_else(|| refused(format!("{path}\"where\" must be an array of conditions")))?;
         for (at, condition) in conditions.iter().enumerate() {
-            query.filters.push(predicate(
+            parts.filters.push(predicate(
                 table,
                 table_name,
                 condition,
-                &format!("where[{at}]"),
+                &format!("{path}where[{at}]"),
             )?);
         }
     }
     if let Some(order) = object.get("orderBy").filter(|o| !o.is_null()) {
         let order = order
             .as_array()
-            .ok_or_else(|| refused("\"orderBy\" must be an array"))?;
+            .ok_or_else(|| refused(format!("{path}\"orderBy\" must be an array")))?;
         for (at, entry) in order.iter().enumerate() {
-            let path = format!("orderBy[{at}]");
+            let at = format!("{path}orderBy[{at}]");
             let name = entry
                 .get("column")
                 .and_then(Json::as_str)
-                .ok_or_else(|| refused(format!("{path} needs a \"column\"")))?;
+                .ok_or_else(|| refused(format!("{at} needs a \"column\"")))?;
             column(table, table_name, name)?;
             let direction = match entry.get("direction").and_then(Json::as_str) {
                 None | Some("asc") => OrderDirection::Asc,
                 Some("desc") => OrderDirection::Desc,
                 Some(other) => {
                     return Err(refused(format!(
-                        "{path}.direction must be \"asc\" or \"desc\", not {other:?}"
+                        "{at}.direction must be \"asc\" or \"desc\", not {other:?}"
                     )));
                 }
             };
-            query.order_by.push(q::OrderBy {
+            parts.order_by.push(q::OrderBy {
                 column: name.to_owned(),
                 direction,
             });
@@ -324,14 +509,178 @@ pub(crate) fn query(schema: &Schema, query_json: &Json) -> Result<(String, q::Qu
                 .as_u64()
                 .and_then(|n| usize::try_from(n).ok())
                 .map(Some)
-                .ok_or_else(|| refused(format!("\"{key}\" must be a non-negative integer"))),
+                .ok_or_else(|| refused(format!("{path}\"{key}\" must be a non-negative integer"))),
         }
     };
-    query.limit = count("limit")?;
+    parts.limit = count("limit")?;
     if let Some(offset) = count("offset")? {
-        query.offset = offset;
+        parts.offset = offset;
     }
-    Ok((table_name.to_owned(), query))
+
+    // `select`: these columns (and `id`, always) instead of all of them.
+    if let Some(select) = object.get("select").filter(|s| !s.is_null()) {
+        let select = select
+            .as_array()
+            .ok_or_else(|| refused(format!("{path}\"select\" must be an array of column names")))?;
+        let mut chosen = Vec::new();
+        for (at, name) in select.iter().enumerate() {
+            let name = name
+                .as_str()
+                .ok_or_else(|| refused(format!("{path}select[{at}] must be a column name")))?;
+            if name == "id" {
+                continue;
+            }
+            let info = column(table, table_name, name)?;
+            if name.starts_with('$') {
+                return Err(unsupported(format!(
+                    "selecting {name} ({path}select[{at}])"
+                )));
+            }
+            if !chosen.iter().any(|(n, _): &(String, ColumnType)| n == name) {
+                chosen.push((name.to_owned(), info.column_type.into_owned()));
+            }
+        }
+        parts.select = Some(chosen.into_iter().map(|(n, _)| n).collect());
+    }
+
+    let mut shape = Shape::of(table.clone());
+    if let Some(includes) = object.get("include").filter(|i| !i.is_null()) {
+        let includes = includes
+            .as_array()
+            .ok_or_else(|| refused(format!("{path}\"include\" must be an array")))?;
+        for (at, include) in includes.iter().enumerate() {
+            let at = format!("{path}include[{at}]");
+            let name = include
+                .get("relation")
+                .and_then(Json::as_str)
+                .ok_or_else(|| refused(format!("{at} needs a \"relation\"")))?;
+            for key in include.as_object().into_iter().flatten().map(|(k, _)| k) {
+                if !matches!(key.as_str(), "relation" | "required" | "query") {
+                    return Err(refused(format!("{at} has an unknown key {key:?}")));
+                }
+            }
+            let relation = relations
+                .get(table_name, name)
+                .ok_or_else(|| refused(format!("table {table_name} has no relation {name}")))?;
+            if table
+                .columns
+                .columns
+                .iter()
+                .any(|c| c.name.as_str() == name)
+            {
+                return Err(unsupported(format!(
+                    "including relation {name}, which has the name of a column of {table_name}"
+                )));
+            }
+            if shape.includes.iter().any(|i| i.name == name) {
+                return Err(refused(format!("{at}: relation {name} is included twice")));
+            }
+            let required = match include.get("required") {
+                None | Some(Json::Null) => false,
+                Some(Json::Bool(required)) => *required,
+                Some(_) => return Err(refused(format!("{at}.required must be true or false"))),
+            };
+            let child = match include.get("query") {
+                None | Some(Json::Null) => Map::new(),
+                Some(Json::Object(child)) => child.clone(),
+                Some(_) => return Err(refused(format!("{at}.query must be an object"))),
+            };
+            let mut child_parts = Parts::default();
+            let child_shape = level(
+                schema,
+                relations,
+                &relation.to_table,
+                &child,
+                &format!("{at}.query."),
+                false,
+                &mut child_parts,
+            )?;
+            let mut subquery = if relation.forward {
+                q::ArraySubquery::new(
+                    name,
+                    &relation.to_table,
+                    "id",
+                    format!("{table_name}.{}", relation.column),
+                )
+            } else {
+                q::ArraySubquery::new(
+                    name,
+                    &relation.to_table,
+                    &relation.column,
+                    format!("{table_name}.id"),
+                )
+            };
+            subquery.filters = child_parts.filters;
+            subquery.order_by = child_parts.order_by;
+            subquery.limit = child_parts.limit;
+            subquery.select = child_parts.select.clone();
+            subquery.nested_arrays = child_parts.includes;
+            // As TS's requireIncludes: a required forward relation through
+            // a non-null reference keeps only rows whose target is readable.
+            if required {
+                let nullable = column(table, table_name, &relation.column)
+                    .map(|c| c.nullable)
+                    .unwrap_or(true);
+                if relation.forward && !nullable {
+                    subquery.requirement = q::ArraySubqueryRequirement::AtLeastOne;
+                } else {
+                    return Err(unsupported(format!(
+                        "\"required\" on {name}: only forward relations through a non-optional column can be required"
+                    )));
+                }
+            }
+            let child_table = convert_table(schema, &relation.to_table)?;
+            let child_columns = match &child_parts.select {
+                Some(_) => child_shape_columns(&child, child_table)?,
+                None => child_table
+                    .columns
+                    .columns
+                    .iter()
+                    .map(|c| (c.name.as_str().to_owned(), c.column_type.clone()))
+                    .collect(),
+            };
+            shape.includes.push(IncludeShape {
+                name: name.to_owned(),
+                forward: relation.forward,
+                columns: child_columns,
+                shape: child_shape,
+            });
+            parts.includes.push(subquery);
+        }
+    }
+    Ok(shape)
+}
+
+fn convert_table<'a>(schema: &'a Schema, name: &str) -> Result<&'a TableSchema> {
+    table(schema, name)
+}
+
+/// An include's selected columns, in the order its query names them.
+fn child_shape_columns(
+    child: &Map<String, Json>,
+    table: &TableSchema,
+) -> Result<Vec<(String, ColumnType)>> {
+    let mut columns: Vec<(String, ColumnType)> = Vec::new();
+    for name in child
+        .get("select")
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Json::as_str)
+    {
+        if name == "id" || columns.iter().any(|(n, _)| n == name) {
+            continue;
+        }
+        if let Some(c) = table
+            .columns
+            .columns
+            .iter()
+            .find(|c| c.name.as_str() == name)
+        {
+            columns.push((name.to_owned(), c.column_type.clone()));
+        }
+    }
+    Ok(columns)
 }
 
 fn predicate(
@@ -431,11 +780,7 @@ fn core(value: Value) -> CoreValue {
 /// An engine delta as delta JSON. `reset` marks the first delta (the full
 /// result). Rows that only moved carry no new value and are left out: the
 /// contract's deltas carry no positions.
-pub(crate) fn delta_json(
-    table: &TableSchema,
-    delta: OrderedRowDelta,
-    reset: bool,
-) -> Result<String> {
+pub(crate) fn delta_json(table: &Shape, delta: OrderedRowDelta, reset: bool) -> Result<String> {
     let id = |key: &jazz_app::jazz::tools::ResultKey| {
         key.row_id()
             .ok_or_else(|| FfiError::Io("a joined result is not a row".into()))
@@ -464,4 +809,22 @@ pub(crate) fn delta_json(
         "coalesced": false,
     })
     .to_string())
+}
+
+/// White-box: no JSON input can produce a non-finite double (JSON has no
+/// NaN or infinity), so the read side's mapping is checked directly.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_finite_doubles_read_as_null() {
+        for double in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                to_json(Value::Double(double), Some(&ColumnType::Double)),
+                Json::Null
+            );
+        }
+        assert_eq!(to_json(Value::Double(0.5), None), json!(0.5));
+    }
 }
