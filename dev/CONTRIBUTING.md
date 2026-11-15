@@ -153,7 +153,7 @@ cache configuration, shard, timing, and direct exit status.
 cargo install cargo-nextest --locked
 node dev/gates/run-rust-tests.mjs --shard-index 1 --shard-count 2 -- \
   --workspace --lib --bins --tests \
-  --features jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test
+  --features jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test,jazz-app/test-relay
 
 # No Devbox or Nextest required: preserves Cargo selection and adds an overall
 # timeout, but cannot attribute a hang to an individual test.

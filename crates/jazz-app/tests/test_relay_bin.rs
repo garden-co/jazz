@@ -24,6 +24,26 @@ impl Drop for Bin {
     }
 }
 
+/// The built bin: Cargo's `CARGO_BIN_EXE_*` when it sets it (it doesn't
+/// here, as with jazz-cli's tests), else the bin beside this test's `deps/`.
+fn relay_bin() -> std::path::PathBuf {
+    if let Some(path) = option_env!("CARGO_BIN_EXE_jazz-app-test-relay") {
+        return path.into();
+    }
+    let test = std::env::current_exe().unwrap();
+    let profile = test.parent().and_then(|deps| deps.parent()).unwrap();
+    let bin = profile.join(format!(
+        "jazz-app-test-relay{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    assert!(
+        bin.is_file(),
+        "build it: cargo build -p jazz-app --features test-relay ({})",
+        bin.display()
+    );
+    bin
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_device_account_syncs_through_the_bin() {
     let app_id = AppId::random();
@@ -50,11 +70,11 @@ async fn a_device_account_syncs_through_the_bin() {
     .await
     .expect("open the app's backend");
 
-    let mut bin = Bin(Command::new(env!("CARGO_BIN_EXE_jazz-app-test-relay"))
+    let mut bin = Bin(Command::new(relay_bin())
         .args(["--core", &server.base_url()])
         .args(["--app-id", &app_id.to_string()])
-        .args(["--backend-secret", server.backend_secret()])
-        .args(["--admin-secret", server.admin_secret()])
+        .env("JAZZ_BACKEND_SECRET", server.backend_secret())
+        .env("JAZZ_ADMIN_SECRET", server.admin_secret())
         .args(["--bundle", backend.bundle().unwrap()])
         .stdout(Stdio::piped())
         .spawn()
