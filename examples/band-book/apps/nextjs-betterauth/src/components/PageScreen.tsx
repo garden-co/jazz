@@ -15,7 +15,7 @@ import {
   VStack,
   type DropdownMenuOption,
 } from "@astryxdesign/core";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { PAGE_TREE_MAX_DEPTH } from "@/src/lib/limits";
 import { createPage, createSongSheet } from "@/src/lib/page-actions";
 import { BlockEditor } from "./BlockEditor";

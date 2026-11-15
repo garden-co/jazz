@@ -1996,3 +1996,26 @@ fn load_app_checks_what_load_checks_of_the_app_file() {
     assert_eq!(app.schemas().len(), full.schemas().len());
     assert_eq!(app.codegen(), full.codegen());
 }
+
+#[test]
+fn version_names_javascript_would_reorder_are_refused() {
+    let error = edited_app(|v| {
+        let history = v["history"].as_object_mut().unwrap();
+        let version = history.remove("00304e9bce65").unwrap();
+        history.insert("12".into(), version);
+        v["migrations"][0]["from"] = "12".into();
+    });
+    assert!(
+        error.contains("history.12: `12` can't name a version"),
+        "{error}"
+    );
+    // Twelve digits are never an array index.
+    for name in ["123456789012", "000000000001", "4294967295"] {
+        edited_app_loads(|v| {
+            let history = v["history"].as_object_mut().unwrap();
+            let version = history.remove("00304e9bce65").unwrap();
+            history.insert(name.into(), version);
+            v["migrations"][0]["from"] = name.into();
+        });
+    }
+}

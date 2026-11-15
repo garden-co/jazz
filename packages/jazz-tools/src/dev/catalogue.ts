@@ -17,6 +17,7 @@ import {
   type PublishedTableLens,
 } from "./catalogue-api.js";
 import { shortSchemaHash } from "./schema-utils.js";
+import { enginePermissions, type PermissionsFile } from "./codegen-napi.js";
 import { fetchMigrationGraph, type MigrationGraph } from "./migration-graph.js";
 
 export { computeSchemaHash, shortSchemaHash };
@@ -42,8 +43,8 @@ export interface DeployResult extends DeploymentResponse {
 export interface DeployOptions extends CatalogueServerOptions {
   /** The generated `app` (or its schema). */
   app: SchemaSourceInput;
-  /** The engine's permissions, as `loadBackendApp` compiles them from jazz.permissions.json. */
-  permissions: CompiledPermissionsMap;
+  /** The app's `jazz.permissions.json` (or the engine's policies a load returned). */
+  permissions: PermissionsFile | CompiledPermissionsMap;
   /**
    * Confirms switching tables of the active schema to latest-only history,
    * which drops their past versions for good.
@@ -52,7 +53,10 @@ export interface DeployOptions extends CatalogueServerOptions {
 }
 
 /** A warning for each table without any policy: everything on it is denied. */
-function missingPolicyWarnings(tables: readonly string[], permissions: CompiledPermissionsMap): string[] {
+function missingPolicyWarnings(
+  tables: readonly string[],
+  permissions: CompiledPermissionsMap,
+): string[] {
   return tables
     .filter((table) => {
       const policies = permissions[table];
@@ -104,8 +108,9 @@ export async function deployArtifacts(
  */
 export async function deployApp(options: DeployOptions): Promise<DeployResult> {
   const declared = resolveSchemaSource(options.app);
+  const permissions = await enginePermissions(options.app, options.permissions);
   const schema = mergePermissionsIntoWasmSchema(declared, {});
-  await validateSchemaAndPermissions(schema, options.permissions);
+  await validateSchemaAndPermissions(schema, permissions);
   const targetSchemaHash = await computeSchemaHash(schema);
   const shipped = shippedMigrations(declared);
   const schemas = new Map<string, WasmSchema>();
@@ -122,10 +127,9 @@ export async function deployApp(options: DeployOptions): Promise<DeployResult> {
       toHash: edge.toHash,
       forward: edge.forward as PublishedTableLens[],
     })),
-    permissions: options.permissions,
+    permissions,
   });
 }
-
 
 /** Publish an app and its permissions (what `createJazz` publishes when it starts). */
 export const deploy = deployApp;

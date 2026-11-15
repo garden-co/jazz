@@ -12,7 +12,7 @@ import {
   VStack,
 } from "@astryxdesign/core";
 import { useAll, useOne } from "jazz-tools/react";
-import { app } from "../../schema";
+import { app } from "../../jazz.generated";
 import { CatalogueDialog } from "../components/forms";
 import { ListPagination, pageOf, useListControls } from "../components/list";
 import { PageHeader, PageSection } from "../components/page";

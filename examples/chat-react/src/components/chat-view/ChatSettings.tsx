@@ -27,7 +27,7 @@ import {
 } from "@/components/ui/sheet";
 import { navigate } from "@/hooks/useRouter";
 import { fireAndReport } from "@/lib/db-write";
-import { app } from "../../../schema.js";
+import { app } from "../../../jazz.generated.js";
 
 interface ChatSettingsProps {
   chatId: string;

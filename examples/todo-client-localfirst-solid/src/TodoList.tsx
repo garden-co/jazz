@@ -1,7 +1,7 @@
 import { For, createMemo, createSignal, type JSX } from "solid-js";
 import { useAll, useSession } from "jazz-tools/solid";
 import { toast } from "solid-sonner";
-import { app, type Todo } from "./lib/schema.js";
+import { app, type Todo } from "./lib/jazz.generated.js";
 
 export function TodoList() {
   const session = useSession();

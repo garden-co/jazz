@@ -1,6 +1,6 @@
 import { Show } from "solid-js";
 import { useAll } from "jazz-tools/solid";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 export function QuickstartItem(props: { id: string }) {
   const todos = useAll(() => ({ query: app.todos.where({ id: props.id }).limit(1) }));

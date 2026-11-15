@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { Db } from "jazz-tools";
 import { createPolicyTestApp, type PolicyTestApp, type TestDb } from "jazz-tools/testing";
-import { app } from "../schema.js";
-import permissions from "../permissions.js";
+import { app } from "../jazz.generated.js";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 import {
   ArtistHasReleasesError,
   CatalogNumberTakenError,

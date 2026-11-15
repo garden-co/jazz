@@ -1,7 +1,7 @@
 import { Data, Effect, Option, Schedule, Stream } from "effect";
 import { schema as s, ReadTier, type RowAuthor } from "jazz-tools";
 import { Jazz } from "jazz-tools/effect";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";
 const EXAMPLE_OWNER_ID = "00000000-0000-0000-0000-00000000000a";

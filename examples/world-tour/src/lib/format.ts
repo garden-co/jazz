@@ -1,4 +1,4 @@
-import type { StopStatus } from "../../schema.js";
+import type { StopStatus } from "../../app-extras.js";
 
 const long = new Intl.DateTimeFormat("en-GB", {
   weekday: "long",

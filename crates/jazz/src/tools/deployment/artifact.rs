@@ -120,7 +120,7 @@ impl ArtifactError {
     }
 }
 
-const REGENERATE: &str = "regenerate it with `jazz-tools validate`";
+const REGENERATE: &str = "regenerate it with `jazz-tools generate`";
 
 // ============================================================================
 // Codegen metadata
@@ -397,7 +397,7 @@ enum BoundRelation {
 pub fn load_backend(bound: &[u8], permissions: &[u8]) -> Result<LoadedApp, ArtifactError> {
     let refuse = |message: String| {
         ArtifactError::new(format!(
-            "the bindings' compiled app: {message}; regenerate them with `jazz-tools validate`"
+            "the bindings' compiled app: {message}; regenerate them with `jazz-tools generate`"
         ))
     };
     let bound: BoundApp =
@@ -624,7 +624,7 @@ fn refuse_todos(root: &Json) -> Result<(), ArtifactError> {
         .collect();
     Err(ArtifactError::new(format!(
         "{} unresolved TODO{} left by `jazz-tools migrations create`; replace each with \
-         the value it asks for, then run `jazz-tools validate` again:\n{}",
+         the value it asks for, then run `jazz-tools generate` again:\n{}",
         todos.len(),
         if todos.len() == 1 { "" } else { "s" },
         list.join("\n")

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useDb, useJazzSession, useSession } from "jazz-tools/vue";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 // #region db-access-vue
 // Must be called inside setup() or <script setup>

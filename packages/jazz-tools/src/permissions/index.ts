@@ -8,4 +8,5 @@ import type { RemovedApi } from "../removed-api.js";
 
 export { definePermissions, anyOf, allOf } from "../removed-schema-api.js";
 /** @deprecated Removed in alpha.65, and throws when used: permissions are written in jazz.permissions.json. Run `npx jazz-tools upgrade`. */
-export const createSessionContext: RemovedApi = /*#__PURE__*/ removedSchemaApi("createSessionContext");
+export const createSessionContext: RemovedApi =
+  /*#__PURE__*/ removedSchemaApi("createSessionContext");
