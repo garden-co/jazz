@@ -364,7 +364,15 @@ describe("Jazz session lifecycle", () => {
       deleteSignedOutStore?: (account: AccountHandle) => Promise<"deleted" | "held">;
     } = {},
   ) {
+    // The account store's saves, which a test can make fail.
+    const save = { fail: false };
     const accounts = createAccountManagerWithRuntime({
+      selectionDurability: {
+        selectionChanged() {},
+        settle: async () => {
+          if (save.fail) throw new Error("storage full");
+        },
+      },
       registry: "https://core.example/apps/test/accounts",
       localFirst: {
         create: () => ({
@@ -420,7 +428,7 @@ describe("Jazz session lifecycle", () => {
         return client;
       },
     });
-    return { session, net, opened };
+    return { session, net, opened, save };
   }
   it("keeps a signing-out client's credential until its writes uploaded", async () => {
     const { session, net, opened } = await realEnrollmentSetup();
@@ -543,6 +551,65 @@ describe("Jazz session lifecycle", () => {
       // delete through a client that may be shutting down.
       expect(deleteSignedOutStore).toHaveBeenCalledWith(account);
       expect(client.db.deleteClientStorage).not.toHaveBeenCalled();
+      await session.close();
+    } finally {
+      warned.mockRestore();
+    }
+  });
+  it("tells the app when another tab holds off a discard's wipe, and retry() finishes it", async () => {
+    let holder: "held" | "deleted" = "held";
+    const deleteSignedOutStore = vi.fn(async (_account: AccountHandle) => holder);
+    const { session, opened } = await realEnrollmentSetup({ deleteSignedOutStore });
+    await session.createLocalFirst();
+    const client = opened.at(-1)!;
+    await session.logout({ discardUnsynced: true });
+    // Signed out, but the data stays while that tab has it: the app is told.
+    expect(session.getSnapshot()).toMatchObject({
+      status: "signed-out",
+      recovery: "action",
+      error: { message: expect.stringContaining("another tab still has this account open") },
+    });
+    expect(client.torn).toBe(true);
+    await expect(session.retry()).rejects.toThrow("another tab still has this account open");
+    expect(session.getSnapshot().error).toBeDefined();
+    // That tab closed: retrying wipes it.
+    holder = "deleted";
+    await session.retry();
+    expect(deleteSignedOutStore).toHaveBeenCalledTimes(3);
+    expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+    expect(session.getSnapshot().error).toBeUndefined();
+    await session.close();
+  });
+  it("saves a selection that failed during an offline sign-out on retry, back to signing-out", async () => {
+    const { session, save } = await realEnrollmentSetup();
+    await session.createLocalFirst();
+    save.fail = true;
+    await expect(session.logout()).rejects.toThrow("storage full");
+    expect(session.getSnapshot()).toMatchObject({ status: "error", recovery: "session" });
+    save.fail = false;
+    // Saved now; the upload, still offline, keeps waiting.
+    await expect(session.retry()).rejects.toBeInstanceOf(GracefulShutdownSyncError);
+    expect(session.getSnapshot()).toMatchObject({ status: "signing-out" });
+    await session.close();
+  });
+  it("discards while signing out even when the selection won't save", async () => {
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { session, save, opened } = await realEnrollmentSetup();
+      await session.createLocalFirst();
+      const client = opened.at(-1)!;
+      save.fail = true;
+      await expect(session.logout()).rejects.toThrow("storage full");
+      // The escape hatch still drops the writes and closes the client.
+      await expect(session.logout({ discardUnsynced: true })).rejects.toThrow("storage full");
+      expect(client.deleted).toBe(true);
+      expect(client.torn).toBe(true);
+      expect(session.getSnapshot()).toMatchObject({ status: "error", recovery: "session" });
+      save.fail = false;
+      await session.retry();
+      expect(session.getSnapshot()).toMatchObject({ status: "signed-out" });
+      await session.createLocalFirst();
+      expect(session.getSnapshot().status).toBe("ready");
       await session.close();
     } finally {
       warned.mockRestore();

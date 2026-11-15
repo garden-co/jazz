@@ -40,6 +40,7 @@ import {
 } from "./follow-user.js";
 import {
   holdReplicaStore,
+  releaseHoldOnShutdown,
   replicaLedger,
   wipeAccountStoreNow,
   replicaLifecycle,
@@ -307,14 +308,7 @@ export async function openBrowserSessionCore(
         await release();
         throw error;
       }
-      const shutdown = client.shutdown.bind(client);
-      client.shutdown = async (options) => {
-        try {
-          await shutdown(options);
-        } finally {
-          await release();
-        }
-      };
+      releaseHoldOnShutdown(client, release);
       return client;
     } finally {
       opening.delete(account.id);

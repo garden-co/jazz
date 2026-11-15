@@ -1,3 +1,4 @@
+import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 import { reloadAfterStorageInvalidation } from "../runtime/browser-storage-invalidation.js";
 import { holdAcrossPageCache } from "../runtime/page-cache.js";
 
@@ -352,6 +353,29 @@ async function whileNoTabHolds<T>(
     },
   );
   return result;
+}
+
+/**
+ * @internal Let go of a client's store hold (`release`) once the client has
+ * shut down, however that ended, except for a graceful shutdown whose sync
+ * failed: the client is still open then (a `signing-out` session keeps it
+ * to upload later), so it still holds the store against other tabs'
+ * opens and wipes until a later shutdown ends it.
+ */
+export function releaseHoldOnShutdown(
+  client: { shutdown(options?: { waitForSync?: boolean }): Promise<void> },
+  release: () => Promise<void>,
+): void {
+  const shutdown = client.shutdown.bind(client);
+  client.shutdown = async (options) => {
+    try {
+      await shutdown(options);
+    } catch (error) {
+      if (!(error instanceof GracefulShutdownSyncError)) await release();
+      throw error;
+    }
+    await release();
+  };
 }
 
 /**

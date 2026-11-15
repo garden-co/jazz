@@ -298,6 +298,30 @@ export async function createJazzSessionOwner<
   let closing: Promise<void> | undefined;
   let loggingOut: Promise<void> | undefined;
   let signOuts = 0;
+  // A discard another tab held off: that account's store (and the writes
+  // in it, which that tab may still upload) stays until `retry()` wipes it.
+  let pendingWipe: AccountHandle | undefined;
+  const wipeHeld = () =>
+    new Error(
+      "Jazz signed out, but another tab still has this account open, so its data stays on this device (that tab may still upload its unsynced writes). Close that tab, then call retry() to finish wiping it (discardUnsynced).",
+    );
+  /** Wipe what a held-off discard left, once no tab holds the store. */
+  const finishWipe = async () => {
+    const account = pendingWipe;
+    if (!account || !options.deleteSignedOutStore) return;
+    if ((await options.deleteSignedOutStore(account)) === "held") {
+      const error = wipeHeld();
+      if (pendingWipe === account && !selected && !closed)
+        publish({ status: "signed-out", error, recovery: "action" });
+      throw error;
+    }
+    if (pendingWipe !== account) return;
+    pendingWipe = undefined;
+    await forgetDeviceAccount(accounts, account.id).catch((error: unknown) =>
+      console.warn("Jazz couldn't forget the signed-out device account's key.", error),
+    );
+    if (!selected && !closed && snapshot.status === "signed-out") publish({ status: "signed-out" });
+  };
   // A sign-out that couldn't reach the server (`signing-out`): the
   // signed-out user's client, still open so it can upload its last writes.
   let draining:
@@ -398,6 +422,7 @@ export async function createJazzSessionOwner<
           wiped = !outcome.held;
           heldElsewhere = outcome.held;
           unfinishedWipe = outcome.unfinished;
+          if (outcome.held) pendingWipe = selected;
         } else if (
           signsOut &&
           options.clearOnSignOut &&
@@ -560,11 +585,17 @@ export async function createJazzSessionOwner<
       watchDrain(draining);
       return;
     }
+    // Signed in as the account a held-off discard left: its store is in use.
+    if (selected && pendingWipe?.id === selected.id) pendingWipe = undefined;
     publish({
       status: client ? "ready" : "signed-out",
       account: selected,
       client,
-      ...(unfinishedWipe ? { error: unfinishedWipe, recovery: "session" as const } : {}),
+      ...(unfinishedWipe
+        ? { error: unfinishedWipe, recovery: "session" as const }
+        : !client && pendingWipe
+          ? { error: wipeHeld(), recovery: "action" as const }
+          : {}),
     });
   };
   type Drain = NonNullable<typeof draining>;
@@ -619,11 +650,7 @@ export async function createJazzSessionOwner<
       } catch (cause) {
         failure ??= cause;
       }
-    if (held)
-      console.warn(
-        "Jazz signed out and dropped this tab's unsynced writes, but another tab still has this account open, so its data stays on this device for that tab.",
-      );
-    else warnDiscarded(writes, "signOut({ discardUnsynced: true })");
+    if (!held) warnDiscarded(writes, "signOut({ discardUnsynced: true })");
     return {
       held,
       ...(failure === undefined
@@ -642,7 +669,7 @@ export async function createJazzSessionOwner<
    * client keeps none), and finish the sign-out now. Nothing signs in until
    * it has.
    */
-  const discardDrain = (drain: Drain): Promise<void> => {
+  const discardDrain = (drain: Drain, unsaved?: unknown): Promise<void> => {
     const task = (async () => {
       endDrain(drain, false);
       let outcome: Awaited<ReturnType<typeof discardLocal>>;
@@ -651,14 +678,25 @@ export async function createJazzSessionOwner<
       } finally {
         drain.release?.();
       }
-      if (drain.account && !outcome.held)
+      if (outcome.held) pendingWipe = drain.account;
+      else if (drain.account)
         await forgetDeviceAccount(accounts, drain.account.id).catch((error: unknown) =>
           console.warn("Jazz couldn't forget the signed-out device account's key.", error),
         );
       if (closed) return;
+      // The signed-out selection still didn't save: as any sign-out whose
+      // save failed, `error`, and `retry()` saves it again.
+      if (unsaved !== undefined) {
+        publish({ status: "error", error: toError(unsaved), recovery: "session" });
+        throw unsaved;
+      }
       publish({
         status: "signed-out",
-        ...(outcome.unfinished ? { error: outcome.unfinished, recovery: "session" as const } : {}),
+        ...(outcome.unfinished
+          ? { error: outcome.unfinished, recovery: "session" as const }
+          : outcome.held
+            ? { error: wipeHeld(), recovery: "action" as const }
+            : {}),
       });
     })();
     loggingOut = task;
@@ -783,7 +821,13 @@ export async function createJazzSessionOwner<
     loginWithBackend: () => run("loginWithBackend", () => accounts.loginWithBackend()),
     linkWithBackend: () => run("linkWithBackend", () => accounts.linkWithBackend()),
     // Signing out: save a selection that failed to land, then try the upload now.
-    retry: () => (draining ? resumeDrain().then(drainNow) : run("retry", () => selected)),
+    // Signed out with a held-off discard: wipe what it left, now.
+    retry: () =>
+      draining
+        ? resumeDrain().then(drainNow)
+        : pendingWipe && !selected && snapshot.status === "signed-out"
+          ? finishWipe()
+          : run("retry", () => selected),
     logout: (logoutOptions = {}) => {
       if (closed) return Promise.reject(new Error("Jazz session is closed"));
       const discard = logoutOptions.discardUnsynced === true;
@@ -797,7 +841,12 @@ export async function createJazzSessionOwner<
       // the app gives it up.
       if (draining) {
         const drain = draining;
-        return resumeDrain().then(() => (discard ? discardDrain(drain) : undefined));
+        if (!discard) return resumeDrain();
+        // The escape hatch runs even while the selection won't save.
+        return resumeDrain().then(
+          () => discardDrain(drain),
+          (unsaved: unknown) => discardDrain(drain, unsaved),
+        );
       }
       const token = ++generation;
       ++signOuts;

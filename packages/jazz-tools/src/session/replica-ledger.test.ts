@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   holdReplicaStore,
   replicaLedger,
+  releaseHoldOnShutdown,
   replicaLifecycle,
   wipeAccountStoreNow,
   type Locks,
@@ -9,6 +10,7 @@ import {
   type ReplicaLifecycle,
 } from "./replica-ledger.js";
 import { holdAcrossPageCache, pageCacheForTest } from "../runtime/page-cache.js";
+import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 
 // The #5250 model test: several tabs of one browser, one per-account store,
 // a backend and the device's account store, all simulated; random
@@ -863,5 +865,38 @@ describe("wipeAccountStoreNow (signOut({ discardUnsynced }))", () => {
       wipeAccountStoreNow(REGISTRY, alice.id, deleteStore, locks.view("me")),
     ).resolves.toBe("deleted");
     expect(deleteStore).toHaveBeenCalledWith(alice.id);
+  });
+});
+
+describe("releaseHoldOnShutdown", () => {
+  it("keeps the store held past a failed drain, until a shutdown ends the client", async () => {
+    const release = vi.fn(async () => {});
+    let offline = true;
+    const client = {
+      shutdown: vi.fn(async (options?: { waitForSync?: boolean }) => {
+        if (options?.waitForSync && offline)
+          throw new GracefulShutdownSyncError(new Error("offline"));
+      }),
+    };
+    releaseHoldOnShutdown(client, release);
+    // The upload failed: the client is still open (signing-out), and holds.
+    await expect(client.shutdown({ waitForSync: true })).rejects.toBeInstanceOf(
+      GracefulShutdownSyncError,
+    );
+    expect(release).not.toHaveBeenCalled();
+    offline = false;
+    await client.shutdown({ waitForSync: true });
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+  it("lets go when teardown itself fails", async () => {
+    const release = vi.fn(async () => {});
+    const client = {
+      shutdown: vi.fn(async () => {
+        throw new Error("teardown failed");
+      }),
+    };
+    releaseHoldOnShutdown(client, release);
+    await expect(client.shutdown()).rejects.toThrow("teardown failed");
+    expect(release).toHaveBeenCalledTimes(1);
   });
 });

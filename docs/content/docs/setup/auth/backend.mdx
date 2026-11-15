@@ -500,8 +500,9 @@ down gracefully with its writes synced, and only then signs in and opens the new
   so someone else can sign in. Writes the server already has stay there, and the device forgets a
   device account's key with its data, so `reopenDeviceAccount()` can't open it again. Plain
   `signOut()` never drops writes. In a browser, a store another tab still has open stays for that
-  tab. On Node, a persistent store isn't deleted (only its client closes); a memory store keeps
-  nothing.
+  tab (which may still upload its writes): the session is `signed-out` with an `error` saying so,
+  and `retry()` finishes the wipe once that tab has closed. On Node, a persistent store isn't
+  deleted (only its client closes); a memory store keeps nothing.
 
 ### Reactive state
 
