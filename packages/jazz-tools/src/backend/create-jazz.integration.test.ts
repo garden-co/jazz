@@ -24,7 +24,7 @@ import { generateSecret, identityOf, signChallenge, signToken } from "../local-f
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { JazzCore } from "jazz-napi";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { testApp } from "../testing/index.js";
+import { testApp, testPermissions } from "../testing/index.js";
 import { decodeWebSocketFrameBatch } from "../runtime/native-runtime/websocket.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import {
@@ -58,6 +58,8 @@ const permissions = {
   format: 1,
   tables: { todos: { read: "owner = session.user", insert: "owner = session.user" } },
 };
+/** The same permissions, compiled, for a browser session (`createJazzClient`). */
+const clientPermissions = testPermissions(app, permissions);
 
 const NodeWebSocket = globalThis.WebSocket;
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -183,7 +185,7 @@ async function userSession(appId: string, origin: string, userId: string) {
   const session = await createJazzClient({
     appId,
     app,
-    permissions,
+    permissions: clientPermissions,
     serverUrl: `${origin}/jazz`,
     driver: { type: "memory" },
   });
@@ -1167,7 +1169,7 @@ describe("createJazz", () => {
     const session = await createJazzClient({
       appId: jazz.appId,
       app,
-      permissions: byRole,
+      permissions: testPermissions(app, byRole),
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
     });
@@ -1545,7 +1547,7 @@ describe("createJazz", () => {
     const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
     const guestSession = await createJazzClient({
       app,
-      permissions,
+      permissions: clientPermissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       initial: "device",
@@ -1592,7 +1594,7 @@ describe("createJazz", () => {
     });
     const guestSession = await createJazzClient({
       app,
-      permissions,
+      permissions: clientPermissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       initial: "device",
@@ -1621,7 +1623,7 @@ describe("createJazz", () => {
     const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
     const guestSession = await createJazzClient({
       app,
-      permissions,
+      permissions: clientPermissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       initial: "device",
@@ -1682,7 +1684,7 @@ describe("createJazz", () => {
     // And its sync session is let in.
     const guestSession = await createJazzClient({
       app,
-      permissions,
+      permissions: clientPermissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       initial: "device",
@@ -1793,7 +1795,7 @@ describe("createJazz", () => {
     signInAs(origin, "alice");
     const session = await createJazzClient({
       app,
-      permissions,
+      permissions: clientPermissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
     });
@@ -1822,7 +1824,7 @@ describe("createJazz", () => {
     // Her sign-in gives her an account on the new core, and syncs.
     const again = await createJazzClient({
       app,
-      permissions,
+      permissions: clientPermissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
     });
@@ -1892,7 +1894,7 @@ describe("createJazz", () => {
       const session = await createJazzClient({
         ...(scoping === "names the app" ? { appId } : {}),
         app,
-        permissions,
+        permissions: clientPermissions,
         serverUrl: `${origin}/jazz`,
         driver: { type: "memory" },
         initial: "device",
@@ -1949,7 +1951,7 @@ describe("createJazz", () => {
     const session = await createJazzClient({
       appId: jazz.appId,
       app,
-      permissions,
+      permissions: clientPermissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       initial: "device",
@@ -2833,7 +2835,7 @@ describe("createJazz", () => {
       const session = await createJazzClient({
         appId: jazz.appId,
         app: blobs,
-        permissions: blobPermissions,
+        permissions: testPermissions(blobs, blobPermissions),
         serverUrl: `${origin}/jazz`,
         driver: { type: "memory" },
       });
@@ -3363,7 +3365,7 @@ describe("createJazz", () => {
     const guestOrigin = await serve(jazz, { sockets: true });
     const guestSession = await createJazzClient({
       app,
-      permissions,
+      permissions: clientPermissions,
       serverUrl: `${guestOrigin}/jazz`,
       driver: { type: "memory" },
       initial: "device",
@@ -3803,7 +3805,7 @@ describe("createJazz", () => {
     const guestOf = async (origin: string) => {
       const session = await createJazzClient({
         app,
-        permissions,
+        permissions: clientPermissions,
         serverUrl: `${origin}/jazz`,
         driver: { type: "memory" },
         initial: "device",

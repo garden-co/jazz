@@ -9,6 +9,7 @@ import { testApp } from "../testing/index.js";
 import { Db } from "../runtime/db.js";
 import { earlyDb, earlyDbMethodKind, MAX_EARLY_WRITES } from "./early-db.js";
 import { createJazz, memory, sqlite, type Jazz } from "./index.js";
+import type { AppPermissionsFile } from "./create-jazz.js";
 
 // `createJazz` at a module's top level: it opens nothing until first use,
 // and a later call for the same store (a hot reload) reuses its core.
@@ -164,7 +165,7 @@ describe("createJazz, opened on first use", () => {
 
     // New permissions apply to the next use: the user may no longer insert.
     const noInserts = { format: 1, tables: { todos: { read: "owner = session.user" } } };
-    const asBob = (store: ReturnType<typeof sqlite>, rules: typeof permissions) =>
+    const asBob = (store: ReturnType<typeof sqlite>, rules: AppPermissionsFile) =>
       createJazz({ app, permissions: rules, store, authenticate: as("bob") });
     const insertAsBob = async (jazz: Jazz) =>
       (await jazz.forReqUser(request))
