@@ -85,15 +85,18 @@ impl Lang {
         match name {
             "ts" | "typescript" => Ok(Lang::TypeScript),
             "rust" | "rs" => Ok(Lang::Rust),
-            "kotlin" | "kt" => Ok(Lang::Kotlin),
+            // Switched off until the jazz-kotlin runtime lands.
+            "kotlin" | "kt" => Err(CodegenError::unsupported(
+                "Kotlin bindings are not available yet",
+            )),
             other => Err(CodegenError::unsupported(format!(
-                "generating bindings in `{other}` is not supported yet; supported: ts, rust, kotlin"
+                "generating bindings in `{other}` is not supported yet; supported: ts, rust"
             ))),
         }
     }
 
     /// Every language, in the order `jazz-tools generate` handles them.
-    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust, Lang::Kotlin];
+    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust];
 
     /// The file whose presence beside `jazz.app.json` says the app is
     /// written in this language, so `validate` writes its bindings.
@@ -113,7 +116,10 @@ impl Lang {
     pub fn detected_in(self, dir: &std::path::Path) -> bool {
         let marker = dir.join(self.marker());
         match self {
-            Lang::TypeScript | Lang::Kotlin => marker.exists(),
+            Lang::TypeScript => marker.exists(),
+            Lang::Kotlin => {
+                std::fs::read_to_string(marker).is_ok_and(|build| kotlin::is_app_build(&build))
+            }
             Lang::Rust => std::fs::read_to_string(marker)
                 .is_ok_and(|manifest| rust::is_app_manifest(&manifest)),
         }

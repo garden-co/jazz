@@ -32,6 +32,20 @@ pub const HEADER: &str =
 /// The marker beside `jazz.app.json` that says the app is written in Kotlin.
 pub const MARKER: &str = "build.gradle.kts";
 
+/// The runtime a Kotlin app's `build.gradle.kts` depends on.
+pub const RUNTIME: &str = "jazz-kotlin";
+
+/// Whether `build` (a `build.gradle.kts`) is a Kotlin Jazz app's: it depends
+/// on the `jazz-kotlin` runtime.
+pub fn is_app_build(build: &str) -> bool {
+    build
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or(""))
+        .any(|line| {
+            line.contains(&format!(":{RUNTIME}\"")) || line.contains(&format!(":{RUNTIME}:"))
+        })
+}
+
 /// The package the bindings declare.
 pub const PACKAGE: &str = "jazzapp";
 
@@ -82,6 +96,20 @@ const RESERVED: &[&str] = &[
     "Throwable",
     "Exception",
     "Error",
+    "Sequence",
+    "Iterable",
+    "Collection",
+    "Iterator",
+    "Lazy",
+    "Function",
+    "Comparator",
+    "CharSequence",
+    "Thread",
+    "Process",
+    "Runtime",
+    "Class",
+    "Object",
+    "System",
 ];
 
 const KEYWORDS: &[&str] = &[
@@ -431,8 +459,24 @@ impl<'a> Writer<'a> {
             string_literal(&table.name)
         );
         out.push_str("    /** The row's id. */\n    public val id: Column<String> = Column(\"id\", String.serializer())\n");
-        let mut props =
-            BTreeSet::from(["id".to_owned(), "query".to_owned(), "tableName".to_owned()]);
+        // The public members of `tools.jazz.Table` (and `Any`): a column of
+        // that name gets `Column` after it.
+        let mut props: BTreeSet<String> = [
+            "id",
+            "query",
+            "where",
+            "orderBy",
+            "tableName",
+            "rowSerializer",
+            "insertSerializer",
+            "newPatch",
+            "equals",
+            "hashCode",
+            "toString",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
         for f in &fields {
             let mut ident = f.ident.clone();
             if props.contains(ident.trim_matches('`')) {
@@ -706,6 +750,20 @@ mod tests {
         for text in ["", "a\"b\\c$d\n", "\t\r\u{1}é", "${x}"] {
             assert_eq!(unescape(&string_literal(text)).as_deref(), Some(text));
         }
+    }
+
+    #[test]
+    fn app_builds_depend_on_jazz_kotlin() {
+        assert!(is_app_build(
+            "dependencies {\n    implementation(\"tools.jazz:jazz-kotlin\")\n}\n"
+        ));
+        assert!(is_app_build(
+            "implementation(\"tools.jazz:jazz-kotlin:2.0.0-alpha.65\")"
+        ));
+        assert!(!is_app_build(
+            "// implementation(\"tools.jazz:jazz-kotlin\")\nplugins { kotlin(\"jvm\") }"
+        ));
+        assert!(!is_app_build("rootProject.name = \"jazz-kotlin\""));
     }
 
     #[test]
