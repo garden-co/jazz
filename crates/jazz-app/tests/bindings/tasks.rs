@@ -1,5 +1,5 @@
 // jazz_app.rs: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
-// Bindings format 3. Regenerate it after changing jazz.app.json.
+// Bindings format 4. Regenerate it after changing jazz.app.json.
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(dead_code, clippy::all)]
 
@@ -130,6 +130,11 @@ pub mod boxes {
     /// Every row of `boxes`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<Box> {
         ::jazz_app::Query::all()
+    }
+
+    /// Every accepted version of `boxes`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Box>> {
+        ::jazz_app::Query::history()
     }
 
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
@@ -265,6 +270,11 @@ pub mod steps {
     /// Every row of `steps`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<Step> {
         ::jazz_app::Query::all()
+    }
+
+    /// Every accepted version of `steps`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Step>> {
+        ::jazz_app::Query::history()
     }
 
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
@@ -483,6 +493,11 @@ pub mod tasks {
     /// Every row of `tasks`; narrow it with `filter`.
     pub fn query() -> ::jazz_app::Query<Task> {
         ::jazz_app::Query::all()
+    }
+
+    /// Every accepted version of `tasks`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app::Query<::jazz_app::Version<Task>> {
+        ::jazz_app::Query::history()
     }
 
     /// The row's id. (`::jazz_app::created_at()` and `updated_at()` are columns of every table too.)
