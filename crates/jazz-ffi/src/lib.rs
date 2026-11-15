@@ -314,6 +314,7 @@ impl JazzHandle {
         authenticator: Arc<dyn Authenticator>,
         base_path: Option<String>,
         session_ttl_secs: Option<u64>,
+        max_sockets: Option<u32>,
     ) -> Result<Arc<Endpoint>> {
         let auth: Arc<endpoint::HostAuthFn> =
             Arc::new(move |request: &str| authenticator.authenticate(request.to_owned()));
@@ -322,6 +323,7 @@ impl JazzHandle {
             auth,
             base_path.as_deref(),
             session_ttl_secs,
+            max_sockets.map(|max| max as usize),
         ))?;
         Ok(Arc::new(Endpoint {
             inner,

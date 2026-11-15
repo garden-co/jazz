@@ -174,7 +174,11 @@ typedef char *(*JazzAuthCallback)(void *ctx, const char *request_json);
 typedef void (*JazzSocketMessage)(void *ctx, const unsigned char *data, size_t len);
 typedef void (*JazzSocketClosed)(void *ctx, unsigned short code, const char *reason);
 
-/* options_json: {"basePath"?: "/jazz", "sessionTtlSecs"?} or NULL. */
+/*
+ * options_json: {"basePath"?: "/jazz", "sessionTtlSecs"?, "maxSockets"?
+ * (default 10000; past it a socket closes 1013)} or NULL. A client message
+ * over 2 MiB closes 1009; a refused prelude or sign-in closes 1008.
+ */
 JazzEndpoint *jazz_endpoint_new(JazzHandle *backend, JazzAuthCallback cb, void *ctx,
                                 const char *options_json, char **err);
 /* Answers an HTTP request with a response's JSON. */

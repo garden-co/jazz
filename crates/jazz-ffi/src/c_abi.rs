@@ -602,7 +602,7 @@ pub type JazzSocketClosed =
     Option<unsafe extern "C" fn(ctx: *mut c_void, code: u16, reason: *const c_char)>;
 
 /// The `/jazz` endpoint of a backend handle. `options_json`:
-/// `{"basePath"?: "/jazz", "sessionTtlSecs"?}` (or NULL).
+/// `{"basePath"?: "/jazz", "sessionTtlSecs"?, "maxSockets"?}` (or NULL).
 ///
 /// # Safety
 /// `handle` is an open backend handle; `auth_cb` and `ctx` stay valid, from
@@ -652,6 +652,10 @@ pub unsafe extern "C" fn jazz_endpoint_new(
             auth,
             options.get("basePath").and_then(Json::as_str),
             options.get("sessionTtlSecs").and_then(Json::as_u64),
+            options
+                .get("maxSockets")
+                .and_then(Json::as_u64)
+                .and_then(|max| usize::try_from(max).ok()),
         )?;
         Ok(Box::into_raw(Box::new(JazzEndpoint(endpoint))))
     })

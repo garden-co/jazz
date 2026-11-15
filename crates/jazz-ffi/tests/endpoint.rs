@@ -200,7 +200,9 @@ async fn a_backend_serves_its_users_through_its_own_endpoint() {
     let backend_config = backend_config(&server, &app_id.to_string(), "stage-plan");
     let (backend, endpoint) = blocking(move || {
         let backend = JazzHandle::open(backend_config).unwrap();
-        let endpoint = backend.endpoint(Arc::new(Bearers), None, None).unwrap();
+        let endpoint = backend
+            .endpoint(Arc::new(Bearers), None, None, None)
+            .unwrap();
         (backend, endpoint)
     })
     .await
@@ -259,6 +261,110 @@ async fn a_backend_serves_its_users_through_its_own_endpoint() {
     })
     .await;
     serving.abort();
+    server.shutdown().await;
+    result.unwrap();
+}
+
+/// The host's sign-in says alice, but her credential expired an hour ago.
+struct Expired;
+impl Authenticator for Expired {
+    fn authenticate(&self, _request_json: String) -> Option<String> {
+        let past = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 3600;
+        Some(json!({ "kind": "user", "userId": "alice", "expiresAt": past }).to_string())
+    }
+}
+
+/// An `authenticate` answer that has expired is no one on every path: the
+/// sign-in route answers 401 without the account, and the backend can't act
+/// as that user.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_answer_is_no_one() {
+    let app_id = jazz_app::AppId::random();
+    let server = jazz_server::JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let config = backend_config(&server, &app_id.to_string(), "stage-plan");
+    let app = app_id.to_string();
+    let result = blocking(move || {
+        let backend = JazzHandle::open(config).unwrap();
+        let endpoint = backend.endpoint(Arc::new(Expired), None, None, Some(8)).unwrap();
+        let request = json!({
+            "method": "POST",
+            "path": format!("/jazz/apps/{app}/accounts/backend-sign-in"),
+            "headers": [["authorization", "Bearer token-alice"], ["content-type", "application/json"]],
+            "body": BASE64.encode(b"{}"),
+        })
+        .to_string();
+        let response = parse(&endpoint.handle(request.clone()).unwrap());
+        assert_eq!(response["status"], 401, "{response}");
+        let body = String::from_utf8(BASE64.decode(response["body"].as_str().unwrap()).unwrap()).unwrap();
+        assert!(!body.contains("account"), "{body}");
+        assert!(endpoint.for_user(request).is_err());
+        endpoint.shutdown().unwrap();
+        backend.shutdown().unwrap();
+    })
+    .await;
+    server.shutdown().await;
+    result.unwrap();
+}
+
+struct Recorder(std::sync::mpsc::Sender<(Option<Vec<u8>>, Option<(u16, String)>)>);
+impl SocketListener for Recorder {
+    fn on_message(&self, message: Vec<u8>) {
+        let _ = self.0.send((Some(message), None));
+    }
+    fn on_close(&self, code: u16, reason: String) {
+        let _ = self.0.send((None, Some((code, reason))));
+    }
+}
+
+/// A socket whose opening message names credentials anywhere but its
+/// `auth` (here: an empty `auth` beside a top-level token) gets no session:
+/// the endpoint answers it as not signed in and closes it with 1008.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prelude_with_credentials_outside_auth_gets_no_session() {
+    let app_id = jazz_app::AppId::random();
+    let server = jazz_server::JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let config = backend_config(&server, &app_id.to_string(), "stage-plan");
+    let app = app_id.to_string();
+    let result = blocking(move || {
+        let backend = JazzHandle::open(config).unwrap();
+        let endpoint = backend
+            .endpoint(Arc::new(Bearers), None, None, None)
+            .unwrap();
+        let path = format!("/jazz/apps/{app}/ws");
+        assert!(endpoint.is_socket(path.clone()));
+        let (sender, events) = std::sync::mpsc::channel();
+        let upgrade = json!({ "method": "GET", "path": path, "headers": [] }).to_string();
+        let socket = endpoint
+            .socket(upgrade, Arc::new(Recorder(sender)))
+            .unwrap();
+        let prelude = json!({ "peer_identity": "someone", "jwt_token": "a.b.c", "auth": {} });
+        socket.push(serde_json::to_vec(&prelude).unwrap()).unwrap();
+        let mut closed = None;
+        while let Ok((_, close)) = events.recv_timeout(Duration::from_secs(10)) {
+            if close.is_some() {
+                closed = close;
+                break;
+            }
+        }
+        let (code, _) = closed.expect("the socket is closed");
+        assert_eq!(code, 1008);
+        socket.end();
+        endpoint.shutdown().unwrap();
+        backend.shutdown().unwrap();
+    })
+    .await;
     server.shutdown().await;
     result.unwrap();
 }
