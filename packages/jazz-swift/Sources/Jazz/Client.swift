@@ -64,7 +64,7 @@ public struct Config: Sendable {
     public enum Storage: String, Sendable { case memory, persistent }
 
     /// The session a backend acts in: `subject` is the user's id.
-    public struct Session: Sendable {
+    @_spi(Backend) public struct Session: Sendable {
         public var issuer: String
         public var subject: String
         public init(issuer: String = "jazz:backend", subject: String) {
@@ -78,14 +78,16 @@ public struct Config: Sendable {
     public var serverUrl: String?
     public var dataDir: String?
     /// The text of `jazz.permissions.json`: set, the app opens as a backend.
-    public var permissions: String?
-    public var backendSecret: String?
-    public var adminSecret: String?
-    public var session: Session?
+    @_spi(Backend) public var permissions: String?
+    @_spi(Backend) public var backendSecret: String?
+    @_spi(Backend) public var adminSecret: String?
+    @_spi(Backend) public var session: Session?
     /// An end user signing in through the app's Jazz endpoint (`serverUrl`).
     public var auth: Auth?
 
-    public init(
+    /// Every field at once, backend ones included: Swift opens apps as
+    /// clients (`.client`, `.local`), and backends run in TS, Rust or Go.
+    @_spi(Backend) public init(
         storage: Storage = .memory, appId: String? = nil, serverUrl: String? = nil,
         dataDir: String? = nil, permissions: String? = nil, backendSecret: String? = nil,
         adminSecret: String? = nil, session: Session? = nil
@@ -118,8 +120,10 @@ public struct Config: Sendable {
         Config(storage: storage, appId: appId, dataDir: dataDir)
     }
 
-    /// A backend with its `jazz.permissions.json`, acting for `user`.
-    public static func backend(
+    /// A backend with its `jazz.permissions.json`, acting for `user`. Not
+    /// public API: Swift is a client; run your backend in TS, Rust or Go.
+    /// (Jazz's own tests use it.)
+    @_spi(Backend) public static func backend(
         appId: String, permissions: String, serverUrl: String? = nil,
         backendSecret: String? = nil, adminSecret: String? = nil, user: String? = nil,
         storage: Storage = .memory, dataDir: String? = nil
@@ -128,6 +132,25 @@ public struct Config: Sendable {
             storage: storage, appId: appId, serverUrl: serverUrl, dataDir: dataDir,
             permissions: permissions, backendSecret: backendSecret, adminSecret: adminSecret,
             session: user.map { Session(subject: $0) })
+    }
+
+    /// Where a persistent store goes without a `dataDir`: Application
+    /// Support on Apple platforms, `$XDG_DATA_HOME` (or `~/.local/share`)
+    /// elsewhere, under `jazz/<appId>`.
+    static func defaultDataDir(appId: String?) throws -> String {
+        guard let appId else { throw JazzError.refused("a persistent store needs an appId") }
+        #if canImport(Darwin)
+            let base = try FileManager.default.url(
+                for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        #else
+            let env = ProcessInfo.processInfo.environment
+            let base =
+                env["XDG_DATA_HOME"].map { URL(fileURLWithPath: $0) }
+                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share")
+        #endif
+        let dir = base.appendingPathComponent("jazz").appendingPathComponent(appId)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.path
     }
 
     func json(app: String) throws -> String {
@@ -139,7 +162,11 @@ public struct Config: Sendable {
         object["permissions"] = permissions.map(JSONValue.string)
         object["appId"] = appId.map(JSONValue.string)
         object["serverUrl"] = serverUrl.map(JSONValue.string)
-        object["dataDir"] = dataDir.map(JSONValue.string)
+        if storage == .persistent {
+            object["dataDir"] = .string(try dataDir ?? Self.defaultDataDir(appId: appId))
+        } else {
+            object["dataDir"] = dataDir.map(JSONValue.string)
+        }
         object["backendSecret"] = backendSecret.map(JSONValue.string)
         object["adminSecret"] = adminSecret.map(JSONValue.string)
         switch auth {
@@ -499,4 +526,20 @@ extension AsyncThrowingStream where Failure == any Error {
             continuation.onTermination = { _ in task.cancel() }
         }
     }
+}
+
+extension Config: CustomStringConvertible, CustomDebugStringConvertible {
+    /// Without secrets: logs and crash reports mustn't carry them.
+    public var description: String {
+        var parts = ["storage: \(storage.rawValue)"]
+        if let appId { parts.append("appId: \(appId)") }
+        if let serverUrl { parts.append("serverUrl: \(serverUrl)") }
+        if let dataDir { parts.append("dataDir: \(dataDir)") }
+        if let auth { parts.append("auth: \(auth)") }
+        if permissions != nil { parts.append("permissions: <set>") }
+        if backendSecret != nil { parts.append("backendSecret: <redacted>") }
+        if adminSecret != nil { parts.append("adminSecret: <redacted>") }
+        return "Config(\(parts.joined(separator: ", ")))"
+    }
+    public var debugDescription: String { description }
 }
