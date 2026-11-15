@@ -207,6 +207,22 @@ describe("jazz-tools upgrade: conversions", () => {
     );
   });
 
+  it("converts a Better Auth app: its generated DSL tables go, its generation config and script follow", async () => {
+    const dir = fixture("better-auth");
+    const report = await upgrade(dir);
+    expect(existsSync(join(dir, "schema-better-auth"))).toBe(false);
+    const config = readFileSync(join(dir, "auth-generate.ts"), "utf8");
+    expect(config).toContain("    schema: {},\n");
+    expect(config).not.toContain('jazz-tools";');
+    const scripts = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).scripts;
+    expect(scripts["auth:generate"]).toBe(
+      "npx @better-auth/cli generate --config ./auth-generate.ts --yes",
+    );
+    expect(scripts.build).toBe("jazz-tools generate && next build");
+    expect(report.manual).toEqual([]);
+    expectGolden("better-auth", dir, report);
+  });
+
   it("writes nothing on a dry run", async () => {
     const dir = fixture("backend-history");
     const before = projectFiles(dir);

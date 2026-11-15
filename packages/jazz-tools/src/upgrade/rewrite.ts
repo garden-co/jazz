@@ -216,8 +216,57 @@ function rewriteModule(
     }
   }
   const dslLocals = new Set(dslImports.map((d) => d.local));
+  // `jazzAdapter` from jazz-tools/better-auth-adapter, under whatever local name.
+  const adapterLocals = new Set<string>();
+  for (const statement of source.statements) {
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier))
+      continue;
+    if (statement.moduleSpecifier.text !== "jazz-tools/better-auth-adapter") continue;
+    const named = statement.importClause?.namedBindings;
+    if (named && ts.isNamedImports(named)) {
+      for (const element of named.elements) {
+        if ((element.propertyName ?? element.name).text === "jazzAdapter")
+          adapterLocals.add(element.name.text);
+      }
+    }
+  }
   const remainingDsl: TS.Node[] = [];
   const visit = (node: TS.Node): void => {
+    // Better Auth's generation config: `jazzAdapter({ …, schema: s.defineApp({}, …).wasmSchema })`
+    // only generates tables, and now passes `schema: {}`.
+    if (
+      ts.isPropertyAssignment(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === "schema" &&
+      ts.isObjectLiteralExpression(node.parent) &&
+      ts.isCallExpression(node.parent.parent) &&
+      ts.isIdentifier(node.parent.parent.expression) &&
+      adapterLocals.has(node.parent.parent.expression.text)
+    ) {
+      let value: TS.Expression = node.initializer;
+      if (ts.isPropertyAccessExpression(value) && value.name.text === "wasmSchema")
+        value = value.expression;
+      if (
+        ts.isCallExpression(value) &&
+        ts.isPropertyAccessExpression(value.expression) &&
+        ts.isIdentifier(value.expression.expression) &&
+        dslLocals.has(value.expression.expression.text) &&
+        value.expression.name.text === "defineApp" &&
+        value.arguments[0] &&
+        ts.isObjectLiteralExpression(value.arguments[0]) &&
+        value.arguments[0].properties.length === 0
+      ) {
+        edits.push({
+          start: node.initializer.getStart(source),
+          end: node.initializer.getEnd(),
+          text: "{}",
+        });
+        changes.push(
+          `${at(node)}: Better Auth generation config: jazzAdapter's schema: ${node.initializer.getText(source).replace(/\s+/g, " ")} → {}`,
+        );
+        return;
+      }
+    }
     // s.RowOf<typeof app.x> and friends.
     if (
       ts.isTypeReferenceNode(node) &&

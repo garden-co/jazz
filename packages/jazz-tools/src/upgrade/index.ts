@@ -26,7 +26,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, extname, join, relative } from "node:path";
+import { dirname, extname, join, relative, resolve } from "node:path";
 import type * as TS from "typescript";
 import {
   appTables,
@@ -221,7 +221,7 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     rewrites.files.some((f) => f.importsJson),
     deleted,
   );
-  const manifest = manifestEdit(project);
+  const manifest = manifestEdit(project, deleted);
   // package.json `imports` aliases, on top of the root manifest's edits.
   const aliasEdits = aliases.apply(
     manifest ? new Map([[manifest.file, manifest.text]]) : undefined,
@@ -591,6 +591,7 @@ function escape(text: string): string {
  */
 function manifestEdit(
   project: Project,
+  deleted: Set<string>,
 ): { file: string; text: string; changes: string[] } | undefined {
   const file = join(project.root, "package.json");
   if (!existsSync(file)) return undefined;
@@ -604,14 +605,23 @@ function manifestEdit(
     return undefined;
   }
   for (const [name, script] of Object.entries(manifest.scripts ?? {})) {
-    const renamed = renameValidate(script);
+    let renamed = renameValidate(script);
+    if (renamed !== script) {
+      changes.push(
+        `package.json: script "${name}": \`jazz-tools validate\` → \`jazz-tools generate\``,
+      );
+    }
+    const retargeted = retargetAuthOutput(renamed, project, deleted);
+    if (retargeted !== renamed) {
+      changes.push(
+        `package.json: script "${name}": the Better Auth CLI now writes its tables into ${relative(project.root, project.appFile)}`,
+      );
+      renamed = retargeted;
+    }
     if (renamed === script) continue;
     const quoted = JSON.stringify(script);
     if (!next.includes(quoted)) continue;
     next = next.replace(quoted, JSON.stringify(renamed));
-    changes.push(
-      `package.json: script "${name}": \`jazz-tools validate\` → \`jazz-tools generate\``,
-    );
   }
   const version = packageVersion(runningPackageRoot());
   // A pre-release build of upgrade itself has no version to pin.
@@ -628,6 +638,25 @@ function manifestEdit(
     );
   }
   return next === text ? undefined : { file, text: next, changes };
+}
+
+/**
+ * A Better Auth CLI `generate` that wrote its DSL module (`--output
+ * ./schema-better-auth/schema.ts`, which upgrade deletes) writes jazz.app.json
+ * now: the adapter merges its tables into the app file (by default
+ * ./jazz.app.json, relative to where the script runs).
+ */
+export function retargetAuthOutput(script: string, project: Project, deleted: Set<string>): string {
+  if (!/\bgenerate\b/.test(script) || !/(?:better-auth\/cli|\bauth(?:@\S+)?)\s/.test(script))
+    return script;
+  return script.replace(
+    /(\s)--output(?:=|\s+)(["']?)([^\s"']+\.ts)\2/g,
+    (whole, space: string, _q, path: string) => {
+      if (!deleted.has(resolve(project.root, path))) return whole;
+      const app = relative(project.root, project.appFile).split("\\").join("/");
+      return app === "jazz.app.json" ? "" : `${space}--output ./${app}`;
+    },
+  );
 }
 
 /** A shell command with every jazz-tools CLI `validate` call renamed to `generate`. */
