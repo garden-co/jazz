@@ -216,8 +216,8 @@ extension Client {
         }
     }
 
-    /// The permissions bundle a backend published.
-    public func bundle() async throws(JazzError) -> String? {
+    /// The permissions bundle a backend published (backend mode only).
+    @_spi(Backend) public func bundle() async throws(JazzError) -> String? {
         try await Self.typed { try await Self.run { try self.handle.bundle() } }
     }
 

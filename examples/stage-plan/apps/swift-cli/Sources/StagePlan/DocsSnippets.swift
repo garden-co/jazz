@@ -1,25 +1,8 @@
 // The Swift snippets the docs show, by region; Tests/StagePlanTests runs them.
 import Foundation
-@_spi(Backend) import Jazz
+import Jazz
 
 public enum DocsSnippets {
-    public static func openBackend(server: Server, userId: String) async throws -> Jazz.Client {
-        // #region context-setup-swift-backend
-        let permissions = try StagePlanApp.permissions() // jazz.permissions.json's text
-        let jazz = try await JazzApp.open(
-            .backend(
-                appId: server.appId,
-                permissions: permissions,
-                serverUrl: server.url,
-                backendSecret: server.backendSecret, // vouches for the user below
-                adminSecret: server.adminSecret, // publishes the permissions bundle
-                user: userId, // permissions see it as `session.user`
-                storage: .memory
-            ))
-        // #endregion context-setup-swift-backend
-        return jazz
-    }
-
     public static func openClient(endpoint: String, appId: String, deviceKey: String?) async throws
         -> Jazz.Client
     {

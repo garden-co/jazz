@@ -1,5 +1,5 @@
 import Foundation
-@_spi(Backend) import Jazz
+import Jazz
 import StagePlan
 import XCTest
 
@@ -62,8 +62,8 @@ final class IncludeShapesTests: XCTestCase {
     let user = "00000000-0000-4000-8000-0000000000cc"
 
     func testNestedIncludesOfTwoForwardRelations() async throws {
-        let server = try await TestServer()
-        let app = try await StagePlanApp.open(user: user, server: server.server)
+        let relay = try await TestRelay()
+        let app = try await relay.user()
         let show = try await app.show(named: "Nested")
         let me = try await app.jazz.account()
         let crew = try await app.jazz.insert(JazzApp.NewCrew(account: me, name: "Sam"))
@@ -89,13 +89,8 @@ final class IncludeShapesTests: XCTestCase {
     }
 
     func testAnArrayOfIdsIncludesAsAnArray() async throws {
-        let server = try await TestServer()
-        let jazz = try await Jazz.Client.open(
-            app: tagsApp,
-            config: .backend(
-                appId: server.server.appId, permissions: tagsPermissions, serverUrl: server.server.url,
-                backendSecret: server.server.backendSecret, adminSecret: server.server.adminSecret,
-                user: user))
+        let relay = try await TestRelay(app: tagsApp, permissions: tagsPermissions)
+        let jazz = try await relay.client(auth: .deviceKey(try Jazz.generateDeviceKey()))
         let red = try await jazz.insert(NewTag(name: "red"))
         let blue = try await jazz.insert(NewTag(name: "blue"))
         let item = try await jazz.insert(NewItem(title: "Cable", tagIds: [red.id, blue.id]))

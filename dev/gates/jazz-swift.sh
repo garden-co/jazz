@@ -10,7 +10,9 @@ set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 work=$(mktemp -d)
 server_pid=
+relay_pid=
 cleanup() {
+  [[ -n "$relay_pid" ]] && kill "$relay_pid" 2>/dev/null || true
   [[ -n "$server_pid" ]] && kill "$server_pid" 2>/dev/null || true
   rm -rf "$work"
 }
@@ -55,13 +57,21 @@ export CI="${CI:-1}"
 (cd "$root" && swift test)
 (cd "$example" && swift test)
 
-export JAZZ_SERVER_URL=http://127.0.0.1:41625
-export JAZZ_APP_ID=00000000-0000-4000-8000-00000057a9e0
+# The CLI as an end user: a sync server, and in front of it the app's
+# endpoint (the test relay standing in for a TS, Rust or Go backend's
+# handler), which publishes StagePlan's permissions.
+app_id=00000000-0000-4000-8000-00000057a9e0
 export JAZZ_BACKEND_SECRET=gate-backend-secret
 export JAZZ_ADMIN_SECRET=gate-admin-secret
-"$JAZZ_TOOLS_BIN" server "$JAZZ_APP_ID" --in-memory --port 41625 \
+"$JAZZ_TOOLS_BIN" server "$app_id" --in-memory --port 41625 \
   --backend-secret "$JAZZ_BACKEND_SECRET" --admin-secret "$JAZZ_ADMIN_SECRET" > "$work/server.log" 2>&1 &
 server_pid=$!
 for _ in $(seq 100); do grep -q "Listening on" "$work/server.log" && break; sleep 0.1; done
-(cd "$example" && swift run stage-plan-swift demo) | tee "$work/demo.out"
+"$JAZZ_TEST_RELAY_BIN" --core http://127.0.0.1:41625 --app-id "$app_id" \
+  --app "$example/jazz.app.json" --permissions "$example/jazz.permissions.json" > "$work/relay.out" 2>&1 &
+relay_pid=$!
+for _ in $(seq 300); do grep -q "^http" "$work/relay.out" && break; sleep 0.1; done
+export JAZZ_ENDPOINT=$(grep -m1 "^http" "$work/relay.out")
+export JAZZ_APP_ID=$app_id
+(cd "$example" && swift run stage-plan-swift --key-file "$work/device-key" demo) | tee "$work/demo.out"
 grep -q "doing   Load in" "$work/demo.out"

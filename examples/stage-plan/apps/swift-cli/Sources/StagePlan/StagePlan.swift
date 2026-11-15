@@ -1,5 +1,5 @@
 import Foundation
-@_spi(Backend) import Jazz
+import Jazz
 
 /// StagePlan's slice the Swift CLI covers: as the signed-in user, make sure
 /// a show exists (they're its chief), list its tasks by `rank`, add tasks
@@ -9,23 +9,22 @@ public struct StagePlanApp: Sendable {
 
     public init(jazz: Jazz.Client) { self.jazz = jazz }
 
-    /// The app's `jazz.permissions.json`, as shipped beside `jazz.app.json`.
-    public static func permissions() throws -> String {
-        guard let url = Bundle.module.url(forResource: "jazz", withExtension: "permissions.json")
-        else { throw JazzError.io("jazz.permissions.json is missing from the bundle") }
-        return try String(contentsOf: url, encoding: .utf8)
-    }
-
-    /// Opens StagePlan as a backend of `server` acting for `user` (in
+    /// Opens StagePlan as an end user of the app's Jazz endpoint (its
+    /// backend's handler, in TS, Rust or Go), signed in as `auth` says (in
     /// memory unless `dataDir` is given).
-    public static func open(user: String, server: Server, dataDir: String? = nil) async throws
-        -> StagePlanApp
+    public static func open(endpoint: String, appId: String, auth: Jazz.Auth, dataDir: String? = nil)
+        async throws -> StagePlanApp
     {
-        let config = Jazz.Config.backend(
-            appId: server.appId, permissions: try permissions(), serverUrl: server.url,
-            backendSecret: server.backendSecret, adminSecret: server.adminSecret, user: user,
-            storage: dataDir == nil ? .memory : .persistent, dataDir: dataDir)
-        return StagePlanApp(jazz: try await JazzApp.open(config))
+        let jazz = try await JazzApp.open(
+            .client(
+                appId: appId, serverUrl: endpoint, auth: auth,
+                storage: dataDir == nil ? .memory : .persistent, dataDir: dataDir))
+        // Signed in before anything else.
+        for try await state in jazz.session {
+            if case .signedIn = state { break }
+            if case .signedOut = state { throw JazzError.refused("signed out") }
+        }
+        return StagePlanApp(jazz: jazz)
     }
 
     /// The user's show named `name`, created (with them as chief) if they have none.
@@ -60,26 +59,3 @@ public struct StagePlanApp: Sendable {
     }
 }
 
-/// The sync server a backend publishes to and syncs with.
-public struct Server: Sendable {
-    public var url: String
-    public var appId: String
-    public var backendSecret: String
-    public var adminSecret: String
-
-    public init(url: String, appId: String, backendSecret: String, adminSecret: String) {
-        self.url = url
-        self.appId = appId
-        self.backendSecret = backendSecret
-        self.adminSecret = adminSecret
-    }
-
-    /// From `JAZZ_SERVER_URL`, `JAZZ_APP_ID`, `JAZZ_BACKEND_SECRET` and `JAZZ_ADMIN_SECRET`.
-    public static func fromEnvironment() -> Server? {
-        let env = ProcessInfo.processInfo.environment
-        guard let url = env["JAZZ_SERVER_URL"], let appId = env["JAZZ_APP_ID"],
-            let backendSecret = env["JAZZ_BACKEND_SECRET"], let adminSecret = env["JAZZ_ADMIN_SECRET"]
-        else { return nil }
-        return Server(url: url, appId: appId, backendSecret: backendSecret, adminSecret: adminSecret)
-    }
-}
