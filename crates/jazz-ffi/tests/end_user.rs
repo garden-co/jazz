@@ -95,7 +95,11 @@ async fn end_users_sign_in_and_sync_through_the_app() {
 
         // carol links her device account to her account with the app's
         // sign-in: the session becomes that user's, on her device account.
-        let user = parse(&carol.link("token-carol".into()).unwrap());
+        // From a plain thread with no tokio runtime, as Swift or Go call it.
+        let user = std::thread::scope(|scope| {
+            scope.spawn(|| carol.link("token-carol".into())).join().unwrap()
+        });
+        let user = parse(&user.unwrap());
         assert_eq!(user["kind"], "backend", "{user}");
         assert_eq!(user["account"], account);
         let state = parse(&carol.session_state().unwrap().unwrap());

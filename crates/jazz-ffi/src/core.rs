@@ -894,7 +894,12 @@ impl Core {
             .cloned()
             .ok_or_else(|| refused("link is for an end user's app (\"auth\")"))?;
         let bearer = bearer.to_owned();
-        let user = block_on(async move { session.link(&bearer).await })?;
+        // On the client's runtime: linking talks to the app's endpoint
+        // (tokio I/O), and the caller's thread may have no runtime at all.
+        let user = block_on(
+            self.open_jazz()?
+                .with_client(move |_| async move { session.link(&bearer).await }),
+        )?;
         Ok(serde_json::to_string(&user).unwrap_or_default())
     }
 
