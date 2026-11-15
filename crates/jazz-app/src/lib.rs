@@ -16,8 +16,9 @@
 //! An end user's client signs in through the app's own backend
 //! ([`EndUser`]), with the app's bearer.
 //!
-//! Not supported yet: connecting to a core directly as an end user (with a
-//! JWT the core verifies), local-first (device) accounts, includes (nested
+//! Not supported yet: opening an end user's store without reaching the
+//! app's backend, connecting to a core directly as an end user (with a JWT
+//! the core verifies), local-first (device) accounts, includes (nested
 //! related rows in one result), reads inside transactions.
 
 mod app;

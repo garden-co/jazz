@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use bindings::{NewProject, NewTodo, Todo, TodoUpdate, projects, todos};
 use futures::StreamExt;
-use jazz_app::{AppFiles, AppId, Backend, Config, Error, Jazz, Order, ReadTier, Rows};
+use jazz_app::{AppFiles, AppId, Backend, Config, EndUser, Error, Jazz, Order, ReadTier, Rows};
 use jazz_server::JazzServer;
 
 fn files() -> AppFiles {
@@ -320,6 +320,20 @@ async fn refuses_what_it_cannot_do() {
     let app_id = AppId::random();
     let as_user = Jazz::open(files(), Config::new(app_id).server("http://localhost:1")).await;
     assert!(matches!(as_user, Err(Error::Unsupported(_))), "{as_user:?}");
+
+    // An end user's store opens only once the backend has named the user.
+    let offline = Jazz::open(
+        files(),
+        Config::new(app_id)
+            .server("http://localhost:1")
+            .end_user(EndUser::bearer("alice")),
+    )
+    .await;
+    assert!(
+        matches!(&offline, Err(Error::Unsupported(message))
+            if message.contains("without reaching the app's backend")),
+        "{offline:?}"
+    );
 
     let backend = Backend::new("b", "a", "u");
     let serverless = Jazz::open(files(), Config::new(app_id).backend(backend.clone())).await;

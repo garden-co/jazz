@@ -28,6 +28,11 @@ pub type TokenFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
 /// [`Config::server`](crate::Config::server) is then the backend's Jazz mount,
 /// e.g. `https://app.example/jazz`, not the core.
 ///
+/// Opening needs the backend reachable: its sign-in names the user the store
+/// is for. Offline, [`Jazz::open`](crate::Jazz::open) fails with
+/// [`Error::Unsupported`]; the client renews and reconnects on its own once
+/// it is open.
+///
 /// ```no_run
 /// # async fn open() -> jazz_app::Result<()> {
 /// use jazz_app::{AppFiles, Config, EndUser, Storage};
@@ -95,18 +100,20 @@ pub(crate) struct SignedIn {
 /// `POST <backend>/apps/<id>/accounts/backend-sign-in` with the app's bearer:
 /// the backend's `authenticate` names the user and the core resolves (or
 /// creates) their account.
+/// `unreachable` maps a request that never reached the backend.
 pub(crate) async fn sign_in(
     http: &reqwest::Client,
     server: &str,
     app_id: AppId,
     token: &str,
+    unreachable: impl FnOnce(reqwest::Error) -> Error,
 ) -> Result<SignedIn> {
     let response = http
         .post(app_url(server, app_id, "accounts/backend-sign-in"))
         .bearer_auth(token)
         .send()
         .await
-        .map_err(|error| Error::Server(format!("signing in through the app's backend: {error}")))?;
+        .map_err(unreachable)?;
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
         return Err(Error::SignedOut);
@@ -153,6 +160,10 @@ pub(crate) async fn sign_in(
     })
 }
 
+fn server_error(error: reqwest::Error) -> Error {
+    Error::Server(format!("signing in through the app's backend: {error}"))
+}
+
 /// How long before an expiry the bearer is renewed.
 const RENEW_EARLY: Duration = Duration::from_secs(60);
 /// The longest wait between failed renewals.
@@ -180,7 +191,20 @@ impl Renewal {
     ) -> Result<Self> {
         let http = http()?;
         let token = end_user.token().await?;
-        let signed = sign_in(&http, server, app_id, &token).await?;
+        // The client needs the user's session before it opens their store,
+        // and only the backend's sign-in names it: an end user's store opens
+        // only with the backend reachable.
+        let signed = sign_in(&http, server, app_id, &token, |error| {
+            if error.is_connect() || error.is_timeout() {
+                Error::Unsupported(format!(
+                    "opening an end user's store without reaching the app's backend \
+                     ({error}); open it once the backend is reachable"
+                ))
+            } else {
+                server_error(error)
+            }
+        })
+        .await?;
         Ok(Self {
             end_user: end_user.clone(),
             http,
@@ -228,7 +252,8 @@ impl Renewal {
             }
             let renewed = async {
                 let fresh = self.end_user.token().await?;
-                let again = sign_in(&self.http, &self.server, self.app_id, &fresh).await?;
+                let again =
+                    sign_in(&self.http, &self.server, self.app_id, &fresh, server_error).await?;
                 Ok::<_, Error>((fresh, again))
             }
             .await;
