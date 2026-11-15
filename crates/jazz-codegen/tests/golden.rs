@@ -307,3 +307,67 @@ fn go_is_switched_off_in_the_cli() {
     assert!(error.to_string().contains("not available yet"), "{error}");
     assert!(!Lang::ALL.contains(&Lang::Go));
 }
+
+/// Each app's Swift bindings, committed beside it as `JazzApp.swift`; an
+/// app the Swift back end refuses (computed fields, transforms) commits
+/// none and is refused as unsupported.
+#[test]
+fn every_app_generates_its_committed_swift_byte_for_byte() {
+    let mut generated_any = false;
+    for dir in apps() {
+        let app_json = std::fs::read(dir.join("jazz.app.json")).unwrap();
+        let path = dir.join(jazz_codegen::swift::FILE);
+        let generated = match generate(Lang::Swift, &app_json) {
+            Ok(generated) => generated,
+            Err(error) => {
+                assert!(error.is_unsupported(), "{}: {error}", dir.display());
+                assert!(!path.exists(), "{} should not exist", path.display());
+                continue;
+            }
+        };
+        generated_any = true;
+        assert_eq!(generated, generate(Lang::Swift, &app_json).unwrap());
+        if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
+            std::fs::write(&path, &generated).unwrap();
+            continue;
+        }
+        let committed = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+            panic!(
+                "{} is missing; run with JAZZ_UPDATE_FIXTURES=1",
+                path.display()
+            )
+        });
+        assert_eq!(
+            generated,
+            committed,
+            "{} differs from what the generator writes",
+            path.display()
+        );
+        let app = App::load(&app_json).unwrap();
+        let recorded = bindings::read(Lang::Swift, &committed).unwrap();
+        assert_eq!(recorded.source, app.source);
+        assert_eq!(recorded.current, app.compiled.current);
+        assert_eq!(recorded.format, Lang::Swift.format());
+        assert_eq!(
+            bindings::staleness(&app, Lang::Swift, Some(&committed)).unwrap(),
+            None
+        );
+        // An edited embedded app is caught.
+        let edited = committed.replacen(": \"string\"", ": \"boolean\"", 1);
+        assert_ne!(edited, committed);
+        assert!(bindings::read(Lang::Swift, &edited).is_err());
+    }
+    assert!(generated_any);
+}
+
+#[test]
+fn swift_refuses_computed_fields_as_not_supported_yet() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/tasks");
+    let error = generate(
+        Lang::Swift,
+        &std::fs::read(dir.join("jazz.app.json")).unwrap(),
+    )
+    .unwrap_err();
+    assert!(error.is_unsupported());
+    assert!(error.message().contains("not supported yet"), "{error}");
+}
