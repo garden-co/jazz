@@ -211,6 +211,7 @@ jobs:
         with:
           name: jazz-kotlin-dist
           path: kotlin-dist/*
+          # `error` once dev/scripts/build-kotlin-dist.sh is on main.
           if-no-files-found: warn
 
   # Read-only: packs the assets reproducibly and checksums them, for the
@@ -245,7 +246,10 @@ jobs:
           done
           pack built/jazz-ffi-bindings dist/jazz-ffi-bindings.tar.gz
           shopt -s nullglob
-          cp built/jazz-kotlin-*.jar built/jazz-kotlin-*.aar dist/ 2>/dev/null || true
+          kotlin=(built/jazz-kotlin-*.jar built/jazz-kotlin-*.aar)
+          if [ "${#kotlin[@]}" -gt 0 ]; then
+            cp "${kotlin[@]}" dist/
+          fi
           cd dist
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
