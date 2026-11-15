@@ -77,7 +77,23 @@ func jazzGoSubscriptionCallback(ctx C.uintptr_t, kind *C.char, text *C.char) {
 // subscription fails (a last delta with Err, then the channel closes).
 // Deltas are buffered in order; a slow reader never blocks Jazz.
 func (q *Query[R]) Subscribe(ctx context.Context, db *DB) (<-chan Delta[R], error) {
-	query, err := json.Marshal(q)
+	return subscribe(ctx, db, q.subscription(), func(e event) (Delta[R], bool) {
+		if e.kind == "error" {
+			return Delta[R]{Err: parseError(e.json)}, true
+		}
+		d, err := decodeDelta[R](db.computed(), q.table, e.json)
+		if err != nil {
+			return Delta[R]{Err: err}, true
+		}
+		return d, false
+	})
+}
+
+// subscribe runs a jazz-ffi subscription of query, sending what decode
+// makes of each callback, in order, until ctx is done or decode says the
+// value it made is the last (an error).
+func subscribe[T any](ctx context.Context, db *DB, query any, decode func(event) (T, bool)) (<-chan T, error) {
+	queryJSON, err := json.Marshal(query)
 	if err != nil {
 		return nil, err
 	}
@@ -89,9 +105,9 @@ func (q *Query[R]) Subscribe(ctx context.Context, db *DB) (<-chan Delta[R], erro
 	if db.handle == nil {
 		db.mu.RUnlock()
 		forget()
-		return nil, &Error{Kind: "closed", Message: "closed"}
+		return nil, &Error{Kind: KindClosed, Message: "closed"}
 	}
-	cquery := C.CString(string(query))
+	cquery := C.CString(string(queryJSON))
 	var cerr *C.char
 	sub := C.jazz_go_subscribe(db.handle, cquery, C.uintptr_t(id), &cerr)
 	C.free(unsafe.Pointer(cquery))
@@ -99,11 +115,11 @@ func (q *Query[R]) Subscribe(ctx context.Context, db *DB) (<-chan Delta[R], erro
 	if err := takeError(cerr); err != nil || sub == nil {
 		forget()
 		if err == nil {
-			err = &Error{Kind: "refused", Message: "subscribe failed"}
+			err = &Error{Kind: KindRefused, Message: "subscribe failed"}
 		}
 		return nil, err
 	}
-	out := make(chan Delta[R])
+	out := make(chan T)
 	go func() {
 		defer close(out)
 		stop := func() {
@@ -111,7 +127,7 @@ func (q *Query[R]) Subscribe(ctx context.Context, db *DB) (<-chan Delta[R], erro
 			s.closed = true
 			s.mu.Unlock()
 			C.jazz_unsubscribe(sub)
-			// No callback starts after jazz_unsubscribe returns.
+			// No callback runs after jazz_unsubscribe returns.
 			forget()
 		}
 		for {
@@ -120,21 +136,14 @@ func (q *Query[R]) Subscribe(ctx context.Context, db *DB) (<-chan Delta[R], erro
 			s.queue = nil
 			s.mu.Unlock()
 			for _, e := range events {
-				var d Delta[R]
-				if e.kind == "error" {
-					d.Err = parseError(e.json)
-				} else if decoded, err := decodeDelta[R](q.table, e.json); err != nil {
-					d = Delta[R]{Err: err}
-				} else {
-					d = decoded
-				}
+				v, last := decode(e)
 				select {
-				case out <- d:
+				case out <- v:
 				case <-ctx.Done():
 					stop()
 					return
 				}
-				if d.Err != nil {
+				if last {
 					stop()
 					return
 				}

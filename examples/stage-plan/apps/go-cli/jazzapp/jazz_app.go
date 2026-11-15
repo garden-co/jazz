@@ -148,6 +148,9 @@ type Activity struct {
 	ActorID string       `json:"actorId"`
 	Kind    ActivityKind `json:"kind"`
 	Detail  *string      `json:"detail"`
+	Actor   *Crew        `json:"actor,omitempty"`
+	Show    *Show        `json:"show,omitempty"`
+	Task    *Task        `json:"task,omitempty"`
 }
 
 // NewActivity is a row to insert into `activity`: nil fields are null, or take their default.
@@ -179,7 +182,7 @@ func (p ActivityPatch) MarshalJSON() ([]byte, error) {
 	)
 }
 
-// activityTable is the type of ActivityTable: the columns of `activity`, to build conditions and orders from.
+// activityTable is the type of ActivityTable: the columns of `activity`, to build conditions and orders from, and its relations, to include.
 type activityTable struct {
 	ID      jazz.Column[Activity, string]
 	ShowID  jazz.Column[Activity, string]
@@ -187,6 +190,9 @@ type activityTable struct {
 	ActorID jazz.Column[Activity, string]
 	Kind    jazz.Column[Activity, ActivityKind]
 	Detail  jazz.Column[Activity, string]
+	Actor   jazz.Relation[Activity, Crew]
+	Show    jazz.Relation[Activity, Show]
+	Task    jazz.Relation[Activity, Task]
 }
 
 // ActivityTable is the table `activity`.
@@ -197,6 +203,9 @@ var ActivityTable = activityTable{
 	ActorID: jazz.NewColumn[Activity, string]("actorId"),
 	Kind:    jazz.NewColumn[Activity, ActivityKind]("kind"),
 	Detail:  jazz.NewColumn[Activity, string]("detail"),
+	Actor:   jazz.NewRelation[Activity, Crew]("actor"),
+	Show:    jazz.NewRelation[Activity, Show]("show"),
+	Task:    jazz.NewRelation[Activity, Task]("task"),
 }
 
 // Query starts a query of `activity`.
@@ -205,18 +214,18 @@ func (activityTable) Query() *jazz.Query[Activity] {
 }
 
 // Insert inserts a row into `activity` and returns it, with its id.
-func (activityTable) Insert(ctx context.Context, db *jazz.DB, row NewActivity) (Activity, error) {
-	return jazz.Insert[NewActivity, Activity](ctx, db, "activity", row)
+func (activityTable) Insert(ctx context.Context, db jazz.Querier, row NewActivity, opts ...jazz.WriteOption) (Activity, error) {
+	return jazz.Insert[NewActivity, Activity](ctx, db, "activity", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `activity` with id.
-func (activityTable) Update(ctx context.Context, db *jazz.DB, id string, patch ActivityPatch) error {
-	return db.Update(ctx, "activity", id, patch)
+func (activityTable) Update(ctx context.Context, db jazz.Querier, id string, patch ActivityPatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "activity", id, patch, opts...)
 }
 
 // Delete deletes the row of `activity` with id.
-func (activityTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
-	return db.Delete(ctx, "activity", id)
+func (activityTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "activity", id, opts...)
 }
 
 // ChecklistItem is a row of `checklistItems`.
@@ -250,7 +259,7 @@ func (p ChecklistItemPatch) MarshalJSON() ([]byte, error) {
 	)
 }
 
-// checklistItemsTable is the type of ChecklistItems: the columns of `checklistItems`, to build conditions and orders from.
+// checklistItemsTable is the type of ChecklistItems: the columns of `checklistItems`, to build conditions and orders from, and its relations, to include.
 type checklistItemsTable struct {
 	ID           jazz.Column[ChecklistItem, string]
 	Title        jazz.Column[ChecklistItem, string]
@@ -272,18 +281,18 @@ func (checklistItemsTable) Query() *jazz.Query[ChecklistItem] {
 }
 
 // Insert inserts a row into `checklistItems` and returns it, with its id.
-func (checklistItemsTable) Insert(ctx context.Context, db *jazz.DB, row NewChecklistItem) (ChecklistItem, error) {
-	return jazz.Insert[NewChecklistItem, ChecklistItem](ctx, db, "checklistItems", row)
+func (checklistItemsTable) Insert(ctx context.Context, db jazz.Querier, row NewChecklistItem, opts ...jazz.WriteOption) (ChecklistItem, error) {
+	return jazz.Insert[NewChecklistItem, ChecklistItem](ctx, db, "checklistItems", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `checklistItems` with id.
-func (checklistItemsTable) Update(ctx context.Context, db *jazz.DB, id string, patch ChecklistItemPatch) error {
-	return db.Update(ctx, "checklistItems", id, patch)
+func (checklistItemsTable) Update(ctx context.Context, db jazz.Querier, id string, patch ChecklistItemPatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "checklistItems", id, patch, opts...)
 }
 
 // Delete deletes the row of `checklistItems` with id.
-func (checklistItemsTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
-	return db.Delete(ctx, "checklistItems", id)
+func (checklistItemsTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "checklistItems", id, opts...)
 }
 
 // Comment is a row of `comments`.
@@ -292,6 +301,8 @@ type Comment struct {
 	TaskID   string `json:"taskId"`
 	AuthorID string `json:"authorId"`
 	Body     string `json:"body"`
+	Author   *Crew  `json:"author,omitempty"`
+	Task     *Task  `json:"task,omitempty"`
 }
 
 // NewComment is a row to insert into `comments`: nil fields are null, or take their default.
@@ -317,12 +328,14 @@ func (p CommentPatch) MarshalJSON() ([]byte, error) {
 	)
 }
 
-// commentsTable is the type of Comments: the columns of `comments`, to build conditions and orders from.
+// commentsTable is the type of Comments: the columns of `comments`, to build conditions and orders from, and its relations, to include.
 type commentsTable struct {
 	ID       jazz.Column[Comment, string]
 	TaskID   jazz.Column[Comment, string]
 	AuthorID jazz.Column[Comment, string]
 	Body     jazz.Column[Comment, string]
+	Author   jazz.Relation[Comment, Crew]
+	Task     jazz.Relation[Comment, Task]
 }
 
 // Comments is the table `comments`.
@@ -331,6 +344,8 @@ var Comments = commentsTable{
 	TaskID:   jazz.NewColumn[Comment, string]("taskId"),
 	AuthorID: jazz.NewColumn[Comment, string]("authorId"),
 	Body:     jazz.NewColumn[Comment, string]("body"),
+	Author:   jazz.NewRelation[Comment, Crew]("author"),
+	Task:     jazz.NewRelation[Comment, Task]("task"),
 }
 
 // Query starts a query of `comments`.
@@ -339,25 +354,27 @@ func (commentsTable) Query() *jazz.Query[Comment] {
 }
 
 // Insert inserts a row into `comments` and returns it, with its id.
-func (commentsTable) Insert(ctx context.Context, db *jazz.DB, row NewComment) (Comment, error) {
-	return jazz.Insert[NewComment, Comment](ctx, db, "comments", row)
+func (commentsTable) Insert(ctx context.Context, db jazz.Querier, row NewComment, opts ...jazz.WriteOption) (Comment, error) {
+	return jazz.Insert[NewComment, Comment](ctx, db, "comments", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `comments` with id.
-func (commentsTable) Update(ctx context.Context, db *jazz.DB, id string, patch CommentPatch) error {
-	return db.Update(ctx, "comments", id, patch)
+func (commentsTable) Update(ctx context.Context, db jazz.Querier, id string, patch CommentPatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "comments", id, patch, opts...)
 }
 
 // Delete deletes the row of `comments` with id.
-func (commentsTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
-	return db.Delete(ctx, "comments", id)
+func (commentsTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "comments", id, opts...)
 }
 
 // Crew is a row of `crew`.
 type Crew struct {
-	ID      string `json:"id"`
-	Account string `json:"account"`
-	Name    string `json:"name"`
+	ID            string     `json:"id"`
+	Account       string     `json:"account"`
+	Name          string     `json:"name"`
+	AssignedTasks []Task     `json:"assignedTasks,omitempty"`
+	Memberships   []ShowCrew `json:"memberships,omitempty"`
 }
 
 // NewCrew is a row to insert into `crew`: nil fields are null, or take their default.
@@ -380,18 +397,22 @@ func (p CrewPatch) MarshalJSON() ([]byte, error) {
 	)
 }
 
-// crewTable is the type of CrewTable: the columns of `crew`, to build conditions and orders from.
+// crewTable is the type of CrewTable: the columns of `crew`, to build conditions and orders from, and its relations, to include.
 type crewTable struct {
-	ID      jazz.Column[Crew, string]
-	Account jazz.Column[Crew, string]
-	Name    jazz.Column[Crew, string]
+	ID            jazz.Column[Crew, string]
+	Account       jazz.Column[Crew, string]
+	Name          jazz.Column[Crew, string]
+	AssignedTasks jazz.Relation[Crew, Task]
+	Memberships   jazz.Relation[Crew, ShowCrew]
 }
 
 // CrewTable is the table `crew`.
 var CrewTable = crewTable{
-	ID:      jazz.NewColumn[Crew, string]("id"),
-	Account: jazz.NewColumn[Crew, string]("account"),
-	Name:    jazz.NewColumn[Crew, string]("name"),
+	ID:            jazz.NewColumn[Crew, string]("id"),
+	Account:       jazz.NewColumn[Crew, string]("account"),
+	Name:          jazz.NewColumn[Crew, string]("name"),
+	AssignedTasks: jazz.NewRelation[Crew, Task]("assignedTasks"),
+	Memberships:   jazz.NewRelation[Crew, ShowCrew]("memberships"),
 }
 
 // Query starts a query of `crew`.
@@ -400,18 +421,18 @@ func (crewTable) Query() *jazz.Query[Crew] {
 }
 
 // Insert inserts a row into `crew` and returns it, with its id.
-func (crewTable) Insert(ctx context.Context, db *jazz.DB, row NewCrew) (Crew, error) {
-	return jazz.Insert[NewCrew, Crew](ctx, db, "crew", row)
+func (crewTable) Insert(ctx context.Context, db jazz.Querier, row NewCrew, opts ...jazz.WriteOption) (Crew, error) {
+	return jazz.Insert[NewCrew, Crew](ctx, db, "crew", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `crew` with id.
-func (crewTable) Update(ctx context.Context, db *jazz.DB, id string, patch CrewPatch) error {
-	return db.Update(ctx, "crew", id, patch)
+func (crewTable) Update(ctx context.Context, db jazz.Querier, id string, patch CrewPatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "crew", id, patch, opts...)
 }
 
 // Delete deletes the row of `crew` with id.
-func (crewTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
-	return db.Delete(ctx, "crew", id)
+func (crewTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "crew", id, opts...)
 }
 
 // ShowCrew is a row of `showCrew`.
@@ -422,6 +443,8 @@ type ShowCrew struct {
 	Account    string       `json:"account"`
 	Role       ShowCrewRole `json:"role"`
 	InviteCode *string      `json:"inviteCode"`
+	Crew       *Crew        `json:"crew,omitempty"`
+	Show       *Show        `json:"show,omitempty"`
 }
 
 // NewShowCrew is a row to insert into `showCrew`: nil fields are null, or take their default.
@@ -453,7 +476,7 @@ func (p ShowCrewPatch) MarshalJSON() ([]byte, error) {
 	)
 }
 
-// showCrewTable is the type of ShowCrewTable: the columns of `showCrew`, to build conditions and orders from.
+// showCrewTable is the type of ShowCrewTable: the columns of `showCrew`, to build conditions and orders from, and its relations, to include.
 type showCrewTable struct {
 	ID         jazz.Column[ShowCrew, string]
 	ShowID     jazz.Column[ShowCrew, string]
@@ -461,6 +484,8 @@ type showCrewTable struct {
 	Account    jazz.Column[ShowCrew, string]
 	Role       jazz.Column[ShowCrew, ShowCrewRole]
 	InviteCode jazz.Column[ShowCrew, string]
+	Crew       jazz.Relation[ShowCrew, Crew]
+	Show       jazz.Relation[ShowCrew, Show]
 }
 
 // ShowCrewTable is the table `showCrew`.
@@ -471,6 +496,8 @@ var ShowCrewTable = showCrewTable{
 	Account:    jazz.NewColumn[ShowCrew, string]("account"),
 	Role:       jazz.NewColumn[ShowCrew, ShowCrewRole]("role"),
 	InviteCode: jazz.NewColumn[ShowCrew, string]("inviteCode"),
+	Crew:       jazz.NewRelation[ShowCrew, Crew]("crew"),
+	Show:       jazz.NewRelation[ShowCrew, Show]("show"),
 }
 
 // Query starts a query of `showCrew`.
@@ -479,18 +506,18 @@ func (showCrewTable) Query() *jazz.Query[ShowCrew] {
 }
 
 // Insert inserts a row into `showCrew` and returns it, with its id.
-func (showCrewTable) Insert(ctx context.Context, db *jazz.DB, row NewShowCrew) (ShowCrew, error) {
-	return jazz.Insert[NewShowCrew, ShowCrew](ctx, db, "showCrew", row)
+func (showCrewTable) Insert(ctx context.Context, db jazz.Querier, row NewShowCrew, opts ...jazz.WriteOption) (ShowCrew, error) {
+	return jazz.Insert[NewShowCrew, ShowCrew](ctx, db, "showCrew", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `showCrew` with id.
-func (showCrewTable) Update(ctx context.Context, db *jazz.DB, id string, patch ShowCrewPatch) error {
-	return db.Update(ctx, "showCrew", id, patch)
+func (showCrewTable) Update(ctx context.Context, db jazz.Querier, id string, patch ShowCrewPatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "showCrew", id, patch, opts...)
 }
 
 // Delete deletes the row of `showCrew` with id.
-func (showCrewTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
-	return db.Delete(ctx, "showCrew", id)
+func (showCrewTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "showCrew", id, opts...)
 }
 
 // ShowInvite is a row of `showInvites`.
@@ -498,6 +525,7 @@ type ShowInvite struct {
 	ID     string `json:"id"`
 	ShowID string `json:"showId"`
 	Code   string `json:"code"`
+	Show   *Show  `json:"show,omitempty"`
 }
 
 // NewShowInvite is a row to insert into `showInvites`: nil fields are null, or take their default.
@@ -520,11 +548,12 @@ func (p ShowInvitePatch) MarshalJSON() ([]byte, error) {
 	)
 }
 
-// showInvitesTable is the type of ShowInvites: the columns of `showInvites`, to build conditions and orders from.
+// showInvitesTable is the type of ShowInvites: the columns of `showInvites`, to build conditions and orders from, and its relations, to include.
 type showInvitesTable struct {
 	ID     jazz.Column[ShowInvite, string]
 	ShowID jazz.Column[ShowInvite, string]
 	Code   jazz.Column[ShowInvite, string]
+	Show   jazz.Relation[ShowInvite, Show]
 }
 
 // ShowInvites is the table `showInvites`.
@@ -532,6 +561,7 @@ var ShowInvites = showInvitesTable{
 	ID:     jazz.NewColumn[ShowInvite, string]("id"),
 	ShowID: jazz.NewColumn[ShowInvite, string]("showId"),
 	Code:   jazz.NewColumn[ShowInvite, string]("code"),
+	Show:   jazz.NewRelation[ShowInvite, Show]("show"),
 }
 
 // Query starts a query of `showInvites`.
@@ -540,28 +570,32 @@ func (showInvitesTable) Query() *jazz.Query[ShowInvite] {
 }
 
 // Insert inserts a row into `showInvites` and returns it, with its id.
-func (showInvitesTable) Insert(ctx context.Context, db *jazz.DB, row NewShowInvite) (ShowInvite, error) {
-	return jazz.Insert[NewShowInvite, ShowInvite](ctx, db, "showInvites", row)
+func (showInvitesTable) Insert(ctx context.Context, db jazz.Querier, row NewShowInvite, opts ...jazz.WriteOption) (ShowInvite, error) {
+	return jazz.Insert[NewShowInvite, ShowInvite](ctx, db, "showInvites", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `showInvites` with id.
-func (showInvitesTable) Update(ctx context.Context, db *jazz.DB, id string, patch ShowInvitePatch) error {
-	return db.Update(ctx, "showInvites", id, patch)
+func (showInvitesTable) Update(ctx context.Context, db jazz.Querier, id string, patch ShowInvitePatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "showInvites", id, patch, opts...)
 }
 
 // Delete deletes the row of `showInvites` with id.
-func (showInvitesTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
-	return db.Delete(ctx, "showInvites", id)
+func (showInvitesTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "showInvites", id, opts...)
 }
 
 // Show is a row of `shows`.
 type Show struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Venue        string `json:"venue"`
-	Date         string `json:"date"`
-	Doors        string `json:"doors"`
-	ChiefAccount string `json:"chiefAccount"`
+	ID           string       `json:"id"`
+	Name         string       `json:"name"`
+	Venue        string       `json:"venue"`
+	Date         string       `json:"date"`
+	Doors        string       `json:"doors"`
+	ChiefAccount string       `json:"chiefAccount"`
+	Activity     []Activity   `json:"activity,omitempty"`
+	Crew         []ShowCrew   `json:"crew,omitempty"`
+	Invites      []ShowInvite `json:"invites,omitempty"`
+	Tasks        []Task       `json:"tasks,omitempty"`
 }
 
 // NewShow is a row to insert into `shows`: nil fields are null, or take their default.
@@ -593,7 +627,7 @@ func (p ShowPatch) MarshalJSON() ([]byte, error) {
 	)
 }
 
-// showsTable is the type of Shows: the columns of `shows`, to build conditions and orders from.
+// showsTable is the type of Shows: the columns of `shows`, to build conditions and orders from, and its relations, to include.
 type showsTable struct {
 	ID           jazz.Column[Show, string]
 	Name         jazz.Column[Show, string]
@@ -601,6 +635,10 @@ type showsTable struct {
 	Date         jazz.Column[Show, string]
 	Doors        jazz.Column[Show, string]
 	ChiefAccount jazz.Column[Show, string]
+	Activity     jazz.Relation[Show, Activity]
+	Crew         jazz.Relation[Show, ShowCrew]
+	Invites      jazz.Relation[Show, ShowInvite]
+	Tasks        jazz.Relation[Show, Task]
 }
 
 // Shows is the table `shows`.
@@ -611,6 +649,10 @@ var Shows = showsTable{
 	Date:         jazz.NewColumn[Show, string]("date"),
 	Doors:        jazz.NewColumn[Show, string]("doors"),
 	ChiefAccount: jazz.NewColumn[Show, string]("chiefAccount"),
+	Activity:     jazz.NewRelation[Show, Activity]("activity"),
+	Crew:         jazz.NewRelation[Show, ShowCrew]("crew"),
+	Invites:      jazz.NewRelation[Show, ShowInvite]("invites"),
+	Tasks:        jazz.NewRelation[Show, Task]("tasks"),
 }
 
 // Query starts a query of `shows`.
@@ -619,18 +661,18 @@ func (showsTable) Query() *jazz.Query[Show] {
 }
 
 // Insert inserts a row into `shows` and returns it, with its id.
-func (showsTable) Insert(ctx context.Context, db *jazz.DB, row NewShow) (Show, error) {
-	return jazz.Insert[NewShow, Show](ctx, db, "shows", row)
+func (showsTable) Insert(ctx context.Context, db jazz.Querier, row NewShow, opts ...jazz.WriteOption) (Show, error) {
+	return jazz.Insert[NewShow, Show](ctx, db, "shows", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `shows` with id.
-func (showsTable) Update(ctx context.Context, db *jazz.DB, id string, patch ShowPatch) error {
-	return db.Update(ctx, "shows", id, patch)
+func (showsTable) Update(ctx context.Context, db jazz.Querier, id string, patch ShowPatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "shows", id, patch, opts...)
 }
 
 // Delete deletes the row of `shows` with id.
-func (showsTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
-	return db.Delete(ctx, "shows", id)
+func (showsTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "shows", id, opts...)
 }
 
 // Task is a row of `tasks`.
@@ -642,6 +684,10 @@ type Task struct {
 	AssigneeID *string    `json:"assigneeId"`
 	Notes      *string    `json:"notes"`
 	Rank       float64    `json:"rank"`
+	Activity   []Activity `json:"activity,omitempty"`
+	Assignee   *Crew      `json:"assignee,omitempty"`
+	Comments   []Comment  `json:"comments,omitempty"`
+	Show       *Show      `json:"show,omitempty"`
 }
 
 // NewTask is a row to insert into `tasks`: nil fields are null, or take their default.
@@ -676,7 +722,7 @@ func (p TaskPatch) MarshalJSON() ([]byte, error) {
 	)
 }
 
-// tasksTable is the type of Tasks: the columns of `tasks`, to build conditions and orders from.
+// tasksTable is the type of Tasks: the columns of `tasks`, to build conditions and orders from, and its relations, to include.
 type tasksTable struct {
 	ID         jazz.Column[Task, string]
 	ShowID     jazz.Column[Task, string]
@@ -685,6 +731,10 @@ type tasksTable struct {
 	AssigneeID jazz.Column[Task, string]
 	Notes      jazz.Column[Task, string]
 	Rank       jazz.Column[Task, float64]
+	Activity   jazz.Relation[Task, Activity]
+	Assignee   jazz.Relation[Task, Crew]
+	Comments   jazz.Relation[Task, Comment]
+	Show       jazz.Relation[Task, Show]
 }
 
 // Tasks is the table `tasks`.
@@ -696,6 +746,10 @@ var Tasks = tasksTable{
 	AssigneeID: jazz.NewColumn[Task, string]("assigneeId"),
 	Notes:      jazz.NewColumn[Task, string]("notes"),
 	Rank:       jazz.NewColumn[Task, float64]("rank"),
+	Activity:   jazz.NewRelation[Task, Activity]("activity"),
+	Assignee:   jazz.NewRelation[Task, Crew]("assignee"),
+	Comments:   jazz.NewRelation[Task, Comment]("comments"),
+	Show:       jazz.NewRelation[Task, Show]("show"),
 }
 
 // Query starts a query of `tasks`.
@@ -704,16 +758,16 @@ func (tasksTable) Query() *jazz.Query[Task] {
 }
 
 // Insert inserts a row into `tasks` and returns it, with its id.
-func (tasksTable) Insert(ctx context.Context, db *jazz.DB, row NewTask) (Task, error) {
-	return jazz.Insert[NewTask, Task](ctx, db, "tasks", row)
+func (tasksTable) Insert(ctx context.Context, db jazz.Querier, row NewTask, opts ...jazz.WriteOption) (Task, error) {
+	return jazz.Insert[NewTask, Task](ctx, db, "tasks", row, opts...)
 }
 
 // Update changes the fields patch sets of the row of `tasks` with id.
-func (tasksTable) Update(ctx context.Context, db *jazz.DB, id string, patch TaskPatch) error {
-	return db.Update(ctx, "tasks", id, patch)
+func (tasksTable) Update(ctx context.Context, db jazz.Querier, id string, patch TaskPatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "tasks", id, patch, opts...)
 }
 
 // Delete deletes the row of `tasks` with id.
-func (tasksTable) Delete(ctx context.Context, db *jazz.DB, id string) error {
-	return db.Delete(ctx, "tasks", id)
+func (tasksTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "tasks", id, opts...)
 }

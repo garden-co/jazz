@@ -77,11 +77,17 @@ func (c Column[R, V]) Desc() Order[R] { return Order[R]{column: c.name, directio
 // Query is a query of rows of R. Its methods return a new query and leave
 // the receiver as it is, so a query can be shared and extended.
 type Query[R any] struct {
-	table  string
-	where  []Cond[R]
-	order  []Order[R]
-	limit  *int
-	offset *int
+	table    string
+	where    []Cond[R]
+	order    []Order[R]
+	limit    *int
+	offset   *int
+	include  []Include[R]
+	selected []string
+	tier     ReadTier
+	// raw holds the parts of a query Select made from a query of another
+	// row type; the typed parts above add to it.
+	raw *queryJSON
 }
 
 // NewQuery is a query of every row of table, read as R.
@@ -91,6 +97,7 @@ func (q *Query[R]) clone() *Query[R] {
 	c := *q
 	c.where = append([]Cond[R](nil), q.where...)
 	c.order = append([]Order[R](nil), q.order...)
+	c.include = append([]Include[R](nil), q.include...)
 	return &c
 }
 
@@ -122,61 +129,91 @@ func (q *Query[R]) Offset(n int) *Query[R] {
 	return c
 }
 
-// MarshalJSON writes the query in the jazz-ffi query form.
-func (q *Query[R]) MarshalJSON() ([]byte, error) {
-	type cond struct {
-		Column string `json:"column"`
-		Op     string `json:"op"`
-		Value  any    `json:"value,omitempty"`
+func (q *Query[R]) toJSON() queryJSON {
+	out := queryJSON{Table: q.table, Limit: q.limit, Offset: q.offset, Select: q.selected}
+	if q.raw != nil {
+		out = *q.raw.cloneParts()
+		out.Limit, out.Offset = q.limit, q.offset
+		if q.selected != nil {
+			out.Select = q.selected
+		}
 	}
-	type order struct {
-		Column    string `json:"column"`
-		Direction string `json:"direction"`
-	}
-	out := struct {
-		Table   string  `json:"table"`
-		Where   []cond  `json:"where,omitempty"`
-		OrderBy []order `json:"orderBy,omitempty"`
-		Limit   *int    `json:"limit,omitempty"`
-		Offset  *int    `json:"offset,omitempty"`
-	}{Table: q.table, Limit: q.limit, Offset: q.offset}
 	for _, w := range q.where {
-		c := cond{Column: w.column, Op: w.op}
+		c := condJSON{Column: w.column, Op: w.op}
 		if w.hasVal {
 			raw, err := json.Marshal(w.value)
 			if err != nil {
-				return nil, err
+				raw = []byte("null")
 			}
-			c.Value = json.RawMessage(raw)
+			c.Value = raw
 		}
 		out.Where = append(out.Where, c)
 	}
 	for _, o := range q.order {
-		out.OrderBy = append(out.OrderBy, order{o.column, o.direction})
+		out.OrderBy = append(out.OrderBy, orderJSON{o.column, o.direction})
 	}
-	return json.Marshal(out)
+	for _, i := range q.include {
+		out.Include = append(out.Include, includeJSON{Relation: i.relation, Required: i.required, Query: i.child})
+	}
+	return out
 }
 
-// All is every row the query matches.
-func (q *Query[R]) All(ctx context.Context, db *DB) ([]R, error) {
-	var raws []json.RawMessage
-	if err := db.call(ctx, "all", map[string]any{"query": q}, &raws); err != nil {
+// args is the query's jazz-ffi arguments: the query, and its tier.
+func (q *Query[R]) args() map[string]any {
+	args := map[string]any{"query": q}
+	if q.tier != "" {
+		args["tier"] = string(q.tier)
+	}
+	return args
+}
+
+// subscription is what jazz_subscribe takes: the query, or with a tier
+// {"query", "tier"}.
+func (q *Query[R]) subscription() any {
+	if q.tier == "" {
+		return q
+	}
+	return map[string]any{"query": q, "tier": string(q.tier)}
+}
+
+// MarshalJSON writes the query in the jazz-ffi query form.
+func (q *Query[R]) MarshalJSON() ([]byte, error) {
+	for _, w := range q.where {
+		if w.hasVal {
+			if _, err := json.Marshal(w.value); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return json.Marshal(q.toJSON())
+}
+
+// All is every row the query matches, read through db (a *DB or a *Tx).
+func (q *Query[R]) All(ctx context.Context, db Querier) ([]R, error) {
+	if err := checkSelect[R](q.table, q.selected); err != nil {
 		return nil, err
 	}
-	return decodeRows[R](q.table, raws)
+	var raws []json.RawMessage
+	if err := db.call(ctx, "all", q.args(), &raws); err != nil {
+		return nil, err
+	}
+	return decodeRows[R](db.computed(), q.table, raws)
 }
 
 // One is the first row the query matches, or nil if none does.
-func (q *Query[R]) One(ctx context.Context, db *DB) (*R, error) {
+func (q *Query[R]) One(ctx context.Context, db Querier) (*R, error) {
+	if err := checkSelect[R](q.table, q.selected); err != nil {
+		return nil, err
+	}
 	var raw json.RawMessage
-	if err := db.call(ctx, "one", map[string]any{"query": q}, &raw); err != nil {
+	if err := db.call(ctx, "one", q.args(), &raw); err != nil {
 		return nil, err
 	}
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
 	}
 	var row R
-	if err := decodeRow(q.table, raw, &row); err != nil {
+	if err := decodeRow(db.computed(), q.table, raw, &row); err != nil {
 		return nil, err
 	}
 	return &row, nil
@@ -184,12 +221,16 @@ func (q *Query[R]) One(ctx context.Context, db *DB) (*R, error) {
 
 // Insert inserts row (an insert struct N) into table and returns the
 // inserted row R, with its id.
-func Insert[N, R any](ctx context.Context, db *DB, table string, row N) (R, error) {
+func Insert[N, R any](ctx context.Context, db Querier, table string, row N, opts ...WriteOption) (R, error) {
 	var inserted R
 	var raw json.RawMessage
-	if err := db.call(ctx, "insert", map[string]any{"table": table, "row": row}, &raw); err != nil {
+	encoded, err := encode(db, row)
+	if err != nil {
 		return inserted, err
 	}
-	err := decodeRow(table, raw, &inserted)
+	if err := db.call(ctx, "insert", withOptions(map[string]any{"table": table, "row": encoded}, opts), &raw); err != nil {
+		return inserted, err
+	}
+	err = decodeRow(db.computed(), table, raw, &inserted)
 	return inserted, err
 }

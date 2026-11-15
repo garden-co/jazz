@@ -1,0 +1,136 @@
+package jazz
+
+import (
+	"context"
+	"fmt"
+)
+
+// Querier is what reads and writes go through: a *DB, or a *Tx inside a
+// transaction. Generated table methods take one.
+type Querier interface {
+	call(ctx context.Context, method string, args map[string]any, out any) error
+	// computed is the app's Computed, for generated rows' hooks.
+	computed() any
+}
+
+// Tx is a transaction: pass it where a Querier goes. It belongs to the
+// goroutine running the function given to DB.Tx.
+type Tx struct {
+	db   *DB
+	id   string
+	tier WriteTier
+	done bool
+}
+
+// TxOption configures DB.Tx.
+type TxOption func(*txOptions)
+
+type txOptions struct {
+	serializable bool
+	tier         WriteTier
+}
+
+// Serializable says the transaction is serializable: its reads are checked
+// at commit, which fails with ErrConflict if they changed meanwhile, and
+// is not retried. Every Jazz transaction is serializable, so this only
+// documents it at the call.
+func Serializable() TxOption { return func(o *txOptions) { o.serializable = true } }
+
+// CommitAt makes the commit return once the transaction has reached tier.
+func CommitAt(tier WriteTier) TxOption { return func(o *txOptions) { o.tier = tier } }
+
+// Tx runs fn in a transaction. It commits when fn returns nil, and rolls
+// back when fn returns an error (which Tx returns) or panics (Tx rolls
+// back and panics again).
+func (db *DB) Tx(ctx context.Context, fn func(tx *Tx) error, opts ...TxOption) (err error) {
+	var o txOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	var begun struct {
+		Tx string `json:"tx"`
+	}
+	begin := map[string]any{}
+	if o.serializable {
+		begin["serializable"] = true
+	}
+	if err := db.call(ctx, "txBegin", begin, &begun); err != nil {
+		return err
+	}
+	if begun.Tx == "" {
+		return &Error{Kind: KindNotSupported, Message: "transactions are not supported by this jazz-ffi"}
+	}
+	tx := &Tx{db: db, id: begun.Tx, tier: o.tier}
+	defer func() {
+		if p := recover(); p != nil {
+			tx.end(context.WithoutCancel(ctx), "txRollback")
+			panic(p)
+		}
+	}()
+	if err := fn(tx); err != nil {
+		if rbErr := tx.end(context.WithoutCancel(ctx), "txRollback"); rbErr != nil {
+			return fmt.Errorf("%w (and rolling back: %v)", err, rbErr)
+		}
+		return err
+	}
+	return tx.end(ctx, "txCommit")
+}
+
+func (tx *Tx) end(ctx context.Context, method string) error {
+	if tx.done {
+		return nil
+	}
+	tx.done = true
+	args := map[string]any{"tx": tx.id}
+	if method == "txCommit" && tx.tier != "" {
+		args["tier"] = string(tx.tier)
+	}
+	return tx.db.call(ctx, method, args, nil)
+}
+
+func (tx *Tx) call(ctx context.Context, method string, args map[string]any, out any) error {
+	if tx.done {
+		return &Error{Kind: KindClosed, Message: "the transaction has ended"}
+	}
+	withTx := make(map[string]any, len(args)+1)
+	for k, v := range args {
+		withTx[k] = v
+	}
+	withTx["tx"] = tx.id
+	return tx.db.call(ctx, method, withTx, out)
+}
+
+// Update changes the fields patch sets on the row of table with id.
+func (tx *Tx) Update(ctx context.Context, table, id string, patch any) error {
+	return update(ctx, tx, table, id, patch, nil)
+}
+
+// Delete deletes the row of table with id.
+func (tx *Tx) Delete(ctx context.Context, table, id string) error {
+	return remove(ctx, tx, table, id, nil)
+}
+
+func update(ctx context.Context, q Querier, table, id string, patch any, opts []WriteOption) error {
+	patch, err := encode(q, patch)
+	if err != nil {
+		return err
+	}
+	return q.call(ctx, "update", withOptions(map[string]any{"table": table, "id": id, "patch": patch}, opts), nil)
+}
+
+func remove(ctx context.Context, q Querier, table, id string, opts []WriteOption) error {
+	return q.call(ctx, "delete", withOptions(map[string]any{"table": table, "id": id}, opts), nil)
+}
+
+// Update changes the fields patch sets on the row of table with id
+// through q (a *DB or a *Tx).
+func Update(ctx context.Context, q Querier, table, id string, patch any, opts ...WriteOption) error {
+	return update(ctx, q, table, id, patch, opts)
+}
+
+// Delete deletes the row of table with id through q (a *DB or a *Tx).
+func Delete(ctx context.Context, q Querier, table, id string, opts ...WriteOption) error {
+	return remove(ctx, q, table, id, opts)
+}
+
+func (tx *Tx) computed() any { return tx.db.app }
