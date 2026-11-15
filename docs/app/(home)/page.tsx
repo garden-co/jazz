@@ -65,8 +65,9 @@ export const jazz = createJazz({
   app,
   permissions,
   // Also: cloudflare() (coming soon), and plain sqlite()
-  // for your own servers. One core per Vercel environment:
-  store: vercel({ namespace: ({ environment }) => environment }),
+  // for your own servers. One core per Vercel environment,
+  // in your functions' region:
+  store: vercel({ namespace: ({ environment }) => environment, region: "iad1" }),
   // Better Auth, WorkOS, many other providers or any custom auth:
   // pass on the user ID and permission-relevant claims, or null
   authenticate: (request) => getSignedInUser(request),

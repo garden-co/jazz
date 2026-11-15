@@ -67,8 +67,8 @@ describe('createJazz with an app on { migrations: "none" }', () => {
 
   it("refuses a vercel() store, even one whose local store is memory()", () => {
     for (const store of [
-      vercel({ namespace: "test" }),
-      vercel({ namespace: "test", local: memory() }),
+      vercel({ namespace: "test", region: "iad1" }),
+      vercel({ namespace: "test", region: "iad1", local: memory() }),
     ]) {
       expectNamesTheFix(
         refusal(() => createJazz({ app: none, permissions, store })),

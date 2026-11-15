@@ -135,6 +135,7 @@ async function deployedVercel(): Promise<JazzStore> {
   let coreUrl = "http://127.0.0.1:9";
   const handle = (): SandboxHandle => ({
     status: "running",
+    region: "iad1",
     domain: () => coreUrl,
     currentSession: () => ({
       startedAt: new Date(),
@@ -180,7 +181,7 @@ async function deployedVercel(): Promise<JazzStore> {
     Drive: {
       async getOrCreate() {
         state.drive = true;
-        return {};
+        return { region: "iad1" };
       },
     },
   };
@@ -188,6 +189,7 @@ async function deployedVercel(): Promise<JazzStore> {
     sdk,
     backendCredential: () => oidcToken(issuer),
     namespace: ({ environment }) => environment,
+    region: "iad1",
   });
 }
 
