@@ -536,3 +536,47 @@ async fn open_transaction_restore_with_values() {
     assert_eq!(row.tags, ["retry"]);
     assert_eq!(row.priority, TaskPriority::Low, "the column's default");
 }
+
+/// A restore replaces the whole row, so `restore_with` takes the full
+/// insert, as TS's `restore(table, id, data)` does: on a table with
+/// required columns, the row comes back with the values given.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restore_with_values() {
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask::new("Ship it", 3, vec!["release".to_owned()]))
+        .await
+        .unwrap();
+    jazz.delete::<Task>(task.id).await.unwrap();
+
+    let restored = jazz
+        .restore_with(
+            task.id,
+            NewTask {
+                notes: Some("back again".into()),
+                ..NewTask::new("Ship it again", 7, vec!["retry".to_owned()])
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(restored.id, task.id);
+    assert_eq!(restored.title, "Ship it again");
+    assert_eq!(restored.score, 7);
+    assert_eq!(restored.tags, ["retry"]);
+    assert_eq!(restored.priority, TaskPriority::Low, "the column's default");
+
+    // The same inside a transaction.
+    jazz.delete::<Task>(task.id).await.unwrap();
+    let id = task.id;
+    let restored = jazz
+        .transaction(move |tx| async move {
+            tx.restore_with(id, NewTask::new("Third time", 1, vec![]))
+                .await
+        })
+        .await
+        .unwrap();
+    assert_eq!(restored.title, "Third time");
+    assert_eq!(restored.score, 1);
+}
