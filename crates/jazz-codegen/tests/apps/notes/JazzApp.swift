@@ -70,53 +70,16 @@ public enum JazzApp {
         public var name: Swift.String
     }
 
-    extension Folder {
-        public init(id: Jazz.ID, name: Swift.String) {
-            self.id = id
-            self.name = name
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case id
-            case name = "name"
-        }
-    }
-
     /// A new row of `folders`: `nil` leaves a column out, which stores its default (or `null`).
     public struct NewFolder: Jazz.Insert {
         public typealias Row = Folder
         public var name: Swift.String
     }
 
-    extension NewFolder {
-        public init(name: Swift.String) {
-            self.name = name
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case name = "name"
-        }
-    }
-
     /// A change to a row of `folders`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
     public struct FolderPatch: Jazz.Patch {
         public typealias Row = Folder
         public var name: Jazz.Change<Swift.String>
-    }
-
-    extension FolderPatch {
-        public init(name: Jazz.Change<Swift.String> = .unchanged) {
-            self.name = name
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case name = "name"
-        }
-
-        public func encode(to encoder: any Swift.Encoder) throws {
-            var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encodeChange(self.name, forKey: .name)
-        }
     }
 
     /// Queries of `folders` and its columns.
@@ -140,22 +103,6 @@ public enum JazzApp {
         public var folderId: Jazz.ID?
     }
 
-    extension Note {
-        public init(id: Jazz.ID, body: Swift.String, pinned: Swift.Bool, folderId: Jazz.ID?) {
-            self.id = id
-            self.body = body
-            self.pinned = pinned
-            self.folderId = folderId
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case id
-            case body = "body"
-            case pinned = "pinned"
-            case folderId = "folderId"
-        }
-    }
-
     /// A new row of `notes`: `nil` leaves a column out, which stores its default (or `null`).
     public struct NewNote: Jazz.Insert {
         public typealias Row = Note
@@ -164,47 +111,12 @@ public enum JazzApp {
         public var folderId: Jazz.ID?
     }
 
-    extension NewNote {
-        public init(body: Swift.String, pinned: Swift.Bool? = nil, folderId: Jazz.ID? = nil) {
-            self.body = body
-            self.pinned = pinned
-            self.folderId = folderId
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case body = "body"
-            case pinned = "pinned"
-            case folderId = "folderId"
-        }
-    }
-
     /// A change to a row of `notes`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
     public struct NotePatch: Jazz.Patch {
         public typealias Row = Note
         public var body: Jazz.Change<Swift.String>
         public var pinned: Jazz.Change<Swift.Bool>
         public var folderId: Jazz.Change<Jazz.ID?>
-    }
-
-    extension NotePatch {
-        public init(body: Jazz.Change<Swift.String> = .unchanged, pinned: Jazz.Change<Swift.Bool> = .unchanged, folderId: Jazz.Change<Jazz.ID?> = .unchanged) {
-            self.body = body
-            self.pinned = pinned
-            self.folderId = folderId
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case body = "body"
-            case pinned = "pinned"
-            case folderId = "folderId"
-        }
-
-        public func encode(to encoder: any Swift.Encoder) throws {
-            var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encodeChange(self.body, forKey: .body)
-            try container.encodeChange(self.pinned, forKey: .pinned)
-            try container.encodeChange(self.folderId, forKey: .folderId)
-        }
     }
 
     /// Queries of `notes` and its columns.
@@ -221,5 +133,93 @@ public enum JazzApp {
         public static let pinned = Jazz.Column<Note, Swift.Bool>("pinned")
         /// Column `folderId`.
         public static let folderId = Jazz.Column<Note, Jazz.ID?>("folderId")
+    }
+}
+
+extension JazzApp.Folder {
+    public init(id: Jazz.ID, name: Swift.String) {
+        self.id = id
+        self.name = name
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case id
+        case name = "name"
+    }
+}
+
+extension JazzApp.NewFolder {
+    public init(name: Swift.String) {
+        self.name = name
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case name = "name"
+    }
+}
+
+extension JazzApp.FolderPatch {
+    public init(name: Jazz.Change<Swift.String> = .unchanged) {
+        self.name = name
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case name = "name"
+    }
+
+    public func encode(to encoder: any Swift.Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeChange(self.name, forKey: .name)
+    }
+}
+
+extension JazzApp.Note {
+    public init(id: Jazz.ID, body: Swift.String, pinned: Swift.Bool, folderId: Jazz.ID?) {
+        self.id = id
+        self.body = body
+        self.pinned = pinned
+        self.folderId = folderId
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case id
+        case body = "body"
+        case pinned = "pinned"
+        case folderId = "folderId"
+    }
+}
+
+extension JazzApp.NewNote {
+    public init(body: Swift.String, pinned: Swift.Bool? = nil, folderId: Jazz.ID? = nil) {
+        self.body = body
+        self.pinned = pinned
+        self.folderId = folderId
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case body = "body"
+        case pinned = "pinned"
+        case folderId = "folderId"
+    }
+}
+
+extension JazzApp.NotePatch {
+    public init(body: Jazz.Change<Swift.String> = .unchanged, pinned: Jazz.Change<Swift.Bool> = .unchanged, folderId: Jazz.Change<Jazz.ID?> = .unchanged) {
+        self.body = body
+        self.pinned = pinned
+        self.folderId = folderId
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case body = "body"
+        case pinned = "pinned"
+        case folderId = "folderId"
+    }
+
+    public func encode(to encoder: any Swift.Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeChange(self.body, forKey: .body)
+        try container.encodeChange(self.pinned, forKey: .pinned)
+        try container.encodeChange(self.folderId, forKey: .folderId)
     }
 }

@@ -76,53 +76,16 @@ public enum JazzApp {
         public var chatId: Jazz.ID
     }
 
-    extension Canvas {
-        public init(id: Jazz.ID, chatId: Jazz.ID) {
-            self.id = id
-            self.chatId = chatId
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case id
-            case chatId = "chatId"
-        }
-    }
-
     /// A new row of `canvases`: `nil` leaves a column out, which stores its default (or `null`).
     public struct NewCanvas: Jazz.Insert {
         public typealias Row = Canvas
         public var chatId: Jazz.ID
     }
 
-    extension NewCanvas {
-        public init(chatId: Jazz.ID) {
-            self.chatId = chatId
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case chatId = "chatId"
-        }
-    }
-
     /// A change to a row of `canvases`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
     public struct CanvasPatch: Jazz.Patch {
         public typealias Row = Canvas
         public var chatId: Jazz.Change<Jazz.ID>
-    }
-
-    extension CanvasPatch {
-        public init(chatId: Jazz.Change<Jazz.ID> = .unchanged) {
-            self.chatId = chatId
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case chatId = "chatId"
-        }
-
-        public func encode(to encoder: any Swift.Encoder) throws {
-            var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encodeChange(self.chatId, forKey: .chatId)
-        }
     }
 
     /// Queries of `canvases` and its columns.
@@ -146,22 +109,6 @@ public enum JazzApp {
         public var joinCode: Swift.String?
     }
 
-    extension ChatMember {
-        public init(id: Jazz.ID, chatId: Jazz.ID, userId: Jazz.ID, joinCode: Swift.String?) {
-            self.id = id
-            self.chatId = chatId
-            self.userId = userId
-            self.joinCode = joinCode
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case id
-            case chatId = "chatId"
-            case userId = "userId"
-            case joinCode = "joinCode"
-        }
-    }
-
     /// A new row of `chatMembers`: `nil` leaves a column out, which stores its default (or `null`).
     public struct NewChatMember: Jazz.Insert {
         public typealias Row = ChatMember
@@ -170,47 +117,12 @@ public enum JazzApp {
         public var joinCode: Swift.String?
     }
 
-    extension NewChatMember {
-        public init(chatId: Jazz.ID, userId: Jazz.ID, joinCode: Swift.String? = nil) {
-            self.chatId = chatId
-            self.userId = userId
-            self.joinCode = joinCode
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case chatId = "chatId"
-            case userId = "userId"
-            case joinCode = "joinCode"
-        }
-    }
-
     /// A change to a row of `chatMembers`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
     public struct ChatMemberPatch: Jazz.Patch {
         public typealias Row = ChatMember
         public var chatId: Jazz.Change<Jazz.ID>
         public var userId: Jazz.Change<Jazz.ID>
         public var joinCode: Jazz.Change<Swift.String?>
-    }
-
-    extension ChatMemberPatch {
-        public init(chatId: Jazz.Change<Jazz.ID> = .unchanged, userId: Jazz.Change<Jazz.ID> = .unchanged, joinCode: Jazz.Change<Swift.String?> = .unchanged) {
-            self.chatId = chatId
-            self.userId = userId
-            self.joinCode = joinCode
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case chatId = "chatId"
-            case userId = "userId"
-            case joinCode = "joinCode"
-        }
-
-        public func encode(to encoder: any Swift.Encoder) throws {
-            var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encodeChange(self.chatId, forKey: .chatId)
-            try container.encodeChange(self.userId, forKey: .userId)
-            try container.encodeChange(self.joinCode, forKey: .joinCode)
-        }
     }
 
     /// Queries of `chatMembers` and its columns.
@@ -238,22 +150,6 @@ public enum JazzApp {
         public var joinCode: Swift.String?
     }
 
-    extension Chat {
-        public init(id: Jazz.ID, name: Swift.String?, isPublic: Swift.Bool, joinCode: Swift.String?) {
-            self.id = id
-            self.name = name
-            self.isPublic = isPublic
-            self.joinCode = joinCode
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case id
-            case name = "name"
-            case isPublic = "isPublic"
-            case joinCode = "joinCode"
-        }
-    }
-
     /// A new row of `chats`: `nil` leaves a column out, which stores its default (or `null`).
     public struct NewChat: Jazz.Insert {
         public typealias Row = Chat
@@ -262,47 +158,12 @@ public enum JazzApp {
         public var joinCode: Swift.String?
     }
 
-    extension NewChat {
-        public init(name: Swift.String? = nil, isPublic: Swift.Bool, joinCode: Swift.String? = nil) {
-            self.name = name
-            self.isPublic = isPublic
-            self.joinCode = joinCode
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case name = "name"
-            case isPublic = "isPublic"
-            case joinCode = "joinCode"
-        }
-    }
-
     /// A change to a row of `chats`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
     public struct ChatPatch: Jazz.Patch {
         public typealias Row = Chat
         public var name: Jazz.Change<Swift.String?>
         public var isPublic: Jazz.Change<Swift.Bool>
         public var joinCode: Jazz.Change<Swift.String?>
-    }
-
-    extension ChatPatch {
-        public init(name: Jazz.Change<Swift.String?> = .unchanged, isPublic: Jazz.Change<Swift.Bool> = .unchanged, joinCode: Jazz.Change<Swift.String?> = .unchanged) {
-            self.name = name
-            self.isPublic = isPublic
-            self.joinCode = joinCode
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case name = "name"
-            case isPublic = "isPublic"
-            case joinCode = "joinCode"
-        }
-
-        public func encode(to encoder: any Swift.Encoder) throws {
-            var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encodeChange(self.name, forKey: .name)
-            try container.encodeChange(self.isPublic, forKey: .isPublic)
-            try container.encodeChange(self.joinCode, forKey: .joinCode)
-        }
     }
 
     /// Queries of `chats` and its columns.
@@ -330,22 +191,6 @@ public enum JazzApp {
         public var senderId: Jazz.ID
     }
 
-    extension Message {
-        public init(id: Jazz.ID, chatId: Jazz.ID, text: Swift.String, senderId: Jazz.ID) {
-            self.id = id
-            self.chatId = chatId
-            self.text = text
-            self.senderId = senderId
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case id
-            case chatId = "chatId"
-            case text = "text"
-            case senderId = "senderId"
-        }
-    }
-
     /// A new row of `messages`: `nil` leaves a column out, which stores its default (or `null`).
     public struct NewMessage: Jazz.Insert {
         public typealias Row = Message
@@ -354,47 +199,12 @@ public enum JazzApp {
         public var senderId: Jazz.ID
     }
 
-    extension NewMessage {
-        public init(chatId: Jazz.ID, text: Swift.String, senderId: Jazz.ID) {
-            self.chatId = chatId
-            self.text = text
-            self.senderId = senderId
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case chatId = "chatId"
-            case text = "text"
-            case senderId = "senderId"
-        }
-    }
-
     /// A change to a row of `messages`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
     public struct MessagePatch: Jazz.Patch {
         public typealias Row = Message
         public var chatId: Jazz.Change<Jazz.ID>
         public var text: Jazz.Change<Swift.String>
         public var senderId: Jazz.Change<Jazz.ID>
-    }
-
-    extension MessagePatch {
-        public init(chatId: Jazz.Change<Jazz.ID> = .unchanged, text: Jazz.Change<Swift.String> = .unchanged, senderId: Jazz.Change<Jazz.ID> = .unchanged) {
-            self.chatId = chatId
-            self.text = text
-            self.senderId = senderId
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case chatId = "chatId"
-            case text = "text"
-            case senderId = "senderId"
-        }
-
-        public func encode(to encoder: any Swift.Encoder) throws {
-            var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encodeChange(self.chatId, forKey: .chatId)
-            try container.encodeChange(self.text, forKey: .text)
-            try container.encodeChange(self.senderId, forKey: .senderId)
-        }
     }
 
     /// Queries of `messages` and its columns.
@@ -422,22 +232,6 @@ public enum JazzApp {
         public var avatar: Swift.String?
     }
 
-    extension Profile {
-        public init(id: Jazz.ID, userId: Jazz.ID, name: Swift.String, avatar: Swift.String?) {
-            self.id = id
-            self.userId = userId
-            self.name = name
-            self.avatar = avatar
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case id
-            case userId = "userId"
-            case name = "name"
-            case avatar = "avatar"
-        }
-    }
-
     /// A new row of `profiles`: `nil` leaves a column out, which stores its default (or `null`).
     public struct NewProfile: Jazz.Insert {
         public typealias Row = Profile
@@ -446,47 +240,12 @@ public enum JazzApp {
         public var avatar: Swift.String?
     }
 
-    extension NewProfile {
-        public init(userId: Jazz.ID, name: Swift.String, avatar: Swift.String? = nil) {
-            self.userId = userId
-            self.name = name
-            self.avatar = avatar
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case userId = "userId"
-            case name = "name"
-            case avatar = "avatar"
-        }
-    }
-
     /// A change to a row of `profiles`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
     public struct ProfilePatch: Jazz.Patch {
         public typealias Row = Profile
         public var userId: Jazz.Change<Jazz.ID>
         public var name: Jazz.Change<Swift.String>
         public var avatar: Jazz.Change<Swift.String?>
-    }
-
-    extension ProfilePatch {
-        public init(userId: Jazz.Change<Jazz.ID> = .unchanged, name: Jazz.Change<Swift.String> = .unchanged, avatar: Jazz.Change<Swift.String?> = .unchanged) {
-            self.userId = userId
-            self.name = name
-            self.avatar = avatar
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case userId = "userId"
-            case name = "name"
-            case avatar = "avatar"
-        }
-
-        public func encode(to encoder: any Swift.Encoder) throws {
-            var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encodeChange(self.userId, forKey: .userId)
-            try container.encodeChange(self.name, forKey: .name)
-            try container.encodeChange(self.avatar, forKey: .avatar)
-        }
     }
 
     /// Queries of `profiles` and its columns.
@@ -514,22 +273,6 @@ public enum JazzApp {
         public var emoji: Swift.String
     }
 
-    extension Reaction {
-        public init(id: Jazz.ID, messageId: Jazz.ID, userId: Jazz.ID, emoji: Swift.String) {
-            self.id = id
-            self.messageId = messageId
-            self.userId = userId
-            self.emoji = emoji
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case id
-            case messageId = "messageId"
-            case userId = "userId"
-            case emoji = "emoji"
-        }
-    }
-
     /// A new row of `reactions`: `nil` leaves a column out, which stores its default (or `null`).
     public struct NewReaction: Jazz.Insert {
         public typealias Row = Reaction
@@ -538,47 +281,12 @@ public enum JazzApp {
         public var emoji: Swift.String
     }
 
-    extension NewReaction {
-        public init(messageId: Jazz.ID, userId: Jazz.ID, emoji: Swift.String) {
-            self.messageId = messageId
-            self.userId = userId
-            self.emoji = emoji
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case messageId = "messageId"
-            case userId = "userId"
-            case emoji = "emoji"
-        }
-    }
-
     /// A change to a row of `reactions`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
     public struct ReactionPatch: Jazz.Patch {
         public typealias Row = Reaction
         public var messageId: Jazz.Change<Jazz.ID>
         public var userId: Jazz.Change<Jazz.ID>
         public var emoji: Jazz.Change<Swift.String>
-    }
-
-    extension ReactionPatch {
-        public init(messageId: Jazz.Change<Jazz.ID> = .unchanged, userId: Jazz.Change<Jazz.ID> = .unchanged, emoji: Jazz.Change<Swift.String> = .unchanged) {
-            self.messageId = messageId
-            self.userId = userId
-            self.emoji = emoji
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case messageId = "messageId"
-            case userId = "userId"
-            case emoji = "emoji"
-        }
-
-        public func encode(to encoder: any Swift.Encoder) throws {
-            var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encodeChange(self.messageId, forKey: .messageId)
-            try container.encodeChange(self.userId, forKey: .userId)
-            try container.encodeChange(self.emoji, forKey: .emoji)
-        }
     }
 
     /// Queries of `reactions` and its columns.
@@ -607,24 +315,6 @@ public enum JazzApp {
         public var pointsJson: Swift.String
     }
 
-    extension Stroke {
-        public init(id: Jazz.ID, canvasId: Jazz.ID, color: Swift.String, width: Swift.Int, pointsJson: Swift.String) {
-            self.id = id
-            self.canvasId = canvasId
-            self.color = color
-            self.width = width
-            self.pointsJson = pointsJson
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case id
-            case canvasId = "canvasId"
-            case color = "color"
-            case width = "width"
-            case pointsJson = "pointsJson"
-        }
-    }
-
     /// A new row of `strokes`: `nil` leaves a column out, which stores its default (or `null`).
     public struct NewStroke: Jazz.Insert {
         public typealias Row = Stroke
@@ -634,22 +324,6 @@ public enum JazzApp {
         public var pointsJson: Swift.String
     }
 
-    extension NewStroke {
-        public init(canvasId: Jazz.ID, color: Swift.String, width: Swift.Int, pointsJson: Swift.String) {
-            self.canvasId = canvasId
-            self.color = color
-            self.width = width
-            self.pointsJson = pointsJson
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case canvasId = "canvasId"
-            case color = "color"
-            case width = "width"
-            case pointsJson = "pointsJson"
-        }
-    }
-
     /// A change to a row of `strokes`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
     public struct StrokePatch: Jazz.Patch {
         public typealias Row = Stroke
@@ -657,30 +331,6 @@ public enum JazzApp {
         public var color: Jazz.Change<Swift.String>
         public var width: Jazz.Change<Swift.Int>
         public var pointsJson: Jazz.Change<Swift.String>
-    }
-
-    extension StrokePatch {
-        public init(canvasId: Jazz.Change<Jazz.ID> = .unchanged, color: Jazz.Change<Swift.String> = .unchanged, width: Jazz.Change<Swift.Int> = .unchanged, pointsJson: Jazz.Change<Swift.String> = .unchanged) {
-            self.canvasId = canvasId
-            self.color = color
-            self.width = width
-            self.pointsJson = pointsJson
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case canvasId = "canvasId"
-            case color = "color"
-            case width = "width"
-            case pointsJson = "pointsJson"
-        }
-
-        public func encode(to encoder: any Swift.Encoder) throws {
-            var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encodeChange(self.canvasId, forKey: .canvasId)
-            try container.encodeChange(self.color, forKey: .color)
-            try container.encodeChange(self.width, forKey: .width)
-            try container.encodeChange(self.pointsJson, forKey: .pointsJson)
-        }
     }
 
     /// Queries of `strokes` and its columns.
@@ -699,5 +349,355 @@ public enum JazzApp {
         public static let width = Jazz.Column<Stroke, Swift.Int>("width")
         /// Column `pointsJson`.
         public static let pointsJson = Jazz.Column<Stroke, Swift.String>("pointsJson")
+    }
+}
+
+extension JazzApp.Canvas {
+    public init(id: Jazz.ID, chatId: Jazz.ID) {
+        self.id = id
+        self.chatId = chatId
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case id
+        case chatId = "chatId"
+    }
+}
+
+extension JazzApp.NewCanvas {
+    public init(chatId: Jazz.ID) {
+        self.chatId = chatId
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case chatId = "chatId"
+    }
+}
+
+extension JazzApp.CanvasPatch {
+    public init(chatId: Jazz.Change<Jazz.ID> = .unchanged) {
+        self.chatId = chatId
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case chatId = "chatId"
+    }
+
+    public func encode(to encoder: any Swift.Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeChange(self.chatId, forKey: .chatId)
+    }
+}
+
+extension JazzApp.ChatMember {
+    public init(id: Jazz.ID, chatId: Jazz.ID, userId: Jazz.ID, joinCode: Swift.String?) {
+        self.id = id
+        self.chatId = chatId
+        self.userId = userId
+        self.joinCode = joinCode
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case id
+        case chatId = "chatId"
+        case userId = "userId"
+        case joinCode = "joinCode"
+    }
+}
+
+extension JazzApp.NewChatMember {
+    public init(chatId: Jazz.ID, userId: Jazz.ID, joinCode: Swift.String? = nil) {
+        self.chatId = chatId
+        self.userId = userId
+        self.joinCode = joinCode
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case chatId = "chatId"
+        case userId = "userId"
+        case joinCode = "joinCode"
+    }
+}
+
+extension JazzApp.ChatMemberPatch {
+    public init(chatId: Jazz.Change<Jazz.ID> = .unchanged, userId: Jazz.Change<Jazz.ID> = .unchanged, joinCode: Jazz.Change<Swift.String?> = .unchanged) {
+        self.chatId = chatId
+        self.userId = userId
+        self.joinCode = joinCode
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case chatId = "chatId"
+        case userId = "userId"
+        case joinCode = "joinCode"
+    }
+
+    public func encode(to encoder: any Swift.Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeChange(self.chatId, forKey: .chatId)
+        try container.encodeChange(self.userId, forKey: .userId)
+        try container.encodeChange(self.joinCode, forKey: .joinCode)
+    }
+}
+
+extension JazzApp.Chat {
+    public init(id: Jazz.ID, name: Swift.String?, isPublic: Swift.Bool, joinCode: Swift.String?) {
+        self.id = id
+        self.name = name
+        self.isPublic = isPublic
+        self.joinCode = joinCode
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case id
+        case name = "name"
+        case isPublic = "isPublic"
+        case joinCode = "joinCode"
+    }
+}
+
+extension JazzApp.NewChat {
+    public init(name: Swift.String? = nil, isPublic: Swift.Bool, joinCode: Swift.String? = nil) {
+        self.name = name
+        self.isPublic = isPublic
+        self.joinCode = joinCode
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case name = "name"
+        case isPublic = "isPublic"
+        case joinCode = "joinCode"
+    }
+}
+
+extension JazzApp.ChatPatch {
+    public init(name: Jazz.Change<Swift.String?> = .unchanged, isPublic: Jazz.Change<Swift.Bool> = .unchanged, joinCode: Jazz.Change<Swift.String?> = .unchanged) {
+        self.name = name
+        self.isPublic = isPublic
+        self.joinCode = joinCode
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case name = "name"
+        case isPublic = "isPublic"
+        case joinCode = "joinCode"
+    }
+
+    public func encode(to encoder: any Swift.Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeChange(self.name, forKey: .name)
+        try container.encodeChange(self.isPublic, forKey: .isPublic)
+        try container.encodeChange(self.joinCode, forKey: .joinCode)
+    }
+}
+
+extension JazzApp.Message {
+    public init(id: Jazz.ID, chatId: Jazz.ID, text: Swift.String, senderId: Jazz.ID) {
+        self.id = id
+        self.chatId = chatId
+        self.text = text
+        self.senderId = senderId
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case id
+        case chatId = "chatId"
+        case text = "text"
+        case senderId = "senderId"
+    }
+}
+
+extension JazzApp.NewMessage {
+    public init(chatId: Jazz.ID, text: Swift.String, senderId: Jazz.ID) {
+        self.chatId = chatId
+        self.text = text
+        self.senderId = senderId
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case chatId = "chatId"
+        case text = "text"
+        case senderId = "senderId"
+    }
+}
+
+extension JazzApp.MessagePatch {
+    public init(chatId: Jazz.Change<Jazz.ID> = .unchanged, text: Jazz.Change<Swift.String> = .unchanged, senderId: Jazz.Change<Jazz.ID> = .unchanged) {
+        self.chatId = chatId
+        self.text = text
+        self.senderId = senderId
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case chatId = "chatId"
+        case text = "text"
+        case senderId = "senderId"
+    }
+
+    public func encode(to encoder: any Swift.Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeChange(self.chatId, forKey: .chatId)
+        try container.encodeChange(self.text, forKey: .text)
+        try container.encodeChange(self.senderId, forKey: .senderId)
+    }
+}
+
+extension JazzApp.Profile {
+    public init(id: Jazz.ID, userId: Jazz.ID, name: Swift.String, avatar: Swift.String?) {
+        self.id = id
+        self.userId = userId
+        self.name = name
+        self.avatar = avatar
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case id
+        case userId = "userId"
+        case name = "name"
+        case avatar = "avatar"
+    }
+}
+
+extension JazzApp.NewProfile {
+    public init(userId: Jazz.ID, name: Swift.String, avatar: Swift.String? = nil) {
+        self.userId = userId
+        self.name = name
+        self.avatar = avatar
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case userId = "userId"
+        case name = "name"
+        case avatar = "avatar"
+    }
+}
+
+extension JazzApp.ProfilePatch {
+    public init(userId: Jazz.Change<Jazz.ID> = .unchanged, name: Jazz.Change<Swift.String> = .unchanged, avatar: Jazz.Change<Swift.String?> = .unchanged) {
+        self.userId = userId
+        self.name = name
+        self.avatar = avatar
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case userId = "userId"
+        case name = "name"
+        case avatar = "avatar"
+    }
+
+    public func encode(to encoder: any Swift.Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeChange(self.userId, forKey: .userId)
+        try container.encodeChange(self.name, forKey: .name)
+        try container.encodeChange(self.avatar, forKey: .avatar)
+    }
+}
+
+extension JazzApp.Reaction {
+    public init(id: Jazz.ID, messageId: Jazz.ID, userId: Jazz.ID, emoji: Swift.String) {
+        self.id = id
+        self.messageId = messageId
+        self.userId = userId
+        self.emoji = emoji
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case id
+        case messageId = "messageId"
+        case userId = "userId"
+        case emoji = "emoji"
+    }
+}
+
+extension JazzApp.NewReaction {
+    public init(messageId: Jazz.ID, userId: Jazz.ID, emoji: Swift.String) {
+        self.messageId = messageId
+        self.userId = userId
+        self.emoji = emoji
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case messageId = "messageId"
+        case userId = "userId"
+        case emoji = "emoji"
+    }
+}
+
+extension JazzApp.ReactionPatch {
+    public init(messageId: Jazz.Change<Jazz.ID> = .unchanged, userId: Jazz.Change<Jazz.ID> = .unchanged, emoji: Jazz.Change<Swift.String> = .unchanged) {
+        self.messageId = messageId
+        self.userId = userId
+        self.emoji = emoji
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case messageId = "messageId"
+        case userId = "userId"
+        case emoji = "emoji"
+    }
+
+    public func encode(to encoder: any Swift.Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeChange(self.messageId, forKey: .messageId)
+        try container.encodeChange(self.userId, forKey: .userId)
+        try container.encodeChange(self.emoji, forKey: .emoji)
+    }
+}
+
+extension JazzApp.Stroke {
+    public init(id: Jazz.ID, canvasId: Jazz.ID, color: Swift.String, width: Swift.Int, pointsJson: Swift.String) {
+        self.id = id
+        self.canvasId = canvasId
+        self.color = color
+        self.width = width
+        self.pointsJson = pointsJson
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case id
+        case canvasId = "canvasId"
+        case color = "color"
+        case width = "width"
+        case pointsJson = "pointsJson"
+    }
+}
+
+extension JazzApp.NewStroke {
+    public init(canvasId: Jazz.ID, color: Swift.String, width: Swift.Int, pointsJson: Swift.String) {
+        self.canvasId = canvasId
+        self.color = color
+        self.width = width
+        self.pointsJson = pointsJson
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case canvasId = "canvasId"
+        case color = "color"
+        case width = "width"
+        case pointsJson = "pointsJson"
+    }
+}
+
+extension JazzApp.StrokePatch {
+    public init(canvasId: Jazz.Change<Jazz.ID> = .unchanged, color: Jazz.Change<Swift.String> = .unchanged, width: Jazz.Change<Swift.Int> = .unchanged, pointsJson: Jazz.Change<Swift.String> = .unchanged) {
+        self.canvasId = canvasId
+        self.color = color
+        self.width = width
+        self.pointsJson = pointsJson
+    }
+
+    enum CodingKeys: Swift.String, Swift.CodingKey {
+        case canvasId = "canvasId"
+        case color = "color"
+        case width = "width"
+        case pointsJson = "pointsJson"
+    }
+
+    public func encode(to encoder: any Swift.Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeChange(self.canvasId, forKey: .canvasId)
+        try container.encodeChange(self.color, forKey: .color)
+        try container.encodeChange(self.width, forKey: .width)
+        try container.encodeChange(self.pointsJson, forKey: .pointsJson)
     }
 }
