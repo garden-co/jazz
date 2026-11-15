@@ -88,7 +88,7 @@ jazz-app's `Endpoint`), for a backend serving its users' clients from the
 host's own HTTP server: UniFFI `JazzHandle.endpoint(authenticator,
 base_path?, session_ttl_secs?) -> Endpoint` (`is_socket(path)`,
 `handle(request) -> response`, `for_user(request) -> JazzHandle`,
-`socket(upgrade, SocketListener) -> Socket` with `push`/`close`); C
+`socket(upgrade, SocketListener) -> Socket` with `push`/`end`); C
 `jazz_endpoint_new`/`_handle`/`_is_socket`/`_for_user`/`_socket`,
 `jazz_socket_push`/`_free`, `jazz_endpoint_free`. Requests and responses
 are JSON (bodies base64); the host upgrades the socket path itself and

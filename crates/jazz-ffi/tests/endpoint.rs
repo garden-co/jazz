@@ -122,7 +122,7 @@ async fn serve(stream: TcpStream, endpoint: Arc<Endpoint>) {
                     _ => {}
                 }
             }
-            pushing.close();
+            pushing.end();
         };
         let write = async move {
             while let Some(Some(data)) = from_endpoint.recv().await {
@@ -253,6 +253,7 @@ async fn a_backend_serves_its_users_through_its_own_endpoint() {
         let nobody = endpoint.for_user(json!({ "method": "GET", "path": "/", "headers": [] }).to_string());
         assert!(nobody.is_err());
         as_alice.shutdown().unwrap();
+        endpoint.shutdown().unwrap();
         alice.shutdown().unwrap();
         backend.shutdown().unwrap();
     })

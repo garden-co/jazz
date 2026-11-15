@@ -681,6 +681,13 @@ impl Endpoint {
             .map_err(|e| JazzError::from(e).for_contract(self.contract))
     }
 
+    /// Stops the client the endpoint acts as its users with.
+    pub fn shutdown(&self) -> Result<()> {
+        self.inner
+            .shutdown()
+            .map_err(|e| JazzError::from(e).for_contract(self.contract))
+    }
+
     /// A handle acting as the request's user (TS `forReqUser`).
     pub fn for_user(&self, request_json: String) -> Result<Arc<JazzHandle>> {
         let core = self
@@ -722,8 +729,9 @@ impl Socket {
         self.inner.push(message).map_err(JazzError::from)
     }
 
-    /// The client's socket closed; `on_close` follows.
-    pub fn close(&self) {
+    /// The client's socket closed; `on_close` follows. Named `end`, not
+    /// `close`, which would clash with Kotlin's `AutoCloseable.close`.
+    pub fn end(&self) {
         self.inner.close();
     }
 }
