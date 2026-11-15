@@ -136,18 +136,18 @@ impl From<jazz_app::Error> for JazzErrorKind {
         let message = error.to_string();
         // Only what contract 1 reports as `Refused` is told apart, so a
         // contract 1 host sees exactly what it did before.
-        #[allow(unreachable_patterns)]
         match error {
             E::Rejected(reason) => rejection(&reason, message),
             E::Unsupported(what) => unsupported(what),
             E::App(_) | E::Config(_) | E::Decode { .. } => Self::Refused(message),
+            // The backend refused to link (the user is linked elsewhere):
+            // before the other server errors, which are I/O.
+            E::Server(reason) if reason.contains("refused the link") => Self::Refused(message),
             E::Server(_) | E::Panicked(_) => Self::Io(message),
             E::Stopped => Self::Closed,
             // A bearer the backend names no one by (e.g. a rejected link):
             // a refusal, not a network blip to retry.
             E::SignedOut => Self::Refused(message),
-            // The backend refused to link (the user is linked elsewhere).
-            E::Server(reason) if reason.contains("refused the link") => Self::Refused(message),
             E::Jazz(J::ChannelClosed) => Self::Closed,
             // The authority rejected a write that was waiting for a tier:
             // a refusal, not a transport failure.
