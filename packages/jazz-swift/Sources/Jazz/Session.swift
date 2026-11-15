@@ -7,8 +7,10 @@ public enum Auth: Sendable {
     /// as a password in the platform's keychain.
     case deviceKey(String)
     /// The app's own sign-in: `tokens` gives the current bearer token, or
-    /// `nil` when the user is signed out. It's asked again on renewal,
-    /// expiry and `refresh()`.
+    /// `nil` when the user is signed out (which stops the app). Throwing
+    /// (or taking over 30 s) is a failed fetch instead: the session stays
+    /// signed in and is retried. It's asked again on renewal, expiry and
+    /// `refresh()`.
     case bearer(tokens: @Sendable (TokenReason) async throws -> String?)
 }
 
@@ -121,23 +123,44 @@ public struct SyncError: Decodable, Hashable, Sendable {
 
 final class Tokens: TokenProvider, @unchecked Sendable {
     let provide: @Sendable (TokenReason) async throws -> String?
+    /// How long a fetch may take before it counts as failed (not signed out).
+    static let timeout: TimeInterval = 30
     init(_ provide: @escaping @Sendable (TokenReason) async throws -> String?) { self.provide = provide }
 
-    // Called by jazz-ffi on a thread of its own, which may block.
-    func token(reason: String) -> String? {
+    // Called by jazz-ffi on a thread of its own, which may block. Returning
+    // nil signs the user out; throwing is a failed fetch: the session stays
+    // signed in and jazz-app retries on its own backoff.
+    func token(reason: String) throws -> String? {
         let reason = TokenReason(rawValue: reason) ?? .connect
         let result = Box()
         let done = DispatchSemaphore(value: 0)
         let provide = provide
-        _Concurrency.Task {
-            result.value = try? await provide(reason)
+        let task = _Concurrency.Task {
+            do {
+                result.set(.success(try await provide(reason)))
+            } catch {
+                result.set(.failure(error))
+            }
             done.signal()
         }
-        done.wait()
-        return result.value
+        if done.wait(timeout: .now() + Self.timeout) == .timedOut {
+            task.cancel()
+            throw JazzFFI.JazzError.Io(reason: "the token provider took longer than \(Int(Self.timeout)) s")
+        }
+        switch result.get() {
+        case .success(let token)?: return token
+        case .failure(let error)?:
+            throw JazzFFI.JazzError.Io(reason: "the token provider failed: \(error)")
+        case nil: throw JazzFFI.JazzError.Io(reason: "the token provider gave no answer")
+        }
     }
 
-    final class Box: @unchecked Sendable { var value: String? }
+    final class Box: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Result<String?, any Error>?
+        func set(_ value: Result<String?, any Error>) { lock.withLock { self.value = value } }
+        func get() -> Result<String?, any Error>? { lock.withLock { value } }
+    }
 }
 
 final class States: StateListener, @unchecked Sendable {
