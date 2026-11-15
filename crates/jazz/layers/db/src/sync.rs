@@ -11081,11 +11081,7 @@ impl Db {
     pub fn disconnect_subscriber(&self, subscriber: SubscriberId) {
         let mut inner = self.inner.borrow_mut();
         let dropped = inner.fan.dropped.clone();
-        if let Some(session) = inner
-            .sessions
-            .get_mut(subscriber.slot)
-            .filter(|session| session.open && session.generation == subscriber.generation)
-        {
+        if let Some(session) = inner.open_session_mut(subscriber) {
             for (query, binding, include_deleted, view) in session.close(&dropped) {
                 inner.release_remote(
                     &query,
@@ -14954,11 +14950,7 @@ impl Db {
         }
         let mut sent = false;
         for (to, message) in released {
-            if let Some(session) = inner
-                .sessions
-                .get_mut(to.slot)
-                .filter(|session| session.open && session.generation == to.generation)
-            {
+            if let Some(session) = inner.open_session_mut(to) {
                 session.outbox.push(message);
                 sent = true;
             }
@@ -15353,5 +15345,119 @@ mod tests {
         let mut joiner = FrameJoiner::with_ceiling(bytes.len() - 1);
         assert!(joiner.push(&parts[0]).unwrap().is_none());
         assert!(joiner.push(&parts[1]).is_err());
+    }
+
+    /// A relay keys what it owes a session by the session's acceptance, not
+    /// its slot: should a close path ever skip [`Inner::forget_relayed`], a
+    /// later session in the same slot is still never handed the earlier
+    /// one's fate.
+    #[test]
+    fn a_relayed_fate_never_reaches_a_later_session_in_the_same_slot() {
+        use crate::db::{Db, DbConfig, DbIdentity, InsertOptions};
+        use jazz_model::model::public_schema::{
+            ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema,
+        };
+        use jazz_types::ids::{AuthorSubject, NodeUuid};
+        use jazz_types::local_executor::block_on;
+
+        let schema = || {
+            JazzSchema::new(
+                &SchemaBuilder::new()
+                    .table(
+                        TableSchema::builder("notes")
+                            .column("body", ColumnType::Text)
+                            .policies(
+                                TablePolicies::new()
+                                    .with_select(PolicyExpr::True)
+                                    .with_insert(PolicyExpr::True)
+                                    .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                                    .with_delete(PolicyExpr::True),
+                            ),
+                    )
+                    .build(),
+            )
+            .unwrap()
+        };
+        let open = |node: u8, author: AuthorSubject| {
+            block_on(Db::open(DbConfig::new(
+                schema(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([node; 16]),
+                    author,
+                },
+            )))
+            .unwrap()
+        };
+        let worker_author = AuthorSubject::for_test_bytes([0x77; 16]);
+        let core = open(0xc0, AuthorSubject::SYSTEM);
+        let worker = open(0x77, worker_author);
+        let (up, down) = duplex();
+        let _upstream = block_on(worker.connect_upstream(up));
+        core.accept_subscriber(down, worker_author).unwrap();
+        worker.set_remote_link_hint(RemoteLinkHint::Live);
+
+        // Tab A writes through the relay; the relay accepts it and uploads it
+        // as its own, owing A its fate.
+        let tab = open(0x78, worker_author);
+        tab.set_non_durable_client();
+        tab.set_remote_link_hint(RemoteLinkHint::Live);
+        let (tab_up, tab_down) = duplex();
+        let _tab_upstream = block_on(tab.connect_upstream(tab_up));
+        let a = worker.accept_subscriber(tab_down, worker_author).unwrap();
+        block_on(tab.insert(
+            "notes",
+            BTreeMap::from([("body".to_owned(), Value::String("hi".to_owned()))]),
+            InsertOptions::default(),
+        ))
+        .unwrap();
+        block_on(tab.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+        {
+            let inner = worker.inner.borrow();
+            let owed = inner.client.as_ref().unwrap().relayed_fates.values();
+            assert!(
+                owed.flatten().any(|(session, _, _)| *session == a),
+                "the relay owes A its fate"
+            );
+        }
+
+        // A closes on a path that skips `forget_relayed`; B takes its slot.
+        {
+            let mut inner = worker.inner.borrow_mut();
+            let dropped = inner.fan.dropped.clone();
+            let _ = inner.sessions[a.slot()].close(&dropped);
+        }
+        let (b_client, b_server) = duplex();
+        let b = worker.accept_subscriber(b_server, worker_author).unwrap();
+        assert_eq!(b.slot(), a.slot(), "B reuses A's slot");
+        {
+            let mut inner = worker.inner.borrow_mut();
+            assert!(inner.open_session_mut(a).is_none(), "A's handle is stale");
+            assert!(inner.open_session_mut(b).is_some());
+        }
+
+        // The upload settles upstream: A's fate is due, and B must not get it.
+        for _ in 0..6 {
+            block_on(core.tick()).unwrap();
+            block_on(worker.tick()).unwrap();
+        }
+        assert!(
+            worker
+                .inner
+                .borrow()
+                .client
+                .as_ref()
+                .unwrap()
+                .relayed_fates
+                .is_empty(),
+            "the upload settled"
+        );
+        let mut b_client = b_client;
+        while let Some(message) = b_client.try_recv() {
+            assert!(
+                !matches!(message, SyncMessage::Fate { .. }),
+                "B was handed A's fate: {message:?}"
+            );
+        }
     }
 }
