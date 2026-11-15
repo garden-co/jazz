@@ -75,8 +75,16 @@ if (withFfi) {
     tasks.named("processResources") { dependsOn(bundleFfi) }
 }
 
-// Generated bindings for jazz-codegen's widest fixture must compile against this runtime.
+// jazz-codegen's Kotlin goldens must compile against this runtime: chat-react
+// (the widest types) with the tests, kotlin-edges (names that could hide
+// packages or members) on its own, as both declare package jazzapp.
 sourceSets.test { kotlin.srcDir(repo.resolve("crates/jazz-codegen/tests/apps/chat-react")) }
+val edges = sourceSets.create("edges") {
+    kotlin.srcDir(repo.resolve("crates/jazz-codegen/tests/apps/kotlin-edges"))
+    compileClasspath += sourceSets.main.get().output + sourceSets.main.get().compileClasspath
+}
+tasks.named("check") { dependsOn("compileEdgesKotlin") }
+tasks.named("test") { dependsOn("compileEdgesKotlin") }
 
 tasks.test {
     useJUnitPlatform()
