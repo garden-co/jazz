@@ -324,6 +324,98 @@ describe("createJazz", () => {
     expect(probe.headers.get("x-jazz-stream")).toBeNull();
   }, 60_000);
 
+  // The backend reads a socket's credentials from its prelude's `auth`, and
+  // forwards exactly those: a credential stated only beside an empty `auth`
+  // is no credential.
+  it("reads a socket's credentials only from its prelude's auth", async () => {
+    // Record every prelude the backend forwards to the core.
+    const forwarded: Array<Record<string, unknown>> = [];
+    const realOpenSocket = JazzCore.prototype.openSocket;
+    JazzCore.prototype.openSocket = function (this: unknown, ...args: unknown[]) {
+      const sock = (
+        realOpenSocket as (...a: unknown[]) => { send(data: Uint8Array): boolean }
+      ).apply(this, args);
+      let first = true;
+      const realSend = sock.send.bind(sock);
+      sock.send = (data: Uint8Array) => {
+        if (first) {
+          first = false;
+          try {
+            forwarded.push(JSON.parse(new TextDecoder().decode(data)) as Record<string, unknown>);
+          } catch {
+            // Not a prelude.
+          }
+        }
+        return realSend(data);
+      };
+      return sock;
+    } as never;
+    cleanups.push(async () => {
+      JazzCore.prototype.openSocket = realOpenSocket;
+    });
+
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    const appId = jazz.appId;
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const wsUrl = `${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`;
+
+    // Alice signs in; her forwarded prelude carries her identity.
+    const alice = await userSession(appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "alice private", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    const aliceAuth = forwarded.find(
+      (p) =>
+        (p.auth as { backend_session?: { user_id?: string } })?.backend_session?.user_id ===
+        "alice",
+    );
+    const aliceIdentity = aliceAuth?.peer_identity as string | undefined;
+    expect(typeof aliceIdentity).toBe("string");
+
+    // A prelude naming alice, with a device's own token beside an empty `auth`.
+    forwarded.length = 0;
+    const deviceToken = signToken(generateSecret(), { audience: appId });
+    const socket = new NodeWebSocket(wsUrl);
+    socket.addEventListener("open", () =>
+      socket.send(
+        JSON.stringify({ peer_identity: aliceIdentity, jwt_token: deviceToken, auth: {} }),
+      ),
+    );
+    // A refused prelude is answered with a close; an admitted one keeps the
+    // socket open and relays the core's frames, so a short wait with no close
+    // means admitted. (The close is preceded by a "not signed in" message, so
+    // the close code, not the first frame, is the signal.)
+    const outcome = await new Promise<string>((resolve) => {
+      const open = setTimeout(() => resolve("admitted (socket open)"), 3000);
+      socket.addEventListener("close", (event) => {
+        clearTimeout(open);
+        resolve(`closed ${event.code}`);
+      });
+    });
+    socket.close();
+
+    // The prelude is refused outright: never relayed to the core.
+    expect(outcome).toBe("closed 1008");
+    // Nothing is forwarded for alice without a credential of hers in `auth`.
+    const forwardedBare = forwarded.find((p) => {
+      const auth = p.auth as Record<string, unknown> | undefined;
+      return (
+        p.peer_identity === aliceIdentity &&
+        auth?.backend_secret != null &&
+        auth?.jwt_token == null &&
+        auth?.backend_session == null
+      );
+    });
+    expect(forwardedBare).toBeUndefined();
+
+    // Positive control: alice's own prelude (above) still reached the core
+    // vouched — its `auth` carried her session alongside the backend secret,
+    // exactly one identity credential, as a genuine vouched prelude does.
+    expect((aliceAuth?.auth as { backend_secret?: unknown })?.backend_secret).toBeTruthy();
+    expect((aliceAuth?.auth as { jwt_token?: unknown })?.jwt_token).toBeFalsy();
+  }, 60_000);
+
   for (const sockets of [true, false]) {
     it(`lets go of its clients' ${sockets ? "sockets" : "HTTP streams"} when it closes, so its server can`, async () => {
       const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
