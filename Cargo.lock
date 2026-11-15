@@ -4533,6 +4533,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "stage-plan-rust-cli"
+version = "0.1.0"
+dependencies = [
+ "jazz-app",
+ "jazz-server",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "statrs"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
