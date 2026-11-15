@@ -204,8 +204,7 @@
             },
             "enum": {
               "type": "array",
-              "items": { "type": "string" },
-              "minItems": 1
+              "items": { "type": "string" }
             },
             "json": {},
             "array": {
@@ -246,8 +245,7 @@
             },
             "enum": {
               "type": "array",
-              "items": { "type": "string" },
-              "minItems": 1
+              "items": { "type": "string" }
             },
             "json": {},
             "array": {
@@ -359,8 +357,7 @@
             },
             "enum": {
               "type": "array",
-              "items": { "type": "string" },
-              "minItems": 1
+              "items": { "type": "string" }
             },
             "json": {},
             "array": {
