@@ -63,6 +63,8 @@ mod fanout_differential;
 mod fanout_policy_pins;
 #[path = "../flat_joins.rs"]
 mod flat_joins;
+#[path = "../follow_memo.rs"]
+mod follow_memo;
 #[path = "../gather_policy_double_ref.rs"]
 mod gather_policy_double_ref;
 #[path = "../history_reads.rs"]
