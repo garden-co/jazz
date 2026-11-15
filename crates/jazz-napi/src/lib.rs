@@ -1538,9 +1538,13 @@ impl Transport {
     pub fn set_outbound_scheduler(&self, callback: Function<'_, (), ()>) -> js::Result<()> {
         let queued = Arc::new(AtomicBool::new(false));
         let delivered = Arc::clone(&queued);
+        // Weak: a wake for queued frames must not by itself keep Node's
+        // event loop alive. The socket carrying the link does that while it
+        // is open; once the client and server stop, the process exits.
         let callback = callback
             .build_threadsafe_function::<()>()
             .callee_handled::<false>()
+            .weak::<true>()
             .build_callback(move |_| {
                 // Clear before calling JS: a frame it queues re-arms.
                 delivered.store(false, Ordering::Release);
@@ -1586,6 +1590,8 @@ impl Transport {
 
     #[napi]
     pub fn close(&mut self) -> bool {
+        // A closed link queues nothing more; release the host's callback.
+        self.link.set_outbound_ready(None);
         self.link.close()
     }
 }
