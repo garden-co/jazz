@@ -464,7 +464,7 @@ test("continuous soak precompiles outside seed watchdogs and preserves failure a
     assert.match(run, /timeout --kill-after=30s "\$\{PRECOMPILE_TIMEOUT_SECONDS\}s"/);
     assert.match(
       run,
-      /cargo test -p jazz --no-default-features \\\n\s+--features testing,transport-compression-zstd --no-run \\\n\s+--test integration --test maintained_differential \\\n/,
+      /cargo test -p jazz-core --no-default-features \\\n\s+--features testing,transport-compression-zstd --no-run \\\n\s+--test integration --test maintained_differential \\\n/,
     );
     assert.doesNotMatch(run, /--no-exec/);
   };
@@ -740,7 +740,7 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
   );
   assert.match(
     localCi,
-    /cargo test -p jazz --test maintained_differential --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json/,
+    /cargo test -p jazz-core --test maintained_differential --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json/,
   );
   assert.match(localCi, /message\.target\.name === "maintained_differential"/);
   assert.match(
@@ -754,11 +754,12 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
   assert.match(aggregate, /if: always\(\)/);
   assert.match(
     aggregate,
-    /needs: \[test-rust-workspace, test-storage-compat, test-jazz-ffi-bindings\]/,
+    /needs: \[test-rust-workspace, test-storage-compat, test-jazz-ffi-bindings, test-crates-package\]/,
   );
   assert.match(aggregate, /test "\$\{WORKSPACE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{STORAGE_COMPAT_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{JAZZ_FFI_BINDINGS_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{CRATES_PACKAGE_RESULT\}" = success/);
   assert.throws(
     () => assert.match(localCi.replace("--exact --ignored", "--ignored"), /--exact --ignored/),
     /exact/,
@@ -1378,7 +1379,7 @@ test("benchmark correctness stays on ordinary CI while API compilation runs nigh
   );
   assert.match(
     compileMode,
-    /run_phase jazz-benchmark-api cargo check -p jazz --benches --features testing/,
+    /run_phase jazz-benchmark-api cargo check -p jazz-core --benches --features testing/,
   );
   assert.match(compileMode, /run_phase jazz-sim-benchmark-api cargo check -p jazz-sim --benches/);
   assert.doesNotMatch(scenarioMode, /cargo check -p (?:jazz|jazz-sim) --benches/);
@@ -2063,6 +2064,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     "test-ts",
     "test-react-native",
     "test-jazz-ffi-bindings",
+    "test-crates-package",
   ])
     assert.equal(
       suite.jobs[name].if,
@@ -2078,6 +2080,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     Object.keys(suite.jobs).sort(),
     [
       "lint",
+      "test-crates-package",
       "test-jazz-ffi-bindings",
       "test-next-trace",
       "test-react-native",

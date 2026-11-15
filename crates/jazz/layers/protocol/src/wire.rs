@@ -31,7 +31,7 @@ pub const WIRE_PROTOCOL_VERSION: u16 = 6;
 /// rejection cases, through this module's production decoders. This is
 /// test-only input, not a second wire format.
 pub const WIRE_FRAME_ARTIFACT_CORPUS: &str =
-    include_str!("../../../fixtures/wire_frame_artifact_corpus_v6.json");
+    include_str!("../fixtures/wire_frame_artifact_corpus_v6.json");
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;

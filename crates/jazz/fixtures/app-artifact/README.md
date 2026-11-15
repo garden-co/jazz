@@ -12,7 +12,7 @@ The Rust test `the_writer_reproduces_each_fixture_byte_for_byte` rebuilds every 
 After an intended change, regenerate them:
 
 ```sh
-JAZZ_UPDATE_FIXTURES=1 cargo test -p jazz --lib artifact
+JAZZ_UPDATE_FIXTURES=1 cargo test -p jazz-core --lib artifact
 ```
 
 The format is specified in SPEC §10.10 (`crates/jazz/SPEC/10_lenses_migrations.md`).

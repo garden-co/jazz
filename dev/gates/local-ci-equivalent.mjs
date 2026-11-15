@@ -28,7 +28,7 @@ export const RUST_WORKSPACE_TARGETS = Object.freeze([
   "--benches",
 ]);
 export const RUST_CI_FEATURES =
-  "jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test";
+  "jazz-core/testing,jazz-core/transport-compression-zstd,jazz-server/test,jazz-tools/test";
 
 // CI setup supplies this one coordination input. Every other JAZZ_* variable
 // is a test, fixture, benchmark, timeout, or assertion control and would make
@@ -48,6 +48,7 @@ export const ciPartitionJobs = Object.freeze({
   "next-trace": "test-next-trace",
   "react-native": "test-react-native",
   "jazz-ffi-bindings": "test-jazz-ffi-bindings",
+  "crates-package": "test-crates-package",
 });
 
 const command = (label, executable, args, options = {}) =>
@@ -60,7 +61,7 @@ const command = (label, executable, args, options = {}) =>
 const differentialCommand = command("bounded maintained-vs-one-shot differential oracle", "bash", [
   "-lc",
   String.raw`set -euo pipefail
-test_binary="$(cargo test -p jazz --test maintained_differential --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
+test_binary="$(cargo test -p jazz-core --test maintained_differential --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
   const readline = require("node:readline");
   let executable;
   const lines = readline.createInterface({ input: process.stdin });
@@ -99,6 +100,8 @@ export const ciPartitions = Object.freeze({
     command("crate publication selector contract", "bash", [
       "dev/scripts/publish-crates-alpha.test.sh",
     ]),
+    // npm packages, published Rust crates and the Go module share one version.
+    command("lockstep versions", "node", ["dev/scripts/check-lockstep-versions.mjs"]),
     command("CI workflow contracts", "pnpm", ["test:ci-workflow"]),
     command("Turbo cache-input contracts", "pnpm", ["test:turbo-cache-inputs"]),
     command("invariant registry", "bash", ["dev/gates/invariant-registry.sh"]),
@@ -311,7 +314,7 @@ export const ciPartitions = Object.freeze({
       "test",
       "--workspace",
       "--features",
-      "jazz/durable-object-limits",
+      "jazz-core/durable-object-limits",
     ]),
   ]),
   // jazz-ffi's generated Kotlin and Swift, compiled with smoke programs and
@@ -320,6 +323,11 @@ export const ciPartitions = Object.freeze({
     command("jazz-ffi Kotlin and Swift bindings", "bash", [
       "dev/gates/jazz-ffi-compile-bindings.sh",
     ]),
+  ]),
+  // Every crate publish-crates.yml publishes packages and builds from its
+  // .crate against the others, as crates.io will see them.
+  "crates-package": Object.freeze([
+    command("cargo package, published crates", "node", ["dev/scripts/publish-crates.mjs", "--verify"]),
   ]),
 });
 
@@ -331,7 +339,7 @@ export const focusedCommands = Object.freeze([
     "dev/gates/ignored-tests.mjs",
     "--self-test",
   ]),
-  command("core Rust library compile", "cargo", ["check", "-p", "jazz", "--lib"]),
+  command("core Rust library compile", "cargo", ["check", "-p", "jazz-core", "--lib"]),
   command("jazz-tools typecheck", "pnpm", ["--filter", "jazz-tools", "check"]),
 ]);
 
