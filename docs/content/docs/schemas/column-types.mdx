@@ -82,7 +82,10 @@ implement it in `jazz.computed.ts`:
     }
   },
   "transforms": {
-    "priorityLevel": { "stored": "int", "view": { "enum": ["low", "medium", "high"] } }
+    "priorityLevel": {
+      "stored": "int",
+      "view": { "enum": ["low", "medium", "high"] }
+    }
   }
 }
 ```
@@ -146,9 +149,15 @@ read-only. Declare it under the table's `computed`, with its `type` and the colu
   "format": 1,
   "tables": {
     "tasks": {
-      "columns": { "title": "string", "score": "int" },
+      "columns": {
+        "title": "string",
+        "score": "int"
+      },
       "computed": {
-        "priority": { "type": { "enum": ["low", "medium", "high"] }, "from": ["score"] }
+        "priority": {
+          "type": { "enum": ["low", "medium", "high"] },
+          "from": ["score"]
+        }
       }
     }
   }

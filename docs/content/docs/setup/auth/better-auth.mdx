@@ -227,7 +227,9 @@ next to the `better_auth_*` tables the Better Auth CLI wrote:
         "createdAt": "timestamp",
         "updatedAt": "timestamp"
       },
-      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+      "relations": {
+        "user": { "rel": "better_auth_user", "column": "userId" }
+      }
     },
     "better_auth_jwks": {
       "columns": {
@@ -250,7 +252,9 @@ next to the `better_auth_*` tables the Better Auth CLI wrote:
         "userId": "uuid",
         "impersonatedBy": "string?"
       },
-      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+      "relations": {
+        "user": { "rel": "better_auth_user", "column": "userId" }
+      }
     },
     "better_auth_user": {
       "columns": {
@@ -333,7 +337,9 @@ tables: client sessions have no business reading them.
       "update": "false",
       "delete": "false"
     },
-    "messages": { "read": "true" }
+    "messages": {
+      "read": "true"
+    }
   }
 }
 ```
