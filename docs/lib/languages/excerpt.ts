@@ -71,7 +71,14 @@ export function extractSymbol(source: string, name: string): string | undefined 
       last = close;
     }
   }
-  return lines.slice(first, last + 1).join("\n");
+  return dedent(lines.slice(first, last + 1));
+}
+
+/** Strips the indentation the lines share, for declarations nested in a namespace. */
+function dedent(lines: string[]): string {
+  const indents = lines.filter((l) => l.trim()).map((l) => /^[ \t]*/.exec(l)![0].length);
+  const cut = Math.min(...indents);
+  return lines.map((l) => l.slice(Math.min(cut, /^[ \t]*/.exec(l)![0].length))).join("\n");
 }
 
 /** The declarations of `names`, in order, separated by blank lines. Throws on a missing one. */

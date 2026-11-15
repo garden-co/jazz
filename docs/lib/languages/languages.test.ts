@@ -179,6 +179,14 @@ pub struct Task {
     );
   });
 
+  it("dedents a declaration nested in a namespace", () => {
+    const swift =
+      "public enum JazzApp {\n    /// A row.\n    public struct Task: Jazz.Row {\n        public let id: Jazz.ID\n    }\n}\n";
+    expect(extractSymbol(swift, "Task")).toBe(
+      "/// A row.\npublic struct Task: Jazz.Row {\n    public let id: Jazz.ID\n}",
+    );
+  });
+
   it("throws on a missing symbol", () => {
     expect(() => extractSymbols(rust, ["Nope"], "f.rs")).toThrow(/no declaration of Nope/);
   });
