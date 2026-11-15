@@ -1,20 +1,20 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes, type TransformImpl } from "jazz-tools";
-import { transforms } from "./jazz.computed";
+import { transforms } from "./jazz.computed.js";
 
 export type TaskUrgency = "low" | "high";
 
-export interface Task {
+export type Task = {
   readonly id: string;
   title: string;
   urgency: TaskUrgency;
-}
+};
 
-export interface TaskInsert {
+export type TaskInsert = {
   title: string;
   urgency: TaskUrgency;
-}
+};
 
 interface Types extends AppTypes {
   tasks: {

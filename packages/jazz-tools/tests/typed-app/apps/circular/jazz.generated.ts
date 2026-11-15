@@ -1,49 +1,49 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface Employee {
+export type Employee = {
   readonly id: string;
   name: string;
   manager: string | null;
   mentors: string[];
   homeTeam: string | null;
-}
+};
 
-export interface EmployeeInsert {
+export type EmployeeInsert = {
   name: string;
   manager?: string | null;
   mentors: string[];
   homeTeam?: string | null;
-}
+};
 
-export interface Project {
+export type Project = {
   readonly id: string;
   name: string;
   team: string;
   approver: string | null;
-}
+};
 
-export interface ProjectInsert {
+export type ProjectInsert = {
   name: string;
   team: string;
   approver?: string | null;
-}
+};
 
-export interface Team {
+export type Team = {
   readonly id: string;
   name: string;
   lead: string;
   parentTeam: string | null;
   flagshipProject: string | null;
-}
+};
 
-export interface TeamInsert {
+export type TeamInsert = {
   name: string;
   lead: string;
   parentTeam?: string | null;
   flagshipProject?: string | null;
-}
+};
 
 interface Types extends AppTypes {
   employees: {

@@ -1,26 +1,26 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface TeamEdge {
+export type TeamEdge = {
   readonly id: string;
   child_team: string;
   parent_team: string;
-}
+};
 
-export interface TeamEdgeInsert {
+export type TeamEdgeInsert = {
   child_team: string;
   parent_team: string;
-}
+};
 
-export interface Team {
+export type Team = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface TeamInsert {
+export type TeamInsert = {
   name: string;
-}
+};
 
 interface Types extends AppTypes {
   team_edges: {

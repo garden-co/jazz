@@ -1,17 +1,17 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface Document {
+export type Document = {
   readonly id: string;
   title: string;
   done: boolean;
-}
+};
 
-export interface DocumentInsert {
+export type DocumentInsert = {
   title: string;
   done: boolean;
-}
+};
 
 interface Types extends AppTypes {
   documents: {

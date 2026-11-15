@@ -1,54 +1,54 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface Announcement {
+export type Announcement = {
   readonly id: string;
   title: string;
-}
+};
 
-export interface AnnouncementInsert {
+export type AnnouncementInsert = {
   title: string;
-}
+};
 
-export interface ChatMember {
+export type ChatMember = {
   readonly id: string;
   chat_id: string;
   user_id: string;
-}
+};
 
-export interface ChatMemberInsert {
+export type ChatMemberInsert = {
   chat_id: string;
   user_id: string;
-}
+};
 
-export interface Chat {
+export type Chat = {
   readonly id: string;
   title: string;
   visibility: string;
   owner_id: string;
-}
+};
 
-export interface ChatInsert {
+export type ChatInsert = {
   title: string;
   visibility: string;
   owner_id: string;
-}
+};
 
-export interface Message {
+export type Message = {
   readonly id: string;
   chat_id: string;
   body: string;
   author_id: string;
   owner_id: string;
-}
+};
 
-export interface MessageInsert {
+export type MessageInsert = {
   chat_id: string;
   body: string;
   author_id: string;
   owner_id: string;
-}
+};
 
 interface Types extends AppTypes {
   announcements: {

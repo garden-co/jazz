@@ -1,8 +1,8 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface ActivityEvent {
+export type ActivityEvent = {
   readonly id: string;
   project_id: string;
   task_id: string | null;
@@ -10,83 +10,83 @@ export interface ActivityEvent {
   kind: string;
   created_at: Date;
   payload: string;
-}
+};
 
-export interface ActivityEventInsert {
+export type ActivityEventInsert = {
   project_id: string;
   task_id?: string | null;
   actor_id: string;
   kind: string;
   created_at: Date;
   payload: string;
-}
+};
 
-export interface Membership {
+export type Membership = {
   readonly id: string;
   organization_id: string;
   user_id: string;
   role: string;
-}
+};
 
-export interface MembershipInsert {
+export type MembershipInsert = {
   organization_id: string;
   user_id: string;
   role: string;
-}
+};
 
-export interface Organization {
+export type Organization = {
   readonly id: string;
   name: string;
   created_at: Date;
-}
+};
 
-export interface OrganizationInsert {
+export type OrganizationInsert = {
   name: string;
   created_at: Date;
-}
+};
 
-export interface Project {
+export type Project = {
   readonly id: string;
   organization_id: string;
   name: string;
   archived: boolean;
   updated_at: Date;
-}
+};
 
-export interface ProjectInsert {
+export type ProjectInsert = {
   organization_id: string;
   name: string;
   archived: boolean;
   updated_at: Date;
-}
+};
 
-export interface TaskComment {
+export type TaskComment = {
   readonly id: string;
   task_id: string;
   author_id: string;
   body: string;
   created_at: Date;
-}
+};
 
-export interface TaskCommentInsert {
+export type TaskCommentInsert = {
   task_id: string;
   author_id: string;
   body: string;
   created_at: Date;
-}
+};
 
-export interface TaskWatcher {
+export type TaskWatcher = {
   readonly id: string;
   task_id: string;
   user_id: string;
-}
+};
 
-export interface TaskWatcherInsert {
+export type TaskWatcherInsert = {
   task_id: string;
   user_id: string;
-}
+};
 
-export interface Task {
+export type Task = {
   readonly id: string;
   project_id: string;
   title: string;
@@ -95,9 +95,9 @@ export interface Task {
   assignee_id: string;
   updated_at: Date;
   due_at: Date | null;
-}
+};
 
-export interface TaskInsert {
+export type TaskInsert = {
   project_id: string;
   title: string;
   status: string;
@@ -105,18 +105,18 @@ export interface TaskInsert {
   assignee_id: string;
   updated_at: Date;
   due_at?: Date | null;
-}
+};
 
-export interface User {
+export type User = {
   readonly id: string;
   display_name: string;
   email: string;
-}
+};
 
-export interface UserInsert {
+export type UserInsert = {
   display_name: string;
   email: string;
-}
+};
 
 interface Types extends AppTypes {
   activity_events: {

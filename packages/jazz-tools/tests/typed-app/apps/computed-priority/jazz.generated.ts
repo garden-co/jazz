@@ -1,22 +1,22 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes, type ComputedImpl, type TransformImpl } from "jazz-tools";
-import { computed, transforms } from "./jazz.computed";
+import { computed, transforms } from "./jazz.computed.js";
 
 export type ItemStoredPriority = "low" | "medium" | "high";
 export type ItemPriority = "low" | "medium" | "high";
 
-export interface Item {
+export type Item = {
   readonly id: string;
   score: number;
   storedPriority: ItemStoredPriority;
   readonly priority: ItemPriority;
-}
+};
 
-export interface ItemInsert {
+export type ItemInsert = {
   score: number;
   storedPriority: ItemStoredPriority;
-}
+};
 
 interface Types extends AppTypes {
   items: {

@@ -1,17 +1,17 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface Todo {
+export type Todo = {
   readonly id: string;
   title: string;
   completed: boolean;
-}
+};
 
-export interface TodoInsert {
+export type TodoInsert = {
   title: string;
   completed: boolean;
-}
+};
 
 interface Types extends AppTypes {
   todos: {

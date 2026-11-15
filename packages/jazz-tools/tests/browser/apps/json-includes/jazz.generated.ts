@@ -1,41 +1,41 @@
-// jazz.generated.ts: generated from jazz.app.json by `jazz-tools validate`. Do not edit.
+// jazz.generated.ts: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes, type JsonValue } from "jazz-tools";
 
 export type ParentState = "draft" | "open" | "closed";
 
-export interface Child {
+export type Child = {
   readonly id: string;
   parentId: string;
   metadata: JsonValue;
-}
+};
 
-export interface ChildInsert {
+export type ChildInsert = {
   parentId: string;
   metadata: JsonValue;
-}
+};
 
-export interface Parent {
+export type Parent = {
   readonly id: string;
   name: string;
   state: ParentState;
   summaryId: string | null;
-}
+};
 
-export interface ParentInsert {
+export type ParentInsert = {
   name: string;
   state: ParentState;
   summaryId?: string | null;
-}
+};
 
-export interface Summary {
+export type Summary = {
   readonly id: string;
   metadata: JsonValue;
-}
+};
 
-export interface SummaryInsert {
+export type SummaryInsert = {
   metadata: JsonValue;
-}
+};
 
 interface Types extends AppTypes {
   children: {
