@@ -32,57 +32,57 @@ export type Language = {
 export const LANGUAGES: readonly Language[] = [
   {
     label: "TypeScript",
+    backend: true,
     bindings: {
       file: "examples/stage-plan/apps/react-localfirst/jazz.generated.ts",
       lang: "ts",
       symbols: ["TaskStatus", "Task", "TaskInsert"],
     },
-    backend: true,
     enabled: true,
   },
   { label: "Effect", backend: true, enabled: true },
   {
     label: "Rust",
+    backend: true,
     bindings: {
       file: "examples/stage-plan/apps/rust-cli/src/jazz_app.rs",
       lang: "rust",
       symbols: ["TaskStatus", "Task", "NewTask"],
     },
     setupPage: "setup/rust",
-    backend: true,
     enabled: true,
   },
   {
     label: "Swift",
+    backend: false,
     setupPage: "setup/swift",
     bindings: {
       file: "examples/stage-plan/apps/swift-cli/JazzApp.swift",
       lang: "swift",
       symbols: ["TaskStatus", "Task", "NewTask"],
     },
-    backend: false,
     enabled: false,
   },
   {
     label: "Kotlin",
+    backend: false,
     setupPage: "setup/kotlin",
     bindings: {
       file: "examples/stage-plan/apps/kotlin-cli/src/main/kotlin/JazzApp.kt",
       lang: "kotlin",
       symbols: ["TaskStatus", "Task", "TaskInsert"],
     },
-    backend: false,
     enabled: false,
   },
   {
     label: "Go",
+    backend: true,
     setupPage: "setup/go",
     bindings: {
       file: "examples/stage-plan/apps/go-cli/jazzapp/jazz_app.go",
       lang: "go",
       symbols: ["TaskStatus", "Task", "NewTask"],
     },
-    backend: true,
     enabled: false,
   },
 ];
