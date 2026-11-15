@@ -80,6 +80,9 @@ public interface Native : AutoCloseable {
     public fun beginUpload(table: String, column: String, kind: String, id: String?, rowJson: String?): NativeUpload =
         throw JazzException.NotSupported("streaming uploads")
 
+    /** The permissions bundle a backend published, or `null` for a client. */
+    public fun bundle(): String? = null
+
     /** Asks the token provider for a fresh token. */
     public fun refresh() {}
 

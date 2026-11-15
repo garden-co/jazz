@@ -181,6 +181,9 @@ public class Jazz internal constructor(
     public suspend fun <Row : Any, Insert : Any, P : Patch> restore(table: Table<Row, Insert, P>, id: String, row: Insert? = null): Row =
         io { decodeStored(table, native.restore(table.tableName, id, row?.let { insertJson(table, it) })) }
 
+    /** The id of the permissions bundle this backend published, or `null` for a client. */
+    public suspend fun bundle(): String? = io { native.bundle() }
+
     /** The account id of the user this backend acts as, or `null` for a client. */
     public suspend fun account(): String? = io { native.account() }
 

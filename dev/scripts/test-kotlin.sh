@@ -50,7 +50,7 @@ if ! command -v gradle >/dev/null; then
 fi
 
 cargo build -p jazz-ffi -p jazz-cli --bin jazz-tools  # jazz-tools: the e2e tests' server
-cargo build -p jazz-ffi --example end_user_endpoint  # the end-user tests' app endpoint
+cargo build -p jazz-app --features test-relay --bin jazz-app-test-relay  # the end-user tests' app endpoint
 # Kotlin is switched off in the CLI until it ships: the codegen golden test
 # checks the example's committed bindings byte for byte instead.
 cargo test -p jazz-codegen --test golden the_stage_plan_kotlin_cli_commits_its_bindings_byte_for_byte

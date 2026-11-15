@@ -239,16 +239,18 @@ class StagePlanTest {
 
     @Test
     fun end_users_sign_in_with_device_accounts_and_bearer_tokens(): Unit = runBlocking {
+        // The app's Jazz endpoint for end users: jazz-app's test stand-in for createJazz's
+        // handler, in front of this test's server, with the bundle the backend published.
+        val backend = open("endpoint-backend")
+        val bundle = checkNotNull(backend.bundle())
         val endpointProcess = ProcessBuilder(
-            System.getenv("JAZZ_END_USER_ENDPOINT"),
-            java.io.File("jazz.app.json").absolutePath,
-            java.io.File("jazz.permissions.json").absolutePath,
+            System.getenv("JAZZ_APP_TEST_RELAY"),
+            "--core", url, "--app-id", appId,
+            "--backend-secret", backendSecret, "--admin-secret", adminSecret,
+            "--bundle", bundle,
         ).redirectError(ProcessBuilder.Redirect.INHERIT).start()
         try {
-            val line = endpointProcess.inputStream.bufferedReader().readLine() ?: error("the endpoint didn't start")
-            val info = kotlinx.serialization.json.Json.parseToJsonElement(line).let { it as kotlinx.serialization.json.JsonObject }
-            val appId = info["appId"].toString().trim('"')
-            val endpoint = info["endpoint"].toString().trim('"')
+            val endpoint = endpointProcess.inputStream.bufferedReader().readLine() ?: error("the endpoint didn't start")
 
             // A device account signs up by opening with a new key.
             val carol = DocsSnippets.openClient(endpoint, appId, tools.jazz.JazzAuth.generateDeviceKey())
@@ -280,8 +282,8 @@ class StagePlanTest {
             watching.cancel()
             kotlin.test.assertFailsWith<tools.jazz.JazzException.Closed> { alice.all(jazzapp.Shows.query()) }
         } finally {
-            endpointProcess.outputStream.close()
             endpointProcess.destroy()
+            backend.close()
         }
     }
 }
