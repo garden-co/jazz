@@ -186,6 +186,16 @@ pub fn schema_source_hash(app_json: String) -> String {
     jazz::tools::deployment::artifact::source_hash(app_json.as_bytes())
 }
 
+/// The engine's hash of a schema in its own JSON form (`{ "tables": … }`),
+/// policies dropped as a deployment drops them, as 64 hex characters. Not
+/// [`schema_source_hash`], which hashes the `jazz.app.json` file.
+#[napi(js_name = "schemaHash")]
+pub fn schema_hash(engine_schema_json: String) -> js::Result<String> {
+    jazz::tools::deployment::artifact::schema_hash(engine_schema_json.as_bytes())
+        .map(|hash| hash.to_string())
+        .map_err(|error| napi::Error::from_reason(error.message().to_owned()).into())
+}
+
 /// What `migrationsCreate` wrote.
 #[napi(object)]
 pub struct CreatedMigration {
