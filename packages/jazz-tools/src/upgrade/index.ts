@@ -226,6 +226,12 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
   if (computed.computedFile) writes.push([computedFile, computed.computedFile]);
   if (extras.extrasFile) writes.push([extrasFile, extras.extrasFile]);
   if (generatedText) writes.push([generatedFile, generatedText]);
+  // A Rust crate beside the files gets its bindings too, as `jazz-tools generate` writes them.
+  if (generatedText && existsSync(join(project.schemaDir, "Cargo.toml"))) {
+    const rust = await rustBindings(newAppText);
+    if (typeof rust === "string") writes.push([join(project.schemaDir, "src", "jazz_app.rs"), rust]);
+    else report.notes.push(`src/jazz_app.rs was not written (${rust.reason}); run \`npx jazz-tools generate\` once this jazz-tools generates Rust bindings.`);
+  }
   for (const file of rewrites.files) writes.push([file.file, file.text]);
   if (config.file) writes.push([config.file, config.text]);
   if (manifest) writes.push([manifest.file, manifest.text]);
@@ -282,6 +288,17 @@ async function napiGenerate(appJson: string): Promise<string> {
     );
   }
   return napi.generate("ts", appJson);
+}
+
+/** The `jazz-app` crate's bindings, or why this jazz-napi can't generate them. */
+async function rustBindings(appJson: string): Promise<string | { reason: string }> {
+  try {
+    const napi = (await import("jazz-napi")) as unknown as { generate?: (lang: string, app: string) => string };
+    if (typeof napi.generate !== "function") return { reason: "this jazz-napi has no `generate`" };
+    return napi.generate("rust", appJson);
+  } catch (error) {
+    return { reason: (error instanceof Error ? error.message : String(error)).replace(/[.\s]*$/, "") };
+  }
 }
 
 /** The project's resolved jazz-tools package directory, if installed. */
