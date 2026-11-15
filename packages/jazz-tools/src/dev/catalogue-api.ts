@@ -7,7 +7,6 @@ import type {
   WasmSchema,
 } from "../drivers/types.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
-import { normalizePermissionsForWasm } from "../schema-permissions.js";
 import { appScopedUrl, fetchAdminJson } from "../runtime/url.js";
 
 export interface FetchStoredWasmSchemaOptions {
@@ -283,7 +282,7 @@ export async function publishDeployment(
         targetSchemaHash: options.targetSchemaHash,
         schemas: options.schemas.map(({ hash, schema }) => ({ hash, schema: { tables: schema } })),
         migrations: options.migrations,
-        permissions: normalizePermissionsForWasm(options.permissions),
+        permissions: options.permissions,
         ...(options.allowDroppingHistory ? { allowDroppingHistory: true } : {}),
       },
       runtimeSchemaJsonReplacer,
