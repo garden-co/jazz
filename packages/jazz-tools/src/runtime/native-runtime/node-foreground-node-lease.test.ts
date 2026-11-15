@@ -19,11 +19,10 @@ import { isRandomNodeUuid } from "../runtime-entropy.js";
 const roots: string[] = [];
 let restoreCwd: (() => void) | undefined;
 // The built modules a Node session opens its local-first Db with.
-const builtCreateDb = new URL("../../../dist/runtime/default-create-db.js", import.meta.url).href;
-const builtAccountManager = new URL(
-  "../../../dist/runtime/testing/account-fixtures.js",
-  import.meta.url,
-).href;
+// (`runtime/testing` is not built, so the child signs tokens as its
+// `createTestAccountManager` does, from modules that are.)
+const built = (path: string) =>
+  JSON.stringify(new URL(`../../../dist/${path}`, import.meta.url).href);
 const memoryApp = s.defineApp(
   { notes: s.table({ title: s.string() }, {}) },
   { migrations: "none" },
@@ -65,8 +64,16 @@ function spawnPublicPersistentDb(
       "--input-type=module",
       "--eval",
       [
-        `import { createDb } from ${JSON.stringify(builtCreateDb)};`,
-        `import { createTestAccountManager } from ${JSON.stringify(builtAccountManager)};`,
+        `import { createDb } from ${built("runtime/default-create-db.js")};`,
+        `import { createAccountManagerWithMinter, resolvedServerUrl } from ${built("accounts/account-manager-core.js")};`,
+        `import { authSecretSeedForMinting } from ${built("runtime/auth-secret-codec.js")};`,
+        `import { clientScope } from ${built("runtime/client-scope.js")};`,
+        `import { DefaultRuntimeSource } from ${built("runtime/default-runtime-source.js")};`,
+        `async function createTestAccountManager(config) {`,
+        `  const source = new DefaultRuntimeSource();`,
+        `  await source.load({ appId: clientScope({ ...config, serverUrl: resolvedServerUrl(config) }), runtimeSources: config.runtimeSources });`,
+        `  return createAccountManagerWithMinter(config, (secret, audience) => source.mintLocalFirstToken({ secret: authSecretSeedForMinting(secret), audience, ttlSeconds: 3600, nowSeconds: BigInt(Math.floor(Date.now() / 1000)) }));`,
+        `}`,
         `let stored = null;`,
         `const accounts = await createTestAccountManager({ appId: ${JSON.stringify(appId)}, serverUrl: "http://127.0.0.1:1", store: { async read() { return stored; }, async update(transform) { stored = transform(stored); } } });`,
         `const account = accounts.restoreLocalFirst(${JSON.stringify(secret)});`,
