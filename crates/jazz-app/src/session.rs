@@ -434,6 +434,11 @@ impl Session {
     /// keeps syncing on the device key, unless the backend revokes it on
     /// linking (`guestKeyAfterLink: "revoke"`), when the session expires and
     /// the app reopens with the bearer.
+    ///
+    /// Where the backend keeps linked keys (TS's default), linking the same
+    /// device again with another user's bearer brings that user into this
+    /// account too: link only a device that is its user's alone, or have
+    /// the backend revoke keys on linking.
     pub async fn link(&self, bearer: &str) -> Result<User> {
         let linking = self.linking.as_ref().ok_or_else(|| {
             Error::Config("only a device account's session links (Auth::Device)".into())
