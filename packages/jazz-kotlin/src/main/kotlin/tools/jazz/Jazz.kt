@@ -142,10 +142,12 @@ public class Jazz internal constructor(private val native: Native) : AutoCloseab
     )
 
     private fun raw(query: Query<*>): Flow<RawDelta> = callbackFlow {
-        // Subscribed outside withContext's cancellation: a cancel while
-        // subscribing still reaches `cancel` below.
-        val cancel = withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
-            native.subscribe(
+        // Kept as soon as the native core returns it: a cancel while
+        // subscribing (withContext then throws) still unsubscribes.
+        var cancel: (() -> Unit)? = null
+        try {
+            withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
+                cancel = native.subscribe(
                 query.toJson(),
                 onDelta = { json ->
                     val o = jazzJson.parseToJsonElement(json) as JsonObject
@@ -162,8 +164,11 @@ public class Jazz internal constructor(private val native: Native) : AutoCloseab
                 },
                 onError = { message -> close(JazzException.Subscription(message)) },
             )
+            }
+            awaitClose()
+        } finally {
+            cancel?.invoke()
         }
-        awaitClose { cancel() }
     }.buffer(Channel.UNLIMITED)
 
     /** Closes the app; later calls fail with [JazzException.Closed]. */

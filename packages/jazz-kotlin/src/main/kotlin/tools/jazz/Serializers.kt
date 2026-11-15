@@ -1,6 +1,7 @@
 package tools.jazz
 
 import kotlinx.serialization.KSerializer
+import kotlinx.serialization.builtins.nullable
 import kotlinx.serialization.descriptors.PrimitiveKind
 import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
 import kotlinx.serialization.encoding.Decoder
@@ -26,3 +27,6 @@ public object JazzBytes : KSerializer<ByteArray> {
 
     override fun deserialize(decoder: Decoder): ByteArray = Base64.decode(decoder.decodeString())
 }
+
+/** [serializer] with `null` as a value too: what generated bindings use for optional columns. */
+public fun <T : Any> nullable(serializer: KSerializer<T>): KSerializer<T?> = serializer.nullable
