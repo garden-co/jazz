@@ -176,3 +176,60 @@ pub(crate) async fn sign_in(
     }
     Ok(Some(signed_in))
 }
+
+/// Links the device account `key` to the user the app's backend names from
+/// `bearer`, as TypeScript's `linkWithBackend`: the device signs a challenge
+/// the backend issued for that user (never its sync token), so a proof links
+/// once, and only to them. The backend founds the device's account and links
+/// the user to it; it answers as `backend-sign-in` does.
+pub(crate) async fn link(
+    endpoint: &str,
+    app_id: AppId,
+    bearer: &str,
+    key: &crate::auth::DeviceKey,
+) -> Result<SignedIn> {
+    let response = http()?
+        .post(app_url(endpoint, app_id, "accounts/backend-link/challenge"))
+        .bearer_auth(bearer)
+        .send()
+        .await
+        .map_err(|error| Error::Server(format!("linking the device account: {error}")))?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(Error::SignedOut);
+    }
+    if !response.status().is_success() {
+        return Err(refusal("asking for a link challenge", response).await);
+    }
+    #[derive(Deserialize)]
+    struct Challenge {
+        challenge: String,
+    }
+    let Challenge { challenge } = response
+        .json()
+        .await
+        .map_err(|error| Error::Server(format!("asking for a link challenge: {error}")))?;
+    let proof = key.sign_challenge(&challenge)?;
+    let response = http()?
+        .post(app_url(endpoint, app_id, "accounts/backend-link"))
+        .bearer_auth(bearer)
+        .json(&json!({ "challenge": challenge, "proof": proof }))
+        .send()
+        .await
+        .map_err(|error| Error::Server(format!("linking the device account: {error}")))?;
+    match response.status() {
+        reqwest::StatusCode::UNAUTHORIZED => return Err(Error::SignedOut),
+        reqwest::StatusCode::CONFLICT => {
+            return Err(Error::Server(
+                "the backend refused the link: its user already has another account".into(),
+            ));
+        }
+        status if !status.is_success() => {
+            return Err(refusal("linking the device account", response).await);
+        }
+        _ => {}
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| Error::Server(format!("linking the device account: {error}")))
+}
