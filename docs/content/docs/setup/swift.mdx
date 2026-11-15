@@ -95,8 +95,8 @@ Before the process exits, call `try await jazz.close()`. It ends every live `wat
 
 The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Swift
 tab for each example. `examples/stage-plan/apps/swift-cli` in the repository is a complete
-command-line client of StagePlan: it signs in with a device account (its key in a file, mode
-0600) or a bearer token, and creates a show, lists, adds and moves tasks.
+command-line client of StagePlan: it signs in with a device account, whose key it keeps in a file
+only its user can read, or with a bearer token, and creates a show, lists, adds and moves tasks.
 
 A device key is the account: keep it as a password in the Keychain on Apple platforms, and in a
 file only its user can read on Linux. The Jazz Swift package has no helper for either yet.
