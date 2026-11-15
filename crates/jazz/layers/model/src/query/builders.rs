@@ -125,6 +125,7 @@ impl Query {
             offset: 0,
             relation: None,
             partial: Vec::new(),
+            relations_from: 0,
         }
     }
 

@@ -3218,6 +3218,9 @@ pub(crate) fn remote_query(query: &Query) -> std::borrow::Cow<'_, Query> {
         let mut prefix = query.clone();
         prefix.limit = query.limit.map(|limit| limit + query.offset);
         prefix.offset = 0;
+        // The prefix places the window: only the window's rows need their
+        // relations.
+        prefix.relations_from = query.relations_from + query.offset;
         return std::borrow::Cow::Owned(prefix);
     }
     if query.aggregate.is_none() {

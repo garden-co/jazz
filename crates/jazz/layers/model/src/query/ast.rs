@@ -2,7 +2,7 @@
 pub const QUERY_NAMESPACE: uuid::Uuid = uuid::uuid!("5d39e9ed-88f3-5b58-b8db-8786b02f5d2f");
 
 /// v0 query AST.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Query {
     /// Root table.
     pub table: String,
@@ -55,6 +55,42 @@ pub struct Query {
     /// chunks its range or pointer covers. Root rows only.
     #[serde(default)]
     pub partial: Vec<PartialSelect>,
+    /// The first root row whose array relations are nested: the rows
+    /// before it are returned without them. Set by a replica that reads a
+    /// window past an offset as the prefix through its end, which needs
+    /// the prefix rows only to place the window (see `remote_query`). Not
+    /// sent: a peer that is not told nests every row, as before.
+    #[serde(skip)]
+    pub relations_from: usize,
+}
+
+/// As derived, with `relations_from` only when set: a query's debug text
+/// names its shape and its remote read (stored resume points among them),
+/// which stay what they were for every query that does not set it.
+impl std::fmt::Debug for Query {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut out = f.debug_struct("Query");
+        out.field("table", &self.table)
+            .field("filters", &self.filters)
+            .field("joins", &self.joins)
+            .field("flat_join", &self.flat_join)
+            .field("policy_branches", &self.policy_branches)
+            .field("reachable", &self.reachable)
+            .field("inherits", &self.inherits)
+            .field("includes", &self.includes)
+            .field("array_subqueries", &self.array_subqueries)
+            .field("select", &self.select)
+            .field("order_by", &self.order_by)
+            .field("aggregate", &self.aggregate)
+            .field("limit", &self.limit)
+            .field("offset", &self.offset)
+            .field("relation", &self.relation)
+            .field("partial", &self.partial);
+        if self.relations_from > 0 {
+            out.field("relations_from", &self.relations_from);
+        }
+        out.finish()
+    }
 }
 
 /// A selected column read only in part.

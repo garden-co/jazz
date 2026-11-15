@@ -2930,3 +2930,212 @@ fn edits_above_a_deduplicated_offset_page_reach_it() {
     pump(&server, &client);
     check("a row inserted at the top and a prefix row edited");
 }
+
+/// Notes by body (ties by id), `offset` rows in, `limit` long, each with
+/// its reactions nested.
+fn notes_page(offset: usize, limit: usize) -> Query {
+    Query::from("notes")
+        .order_by("body", OrderDirection::Asc)
+        .order_by("id", OrderDirection::Asc)
+        .array_subquery(jazz::query::ArraySubquery::new(
+            "reactions",
+            "reactions",
+            "note",
+            "id",
+        ))
+        .offset(offset)
+        .limit(limit)
+}
+
+/// A page's rows with their nested relations, as `db` lists them: its own
+/// store's (`identity` None), or what the server lists for `identity`.
+fn page_rows(db: &Db, query: &Query, identity: Option<AuthorSubject>) -> Vec<String> {
+    let prepared = db.prepare_query(query).unwrap();
+    let rows = match identity {
+        Some(identity) => {
+            block_on(db.all_for_identity(&prepared, ReadOpts::default(), identity)).unwrap()
+        }
+        None => block_on(db.all(
+            &prepared,
+            ReadOpts {
+                tier: ReadTier::LocalOnly,
+                ..ReadOpts::default()
+            },
+        ))
+        .unwrap(),
+    };
+    rows.iter()
+        .map(|row| {
+            let cell = |name: &str| {
+                row.cells()
+                    .find(|(column, _)| *column == name)
+                    .map(|(_, value)| format!("{value:?}"))
+            };
+            format!(
+                "{:?} {:?} {:?}",
+                row.row_uuid(),
+                cell("body"),
+                cell("reactions")
+            )
+        })
+        .collect()
+}
+
+/// A server with `n` notes in room 0, each with `n % 3` reactions. Bodies
+/// repeat every 7 notes, so the order has ties (broken by id).
+fn notes_server(n: u32) -> Db {
+    let server = seeded(1);
+    for i in 0..n {
+        server
+            .seed_settled_mergeable_for_bootstrap(
+                "notes",
+                id(5, i),
+                AuthorSubject::SYSTEM,
+                cells(&[
+                    ("room", Value::Uuid(id(1, 0).0)),
+                    ("body", Value::String(format!("note {}", i % 7))),
+                    ("stickers", Value::Array(Vec::new())),
+                ]),
+            )
+            .unwrap();
+        for r in 0..i % 3 {
+            server
+                .seed_settled_mergeable_for_bootstrap(
+                    "reactions",
+                    id(6, i * 10 + r),
+                    AuthorSubject::SYSTEM,
+                    cells(&[
+                        ("note", Value::Uuid(id(5, i).0)),
+                        ("body", Value::String(format!("r{i}.{r}"))),
+                    ]),
+                )
+                .unwrap();
+        }
+    }
+    server
+}
+
+/// Each page of a windowed read with a relation shows the same rows and
+/// relations as the server's, and the work of nesting relations stays per
+/// page, not per row before it: the prefix a window past an offset reads
+/// needs its rows only to place the window.
+#[test]
+fn an_offset_page_nests_relations_for_its_window_only() {
+    let server = notes_server(30);
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    let mut pages = Vec::new();
+    let mut nested = Vec::new();
+    for page in 0..6 {
+        // Paging keeps the page just left live for a moment, no others.
+        if pages.len() > 1 {
+            pages.remove(0);
+            pump(&server, &client);
+        }
+        let query = notes_page(page * 5, 5);
+        let prepared = client.prepare_query(&query).unwrap();
+        jazz::db::take_nested_roots_for_test();
+        pages.push(block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap());
+        pump(&server, &client);
+        nested.push(jazz::db::take_nested_roots_for_test());
+        let rows = page_rows(&client, &query, None);
+        assert_eq!(rows.len(), 5, "page {page}");
+        assert_eq!(
+            rows,
+            page_rows(&server, &query, Some(alice())),
+            "page {page}"
+        );
+    }
+    // Without the window, the server would nest the 5 rows of page k and
+    // the 5k before them (here 15, 20, 25, 30 for pages 2 to 5).
+    assert!(
+        nested[2..].iter().all(|&n| n == nested[2]),
+        "nesting grows with depth: {nested:?}"
+    );
+}
+
+/// Rows moving into or out of a window past an offset carry exactly the
+/// relations the server's window shows: a prefix row moved past the
+/// window, a row of the window moved into the prefix, a prefix row
+/// deleted, a reaction added to a row that just entered the window, and
+/// the window read at another offset.
+#[test]
+fn rows_entering_an_offset_window_bring_their_relations() {
+    let server = notes_server(20);
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    let query = notes_page(5, 5);
+    let prepared = client.prepare_query(&query).unwrap();
+    let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    let check = |what: &str| {
+        assert_eq!(
+            page_rows(&client, &query, None),
+            page_rows(&server, &query, Some(alice())),
+            "{what}"
+        );
+    };
+    check("opening");
+    let set_body = |row: RowUuid, body: &str| {
+        block_on(server.update(
+            "notes",
+            row,
+            cells(&[("body", Value::String(body.into()))]),
+            Default::default(),
+        ))
+        .unwrap();
+    };
+    // The first rows by body are notes 0, 7 and 14 ("note 0").
+    set_body(id(5, 0), "zz");
+    pump(&server, &client);
+    check("a prefix row moved past the window");
+    let window = page_rows(&server, &query, Some(alice()));
+    let first_in_window = window[0].clone();
+    // Move the window's last row to the front: it leaves the window, and
+    // the row before the window enters it.
+    let last = client
+        .prepare_query(&notes_page(9, 1))
+        .map(|prepared| block_on(server.all_for_identity(&prepared, ReadOpts::default(), alice())))
+        .unwrap()
+        .unwrap()[0]
+        .row_uuid();
+    set_body(last, "a");
+    pump(&server, &client);
+    check("a window row moved into the prefix");
+    assert_ne!(page_rows(&client, &query, None)[0], first_in_window);
+    block_on(server.delete("notes", id(5, 7), Default::default())).unwrap();
+    pump(&server, &client);
+    check("a prefix row deleted");
+    let entered = page_rows(&server, &query, Some(alice()));
+    let _ = entered;
+    let row = client
+        .prepare_query(&notes_page(5, 1))
+        .map(|prepared| block_on(server.all_for_identity(&prepared, ReadOpts::default(), alice())))
+        .unwrap()
+        .unwrap()[0]
+        .row_uuid();
+    block_on(server.insert(
+        "reactions",
+        cells(&[
+            ("note", Value::Uuid(row.0)),
+            ("body", Value::String("new".into())),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &client);
+    check("a reaction added to a row that entered the window");
+    let other = notes_page(3, 6);
+    let prepared = client.prepare_query(&other).unwrap();
+    let _other = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        page_rows(&client, &other, None),
+        page_rows(&server, &other, Some(alice())),
+        "another offset"
+    );
+}

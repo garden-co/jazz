@@ -1186,6 +1186,14 @@ pub fn set_relation_batch_for_test(batch: bool) {
 #[cfg(any(test, feature = "testing"))]
 thread_local! {
     static VM_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static NESTED_ROOTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Tests only: the root rows this thread nested array relations for since
+/// the last call, then zero.
+#[cfg(any(test, feature = "testing"))]
+pub fn take_nested_roots_for_test() -> u64 {
+    NESTED_ROOTS.with(|cell| cell.replace(0))
 }
 
 /// Tests only: the SQLite virtual-machine steps this thread's query
@@ -5329,11 +5337,19 @@ impl Inner {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
-        roots: Vec<CurrentRow>,
+        mut roots: Vec<CurrentRow>,
     ) -> Result<Vec<CurrentRow>, Error> {
         if prepared.query.array_subqueries.is_empty() {
             return Ok(roots);
         }
+        // A window's prefix places the window and needs no relations (see
+        // `Query::relations_from`): only the rows from it on are nested.
+        let from = prepared.query.relations_from.min(roots.len());
+        let window = roots.split_off(from);
+        let mut prefix = roots;
+        #[cfg(any(test, feature = "testing"))]
+        NESTED_ROOTS.with(|cell| cell.set(cell.get() + window.len() as u64));
+        let roots = window;
         // Related rows read as of the cut the roots were read through (the
         // same decision, over the same tables; a cut read is its own).
         let visible;
@@ -5346,15 +5362,18 @@ impl Inner {
             read
         };
         let mut run = RelationRun::new(self, prepared, identity, read);
-        self.nest(
-            &mut run,
-            &prepared.query.table,
-            &prepared.query.array_subqueries,
-            roots,
-        )?
-        .into_iter()
-        .map(ResultNode::into_nested_row)
-        .collect()
+        let nested = self
+            .nest(
+                &mut run,
+                &prepared.query.table,
+                &prepared.query.array_subqueries,
+                roots,
+            )?
+            .into_iter()
+            .map(ResultNode::into_nested_row)
+            .collect::<Result<Vec<_>, Error>>()?;
+        prefix.extend(nested);
+        Ok(prefix)
     }
 
     /// The rows the first `prefix` staged writes of `batch` write, counted

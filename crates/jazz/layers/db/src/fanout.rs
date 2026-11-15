@@ -508,7 +508,13 @@ impl Inner {
             params: format!("{:?}", compiled.params),
             identity: (session_used || !prepared.query.array_subqueries.is_empty())
                 .then(|| format!("{identity:?}")),
-            relations: format!("{:?}", prepared.query.array_subqueries),
+            // From which root row they are nested is part of them: a
+            // window's prefix read nests fewer rows than the same read
+            // without one.
+            relations: format!(
+                "{:?}@{}",
+                prepared.query.array_subqueries, prepared.query.relations_from
+            ),
             partial: format!("{:?}", compiled.partial),
             splices: read.splices.clone(),
             position: format!("{:?}", read.position),

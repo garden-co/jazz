@@ -2164,3 +2164,14 @@ mod tests {
         }
     }
 }
+
+#[test]
+fn query_debug_text_is_unchanged_unless_relations_from_is_set() {
+    let query = Query::from("todos");
+    let text = format!("{query:?}");
+    assert!(!text.contains("relations_from"));
+    assert!(text.ends_with("partial: [] }"), "{text}");
+    let mut windowed = query.clone();
+    windowed.relations_from = 3;
+    assert!(format!("{windowed:?}").ends_with("partial: [], relations_from: 3 }"));
+}
