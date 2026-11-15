@@ -75,6 +75,7 @@ cargo test -p todo-server
 ```
 
 The tests drive the real router:
+
 - CRUD, persistence across restarts and the SSE stream run on a local app.
 - Resync runs against an in-process Jazz server: one backend publishes the bundle and writes as Alice, and a second backend with an empty store reads the write as Bob.
 
