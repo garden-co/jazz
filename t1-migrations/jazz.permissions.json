@@ -1,0 +1,49 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "projectMembers": {
+      "read": {
+        "anyOf": [
+          "exists projects(id = this.projectId, owner_id = session.user)",
+          "exists projectMembers(projectId = this.projectId, user_id = session.user)"
+        ]
+      },
+      "insert": "exists projects(id = this.projectId, owner_id = session.user)",
+      "update": "false",
+      "delete": "false"
+    },
+    "projects": {
+      "read": {
+        "anyOf": [
+          "exists projects(id = this.id, owner_id = session.user)",
+          "exists projectMembers(projectId = this.id, user_id = session.user)"
+        ]
+      },
+      "insert": "owner_id = session.user",
+      "update": "owner_id = session.user",
+      "delete": "false"
+    },
+    "tasks": {
+      "read": {
+        "anyOf": [
+          "exists projects(id = this.projectId, owner_id = session.user)",
+          "exists projectMembers(projectId = this.projectId, user_id = session.user)"
+        ]
+      },
+      "insert": {
+        "anyOf": [
+          "exists projects(id = this.projectId, owner_id = session.user)",
+          "exists projectMembers(projectId = this.projectId, user_id = session.user)"
+        ]
+      },
+      "update": {
+        "anyOf": [
+          "exists projects(id = this.projectId, owner_id = session.user)",
+          "exists projectMembers(projectId = this.projectId, user_id = session.user)"
+        ]
+      },
+      "delete": "false"
+    }
+  }
+}

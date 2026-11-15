@@ -1,0 +1,89 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "comments": {
+      "read": "allowedTo.read(doc)",
+      "insert": "allowedTo.read(doc)",
+      "update": "false",
+      "delete": "allowedTo.update(doc)"
+    },
+    "docShares": {
+      "read": {
+        "anyOf": [
+          "userId = session.identity.subject",
+          "exists docShares(id = this.id).doc(authorId = session.identity.subject)"
+        ]
+      },
+      "insert": "exists docs(id = this.docId, authorId = session.identity.subject)",
+      "update": "false",
+      "delete": "allowedTo.update(doc)"
+    },
+    "docs": {
+      "read": {
+        "anyOf": [
+          "exists members(orgId = this.orgId, userId = session.identity.subject, role in ['admin', 'editor'])",
+          {
+            "allOf": [
+              "exists members(orgId = this.orgId, userId = session.identity.subject, role in ['viewer'])",
+              "status = 'published'"
+            ]
+          },
+          "session.claims.staff = true",
+          "exists docShares(docId = this.id, userId = session.identity.subject)"
+        ]
+      },
+      "insert": {
+        "allOf": [
+          "exists members(orgId = this.orgId, userId = session.identity.subject, role in ['admin', 'editor'])",
+          "authorId = session.identity.subject"
+        ]
+      },
+      "update": {
+        "old": {
+          "allOf": [
+            "exists members(orgId = this.orgId, userId = session.identity.subject, role in ['admin', 'editor'])",
+            "status != 'locked'"
+          ]
+        },
+        "new": {
+          "allOf": [
+            "exists members(orgId = this.orgId, userId = session.identity.subject, role in ['admin', 'editor'])",
+            "exists docs(id = this.id, orgId = this.orgId, authorId = this.authorId)"
+          ]
+        }
+      },
+      "delete": "exists members(orgId = this.orgId, userId = session.identity.subject, role in ['admin'])"
+    },
+    "members": {
+      "read": "exists members(orgId = this.orgId, userId = session.identity.subject, role in ['admin', 'editor', 'viewer'])",
+      "insert": {
+        "allOf": [
+          "exists members(orgId = this.orgId, userId = session.identity.subject, role in ['admin'])",
+          "userId != session.identity.subject"
+        ]
+      },
+      "update": {
+        "old": {
+          "allOf": [
+            "exists members(orgId = this.orgId, userId = session.identity.subject, role in ['admin'])",
+            "userId != session.identity.subject"
+          ]
+        },
+        "new": "exists members(id = this.id, orgId = this.orgId, userId = this.userId)"
+      },
+      "delete": "exists members(orgId = this.orgId, userId = session.identity.subject, role in ['admin'])"
+    },
+    "orgs": {
+      "read": {
+        "anyOf": [
+          "exists members(orgId = this.id, userId = session.identity.subject, role in ['admin', 'editor', 'viewer'])",
+          "session.claims.staff = true"
+        ]
+      },
+      "insert": "false",
+      "update": "exists members(orgId = this.id, userId = session.identity.subject, role in ['admin'])",
+      "delete": "false"
+    }
+  }
+}

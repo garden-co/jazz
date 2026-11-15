@@ -1,0 +1,103 @@
+{
+  "projects": {
+    "columns": [
+      {
+        "name": "name",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "owner_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "tasks": {
+        "kind": "reverse",
+        "table": "tasks",
+        "relation": "project"
+      },
+      "members": {
+        "kind": "reverse",
+        "table": "projectMembers",
+        "relation": "project"
+      }
+    }
+  },
+  "projectMembers": {
+    "columns": [
+      {
+        "name": "projectId",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "projects"
+      },
+      {
+        "name": "user_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "project": {
+        "kind": "forward",
+        "table": "projects",
+        "column": "projectId"
+      }
+    }
+  },
+  "tasks": {
+    "columns": [
+      {
+        "name": "projectId",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "projects"
+      },
+      {
+        "name": "title",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "details",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Enum",
+          "variants": [
+            "todo",
+            "doing",
+            "done"
+          ]
+        },
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "project": {
+        "kind": "forward",
+        "table": "projects",
+        "column": "projectId"
+      }
+    }
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "tasks": {
+    "columns": [
+      {
+        "name": "title",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "score",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "estimate",
+        "column_type": {
+          "type": "Double"
+        },
+        "nullable": true
+      },
+      {
+        "name": "owner_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false
+      },
+      {
+        "name": "dueAt",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
+      },
+      {
+        "name": "tags",
+        "column_type": {
+          "type": "Array",
+          "element": {
+            "type": "Text"
+          }
+        },
+        "nullable": false
+      },
+      {
+        "name": "meta",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      }
+    ],
+    "relations": {}
+  }
+}
