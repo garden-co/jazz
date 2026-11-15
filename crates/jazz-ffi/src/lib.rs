@@ -143,6 +143,43 @@ impl JazzHandle {
             .surface(core::write_tier(&tier).and_then(|tier| self.core.wait_for_sync(tier)))
     }
 
+    /// Sets the text-merge column `column` to `text`, an edit of
+    /// `edited_from` (the value its writer last saw): changes made since by
+    /// others are kept, as the server merges them.
+    pub fn edit_text(
+        &self,
+        table: String,
+        id: String,
+        column: String,
+        edited_from: String,
+        text: String,
+    ) -> Result<()> {
+        let edits = text_edit(column, edited_from, text);
+        self.core.surface(
+            self.core
+                .edit(&table, &id, None, &edits, &Default::default()),
+        )
+    }
+
+    /// Partial edits of a row's text, bytes and JSON values (`edits_json`:
+    /// `text`, `splice` and `jsonSet` edits), with an optional whole-column
+    /// `patch_json`, in one write.
+    pub fn edit(
+        &self,
+        table: String,
+        id: String,
+        patch_json: Option<String>,
+        edits_json: String,
+    ) -> Result<()> {
+        self.core.surface(self.core.edit(
+            &table,
+            &id,
+            patch_json.as_deref(),
+            &edits_json,
+            &Default::default(),
+        ))
+    }
+
     /// Begins a serializable transaction. Its reads see a snapshot and its
     /// own writes; dropping it without `commit` rolls it back.
     pub fn begin(self: Arc<Self>) -> Result<Arc<Transaction>> {
@@ -191,16 +228,30 @@ impl JazzHandle {
         opts: core::Opts,
         listener: Arc<dyn SubscriptionListener>,
     ) -> Result<Arc<Subscription>> {
+        let contract = self.core.contract;
         let inner = self.core.surface(self.core.subscribe(
             &query_json,
             &opts,
             Box::new(move |event| match event {
                 core::Event::Delta(json) => listener.on_delta(json),
-                core::Event::Error(error) => listener.on_error(error.to_string()),
+                core::Event::Error(error) => {
+                    let error = error.for_contract(contract);
+                    listener.on_error(error.kind().to_owned(), error.to_string())
+                }
             }),
         ))?;
         Ok(Arc::new(Subscription { inner }))
     }
+}
+
+fn text_edit(column: String, edited_from: String, text: String) -> String {
+    serde_json::json!([{
+        "kind": "text",
+        "column": column,
+        "text": text,
+        "editedFrom": edited_from,
+    }])
+    .to_string()
 }
 
 fn read_opts(tier: &str) -> error::Result<core::Opts> {
@@ -279,6 +330,38 @@ impl Transaction {
             .surface(self.handle.core.delete(&table, &id, &self.opts()))
     }
 
+    pub fn edit_text(
+        &self,
+        table: String,
+        id: String,
+        column: String,
+        edited_from: String,
+        text: String,
+    ) -> Result<()> {
+        let edits = text_edit(column, edited_from, text);
+        self.handle.core.surface(
+            self.handle
+                .core
+                .edit(&table, &id, None, &edits, &self.opts()),
+        )
+    }
+
+    pub fn edit(
+        &self,
+        table: String,
+        id: String,
+        patch_json: Option<String>,
+        edits_json: String,
+    ) -> Result<()> {
+        self.handle.core.surface(self.handle.core.edit(
+            &table,
+            &id,
+            patch_json.as_deref(),
+            &edits_json,
+            &self.opts(),
+        ))
+    }
+
     /// Commits its writes together, returning once they reach `tier`
     /// (`"local"` or `"global"`) if given.
     pub fn commit(&self, tier: Option<String>) -> Result<()> {
@@ -318,8 +401,11 @@ impl std::fmt::Debug for JazzHandle {
 #[uniffi::export(with_foreign)]
 pub trait SubscriptionListener: Send + Sync {
     fn on_delta(&self, delta_json: String);
-    /// The subscription failed and ends.
-    fn on_error(&self, message: String);
+    /// The subscription ended: its last call. `kind` is the error JSON's
+    /// kind (`"closed"` when its app closed or its stream ended; `"refused"`;
+    /// with contract 2 also `"permission"`, …), so hosts need not match on
+    /// `message`.
+    fn on_error(&self, kind: String, message: String);
 }
 
 /// A live subscription; it ends when cancelled or dropped.

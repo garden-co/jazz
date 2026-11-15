@@ -61,6 +61,9 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *   "txBegin"    {"serializable"?: true}      -> {"tx": "<id>"}
  *   "txCommit"   {"tx", "tier"?}              -> null
  *   "txRollback" {"tx"}                       -> null
+ *   "editText" {"table", "id", "column", "editedFrom", "text"} -> null
+ *   "edit"     {"table", "id", "patch"?, "edits": [...]}      -> null
+ *              (edits: text / splice / jsonSet, see the README)
  *   "waitForSync" {"tier"}                    -> null, once every write so
  *                                                far reaches "local"|"global"
  * Reads (all, one) and writes (insert, update, delete) also take "tx": run
@@ -68,7 +71,11 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  * for reads "local" | "localFirst" (default) | "remote"; for writes and
  * txCommit "local" | "global", the durability to wait for. A write inside a
  * transaction takes no tier: give it to txCommit. Use a transaction from
- * one thread at a time.
+ * one thread at a time. A transaction the host never ends stays open (and
+ * holds its snapshot) until jazz_close, which rolls it back. A failed
+ * txCommit ends the transaction. "global" on an app without a server is
+ * refused before anything is written. TS's "local-first" is accepted for
+ * "localFirst".
  */
 char *jazz_call(JazzHandle *handle, const char *method, const char *args_json, char **err);
 

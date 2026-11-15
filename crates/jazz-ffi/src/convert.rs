@@ -86,6 +86,8 @@ pub(crate) fn to_value(
             }
             Value::Text(text.to_owned())
         }
+        // The engine's client can't write them yet (its public values have
+        // no payload enum).
         ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. } => {
             return Err(unsupported(format!(
                 "writing an enum with payloads ({path})"
@@ -275,7 +277,10 @@ fn included_row(include: &IncludeShape, id: Option<ObjectId>, values: Vec<Value>
         let value = values.next().unwrap_or(Value::Null);
         row.insert(name.clone(), to_json(value, Some(column_type)));
     }
-    for nested in &include.shape.includes {
+    // The engine appends a row's nested relations in name order.
+    let mut nested: Vec<&IncludeShape> = include.shape.includes.iter().collect();
+    nested.sort_by(|a, b| a.name.cmp(&b.name));
+    for nested in nested {
         let value = values.next().unwrap_or(Value::Null);
         row.insert(nested.name.clone(), included_json(nested, value));
     }
@@ -332,7 +337,9 @@ impl Relations {
                 } else if let (Some(to_table), Some(via)) = (
                     relation.get("reverse").and_then(Json::as_str),
                     relation.get("relation").and_then(Json::as_str),
-                ) && let Some((_, column)) = forward(to_table, via)
+                ) && let Some((target, column)) = forward(to_table, via)
+                    // A reverse relation reverses a forward one pointing here.
+                    && target == *table
                 {
                     list.push(Relation {
                         name: name.clone(),
@@ -444,6 +451,9 @@ fn level(
         match key.as_str() {
             "where" | "orderBy" | "limit" | "include" | "select" => {}
             "table" | "offset" if root => {}
+            "offset"
+                if matches!(object.get("offset"), Some(Json::Null))
+                    || object.get("offset").and_then(Json::as_u64) == Some(0) => {}
             "offset" => {
                 return Err(unsupported(format!(
                     "\"offset\" in an include ({path}); use \"limit\" or query the table"
@@ -518,7 +528,12 @@ fn level(
     }
 
     // `select`: these columns (and `id`, always) instead of all of them.
-    if let Some(select) = object.get("select").filter(|s| !s.is_null()) {
+    // `"*"` among them selects every column, as no `select` does.
+    let every = object
+        .get("select")
+        .and_then(Json::as_array)
+        .is_some_and(|names| names.iter().any(|n| n == "*"));
+    if let Some(select) = object.get("select").filter(|s| !s.is_null() && !every) {
         let select = select
             .as_array()
             .ok_or_else(|| refused(format!("{path}\"select\" must be an array of column names")))?;
@@ -617,12 +632,21 @@ fn level(
             subquery.nested_arrays = child_parts.includes;
             // As TS's requireIncludes: a required forward relation through
             // a non-null reference keeps only rows whose target is readable.
+            // A forward relation through a `uuid[]` column references many
+            // rows: it reads as an array, as in TS.
+            let reference = column(table, table_name, &relation.column).ok();
+            let many = relation.forward
+                && reference
+                    .as_ref()
+                    .is_some_and(|c| matches!(c.column_type.as_ref(), ColumnType::Array { .. }));
             if required {
-                let nullable = column(table, table_name, &relation.column)
-                    .map(|c| c.nullable)
-                    .unwrap_or(true);
+                let nullable = reference.as_ref().map(|c| c.nullable).unwrap_or(true);
                 if relation.forward && !nullable {
-                    subquery.requirement = q::ArraySubqueryRequirement::AtLeastOne;
+                    subquery.requirement = if many {
+                        q::ArraySubqueryRequirement::MatchCorrelationCardinality
+                    } else {
+                        q::ArraySubqueryRequirement::AtLeastOne
+                    };
                 } else {
                     return Err(unsupported(format!(
                         "\"required\" on {name}: only forward relations through a non-optional column can be required"
@@ -641,7 +665,7 @@ fn level(
             };
             shape.includes.push(IncludeShape {
                 name: name.to_owned(),
-                forward: relation.forward,
+                forward: relation.forward && !many,
                 columns: child_columns,
                 shape: child_shape,
             });
@@ -698,6 +722,15 @@ fn predicate(
         .and_then(Json::as_str)
         .ok_or_else(|| refused(format!("{path} needs an \"op\"")))?;
     let column = column(table, table_name, name)?;
+    if matches!(
+        column.column_type.as_ref(),
+        ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. }
+    ) && !matches!(op, "isNull" | "isNotNull")
+    {
+        return Err(unsupported(format!(
+            "comparing {name}, an enum with payloads ({path})"
+        )));
+    }
     let value = condition.get("value");
     let path = format!("{path}.value");
     let literal = || -> Result<q::Operand> {
@@ -809,6 +842,149 @@ pub(crate) fn delta_json(table: &Shape, delta: OrderedRowDelta, reset: bool) -> 
         "coalesced": false,
     })
     .to_string())
+}
+
+/// The `edits` of an `edit` call as the engine's partial updates:
+/// `{ "kind": "text", "column", "text", "editedFrom" }` (a text-merge
+/// column's new value, made from the one its writer last saw),
+/// `{ "kind": "splice", "column", "within": { "units": "utf8"|"utf16"|"bytes",
+/// "from", "to" }, "splices": [{ "at", "delete", "insert" }] }` (`insert` a
+/// string, or base64 for bytes) and `{ "kind": "jsonSet", "column",
+/// "edits": [{ "at": "<json pointer>", "value" }] }`.
+pub(crate) fn edits(
+    table: &TableSchema,
+    table_name: &str,
+    edits: &Json,
+) -> Result<Vec<jazz_app::jazz::db::LargeValueUpdate>> {
+    use jazz_app::jazz::db::{
+        JsonSetEdit, LargeValueUpdate, LargeValueUpdatePage, LargeValueUpdateSplice,
+    };
+    let edits = edits
+        .as_array()
+        .ok_or_else(|| refused("\"edits\" must be an array"))?;
+    edits
+        .iter()
+        .enumerate()
+        .map(|(at, edit)| {
+            let path = format!("edits[{at}]");
+            let text = |key: &str| -> Result<String> {
+                edit.get(key)
+                    .and_then(Json::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| refused(format!("{path} needs \"{key}\" (a string)")))
+            };
+            let number = |value: Option<&Json>, key: &str| -> Result<u64> {
+                value.and_then(Json::as_u64).ok_or_else(|| {
+                    refused(format!("{path}: \"{key}\" must be a non-negative integer"))
+                })
+            };
+            let column_name = text("column")?;
+            let info = column(table, table_name, &column_name)?;
+            if column_name.starts_with('$') || column_name == "id" {
+                return Err(refused(format!("{path}: {column_name} is set by Jazz")));
+            }
+            let kind = edit.get("kind").and_then(Json::as_str).unwrap_or_default();
+            Ok(match kind {
+                "text" => {
+                    if !matches!(info.column_type.as_ref(), ColumnType::Text) {
+                        return Err(refused(format!(
+                            "{path}: {column_name} is not a string column"
+                        )));
+                    }
+                    LargeValueUpdate::TextEdit {
+                        column: column_name,
+                        text: text("text")?,
+                        edited_from: text("editedFrom")?,
+                    }
+                }
+                "splice" => {
+                    let within = edit
+                        .get("within")
+                        .ok_or_else(|| refused(format!("{path} needs \"within\"")))?;
+                    let (from, to) = (
+                        number(within.get("from"), "within.from")?,
+                        number(within.get("to"), "within.to")?,
+                    );
+                    let bytes = match within.get("units").and_then(Json::as_str) {
+                        Some("bytes") => true,
+                        Some("utf8" | "utf16") => false,
+                        _ => {
+                            return Err(refused(format!(
+                                "{path}.within.units must be \"utf8\", \"utf16\" or \"bytes\""
+                            )));
+                        }
+                    };
+                    let within = match within.get("units").and_then(Json::as_str) {
+                        Some("bytes") => LargeValueUpdatePage::Bytes { from, to },
+                        Some("utf16") => LargeValueUpdatePage::TextUtf16 { from, to },
+                        _ => LargeValueUpdatePage::TextUtf8 { from, to },
+                    };
+                    let splices = edit
+                        .get("splices")
+                        .and_then(Json::as_array)
+                        .ok_or_else(|| refused(format!("{path} needs \"splices\" (an array)")))?
+                        .iter()
+                        .enumerate()
+                        .map(|(i, splice)| {
+                            let insert = match splice.get("insert") {
+                                None | Some(Json::Null) => Vec::new(),
+                                Some(Json::String(insert)) if bytes => {
+                                    BASE64.decode(insert).map_err(|_| {
+                                        refused(format!(
+                                            "{path}.splices[{i}].insert must be base64"
+                                        ))
+                                    })?
+                                }
+                                Some(Json::String(insert)) => insert.clone().into_bytes(),
+                                Some(_) => {
+                                    return Err(refused(format!(
+                                        "{path}.splices[{i}].insert must be a string"
+                                    )));
+                                }
+                            };
+                            Ok(LargeValueUpdateSplice {
+                                at: number(splice.get("at"), &format!("splices[{i}].at"))?,
+                                delete: splice.get("delete").and_then(Json::as_u64).unwrap_or(0),
+                                insert,
+                            })
+                        })
+                        .collect::<Result<_>>()?;
+                    LargeValueUpdate::Splice {
+                        column: column_name,
+                        within,
+                        splices,
+                    }
+                }
+                "jsonSet" => LargeValueUpdate::JsonSet {
+                    column: column_name,
+                    edits: edit
+                        .get("edits")
+                        .and_then(Json::as_array)
+                        .ok_or_else(|| refused(format!("{path} needs \"edits\" (an array)")))?
+                        .iter()
+                        .enumerate()
+                        .map(|(i, set)| {
+                            Ok(JsonSetEdit {
+                                at: set
+                                    .get("at")
+                                    .and_then(Json::as_str)
+                                    .ok_or_else(|| {
+                                        refused(format!("{path}.edits[{i}] needs \"at\""))
+                                    })?
+                                    .to_owned(),
+                                value: set.get("value").cloned().unwrap_or(Json::Null),
+                            })
+                        })
+                        .collect::<Result<_>>()?,
+                },
+                other => {
+                    return Err(refused(format!(
+                        "{path}.kind must be \"text\", \"splice\" or \"jsonSet\", not {other:?}"
+                    )));
+                }
+            })
+        })
+        .collect()
 }
 
 /// White-box: no JSON input can produce a non-finite double (JSON has no

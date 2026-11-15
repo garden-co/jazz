@@ -100,7 +100,13 @@ columns (`merge: "text"`) take plain string writes.
   non-optional column. Subscriptions deliver included rows too, and deliver
   an `updated` row when its related rows change.
 - **Select:** `"select": ["<column>", …]` returns those columns (and `id`,
-  always) instead of all of them, at the root or in an include.
+  always) instead of all of them, at the root or in an include. `"*"` selects
+  every column.
+- A forward relation through a `uuid[]` column reads as an array of the
+  referenced rows; `required` on it keeps only rows whose every reference is
+  readable. Stricter than TS: `required` on reverse relations or optional
+  references, an `offset` other than 0 in an include, and a relation named
+  like a column of its table are refused by name.
 - **Transactions:** UniFFI `JazzHandle.begin() -> Transaction` (`all`,
   `one`, `insert`, `update`, `delete`, `commit(tier?)`, `rollback`; dropped
   uncommitted, it rolls back). C ABI: `jazz_call` methods `txBegin`
@@ -114,6 +120,19 @@ columns (`merge: "text"`) take plain string writes.
   the durability they wait for (`"edge"` is refused). UniFFI: `all_at`,
   `one_at`, `insert_at`, `update_at`, `delete_at`, `subscribe_at`. C ABI:
   `"tier"` in the args, or `{"query", "tier"}` for `jazz_subscribe`.
+- **Partial edits:** UniFFI `edit_text(table, id, column, edited_from,
+text)` sets a text-merge column (`merge: "text"`) to `text`, an edit of
+  `edited_from`, the value its writer last saw: changes others made since are
+  kept, as the server merges them (TS's `editedFrom`). `edit(table, id,
+patch?, edits)` takes a list of `{"kind": "text", "column", "text",
+"editedFrom"}`, `{"kind": "splice", "column", "within": {"units":
+"utf8"|"utf16"|"bytes", "from", "to"}, "splices": [{"at", "delete",
+"insert"}]}` (`insert` a string, or base64 for bytes; `at` relative to
+  `from`) and `{"kind": "jsonSet", "column", "edits": [{"at": "<JSON
+pointer>", "value"}]}`, plus an optional whole-column patch, as one write.
+  Both on `Transaction` too. C ABI: `jazz_call` `editText {table, id, column,
+editedFrom, text}` and `edit {table, id, patch?, edits}`, with `"tx"` and
+  `"tier"`.
 - **Contract version:** `"contract": 1 | 2` in the open config (default 1).
   With 2, errors have three more kinds: `permission` (the app's permissions
   refuse it, e.g. a write waiting for global durability), `notSupported`

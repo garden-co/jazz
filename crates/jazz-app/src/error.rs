@@ -16,6 +16,10 @@ pub enum Error {
     #[error("server: {0}")]
     Server(String),
 
+    /// There is no such row (or it isn't readable).
+    #[error("no {table} row {id}")]
+    NotFound { table: &'static str, id: String },
+
     /// A row did not have the shape its generated type expects.
     #[error("row of {table}: {message}")]
     Decode {
