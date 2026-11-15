@@ -83,6 +83,20 @@ status is TS's `SyncStatus` (`{link, pendingUploads, oldestPendingAt,
 rejected, lastError, synced}`). A backend's `bundle()` / `"bundle"` is the
 permissions bundle it published. Anonymous users are not supported (as in TS).
 
+**A backend's own `/jazz` endpoint** (TS `createJazz`'s handler, over
+jazz-app's `Endpoint`), for a backend serving its users' clients from the
+host's own HTTP server: UniFFI `JazzHandle.endpoint(authenticator,
+base_path?, session_ttl_secs?) -> Endpoint` (`is_socket(path)`,
+`handle(request) -> response`, `for_user(request) -> JazzHandle`,
+`socket(upgrade, SocketListener) -> Socket` with `push`/`close`); C
+`jazz_endpoint_new`/`_handle`/`_is_socket`/`_for_user`/`_socket`,
+`jazz_socket_push`/`_free`, `jazz_endpoint_free`. Requests and responses
+are JSON (bodies base64); the host upgrades the socket path itself and
+pumps its WebSocket's binary messages through the socket. The
+`Authenticator` (called on a thread of its own) maps a request to
+`{"kind": "user", "userId", "claims"?, "expiresAt"}`, `{"kind":
+"deviceAccount"}` or none.
+
 Without `permissions` or `auth`, it opens as a local client. `appId` is required for
 `"persistent"` storage.
 
