@@ -438,7 +438,6 @@ impl<'a> Writer<'a> {
                 args.push((field.ident.clone(), field.ty.clone()));
             }
             computed.push(ComputedField {
-                name: c.name.clone(),
                 ident,
                 ty,
                 method,
@@ -622,7 +621,11 @@ impl<'a> Writer<'a> {
             out.push_str("    }\n\n");
             out.push_str("    public func encode(to encoder: any Swift.Encoder) throws {\n");
             out.push_str("        var container = encoder.container(keyedBy: CodingKeys.self)\n");
-            out.push_str("        let computed = try Jazz.implementations(of: (any Computed).self, in: encoder.userInfo)\n");
+            // Only a transform needs the implementations to encode a row.
+            let transforms = fields.iter().any(|f| f.transform.is_some());
+            if transforms {
+                out.push_str("        let computed = try Jazz.implementations(of: (any Computed).self, in: encoder.userInfo)\n");
+            }
             out.push_str("        try container.encode(self.id, forKey: .id)\n");
             for f in &fields {
                 let _ = writeln!(out, "        {}", f.encode(false));
@@ -638,7 +641,9 @@ impl<'a> Writer<'a> {
                     "        try container.encodeIfPresent(self.{key}, forKey: .{key})"
                 );
             }
-            out.push_str("        _ = computed\n");
+            if transforms {
+                out.push_str("        _ = computed\n");
+            }
             out.push_str("    }\n");
         }
         out.push_str("}\n\n");
@@ -831,8 +836,6 @@ struct RelationField {
 }
 
 struct ComputedField {
-    #[allow(dead_code)]
-    name: String,
     ident: String,
     ty: String,
     /// Its `JazzApp.Computed` method.
@@ -1279,6 +1282,18 @@ mod tests {
         let file = br#"{ "format": 1, "tables": { "app": { "columns": { "title": "string" } } } }"#;
         let error = crate::generate(crate::Lang::Swift, file).unwrap_err();
         assert!(error.is_unsupported(), "{error}");
+    }
+
+    #[test]
+    fn rows_without_transforms_encode_without_the_implementations() {
+        let file = br#"{ "format": 1, "tables": { "notes": { "columns": { "score": "int" }, "computed": { "big": { "type": "boolean", "from": ["score"] } } } } }"#;
+        let generated = crate::generate(crate::Lang::Swift, file).unwrap();
+        let encode = &generated[generated.find("public func encode(to encoder").unwrap()..];
+        let encode = &encode[..encode.find("\n        }\n").unwrap()];
+        assert!(!encode.contains("Jazz.implementations"), "{encode}");
+        assert!(generated.contains(
+            "let computed = try Jazz.implementations(of: (any Computed).self, in: decoder.userInfo)"
+        ));
     }
 
     #[test]
