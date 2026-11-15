@@ -645,6 +645,61 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
+  it("SO-U14d a rejected entry with readers subscribes again once the link recovers", async () => {
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      const onError = vi.fn();
+      const onReset = vi.fn();
+      const onfulfilled = vi.fn();
+      const unsubscribe = entry.subscribe({ onError, onReset, onfulfilled });
+      const refusal = Object.assign(new Error("server authority changed"), {
+        code: "authority_changed",
+      });
+      harness.emitError(0, refusal);
+      expect(entry.status).toBe("rejected");
+      expect(onError).toHaveBeenCalledWith(refusal);
+
+      harness.manager.retryRejected();
+
+      expect(harness.calls).toHaveLength(2);
+      expect(harness.calls[0]!.unsubscribe).toHaveBeenCalledOnce();
+      expect(onReset).toHaveBeenCalledOnce();
+      expect(entry.status).toBe("pending");
+      // The old subscription's late events are ignored.
+      harness.emitError(0, new Error("late"));
+      expect(entry.status).toBe("pending");
+
+      harness.emit(1, makeDelta([makeTodo("1")]));
+      expect(entry.status).toBe("fulfilled");
+      expect(onfulfilled).toHaveBeenLastCalledWith([makeTodo("1")]);
+      await expect(entry.promise).resolves.toEqual([makeTodo("1")]);
+
+      // Nothing to retry: a fulfilled entry keeps its subscription.
+      harness.manager.retryRejected();
+      expect(harness.calls).toHaveLength(2);
+      unsubscribe();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U14e a rejected entry nobody reads is not retried", async () => {
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      harness.emitError(0, new Error("refused"));
+      expect(entry.status).toBe("rejected");
+
+      harness.manager.retryRejected();
+
+      expect(harness.calls).toHaveLength(1);
+      expect(entry.status).toBe("rejected");
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
   it("SO-U14a asynchronous subscription admission failure marks entry rejected", async () => {
     const harness = createUnitHarness();
     const admissionError = new Error("browser storage open failed");
