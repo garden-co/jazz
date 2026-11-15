@@ -805,7 +805,8 @@ impl Endpoint {
 
     /// Serves an upgraded sync socket (`<base>/apps/<id>/ws`): `request` is
     /// the upgrade request (its cookies or `Authorization` are what
-    /// `authenticate` reads), `incoming` the client's binary messages (it
+    /// `authenticate` reads), `incoming` the client's messages, binary and
+    /// text alike, as bytes (TS clients send their prelude as text; it
     /// ends when the client goes away), `outgoing` where the client's
     /// messages go. Returns how the socket ended, for the host to close it
     /// with.
@@ -881,13 +882,13 @@ impl Endpoint {
                         "session invalid: this backend did not accept the credential the client sent",
                     ))
                     .await;
-                return Closed::policy("not signed in");
+                return Closed::policy("session invalid");
             }
             Admission::Missing => {
                 let _ = outgoing
                     .send(auth_failed("session missing: not signed in"))
                     .await;
-                return Closed::policy("not signed in");
+                return Closed::policy("session missing");
             }
             Admission::Expired => {
                 let _ = outgoing
