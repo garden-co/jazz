@@ -4,8 +4,12 @@ A dynamic, JSON-in/JSON-out layer over [`jazz-app`](../jazz-app), so the
 Swift, Kotlin and Go bindings only (de)serialize JSON. Two surfaces over one
 handle:
 
-- **UniFFI** (proc-macros, no UDL), for Swift and Kotlin: `JazzHandle`,
-  `Subscription`, `SubscriptionListener`, `JazzError`.
+- **UniFFI** (proc-macros, no UDL), for Swift and Kotlin: `JazzHandle`
+  (`open`, `account`, `all`, `one`, `insert`, `update`, `delete`,
+  `subscribe`, `shutdown`), `Subscription` (`cancel`), `SubscriptionListener`
+  (`on_delta`, `on_error`) and `JazzError` (`Refused { reason }`,
+  `Io { reason }`, `Closed`). The names `shutdown` and `reason` avoid
+  clashing with Kotlin's `AutoCloseable.close` and `Throwable.message`.
 - **A C ABI** declared in [`include/jazz_ffi.h`](include/jazz_ffi.h), for Go
   via cgo: `jazz_open`, `jazz_call`, `jazz_subscribe`, `jazz_unsubscribe`,
   `jazz_close`, `jazz_string_free`.
@@ -30,7 +34,11 @@ overrides. CI runs [`dev/gates/jazz-ffi.sh`](../../dev/gates/jazz-ffi.sh) in
 the `rust-workspace` partition. It links `libjazz_ffi.a` into
 [`tests/c/jazz_ffi_test.c`](tests/c/jazz_ffi_test.c) and runs it, writes both
 languages' sources to `target/jazz-ffi-bindings`, and uploads them as the
-`jazz-ffi-bindings` artifact.
+`jazz-ffi-bindings` artifact. The `test-jazz-ffi-bindings` job runs
+[`dev/gates/jazz-ffi-compile-bindings.sh`](../../dev/gates/jazz-ffi-compile-bindings.sh),
+which compiles the generated Kotlin (with JNA) and Swift sources together
+with small smoke programs ([`tests/kotlin`](tests/kotlin),
+[`tests/swift`](tests/swift)) and runs them against the library.
 
 ## Config
 
@@ -55,30 +63,30 @@ Without `permissions`, it opens as a local client. `appId` is required for
 
 Values are plain JSON, typed by the schema:
 
-| Column type | JSON |
-| --- | --- |
-| string, uuid, enum | string |
-| int, float | number |
-| bigint | decimal string (a number is accepted on input) |
-| boolean | boolean |
-| timestamp | number, ms since the epoch |
-| json | any JSON |
-| bytes | base64 string |
-| array | JSON array |
-| optional | `null` |
+| Column type        | JSON                                           |
+| ------------------ | ---------------------------------------------- |
+| string, uuid, enum | string                                         |
+| int, float         | number                                         |
+| bigint             | decimal string (a number is accepted on input) |
+| boolean            | boolean                                        |
+| timestamp          | number, ms since the epoch                     |
+| json               | any JSON                                       |
+| bytes              | base64 string                                  |
+| array              | JSON array                                     |
+| optional           | `null`                                         |
 
 Enums with payloads read as `{ "case": …, "fields": { … } }`. Text-merge
 columns (`merge: "text"`) take plain string writes.
 
 - **Query:** `{ "table", "where": [{ "column", "op", "value"? }], "orderBy":
-  [{ "column", "direction" }], "limit", "offset" }`. The `where` entries are
+[{ "column", "direction" }], "limit", "offset" }`. The `where` entries are
   ANDed. Ops: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `contains` (string or
   array column), `in`, `isNull`, `isNotNull`. Columns also include `id`,
   `$createdAt` and `$updatedAt`.
 - **Row:** `{ "id", "<column>": … }`, with the authored column names. An
   insert may give its own `id`.
 - **Delta:** `{ "added": [row], "updated": [row], "removed": [id], "reset",
-  "coalesced" }`. The first delta has `reset: true` and holds the full result.
+"coalesced" }`. The first delta has `reset: true` and holds the full result.
   `coalesced` stays `false` until the engine coalesces lagging readers
   ([jazz#5635](https://github.com/garden-co/jazz/pull/5635)). Deltas carry no
   positions, so an ordered subscription re-sorts locally. A row that only

@@ -202,6 +202,19 @@ jobs:
         if: always()
         run: sccache --show-stats
 
+  # jazz-ffi's generated Kotlin and Swift must compile and load the library:
+  # runs on the runner image (JDK, kotlinc, swiftc), not the Rust container.
+  test-jazz-ffi-bindings:
+    if: inputs.scope == 'full'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Generate, compile and run jazz-ffi's Kotlin and Swift bindings
+        run: bash dev/gates/jazz-ffi-compile-bindings.sh
+
   # Branch protection requires this stable check name. It aggregates the Rust
   # correctness jobs and stays red whenever any dependency fails or is cancelled.
   # test-storage-compat also runs the bounded differential oracle partition.

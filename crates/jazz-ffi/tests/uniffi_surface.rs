@@ -29,11 +29,14 @@ fn next(deltas: &mpsc::Receiver<Result<Value, String>>) -> Value {
 
 fn refused(result: Result<impl std::fmt::Debug, JazzError>) -> String {
     match result {
-        Err(JazzError::Refused { message }) => message,
+        Err(JazzError::Refused { reason }) => reason,
         other => panic!("expected Refused, got {other:?}"),
     }
 }
 
+/// A local StagePlan client (no actors beyond the app) inserts a show and
+/// its tasks, reads them back through every query op, moves a task between
+/// stages, rewrites its text-merge notes, deletes it, and closes.
 #[test]
 fn stage_plan_reads_and_writes_locally() {
     let jazz = JazzHandle::open(client_config()).expect("open locally");
@@ -149,11 +152,13 @@ fn stage_plan_reads_and_writes_locally() {
         None
     );
 
-    jazz.close().unwrap();
-    jazz.close().unwrap();
+    jazz.shutdown().unwrap();
+    jazz.shutdown().unwrap();
     assert_eq!(jazz.all(tasks_of(&show_id)), Err(JazzError::Closed));
 }
 
+/// Every column kind round-trips as the contract's plain JSON: bigint as a
+/// decimal string, bytes as base64, json as nested JSON, enum defaults filled.
 #[test]
 fn every_value_kind_maps_to_plain_json() {
     let jazz = JazzHandle::open(json!({ "app": KITCHEN_APP }).to_string()).unwrap();
@@ -225,6 +230,9 @@ fn every_value_kind_maps_to_plain_json() {
     );
 }
 
+/// A subscriber gets a reset delta with the full result, then added, updated
+/// and removed deltas, and nothing after cancel. A listener may call back
+/// into the handle from its delivery thread.
 #[test]
 fn subscriptions_deliver_deltas_until_cancelled() {
     let jazz = JazzHandle::open(client_config()).unwrap();
@@ -295,6 +303,8 @@ fn subscriptions_deliver_deltas_until_cancelled() {
     assert_eq!(counts.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
 }
 
+/// What jazz-app cannot do (includes, end-user JWT connect, foreign session
+/// issuers) and invalid input are refused with `Refused`, naming the pattern.
 #[test]
 fn refuses_what_it_cannot_do_by_name() {
     assert!(refused(JazzHandle::open("not json".into())).contains("not valid JSON"));
@@ -369,8 +379,15 @@ fn refuses_what_it_cannot_do_by_name() {
     );
 }
 
-/// As StagePlan's backend: acting as the signed-in user, create a show they
-/// chief, then read and add its tasks under the app's permissions.
+/// As StagePlan's backend: alice's backend creates a show she chiefs
+/// (`chiefAccount = session.user`) and adds a task; a second backend acting
+/// as alice receives both through the server, and bob (neither chief nor
+/// crew) reads none of it.
+///
+/// ```
+/// alice ──insert show, task──► server ──read policy──► alice (again)
+///                                 └──────────✗──────► bob
+/// ```
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_backend_acts_as_its_session_user_under_permissions() {
     let app_id = jazz_app::AppId::random();
@@ -423,9 +440,9 @@ async fn a_backend_acts_as_its_session_user_under_permissions() {
             bob_sees.extend(titles(&delta.unwrap()["added"]));
         }
         assert!(bob_sees.is_empty(), "{bob_sees:?}");
-        again.close().unwrap();
-        alice.close().unwrap();
-        bob.close().unwrap();
+        again.shutdown().unwrap();
+        alice.shutdown().unwrap();
+        bob.shutdown().unwrap();
     })
     .await;
     server.shutdown().await;
