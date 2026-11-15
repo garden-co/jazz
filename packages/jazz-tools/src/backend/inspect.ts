@@ -879,20 +879,51 @@ export function createInspector(deps: InspectorDeps) {
     const scoped = admitted.via === "token" && admitted.tables !== undefined;
     const showPolicy = !scoped;
     const showWhy = !scoped && !redactedFor(admitted, query.table);
+    const clauseList = (of: unknown[]) =>
+      of.map((clause, index) => ({ index, ...(showPolicy ? { text: renderPolicy(clause) } : {}) }));
+    // One level through each inherited clause: the parent row each row
+    // points to, and that row's own verdict, by the parent table's clauses.
+    const inherited = showWhy ? explainParents(admitted, db, query.table, clauses, read.rows) : [];
     const answer: Omit<InspectExplainAnswer, "inspectorUrl"> = {
       table: query.table,
       as: asUser!,
-      clauses: clauses.map((clause, index) => ({
-        index,
-        ...(showPolicy ? { text: renderPolicy(clause) } : {}),
-      })),
+      clauses: clauseList(clauses),
       rows: read.rows.flatMap((row) => {
         const holds = found.get(String(row.id));
         // Gone between the two reads.
         if (!holds) return [];
         const by = holds.flatMap((held, index) => (held ? [index] : []));
-        return [{ id: String(row.id), allowed: by.length > 0, ...(showWhy ? { by } : {}), row }];
+        type Via = { id: string | null; allowed: boolean; by?: number[] };
+        const via: Record<number, Via> = {};
+        for (const { index, column, parents } of inherited) {
+          const parent = row[column];
+          if (parent === null || parent === undefined) {
+            via[index] = { id: null, allowed: false };
+            continue;
+          }
+          const verdict = parents.get(String(parent));
+          if (verdict) via[index] = { id: String(parent), ...verdict };
+        }
+        return [
+          {
+            id: String(row.id),
+            allowed: by.length > 0,
+            ...(showWhy ? { by } : {}),
+            row,
+            ...(Object.keys(via).length ? { via } : {}),
+          },
+        ];
       }),
+      ...(inherited.length
+        ? {
+            inherited: Object.fromEntries(
+              inherited.map(({ index, table, column, clauses: parentClauses }) => [
+                index,
+                { table, column, clauses: clauseList(parentClauses) },
+              ]),
+            ),
+          }
+        : {}),
       truncated: read.truncated,
       ...(policy === undefined
         ? { note: `${query.table} has no read policy, so every row is denied` }
@@ -900,6 +931,56 @@ export function createInspector(deps: InspectorDeps) {
       ...(warning ? { warning } : {}),
     };
     return { answer, as: asUser, asClaims };
+  }
+
+  /**
+   * For each of `clauses` that inherits read from a parent row (`Inherits`
+   * with `Select`, through a column that references a table): every parent
+   * the listed rows point to, with whether the user `db` reads as may read
+   * it, and by which of the parent table's clauses. Parents in a table the
+   * caller may not see, or one with branches, are left out.
+   */
+  function explainParents(
+    admitted: Admitted,
+    db: Db,
+    table: string,
+    clauses: unknown[],
+    rows: Record<string, unknown>[],
+  ) {
+    const schema = deps.schema();
+    const permissions = deps.permissions as Record<string, TablePolicies> | undefined;
+    const explained = [];
+    for (const [index, clause] of clauses.entries()) {
+      const node = clause as { type?: string; operation?: string; via_column?: string };
+      if (node.type !== "Inherits" || node.operation !== "Select" || !node.via_column) continue;
+      const column = node.via_column;
+      const parentTable = schema[table]?.columns.find((c) => c.name === column)?.references;
+      if (!parentTable || schema[parentTable]?.branchBy?.length) continue;
+      if (admitted.tables && !admitted.tables.includes(parentTable)) continue;
+      const parentPolicy =
+        permissions?.[parentTable]?.select?.using ?? permissions?.[parentTable]?.select?.with_check;
+      const parentClauses = policyClauses(parentPolicy);
+      const ids = [
+        ...new Set(
+          rows
+            .map((row) => row[column])
+            .filter((id): id is string => typeof id === "string" && id !== REDACTED),
+        ),
+      ];
+      const engine = ids.length
+        ? db.explainReadClauses(tableProxy(parentTable), ids)
+        : { clauses: parentClauses.length, rows: [] };
+      // As for the table itself: the numbers are the engine's, the text ours.
+      if (engine.clauses !== parentClauses.length) continue;
+      const parents = new Map(
+        engine.rows.map((row) => {
+          const by = row.holds.flatMap((held, at) => (held ? [at] : []));
+          return [row.id, { allowed: by.length > 0, by }] as const;
+        }),
+      );
+      explained.push({ index, table: parentTable, column, clauses: parentClauses, parents });
+    }
+    return explained;
   }
 
   function schemaAnswer(admitted: Admitted) {
