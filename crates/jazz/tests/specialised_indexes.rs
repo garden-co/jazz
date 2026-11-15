@@ -732,3 +732,86 @@ fn a_live_text_search_splices_a_changed_row_by_its_score() {
     assert_eq!((added, removed), (vec![3], vec![1]));
     assert_eq!(ids(&db, &search("garden").limit(2)), [3, 4]);
 }
+
+/// A rebase reaches the index: bob's pending edit of one field replays
+/// over the authority's concurrent edit of another, and his index follows
+/// the rebased row, as the authority's follows the merged one.
+///
+/// ```
+/// server: body := "garden beans"      bob (pending): title := "Shed"
+///        ──synced version──► bob rebases: title "Shed", body "garden beans"
+/// ```
+#[test]
+fn a_rebased_pending_write_reaches_the_index() {
+    let server = authority(schema());
+    insert(&server, 1, note("Plans", None, "open", &[0.0, 0.0]));
+    let bob = client(1, schema());
+    let _link = link(&bob, &server);
+    let all = bob.prepare_query(&Query::from("notes")).unwrap();
+    let _sub = block_on(bob.subscribe(&all, ReadOpts::default())).unwrap();
+    pump(&server, &[&bob]);
+    update(&bob, 1, "title", Value::String("Shed".into()));
+    update(
+        &server,
+        1,
+        "body",
+        Value::Nullable(Some(Box::new(Value::String("garden beans".into())))),
+    );
+    // Bob's tick receives the server's version before his upload settles.
+    block_on(server.tick()).unwrap();
+    block_on(bob.tick()).unwrap();
+    assert_eq!(ids(&bob, &search("shed garden")), [1]);
+    pump(&server, &[&bob]);
+    assert_eq!(ids(&bob, &search("shed garden")), [1]);
+    assert_eq!(ids(&server, &search("shed garden")), [1]);
+    assert_eq!(ids(&bob, &search("plans")), Vec::<u8>::new());
+}
+
+/// An eviction reaches the index: when bob loses read access to a row,
+/// the authority evicts it from his replica, and his search stops
+/// returning it in the same transaction that drops the row.
+#[test]
+fn an_evicted_row_leaves_the_replicas_index() {
+    let read_open = |restrict: bool| {
+        let mut policies = allow_all_policies();
+        if restrict {
+            policies = policies.with_select(PolicyExpr::eq_literal(
+                "project",
+                PublicValue::Text("open".into()),
+            ));
+        }
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column("title", ColumnType::Text)
+                        .nullable_column("body", ColumnType::Text)
+                        .column("project", ColumnType::Text)
+                        .column("embedding", ColumnType::Vector { dimensions: 2 })
+                        .index_only(["project"])
+                        .policies(policies)
+                        .text_index(
+                            "search",
+                            [("title", 2), ("body", 1)],
+                            "jazz-text/1:en",
+                            false,
+                        )
+                        .vector_index("similar", "embedding", VectorMetric::L2),
+                )
+                .build(),
+        )
+    };
+    let server = authority(read_open(true));
+    insert(&server, 1, note("Garden plans", None, "open", &[0.0, 0.0]));
+    insert(&server, 2, note("Garden tools", None, "open", &[0.0, 0.0]));
+    let bob = client(1, read_open(true));
+    let _link = link(&bob, &server);
+    let all = bob.prepare_query(&Query::from("notes")).unwrap();
+    let _sub = block_on(bob.subscribe(&all, ReadOpts::default())).unwrap();
+    pump(&server, &[&bob]);
+    assert_eq!(ids(&bob, &search("garden")), [1, 2]);
+    update(&server, 1, "project", Value::String("secret".into()));
+    pump(&server, &[&bob]);
+    assert_eq!(ids(&bob, &Query::from("notes")), [2], "evicted");
+    assert_eq!(ids(&bob, &search("garden")), [2]);
+}

@@ -343,3 +343,83 @@ fn a_synced_value_the_index_cannot_take_applies_and_does_not_match() {
         "its other indexes take it"
     );
 }
+
+/// `notes(title)` with a text index over it, under `column`'s name.
+fn renamed(column: &str) -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column(column, ColumnType::Text)
+                    .policies(allow_all_policies())
+                    .text_index("search", [(column, 1)], "jazz-text/1:en", false),
+            )
+            .build(),
+    )
+}
+
+/// A migration reaches the index too: a store that moves to a version
+/// renaming an indexed column (its stored column unchanged) keeps the index
+/// as built, since its recorded declaration names stored columns, and goes
+/// on maintaining it under the new name.
+#[test]
+fn a_migration_renaming_an_indexed_column_keeps_its_index() {
+    use jazz::protocol::{LensOp, MigrationLens, TableLens};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.sqlite");
+    let (v1, v2) = (renamed("title"), renamed("name"));
+    let lens = MigrationLens::new(
+        v1.version_id(),
+        v2.version_id(),
+        vec![TableLens {
+            source_table: "notes".into(),
+            target_table: "notes".into(),
+            ops: vec![LensOp::RenameColumn {
+                from: "title".into(),
+                to: "name".into(),
+            }],
+        }],
+    )
+    .unwrap();
+    let with = |schema: &JazzSchema| {
+        config(schema.clone()).with_migrations(vec![v1.clone(), v2.clone()], vec![lens.clone()])
+    };
+    let search = |db: &Db, words: &str| {
+        ids(
+            db,
+            &Query::from("notes").search("search", IndexOp::Match { text: words.into() }),
+        )
+    };
+    let db = block_on(Db::open_at(with(&v1), &path, FileOptions::default())).unwrap();
+    for (n, title) in [(1, "garden plans"), (2, "tomato soup")] {
+        block_on(db.insert(
+            "notes",
+            BTreeMap::from([("title".to_owned(), Value::String(title.into()))]),
+            InsertOptions {
+                row_id: Some(row(n)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    drop(db);
+    let db = block_on(Db::open_at(with(&v2), &path, FileOptions::default())).unwrap();
+    let built: i64 = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT state FROM _jazz_ix WHERE name = 'search'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(built, 1, "not rebuilt");
+    assert_eq!(search(&db, "garden"), [1]);
+    block_on(db.update(
+        "notes",
+        row(2),
+        BTreeMap::from([("name".to_owned(), Value::String("garden soup".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(search(&db, "garden"), [1, 2]);
+}
