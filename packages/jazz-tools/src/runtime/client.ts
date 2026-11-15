@@ -1044,6 +1044,19 @@ export class WriteResult<T> extends WriteHandle<T, T> {
 }
 
 /**
+ * The `txId` of a transaction that wrote nothing: it committed nothing, so
+ * it has no transaction id.
+ */
+export class EmptyTransactionError extends Error {
+  readonly name = "EmptyTransactionError";
+  readonly code = "empty_transaction";
+
+  constructor() {
+    super("This transaction wrote nothing, so it has no transaction id");
+  }
+}
+
+/**
  * Returned by a `db.transaction(callback)` whose callback wrote nothing: the
  * transaction was rolled back, as there was nothing to commit, so `wait()`
  * resolves at once with the callback's value. It has no transaction id:
@@ -1051,11 +1064,7 @@ export class WriteResult<T> extends WriteHandle<T, T> {
  */
 export class EmptyTransactionWriteResult<T> extends WriteResult<T> {
   constructor(value: T, client: JazzClient) {
-    super(
-      value,
-      Promise.reject(new Error("This transaction wrote nothing, so it has no transaction id")),
-      client,
-    );
+    super(value, Promise.reject(new EmptyTransactionError()), client);
   }
 
   override async wait(options: WriteWaitOptions): Promise<T> {

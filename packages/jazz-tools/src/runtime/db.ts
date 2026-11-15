@@ -1996,17 +1996,31 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * `"empty"` is returned. Anything else commits as {@link commit} does.
    */
   async commitUnlessEmpty(): Promise<TransactionCommitHandle<TKind> | "empty"> {
-    if (this.kind === "mergeable") {
-      const { ownerClient, openTransactionId, preparation } = this.requireBinding("commit");
-      // Writes still being prepared stage first: only then is it known
-      // whether the transaction staged anything.
-      await Promise.all([preparation.drain(), ...this.pendingReads]);
-      if (ownerClient.hasStagedTransactionWrites(openTransactionId) === false) {
-        await this.rollback();
-        return "empty";
+    if (this.kind !== "mergeable") return this.commit();
+    const { ownerClient, openTransactionId, preparation } = this.requireBinding("commit");
+    // Staged, or this runtime can't tell: commit at once, as `commit` does
+    // (reads still in flight settle through the commit's `txId`).
+    if (ownerClient.hasStagedTransactionWrites(openTransactionId) !== false) return this.commit();
+    // Nothing staged yet, but a write still being prepared may stage. Reads
+    // stage nothing, so only preparations are waited for, and the
+    // transaction takes no more operations meanwhile.
+    if (preparation.pending || preparation.failed) {
+      this.committing = true;
+      let drained = true;
+      try {
+        await preparation.drain();
+      } catch {
+        drained = false;
+      } finally {
+        this.committing = false;
+      }
+      // A preparation that failed fails the commit, as for `commit`.
+      if (!drained || ownerClient.hasStagedTransactionWrites(openTransactionId) !== false) {
+        return this.commit();
       }
     }
-    return this.commit();
+    await this.rollback();
+    return "empty";
   }
 
   /**

@@ -402,7 +402,10 @@ describe("Db mergeable transactions", () => {
     });
     expect(onlyReads.value).toBe("nothing to clean up");
     await expect(onlyReads.wait({ tier: "global" })).resolves.toBe("nothing to clean up");
-    await expect(onlyReads.txId).rejects.toThrow("wrote nothing");
+    await expect(onlyReads.txId).rejects.toMatchObject({
+      name: "EmptyTransactionError",
+      code: "empty_transaction",
+    });
 
     const nothingAtAll = await db.transaction(() => 7);
     await expect(nothingAtAll.wait({ tier: "local" })).resolves.toBe(7);
