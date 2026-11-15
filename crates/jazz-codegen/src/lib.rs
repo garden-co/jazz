@@ -5,6 +5,7 @@
 //! - [`ts`]: the TypeScript back end (`jazz.generated.ts`).
 //! - [`rust`]: the Rust back end (`src/jazz_app.rs`).
 //! - [`swift`]: the Swift back end (`JazzApp.swift`).
+//! - [`go`]: the Go back end (`jazzapp/jazz_app.go`).
 //! - [`migrations`]: `migrations create`, the schema diff and stub writer.
 //! - [`bindings`]: what committed bindings record, for staleness checks.
 //!
@@ -12,6 +13,7 @@
 //! and a [`Lang`] variant. Plain string writers, no templates.
 
 pub mod bindings;
+pub mod go;
 mod json_schema;
 pub mod migrations;
 pub mod model;
@@ -79,6 +81,7 @@ pub enum Lang {
     TypeScript,
     Rust,
     Swift,
+    Go,
 }
 
 impl Lang {
@@ -92,14 +95,20 @@ impl Lang {
             "swift" => Err(CodegenError::unsupported(
                 "generating Swift bindings is not available yet; supported: ts, rust",
             )),
+            // Switched off until the Go runtime and docs ship with it.
+            "go" | "golang" => Err(CodegenError::unsupported(
+                "generating bindings in Go is not available yet; supported: ts, rust",
+            )),
             other => Err(CodegenError::unsupported(format!(
                 "generating bindings in `{other}` is not supported yet; supported: ts, rust"
             ))),
         }
     }
 
-    /// Every language `jazz-tools generate` handles, in that order. (Swift is
-    /// not available yet: [`Lang::Swift`] is generated only by direct calls.)
+    /// Every language `jazz-tools generate` handles, in that order. (Swift and
+    /// Go are not available yet: [`Lang::Swift`] and [`Lang::Go`] are
+    /// generated only by direct calls, so no `Package.swift` or `go.mod`
+    /// selects them.)
     pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust];
 
     /// The file whose presence beside `jazz.app.json` says the app is
@@ -109,6 +118,7 @@ impl Lang {
             Lang::TypeScript => "package.json",
             Lang::Rust => "Cargo.toml",
             Lang::Swift => "Package.swift",
+            Lang::Go => "go.mod",
         }
     }
 
@@ -116,7 +126,8 @@ impl Lang {
     /// written in this language: a TS app has a `package.json`; a Rust app
     /// a `Cargo.toml` with a `[package]` that depends on `jazz-app` (a
     /// workspace root or another crate beside a TS app's files is not
-    /// one). Committed bindings say so too; the caller checks those.
+    /// one); a Go app a `go.mod` that requires the Go runtime module.
+    /// Committed bindings say so too; the caller checks those.
     pub fn detected_in(self, dir: &std::path::Path) -> bool {
         let marker = dir.join(self.marker());
         match self {
@@ -125,6 +136,9 @@ impl Lang {
                 .is_ok_and(|manifest| rust::is_app_manifest(&manifest)),
             Lang::Swift => std::fs::read_to_string(marker)
                 .is_ok_and(|manifest| swift::is_app_manifest(&manifest)),
+            Lang::Go => {
+                std::fs::read_to_string(marker).is_ok_and(|go_mod| go::is_app_module(&go_mod))
+            }
         }
     }
 
@@ -134,6 +148,7 @@ impl Lang {
             Lang::TypeScript => ts::FORMAT,
             Lang::Rust => rust::FORMAT,
             Lang::Swift => swift::FORMAT,
+            Lang::Go => go::FORMAT,
         }
     }
 
@@ -143,6 +158,7 @@ impl Lang {
             Lang::TypeScript => ts::FILE,
             Lang::Rust => rust::FILE,
             Lang::Swift => swift::FILE,
+            Lang::Go => go::FILE,
         }
     }
 }
@@ -160,6 +176,7 @@ pub fn generate_app(lang: Lang, app: &App) -> Result<String, CodegenError> {
         Lang::TypeScript => ts::generate(app),
         Lang::Rust => rust::generate(app),
         Lang::Swift => swift::generate(app),
+        Lang::Go => go::generate(app),
     }
 }
 
