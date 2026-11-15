@@ -14,6 +14,11 @@ pub(crate) struct Settler {
 }
 
 impl Settler {
+    /// A settler that only commits locally.
+    pub(crate) fn local() -> Settler {
+        Settler { durability: None }
+    }
+
     pub(crate) async fn settle(
         &self,
         client: &JazzClient,

@@ -547,6 +547,9 @@ fn run(
             jobs.abort_all();
             while jobs.join_next().await.is_some() {}
         }
+        // No job is left: roll back the transactions still open while the
+        // client runs, so none is dropped with the thread's locals.
+        crate::transaction::roll_back_parked();
         let result = client.shutdown().await;
         let failure = result.as_ref().err().map(ToString::to_string);
         let mut replies = stopped.into_iter();

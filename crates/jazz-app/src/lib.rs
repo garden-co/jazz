@@ -58,7 +58,7 @@ pub use query::{Column, Condition, Many, One, Order, Query, created_at, id, upda
 pub use session::{AuthFailure, Link, Offline, Session, SessionState, SyncStatus, User, UserKind};
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated};
 pub use table::{Fields, Implementations, Insert, Table, Update};
-pub use transaction::Transaction;
+pub use transaction::{OpenTransaction, Transaction};
 pub use value::{ColumnValue, Json, Timestamp};
 
 pub use jazz::account_registry::AccountId;
