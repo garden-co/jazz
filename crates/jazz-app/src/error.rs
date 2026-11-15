@@ -27,6 +27,11 @@ pub enum Error {
     #[error("subscription rejected: {0}")]
     Rejected(String),
 
+    /// The app's backend does not accept the end user's bearer: their
+    /// sign-in ended or the bearer is not one its `authenticate` accepts.
+    #[error("signed out: the app's backend does not accept the end user's bearer")]
+    SignedOut,
+
     /// Something this crate does not support yet.
     #[error("not supported yet: {0}")]
     Unsupported(String),

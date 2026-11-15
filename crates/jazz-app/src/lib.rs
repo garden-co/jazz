@@ -13,13 +13,17 @@
 //! let mut changes = jazz.subscribe(todos::query()).await?; // a futures::Stream
 //! ```
 //!
-//! Not supported yet: connecting to a sync server as an end user (with a
-//! JWT), includes (nested related rows in one result), reads inside
+//! An end user's client signs in through the app's own backend
+//! ([`EndUser`]), with the app's bearer.
+//!
+//! Not supported yet: connecting to a core directly as an end user (with a
+//! JWT the core verifies), local-first (device) accounts, includes (nested related rows in one result), reads inside
 //! transactions.
 
 mod app;
 mod backend;
 mod config;
+mod end_user;
 mod error;
 mod handle;
 mod query;
@@ -29,6 +33,7 @@ mod value;
 
 pub use app::AppFiles;
 pub use config::{Backend, Config, Storage};
+pub use end_user::{EndUser, TokenFuture};
 pub use error::{Error, Result};
 pub use handle::{Jazz, Transaction};
 pub use query::{Column, Condition, Many, One, Order, Query};

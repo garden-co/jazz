@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use jazz::tools::AppId;
 
+use crate::end_user::EndUser;
+
 /// How to open an app.
 ///
 /// ```no_run
@@ -23,6 +25,8 @@ pub struct Config {
     pub storage: Storage,
     /// Open as the app's backend.
     pub backend: Option<Backend>,
+    /// Open as one of the app's end users, signed in through its backend.
+    pub end_user: Option<EndUser>,
 }
 
 impl Config {
@@ -33,6 +37,7 @@ impl Config {
             server_url: None,
             storage: Storage::Memory,
             backend: None,
+            end_user: None,
         }
     }
 
@@ -48,6 +53,13 @@ impl Config {
 
     pub fn backend(mut self, backend: Backend) -> Self {
         self.backend = Some(backend);
+        self
+    }
+
+    /// Open as an end user signed in through the app's backend; `server` is
+    /// then that backend's Jazz mount (e.g. `https://app.example/jazz`).
+    pub fn end_user(mut self, end_user: EndUser) -> Self {
+        self.end_user = Some(end_user);
         self
     }
 }

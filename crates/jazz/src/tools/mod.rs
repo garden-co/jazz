@@ -81,6 +81,13 @@ pub struct AppContext {
     /// With `backend_secret`: the user this client acts for, as the app's
     /// backend states it (the way `createJazz` relays its users' clients).
     /// The client is then that user's session, not the backend's own link.
+    ///
+    /// With `jwt_token` and no secret: the session the app's backend signed
+    /// this end user in as (`backend-sign-in`), and `server_url` is that
+    /// backend's Jazz mount (e.g. `https://app.example/jazz`). The token is
+    /// then the app's own bearer, sent as the socket upgrade's
+    /// `Authorization` header; the backend checks it names this user and
+    /// relays the session to the core. No `bundle` is needed.
     pub backend_session: Option<Session>,
     /// With `backend_session`: the published permissions bundle (its hex
     /// id) that session is pinned to, as `createJazz` pins every session it

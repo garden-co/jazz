@@ -14,7 +14,7 @@ use crate::error::{Error, Result};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-fn http() -> Result<reqwest::Client> {
+pub(crate) fn http() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(TIMEOUT)
@@ -22,11 +22,11 @@ fn http() -> Result<reqwest::Client> {
         .map_err(|error| Error::Server(error.to_string()))
 }
 
-fn app_url(server: &str, app_id: AppId, path: &str) -> String {
+pub(crate) fn app_url(server: &str, app_id: AppId, path: &str) -> String {
     format!("{}/apps/{app_id}/{path}", server.trim_end_matches('/'))
 }
 
-async fn refusal(what: &str, response: reqwest::Response) -> Error {
+pub(crate) async fn refusal(what: &str, response: reqwest::Response) -> Error {
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     let detail = serde_json::from_str::<serde_json::Value>(&body)

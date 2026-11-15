@@ -13,13 +13,15 @@ use std::sync::Arc;
 
 use jazz::account_registry::AccountId;
 use jazz::tools::{
-    AppContext, ClientStorage, JazzClient, ObjectId, QueryResult, ReadTier, Session, TableName,
+    AppContext, AppId, ClientStorage, JazzClient, ObjectId, QueryResult, ReadTier, Session,
+    TableName,
 };
 use tokio::sync::{mpsc, oneshot};
 
 use crate::app::AppFiles;
 use crate::backend;
 use crate::config::{Config, Storage};
+use crate::end_user::{self, EndUser, SignedIn};
 use crate::error::{Error, Result};
 use crate::query::Query;
 use crate::subscription::{self, Subscription};
@@ -95,10 +97,20 @@ impl Jazz {
                 "a backend needs the app's jazz.permissions.json".into(),
             ));
         }
-        if config.server_url.is_some() && config.backend.is_none() {
+        if config.backend.is_some() && config.end_user.is_some() {
+            return Err(Error::Config(
+                "open the app as its backend or as an end user, not both".into(),
+            ));
+        }
+        if config.end_user.is_some() && config.server_url.is_none() {
+            return Err(Error::Config(
+                "an end user needs the app backend's Jazz URL (Config::server)".into(),
+            ));
+        }
+        if config.server_url.is_some() && config.backend.is_none() && config.end_user.is_none() {
             return Err(Error::Unsupported(
-                "connecting to a sync server as an end user; open the app as a backend \
-                 (Config::backend) or locally (no server)"
+                "connecting to a sync server without a user; open the app as an end user \
+                 (Config::end_user), as a backend (Config::backend) or locally (no server)"
                     .into(),
             ));
         }
@@ -124,7 +136,8 @@ impl Jazz {
         self.info.bundle.as_deref()
     }
 
-    /// The account of the user this backend acts as.
+    /// The account of the user this client acts as: the backend's user, or
+    /// the signed-in end user.
     pub fn account(&self) -> Option<AccountId> {
         self.info.account
     }
@@ -356,7 +369,7 @@ fn run(
     };
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
-        let (client, opened) = match connect(files, config).await {
+        let (client, opened, signed_in) = match connect(files, config).await {
             Ok(opened) => opened,
             Err(error) => {
                 let _ = ready.send(Err(error));
@@ -366,6 +379,9 @@ fn run(
         if ready.send(Ok(opened)).is_err() {
             let _ = client.shutdown().await;
             return;
+        }
+        if let Some(renewal) = signed_in {
+            tokio::task::spawn_local(renewal.keep(client.clone()));
         }
         // Jobs run as local tasks, so a slow one never holds up the rest.
         // Subscription forwarders are spawned by their jobs and are not in
@@ -433,7 +449,30 @@ fn run(
 
 type Opened = (Option<String>, Option<AccountId>);
 
-async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Opened)> {
+/// An end user's sign-in, kept fresh while the client runs.
+struct Renewal {
+    end_user: EndUser,
+    server: String,
+    app_id: AppId,
+    token: String,
+    signed: SignedIn,
+}
+
+impl Renewal {
+    async fn keep(self, client: JazzClient) {
+        end_user::keep_signed_in(
+            client,
+            self.end_user,
+            self.server,
+            self.app_id,
+            self.token,
+            self.signed,
+        )
+        .await
+    }
+}
+
+async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Opened, Option<Renewal>)> {
     let loaded = files.load()?;
     let (storage, data_dir) = match config.storage {
         Storage::Memory => (ClientStorage::Memory, std::env::temp_dir()),
@@ -470,6 +509,24 @@ async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Opened)
         context.bundle = Some(published.clone());
         bundle = Some(published);
     }
+    let mut renewal = None;
+    if let (Some(end_user), Some(server)) = (&config.end_user, &config.server_url) {
+        let token = end_user.token().await?;
+        let signed = end_user::sign_in(server, config.app_id, &token).await?;
+        context.account_id = Some(signed.account);
+        admitted = Some(signed.account);
+        // The backend vouches for this session to the core; the client
+        // presents the app's bearer on the upgrade (see AppContext).
+        context.backend_session = Some(signed.session.clone());
+        context.jwt_token = Some(token.clone());
+        renewal = Some(Renewal {
+            end_user: end_user.clone(),
+            server: server.clone(),
+            app_id: config.app_id,
+            token,
+            signed,
+        });
+    }
     let client = if context.server_url.is_empty() {
         JazzClient::connect(context).await?
     } else {
@@ -479,7 +536,7 @@ async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Opened)
         )
         .await?
     };
-    Ok((client, (bundle, admitted)))
+    Ok((client, (bundle, admitted), renewal))
 }
 
 #[allow(dead_code)]
