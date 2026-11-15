@@ -43,6 +43,12 @@ pub struct ServerResourceLimits {
     /// Seconds a session may stay at its egress budget without reading
     /// before it is closed (`None`: 300).
     pub slow_reader_timeout_secs: Option<u64>,
+    /// Seconds a session must be behind the minimum read rate before the
+    /// egress budget may close it (`None`: 10).
+    pub egress_stall_grace_secs: Option<u64>,
+    /// Bytes a second a client must read, on average, while its output
+    /// waits (`None`: 1024).
+    pub slow_reader_min_bytes_per_sec: Option<u64>,
 }
 
 impl Default for ServerResourceLimits {
@@ -58,6 +64,8 @@ impl Default for ServerResourceLimits {
             session_backlog_max_bytes: None,
             egress_budget_bytes: None,
             slow_reader_timeout_secs: None,
+            egress_stall_grace_secs: None,
+            slow_reader_min_bytes_per_sec: None,
         }
     }
 }
@@ -131,7 +139,12 @@ impl ServerResourceLimits {
             slow_reader_timeout: self
                 .slow_reader_timeout_secs
                 .map_or(defaults.slow_reader_timeout, std::time::Duration::from_secs),
-            stall_grace: defaults.stall_grace,
+            stall_grace: self
+                .egress_stall_grace_secs
+                .map_or(defaults.stall_grace, std::time::Duration::from_secs),
+            min_read_rate: self
+                .slow_reader_min_bytes_per_sec
+                .unwrap_or(defaults.min_read_rate),
         }
     }
 

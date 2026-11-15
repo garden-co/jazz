@@ -2320,16 +2320,20 @@ pub struct EgressLimits {
     /// ticks ([`SESSION_BACKLOG_CEILING`]). At least `session_backlog_bytes`.
     pub session_backlog_max_bytes: usize,
     /// Undrained output all sessions together may hold, best effort: past
-    /// it, the sessions stalled for [`Self::stall_grace`] are closed,
+    /// it, the sessions behind the minimum read rate by
+    /// [`Self::stall_grace`] are closed,
     /// biggest first, until the rest fit or none is left stalled. Sessions
     /// still reading are never closed for it, so the total may exceed it by
     /// what they hold (each bounded by its own backlog bound).
     pub egress_budget_bytes: usize,
     /// How long a session may stay at its egress budget without reading.
     pub slow_reader_timeout: Duration,
-    /// How long a session must have read nothing before the egress budget
-    /// may close it ([`STALL_GRACE`]).
+    /// How long a session must have been behind [`Self::min_read_rate`]
+    /// before the egress budget may close it ([`STALL_GRACE`]).
     pub stall_grace: Duration,
+    /// Bytes a second a client must read, on average, while its output
+    /// waits, to count as reading ([`MIN_READ_RATE`]).
+    pub min_read_rate: u64,
 }
 
 impl Default for EgressLimits {
@@ -2340,6 +2344,7 @@ impl Default for EgressLimits {
             egress_budget_bytes: EGRESS_BUDGET_DEFAULT,
             slow_reader_timeout: SLOW_READER_TIMEOUT,
             stall_grace: STALL_GRACE,
+            min_read_rate: MIN_READ_RATE,
         }
     }
 }
@@ -2387,22 +2392,31 @@ fn sessions_to_shed(held: Vec<(ServerSession, usize, bool)>, budget: usize) -> V
     shed
 }
 
-/// Whether a session's client is reading: from the bytes handed to its
-/// socket side and those its connection has not taken yet, the bytes it
-/// has taken (which it takes as the client reads). A
-/// client that read anything since the last check is reading, however much
-/// it still has to read; one that read nothing while its egress was at the
-/// budget has been stalled since that check. Past
-/// [`EgressLimits::slow_reader_timeout`] stalled, it is closed.
+/// How far a session's client is behind a minimum read rate, while its
+/// output waits at the budget.
+///
+/// A client's progress is the bytes it took (handed to the socket side
+/// minus those still held) or the raw bytes its socket wrote, whichever
+/// moved more since the last check: either is the client making room. Each
+/// check while the egress is at the budget, the clock runs, and progress
+/// winds it back at [`EgressLimits::min_read_rate`]: a client reading at
+/// least that fast stays at zero, one that stopped, or trickles a few
+/// bytes a second to dodge the bound, falls behind as fast as time passes.
+/// Under the budget nothing waits on the client, and the clock resets.
+/// Past [`EgressLimits::slow_reader_timeout`] behind, the session is
+/// closed; past [`EgressLimits::stall_grace`], the egress budget may close
+/// it.
 #[derive(Default)]
 struct ReadClock {
     /// Bytes ever handed to the socket side.
     handed: std::cell::Cell<u64>,
-    /// Bytes the client had read at the last check (`handed - egress`).
-    read: std::cell::Cell<i128>,
+    /// Bytes the client had taken at the last check (`handed - egress`).
+    taken: std::cell::Cell<i128>,
     /// Raw bytes the socket had written at the last check.
     written: std::cell::Cell<u64>,
-    stalled_since: std::cell::Cell<Option<std::time::Instant>>,
+    /// The moment the client's reading has caught up to, at the minimum
+    /// rate, while the egress is at the budget.
+    caught_up: std::cell::Cell<Option<std::time::Instant>>,
 }
 
 impl ReadClock {
@@ -2411,35 +2425,44 @@ impl ReadClock {
         self.handed.set(self.handed.get() + bytes as u64);
     }
 
-    /// Check at `now`, with `egress` unread: how long the client has been
-    /// stalled, if it is.
-    fn check(&self, egress: &Egress, now: std::time::Instant) -> Option<Duration> {
+    /// Check at `now`: how far the client is behind `min_rate` bytes a
+    /// second while its egress is at the budget, if it is.
+    fn check(&self, egress: &Egress, now: std::time::Instant, min_rate: u64) -> Option<Duration> {
         let (held, written) = (egress.load(Ordering::Acquire), egress.written());
-        let read = i128::from(self.handed.get()) - held as i128;
-        // A message taken off the queue, or raw bytes the socket wrote (the
-        // client made room for them): either is the client reading.
-        let took = read > self.read.replace(read);
-        let wrote = written > self.written.replace(written);
-        let reading = took || wrote;
-        let egress = held;
-        if reading || egress < SESSION_QUEUE_BUDGET {
-            self.stalled_since.set(None);
+        let taken = i128::from(self.handed.get()) - held as i128;
+        let took = u64::try_from(taken - self.taken.replace(taken)).unwrap_or(0);
+        let wrote = written.saturating_sub(self.written.replace(written));
+        let progress = took.max(wrote);
+        if held < SESSION_QUEUE_BUDGET {
+            self.caught_up.set(None);
             return None;
         }
-        let since = *self.stalled_since.get().get_or_insert(now);
-        self.stalled_since.set(Some(since));
-        Some(now.duration_since(since))
+        let credit = Duration::from_secs_f64(progress as f64 / min_rate.max(1) as f64);
+        let caught_up = self
+            .caught_up
+            .get()
+            .unwrap_or(now)
+            .checked_add(credit)
+            .unwrap_or(now)
+            .min(now);
+        self.caught_up.set(Some(caught_up));
+        Some(now.duration_since(caught_up))
     }
 }
 
-/// How long a session must have read nothing before the egress budget may
-/// close it: the default of [`EgressLimits::stall_grace`]. A reader's
-/// progress reaches the server in TCP window updates, a megabyte or so
-/// apart: at a slow mobile link's pace that is seconds between them, which
-/// must not read as stopped. Output handed over in this tick has not had a
-/// chance to be read either, so a session that just got a big result is
-/// not stalled.
-pub(crate) const STALL_GRACE: Duration = Duration::from_secs(30);
+/// The default of [`EgressLimits::min_read_rate`]: 1 KiB/s. Slower than
+/// any link a person uses; a client that reads slower than this for the
+/// slow-reader timeout while its output waits is closed.
+pub(crate) const MIN_READ_RATE: u64 = 1024;
+
+/// How long a session must have been behind the minimum read rate before
+/// the egress budget may close it: the default of
+/// [`EgressLimits::stall_grace`] (`JAZZ_EGRESS_STALL_GRACE_SECS`). Output
+/// handed over in this tick has not had a chance to be read, so a session
+/// that just got a big result is not closed at once; a client reading at
+/// the minimum rate never falls behind at all. Shorter reclaims memory
+/// sooner in a spike, longer spares clients whose link pauses.
+pub(crate) const STALL_GRACE: Duration = Duration::from_secs(10);
 
 /// Sessions a runtime closed because their client fell behind, by reason.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -3067,7 +3090,11 @@ impl Owner {
         let mut held: Vec<(ServerSession, usize, bool)> = Vec::new();
         let mut too_slow = Vec::new();
         for (id, session) in &self.sessions {
-            let stalled = session.queues.clock.check(&session.egress, now);
+            let stalled =
+                session
+                    .queues
+                    .clock
+                    .check(&session.egress, now, self.limits.min_read_rate);
             if stalled.is_some_and(|stalled| stalled > timeout) {
                 too_slow.push(*id);
             }
@@ -3075,7 +3102,7 @@ impl Owner {
             held.push((*id, session.queues.backlog.undrained(), stalled_long));
         }
         for (id, thin) in &self.thin {
-            let stalled = thin.stalled_for(now);
+            let stalled = thin.stalled_for(now, self.limits.min_read_rate);
             if stalled.is_some_and(|stalled| stalled > timeout) {
                 too_slow.push(*id);
             }
@@ -4105,6 +4132,32 @@ mod tests {
         assert!(!backlog.admits());
     }
 
+    /// Once the burst that raised it has drained, a session's bound is the
+    /// floor again: one huge result does not let it hold more for good.
+    #[test]
+    fn the_bound_drops_back_once_the_burst_has_drained() {
+        let egress = Arc::new(Egress::default());
+        let backlog = Backlog::new(Arc::clone(&egress), &EgressLimits::default());
+        backlog.start_tick();
+        let burst = 200 * 1024 * 1024;
+        backlog.queued(burst);
+        backlog.handed_on(burst);
+        egress.store(burst, Ordering::Release);
+        backlog.start_tick();
+        egress.store(SESSION_BACKLOG_FLOOR + 1, Ordering::Release);
+        backlog.start_tick();
+        assert!(backlog.admits(), "still draining the burst");
+        // Drained under the floor: the burst no longer counts.
+        egress.store(SESSION_BACKLOG_FLOOR - 1, Ordering::Release);
+        backlog.start_tick();
+        egress.store(SESSION_BACKLOG_FLOOR + 1, Ordering::Release);
+        backlog.start_tick();
+        assert!(
+            !backlog.admits(),
+            "past the floor again, with no new burst, it is refused"
+        );
+    }
+
     /// Over the server's egress budget, the stalled sessions holding the
     /// most are closed first, only as many as the rest need to fit. A
     /// session that is reading is never picked, however much it holds.
@@ -4135,39 +4188,48 @@ mod tests {
         );
     }
 
-    /// A client is stalled only while it reads nothing with its egress at
-    /// the budget: a steady slow reader with far more to read than the
-    /// budget is never stalled, and any read restarts the clock.
+    /// While its output waits at the budget, a client is behind by the time
+    /// it read slower than the minimum rate: one reading faster stays at
+    /// zero however much it has left, one that stops or only trickles falls
+    /// behind as time passes, and raw bytes its socket wrote count as
+    /// reading as much as messages taken.
     #[test]
-    fn the_read_clock_runs_only_while_the_client_reads_nothing() {
+    fn the_read_clock_measures_how_far_behind_the_minimum_rate_a_client_is() {
         let clock = ReadClock::default();
         let egress = Egress::default();
         let start = std::time::Instant::now();
-        let at = |secs| start + Duration::from_secs(secs);
+        let at = |secs: u64| start + Duration::from_secs(secs);
         let full = SESSION_QUEUE_BUDGET;
+        let rate = 1024;
         let check = |held: usize, secs| {
             egress.store(held, Ordering::Release);
-            clock.check(&egress, at(secs))
+            clock.check(&egress, at(secs), rate)
         };
-        // A slow reader: each check it read a little, and was refilled.
+        // A slow reader taking 2 KiB a second, refilled: never behind.
         clock.handed(full);
-        for secs in 0..600 {
-            clock.handed(1024);
-            assert_eq!(check(full, secs), None, "it reads at {secs}s");
+        assert_eq!(check(full, 0), Some(Duration::ZERO));
+        for secs in 1..600 {
+            clock.handed(2048);
+            assert_eq!(check(full, secs), Some(Duration::ZERO), "at {secs}s");
         }
-        // It stops reading: stalled from the first check that saw no read.
-        clock.handed(1024);
-        assert_eq!(check(full + 1024, 600), Some(Duration::ZERO));
-        assert_eq!(check(full + 1024, 900), Some(Duration::from_secs(300)));
-        // One read restarts it.
-        assert_eq!(check(full, 901), None);
-        assert_eq!(check(full, 902), Some(Duration::ZERO));
-        // Raw bytes its socket wrote, a large message still going: reading.
-        egress.written.fetch_add(4096, Ordering::AcqRel);
-        assert_eq!(check(full, 903), None);
-        assert_eq!(check(full, 904), Some(Duration::ZERO));
-        // Under the budget, nothing waits on it: not stalled.
-        assert_eq!(check(full - 1, 905), None);
+        // It stops: behind by the time passed.
+        assert_eq!(check(full, 900), Some(Duration::from_secs(301)));
+        // A trickle of 10 bytes a second winds it back by 10 ms a second.
+        for secs in 901..=1000 {
+            clock.handed(10);
+            check(full, secs);
+        }
+        let behind = check(full, 1000).unwrap();
+        assert!(
+            behind > Duration::from_secs(400),
+            "a trickle stays behind: {behind:?}"
+        );
+        // Raw bytes its socket wrote, a large message still going out,
+        // count as reading: 1 MiB is 1024 s at 1 KiB/s.
+        egress.written.fetch_add(1024 * 1024, Ordering::AcqRel);
+        assert_eq!(check(full, 1001), Some(Duration::ZERO));
+        // Under the budget nothing waits on it.
+        assert_eq!(check(full - 1, 1002), None);
     }
 
     #[test]

@@ -212,6 +212,8 @@ pub fn serve_core(options: JsonValue) -> Result<ServedCore> {
                 session_backlog_max_bytes: None,
                 egress_budget_bytes: None,
                 slow_reader_timeout_secs: None,
+                egress_stall_grace_secs: None,
+                slow_reader_min_bytes_per_sec: None,
             },
             jazz_server::ShutdownSignal::External(stop_requested),
         )

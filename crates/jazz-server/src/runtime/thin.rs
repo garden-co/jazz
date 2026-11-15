@@ -113,10 +113,14 @@ impl ThinSession {
         }
     }
 
-    /// How long its client has read nothing with its egress at the
-    /// budget, if it has ([`super::ReadClock`]).
-    pub(super) fn stalled_for(&self, now: std::time::Instant) -> Option<std::time::Duration> {
-        self.clock.check(&self.egress, now)
+    /// How far its client is behind the minimum read rate with its egress
+    /// at the budget, if it is ([`super::ReadClock`]).
+    pub(super) fn stalled_for(
+        &self,
+        now: std::time::Instant,
+        min_rate: u64,
+    ) -> Option<std::time::Duration> {
+        self.clock.check(&self.egress, now, min_rate)
     }
 
     /// Output it holds in server memory: handed to the socket side, not yet

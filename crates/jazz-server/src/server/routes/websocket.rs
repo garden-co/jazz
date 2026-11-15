@@ -1193,7 +1193,10 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     let (writer_stopped, mut writer_terminal) = tokio::sync::oneshot::channel();
     // The session's output counts as held until it is written to the
     // socket, a message at a time: a client reading slowly is seen reading
-    // as each message goes, not only when a whole batch is taken.
+    // as each message goes, not only when a whole batch is taken. If the
+    // writer fails or is aborted, the messages still queued for it are
+    // never released: they stay counted until the session closes, which
+    // the failed writer ends the connection with anyway.
     let egress = output.egress_release();
     if let Some(activity) = &peer_activity {
         activity.report_writes(output.written_bytes());
@@ -5999,7 +6002,11 @@ mod tests {
         .await
     }
 
-    async fn send_thin(ws: &mut TestWs, id: u64, op: jazz::thin::ThinOp) {
+    async fn send_thin<IO: TestWsIo>(
+        ws: &mut tokio_tungstenite::WebSocketStream<IO>,
+        id: u64,
+        op: jazz::thin::ThinOp,
+    ) {
         let frame = encode_frame(&WireFrame::ThinRequest(jazz::thin::ThinRequest { id, op }))
             .expect("encode thin request");
         // A request over one frame goes in parts, a message each.
@@ -6012,8 +6019,8 @@ mod tests {
     }
 
     /// Thin responses until `done` holds for the ones so far.
-    async fn thin_responses_until(
-        ws: &mut TestWs,
+    async fn thin_responses_until<IO: TestWsIo>(
+        ws: &mut tokio_tungstenite::WebSocketStream<IO>,
         done: impl Fn(&[jazz::thin::ThinResponse]) -> bool,
     ) -> Vec<jazz::thin::ThinResponse> {
         let mut responses = Vec::new();
@@ -6048,7 +6055,10 @@ mod tests {
         responses
     }
 
-    async fn thin_answer(ws: &mut TestWs, id: u64) -> jazz::thin::ThinBody {
+    async fn thin_answer<IO: TestWsIo>(
+        ws: &mut tokio_tungstenite::WebSocketStream<IO>,
+        id: u64,
+    ) -> jazz::thin::ThinBody {
         let responses =
             thin_responses_until(ws, |responses| responses.iter().any(|r| r.id == id)).await;
         responses
@@ -6114,7 +6124,10 @@ mod tests {
         titles
     }
 
-    async fn bind_thin_schema(ws: &mut TestWs, schema: &Schema) {
+    async fn bind_thin_schema<IO: TestWsIo>(
+        ws: &mut tokio_tungstenite::WebSocketStream<IO>,
+        schema: &Schema,
+    ) {
         send_thin(
             ws,
             0,
@@ -6863,21 +6876,81 @@ mod tests {
         assert_eq!(runtime.egress_sheds().await.unwrap().slow_reader, 1);
     }
 
-    /// Through the real WebSocket writer and TCP: a client that reads one
-    /// message every 20 ms, far slower than the server produces, with tens
-    /// of MiB still to read, keeps its session past several slow-reader
-    /// timeouts: the raw bytes its socket writes as the client makes room
-    /// show it reading. It is closed with `Backpressure` only once it stops
-    /// reading.
+    /// A thin client WebSocket served exactly as `ws_handler` serves an
+    /// upgraded one, over a link that passes the server's bytes on at `rate`
+    /// bytes a second while `flowing` and none while not: a slow mobile link,
+    /// then one that went dead. The client's bytes pass freely. Each side's
+    /// pipe holds 64 KiB, so the server sees the link's pace, not a buffer.
+    async fn open_thin_ws_over_link(
+        state: &Arc<ServerState>,
+        identity: AuthorSubject,
+        rate: usize,
+        flowing: Arc<std::sync::atomic::AtomicBool>,
+    ) -> tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (server_io, link_server) = tokio::io::duplex(64 * 1024);
+        let (link_client, client_io) = tokio::io::duplex(64 * 1024);
+        let (mut from_server, mut to_server) = tokio::io::split(link_server);
+        let (mut from_client, mut to_client) = tokio::io::split(link_client);
+        tokio::spawn(async move {
+            let _ = tokio::io::copy(&mut from_client, &mut to_server).await;
+        });
+        tokio::spawn(async move {
+            let tick = std::time::Duration::from_millis(20);
+            let mut buf = vec![0; rate / 50];
+            loop {
+                if flowing.load(Ordering::Acquire) {
+                    let read = match from_server.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => read,
+                    };
+                    if to_client.write_all(&buf[..read]).await.is_err() {
+                        break;
+                    }
+                }
+                tokio::time::sleep(tick).await;
+            }
+        });
+        let guard = state
+            .shutdown
+            .try_enter_websocket_within(state.max_websocket_connections)
+            .expect("a websocket slot");
+        tokio::spawn(serve_upgraded_ws(
+            server_io,
+            Arc::clone(state),
+            HeaderMap::new(),
+            guard,
+        ));
+        let ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            client_io,
+            tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let bundle = current_bundle(([127, 0, 0, 1], 0).into(), state).await;
+        negotiate_ws(
+            ws,
+            ws_pinned_session_prelude(identity, &bundle),
+            jazz::wire::FEATURE_THIN_RESULTS,
+        )
+        .await
+    }
+
+    /// Through the real WebSocket route and writer: a client on a 50 KiB/s
+    /// link, with tens of MiB to read, keeps its session past several
+    /// slow-reader timeouts. Each row is 1 MiB, so each message takes about
+    /// 20 s on that link: what shows it reading is the raw bytes its socket
+    /// writes as the link makes room, not whole messages. Once the link goes
+    /// dead it is closed for reading slower than the minimum rate.
     ///
     /// ```text
-    /// alice ──insert×1600 (16 KiB)──► server ──events──► alice's socket
-    /// (the inserts come over a second connection of hers)
-    ///   reads 1 msg / 20 ms for 8 s ── stays open (timeout 3 s)
-    ///   stops reading ── > 3 s ───────► Backpressure, Later
+    /// writer (alice, 2nd connection) ──insert×40 (1 MiB)──► server
+    /// server ──events──► alice's socket ──50 KiB/s link──► alice
+    ///   8 s reading (timeout 3 s) ───────── stays open
+    ///   link dead ── > 3 s ──────────────── closed, slow_reader = 1
     /// ```
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_slow_websocket_reader_is_seen_reading_by_its_socket_writes() {
+    async fn a_client_on_a_slow_link_is_seen_reading_by_its_socket_writes() {
         use crate::runtime::EgressLimits;
         let (state, schema) = private_docs_state().await;
         let runtime = state.runtime().expect("a runtime");
@@ -6889,7 +6962,8 @@ mod tests {
             .await;
         let addr = start_ws_test_server(state.clone()).await;
         let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
-        let mut ws = open_thin_ws(addr, &state, alice).await;
+        let flowing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut ws = open_thin_ws_over_link(&state, alice, 50 * 1024, Arc::clone(&flowing)).await;
         bind_thin_schema(&mut ws, &schema).await;
         send_thin(
             &mut ws,
@@ -6900,69 +6974,40 @@ mod tests {
             },
         )
         .await;
-        // The writes come over a second connection, whose output (its
-        // answers) stays small, while alice reads slowly from the start.
+        // Alice reads everything that comes over her link.
+        let reader = tokio::spawn(async move { while let Some(Ok(_)) = ws.next().await {} });
         let mut writer = open_thin_ws(addr, &state, alice).await;
         bind_thin_schema(&mut writer, &schema).await;
-        let inserts = tokio::spawn(async move {
-            let body = "x".repeat(16 * 1024);
-            for n in 0..1600u64 {
-                send_thin(
-                    &mut writer,
-                    10 + n,
-                    jazz::thin::ThinOp::Insert {
-                        table: "docs".to_owned(),
-                        cells: doc_cells(&format!("{n:05}{body}"), alice),
-                        options: Vec::new(),
-                        transaction: None,
-                    },
-                )
-                .await;
-            }
-            writer
-        });
-        let closed = |message: &WsMessage| {
-            decode_ws_message(message)
-                .into_iter()
-                .find_map(|frame| match frame {
-                    WireFrame::Error(error) => Some(error),
-                    _ => None,
-                })
-        };
-        // Reading slowly, well past the timeout.
-        let reading = tokio::time::Instant::now();
-        while reading.elapsed() < std::time::Duration::from_secs(8) {
-            let message = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
-                .await
-                .expect("output keeps coming")
-                .expect("open")
-                .expect("a message");
-            assert_eq!(closed(&message), None, "a reader that reads is not closed");
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let body = "x".repeat(1024 * 1024);
+        for n in 0..40u64 {
+            send_thin(
+                &mut writer,
+                10 + n,
+                jazz::thin::ThinOp::Insert {
+                    table: "docs".to_owned(),
+                    cells: doc_cells(&format!("{n:05}{body}"), alice),
+                    options: Vec::new(),
+                    transaction: None,
+                },
+            )
+            .await;
         }
-        assert_eq!(runtime.egress_sheds().await.unwrap().slow_reader, 0);
-        let _writer = inserts.await.expect("the inserts went in");
-        // It stops reading: past the timeout it is closed.
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+        assert_eq!(
+            runtime.egress_sheds().await.unwrap().slow_reader,
+            0,
+            "a client whose link moves is not closed"
+        );
+        // The link goes dead; its output waits at the budget (tens of MiB
+        // are still to go).
+        flowing.store(false, Ordering::Release);
         tokio::time::sleep(std::time::Duration::from_secs(6)).await;
         assert_eq!(
             runtime.egress_sheds().await.unwrap().slow_reader,
             1,
-            "the reader that stopped is closed"
+            "the client whose link went dead is closed"
         );
-        let error = loop {
-            let message = tokio::time::timeout(std::time::Duration::from_secs(30), ws.next())
-                .await
-                .expect("the close arrives")
-                .expect("open")
-                .expect("a message");
-            if let Some(error) = closed(&message) {
-                break error;
-            }
-        };
-        assert_eq!(
-            (error.code, error.retry),
-            (WireErrorCode::Backpressure, WireRetry::Later)
-        );
+        reader.abort();
     }
 
     /// Over the server's egress budget, the stalled session holding the
