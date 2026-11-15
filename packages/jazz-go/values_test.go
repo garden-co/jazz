@@ -75,3 +75,22 @@ func TestNullInANonPointerFieldIsRefused(t *testing.T) {
 		t.Fatalf("a delta with a null rank: %+v", d)
 	}
 }
+
+func TestPayloadEnumCases(t *testing.T) {
+	got, err := MarshalCase("approved", struct {
+		By string `json:"by"`
+	}{"u1"})
+	if err != nil || string(got) != `{"case":"approved","fields":{"by":"u1"}}` {
+		t.Fatalf("%s %v", got, err)
+	}
+	c, fields, err := DecodeCase(json.RawMessage(`{"case":"pending"}`))
+	if err != nil || c != "pending" || string(fields) != "{}" {
+		t.Fatalf("%q %s %v", c, fields, err)
+	}
+	if c, _, err := DecodeCase(json.RawMessage(`null`)); c != "" || err != nil {
+		t.Fatalf("null: %q %v", c, err)
+	}
+	if !errors.Is(UnknownCase("column `tasks.review`", "later"), ErrRefused) {
+		t.Fatal("unknown case is refused")
+	}
+}

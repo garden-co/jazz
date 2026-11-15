@@ -175,3 +175,93 @@ func TestWaitForSyncAndPermissionErrors(t *testing.T) {
 		t.Fatalf("bob's write: %v", err)
 	}
 }
+
+func TestMergeableTextEdits(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	srv := testServer(t)
+	db := openTest(t, srv, "alice")
+	show, err := ensureShow(ctx, db, "Text Night")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := jazzapp.Tasks.Insert(ctx, db, jazzapp.NewTask{
+		ShowID: show.ID, Title: "Soundcheck", Status: jazzapp.TaskStatusTodo, Rank: 1,
+		Notes: jazz.Ptr("check mics"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes := func() string {
+		row, err := jazzapp.Tasks.Query().Where(jazzapp.Tasks.ID.Eq(task.ID)).One(ctx, db)
+		if err != nil || row == nil || row.Notes == nil {
+			t.Fatalf("read: %+v %v", row, err)
+		}
+		return *row.Notes
+	}
+	// Edits by byte offset: capitalise, then append.
+	if err := jazzapp.Tasks.EditNotes(ctx, db, task.ID,
+		jazz.Splice(0, 1, "C"), jazz.Splice(len("Check mics"), 0, " and DI boxes")); err != nil {
+		t.Fatal(err)
+	}
+	if got := notes(); got != "Check mics and DI boxes" {
+		t.Fatalf("after edits: %q", got)
+	}
+	// Two writers editing from the same text merge three-way.
+	base := notes()
+	if err := jazz.SetText(ctx, db, "tasks", task.ID, "notes", base, "Check mics and DI boxes, early"); err != nil {
+		t.Fatal(err)
+	}
+	if err := jazz.SetText(ctx, db, "tasks", task.ID, "notes", base, "Check all mics and DI boxes"); err != nil {
+		t.Fatal(err)
+	}
+	if got := notes(); got != "Check all mics and DI boxes, early" {
+		t.Fatalf("merged: %q", got)
+	}
+	// An offset outside the text, or inside a character, is refused.
+	if err := jazzapp.Tasks.EditNotes(ctx, db, task.ID, jazz.Splice(-1, 0, "x")); !errors.Is(err, jazz.ErrRefused) {
+		t.Fatalf("negative offset: %v", err)
+	}
+	if err := jazzapp.Tasks.Update(ctx, db, task.ID, jazzapp.TaskPatch{Notes: jazz.Set(jazz.Ptr("héllo"))}); err != nil {
+		t.Fatal(err)
+	}
+	if err := jazzapp.Tasks.EditNotes(ctx, db, task.ID, jazz.Splice(2, 0, "x")); !errors.Is(err, jazz.ErrRefused) {
+		t.Fatalf("mid-character offset: %v (notes now %q)", err, notes())
+	}
+}
+
+func TestPermissionAdvice(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	srv := testServer(t)
+	alice := openTest(t, srv, "alice")
+	bob := openTest(t, srv, "bob")
+	show, err := ensureShow(ctx, alice, "Advice Night")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := addTask(ctx, alice, show.ID, "Load-in")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := alice.WaitForSync(ctx, jazz.WriteGlobal); err != nil {
+		t.Fatal(err)
+	}
+	newTask := jazzapp.NewTask{ShowID: show.ID, Title: "More", Status: jazzapp.TaskStatusTodo, Rank: 2}
+	for _, c := range []struct {
+		name string
+		got  func() (jazz.Advice, error)
+		want jazz.Advice
+	}{
+		{"alice inserts", func() (jazz.Advice, error) { return jazzapp.Tasks.CanInsert(ctx, alice, newTask) }, jazz.Allowed},
+		{"alice updates", func() (jazz.Advice, error) {
+			return jazzapp.Tasks.CanUpdate(ctx, alice, task.ID, jazzapp.TaskPatch{Title: jazz.Set("Load-in early")})
+		}, jazz.Allowed},
+		{"bob inserts", func() (jazz.Advice, error) { return jazzapp.Tasks.CanInsert(ctx, bob, newTask) }, jazz.Denied},
+	} {
+		got, err := c.got()
+		if err != nil || got != c.want {
+			t.Errorf("%s: %q, %v (want %q)", c.name, got, err, c.want)
+		}
+	}
+}

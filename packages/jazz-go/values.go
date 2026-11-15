@@ -98,3 +98,37 @@ func PatchJSON(entries ...PatchEntry) (any, error) {
 	}
 	return json.RawMessage(b), nil
 }
+
+// MarshalCase writes a payload enum's case as Jazz carries it:
+// {"case": name, "fields": {…}}. Generated case structs use it.
+func MarshalCase(name string, fields any) ([]byte, error) {
+	return json.Marshal(struct {
+		Case   string `json:"case"`
+		Fields any    `json:"fields"`
+	}{name, fields})
+}
+
+// DecodeCase reads a payload enum's {"case", "fields"}: its case ("" for
+// null) and its fields (an empty object when it has none).
+func DecodeCase(raw json.RawMessage) (string, json.RawMessage, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", nil, nil
+	}
+	var v struct {
+		Case   string          `json:"case"`
+		Fields json.RawMessage `json:"fields"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "", nil, err
+	}
+	if len(v.Fields) == 0 || string(v.Fields) == "null" {
+		v.Fields = json.RawMessage("{}")
+	}
+	return v.Case, v.Fields, nil
+}
+
+// UnknownCase is the error for a payload enum case the bindings don't
+// know: regenerate them.
+func UnknownCase(what, name string) error {
+	return &Error{Kind: KindRefused, Message: what + " has no case " + name + ": regenerate the bindings"}
+}

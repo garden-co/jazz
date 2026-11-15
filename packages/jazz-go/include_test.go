@@ -77,3 +77,36 @@ func TestSelectReadsIntoYourStruct(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+type hookCrew struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Upper string `json:"-"`
+}
+
+func (c *hookCrew) JazzDecode(app any, fields map[string]json.RawMessage) error {
+	c.Upper = app.(string) + c.Name
+	return nil
+}
+
+type hookComment struct {
+	ID     string    `json:"id"`
+	Author *hookCrew `json:"author,omitempty"`
+}
+
+type hookTask struct {
+	ID       string        `json:"id"`
+	Comments []hookComment `json:"comments,omitempty"`
+	Owner    *hookCrew     `json:"owner,omitempty"`
+}
+
+func TestHooksRunOnIncludedRows(t *testing.T) {
+	var row hookTask
+	err := decodeRow("hi ", "tasks", json.RawMessage(`{"id":"t","owner":{"id":"o","name":"Olu"},"comments":[{"id":"c","author":{"id":"a","name":"Ann"}},{"id":"d","author":null}]}`), &row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Owner.Upper != "hi Olu" || row.Comments[0].Author.Upper != "hi Ann" || row.Comments[1].Author != nil {
+		t.Fatalf("%+v", row)
+	}
+}

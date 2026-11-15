@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use jazz::tools::public_schema::ColumnType;
+use jazz::tools::public_schema::{ColumnMergeStrategy, ColumnType};
 
 use crate::CodegenError;
 use crate::model::{App, Column, RelationKind, Table};
@@ -55,7 +55,18 @@ const RESERVED: &[&str] = &["App", "Source", "Open"];
 
 /// Method names of a table value or a patch struct, which no column may
 /// take as its Go name.
-const TABLE_METHODS: &[&str] = &["Query", "Insert", "Update", "Delete", "MarshalJSON"];
+const TABLE_METHODS: &[&str] = &[
+    "Query",
+    "History",
+    "Insert",
+    "Update",
+    "Delete",
+    "CanRead",
+    "CanInsert",
+    "CanUpdate",
+    "CanDelete",
+    "MarshalJSON",
+];
 
 /// Words Go spells in capitals inside a name (`userID`, `avatarURL`).
 const INITIALISMS: &[&str] = &[
@@ -105,6 +116,9 @@ struct Writer<'a> {
     uses_json: bool,
     /// Transforms by name, once their types were generated.
     transforms: BTreeMap<String, (String, String, String)>,
+    /// Generated payload enums by Go name: cases (struct name, stored name,
+    /// fields as (Go name, stored name, Go type)), and what declared them.
+    unions: BTreeMap<String, (Vec<UnionCase>, String)>,
     /// The methods of the `Computed` interface, with their doc lines.
     computed_methods: Vec<(String, String)>,
     has_computed: bool,
@@ -120,6 +134,9 @@ struct Field {
     value: String,
     optional_on_insert: bool,
     nullable: bool,
+    /// The payload enum (a sealed interface) the column holds, if any:
+    /// decoded by the row's JazzDecode, and nil when null.
+    union: Option<String>,
     /// The transform the column goes through: `ty` is then its view type,
     /// `value` (and the JSON) its stored one.
     transform: Option<FieldTransform>,
@@ -133,6 +150,10 @@ struct FieldTransform {
     /// The view type, never a pointer.
     view: String,
 }
+
+/// A payload enum case: its struct, its stored name, and its fields as
+/// (Go name, stored name, Go type).
+type UnionCase = (String, String, Vec<(String, String, String)>);
 
 /// A transform's Go names and types.
 struct GoTransform {
@@ -153,6 +174,7 @@ impl<'a> Writer<'a> {
                 .collect(),
             uses_json: false,
             transforms: BTreeMap::new(),
+            unions: BTreeMap::new(),
             computed_methods: Vec::new(),
             has_computed: !app.transforms.is_empty()
                 || app.tables.iter().any(|t| !t.computed.is_empty()),
@@ -264,6 +286,55 @@ impl<'a> Writer<'a> {
             }
             out.push_str(")\n\n");
         }
+        for (name, (cases, what)) in &self.unions {
+            let _ = writeln!(
+                out,
+                "// {name} is a value of {what}: one of {}.",
+                cases
+                    .iter()
+                    .map(|(c, _, _)| c.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let _ = writeln!(out, "type {name} interface{{ is{name}() }}\n");
+            for (case_ty, case_name, fields) in cases {
+                let _ = writeln!(out, "// {case_ty} is the case `{case_name}` of {name}.");
+                let lines: Vec<[String; 3]> = fields
+                    .iter()
+                    .map(|(ident, field, ty)| {
+                        [ident.clone(), ty.clone(), format!("`json:\"{field}\"`")]
+                    })
+                    .collect();
+                write_struct(&mut out, case_ty, &lines);
+                let _ = writeln!(out, "func ({case_ty}) is{name}() {{}}\n");
+                let _ = writeln!(
+                    out,
+                    "// MarshalJSON writes the case as Jazz carries it: {{case, fields}}."
+                );
+                let _ = writeln!(
+                    out,
+                    "func (v {case_ty}) MarshalJSON() ([]byte, error) {{\n\ttype fields {case_ty}\n\treturn jazz.MarshalCase({}, fields(v))\n}}\n",
+                    go_string(case_name)
+                );
+            }
+            let _ = writeln!(
+                out,
+                "func decode{name}(raw json.RawMessage) ({name}, error) {{"
+            );
+            out.push_str("\tcase_, fields, err := jazz.DecodeCase(raw)\n\tif err != nil || case_ == \"\" {\n\t\treturn nil, err\n\t}\n\tswitch case_ {\n");
+            for (case_ty, case_name, _) in cases {
+                let _ = writeln!(
+                    out,
+                    "\tcase {}:\n\t\tvar v {case_ty}\n\t\terr := json.Unmarshal(fields, &v)\n\t\treturn v, err",
+                    go_string(case_name)
+                );
+            }
+            let _ = writeln!(
+                out,
+                "\t}}\n\treturn nil, jazz.UnknownCase({}, case_)\n}}\n",
+                go_string(what)
+            );
+        }
         out.push_str(&items);
         // One trailing newline, as gofmt leaves it.
         while out.ends_with("\n\n") {
@@ -310,6 +381,42 @@ impl<'a> Writer<'a> {
                     .insert(name.to_owned(), (values, what.to_owned()));
                 name.to_owned()
             }
+            ColumnType::EnumPayload { cases } => {
+                self.uses_json = true;
+                self.take(name, what)?;
+                let mut out = Vec::new();
+                for case in cases {
+                    let case_ty =
+                        go_ident(&format!("{name}{}", pascal_words(&case.name)), &case.name)?;
+                    self.take(&case_ty, what)?;
+                    let mut fields = Vec::new();
+                    let mut seen = BTreeSet::new();
+                    for field in &case.fields {
+                        let field_name = field.name_str().to_string();
+                        let ident = go_ident(&pascal_words(&field_name), &field_name)?;
+                        if !seen.insert(ident.clone()) {
+                            return Err(CodegenError::unsupported(format!(
+                                "{what}: fields of case `{}` are both the Go name `{ident}`",
+                                case.name
+                            )));
+                        }
+                        let inner = self.go_type(
+                            &field.column_type,
+                            &format!("{case_ty}{ident}"),
+                            &format!("{what}, case `{}`", case.name),
+                        )?;
+                        let ty = if field.nullable {
+                            format!("*{inner}")
+                        } else {
+                            inner
+                        };
+                        fields.push((ident, field_name, ty));
+                    }
+                    out.push((case_ty, case.name.clone(), fields));
+                }
+                self.unions.insert(name.to_owned(), (out, what.to_owned()));
+                name.to_owned()
+            }
             other => {
                 return Err(CodegenError::unsupported(format!(
                     "{what}: {} values in Go bindings",
@@ -341,10 +448,16 @@ impl<'a> Writer<'a> {
             None => None,
         };
         let shown = transform.as_ref().map_or(value.clone(), |t| t.view.clone());
+        let union = self.unions.contains_key(&value).then(|| value.clone());
         Ok(Field {
             name: column.name.clone(),
             ident,
-            ty: if nullable { format!("*{shown}") } else { shown },
+            union: union.clone(),
+            ty: if nullable && union.is_none() {
+                format!("*{shown}")
+            } else {
+                shown
+            },
             value,
             optional_on_insert: column.optional_on_insert(),
             nullable,
@@ -419,9 +532,17 @@ impl<'a> Writer<'a> {
                 )));
             }
             let target = self.tables[relation.target.as_str()].row.clone();
-            let ty = match relation.kind {
-                RelationKind::One { .. } => format!("*{target}"),
-                RelationKind::Many { .. } => format!("[]{target}"),
+            // A forward relation through an array of ids leads to many rows.
+            let through_array = match &relation.kind {
+                RelationKind::One { column, .. } => table
+                    .column(column)
+                    .is_some_and(|c| matches!(c.ty.ty, ColumnType::Array { .. })),
+                RelationKind::Many { .. } => true,
+            };
+            let ty = if through_array {
+                format!("[]{target}")
+            } else {
+                format!("*{target}")
             };
             relations.push((ident, relation.name.clone(), target, ty));
         }
@@ -470,7 +591,34 @@ impl<'a> Writer<'a> {
             ));
             computed.push((ident, ty, method, args));
         }
-        let hooks = !computed.is_empty() || fields.iter().any(|f| f.transform.is_some());
+        // Mergeable text columns get an edit method.
+        let mut text_edits = Vec::new();
+        for column in &table.columns {
+            if !matches!(
+                column.merge,
+                Some(
+                    ColumnMergeStrategy::Text
+                        | ColumnMergeStrategy::Markdown
+                        | ColumnMergeStrategy::Html
+                )
+            ) {
+                continue;
+            }
+            let f = fields
+                .iter()
+                .find(|f| f.name == column.name)
+                .expect("a field per column");
+            let method = format!("Edit{}", f.ident);
+            if !idents.insert(method.clone()) {
+                return Err(CodegenError::unsupported(format!(
+                    "`{}.{}`'s edit method `{method}` is the Go name of a column, a relation or a method of `{value}`",
+                    table.name, column.name
+                )));
+            }
+            text_edits.push((method, column.name.clone()));
+        }
+        let needs_computed = !computed.is_empty() || fields.iter().any(|f| f.transform.is_some());
+        let hooks = needs_computed || fields.iter().any(|f| f.union.is_some());
         if hooks {
             self.uses_json = true;
         }
@@ -489,7 +637,7 @@ impl<'a> Writer<'a> {
         let _ = writeln!(out, "// {row} is a row of `{}`.", table.name);
         let mut lines = vec![["ID".to_owned(), "string".to_owned(), tag("id", false)]];
         for f in &fields {
-            let t = if f.transform.is_some() {
+            let t = if f.transform.is_some() || f.union.is_some() {
                 "`json:\"-\"`".to_owned()
             } else {
                 tag(&f.name, false)
@@ -506,19 +654,26 @@ impl<'a> Writer<'a> {
         if hooks {
             let _ = writeln!(
                 out,
-                "// JazzDecode reads the transformed columns' views and fills the computed fields."
+                "// JazzDecode reads what plain JSON can't: payload enums, the transformed columns' views and\n// the computed fields."
             );
             let _ = writeln!(
                 out,
                 "func (r *{row}) JazzDecode(app any, fields map[string]json.RawMessage) error {{"
             );
-            out.push_str(
-                "	c, ok := app.(Computed)
-	if !ok {
-		return jazz.ErrNoComputed
-	}
-",
-            );
+            if needs_computed {
+                out.push_str(
+                    "\tc, ok := app.(Computed)\n\tif !ok {\n\t\treturn jazz.ErrNoComputed\n\t}\n",
+                );
+            }
+            for f in &fields {
+                let Some(union) = &f.union else { continue };
+                let _ = write!(
+                    out,
+                    "\tif raw, ok := fields[{key}]; ok {{\n\t\tv, err := decode{union}(raw)\n\t\tif err != nil {{\n\t\t\treturn err\n\t\t}}\n\t\tr.{id} = v\n\t}}\n",
+                    key = go_string(&f.name),
+                    id = f.ident
+                );
+            }
             for f in &fields {
                 let Some(t) = &f.transform else { continue };
                 let key = go_string(&f.name);
@@ -817,6 +972,64 @@ impl<'a> Writer<'a> {
             out,
             "func ({ty}) Update(ctx context.Context, db jazz.Querier, id string, patch {patch}, opts ...jazz.WriteOption) error {{\n\treturn jazz.Update(ctx, db, {table_name}, id, patch, opts...)\n}}\n"
         );
+        for (method, column) in &text_edits {
+            let _ = writeln!(
+                out,
+                "// {method} edits `{}.{column}`, a mergeable text: positions are UTF-8 byte offsets, and\n// the edits merge with others made meanwhile.",
+                table.name
+            );
+            let _ = writeln!(
+                out,
+                "func ({ty}) {method}(ctx context.Context, db jazz.Querier, id string, edits ...jazz.TextEdit) error {{\n\treturn jazz.EditText(ctx, db, {table_name}, id, {}, edits...)\n}}\n",
+                go_string(column)
+            );
+        }
+        let _ = writeln!(
+            out,
+            "// History starts a query of `{}`'s history: every accepted version of its rows.",
+            table.name
+        );
+        let _ = writeln!(
+            out,
+            "func ({ty}) History() *jazz.Query[jazz.Version[{row}]] {{\n\treturn jazz.History(jazz.NewQuery[{row}]({table_name}))\n}}\n"
+        );
+        for (method, doc, params, call) in [
+            (
+                "CanRead",
+                "reading the row with id",
+                "id string".to_owned(),
+                "jazz.CanRead(ctx, db, TABLE, id)",
+            ),
+            (
+                "CanInsert",
+                "inserting row",
+                format!("row {new}"),
+                "jazz.CanInsert(ctx, db, TABLE, row)",
+            ),
+            (
+                "CanUpdate",
+                "applying patch to the row with id",
+                format!("id string, patch {patch}"),
+                "jazz.CanUpdate(ctx, db, TABLE, id, patch)",
+            ),
+            (
+                "CanDelete",
+                "deleting the row with id",
+                "id string".to_owned(),
+                "jazz.CanDelete(ctx, db, TABLE, id)",
+            ),
+        ] {
+            let _ = writeln!(
+                out,
+                "// {method} advises whether the app's permissions allow {doc} in `{}`.",
+                table.name
+            );
+            let _ = writeln!(
+                out,
+                "func ({ty}) {method}(ctx context.Context, db jazz.Querier, {params}) (jazz.Advice, error) {{\n\treturn {}\n}}\n",
+                call.replace("TABLE", &table_name)
+            );
+        }
         let _ = writeln!(
             out,
             "// Delete deletes the row of `{}` with id.",
@@ -969,6 +1182,9 @@ fn pascal_words(name: &str) -> String {
         .map(|w| {
             if INITIALISMS.contains(&w.as_str()) {
                 w.to_uppercase()
+            } else if let Some(one) = w.strip_suffix('s').filter(|one| INITIALISMS.contains(one)) {
+                // `ids` → `IDs`, `urls` → `URLs`.
+                format!("{}s", one.to_uppercase())
             } else {
                 pascal(w)
             }
@@ -1039,6 +1255,7 @@ mod tests {
         assert_eq!(pascal_words("userId"), "UserID");
         assert_eq!(pascal_words("user_id"), "UserID");
         assert_eq!(pascal_words("avatarUrl"), "AvatarURL");
+        assert_eq!(pascal_words("assigneeIds"), "AssigneeIDs");
         assert_eq!(pascal_words("in-progress"), "InProgress");
         assert_eq!(pascal_words("HIGH"), "High");
         assert!(go_ident(&pascal_words("2fa"), "2fa").is_err());

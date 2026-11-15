@@ -95,7 +95,8 @@ type Person struct {
 	Email string `json:"-"`
 }
 
-// JazzDecode reads the transformed columns' views and fills the computed fields.
+// JazzDecode reads what plain JSON can't: payload enums, the transformed columns' views and
+// the computed fields.
 func (r *Person) JazzDecode(app any, fields map[string]json.RawMessage) error {
 	c, ok := app.(Computed)
 	if !ok {
@@ -196,6 +197,31 @@ func (peopleTable) Update(ctx context.Context, db jazz.Querier, id string, patch
 	return jazz.Update(ctx, db, "people", id, patch, opts...)
 }
 
+// History starts a query of `people`'s history: every accepted version of its rows.
+func (peopleTable) History() *jazz.Query[jazz.Version[Person]] {
+	return jazz.History(jazz.NewQuery[Person]("people"))
+}
+
+// CanRead advises whether the app's permissions allow reading the row with id in `people`.
+func (peopleTable) CanRead(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanRead(ctx, db, "people", id)
+}
+
+// CanInsert advises whether the app's permissions allow inserting row in `people`.
+func (peopleTable) CanInsert(ctx context.Context, db jazz.Querier, row NewPerson) (jazz.Advice, error) {
+	return jazz.CanInsert(ctx, db, "people", row)
+}
+
+// CanUpdate advises whether the app's permissions allow applying patch to the row with id in `people`.
+func (peopleTable) CanUpdate(ctx context.Context, db jazz.Querier, id string, patch PersonPatch) (jazz.Advice, error) {
+	return jazz.CanUpdate(ctx, db, "people", id, patch)
+}
+
+// CanDelete advises whether the app's permissions allow deleting the row with id in `people`.
+func (peopleTable) CanDelete(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanDelete(ctx, db, "people", id)
+}
+
 // Delete deletes the row of `people` with id.
 func (peopleTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
 	return jazz.Delete(ctx, db, "people", id, opts...)
@@ -212,7 +238,8 @@ type Task struct {
 	Label    *string      `json:"-"`
 }
 
-// JazzDecode reads the transformed columns' views and fills the computed fields.
+// JazzDecode reads what plain JSON can't: payload enums, the transformed columns' views and
+// the computed fields.
 func (r *Task) JazzDecode(app any, fields map[string]json.RawMessage) error {
 	c, ok := app.(Computed)
 	if !ok {
@@ -330,6 +357,31 @@ func (tasksTable) Insert(ctx context.Context, db jazz.Querier, row NewTask, opts
 // Update changes the fields patch sets of the row of `tasks` with id.
 func (tasksTable) Update(ctx context.Context, db jazz.Querier, id string, patch TaskPatch, opts ...jazz.WriteOption) error {
 	return jazz.Update(ctx, db, "tasks", id, patch, opts...)
+}
+
+// History starts a query of `tasks`'s history: every accepted version of its rows.
+func (tasksTable) History() *jazz.Query[jazz.Version[Task]] {
+	return jazz.History(jazz.NewQuery[Task]("tasks"))
+}
+
+// CanRead advises whether the app's permissions allow reading the row with id in `tasks`.
+func (tasksTable) CanRead(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanRead(ctx, db, "tasks", id)
+}
+
+// CanInsert advises whether the app's permissions allow inserting row in `tasks`.
+func (tasksTable) CanInsert(ctx context.Context, db jazz.Querier, row NewTask) (jazz.Advice, error) {
+	return jazz.CanInsert(ctx, db, "tasks", row)
+}
+
+// CanUpdate advises whether the app's permissions allow applying patch to the row with id in `tasks`.
+func (tasksTable) CanUpdate(ctx context.Context, db jazz.Querier, id string, patch TaskPatch) (jazz.Advice, error) {
+	return jazz.CanUpdate(ctx, db, "tasks", id, patch)
+}
+
+// CanDelete advises whether the app's permissions allow deleting the row with id in `tasks`.
+func (tasksTable) CanDelete(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanDelete(ctx, db, "tasks", id)
 }
 
 // Delete deletes the row of `tasks` with id.

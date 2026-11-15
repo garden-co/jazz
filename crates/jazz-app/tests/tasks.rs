@@ -120,3 +120,85 @@ async fn a_column_named_query() {
         .unwrap();
     assert_eq!(found, vec![labelled]);
 }
+
+/// A text-merge column's edit made from an older value merges over the
+/// writes the editor didn't see; on an unchanged value it is a plain set.
+#[tokio::test]
+async fn text_edits_merge() {
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(bindings::NewTask {
+            notes: Some("hello world".into()),
+            ..NewTask::new("Notes", 0, Vec::new())
+        })
+        .await
+        .unwrap();
+    let notes = || async {
+        jazz.get::<Task>(task.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .notes
+            .unwrap()
+    };
+
+    // Someone else changes the notes...
+    jazz.update(
+        task.id,
+        bindings::TaskUpdate {
+            notes: Some(Some("hello brave world".into())),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    // ...while an editor, who still shows "hello world", appends "!".
+    jazz.edit_text(task.id, tasks::notes(), "hello world", "hello world!")
+        .await
+        .unwrap();
+    assert_eq!(notes().await, "hello brave world!");
+
+    // From the current value, an edit is just the new value.
+    jazz.edit_text(task.id, tasks::notes(), "hello brave world!", "bye")
+        .await
+        .unwrap();
+    assert_eq!(notes().await, "bye");
+
+    // And inside a transaction.
+    let id = task.id;
+    jazz.transaction(move |tx| async move { tx.edit_text(id, tasks::notes(), "bye", "bye now") })
+        .await
+        .unwrap();
+    assert_eq!(notes().await, "bye now");
+
+    // A column without "merge": "text" is refused.
+    let plain = jazz
+        .edit_text(task.id, tasks::title(), "Notes", "Renamed")
+        .await;
+    assert!(plain.is_err(), "{plain:?}");
+    // A row that isn't there.
+    let missing = jazz
+        .edit_text(jazz_app::ObjectId::new(), tasks::notes(), "", "x")
+        .await;
+    assert!(
+        matches!(missing, Err(Error::NotFound { .. })),
+        "{missing:?}"
+    );
+    // A stale base at the other end merges too: the edit keeps the other
+    // writer's change at the start.
+    jazz.update(
+        task.id,
+        bindings::TaskUpdate {
+            notes: Some(Some("well, bye now".into())),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    jazz.edit_text(task.id, tasks::notes(), "bye now", "bye now, friend")
+        .await
+        .unwrap();
+    assert_eq!(notes().await, "well, bye now, friend");
+}

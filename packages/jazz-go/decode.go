@@ -58,11 +58,85 @@ func decodeRow[R any](app any, table string, raw json.RawMessage, out *R) error 
 	if err := json.Unmarshal(raw, out); err != nil {
 		return err
 	}
-	if d, ok := any(out).(Decoder); ok {
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &fields); err != nil {
-			return err
+	return runHooks(app, reflect.ValueOf(out).Elem(), raw)
+}
+
+// hooked is, per row type, whether it or a row it includes is a Decoder.
+var hooked sync.Map // reflect.Type → bool
+
+var decoderType = reflect.TypeOf((*Decoder)(nil)).Elem()
+
+func hasHooks(t reflect.Type) bool {
+	if cached, ok := hooked.Load(t); ok {
+		return cached.(bool)
+	}
+	hooked.Store(t, false) // a row type that includes itself
+	result := reflect.PointerTo(t).Implements(decoderType)
+	if t.Kind() == reflect.Struct {
+		for i := 0; i < t.NumField() && !result; i++ {
+			if inner, ok := includedRow(t.Field(i).Type); ok {
+				result = hasHooks(inner)
+			}
 		}
+	}
+	hooked.Store(t, result)
+	return result
+}
+
+// includedRow is the row type of a relation field: *Row or []Row.
+func includedRow(t reflect.Type) (reflect.Type, bool) {
+	if (t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice) && t.Elem().Kind() == reflect.Struct {
+		return t.Elem(), true
+	}
+	return nil, false
+}
+
+// runHooks runs the Decoder hooks of the row v (read from raw) and of the
+// rows it includes, innermost first.
+func runHooks(app any, v reflect.Value, raw json.RawMessage) error {
+	if v.Kind() != reflect.Struct || !hasHooks(v.Type()) {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		inner, ok := includedRow(f.Type)
+		if !ok || !f.IsExported() || !hasHooks(inner) {
+			continue
+		}
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if name == "" {
+			name = f.Name
+		}
+		value, ok := fields[name]
+		if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			continue
+		}
+		field := v.Field(i)
+		switch f.Type.Kind() {
+		case reflect.Pointer:
+			if !field.IsNil() {
+				if err := runHooks(app, field.Elem(), value); err != nil {
+					return err
+				}
+			}
+		case reflect.Slice:
+			var items []json.RawMessage
+			if err := json.Unmarshal(value, &items); err != nil {
+				return err
+			}
+			for j := 0; j < field.Len() && j < len(items); j++ {
+				if err := runHooks(app, field.Index(j), items[j]); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if d, ok := v.Addr().Interface().(Decoder); ok {
 		return d.JazzDecode(app, fields)
 	}
 	return nil
