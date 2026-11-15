@@ -213,10 +213,7 @@ describe("translateQuery", () => {
     );
   });
 
-  // TODO(files-as-source): the removed DSL's defineApp rejected relation names that
-  // shadow a column or the implicit `id`; the jazz.app.json loader accepts these apps,
-  // so these assertions fail today. Skipped pending a decision on where that check lives.
-  it.skip("rejects a forward relation that would shadow a stored output column", () => {
+  it("rejects a forward relation that would shadow a stored output column", () => {
     expect(() =>
       testApp({
         tables: {
@@ -230,10 +227,10 @@ describe("translateQuery", () => {
           },
         },
       }),
-    ).toThrow(/Relationship "owner" collides with a column/);
+    ).toThrow("tables.todos.relations.owner: table todos already has a column owner");
   });
 
-  it.skip("rejects a generated relation that would shadow the implicit public id", () => {
+  it("rejects a generated relation that would shadow the implicit public id", () => {
     expect(() =>
       testApp({
         tables: {
@@ -247,10 +244,10 @@ describe("translateQuery", () => {
           },
         },
       }),
-    ).toThrow(/Relationship "id" collides with a column/);
+    ).toThrow("tables.todos.relations.id: table todos already has a column id");
   });
 
-  it.skip("rejects a nested reverse relation that would shadow a stored output column", () => {
+  it("rejects a nested reverse relation that would shadow a stored output column", () => {
     expect(() =>
       testApp({
         tables: {
@@ -264,7 +261,9 @@ describe("translateQuery", () => {
           },
         },
       }),
-    ).toThrow(/Relationship "todosViaOwner" collides with a column/);
+    ).toThrow(
+      "tables.users.relations.todosViaOwner: table users already has a column todosViaOwner",
+    );
   });
 
   it("uses a distinct declared alias for an unsuffixed UUID column", () => {

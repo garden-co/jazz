@@ -1500,60 +1500,7 @@ describe("NAPI integration", () => {
     }
   }, 90_000);
 
-  // BLOCKED: jazz.permissions.json can't spell this test's permissions yet. The
-  // alpha.64 DSL built `dropdowns.read` / `dropdowns.update.old` from a `gather`
-  // (recursive reachability, maxDepth 32) hopped to `dropdowns_access_edgesViaTeam`;
-  // Jazz's writer refuses it ("has no exact spelling", JAZZ_APP_FILES_UNSUPPORTED).
-  // The app is converted below; the permissions were:
-  //
-  // export default s.definePermissions(app, ({ policy, allowedTo, session }) => {
-  //   const directlyReachableTeams = policy.team_entry
-  //     .where({ team_id: session.user })
-  //     .hopTo("target");
-  //   const memberReachableTeams = directlyReachableTeams.gather({
-  //     step: ({ current }) =>
-  //       policy.team_entry
-  //         .where({ team_id: current, administrator: false })
-  //         .hopTo("target"),
-  //     maxDepth: 32,
-  //   });
-  //
-  //   policy.dropdowns.allowRead.where((dropdown) =>
-  //     policy.exists(
-  //       memberReachableTeams.hopTo("dropdowns_access_edgesViaTeam").where({
-  //         "dropdowns_access_edges.resource_id": dropdown.id,
-  //         grant_role: { in: ["EDITOR"] },
-  //         administrator: false,
-  //       }),
-  //     ),
-  //   );
-  //   policy.dropdowns.allowInsert.where({});
-  //   policy.dropdowns.allowUpdate
-  //     .whereOld((dropdown) =>
-  //       policy.exists(
-  //         memberReachableTeams.hopTo("dropdowns_access_edgesViaTeam").where({
-  //           "dropdowns_access_edges.resource_id": dropdown.id,
-  //           grant_role: { in: ["EDITOR"] },
-  //           administrator: false,
-  //         }),
-  //       ),
-  //     )
-  //     .whereNew({});
-  //   policy.dropdowns.allowDelete.where({});
-  //
-  //   policy.dropdowns_access_edges.allowRead.where({});
-  //   policy.dropdowns_access_edges.allowInsert.where({});
-  //   policy.dropdowns_access_edges.allowUpdate.where({});
-  //   policy.dropdowns_access_edges.allowDelete.where({});
-  //
-  //   policy.dropdown_entry.allowRead.where(allowedTo.read("dropdowns"));
-  //   policy.dropdown_entry.allowInsert.where(allowedTo.update("dropdowns"));
-  //   policy.dropdown_entry.allowUpdate
-  //     .whereOld(allowedTo.update("dropdowns"))
-  //     .whereNew(allowedTo.update("dropdowns"));
-  //   policy.dropdown_entry.allowDelete.where(allowedTo.update("dropdowns"));
-  // });
-  it.skip("publishes inherited seeded-reachability permissions through the local server route", async () => {
+  it("publishes inherited seeded-reachability permissions through the local server route", async () => {
     const appId = randomUUID();
     const adminSecret = "napi-policy_graph-permissions-admin-secret";
     const app = testApp({
@@ -1601,8 +1548,35 @@ describe("NAPI integration", () => {
         },
       },
     });
-    // TODO: the permissions above, once jazz.permissions.json can express them.
-    const permissions = testPermissions(app, { tables: {} });
+    // Teams reachable from the user's entries along `target` (up to 32 hops),
+    // then their EDITOR edges to this dropdown.
+    const editorOfReachableTeam =
+      "exists (from recursive(seed: from team_entry join team as __hop_0 on team_entry.target_id = __hop_0.id where team_entry.team_id = session.user select __hop_0.id as id, step: from team_entry where team_entry.administrator = bool(false) and team_entry.team_id = id(frontier) select team_entry.target_id as id, frontier: id(row), dedupe: (id(row)), maxDepth: 32) join dropdowns_access_edges as __recursive_join_0 on team.id = __recursive_join_0.team_id where __recursive_join_0.resource_id = outer.id and __recursive_join_0.grant_role in [text('EDITOR')] and __recursive_join_0.administrator = bool(false) select __recursive_join_0.id as id)";
+    const permissions = testPermissions(app, {
+      tables: {
+        dropdown_entry: {
+          read: "allowedTo.read(dropdowns)",
+          insert: "allowedTo.update(dropdowns)",
+          update: "allowedTo.update(dropdowns)",
+          delete: "allowedTo.update(dropdowns)",
+        },
+        dropdowns: {
+          read: editorOfReachableTeam,
+          insert: "true",
+          update: {
+            old: editorOfReachableTeam,
+            new: "true",
+          },
+          delete: "true",
+        },
+        dropdowns_access_edges: {
+          read: "true",
+          insert: "true",
+          update: "true",
+          delete: "true",
+        },
+      },
+    });
     const server = await startLocalJazzServer({
       appId,
       backendSecret: "napi-policy_graph-permissions-secret",
