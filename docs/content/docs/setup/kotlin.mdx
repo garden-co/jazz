@@ -38,9 +38,12 @@ With a `build.gradle.kts` beside `jazz.app.json`, `jazz-tools generate` writes
 `src/main/kotlin/JazzApp.kt`, in the package `jazzapp`:
 
 ```bash
-npx jazz-tools generate            # checks the files, writes src/main/kotlin/JazzApp.kt
-npx jazz-tools generate --check    # in CI: fails if JazzApp.kt is stale
+jazz-tools generate            # checks the files, writes src/main/kotlin/JazzApp.kt
+jazz-tools generate --check    # in CI: fails if JazzApp.kt is stale
 ```
+
+This is the `jazz-tools` binary built from the Jazz repository (`cargo build -p jazz-cli --bin
+jazz-tools`); the npm `jazz-tools` CLI doesn't generate Kotlin yet.
 
 Commit `JazzApp.kt`. Per table it gives you:
 
@@ -70,7 +73,8 @@ these fully qualified (`kotlin.String`), so a table may be called `Result` or `U
 
 `Jazz` is safe to use from any coroutine. Its calls run on `Dispatchers.IO`, and the native core
 runs the client on a thread of its own. Call `jazz.close()` (it's `AutoCloseable`) before the
-process exits.
+process exits. Closing ends open `watch`es and subscriptions with `JazzException.Closed`, later
+calls throw it too, and closing twice is harmless.
 
 `jazz.account()` is the account id of the user the backend acts as. Write it into columns that
 policies compare with `session.user`, like StagePlan's `shows.chiefAccount`.
