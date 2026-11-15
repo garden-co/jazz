@@ -1159,6 +1159,15 @@ describe("createJazz", () => {
     }).ready();
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz, { sockets: false });
+    // Same-origin, as a page is: the client falls back to the stream.
+    const previous = (globalThis as { location?: unknown }).location;
+    (globalThis as { location?: unknown }).location = {
+      host: new URL(origin).host,
+      href: `${origin}/`,
+    };
+    cleanups.push(async () => {
+      (globalThis as { location?: unknown }).location = previous;
+    });
     const alice = await userSession(jazz.appId, origin, "alice");
     await alice.db
       .insert(app.todos, { title: "signed in", owner: alice.session!.user! })
