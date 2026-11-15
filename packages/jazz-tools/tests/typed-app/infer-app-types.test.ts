@@ -50,9 +50,7 @@ const everyKind = {
         at: "timestamp",
         blob: "bytes",
         ownerId: "uuid",
-        reviewerId: {
-          type: "uuid?",
-        },
+        reviewerId: "uuid?",
         coOwnerIds: {
           array: "uuid",
         },

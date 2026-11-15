@@ -20,7 +20,7 @@
         "at": "timestamp",
         "blob": "bytes",
         "ownerId": "uuid",
-        "reviewerId": { "type": "uuid?" },
+        "reviewerId": "uuid?",
         "coOwnerIds": { "array": "uuid" },
         "optionalInt": { "type": "int", "optional": true },
         "defaultedFloat": { "type": "float", "default": 1.5 },
