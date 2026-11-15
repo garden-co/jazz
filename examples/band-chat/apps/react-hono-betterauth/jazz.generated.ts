@@ -2,7 +2,7 @@
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface BetterAuthAccount {
+export type BetterAuthAccount = {
   readonly id: string;
   accountId: string;
   providerId: string;
@@ -10,18 +10,18 @@ export interface BetterAuthAccount {
   password: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthAccountInsert {
+export type BetterAuthAccountInsert = {
   accountId: string;
   providerId: string;
   userId: string;
   password?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthJwk {
+export type BetterAuthJwk = {
   readonly id: string;
   publicKey: string;
   privateKey: string;
@@ -29,18 +29,18 @@ export interface BetterAuthJwk {
   expiresAt: Date | null;
   alg: string | null;
   crv: string | null;
-}
+};
 
-export interface BetterAuthJwkInsert {
+export type BetterAuthJwkInsert = {
   publicKey: string;
   privateKey: string;
   createdAt: Date;
   expiresAt?: Date | null;
   alg?: string | null;
   crv?: string | null;
-}
+};
 
-export interface BetterAuthSession {
+export type BetterAuthSession = {
   readonly id: string;
   expiresAt: Date;
   token: string;
@@ -49,9 +49,9 @@ export interface BetterAuthSession {
   ipAddress: string | null;
   userAgent: string | null;
   userId: string;
-}
+};
 
-export interface BetterAuthSessionInsert {
+export type BetterAuthSessionInsert = {
   expiresAt: Date;
   token: string;
   createdAt: Date;
@@ -59,9 +59,9 @@ export interface BetterAuthSessionInsert {
   ipAddress?: string | null;
   userAgent?: string | null;
   userId: string;
-}
+};
 
-export interface BetterAuthUser {
+export type BetterAuthUser = {
   readonly id: string;
   name: string;
   email: string;
@@ -69,59 +69,59 @@ export interface BetterAuthUser {
   image: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthUserInsert {
+export type BetterAuthUserInsert = {
   name: string;
   email: string;
   emailVerified: boolean;
   image?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerification {
+export type BetterAuthVerification = {
   readonly id: string;
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerificationInsert {
+export type BetterAuthVerificationInsert = {
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface Canvas {
+export type Canvas = {
   readonly id: string;
   roomId: string;
   title: string;
-}
+};
 
-export interface CanvasInsert {
+export type CanvasInsert = {
   roomId: string;
   title: string;
-}
+};
 
-export interface JoinRequest {
+export type JoinRequest = {
   readonly id: string;
   roomId: string;
   requester: string;
   profileId: string;
-}
+};
 
-export interface JoinRequestInsert {
+export type JoinRequestInsert = {
   roomId: string;
   requester: string;
   profileId: string;
-}
+};
 
-export interface Message {
+export type Message = {
   readonly id: string;
   roomId: string;
   senderId: string;
@@ -131,9 +131,9 @@ export interface Message {
   attachmentType: string | null;
   attachmentSize: number | null;
   canvasId: string | null;
-}
+};
 
-export interface MessageInsert {
+export type MessageInsert = {
   roomId: string;
   senderId: string;
   text: string;
@@ -142,76 +142,76 @@ export interface MessageInsert {
   attachmentType?: string | null;
   attachmentSize?: number | null;
   canvasId?: string | null;
-}
+};
 
-export interface Profile {
+export type Profile = {
   readonly id: string;
   author: string;
   displayName: string;
   avatar: Uint8Array | null;
   avatarType: string | null;
-}
+};
 
-export interface ProfileInsert {
+export type ProfileInsert = {
   author: string;
   displayName: string;
   avatar?: Uint8Array | null;
   avatarType?: string | null;
-}
+};
 
-export interface Reaction {
+export type Reaction = {
   readonly id: string;
   roomId: string;
   messageId: string;
   author: string;
   emoji: string;
-}
+};
 
-export interface ReactionInsert {
+export type ReactionInsert = {
   roomId: string;
   messageId: string;
   author: string;
   emoji: string;
-}
+};
 
-export interface ReadMarker {
+export type ReadMarker = {
   readonly id: string;
   roomId: string;
   reader: string;
   lastReadAt: Date;
-}
+};
 
-export interface ReadMarkerInsert {
+export type ReadMarkerInsert = {
   roomId: string;
   reader: string;
   lastReadAt: Date;
-}
+};
 
-export interface RoomMember {
+export type RoomMember = {
   readonly id: string;
   roomId: string;
   memberAuthor: string;
   memberProfileId: string | null;
-}
+};
 
-export interface RoomMemberInsert {
+export type RoomMemberInsert = {
   roomId: string;
   memberAuthor: string;
   memberProfileId?: string | null;
-}
+};
 
-export interface Room {
+export type Room = {
   readonly id: string;
   name: string;
   lastActivityAt: Date | null;
-}
+};
 
-export interface RoomInsert {
+export type RoomInsert = {
   name: string;
   lastActivityAt?: Date | null;
-}
+};
 
-export interface Stroke {
+export type Stroke = {
   readonly id: string;
   canvasId: string;
   roomId: string;
@@ -219,16 +219,16 @@ export interface Stroke {
   color: string;
   width: number;
   points: number[];
-}
+};
 
-export interface StrokeInsert {
+export type StrokeInsert = {
   canvasId: string;
   roomId: string;
   author: string;
   color: string;
   width: number;
   points: number[];
-}
+};
 
 interface Types extends AppTypes {
   better_auth_account: {

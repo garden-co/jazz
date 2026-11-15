@@ -2,20 +2,20 @@
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface Message {
+export type Message = {
   readonly id: string;
   author_name: string;
   chat_id: string;
   text: string;
   sent_at: Date;
-}
+};
 
-export interface MessageInsert {
+export type MessageInsert = {
   author_name: string;
   chat_id: string;
   text: string;
   sent_at: Date;
-}
+};
 
 interface Types extends AppTypes {
   messages: {

@@ -2,31 +2,31 @@
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface Project {
+export type Project = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface ProjectInsert {
+export type ProjectInsert = {
   name: string;
-}
+};
 
-export interface Todo {
+export type Todo = {
   readonly id: string;
   title: string;
   done: boolean;
   description: string | null;
   parentId: string | null;
   projectId: string | null;
-}
+};
 
-export interface TodoInsert {
+export type TodoInsert = {
   title: string;
   done: boolean;
   description?: string | null;
   parentId?: string | null;
   projectId?: string | null;
-}
+};
 
 interface Types extends AppTypes {
   projects: {

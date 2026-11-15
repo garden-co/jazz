@@ -5,24 +5,24 @@ import { bindApp, type AppTypes } from "jazz-tools";
 export type InvitationRole = "listener" | "editor";
 export type InvitationStatus = "pending" | "accepted" | "revoked";
 
-export interface Album {
+export type Album = {
   readonly id: string;
   title: string;
   artist: string;
   cover_locator: string | null;
   cover_image: Uint8Array | null;
   cover_mime: string | null;
-}
+};
 
-export interface AlbumInsert {
+export type AlbumInsert = {
   title: string;
   artist: string;
   cover_locator?: string | null;
   cover_image?: Uint8Array | null;
   cover_mime?: string | null;
-}
+};
 
-export interface BetterAuthAccount {
+export type BetterAuthAccount = {
   readonly id: string;
   accountId: string;
   providerId: string;
@@ -30,18 +30,18 @@ export interface BetterAuthAccount {
   password: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthAccountInsert {
+export type BetterAuthAccountInsert = {
   accountId: string;
   providerId: string;
   userId: string;
   password?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthJwk {
+export type BetterAuthJwk = {
   readonly id: string;
   publicKey: string;
   privateKey: string;
@@ -49,18 +49,18 @@ export interface BetterAuthJwk {
   expiresAt: Date | null;
   alg: string | null;
   crv: string | null;
-}
+};
 
-export interface BetterAuthJwkInsert {
+export type BetterAuthJwkInsert = {
   publicKey: string;
   privateKey: string;
   createdAt: Date;
   expiresAt?: Date | null;
   alg?: string | null;
   crv?: string | null;
-}
+};
 
-export interface BetterAuthSession {
+export type BetterAuthSession = {
   readonly id: string;
   expiresAt: Date;
   token: string;
@@ -69,9 +69,9 @@ export interface BetterAuthSession {
   userId: string;
   ipAddress: string | null;
   userAgent: string | null;
-}
+};
 
-export interface BetterAuthSessionInsert {
+export type BetterAuthSessionInsert = {
   expiresAt: Date;
   token: string;
   createdAt: Date;
@@ -79,9 +79,9 @@ export interface BetterAuthSessionInsert {
   userId: string;
   ipAddress?: string | null;
   userAgent?: string | null;
-}
+};
 
-export interface BetterAuthUser {
+export type BetterAuthUser = {
   readonly id: string;
   name: string;
   email: string;
@@ -89,85 +89,85 @@ export interface BetterAuthUser {
   image: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthUserInsert {
+export type BetterAuthUserInsert = {
   name: string;
   email: string;
   emailVerified: boolean;
   image?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerification {
+export type BetterAuthVerification = {
   readonly id: string;
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerificationInsert {
+export type BetterAuthVerificationInsert = {
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface Invitation {
+export type Invitation = {
   readonly id: string;
   playlist_id: string;
   subject: string;
   role: InvitationRole;
   status: InvitationStatus;
-}
+};
 
-export interface InvitationInsert {
+export type InvitationInsert = {
   playlist_id: string;
   subject: string;
   role: InvitationRole;
   status: InvitationStatus;
-}
+};
 
-export interface PlaybackPosition {
+export type PlaybackPosition = {
   readonly id: string;
   playlist_id: string;
   track_id: string;
   position_ms: number;
-}
+};
 
-export interface PlaybackPositionInsert {
+export type PlaybackPositionInsert = {
   playlist_id: string;
   track_id: string;
   position_ms: number;
-}
+};
 
-export interface PlaylistEntry {
+export type PlaylistEntry = {
   readonly id: string;
   playlist_id: string;
   track_id: string;
   position: number;
-}
+};
 
-export interface PlaylistEntryInsert {
+export type PlaylistEntryInsert = {
   playlist_id: string;
   track_id: string;
   position: number;
-}
+};
 
-export interface Playlist {
+export type Playlist = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface PlaylistInsert {
+export type PlaylistInsert = {
   name: string;
-}
+};
 
-export interface Track {
+export type Track = {
   readonly id: string;
   album_id: string;
   title: string;
@@ -176,9 +176,9 @@ export interface Track {
   audio_bytes: Uint8Array | null;
   audio_mime: string | null;
   audio_byte_length: number | null;
-}
+};
 
-export interface TrackInsert {
+export type TrackInsert = {
   album_id: string;
   title: string;
   ordinal: number;
@@ -186,7 +186,7 @@ export interface TrackInsert {
   audio_bytes?: Uint8Array | null;
   audio_mime?: string | null;
   audio_byte_length?: number | null;
-}
+};
 
 interface Types extends AppTypes {
   albums: {

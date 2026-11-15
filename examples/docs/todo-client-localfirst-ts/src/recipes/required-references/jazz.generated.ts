@@ -2,23 +2,23 @@
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface Customer {
+export type Customer = {
   readonly id: string;
   name: string;
-}
+};
 
-export interface CustomerInsert {
+export type CustomerInsert = {
   name: string;
-}
+};
 
-export interface Order {
+export type Order = {
   readonly id: string;
   customerId: string;
-}
+};
 
-export interface OrderInsert {
+export type OrderInsert = {
   customerId: string;
-}
+};
 
 interface Types extends AppTypes {
   customers: {

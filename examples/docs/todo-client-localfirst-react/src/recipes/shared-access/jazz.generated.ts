@@ -2,29 +2,29 @@
 // Bindings format 1. Formatters may reformat this file, except `app` below.
 import { bindApp, type AppTypes } from "jazz-tools";
 
-export interface TodoShare {
+export type TodoShare = {
   readonly id: string;
   todoId: string;
   user_id: string;
   can_edit: boolean;
-}
+};
 
-export interface TodoShareInsert {
+export type TodoShareInsert = {
   todoId: string;
   user_id: string;
   can_edit: boolean;
-}
+};
 
-export interface Todo {
+export type Todo = {
   readonly id: string;
   title: string;
   done: boolean;
-}
+};
 
-export interface TodoInsert {
+export type TodoInsert = {
   title: string;
   done: boolean;
-}
+};
 
 interface Types extends AppTypes {
   todoShares: {

@@ -3,17 +3,9 @@
 import { bindApp, type AppTypes } from "jazz-tools";
 
 export type SessionMemberRole = "owner" | "editor" | "viewer";
-export type TrackInstrument =
-  | "kick"
-  | "snare"
-  | "clap"
-  | "closed_hat"
-  | "open_hat"
-  | "tom"
-  | "bass"
-  | "lead";
+export type TrackInstrument = "kick" | "snare" | "clap" | "closed_hat" | "open_hat" | "tom" | "bass" | "lead";
 
-export interface BetterAuthAccount {
+export type BetterAuthAccount = {
   readonly id: string;
   accountId: string;
   providerId: string;
@@ -21,18 +13,18 @@ export interface BetterAuthAccount {
   password: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthAccountInsert {
+export type BetterAuthAccountInsert = {
   accountId: string;
   providerId: string;
   userId: string;
   password?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthJwk {
+export type BetterAuthJwk = {
   readonly id: string;
   publicKey: string;
   privateKey: string;
@@ -40,18 +32,18 @@ export interface BetterAuthJwk {
   expiresAt: Date | null;
   alg: string | null;
   crv: string | null;
-}
+};
 
-export interface BetterAuthJwkInsert {
+export type BetterAuthJwkInsert = {
   publicKey: string;
   privateKey: string;
   createdAt: Date;
   expiresAt?: Date | null;
   alg?: string | null;
   crv?: string | null;
-}
+};
 
-export interface BetterAuthSession {
+export type BetterAuthSession = {
   readonly id: string;
   expiresAt: Date;
   token: string;
@@ -60,9 +52,9 @@ export interface BetterAuthSession {
   ipAddress: string | null;
   userAgent: string | null;
   userId: string;
-}
+};
 
-export interface BetterAuthSessionInsert {
+export type BetterAuthSessionInsert = {
   expiresAt: Date;
   token: string;
   createdAt: Date;
@@ -70,9 +62,9 @@ export interface BetterAuthSessionInsert {
   ipAddress?: string | null;
   userAgent?: string | null;
   userId: string;
-}
+};
 
-export interface BetterAuthUser {
+export type BetterAuthUser = {
   readonly id: string;
   name: string;
   email: string;
@@ -80,100 +72,100 @@ export interface BetterAuthUser {
   image: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthUserInsert {
+export type BetterAuthUserInsert = {
   name: string;
   email: string;
   emailVerified: boolean;
   image?: string | null;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerification {
+export type BetterAuthVerification = {
   readonly id: string;
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface BetterAuthVerificationInsert {
+export type BetterAuthVerificationInsert = {
   identifier: string;
   value: string;
   expiresAt: Date;
   createdAt: Date;
   updatedAt: Date;
-}
+};
 
-export interface Pattern {
+export type Pattern = {
   readonly id: string;
   session_id: string;
   position: number;
   name: string;
   length: number;
-}
+};
 
-export interface PatternInsert {
+export type PatternInsert = {
   session_id: string;
   position: number;
   name: string;
   length: number;
-}
+};
 
-export interface Presence {
+export type Presence = {
   readonly id: string;
   session_id: string;
   profile_id: string;
   cursor_step: number;
   heartbeat_at: Date;
-}
+};
 
-export interface PresenceInsert {
+export type PresenceInsert = {
   session_id: string;
   profile_id: string;
   cursor_step: number;
   heartbeat_at: Date;
-}
+};
 
-export interface Profile {
+export type Profile = {
   readonly id: string;
   author: string;
   displayName: string;
-}
+};
 
-export interface ProfileInsert {
+export type ProfileInsert = {
   author: string;
   displayName: string;
-}
+};
 
-export interface SessionMember {
+export type SessionMember = {
   readonly id: string;
   session_id: string;
   member_author: string;
   role: SessionMemberRole;
-}
+};
 
-export interface SessionMemberInsert {
+export type SessionMemberInsert = {
   session_id: string;
   member_author: string;
   role: SessionMemberRole;
-}
+};
 
-export interface Session {
+export type Session = {
   readonly id: string;
   title: string;
   tempo_bpm: number;
-}
+};
 
-export interface SessionInsert {
+export type SessionInsert = {
   title: string;
   tempo_bpm: number;
-}
+};
 
-export interface Step {
+export type Step = {
   readonly id: string;
   session_id: string;
   track_id: string;
@@ -182,9 +174,9 @@ export interface Step {
   enabled: boolean;
   velocity: number;
   probability: number;
-}
+};
 
-export interface StepInsert {
+export type StepInsert = {
   session_id: string;
   track_id: string;
   pattern_id: string;
@@ -192,9 +184,9 @@ export interface StepInsert {
   enabled: boolean;
   velocity: number;
   probability: number;
-}
+};
 
-export interface Track {
+export type Track = {
   readonly id: string;
   session_id: string;
   position: number;
@@ -204,9 +196,9 @@ export interface Track {
   volume: number;
   muted: boolean;
   solo: boolean;
-}
+};
 
-export interface TrackInsert {
+export type TrackInsert = {
   session_id: string;
   position: number;
   name: string;
@@ -215,9 +207,9 @@ export interface TrackInsert {
   volume?: number;
   muted?: boolean;
   solo?: boolean;
-}
+};
 
-export interface TransportObservation {
+export type TransportObservation = {
   readonly id: string;
   session_id: string;
   playing: boolean;
@@ -225,16 +217,16 @@ export interface TransportObservation {
   observed_at: Date;
   tempo_bpm: number;
   pattern_id: string | null;
-}
+};
 
-export interface TransportObservationInsert {
+export type TransportObservationInsert = {
   session_id: string;
   playing: boolean;
   bar: number;
   observed_at: Date;
   tempo_bpm?: number;
   pattern_id?: string | null;
-}
+};
 
 interface Types extends AppTypes {
   better_auth_account: {
