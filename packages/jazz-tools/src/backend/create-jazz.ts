@@ -411,15 +411,26 @@ function withoutCredentials(request: Request): Request {
  * request without its cookies and `Authorization` header, so the device
  * account is let in as it would be on its own.
  *
- * This gates device accounts' sync, and their requests to your own routes
- * (`forReqUser`, `withAttribution`, `accountFor`, which take the device's
- * proof as `Authorization: Bearer`). Linking one to a user who signs up
+ * This gates device accounts' sync, and their requests to your own routes:
+ * `forReqUser` takes the device's proof (`Authorization: Bearer`), and
+ * `withAttribution` and `accountFor` do with `{ deviceAccounts: true }`.
+ * Linking one to a user who signs up
  * (`linkDeviceAccount()`) is authorised by your sign-in (`authenticate`
  * naming that user) plus the device key's proof of a one-time challenge, so
  * it works even when your app doesn't accept device accounts for sync.
  */
 export function acceptDeviceAccounts(_request: Request): LocalFirstGuest {
   return LOCAL_FIRST_GUEST;
+}
+
+/** Whether `withAttribution` and `accountFor` take a device account's request. */
+export interface DeviceAccountsOption {
+  /**
+   * Act for (or name) the device account whose proof the request carries,
+   * when `authenticate` lets it in (`acceptDeviceAccounts`). Off by default:
+   * anyone can make a device account.
+   */
+  deviceAccounts?: boolean;
 }
 
 /** Who the request's user is, as the app's own auth decides. */
@@ -757,18 +768,27 @@ export interface Jazz {
    * signature, expiry, and an audience of this app or `publicUrl`), and a
    * key a link revoked is refused. A proof that doesn't pass throws a
    * {@link RequestAuthenticationError} (`code: "invalid_device_proof"` or
-   * `"device_account_revoked"`); no proof at all is `"signed_out"`.
+   * `"device_account_revoked"`); no proof at all is `"signed_out"`. Anyone
+   * can make a device account, so a device account's db is only as
+   * restricted as your permissions make it, as for its own sync. The db
+   * acts while the proof is unexpired (at most an hour): use it for the
+   * request.
    */
   forReqUser(request: Request): Promise<Db>;
   /**
    * The Jazz account of the request's signed-in user, or null when
    * `authenticate` names no user or the user has no account yet. It never
    * creates one (see {@link createAccountFor}). For API routes that act on
-   * the user's data with the backend's own `db`. A device account's request
-   * (see {@link forReqUser}) names that device account, admitted as its
-   * first sync would admit it; an invalid proof throws as there.
+   * the user's data with the backend's own `db`.
+   *
+   * A device account's request (see {@link forReqUser}) answers null, as
+   * anyone can make a device account, unless you pass
+   * `{ deviceAccounts: true }`: then it names that device account. That
+   * creates the account on the core if the device never synced (as its
+   * first sync would), and throws for an invalid or revoked proof as
+   * `forReqUser` does. Don't treat that answer as "a signed-in user".
    */
-  accountFor(request: Request): Promise<string | null>;
+  accountFor(request: Request, options?: DeviceAccountsOption): Promise<string | null>;
   /**
    * Create the Jazz account of `userId` (the id your `authenticate` returns
    * for them), or return the one they have. Jazz never creates accounts on
@@ -807,11 +827,14 @@ export interface Jazz {
    * user may do what the action does, and keep it in server-only code.
    *
    * Throws a {@link NoJazzAccountError} (`code: "no_account"`) for a user
-   * who has no account yet (see {@link createAccountFor}). A device
-   * account's request (see {@link forReqUser}) is stamped as that device
-   * account.
+   * who has no account yet (see {@link createAccountFor}).
+   *
+   * A device account's request (see {@link forReqUser}) is `signed_out`
+   * here, since anyone can make a device account and this db skips your
+   * permissions, unless you pass `{ deviceAccounts: true }`: then it is
+   * stamped as that device account, with backend authority all the same.
    */
-  withAttribution(request: Request): Promise<Db>;
+  withAttribution(request: Request, options?: DeviceAccountsOption): Promise<Db>;
   /**
    * Make `to` another identity of the account `from` already uses: after
    * this, `authenticate` returning `to` opens that same account and its data.
@@ -875,6 +898,8 @@ function appSecretOf(store: JazzStore, core: { adminSecret: string }): string | 
  * switch since 2.0.0-alpha.62), or a Jazz Cloud app's with it turned off.
  */
 const LOCAL_FIRST_AUTH_DISABLED = "local_first_auth_disabled";
+/** The core's answer for an identity it refuses: one a link retired, or a revoked user. */
+const IDENTITY_NOT_AUTHORIZED = "identity_not_authorized";
 /**
  * What such a core tells a guest's session (jazz-server's
  * `LOCAL_FIRST_AUTH_DISABLED_MESSAGE` before 2.0.0-alpha.62).
@@ -2159,7 +2184,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         // gets an answer (the retry of a link whose response was lost).
         if (
           (error as { status?: number }).status !== 403 ||
-          (error as { code?: string }).code === LOCAL_FIRST_AUTH_DISABLED ||
+          (error as { code?: string }).code !== IDENTITY_NOT_AUTHORIZED ||
           !(await userIs(account))
         )
           throw error;
@@ -2175,10 +2200,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
           // won the race and revoked the key since), this link is done. A
           // used challenge (the core refuses its nonce first) and a user of
           // another account are still refused.
-          const status = (error as { status?: number }).status;
-          if ((status !== 409 && status !== 403) || !(await userIs(account))) throw error;
+          const { status, code } = error as { status?: number; code?: string };
+          const retired = status === 403 && code === IDENTITY_NOT_AUTHORIZED;
+          if ((status !== 409 && !retired) || !(await userIs(account))) throw error;
           // Refused for a retired key: the link that won already retired it.
-          if (status === 403) guestRevoked = true;
+          if (retired) guestRevoked = true;
         }
       }
     } catch (error) {
@@ -3100,13 +3126,19 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   /**
    * The session `forReqUser` and `withAttribution` act as: the user
    * `authenticate` names (on the account they already have), or, when
-   * `authenticate` lets the request in as a device account, the device
-   * account whose proof it carries. Null when neither names anyone.
+   * `authenticate` lets the request in as a device account and the caller
+   * takes device accounts, the device account whose proof it carries. Null
+   * when neither names anyone.
    */
-  async function requestSession(request: Request, caller: string): Promise<Session | null> {
+  async function requestSession(
+    request: Request,
+    caller: string,
+    deviceAccounts: boolean,
+  ): Promise<Session | null> {
     const answer = await requestAnswer(request);
     if (answer === null) return null;
     if (answer !== "device-account") return sessionFor(answer, caller);
+    if (!deviceAccounts) return null;
     const device = await deviceAccountOf(request);
     return device && deviceAccountSession(device, appId, device.audience);
   }
@@ -3134,8 +3166,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         { code: "invalid_device_proof" },
       );
     }
+    const { subject } = audience;
     const verifiedFor = audience.endpoint ?? appId;
-    const subject = verifyLocalFirstToken(token, verifiedFor);
     let account: string;
     try {
       ({ account } = await adminAccounts("found-local-first", {
@@ -3149,7 +3181,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         throw error;
       }
       // The core refuses this key: a link retired it (`guestKeyAfterLink`).
-      if (status === 403) {
+      if (status === 403 && code === IDENTITY_NOT_AUTHORIZED) {
         throw new RequestAuthenticationError("the request's device account key was revoked", {
           code: "device_account_revoked",
         });
@@ -3215,24 +3247,26 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    * clients still name its id, or carry it as their `scope`), one of this
    * endpoint's URLs, or neither (null).
    */
-  function guestAudience(request: Request, token: string): { endpoint?: string } | null {
+  function guestAudience(
+    request: Request,
+    token: string,
+  ): { endpoint?: string; subject: string } | null {
     try {
-      verifyLocalFirstToken(token, appId);
-      return {};
+      return { subject: verifyLocalFirstToken(token, appId) };
     } catch {
       // Not this app's id; try the endpoint.
     }
     const endpoints = endpointAudiences(request);
     for (const endpoint of endpoints) {
       try {
-        verifyLocalFirstToken(token, endpoint);
+        const subject = verifyLocalFirstToken(token, endpoint);
         if (!publicUrls.length && !warnedHeaderAudience && !isLocalEndpoint(endpoint)) {
           warnedHeaderAudience = true;
           console.warn(
             `createJazz: vouched for a local-first guest of ${endpoint}, taken from the request's headers. Set publicUrl to the URL browsers use so a caller can't name another host.`,
           );
         }
-        return { endpoint };
+        return { endpoint, subject };
       } catch {
         // Not this one.
       }
@@ -3644,19 +3678,24 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     },
     linkIdentity,
     async forReqUser(request) {
-      const who = await requestSession(request, "forReqUser");
+      const who = await requestSession(request, "forReqUser", true);
       if (!who) throw signedOut("forReqUser");
       return backendDbForSession(backend, who);
     },
-    async withAttribution(request) {
-      const who = await requestSession(request, "withAttribution");
+    async withAttribution(request, options) {
+      const who = await requestSession(
+        request,
+        "withAttribution",
+        options?.deviceAccounts === true,
+      );
       if (!who) throw signedOut("withAttribution");
       return backendDbAttributedTo(backend, who);
     },
-    async accountFor(request) {
+    async accountFor(request, options) {
       const answer = await requestAnswer(request);
       if (answer === null) return null;
       if (answer === "device-account") {
+        if (options?.deviceAccounts !== true) return null;
         const device = await deviceAccountOf(request);
         return device?.account ?? null;
       }
@@ -4461,8 +4500,8 @@ function facade(entry: Entry): Jazz {
     },
     db,
     forReqUser: async (request) => (await use()).forReqUser(request),
-    withAttribution: async (request) => (await use()).withAttribution(request),
-    accountFor: async (request) => (await use()).accountFor(request),
+    withAttribution: async (request, options) => (await use()).withAttribution(request, options),
+    accountFor: async (request, options) => (await use()).accountFor(request, options),
     createAccountFor: async (userId) => (await use()).createAccountFor(userId),
     revokeUser: async (userId) => (await use()).revokeUser(userId),
     linkIdentity: async (link) => (await use()).linkIdentity(link),

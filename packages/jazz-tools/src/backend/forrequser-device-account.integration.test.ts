@@ -10,7 +10,12 @@ import { acceptDeviceAccounts, createJazz, createJazzClient, memory, type Jazz }
 // `forReqUser`, `withAttribution` and `accountFor` on a plain HTTP request
 // from a device account (#5500): the request carries the account's
 // local-first proof as `Authorization: Bearer` (`db.getLocalFirstIdentityProof()`),
-// checked as a sync socket's is, and admitted by the core.
+// checked as a sync socket's is, and admitted by the core. `forReqUser`
+// takes it, policy-scoped as the device's sync is; `withAttribution` (backend
+// authority) and `accountFor` only with `{ deviceAccounts: true }`, since
+// anyone can make a device account.
+
+const opt = { deviceAccounts: true } as const;
 
 const app = await defineShippedApp({
   todos: s.table({ title: s.string(), owner: s.uuid() }, {}),
@@ -90,7 +95,10 @@ describe("forReqUser for a device account", () => {
     );
     const request = () => route(origin, bearer(proof!));
 
-    await expect(jazz.accountFor(request())).resolves.toBe(account);
+    // Without the opt-in, withAttribution and accountFor take no device account.
+    await expect(jazz.accountFor(request())).resolves.toBeNull();
+    await expect(jazz.withAttribution(request())).rejects.toMatchObject({ code: "signed_out" });
+    await expect(jazz.accountFor(request(), opt)).resolves.toBe(account);
     const db = await jazz.forReqUser(request());
     // Its policies: it reads its own row and nothing else, writes as itself.
     const someoneElse = await jazz.db
@@ -120,7 +128,7 @@ describe("forReqUser for a device account", () => {
       .toEqual(["from a route", "from the device"]);
 
     // withAttribution: backend authority, stamped as the device account.
-    const onBehalf = await jazz.withAttribution(request());
+    const onBehalf = await jazz.withAttribution(request(), opt);
     const behalf = await onBehalf
       .insert(app.todos, { title: "on its behalf", owner: randomUUID() })
       .wait({ tier: "global" });
@@ -136,7 +144,7 @@ describe("forReqUser for a device account", () => {
     const secret = generateSecret();
     const token = signToken(secret, { audience: jazz.appId });
     const account = localFirstAccountId(jazz.appId, identityOf(secret).subject);
-    await expect(jazz.accountFor(route("http://app", bearer(token)))).resolves.toBe(account);
+    await expect(jazz.accountFor(route("http://app", bearer(token)), opt)).resolves.toBe(account);
     const db = await jazz.forReqUser(route("http://app", bearer(token)));
     const row = await db.insert(app.todos, { title: "t", owner: account }).wait({ tier: "global" });
     const [stamped] = await jazz.db.all(app.todos.where({ id: row.id }).select("$createdBy"));
@@ -150,7 +158,7 @@ describe("forReqUser for a device account", () => {
     const endpoint = `${origin}/jazz`;
     const secret = generateSecret();
     const valid = signToken(secret, { audience: endpoint });
-    await expect(jazz.accountFor(route(origin, bearer(valid)))).resolves.toEqual(
+    await expect(jazz.accountFor(route(origin, bearer(valid)), opt)).resolves.toEqual(
       expect.any(String),
     );
 
@@ -177,7 +185,12 @@ describe("forReqUser for a device account", () => {
       "another app's proof": signToken(secret, { audience: randomUUID() }),
     };
     for (const [what, token] of Object.entries(refused)) {
-      for (const call of [jazz.forReqUser, jazz.withAttribution, jazz.accountFor]) {
+      const calls = [
+        (request: Request) => jazz.forReqUser(request),
+        (request: Request) => jazz.withAttribution(request, opt),
+        (request: Request) => jazz.accountFor(request, opt),
+      ];
+      for (const call of calls) {
         await expect(call(route(origin, bearer(token))), what).rejects.toMatchObject({
           name: "RequestAuthenticationError",
           code: "invalid_device_proof",
@@ -200,10 +213,10 @@ describe("forReqUser for a device account", () => {
         name: "RequestAuthenticationError",
         code: "signed_out",
       });
-      await expect(jazz.withAttribution(route(origin, headers))).rejects.toMatchObject({
+      await expect(jazz.withAttribution(route(origin, headers), opt)).rejects.toMatchObject({
         code: "signed_out",
       });
-      await expect(jazz.accountFor(route(origin, headers))).resolves.toBeNull();
+      await expect(jazz.accountFor(route(origin, headers), opt)).resolves.toBeNull();
     }
   });
 
@@ -219,7 +232,10 @@ describe("forReqUser for a device account", () => {
     await expect(jazz.forReqUser(route("http://app", bearer(token)))).rejects.toMatchObject({
       code: "signed_out",
     });
-    await expect(jazz.accountFor(route("http://app", bearer(token)))).resolves.toBeNull();
+    await expect(
+      jazz.withAttribution(route("http://app", bearer(token)), opt),
+    ).rejects.toMatchObject({ code: "signed_out" });
+    await expect(jazz.accountFor(route("http://app", bearer(token)), opt)).resolves.toBeNull();
   });
 
   it("lets the user authenticate names win, and refuses a key its link revoked", async () => {
@@ -234,15 +250,32 @@ describe("forReqUser for a device account", () => {
     const origin = await serve(jazz);
     const secret = generateSecret();
     const token = signToken(secret, { audience: jazz.appId });
-    const guestAccount = await jazz.accountFor(route(origin, bearer(token)));
+    const guestAccount = await jazz.accountFor(route(origin, bearer(token)), opt);
     expect(guestAccount).toEqual(expect.any(String));
 
     // Bob signs in elsewhere; a request carrying his credential and the
-    // device's proof is his, never the device account's.
+    // device's proof is his, never the device account's, in all three.
     const bob = await jazz.createAccountFor("bob");
+    const bobWithProof = () => route(origin, { ...bearer(token), "x-test-user": "bob" });
+    await expect(jazz.accountFor(bobWithProof(), opt)).resolves.toBe(bob);
+    const asBob = await jazz.forReqUser(bobWithProof());
+    const bobs = await asBob.insert(app.todos, { title: "bob's", owner: bob }).wait({
+      tier: "global",
+    });
+    // Bob's db acts under bob's policies: the device account's rows aren't his.
     await expect(
-      jazz.accountFor(route(origin, { ...bearer(token), "x-test-user": "bob" })),
-    ).resolves.toBe(bob);
+      asBob.insert(app.todos, { title: "as the device", owner: guestAccount! }).wait({
+        tier: "global",
+      }),
+    ).rejects.toThrow();
+    const onBobsBehalf = await jazz.withAttribution(bobWithProof(), opt);
+    const behalf = await onBobsBehalf
+      .insert(app.todos, { title: "on bob's behalf", owner: randomUUID() })
+      .wait({ tier: "global" });
+    for (const { id } of [bobs, behalf]) {
+      const [row] = await jazz.db.all(app.todos.where({ id }).select("$createdBy"));
+      expect(row?.$createdBy).toMatchObject({ account: bob });
+    }
 
     // The device account links to alice, who signs up; its key is revoked.
     const post = (path: string, body?: unknown) =>
@@ -260,10 +293,14 @@ describe("forReqUser for a device account", () => {
     });
     expect(linked.status).toBe(200);
     expect(((await linked.json()) as { account: string }).account).toBe(guestAccount);
-    await expect(jazz.forReqUser(route(origin, bearer(token)))).rejects.toMatchObject({
-      name: "RequestAuthenticationError",
-      code: "device_account_revoked",
-    });
+    const revoked = { name: "RequestAuthenticationError", code: "device_account_revoked" };
+    await expect(jazz.forReqUser(route(origin, bearer(token)))).rejects.toMatchObject(revoked);
+    await expect(jazz.withAttribution(route(origin, bearer(token)), opt)).rejects.toMatchObject(
+      revoked,
+    );
+    await expect(jazz.accountFor(route(origin, bearer(token)), opt)).rejects.toMatchObject(revoked);
+    // Without the opt-in, accountFor doesn't look at the proof at all.
+    await expect(jazz.accountFor(route(origin, bearer(token)))).resolves.toBeNull();
     // alice herself still acts as the account.
     await expect(jazz.accountFor(route(origin, { "x-test-user": "alice" }))).resolves.toBe(
       guestAccount,

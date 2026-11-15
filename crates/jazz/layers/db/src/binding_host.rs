@@ -569,27 +569,44 @@ pub fn verify_self_signed(
     app_id: &str,
     claimed_author: &str,
 ) -> HostResult<AuthorSubject> {
-    let now_seconds = web_time::SystemTime::now()
+    verify_self_signed_until(token, app_id, claimed_author).map(|(author, _)| author)
+}
+
+fn now_seconds() -> HostResult<u64> {
+    Ok(web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
         .map_err(|error| HostError::Argument(error.to_string()))?
-        .as_secs();
-    Ok(jazz_types::identity::verify_client_runtime_author_at(
+        .as_secs())
+}
+
+/// [`verify_self_signed`], with the proof's `exp` in Unix seconds.
+fn verify_self_signed_until(
+    token: &str,
+    app_id: &str,
+    claimed_author: &str,
+) -> HostResult<(AuthorSubject, u64)> {
+    Ok(jazz_types::identity::verify_client_runtime_author_until_at(
         token,
         app_id,
         claimed_author,
-        now_seconds,
+        now_seconds()?,
     )?)
 }
 
-/// The account-bound local-first author `proof` proves `claimed_author` is.
-fn verify_local_first(proof: &SelfSignedProof, claimed_author: &str) -> HostResult<AuthorSubject> {
-    let author = verify_self_signed(&proof.token, &proof.app_id, claimed_author)?;
+/// The account-bound local-first author `proof` proves `claimed_author` is,
+/// and until when (Unix seconds).
+fn verify_local_first(
+    proof: &SelfSignedProof,
+    claimed_author: &str,
+) -> HostResult<(AuthorSubject, u64)> {
+    let (author, expires_at) =
+        verify_self_signed_until(&proof.token, &proof.app_id, claimed_author)?;
     if author.principal_parts().0 != AuthorSubject::LOCAL_FIRST_ISSUER
         || author.account_id().is_none()
     {
         return Err("session admission requires an account-bound local-first proof".into());
     }
-    Ok(author)
+    Ok((author, expires_at))
 }
 
 /// The identity `config` opens with under `how`, checked; and whether the
@@ -903,6 +920,8 @@ pub struct Binding {
 struct SelfSignedProof {
     token: String,
     app_id: String,
+    /// The proof's `exp` (Unix seconds), once verified: admission lapses then.
+    expires_at: u64,
 }
 
 impl Binding {
@@ -948,14 +967,18 @@ impl Binding {
         claimed_author: &str,
     ) -> HostResult<()> {
         self.require_trusted_backend()?;
-        let proof = SelfSignedProof {
+        let mut proof = SelfSignedProof {
             token: token.to_owned(),
             app_id: app_id.to_owned(),
+            expires_at: 0,
         };
-        verify_local_first(&proof, claimed_author)?;
-        self.admitted
-            .borrow_mut()
-            .insert(claimed_author.to_owned(), proof);
+        (_, proof.expires_at) = verify_local_first(&proof, claimed_author)?;
+        let now = now_seconds()?;
+        let mut admitted = self.admitted.borrow_mut();
+        // An expired proof admits no one any more: drop those, so the map
+        // holds only the accounts admitted within a proof's lifetime.
+        admitted.retain(|_, admitted| admitted.expires_at > now);
+        admitted.insert(claimed_author.to_owned(), proof);
         Ok(())
     }
 
@@ -969,7 +992,9 @@ impl Binding {
                     Some((canonical, self.admitted.borrow().get(canonical)?.clone()))
                 });
                 match admitted {
-                    Some((canonical, proof)) => verify_local_first(&proof, canonical),
+                    Some((canonical, proof)) => {
+                        verify_local_first(&proof, canonical).map(|(author, _)| author)
+                    }
                     None => Err(error),
                 }
             }

@@ -86,6 +86,7 @@ import {
   type ColumnTransformMap,
   type ColumnTransformRegistry,
 } from "./column-transforms.js";
+
 export type {
   ColumnTransform,
   ColumnTransformMap,
@@ -140,6 +141,9 @@ import { toError } from "./util.js";
 import { isThinDb, upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
+
+/** `getLocalFirstIdentityProof` hands out a session's sync proof only with this long left. */
+const SESSION_PROOF_MIN_REMAINING_SECONDS = 30;
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -2979,10 +2983,11 @@ export class Db {
    * A Db opened by a session (`createJazzClient`, a provider) doesn't hold the
    * device key: it returns the session's current sync proof, which lasts up
    * to an hour and is for this app, so `ttlSeconds` doesn't apply and any
-   * other `audience` returns `null`. Ask for one per request.
+   * other `audience` returns `null`, as does one with under 30 seconds left
+   * (the session renews it). Ask for one per request, and don't log or
+   * forward it: until it expires it also opens this account's sync.
    */
   getLocalFirstIdentityProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
-    const audience = options?.audience ?? clientScope(this.config);
     if (!this._localFirstSecret) {
       const token = this.config.jwtToken;
       const payload = token ? parseJwtPayload(token) : null;
@@ -2990,7 +2995,8 @@ export class Db {
         !token ||
         payload?.iss !== LOCAL_FIRST_JWT_ISSUER ||
         typeof payload.exp !== "number" ||
-        payload.exp <= Date.now() / 1000 ||
+        // One about to expire could lapse on its way to the backend.
+        payload.exp <= Date.now() / 1000 + SESSION_PROOF_MIN_REMAINING_SECONDS ||
         (options?.audience !== undefined && payload.aud !== accountAppId(options.audience))
       )
         return null;
@@ -2998,6 +3004,7 @@ export class Db {
     }
 
     const ttl = options?.ttlSeconds ?? 60;
+    const audience = options?.audience ?? clientScope(this.config);
     return this.mintLocalFirstToken(this._localFirstSecret, audience, ttl);
   }
 

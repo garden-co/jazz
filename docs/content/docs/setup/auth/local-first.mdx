@@ -134,9 +134,8 @@ production hostname.
 
 A device account calls your API routes like any signed-in user: `jazz.forReqUser(request)` gives
 the route a database scoped to that account, under your permissions, and its writes are attributed
-to it (`withAttribution` and `accountFor` work the same way). The browser proves which account it
-is by sending a short-lived proof from `db.getLocalFirstIdentityProof()` as an `Authorization`
-header:
+to it. The browser proves which account it is by sending a short-lived proof from
+`db.getLocalFirstIdentityProof()` as an `Authorization` header:
 
 ```ts
 const proof = db.getLocalFirstIdentityProof(); // null unless signed in as a device account
@@ -152,13 +151,31 @@ await fetch("/api/notes", {
 const db = await jazz.forReqUser(request);
 ```
 
-The proof is short-lived (at most an hour), so ask for it for each request. Your backend checks it as it checks a
-sync connection: its signature and expiry, that it was made for this app (your `publicUrl`, when
-browsers reach Jazz through a proxy), that `authenticate` returns `acceptDeviceAccounts(request)`,
-and that the key wasn't revoked when the account was linked to a user. A request that fails a check
-throws a `RequestAuthenticationError` with `code: "invalid_device_proof"` or
-`"device_account_revoked"`; one with no proof is `"signed_out"`, as before. When `authenticate`
-names a user for the request (a session cookie), that user wins over the proof.
+The proof is short-lived (at most an hour), so ask for it for each request, and use the database
+`forReqUser` returns for that request only: it stops acting when the proof expires. Your backend
+checks the proof as it checks a sync connection: its signature and expiry, that it was made for this
+app (your `publicUrl`, when browsers reach Jazz through a proxy), that `authenticate` returns
+`acceptDeviceAccounts(request)`, and that the key wasn't revoked when the account was linked to a
+user. A request that fails a check throws a `RequestAuthenticationError` with
+`code: "invalid_device_proof"` or `"device_account_revoked"`; one with no proof is `"signed_out"`,
+as before. When `authenticate` names a user for the request (a session cookie), that user wins over
+the proof.
+
+Anyone can make a device account, so a device account's `forReqUser` database is only as
+restricted as your permissions make it, exactly as its own sync is. `withAttribution` (which skips
+your permissions) and `accountFor` don't take device accounts unless you ask:
+`jazz.withAttribution(request, { deviceAccounts: true })` and
+`jazz.accountFor(request, { deviceAccounts: true })`. Without it, they answer as if no one were
+signed in. With it, `accountFor` creates the device account on the backend if the device never
+synced, as its first sync would; don't read its answer as "a signed-in user".
+
+<Callout type="warn">
+  The proof opens this account's sync until it expires. Don't log it or forward it to other
+  services, and keep it out of error reports. Your own `authenticate` now sees
+  `Authorization: Bearer <proof>` on these requests: if your auth library reads any bearer token as
+  its own, skip tokens it can't parse rather than throw, so the request falls through to
+  `acceptDeviceAccounts(request)`.
+</Callout>
 
 ## Signing up later
 

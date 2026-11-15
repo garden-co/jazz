@@ -56,6 +56,8 @@ pub struct VerifiedSelfSigned {
     pub user_id: String,
     pub public_key_bytes: [u8; 32],
     pub issuer: &'static str,
+    /// The proof's `exp`, in Unix seconds: it proves nothing from then on.
+    pub expires_at: u64,
 }
 
 /// Mint a self-signed JWT using the current system time.
@@ -172,7 +174,20 @@ pub fn verify_client_runtime_author_at(
     claimed_author: &str,
     now_seconds: u64,
 ) -> Result<AuthorSubject, String> {
+    verify_client_runtime_author_until_at(token, expected_audience, claimed_author, now_seconds)
+        .map(|(author, _)| author)
+}
+
+/// [`verify_client_runtime_author_at`], with the proof's `exp` (Unix
+/// seconds): when what it proves stops being proven.
+pub fn verify_client_runtime_author_until_at(
+    token: &str,
+    expected_audience: &str,
+    claimed_author: &str,
+    now_seconds: u64,
+) -> Result<(AuthorSubject, u64), String> {
     let verified = verify_jazz_self_signed_proof_at(token, expected_audience, now_seconds)?;
+    let expires_at = verified.expires_at;
     let author = AuthorSubject::reserved(verified.issuer, &verified.user_id)
         .map_err(|error| error.to_string())?;
     let claimed =
@@ -196,7 +211,7 @@ pub fn verify_client_runtime_author_at(
             author.canonical()
         ));
     }
-    Ok(author)
+    Ok((author, expires_at))
 }
 
 /// Verify a self-signed client proof using the current system time.
@@ -326,6 +341,7 @@ pub fn verify_jazz_self_signed_proof_with_max_ttl_at(
         user_id: derived_user_id.to_string(),
         public_key_bytes: pub_key_bytes,
         issuer: matched_issuer,
+        expires_at: exp,
     })
 }
 
