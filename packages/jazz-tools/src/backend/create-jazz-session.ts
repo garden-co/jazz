@@ -303,10 +303,13 @@ export async function createJazzClient(input: JazzClientConfig): Promise<Backend
   let core!: SessionCore<JazzClient>;
   // A jazz.permissions.json is checked against the app's bindings by the Rust loader.
   const permissions = await enginePermissions(input.app, input.permissions);
-  const session = await createStartedJazzSession({ ...input, permissions, initial }, async (config) => {
-    core = await openJazzSession(config);
-    return core;
-  });
+  const session = await createStartedJazzSession(
+    { ...input, permissions, initial },
+    async (config) => {
+      core = await openJazzSession(config);
+      return core;
+    },
+  );
   const keeps = input.driver.type !== "memory";
   const close = async (options?: BackendClientCloseOptions) => {
     await closeAfterUploads(core, keeps, options);

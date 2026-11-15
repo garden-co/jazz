@@ -540,7 +540,7 @@ function specifierFor(like: string, target: string, file: string, project: Proje
   const base = target.slice(target.lastIndexOf(sep) + 1).replace(/\.ts$/, "");
   const last = like.slice(like.lastIndexOf("/") + 1).replace(/\.(js|ts|mjs|mts|jsx|tsx)$/, "");
   if (last === "schema" || last === "permissions") return specifierLike(like, base);
-  return relativeSpecifier(file, target, project, like.endsWith('.js'));
+  return relativeSpecifier(file, target, project, like.endsWith(".js"));
 }
 
 function relativeSpecifier(file: string, target: string, _project: Project, js = false): string {
