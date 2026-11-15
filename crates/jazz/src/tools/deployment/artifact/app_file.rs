@@ -400,7 +400,7 @@ fn read_tables(
         if let Some(fields) = table.get("tsOnly") {
             if let Some((_, warnings)) = codegen.as_mut() {
                 warnings.push(format!(
-                    "{path}.tsOnly: `tsOnly` is from alpha.63 and is ignored; \
+                    "{path}.tsOnly: `tsOnly` (written before alpha.65) is ignored; \
                      `jazz-tools upgrade` turns it into `computed` and `transforms`"
                 ));
             }

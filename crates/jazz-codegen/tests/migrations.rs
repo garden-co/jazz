@@ -381,3 +381,16 @@ fn the_written_file_stays_canonical_and_keeps_the_rest() {
     );
     assert!(artifact::todos(&json::parse(created.app.as_bytes()).unwrap()).is_empty());
 }
+
+#[test]
+fn a_renamed_table_may_reorder_its_columns() {
+    let created = migrate(
+        TODOS,
+        r#"{ "tasks": { "columns": { "done": "boolean", "title": "string" } } }"#,
+    );
+    assert!(
+        migration(&created).contains(r#""renameTables": { "tasks": "todos" }"#),
+        "{}",
+        migration(&created)
+    );
+}

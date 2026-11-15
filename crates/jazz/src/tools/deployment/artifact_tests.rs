@@ -1953,11 +1953,9 @@ fn slices_and_ts_only_from_alpha63_load_with_a_warning() {
             .iter()
             .any(|w| w.contains("slices: schema slicing is gone in alpha.65"))
     );
-    assert!(
-        app.warnings()
-            .iter()
-            .any(|w| w.contains("tables.shares.tsOnly: `tsOnly` is from alpha.63"))
-    );
+    assert!(app.warnings().iter().any(|w| {
+        w.contains("tables.shares.tsOnly: `tsOnly` (written before alpha.65) is ignored")
+    }));
     assert!(edited_app_loads(|_| {}).warnings().is_empty());
 }
 
@@ -1977,13 +1975,83 @@ fn migrations_take_a_name_and_comments() {
 }
 
 #[test]
-fn the_source_hash_ignores_line_ends() {
-    let unix = source_hash(b"{\n  \"format\": 1\n}\n");
-    assert_eq!(unix, source_hash(b"{\r\n  \"format\": 1\r\n}\r\n"));
-    assert_ne!(unix, source_hash(b"{\n  \"format\": 2\n}\n"));
+fn the_source_hash_ignores_formatting_but_not_content() {
+    let canonical = source_hash(b"{\n  \"format\": 1,\n  \"tables\": {}\n}\n");
+    for same in [
+        &b"{\r\n  \"format\": 1,\r\n  \"tables\": {}\r\n}\r\n"[..],
+        b"{\"format\":1,\"tables\":{}}",
+        b"\xef\xbb\xbf{\n\t\"format\": 1, \"tables\": {  }\n}",
+    ] {
+        assert_eq!(
+            source_hash(same),
+            canonical,
+            "{}",
+            String::from_utf8_lossy(same)
+        );
+    }
+    assert_ne!(source_hash(b"{\"format\": 2, \"tables\": {}}"), canonical);
+    // Key order is content: columns are in declared order.
+    assert_ne!(source_hash(b"{\"tables\": {}, \"format\": 1}"), canonical);
     assert!(
-        unix.starts_with("sha256:") && unix.len() == 7 + 64,
-        "{unix}"
+        canonical.starts_with("sha256:") && canonical.len() == 7 + 64,
+        "{canonical}"
+    );
+}
+
+#[test]
+fn a_version_whose_rows_pass_unchanged_needs_no_written_migration() {
+    // A .64 file: `migrations create` wrote a snapshot, but no migration,
+    // for a change of indexes alone.
+    let file = r#"{ "format": 1,
+        "tables": { "todos": { "columns": { "title": "string", "done": "boolean" }, "indexes": ["title"] } },
+        "history": { "a1b2c3d4e5f6": { "tables": { "todos": { "columns": { "title": "string", "done": "boolean" } } } } } }"#;
+    let app = load_app(file.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(app.migrations().len(), 1, "the implied identity step");
+    assert!(
+        app.migrations()[0]
+            .forward
+            .iter()
+            .all(|lens| lens.operations.is_empty())
+    );
+    assert_eq!(load_client(file.as_bytes()).unwrap().schemas.len(), 2);
+    // A version whose rows would need transforming still needs its migration.
+    let structural = file.replace(
+        r#""done": "boolean" } } } } }"#,
+        r#""note": "string?" } } } } }"#,
+    );
+    let error = load_app(structural.as_bytes()).unwrap_err().to_string();
+    assert!(
+        error.contains("history.a1b2c3d4e5f6: no migration leads from it"),
+        "{error}"
+    );
+}
+
+#[test]
+fn todo_is_only_a_placeholder_where_the_tools_write_one() {
+    let file = |extra: &str| {
+        format!(
+            r#"{{ "format": 1, "tables": {{ "notes": {{ "columns": {{
+                "title": {{ "type": "string", "default": "TODO: later" }},
+                "kind": {{ "enum": ["TODO:x", "done"] }},
+                "meta": {{ "json": {{ "type": "object", "description": "TODO: describe" }}, "transform": "metaText" }}
+            }} }} }},
+            "transforms": {{ "metaText": {{ "stored": {{ "json": {{ "type": "object", "description": "TODO: describe" }} }}, "view": {extra} }} }} }}"#
+        )
+    };
+    load_app(file("\"string\"").as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    let error = load_app(file("\"TODO: the view type\"").as_bytes())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("transforms.metaText.view: TODO: the view type"),
+        "{error}"
+    );
+    let error = load_app(file("{ \"json\": \"TODO: a schema\" }").as_bytes())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("transforms.metaText.view.json: TODO: a schema"),
+        "{error}"
     );
 }
 

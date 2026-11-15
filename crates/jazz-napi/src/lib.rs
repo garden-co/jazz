@@ -241,7 +241,9 @@ pub fn validate_bindings(app_json: String, bindings: Option<String>) -> js::Resu
         Some(staleness) => {
             let code = match staleness {
                 Staleness::SchemaChanged => "JAZZ_SCHEMA_CHANGED",
-                Staleness::Missing | Staleness::OutOfDate => "JAZZ_BINDINGS_STALE",
+                Staleness::Missing | Staleness::OutOfDate | Staleness::Unreadable(_) => {
+                    "JAZZ_BINDINGS_STALE"
+                }
             };
             Err(BindingError(napi::Error::new(
                 JsErrorCode(code.to_owned()),

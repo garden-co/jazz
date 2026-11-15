@@ -19,8 +19,9 @@ pub struct App {
     /// `sha256:<hex>` of the file ([`artifact::source_hash`]): what the
     /// bindings record so a stale copy is caught.
     pub source: String,
-    /// The file's text with CRLF read as LF: the bytes `source` hashes.
-    /// Empty when the app wasn't loaded from a file.
+    /// The file's text with CRLF read as LF (`source` hashes its canonical
+    /// form, so the two agree whatever the formatting). Empty when the app
+    /// wasn't loaded from a file.
     pub file: String,
     /// The current tables, by name.
     pub tables: Vec<Table>,

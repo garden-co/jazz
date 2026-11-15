@@ -86,6 +86,12 @@ pub fn generate(dir: &Path, langs: &[Lang], check: bool) -> Result<Outcome, Stri
                     Staleness::SchemaChanged.message(lang)
                 ));
             }
+            Some(Staleness::Unreadable(why)) if !check => {
+                outcome.warnings.push(format!(
+                    "{why}; regenerating it, so a change of `tables` since can't be caught this time"
+                ));
+                stale.push((lang, path, Staleness::Unreadable(why)));
+            }
             Some(staleness) => stale.push((lang, path, staleness)),
         }
     }
