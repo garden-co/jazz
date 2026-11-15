@@ -102,3 +102,73 @@ fn a_loaded_app_keeps_its_file_text_as_its_source_hashes_it() {
     assert_eq!(a.file, b.file);
     assert_eq!(a.source, b.source);
 }
+
+#[test]
+fn type_names_may_shadow_globals_the_module_never_uses() {
+    let app = |table: &str| {
+        format!(
+            r#"{{ "format": 1, "tables": {{ "{table}": {{ "columns": {{ "at": "timestamp" }} }} }} }}"#
+        )
+    };
+    let generated = generate(Lang::TypeScript, app("records").as_bytes()).unwrap();
+    assert!(generated.contains("export type Record = {"), "{generated}");
+    assert!(
+        !generated.contains("Record<"),
+        "the module must not use the global Record"
+    );
+    // `Date` is a type the module uses itself.
+    let error = generate(Lang::TypeScript, app("dates").as_bytes()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("table `dates` would be the TypeScript type `Date`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn bindings_read_back_after_a_formatter_and_regenerate_when_unreadable() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/tasks");
+    let app_json = std::fs::read(dir.join("jazz.app.json")).unwrap();
+    let app = App::load(&app_json).unwrap();
+    let generated = generate(Lang::TypeScript, &app_json).unwrap();
+    // A BOM, CRLF, tabs and bare keys, as editors and formatters leave them.
+    let reformatted = format!(
+        "\u{feff}{}",
+        generated
+            .replace("  \"source\": ", "\tsource: ")
+            .replace("  \"schema\": ", "\tschema:  ")
+            .replace("  \"relations\": ", "\trelations: ")
+            .replace('\n', "\r\n")
+    );
+    let recorded = bindings::read(Lang::TypeScript, &reformatted).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(recorded.source, app.source);
+    assert_eq!(
+        bindings::staleness(&app, Lang::TypeScript, Some(&reformatted)).unwrap(),
+        None
+    );
+    // Bindings that can't be read are stale, not an error.
+    let mangled = generated.replace("\"schema\": {", "\"schema\": {{");
+    assert!(matches!(
+        bindings::staleness(&app, Lang::TypeScript, Some(&mangled)).unwrap(),
+        Some(bindings::Staleness::Unreadable(_))
+    ));
+}
+
+#[test]
+fn a_backend_with_only_the_bindings_loads_what_the_files_load() {
+    use jazz::tools::deployment::artifact;
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/chat-react");
+    let app_json = std::fs::read(dir.join("jazz.app.json")).unwrap();
+    let permissions = std::fs::read(dir.join("jazz.permissions.json")).unwrap();
+    let options = jazz_codegen::compile_app(&app_json).unwrap();
+    let from_bindings =
+        artifact::load_backend(options.as_bytes(), &permissions).unwrap_or_else(|e| panic!("{e}"));
+    let from_files = artifact::load(&app_json, &permissions).unwrap();
+    assert_eq!(from_bindings.bundle(), from_files.bundle());
+    assert_eq!(from_bindings.permissions(), from_files.permissions());
+    assert_eq!(
+        from_bindings.deployment_body(false),
+        from_files.deployment_body(false)
+    );
+}

@@ -140,6 +140,7 @@ pub fn generate(lang: Lang, app_json: &[u8]) -> Result<String, CodegenError> {
 
 /// The bindings for a loaded `app` in `lang`.
 pub fn generate_app(lang: Lang, app: &App) -> Result<String, CodegenError> {
+    refuse_stranded(app)?;
     match lang {
         Lang::TypeScript => ts::generate(app),
         Lang::Rust => rust::generate(app),
@@ -150,5 +151,14 @@ pub fn generate_app(lang: Lang, app: &App) -> Result<String, CodegenError> {
 /// the TS bindings embed, for tests that define an app inline.
 pub fn compile_app(app_json: &[u8]) -> Result<String, CodegenError> {
     let app = App::load(app_json).map_err(CodegenError::from_artifact)?;
+    refuse_stranded(&app)?;
     Ok(json::print(&ts::bind_options(&app)))
+}
+
+/// Bindings must not ship a version clients couldn't open.
+fn refuse_stranded(app: &App) -> Result<(), CodegenError> {
+    match app.stranded.as_slice() {
+        [] => Ok(()),
+        stranded => Err(CodegenError::new(stranded.join("\n"))),
+    }
 }

@@ -39,32 +39,38 @@ fn read_ts(bindings: &str) -> Result<Recorded, CodegenError> {
             ts::FILE
         ))
     };
-    if !bindings.starts_with(ts::HEADER) {
+    let bindings = bindings.strip_prefix('\u{feff}').unwrap_or(bindings);
+    if !bindings.trim_start().starts_with(ts::HEADER) {
         return Err(refuse(
             "not a module jazz-tools generated (its first line differs)",
         ));
     }
     let format = bindings
         .lines()
-        .nth(1)
-        .and_then(|line| line.strip_prefix("// Bindings format "))
+        .find_map(|line| line.trim().strip_prefix("// Bindings format "))
         .and_then(|rest| rest.split('.').next())
         .and_then(|n| n.parse::<u32>().ok())
-        .ok_or_else(|| refuse("no `// Bindings format <n>.` second line"))?;
+        .ok_or_else(|| refuse("no `// Bindings format <n>.` line"))?;
     let call = bindings
-        .find(ts::BIND_APP)
+        .find("bindApp<")
         .ok_or_else(|| refuse("no `export const app = bindApp<…>(…)`"))?;
-    let options = &bindings[call..];
+    let open = bindings[call..]
+        .find('(')
+        .and_then(|at| {
+            bindings[call + at + 1..]
+                .find('{')
+                .map(|brace| call + at + 1 + brace)
+        })
+        .ok_or_else(|| refuse("no options object in `bindApp<…>(…)`"))?;
+    let text = literal_prefix(&bindings[open..])
+        .ok_or_else(|| refuse("bindApp's options are cut short"))?;
+    let options = json::parse(as_json(text).as_bytes())
+        .map_err(|error| refuse(&format!("bindApp's options were edited ({error})")))?;
     let value = |key: &str| -> Result<Json, CodegenError> {
-        let marker = format!("\n  \"{key}\": ");
-        let at = options
-            .find(&marker)
-            .ok_or_else(|| refuse(&format!("no `{key}` in bindApp's options")))?
-            + marker.len();
-        let text = literal_prefix(&options[at..])
-            .ok_or_else(|| refuse(&format!("`{key}` is cut short")))?;
-        json::parse(as_json(text).as_bytes())
-            .map_err(|error| refuse(&format!("`{key}` was edited ({error})")))
+        options
+            .get(key)
+            .cloned()
+            .ok_or_else(|| refuse(&format!("no `{key}` in bindApp's options")))
     };
     let source = match value("source")? {
         Json::String(source) => source,
@@ -133,16 +139,22 @@ fn literal_prefix(text: &str) -> Option<&str> {
     None
 }
 
-/// The generator's object literal as JSON: no trailing commas, and the
-/// computed key `["__proto__"]` as the plain key it stands for. (Inside a
-/// string a `"` is always escaped, so neither pattern occurs there.)
+/// A JS object literal as the generator writes it, or as a formatter
+/// leaves it, as JSON: keys quoted or bare, trailing commas, shorthand
+/// entries (`computed,`, which are values of jazz.computed.ts and dropped)
+/// and the computed key `["__proto__"]` as the plain key it stands for.
+/// (Inside a string a `"` is always escaped, so none of these patterns
+/// occurs there.)
 fn as_json(literal: &str) -> String {
-    let literal = literal.replace("[\"__proto__\"]:", "\"__proto__\":");
+    let literal = literal.replace("[\"__proto__\"]", "\"__proto__\"");
+    let chars: Vec<char> = literal.chars().collect();
     let mut out = String::with_capacity(literal.len());
     let mut in_string = false;
     let mut escaped = false;
-    let chars: Vec<char> = literal.chars().collect();
-    for (i, &c) in chars.iter().enumerate() {
+    let mut i = 0;
+    let next_significant = |from: usize| chars[from..].iter().copied().find(|c| !c.is_whitespace());
+    while i < chars.len() {
+        let c = chars[i];
         if in_string {
             match (escaped, c) {
                 (true, _) => escaped = false,
@@ -151,12 +163,61 @@ fn as_json(literal: &str) -> String {
                 _ => {}
             }
             out.push(c);
+            i += 1;
             continue;
         }
         if c == '"' {
             in_string = true;
+        } else if c.is_ascii_alphabetic() || c == '_' || c == '$' {
+            let start = i;
+            while i < chars.len()
+                && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '$')
+            {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            let before = out.chars().rev().find(|c| !c.is_whitespace());
+            match next_significant(i) {
+                Some(':') => out.push_str(&format!("\"{word}\"")),
+                Some(',' | '}')
+                    if matches!(before, Some('{' | ','))
+                        && !["true", "false", "null"].contains(&word.as_str()) =>
+                {
+                    // A shorthand entry: drop it and its comma.
+                    while i < chars.len() && chars[i].is_whitespace() {
+                        i += 1;
+                    }
+                    if chars.get(i) == Some(&',') {
+                        i += 1;
+                    }
+                }
+                _ => out.push_str(&word),
+            }
+            continue;
         }
-        if c == ','
+        if c == ',' && matches!(next_significant(i + 1), Some('}' | ']')) {
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    // A shorthand entry last leaves its predecessor's comma before `}`.
+    let mut cleaned = String::with_capacity(out.len());
+    let chars: Vec<char> = out.chars().collect();
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, &c) in chars.iter().enumerate() {
+        if in_string {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => in_string = false,
+                _ => {}
+            }
+        } else if c == '"' {
+            in_string = true;
+        } else if c == ','
             && chars[i + 1..]
                 .iter()
                 .find(|c| !c.is_whitespace())
@@ -164,9 +225,9 @@ fn as_json(literal: &str) -> String {
         {
             continue;
         }
-        out.push(c);
+        cleaned.push(c);
     }
-    out
+    cleaned
 }
 
 /// Why committed bindings can't be used with the app file as it is.
@@ -177,6 +238,9 @@ pub enum Staleness {
     /// `tables` changed since the bindings were generated and no migration
     /// leads from that version: `migrations create` is needed.
     SchemaChanged,
+    /// They can't be read (edited, or not this generator's): regenerating
+    /// replaces them, but whether `tables` changed since can't be told.
+    Unreadable(String),
     /// The file changed otherwise, or another Jazz version wrote them:
     /// regenerating is enough. (Formatting doesn't make bindings stale:
     /// only their `source` and format count.)
@@ -191,6 +255,7 @@ impl Staleness {
                  `jazz-tools migrations create --name <name>`"
                 .into(),
             Staleness::OutOfDate => "bindings out of date: run `jazz-tools generate`".into(),
+            Staleness::Unreadable(why) => why.clone(),
         }
     }
 }
@@ -204,7 +269,10 @@ pub fn staleness(
     let Some(bindings) = bindings else {
         return Ok(Some(Staleness::Missing));
     };
-    let recorded = read(lang, bindings)?;
+    let recorded = match read(lang, bindings) {
+        Ok(recorded) => recorded,
+        Err(error) => return Ok(Some(Staleness::Unreadable(error.message().to_string()))),
+    };
     if !app
         .compiled
         .schemas

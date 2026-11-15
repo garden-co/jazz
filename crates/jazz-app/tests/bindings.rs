@@ -54,7 +54,14 @@ fn committed_bindings_read_back() {
             None
         );
 
-        let edited = committed.replacen("\"format\": 1", "\"format\":  1", 1);
+        // Reformatting `APP` changes nothing; editing what it says does.
+        let reformatted = committed.replacen("\"format\": 1", "\"format\":  1", 1);
+        assert!(jazz_codegen::bindings::read(Lang::Rust, &reformatted).is_ok());
+        let edited = committed.replacen(
+            "\"tables\": {",
+            "\"tables\": { \"extra\": { \"columns\": {} },",
+            1,
+        );
         let error = jazz_codegen::bindings::read(Lang::Rust, &edited).unwrap_err();
         assert!(
             error.message().contains("Restore it from version control"),

@@ -38,8 +38,9 @@ pub(crate) fn format_line() -> String {
 /// [`crate::bindings`] reads back.
 pub(crate) const BIND_APP: &str = "export const app = bindApp<";
 
-/// Names the module declares or imports itself, which no table, enum or
-/// JSON type may take; and global types it uses.
+/// Names the module declares or imports itself, and the globals it refers
+/// to, which no table, enum or JSON type may take. Other globals (`Record`,
+/// `Partial`, …) the module never uses, so a type may shadow them.
 const RESERVED: &[&str] = &[
     "Types",
     "Transforms",
@@ -49,24 +50,7 @@ const RESERVED: &[&str] = &[
     "ComputedImpl",
     "TransformImpl",
     "JsonValue",
-    "Array",
-    "BigInt",
-    "Boolean",
     "Date",
-    "Error",
-    "Function",
-    "Map",
-    "Number",
-    "Object",
-    "Omit",
-    "Partial",
-    "Pick",
-    "Promise",
-    "Readonly",
-    "Record",
-    "Set",
-    "String",
-    "Symbol",
     "Uint8Array",
 ];
 
@@ -209,7 +193,7 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
                 None => ts_type(ty, init),
             }
         };
-        let _ = writeln!(out, "export interface {} {{", n.row);
+        let _ = writeln!(out, "export type {} = {{", n.row);
         out.push_str("  readonly id: string;\n");
         for column in &table.columns {
             let ty = field_type(&column.name, &view_type(app, column), false);
@@ -229,8 +213,8 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
                 nullable(ty, field.ty.nullable)
             );
         }
-        out.push_str("}\n\n");
-        let _ = writeln!(out, "export interface {} {{", n.insert);
+        out.push_str("};\n\n");
+        let _ = writeln!(out, "export type {} = {{", n.insert);
         for column in &table.columns {
             let ty = field_type(&column.name, &view_type(app, column), true);
             let _ = writeln!(
@@ -241,7 +225,7 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
                 nullable(ty, column.ty.nullable)
             );
         }
-        out.push_str("}\n\n");
+        out.push_str("};\n\n");
     }
 
     // The type map.

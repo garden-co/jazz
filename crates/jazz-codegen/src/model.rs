@@ -19,8 +19,9 @@ pub struct App {
     /// `sha256:<hex>` of the file ([`artifact::source_hash`]): what the
     /// bindings record so a stale copy is caught.
     pub source: String,
-    /// The file's text with CRLF read as LF: the bytes `source` hashes.
-    /// Empty when the app wasn't loaded from a file.
+    /// The file's text with CRLF read as LF (`source` hashes its canonical
+    /// form, so the two agree whatever the formatting). Empty when the app
+    /// wasn't loaded from a file.
     pub file: String,
     /// The current tables, by name.
     pub tables: Vec<Table>,
@@ -28,8 +29,12 @@ pub struct App {
     pub transforms: Vec<Transform>,
     /// The engine schema, history and lenses a runtime opens along.
     pub compiled: Compiled,
-    /// What loaded but is ignored (a .63 file's `slices`, `tsOnly`).
+    /// What loaded but is ignored (a .63 file's `slices`, `tsOnly`), and
+    /// the stranded versions.
     pub warnings: Vec<String>,
+    /// History versions no migration connects to the current one, whose
+    /// rows would need transforming: bindings refuse them.
+    pub stranded: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -202,6 +207,7 @@ impl App {
                 migrations: definition.migrations().to_vec(),
             },
             warnings: definition.warnings().to_vec(),
+            stranded: definition.stranded().to_vec(),
         }
     }
 

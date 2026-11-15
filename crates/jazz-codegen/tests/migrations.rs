@@ -316,19 +316,36 @@ fn tables_are_created_dropped_and_renamed() {
 }
 
 #[test]
-fn a_change_the_diff_cant_describe_is_a_todo() {
-    let created = migrate(
-        TODOS,
-        r#"{ "todos": { "columns": { "title": "string", "done": "boolean" }, "history": "latest" } }"#,
-    );
-    assert_eq!(
-        created.todos,
-        vec!["migrations[0].migrate.todos".to_string()]
-    );
-    assert!(
-        migration(&created)
-            .contains("no migration step was inferred for the change to table `todos`")
-    );
+fn a_change_that_keeps_every_row_needs_an_empty_step() {
+    for (after, what) in [
+        (
+            r#"{ "todos": { "columns": { "title": "string", "done": "boolean" }, "history": "latest" } }"#,
+            "history retention",
+        ),
+        (
+            r#"{ "todos": { "columns": { "title": "string", "done": "boolean" }, "indexes": ["title", ["done", "title"]] } }"#,
+            "indexes",
+        ),
+        (
+            r#"{ "todos": { "columns": { "title": { "type": "string", "merge": "text" }, "done": "boolean" } } }"#,
+            "merge strategies",
+        ),
+        (
+            r#"{ "todos": { "columns": { "done": "boolean", "title": "string" } } }"#,
+            "the column order",
+        ),
+    ] {
+        let created = migrate(TODOS, after);
+        assert!(created.todos.is_empty(), "{what}: {:?}", created.todos);
+        let text = migration(&created);
+        assert!(
+            text.contains(&format!(
+                "\"todos\": {{ \"$comment\": \"Rows pass unchanged: only {what} changed.\" }}"
+            )),
+            "{text}"
+        );
+        App::load(created.app.as_bytes()).unwrap_or_else(|e| panic!("{what}: {e}"));
+    }
 }
 
 #[test]
@@ -363,4 +380,48 @@ fn the_written_file_stays_canonical_and_keeps_the_rest() {
         json::print(&json::parse(created.app.as_bytes()).unwrap())
     );
     assert!(artifact::todos(&json::parse(created.app.as_bytes()).unwrap()).is_empty());
+}
+
+#[test]
+fn a_renamed_table_may_reorder_its_columns() {
+    let created = migrate(
+        TODOS,
+        r#"{ "tasks": { "columns": { "done": "boolean", "title": "string" } } }"#,
+    );
+    assert!(
+        migration(&created).contains(r#""renameTables": { "tasks": "todos" }"#),
+        "{}",
+        migration(&created)
+    );
+}
+
+#[test]
+fn bindings_refuse_a_version_no_migration_leads_from() {
+    let stranded = r#"{ "format": 1,
+        "tables": { "todos": { "columns": { "title": "string", "note": "string?" } } },
+        "history": { "v1": { "tables": { "todos": { "columns": { "title": "string" } } } } } }"#;
+    let error = generate(Lang::TypeScript, stranded.as_bytes())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("history.v1: no migration leads from it"),
+        "{error}"
+    );
+    assert!(jazz_codegen::compile_app(stranded.as_bytes()).is_err());
+    // `migrations create` still runs on such a file: it's what repairs it.
+    let bindings = generate(
+        Lang::TypeScript,
+        file(r#"{ "todos": { "columns": { "title": "string" } } }"#).as_bytes(),
+    )
+    .unwrap();
+    // The bindings' version is the stranded one, so nothing new is written,
+    // but it runs.
+    let created = create(
+        Lang::TypeScript,
+        stranded.as_bytes(),
+        Some(&bindings),
+        "note",
+    )
+    .unwrap();
+    assert!(!created.changed);
 }

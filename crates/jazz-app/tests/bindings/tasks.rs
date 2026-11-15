@@ -4,7 +4,7 @@
 #![allow(dead_code, clippy::all)]
 
 /// The `jazz.app.json` these bindings were generated from.
-pub const SOURCE: &str = "sha256:2df648c467c181cc2649d01df4301072895cc12e6c7cccd5b298c56c39645813";
+pub const SOURCE: &str = "sha256:c2e939bfae37d7cc77d7ad26ad13f5532e06e6768f9ad0d6a28ab7195fdf62e7";
 
 /// The values of column `tasks.priority`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

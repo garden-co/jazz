@@ -875,7 +875,8 @@ Neither file carries a schema hash or bundle id: loaders compute them.
     must be the column's type).
 - Values are JSON in the column's type: strings for `string`, enums and
   `uuid`, numbers for `int`/`float`, a decimal string for `bigint`, the
-  engine's integer for `timestamp` (an ISO 8601 form is not supported yet),
+  engine's integer for `timestamp`, milliseconds since the Unix epoch (an ISO
+  8601 form is not supported yet),
   base64 for `bytes`, any JSON for `json`, arrays for `array`, objects
   `{"<case>": {...}}` for payload enums, and `null`.
 
@@ -908,10 +909,30 @@ the readable form of `defineMigration`:
 
 Every migration must pass the lens checks a deployment runs (§10.6).
 
-**TODOs.** A string value starting with `TODO:` (anywhere but a `$comment`)
-is a decision `jazz-tools migrations create` or `jazz-tools upgrade` left to
-the author. Every loader refuses a file that has one, listing each by JSON
-path and text, so a half-written migration never deploys.
+**TODOs.** A string starting with `TODO:` where the tools write
+placeholders (any value in `migrations`, a computed field's `type`, a
+transform's `stored` or `view`, or the `json` of such a type) is a
+decision `jazz-tools migrations create` or `jazz-tools upgrade` left to the
+author. Every loader refuses a file that has one, listing each by JSON path
+and text, so a half-written migration never deploys. Elsewhere (a column
+default, an enum variant, a JSON Schema's text, a `$comment`) `TODO:` is
+plain text.
+
+**Every version leads to the current one.** Each `history` version must be
+connected to the current `tables` by a chain of migrations (lenses run both
+ways). A version that isn't, but whose rows pass unchanged to a later one
+(the same tables and columns, by name, of the same type and optionality;
+an enum may gain variants at the end), is joined to the next such version
+by the identity step that change implies, as files written before alpha.65
+hold them (their `migrations create` wrote no migration for an index,
+merge-strategy or column-order change). Any other loads with a warning
+(such files are what `jazz-tools validate` wrote before alpha.65 while a
+migration was still to be written), and `generate` refuses it, since
+bindings must not ship a version clients couldn't open; `migrations create`
+writes the migration that connects it.
+
+**Relation names.** A relation may not take the name of a column of its
+table, nor `id`, as the TS DSL refused.
 
 **Files from alpha.63.** A file's `slices` (schema slicing is gone in
 alpha.65) and a table's `tsOnly` load with a warning that they are ignored;
@@ -1052,7 +1073,10 @@ Meaning:
   naming its JSON path, as it refuses an outer-row reference outside any
   `exists`. `session.__jazz_outer_row…` is not a session value: the reader
   refuses it.
-- **Session values.** `session.user`, `session.claims.<path>`,
+- **Session values.** `session.user` (the account: `$createdBy =
+session.user` matches rows written through any identity linked to it),
+  `session.identity` (the exact login: `$createdBy.identity =
+session.identity` matches only rows it wrote), `session.claims.<path>`,
   `session.identity.subject`, `session.identity.issuer` and
   `session.authMode`; any other path is refused as a typo.
 - **Comparisons.** A comparison compares a column with a value, a column
@@ -1067,7 +1091,7 @@ Meaning:
   with; one that can't (e.g. `'x'` for an `int`, a non-UUID for a `uuid`) is
   refused. Compared with a session claim, `'…'` is text, `1` an int, `1.5` a
   float. A typed literal (`int(5)`, `text('5')`, `uuid('…')`,
-  `timestamp(1700000000000000)`, `bytes('0aff')`, `array(int(1), int(2))`,
+  `timestamp(1700000000000)`, `bytes('0aff')`, `array(int(1), int(2))`,
   `row(null, text('a'))`, `enumcase('closed', timestamp(5))`) is exactly that
   value, whatever it is compared with; the writer uses one only where a plain
   literal would read back as another value.
@@ -1145,12 +1169,14 @@ that would publish something else.
 **Bindings.** From alpha.65 the files are the app's source in every
 language. `crates/jazz-codegen` generates typed bindings from
 `jazz.app.json` (`jazz.generated.ts` in TS), which apps commit. They embed
-the file's `source`, `sha256:` and the hex SHA-256 of its bytes with CRLF
-read as LF (`artifact::source_hash`), and the compiled app a runtime opens
+the file's `source`, `sha256:` and the hex SHA-256 of its canonical text
+(the parsed file printed canonically, so reformatting the file leaves it
+alone; `artifact::source_hash`), and the compiled app a runtime opens
 along: `{current, schemas: [{hash, schema}], migrations}`, the bundle
 `load_client` lowers, so no runtime parses the readable file. Their second
 line names the bindings format. Bindings are stale when their `source` or
-format differs; reformatting them doesn't make them stale. A backend with
+format differs; reformatting them doesn't make them stale, and bindings
+that can't be read are regenerated (`--check` refuses them). A backend with
 only the bindings loads its permissions against their compiled app
 (`artifact::load_backend`), with every check `load` runs.
 

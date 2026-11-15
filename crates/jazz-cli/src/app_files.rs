@@ -118,6 +118,12 @@ pub fn generate(dir: &Path, langs: &[Selected], check: bool) -> Result<Outcome, 
                     Staleness::SchemaChanged.message(lang)
                 ));
             }
+            Some(Staleness::Unreadable(why)) if !check => {
+                outcome.warnings.push(format!(
+                    "{why}; regenerating it, so a change of `tables` since can't be caught this time"
+                ));
+                stale.push((selected, path, Staleness::Unreadable(why)));
+            }
             Some(staleness) => stale.push((selected, path, staleness)),
         }
     }

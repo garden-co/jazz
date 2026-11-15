@@ -143,6 +143,19 @@ fn same_table(a: &TableSchema, b: &TableSchema) -> bool {
     serde_json::to_value(a).ok() == serde_json::to_value(b).ok()
 }
 
+/// Whether `b` is `a` under another name: the same table, whatever the
+/// order of its columns (as TS's `tableSchemasEqual` compares them).
+fn same_table_renamed(a: &TableSchema, b: &TableSchema) -> bool {
+    let sorted = |t: &TableSchema| {
+        let mut t = t.clone();
+        t.columns
+            .columns
+            .sort_by(|x, y| x.name_str().cmp(y.name_str()));
+        t
+    };
+    same_table(&sorted(a), &sorted(b))
+}
+
 fn type_spec(ty: &ColumnType) -> Result<Json, CodegenError> {
     artifact::column_type_spec(ty).map_err(CodegenError::from_artifact)
 }
@@ -398,30 +411,16 @@ fn table_steps(table: &str, from: &TableSchema, to: &TableSchema) -> Result<Json
         })
         .collect();
     if steps.is_empty() && notes.is_empty() {
-        let reference_only = from.columns.columns.len() == to.columns.columns.len()
-            && to.columns.columns.iter().all(|column| {
-                from.columns.columns.iter().any(|source| {
-                    source.name == column.name
-                        && source.column_type == column.column_type
-                        && source.nullable == column.nullable
-                        && source.merge_strategy == column.merge_strategy
-                        && (source.references.is_none() || source.references == column.references)
-                })
-            })
-            && to.columns.columns.iter().any(|c| c.references.is_some());
-        if reference_only {
-            return Ok(Json::object(vec![(
-                "$comment",
-                Json::string(
-                    "Adds reference metadata with an identity lens; existing UUID values are kept.",
-                ),
-            )]));
-        }
-        return Ok(todo(format!(
-            "no migration step was inferred for the change to table `{table}`. If its rows pass \
-             unchanged, replace this with {{}}; otherwise describe the change with add, drop and \
-             renameFrom steps."
-        )));
+        // No column is added, dropped, retyped or made optional: every row
+        // passes unchanged, so the table's lens is the identity. Say what
+        // changed.
+        return Ok(Json::object(vec![(
+            "$comment",
+            Json::string(format!(
+                "Rows pass unchanged: only {} changed.",
+                unchanged_rows_changes(from, to).join(", ")
+            )),
+        )]));
     }
     let mut out = Vec::new();
     if !notes.is_empty() {
@@ -429,6 +428,55 @@ fn table_steps(table: &str, from: &TableSchema, to: &TableSchema) -> Result<Json
     }
     out.extend(steps);
     Ok(Json::Object(out))
+}
+
+/// What changed in a table whose rows pass unchanged.
+fn unchanged_rows_changes(from: &TableSchema, to: &TableSchema) -> Vec<&'static str> {
+    let mut changes = Vec::new();
+    let column = |table: &TableSchema, name: &jazz::tools::public_schema::ColumnName| {
+        table
+            .columns
+            .columns
+            .iter()
+            .find(|c| &c.name == name)
+            .cloned()
+    };
+    let pairs: Vec<(ColumnDescriptor, ColumnDescriptor)> = to
+        .columns
+        .columns
+        .iter()
+        .filter_map(|c| column(from, &c.name).map(|s| (s, c.clone())))
+        .collect();
+    if from.indexed_columns != to.indexed_columns || from.composite_indexes != to.composite_indexes
+    {
+        changes.push("indexes");
+    }
+    if from.history != to.history {
+        changes.push("history retention");
+    }
+    if from.branch_by != to.branch_by {
+        changes.push("branchBy");
+    }
+    if pairs
+        .iter()
+        .any(|(a, b)| a.merge_strategy != b.merge_strategy)
+    {
+        changes.push("merge strategies");
+    }
+    if pairs.iter().any(|(a, b)| a.default != b.default) {
+        changes.push("defaults");
+    }
+    if pairs.iter().any(|(a, b)| a.references != b.references) {
+        changes.push("references");
+    }
+    let order = |t: &TableSchema| t.columns.columns.iter().map(|c| c.name).collect::<Vec<_>>();
+    if order(from) != order(to) {
+        changes.push("the column order");
+    }
+    if changes.is_empty() {
+        changes.push("the table's options");
+    }
+    changes
 }
 
 /// The fields of the migration from `from` to `to`, after `name` and
@@ -465,7 +513,7 @@ pub fn diff(from: &Schema, to: &Schema) -> Result<Vec<(String, Json)>, CodegenEr
             let old_table = get(from, old)?;
             let candidates: Vec<&String> = added
                 .iter()
-                .filter(|new| get(to, new).is_some_and(|t| same_table(&old_table, &t)))
+                .filter(|new| get(to, new).is_some_and(|t| same_table_renamed(&old_table, &t)))
                 .collect();
             (candidates.len() == 1).then(|| (old.clone(), candidates[0].clone()))
         })
