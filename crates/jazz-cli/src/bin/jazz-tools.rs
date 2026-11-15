@@ -139,8 +139,10 @@ enum Commands {
         blobs_dir: Option<String>,
 
         /// Bucket for `--blobs s3` (defaults to S3_BUCKET_NAME). Credentials
-        /// come from AWS_ROLE_ARN with an OIDC token, or AWS_ACCESS_KEY_ID
-        /// and AWS_SECRET_ACCESS_KEY.
+        /// come, as in the AWS SDKs, from AWS_ACCESS_KEY_ID and
+        /// AWS_SECRET_ACCESS_KEY, AWS_ROLE_ARN with an OIDC token, the
+        /// container's role (ECS, Fargate, EKS Pod Identity), or the EC2
+        /// instance profile.
         #[arg(long)]
         s3_bucket: Option<String>,
 

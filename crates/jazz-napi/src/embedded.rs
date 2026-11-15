@@ -29,7 +29,8 @@ struct JazzCoreOpenOptions {
     /// The directory for `blobs: "files"`; defaults to `<dataDir>/blobs`.
     blobs_dir: Option<String>,
     /// For `blobs: "s3"`, each defaulting to the environment
-    /// (`S3_BUCKET_NAME`, `AWS_REGION`; credentials always come from it).
+    /// (`S3_BUCKET_NAME`, `AWS_REGION`; credentials always come from it,
+    /// or from the role the host attaches: ECS, EKS Pod Identity, EC2).
     s3_bucket: Option<String>,
     s3_region: Option<String>,
     s3_endpoint: Option<String>,
