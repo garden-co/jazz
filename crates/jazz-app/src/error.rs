@@ -31,6 +31,11 @@ pub enum Error {
     #[error("subscription rejected: {0}")]
     Rejected(String),
 
+    /// No one is signed in: the token provider gave no bearer, or the app's
+    /// backend named no user from it.
+    #[error("signed out")]
+    SignedOut,
+
     /// Something this crate does not support yet.
     #[error("not supported yet: {0}")]
     Unsupported(String),

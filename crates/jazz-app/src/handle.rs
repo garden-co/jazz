@@ -17,13 +17,17 @@ use jazz::tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, QueryResult, ReadTier,
     Session, TableName, TransactionId,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::app::AppFiles;
+use crate::auth::{Auth, DEVICE_TOKEN_TTL_SECS, TokenReason};
 use crate::backend;
 use crate::config::{Config, Storage};
 use crate::error::{Error, Result};
 use crate::query::Query;
+use crate::session::{
+    self as user_session, Credential, Session as UserSession, SyncStatus, User, UserKind,
+};
 use crate::subscription::{self, Subscription};
 use crate::table::{self, Implementations, Insert, Table, Update};
 
@@ -61,6 +65,9 @@ pub(crate) struct Info {
     pub(crate) implementations: Implementations,
     /// No server: nothing confirms a write past the local store.
     pub(crate) serverless: bool,
+    /// An end user's session ([`Config::user`]).
+    pub(crate) session: Option<UserSession>,
+    pub(crate) sync: watch::Receiver<SyncStatus>,
 }
 
 impl std::fmt::Debug for Jazz {
@@ -102,10 +109,22 @@ impl Jazz {
                 "a backend needs the app's jazz.permissions.json".into(),
             ));
         }
-        if config.server_url.is_some() && config.backend.is_none() {
-            return Err(Error::Unsupported(
-                "connecting to a sync server as an end user; open the app as a backend \
-                 (Config::backend) or locally (no server)"
+        if config.backend.is_some() && config.user.is_some() {
+            return Err(Error::Config(
+                "open either as the app's backend or as an end user, not both".into(),
+            ));
+        }
+        if config.user.is_some() && config.server_url.is_none() {
+            return Err(Error::Config(
+                "an end user needs the app's Jazz endpoint (Config::server), \
+                 e.g. https://app.example/jazz"
+                    .into(),
+            ));
+        }
+        if config.server_url.is_some() && config.backend.is_none() && config.user.is_none() {
+            return Err(Error::Config(
+                "a server needs someone to connect as: the app's backend (Config::backend) \
+                 or an end user (Config::user)"
                     .into(),
             ));
         }
@@ -116,7 +135,12 @@ impl Jazz {
             .name("jazz-client".into())
             .spawn(move || run(files, config, receiver, ready))
             .map_err(|error| Error::Config(format!("cannot start the client thread: {error}")))?;
-        let (bundle, account) = opened.await.map_err(|_| Error::Stopped)??;
+        let Opened {
+            bundle,
+            account,
+            session,
+            sync,
+        } = opened.await.map_err(|_| Error::Stopped)??;
         Ok(Self {
             commands,
             info: Arc::new(Info {
@@ -124,6 +148,8 @@ impl Jazz {
                 account,
                 implementations,
                 serverless,
+                session,
+                sync,
             }),
             durability: None,
         })
@@ -134,7 +160,8 @@ impl Jazz {
         self.info.bundle.as_deref()
     }
 
-    /// The account of the user this backend acts as.
+    /// The account of the user this backend acts as, or of the end user
+    /// signed in.
     pub fn account(&self) -> Option<AccountId> {
         self.info.account
     }
@@ -413,7 +440,12 @@ pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "a panic without a message".to_owned())
 }
 
-type Opened = (Option<String>, Option<AccountId>);
+struct Opened {
+    bundle: Option<String>,
+    account: Option<AccountId>,
+    session: Option<UserSession>,
+    sync: watch::Receiver<SyncStatus>,
+}
 
 async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Opened)> {
     let loaded = files.load()?;
@@ -452,16 +484,87 @@ async fn connect(files: AppFiles, config: Config) -> Result<(JazzClient, Opened)
         context.bundle = Some(published.clone());
         bundle = Some(published);
     }
-    let client = if context.server_url.is_empty() {
-        JazzClient::connect(context).await?
-    } else {
-        JazzClient::connect_with_native_transport(
-            context,
-            Arc::new(jazz_native_transport::NativeWebSocketConnector),
-        )
-        .await?
+    let connector = Arc::new(jazz_native_transport::NativeWebSocketConnector);
+    let (client, user) = match (config.user, &config.server_url) {
+        (Some(auth), Some(endpoint)) => {
+            let (client, user, credential) =
+                connect_user(context, connector, auth, endpoint).await?;
+            admitted = Some(user.account);
+            (client, Some((user, credential)))
+        }
+        _ if context.server_url.is_empty() => (JazzClient::connect(context).await?, None),
+        _ => (
+            JazzClient::connect_with_native_transport(context, connector).await?,
+            None,
+        ),
     };
-    Ok((client, (bundle, admitted)))
+    let sync = user_session::watch_sync(client.clone());
+    let session = user.map(|(user, credential)| {
+        user_session::start(client.clone(), user, credential, sync.clone())
+    });
+    Ok((
+        client,
+        Opened {
+            bundle,
+            account: admitted,
+            session,
+            sync,
+        },
+    ))
+}
+
+/// Connects as an end user through the app's Jazz endpoint, as a browser
+/// does: a device account presents its own proof, which the backend vouches
+/// for; a bearer's user is signed in first, then states their session with
+/// the bearer on the upgrade, which the backend checks it against.
+async fn connect_user(
+    mut context: AppContext,
+    connector: Arc<jazz_native_transport::NativeWebSocketConnector>,
+    auth: Auth,
+    endpoint: &str,
+) -> Result<(JazzClient, User, Credential)> {
+    let app = context.app_id;
+    match auth {
+        Auth::Device(key) => {
+            let account = key.account(app);
+            context.jwt_token = Some(key.mint(app, DEVICE_TOKEN_TTL_SECS)?);
+            context.account_id = Some(account);
+            let client = JazzClient::connect_with_native_transport(context, connector).await?;
+            let user = User {
+                account,
+                issuer: jazz::tools::identity::LOCAL_FIRST_ISSUER.to_owned(),
+                subject: key.user_id(),
+                claims: serde_json::json!({}),
+                kind: UserKind::Device,
+            };
+            Ok((client, user, Credential::Device { key, app }))
+        }
+        Auth::Bearer(provider) => {
+            let token = provider
+                .token(TokenReason::Connect)
+                .await?
+                .ok_or(Error::SignedOut)?;
+            let signed_in = backend::sign_in(endpoint, app, &token)
+                .await?
+                .ok_or(Error::SignedOut)?;
+            let mut session = Session::new(&signed_in.identity.issuer, &signed_in.identity.subject)
+                .with_claims(signed_in.claims.clone());
+            session.account_id = Some(signed_in.account);
+            context.account_id = Some(signed_in.account);
+            context.backend_session = Some(session);
+            let client =
+                JazzClient::connect_with_native_transport_bearer(context, connector, token.clone())
+                    .await?;
+            let user = User {
+                account: signed_in.account,
+                issuer: signed_in.identity.issuer,
+                subject: signed_in.identity.subject,
+                claims: signed_in.claims,
+                kind: UserKind::Backend,
+            };
+            Ok((client, user, Credential::Bearer { provider, token }))
+        }
+    }
 }
 
 #[allow(dead_code)]
