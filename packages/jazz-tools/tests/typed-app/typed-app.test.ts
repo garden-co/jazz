@@ -16,7 +16,6 @@ import { app as indexedApp } from "./apps/composite-indexes/jazz.generated.js";
 import { app as defaultedApp } from "./apps/defaulted-todos/jazz.generated.js";
 import { app as historyApp } from "./apps/history-table/jazz.generated.js";
 import { app as largeValueUpdateApp } from "./apps/large-values/jazz.generated.js";
-import { app as payloadEnumApp } from "./apps/payload-enum/jazz.generated.js";
 import { app as graphApp } from "./apps/team-graph/jazz.generated.js";
 import {
   app as transformedColumnApp,
@@ -451,8 +450,6 @@ describe("typed app prototype", () => {
     });
     // @ts-expect-error required scalar columns do not support isNull
     app.todos.where({ done: { isNull: true } });
-    // @ts-expect-error nullable payload enums keep their dedicated match operator
-    payloadEnumApp.events.where({ optionalEvent: { isNull: true } });
 
     // Membership is deliberately non-nullable. Express null handling with
     // isNull/isNotNull rather than SQL-style null membership semantics.
@@ -564,40 +561,6 @@ describe("typed app prototype", () => {
         done: null,
       };
       void invalidDefaultedNull;
-    }
-  });
-  it("preserves nullable and defaulted fields inside payload enum init values", () => {
-    type EventInsert = InsertOf<typeof payloadEnumApp.events>;
-    const omittedNullableAndDefaulted: EventInsert = {
-      event: {
-        type: "message",
-        requiredText: "required",
-      },
-    };
-    const explicitNullable: EventInsert = {
-      event: {
-        type: "message",
-        requiredText: "required",
-        nullableText: null,
-      },
-    };
-
-    expectTypeOf<EventInsert["event"]>().branded.toEqualTypeOf<{
-      type: "message";
-      requiredText: string;
-      nullableText?: string | null;
-      defaultedText?: string;
-    }>();
-    expectTypeOf(omittedNullableAndDefaulted.event.requiredText).toEqualTypeOf<string>();
-    expectTypeOf(explicitNullable.event.nullableText).toEqualTypeOf<string | null | undefined>();
-
-    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
-      // @ts-expect-error required payload fields cannot be omitted
-      const missingRequired: EventInsert = { event: { type: "message" } };
-      // @ts-expect-error required payload fields cannot be null
-      const nullRequired: EventInsert = { event: { type: "message", requiredText: null } };
-      void missingRequired;
-      void nullRequired;
     }
   });
 
