@@ -8,10 +8,9 @@
 //! reads. Everything sits inside `public enum JazzApp`, which also embeds
 //! `jazz.app.json` and opens it: `JazzApp.Todo`, `JazzApp.todos.query()`.
 //!
-//! Not supported yet, and refused with what to do: computed fields and
-//! transforms (no Swift implementations can be passed to jazz-ffi yet).
-//! Relations are left out of the bindings, as includes are not supported
-//! by jazz-ffi yet.
+//! Computed fields and transforms are declared in `JazzApp.Computed`,
+//! which the app implements. Each relation is a row property, filled when a query includes it
+//! (`JazzApp.tasks.query().include(JazzApp.tasks.assignee)`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -19,7 +18,7 @@ use std::fmt::Write as _;
 use jazz::tools::public_schema::ColumnType;
 
 use crate::CodegenError;
-use crate::model::{App, Column, FieldType, Table};
+use crate::model::{App, Column, FieldType, RelationKind, Table};
 use crate::names::{pascal, singular};
 
 /// Where the bindings go, relative to `jazz.app.json`.
@@ -446,6 +445,42 @@ impl<'a> Writer<'a> {
                 args,
             });
         }
+        // Relations: filled when a query includes them, `nil` otherwise.
+        let mut relations = Vec::new();
+        for r in &table.relations {
+            let ident = value_ident(&r.name)?;
+            let bare = ident.trim_matches('`').to_owned();
+            if !idents.insert(bare.clone()) {
+                return Err(CodegenError::unsupported(format!(
+                    "relation `{}.{}` is the Swift name `{ident}`, which a column, computed field, `id`, `query` or `self` already is",
+                    table.name, r.name
+                )));
+            }
+            let target = self
+                .tables
+                .get(r.target.as_str())
+                .ok_or_else(|| {
+                    CodegenError::new(format!(
+                        "relation `{}.{}` leads to `{}`, which is not a table",
+                        table.name, r.name, r.target
+                    ))
+                })?
+                .row
+                .clone();
+            let to_many = match &r.kind {
+                RelationKind::Many { .. } => true,
+                RelationKind::One { column, .. } => table
+                    .column(column)
+                    .is_some_and(|c| matches!(c.ty.ty, ColumnType::Array { .. })),
+            };
+            relations.push(RelationField {
+                name: r.name.clone(),
+                ident,
+                bare,
+                target,
+                to_many,
+            });
+        }
         let custom = !computed.is_empty() || fields.iter().any(|f| f.transform.is_some());
         let table_lit = swift_string(&table.name);
 
@@ -473,6 +508,23 @@ impl<'a> Writer<'a> {
             );
             let _ = writeln!(out, "    public var {}: {}", c.ident, c.ty);
         }
+        for r in &relations {
+            if r.to_many {
+                let _ = writeln!(
+                    out,
+                    "    /// Relation `{}`: the `{}` rows, when the query includes them.\n    public var {}: [{}]? = nil",
+                    r.name, r.target, r.ident, r.target
+                );
+            } else {
+                // Boxed: tables that point at each other would otherwise
+                // make row types of infinite size.
+                let _ = writeln!(
+                    out,
+                    "    /// Relation `{0}`: the `{1}` row, when the query includes it (and it exists).\n    public var {2}: {1}? {{\n        get {{ _{3}?.value }}\n        set {{ _{3} = newValue.map {{ {RT}.Included($0) }} }}\n    }}\n    private var _{3}: {RT}.Included<{1}>? = nil",
+                    r.name, r.target, r.ident, r.bare
+                );
+            }
+        }
         out.push('\n');
         let computed_params: String = computed
             .iter()
@@ -492,6 +544,20 @@ impl<'a> Writer<'a> {
         }
         out.push_str("    }\n\n");
         coding_keys(&mut out, &fields, true);
+        if !relations.is_empty() {
+            // The relations' keys join the row's coding keys.
+            let close = out.rfind("    }\n").expect("coding keys were written");
+            let mut keys = String::new();
+            for r in &relations {
+                let key = if r.to_many {
+                    r.ident.clone()
+                } else {
+                    format!("_{}", r.bare)
+                };
+                let _ = writeln!(keys, "        case {key} = {}", swift_string(&r.name));
+            }
+            out.insert_str(close, &keys);
+        }
         if custom {
             out.push_str("\n    public init(from decoder: any Swift.Decoder) throws {\n");
             out.push_str(
@@ -501,6 +567,20 @@ impl<'a> Writer<'a> {
             out.push_str("        self.id = try container.decode(Jazz.ID.self, forKey: .id)\n");
             for f in &fields {
                 let _ = writeln!(out, "        self.{} = {}", f.ident, f.decode());
+            }
+            for r in &relations {
+                let (key, ty) = if r.to_many {
+                    (r.ident.clone(), format!("[{}]", r.target))
+                } else {
+                    (
+                        format!("_{}", r.bare),
+                        format!("{RT}.Included<{}>", r.target),
+                    )
+                };
+                let _ = writeln!(
+                    out,
+                    "        self.{key} = try container.decodeIfPresent({ty}.self, forKey: .{key})"
+                );
             }
             for c in &computed {
                 let args = c
@@ -525,6 +605,17 @@ impl<'a> Writer<'a> {
             out.push_str("        try container.encode(self.id, forKey: .id)\n");
             for f in &fields {
                 let _ = writeln!(out, "        {}", f.encode(false));
+            }
+            for r in &relations {
+                let key = if r.to_many {
+                    r.ident.clone()
+                } else {
+                    format!("_{}", r.bare)
+                };
+                let _ = writeln!(
+                    out,
+                    "        try container.encodeIfPresent(self.{key}, forKey: .{key})"
+                );
             }
             out.push_str("        _ = computed\n");
             out.push_str("    }\n");
@@ -612,11 +703,6 @@ impl<'a> Writer<'a> {
 
         // Queries and columns.
         let _ = writeln!(out, "/// Queries of `{}` and its columns.", table.name);
-        if !table.relations.is_empty() {
-            out.push_str(
-                "/// (Its relations are left out: includes are not supported in Swift yet.)\n",
-            );
-        }
         let _ = writeln!(out, "public enum {namespace} {{");
         let _ = writeln!(
             out,
@@ -649,6 +735,16 @@ impl<'a> Writer<'a> {
                 f.ident,
                 f.stored,
                 swift_string(&f.column.name)
+            );
+        }
+        for r in &relations {
+            let _ = writeln!(
+                out,
+                "    /// Relation `{}`, for `include` (narrow it with `where`, `orderBy`, `limit`, `include`).\n    public static let {} = {RT}.Relation<{row}, {}>({})",
+                r.name,
+                r.ident,
+                r.target,
+                swift_string(&r.name)
             );
         }
         out.push_str("}\n\n");
@@ -700,6 +796,17 @@ struct Field<'a> {
     stored: String,
     /// The transform's method stem (`isoDate` for `isoDateView`/`isoDateStored`).
     transform: Option<String>,
+}
+
+struct RelationField {
+    name: String,
+    ident: String,
+    /// `ident` without backticks.
+    bare: String,
+    /// The related row type.
+    target: String,
+    /// A reverse relation, or a forward one through an array of ids.
+    to_many: bool,
 }
 
 struct ComputedField {
