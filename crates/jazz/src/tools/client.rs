@@ -1462,6 +1462,43 @@ impl JazzClient {
         Ok(Some(self.committed(write.mergeable_tx_id())))
     }
 
+    /// [`JazzClient::update`] with edits of large-capable columns: a text
+    /// column's [`LargeValueUpdate::TextEdit`] (merged over what this
+    /// store has, as the authority merges), splices within a page, JSON
+    /// replacements by pointer. The patch and the edits apply as one row
+    /// update; a failing edit leaves the row unchanged.
+    pub fn update_with_edits(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        updates: Vec<(String, Value)>,
+        edits: Vec<crate::db::LargeValueUpdate>,
+    ) -> Result<Option<TransactionId>> {
+        let cells = self.core_cells(table, updates.into_iter().collect())?;
+        let updated_at_ms = self.write_updated_at()?;
+        let row = RowUuid(*object_id.uuid());
+        let db = self.db()?;
+        let options = UpdateOptions {
+            identity: self.write_identity()?,
+            updated_at_ms,
+            ..Default::default()
+        };
+        if let Some(transaction_id) = self.open_transaction()? {
+            crate::db::block_on(
+                db.tx_ref(transaction_id)
+                    .update_with_large_value_mutations(table, row, cells, edits, options),
+            )
+            .map_err(write_error)?;
+            self.staged(transaction_id);
+            return Ok(None);
+        }
+        let write = crate::db::block_on(
+            db.update_with_large_value_mutations(table, row, cells, edits, options),
+        )
+        .map_err(write_error)?;
+        Ok(Some(self.committed(write.mergeable_tx_id())))
+    }
+
     /// Delete a row in the named table.
     ///
     /// The row need not have appeared in a previous query result. The table and

@@ -20,6 +20,7 @@
 mod app;
 mod backend;
 mod config;
+mod edit;
 mod error;
 mod handle;
 mod query;
@@ -31,6 +32,7 @@ mod writes;
 
 pub use app::AppFiles;
 pub use config::{Backend, Config, Storage};
+pub use edit::TextColumn;
 pub use error::{Error, Result};
 pub use handle::Jazz;
 pub use query::{Column, Condition, Many, One, Order, Query, created_at, id, updated_at};
