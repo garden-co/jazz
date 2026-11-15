@@ -7,6 +7,8 @@ use std::rc::Rc;
 
 use jazz::tools::{JazzClient, ObjectId, OpenTransactionId, ReadTier};
 
+use futures_util::FutureExt as _;
+
 use crate::error::Result;
 use crate::handle::{Jazz, decode_result, insert};
 use crate::query::Query;
@@ -41,12 +43,14 @@ impl Transaction {
         Ok(())
     }
 
-    pub fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<()> {
+    /// Writes the row with this id, as [`Jazz::upsert`]; returns it as the
+    /// transaction now sees it.
+    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
         let cells = new.into_cells(&self.implementations)?;
         self.client
             .upsert(<N::Row as Table>::NAME, *id.uuid(), cells)?;
         self.wrote.set(true);
-        Ok(())
+        self.read_back(id).await
     }
 
     pub fn delete<T: Table>(&self, id: ObjectId) -> Result<()> {
@@ -55,10 +59,29 @@ impl Transaction {
         Ok(())
     }
 
-    pub fn restore<T: Table>(&self, id: ObjectId) -> Result<()> {
+    /// Brings back a deleted row, as [`Jazz::restore`].
+    pub async fn restore<T: Table>(&self, id: ObjectId) -> Result<T> {
         self.client.restore(T::NAME, id, None)?;
         self.wrote.set(true);
-        Ok(())
+        self.read_back(id).await
+    }
+
+    /// Brings back a deleted row with `update`'s columns replaced.
+    pub async fn restore_with<U: Update>(&self, id: ObjectId, update: U) -> Result<U::Row> {
+        let cells = update.into_cells(&self.implementations)?;
+        self.client
+            .restore(<U::Row as Table>::NAME, id, Some(cells))?;
+        self.wrote.set(true);
+        self.read_back(id).await
+    }
+
+    async fn read_back<T: Table>(&self, id: ObjectId) -> Result<T> {
+        self.get::<T>(id)
+            .await?
+            .ok_or_else(|| crate::Error::Decode {
+                table: T::NAME,
+                message: format!("row {} is not there after writing it", id.uuid()),
+            })
     }
 
     /// Every row `query` matches, as the transaction sees them.
@@ -85,7 +108,9 @@ impl Jazz {
     /// Runs `body` in a serializable transaction. It is committed if `body`
     /// returns `Ok` (and wrote anything), rolled back if it returns `Err`.
     /// On a [`Jazz::durable`] handle the call returns once the commit
-    /// reached that tier.
+    /// reached that tier. A body that panics rolls back and fails with
+    /// [`crate::Error::Panicked`]. Dropping the returned future doesn't
+    /// cancel the transaction: it runs to its end on the client's thread.
     ///
     /// ```ignore
     /// let moved = jazz.transaction(move |tx| async move {
@@ -101,7 +126,7 @@ impl Jazz {
         R: Send + 'static,
     {
         let implementations = self.info.implementations.clone();
-        let settle = self.settler();
+        let settle = self.settler()?;
         self.with_client(move |client| async move {
             let open = client.begin_transaction()?;
             let transaction = Transaction {
@@ -113,7 +138,16 @@ impl Jazz {
             let wrote = transaction.wrote.clone();
             let scoped = transaction.client.clone();
             let id = transaction.id;
-            match body(transaction).await {
+            // The body runs inside the guard, so a panic rolls back too.
+            let outcome = std::panic::AssertUnwindSafe(async move { body(transaction).await })
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|panic| {
+                    Err(crate::Error::Panicked(crate::handle::panic_message(
+                        &*panic,
+                    )))
+                });
+            match outcome {
                 Ok(result) if wrote.get() => {
                     let committed = scoped.commit_transaction(id)?;
                     settle.settle(&client, Some(committed)).await?;
@@ -124,7 +158,9 @@ impl Jazz {
                     Ok(result)
                 }
                 Err(error) => {
-                    scoped.rollback_transaction(id)?;
+                    // The body's error is the one to report; a rollback
+                    // that fails too adds nothing the caller can act on.
+                    let _ = scoped.rollback_transaction(id);
                     Err(error)
                 }
             }

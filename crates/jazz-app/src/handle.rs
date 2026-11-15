@@ -61,9 +61,6 @@ pub(crate) struct Info {
     pub(crate) implementations: Implementations,
     /// No server: nothing confirms a write past the local store.
     pub(crate) serverless: bool,
-    /// Writes not yet known to have reached the server, for
-    /// [`Jazz::wait_for_sync`].
-    pub(crate) pending: std::sync::Mutex<Vec<TransactionId>>,
 }
 
 impl std::fmt::Debug for Jazz {
@@ -127,7 +124,6 @@ impl Jazz {
                 account,
                 implementations,
                 serverless,
-                pending: Default::default(),
             }),
             durability: None,
         })
@@ -201,9 +197,12 @@ impl Jazz {
 
     /// Inserts a row. Returns it as stored, once committed locally (or, on
     /// a [`Jazz::durable`] handle, once it reached that tier).
+    ///
+    /// Like every write, it is sent to the client's thread when called:
+    /// dropping the returned future doesn't undo or cancel it.
     pub async fn insert<N: Insert>(&self, new: N) -> Result<N::Row> {
         let implementations = self.info.implementations.clone();
-        let settle = self.settler();
+        let settle = self.settler()?;
         self.with_client(move |client| async move {
             let (row, written) = insert(&client, new, &implementations)?;
             settle.settle(&client, written).await?;
@@ -215,7 +214,7 @@ impl Jazz {
     /// Updates the row with this id.
     pub async fn update<U: Update>(&self, id: ObjectId, update: U) -> Result<()> {
         let implementations = self.info.implementations.clone();
-        let settle = self.settler();
+        let settle = self.settler()?;
         self.with_client(move |client| async move {
             let cells = update.into_cells(&implementations)?;
             let written = client.update(<U::Row as Table>::NAME, id, cells)?;
@@ -226,7 +225,7 @@ impl Jazz {
 
     /// Deletes the row of `T` with this id.
     pub async fn delete<T: Table>(&self, id: ObjectId) -> Result<()> {
-        let settle = self.settler();
+        let settle = self.settler()?;
         self.with_client(move |client| async move {
             let written = client.delete(T::NAME, id)?;
             settle.settle(&client, written).await
@@ -406,7 +405,7 @@ fn run(
     });
 }
 
-fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
     panic
         .downcast_ref::<&str>()
         .map(|message| (*message).to_owned())
