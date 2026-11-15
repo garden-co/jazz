@@ -1,7 +1,10 @@
 package tools.jazz
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.channels.trySendBlocking
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -16,6 +19,21 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
+
+/**
+ * `className.open(config)`, by reflection: UniffiNative is compiled from the
+ * sources uniffi-bindgen generates for jazz-ffi (see build.gradle.kts), so
+ * the rest of the library builds without them. What `open` throws is
+ * rethrown as it is, not wrapped.
+ */
+internal fun openReflectively(className: String, config: String): Native {
+    val native = Class.forName(className)
+    return try {
+        native.getMethod("open", String::class.java).invoke(null, config) as Native
+    } catch (e: java.lang.reflect.InvocationTargetException) {
+        throw e.targetException
+    }
+}
 
 /** The JSON settings rows, inserts and patches go through. */
 public val jazzJson: Json = Json {
@@ -41,12 +59,7 @@ public class Jazz internal constructor(private val native: Native) : AutoCloseab
     public companion object {
         /** How [open] reaches jazz-ffi; replace it to open through something else. */
         @Volatile
-        public var opener: Native.Opener = Native.Opener { config ->
-            // UniffiNative is compiled from the sources uniffi-bindgen
-            // generates for jazz-ffi (see build.gradle.kts).
-            val native = Class.forName("tools.jazz.UniffiNative")
-            native.getMethod("open", String::class.java).invoke(null, config) as Native
-        }
+        public var opener: Native.Opener = Native.Opener { config -> openReflectively("tools.jazz.UniffiNative", config) }
 
         /** Opens the app [app] (the text of its `jazz.app.json`), as generated bindings' `open` does. */
         public suspend fun open(app: String, config: JazzConfig): Jazz = io {
@@ -129,12 +142,15 @@ public class Jazz internal constructor(private val native: Native) : AutoCloseab
     )
 
     private fun raw(query: Query<*>): Flow<RawDelta> = callbackFlow {
-        val cancel = withContext(Dispatchers.IO) {
+        // Subscribed outside withContext's cancellation: a cancel while
+        // subscribing still reaches `cancel` below.
+        val cancel = withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
             native.subscribe(
                 query.toJson(),
                 onDelta = { json ->
                     val o = jazzJson.parseToJsonElement(json) as JsonObject
-                    trySend(
+                    // Never dropped: a lost delta would leave `watch`'s result wrong for good.
+                    trySendBlocking(
                         RawDelta(
                             added = (o["added"] as? JsonArray)?.objects() ?: emptyList(),
                             updated = (o["updated"] as? JsonArray)?.objects() ?: emptyList(),
@@ -144,11 +160,11 @@ public class Jazz internal constructor(private val native: Native) : AutoCloseab
                         ),
                     )
                 },
-                onError = { message -> close(JazzException.Refused(message)) },
+                onError = { message -> close(JazzException.Subscription(message)) },
             )
         }
         awaitClose { cancel() }
-    }
+    }.buffer(Channel.UNLIMITED)
 
     /** Closes the app; later calls fail with [JazzException.Closed]. */
     override fun close(): Unit = native.close()

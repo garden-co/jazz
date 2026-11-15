@@ -1,6 +1,6 @@
 // jazz-kotlin: the Kotlin/JVM runtime for Jazz apps, over jazz-ffi.
 //
-// `./gradlew build` (or `gradle build`) first builds crates/jazz-ffi with
+// `gradle build` (Gradle 8.14; no wrapper is committed) first builds crates/jazz-ffi with
 // cargo and generates its Kotlin bindings with uniffi-bindgen; pass
 // -PjazzFfi=skip to build without them (tests then use a fake native).
 
@@ -50,6 +50,7 @@ val generateUniffi by tasks.registering(Exec::class) {
     description = "Generates jazz-ffi's Kotlin bindings with uniffi-bindgen."
     dependsOn(cargoBuildFfi)
     workingDir = repo
+    inputs.file(ffiLib)
     outputs.dir(uniffiOut)
     commandLine(
         "cargo", "run", "-q", "-p", "jazz-ffi", "--features", "bindgen", "--bin", "uniffi-bindgen", "--",

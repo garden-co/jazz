@@ -103,7 +103,11 @@ function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
   const aggregateRuns = (aggregate.steps ?? []).filter(({ run }) => typeof run === "string");
   assert.deepEqual(
     aggregateRuns.map(({ run }) => run.trim()),
-    ['test "${WORKSPACE_RESULT}" = success\n' + 'test "${STORAGE_COMPAT_RESULT}" = success'],
+    [
+      'test "${WORKSPACE_RESULT}" = success\n' +
+        'test "${STORAGE_COMPAT_RESULT}" = success\n' +
+        'test "${KOTLIN_RESULT}" = success',
+    ],
     "the Rust aggregate may check partition statuses, but must not add a correctness command",
   );
 

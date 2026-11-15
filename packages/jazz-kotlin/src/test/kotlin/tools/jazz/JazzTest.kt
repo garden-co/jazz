@@ -13,6 +13,12 @@ import kotlinx.serialization.builtins.serializer
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.SerializationException
 
 // What generated bindings declare for a small table.
 @Serializable
@@ -116,4 +122,72 @@ class JazzTest {
         job.cancel()
         assertEquals(true, jazz.subscribe(Items.query()).first().reset)
     }
+
+    @Test
+    fun open_errors_are_not_wrapped() {
+        val error = assertFailsWith<JazzException.Refused> { openReflectively(RefusingNative::class.java.name, "{}") }
+        assertEquals("no app", error.message)
+    }
+
+    @Test
+    fun cancelling_a_collection_unsubscribes_and_close_reaches_the_native_core() = runBlocking {
+        val fake = FakeNative()
+        val jazz = open(fake)
+        assertEquals(true, jazz.subscribe(Items.query()).first().reset)
+        withTimeout(5_000) { while (fake.subs.isNotEmpty()) delay(10) }
+        jazz.close()
+        assertTrue(fake.closed)
+    }
+
+    @Test
+    fun subscription_errors_end_the_flow() = runBlocking {
+        val fake = FakeNative().apply { failSubscriptionsWith = "lost the server" }
+        val jazz = open(fake)
+        val error = assertFailsWith<JazzException.Subscription> { jazz.subscribe(Items.query()).collect {} }
+        assertEquals("lost the server", error.message)
+    }
+
+    @Test
+    fun watch_drops_no_delta_however_slow_its_collector() = runBlocking {
+        val fake = FakeNative()
+        val jazz = open(fake)
+        val sizes = Channel<Int>(Channel.UNLIMITED)
+        val job = launch(Dispatchers.Default) {
+            jazz.watch(Items.query()).collect { rows ->
+                delay(1)
+                sizes.send(rows.size)
+            }
+        }
+        assertEquals(0, sizes.receive())
+        // 500 deltas at once, far more than a default Flow buffer holds.
+        repeat(500) { fake.insert("items", """{"title":"t$it","rank":$it,"kind":"c"}""") }
+        withTimeout(10_000) { while (sizes.receive() != 500) Unit }
+        job.cancel()
+    }
+
+    @Test
+    fun bigint_is_a_decimal_string_both_ways() = runBlocking {
+        val fake = FakeNative()
+        val jazz = open(fake)
+        val item = jazz.insert(Items, ItemInsert(title = "x", rank = 0.0, kind = ItemKind.C, big = Long.MAX_VALUE))
+        assertEquals(Long.MAX_VALUE, item.big)
+        assertTrue(fake.tables["items"]!![item.id].toString().contains("\"big\":\"9223372036854775807\""))
+        assertEquals(-5L, jazzJson.decodeFromString(Item.serializer(), """{"id":"i","title":"x","rank":0,"kind":"c","big":"-5"}""").big)
+        assertEquals(
+            """{"table":"items","where":[{"column":"tags","op":"contains","value":"3"}]}""",
+            Items.where(Items.tags contains "3").toJson(),
+        )
+    }
+
+    @Test
+    fun non_finite_doubles_are_refused_before_they_reach_the_core() = runBlocking {
+        val jazz = open()
+        assertFailsWith<SerializationException> { jazz.insert(Items, ItemInsert(title = "x", rank = Double.NaN, kind = ItemKind.C)) }
+        assertFailsWith<SerializationException> { Items.where(Items.rank gt Double.POSITIVE_INFINITY).toJson() }
+    }
+}
+
+object RefusingNative {
+    @JvmStatic
+    fun open(config: String): Native = throw JazzException.Refused("no app")
 }

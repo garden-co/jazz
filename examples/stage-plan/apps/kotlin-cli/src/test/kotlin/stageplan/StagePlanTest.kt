@@ -95,7 +95,7 @@ class StagePlanTest {
             DocsSnippets.nullableUpdate(jazz, a.id)
             assertNull(jazz.one(Tasks.where(Tasks.id eq a.id))!!.assigneeId)
             val results = kotlinx.coroutines.coroutineScope {
-                val watching = async { DocsSnippets.subscriptions(jazz, show.id) }
+                val watching = async { kotlinx.coroutines.withTimeout(30_000) { DocsSnippets.subscriptions(jazz, show.id) } }
                 kotlinx.coroutines.delay(500)
                 addTask(jazz, show, "C")
                 watching.await()

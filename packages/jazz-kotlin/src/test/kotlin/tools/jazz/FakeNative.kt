@@ -15,7 +15,9 @@ import java.util.UUID
 class FakeNative : Native {
     val tables = HashMap<String, LinkedHashMap<String, JsonObject>>()
     val queries = ArrayList<String>()
-    private val subs = ArrayList<Pair<JsonObject, (String) -> Unit>>()
+    val subs = java.util.Collections.synchronizedList(ArrayList<Pair<JsonObject, (String) -> Unit>>())
+    var closed = false
+    var failSubscriptionsWith: String? = null
 
     override fun account(): String = "00000000-0000-0000-0000-00000000c0de"
 
@@ -91,8 +93,11 @@ class FakeNative : Native {
         val entry = q to onDelta
         subs += entry
         onDelta(delta(matches(q), emptyList(), emptyList(), true))
+        failSubscriptionsWith?.let(onError)
         return { subs.remove(entry) }
     }
 
-    override fun close() {}
+    override fun close() {
+        closed = true
+    }
 }

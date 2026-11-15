@@ -752,9 +752,10 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
     /#\[ignore = "#\d+: manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn maintained_one_shot_differential_oracle\(/,
   );
   assert.match(aggregate, /if: always\(\)/);
-  assert.match(aggregate, /needs: \[test-rust-workspace, test-storage-compat\]/);
+  assert.match(aggregate, /needs: \[test-rust-workspace, test-storage-compat, test-kotlin\]/);
   assert.match(aggregate, /test "\$\{WORKSPACE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{STORAGE_COMPAT_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{KOTLIN_RESULT\}" = success/);
   assert.throws(
     () => assert.match(localCi.replace("--exact --ignored", "--ignored"), /--exact --ignored/),
     /exact/,

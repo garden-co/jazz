@@ -38,7 +38,13 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
                 },
             )
         }
-        return { subscription.cancel() }
+        return {
+            try {
+                subscription.cancel()
+            } finally {
+                subscription.destroy()
+            }
+        }
     }
 
     override fun close() {

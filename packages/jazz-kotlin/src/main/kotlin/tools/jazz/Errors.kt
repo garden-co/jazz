@@ -8,6 +8,9 @@ public sealed class JazzException(message: String) : Exception(message) {
     /** Storage or network failed. */
     public class Io(message: String) : JazzException(message)
 
+    /** A subscription failed after it started (its `Flow` ends with this). */
+    public class Subscription(message: String) : JazzException(message)
+
     /** The handle was closed. */
     public class Closed : JazzException("the Jazz handle is closed")
 }

@@ -220,7 +220,7 @@ jobs:
   # test-storage-compat also runs the bounded differential oracle partition.
   test-rust:
     if: always() && inputs.scope == 'full'
-    needs: [test-rust-workspace, test-storage-compat]
+    needs: [test-rust-workspace, test-storage-compat, test-kotlin]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 2
     permissions:
@@ -230,9 +230,11 @@ jobs:
         env:
           WORKSPACE_RESULT: ${{ needs.test-rust-workspace.result }}
           STORAGE_COMPAT_RESULT: ${{ needs.test-storage-compat.result }}
+          KOTLIN_RESULT: ${{ needs.test-kotlin.result }}
         run: |
           test "${WORKSPACE_RESULT}" = success
           test "${STORAGE_COMPAT_RESULT}" = success
+          test "${KOTLIN_RESULT}" = success
 
   test-ts:
     if: inputs.scope == 'full'
