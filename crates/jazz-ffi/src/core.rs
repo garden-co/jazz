@@ -330,12 +330,12 @@ fn config(config_json: &str) -> Result<(AppFiles, Config)> {
     if backend {
         let subject = match &session {
             Some(Json::Object(session)) => {
-                if let Some(issuer) = session.get("issuer").filter(|i| !i.is_null()) {
-                    if issuer.as_str() != Some(BACKEND_ISSUER) {
-                        return Err(unsupported(format!(
-                            "a session issuer other than \"{BACKEND_ISSUER}\" ({issuer})"
-                        )));
-                    }
+                if let Some(issuer) = session.get("issuer").filter(|i| !i.is_null())
+                    && issuer.as_str() != Some(BACKEND_ISSUER)
+                {
+                    return Err(unsupported(format!(
+                        "a session issuer other than \"{BACKEND_ISSUER}\" ({issuer})"
+                    )));
                 }
                 session
                     .get("subject")
