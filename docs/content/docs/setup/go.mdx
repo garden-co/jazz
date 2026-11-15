@@ -20,15 +20,20 @@ go get github.com/garden-co/jazz/packages/jazz-go/v2@v2.0.0-alpha.65
 ```
 
 Building needs cgo (a C compiler) and Jazz's core as a static library, `libjazz_ffi.a`, for your
-platform. Download it from the release, and point `CGO_LDFLAGS` at its directory:
+platform. Download it from the same release (`linux-x86_64`, `linux-aarch64` or `darwin-aarch64`),
+check it, and point `CGO_LDFLAGS` at it:
 
 ```bash
-mkdir -p ~/.local/lib/jazz
-curl -fsSL https://github.com/garden-co/jazz/releases/download/v2.0.0-alpha.65/libjazz_ffi-linux-x86_64.tar.gz \
-  | tar -xz -C ~/.local/lib/jazz      # or -macos-aarch64, -linux-aarch64, -macos-x86_64
-export CGO_LDFLAGS="-L$HOME/.local/lib/jazz"
-go build ./...
+release=https://github.com/garden-co/jazz/releases/download/v2.0.0-alpha.65
+archive=libjazz_ffi-linux-x86_64.tar.gz
+mkdir -p ~/.local/lib/jazz && cd ~/.local/lib/jazz
+curl -fsSLO "$release/$archive" && curl -fsSL "$release/SHA256SUMS" | grep " $archive\$" | sha256sum -c -
+tar -xzf "$archive" libjazz_ffi.a LINK_FLAGS   # only the static library: the linker prefers a shared one
+export CGO_LDFLAGS="-L$HOME/.local/lib/jazz $(cat ~/.local/lib/jazz/LINK_FLAGS)"
+cd - && go build ./...
 ```
+
+(On macOS, `shasum -a 256 -c -` checks the sum.)
 
 Or build it from source, with Rust:
 
@@ -38,8 +43,8 @@ cargo build --release -p jazz-ffi --manifest-path jazz/Cargo.toml
 export CGO_LDFLAGS="-L$PWD/jazz/target/release"
 ```
 
-Use the library of the same release as the module. Linux is tested in CI; macOS builds but is not
-tested yet, and Windows is not supported.
+Use the library of the same release as the module. Linux is tested in CI; macOS (Apple silicon)
+builds but is not tested yet; Intel Macs and Windows have no library.
 
 ## Generate the bindings
 
