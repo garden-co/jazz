@@ -203,6 +203,10 @@ extension Client {
         decode: @escaping @Sendable (String) throws -> T
     ) -> AsyncThrowingStream<T, any Error> {
         AsyncThrowingStream { continuation in
+            // Set before starting: a state delivered during `start` may end
+            // the stream, and the watch must still be cancelled then.
+            let holder = WatchHolder()
+            continuation.onTermination = { _ in holder.cancel() }
             let listener = States { json in
                 do {
                     continuation.yield(try decode(json))
@@ -211,8 +215,7 @@ extension Client {
                 }
             }
             do {
-                let watch = try start(listener)
-                continuation.onTermination = { _ in watch.cancel() }
+                holder.set(try start(listener))
             } catch {
                 continuation.finish(throwing: JazzError.wrap(error))
             }
@@ -268,4 +271,40 @@ extension Transaction {
             return try Coding.decode(R.self, stored, userInfo)
         }
     }
+}
+
+/// A `Watch` cancelled once, whether the stream ended before or after it started.
+final class WatchHolder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var watch: Watch?
+    private var cancelled = false
+
+    func set(_ watch: Watch) {
+        let cancelNow = lock.withLock { () -> Bool in
+            if cancelled { return true }
+            self.watch = watch
+            return false
+        }
+        if cancelNow { watch.cancel() }
+    }
+
+    func cancel() {
+        let watch = lock.withLock { () -> Watch? in
+            cancelled = true
+            defer { self.watch = nil }
+            return self.watch
+        }
+        watch?.cancel()
+    }
+}
+
+extension Auth: CustomStringConvertible, CustomDebugStringConvertible {
+    /// Never the key: logs and crash reports mustn't carry it.
+    public var description: String {
+        switch self {
+        case .deviceKey: return "Auth.deviceKey(<redacted>)"
+        case .bearer: return "Auth.bearer(<token provider>)"
+        }
+    }
+    public var debugDescription: String { description }
 }

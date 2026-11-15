@@ -1,5 +1,5 @@
 import Foundation
-import Jazz
+@_spi(Backend) import Jazz
 import StagePlan
 
 // stage-plan-swift [--user <uuid>] [--data-dir <dir>] [--show <name>] <command>

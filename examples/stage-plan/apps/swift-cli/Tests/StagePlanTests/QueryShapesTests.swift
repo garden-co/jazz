@@ -1,5 +1,5 @@
 import Foundation
-import Jazz
+@_spi(Backend) import Jazz
 import StagePlan
 import XCTest
 

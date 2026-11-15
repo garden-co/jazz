@@ -1,6 +1,6 @@
 // The Swift snippets the docs show, by region; Tests/StagePlanTests runs them.
 import Foundation
-import Jazz
+@_spi(Backend) import Jazz
 
 public enum DocsSnippets {
     public static func openBackend(server: Server, userId: String) async throws -> Jazz.Client {
