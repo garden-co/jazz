@@ -1,28 +1,14 @@
 // JazzApp.kt: generated from jazz.app.json by `jazz-tools generate`. Do not edit.
 // Bindings format 1. Regenerate it after changing jazz.app.json.
-@file:Suppress("unused", "RedundantVisibilityModifier")
+@file:kotlin.Suppress("unused", "RedundantVisibilityModifier")
 
 package jazzapp
 
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.builtins.ListSerializer
-import kotlinx.serialization.builtins.nullable
-import kotlinx.serialization.builtins.serializer
-import kotlinx.serialization.json.JsonElement
-import tools.jazz.Column
-import tools.jazz.Jazz
-import tools.jazz.JazzBigInt
-import tools.jazz.JazzBytes
-import tools.jazz.JazzConfig
-import tools.jazz.Patch
-import tools.jazz.Table
-
 /** `sha256:…` of the `jazz.app.json` these bindings were generated from. */
-public const val SOURCE: String = "sha256:320aeff40326a9b6076a5196c5e24d44d5eaec47c105abdecae9c0b5d77a49ae";
+public const val SOURCE: kotlin.String = "sha256:320aeff40326a9b6076a5196c5e24d44d5eaec47c105abdecae9c0b5d77a49ae";
 
 /** The app's `jazz.app.json`: its schema, every earlier version and the migrations between them. */
-public val APP: String = arrayOf(
+public val APP: kotlin.String = kotlin.arrayOf(
     "{\n",
     "  \"\$schema\": \"https://jazz.tools/schemas/jazz.app.schema.json\",\n",
     "  \"format\": 1,\n",
@@ -69,70 +55,87 @@ public val APP: String = arrayOf(
  * `jazz.permissions.json`) first publishes the app's permissions bundle
  * and pins the session it acts in to it.
  */
-public suspend fun open(config: JazzConfig): Jazz = Jazz.open(APP, config)
+public suspend fun open(config: tools.jazz.JazzConfig): tools.jazz.Jazz =
+    tools.jazz.Jazz.open(APP, config)
 
 /** A row of `folders`. */
-@Serializable
+@kotlinx.serialization.Serializable
 public data class Folder(
-    val id: String,
-    val name: String,
+    val id: kotlin.String,
+    val name: kotlin.String,
 )
 
 /** A new row of `folders`: leave out a column to store its default (or `null`). */
-@Serializable
-public data class FolderInsert(
-    val name: String,
+@kotlinx.serialization.Serializable
+public data class NewFolder(
+    val name: kotlin.String,
 )
 
 /** Changes to a row of `folders`: columns not set are left as they are. */
-public class FolderPatch : Patch() {
+public class FolderPatch : tools.jazz.Patch() {
     /** Sets `name`. */
-    public fun name(value: String): FolderPatch = apply { set("name", value, String.serializer()) }
+    public fun name(value: kotlin.String): FolderPatch = apply { set("name", value, kotlinx.serialization.serializer<kotlin.String>()) }
 }
 
 /** Table `folders`: its columns, and queries with `query()`. */
-public object Folders : Table<Folder, FolderInsert, FolderPatch>("folders", Folder.serializer(), FolderInsert.serializer(), ::FolderPatch) {
+public object Folders : tools.jazz.Table<Folder, NewFolder, FolderPatch>(
+    "folders",
+    Folder.serializer(),
+    NewFolder.serializer(),
+    ::FolderPatch,
+) {
     /** The row's id. */
-    public val id: Column<String> = Column("id", String.serializer())
+    public val id: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("id", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `name`. */
-    public val name: Column<String> = Column("name", String.serializer())
+    public val name: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("name", kotlinx.serialization.serializer<kotlin.String>())
 }
 
 /** A row of `notes`. */
-@Serializable
+@kotlinx.serialization.Serializable
 public data class Note(
-    val id: String,
-    val body: String,
-    val pinned: Boolean,
-    val folderId: String? = null,
+    val id: kotlin.String,
+    val body: kotlin.String,
+    val pinned: kotlin.Boolean,
+    val folderId: kotlin.String? = null,
 )
 
 /** A new row of `notes`: leave out a column to store its default (or `null`). */
-@Serializable
-public data class NoteInsert(
-    val body: String,
-    val pinned: Boolean? = null,
-    val folderId: String? = null,
+@kotlinx.serialization.Serializable
+public data class NewNote(
+    val body: kotlin.String,
+    val pinned: kotlin.Boolean? = null,
+    val folderId: kotlin.String? = null,
 )
 
 /** Changes to a row of `notes`: columns not set are left as they are. */
-public class NotePatch : Patch() {
+public class NotePatch : tools.jazz.Patch() {
     /** Sets `body`. */
-    public fun body(value: String): NotePatch = apply { set("body", value, String.serializer()) }
+    public fun body(value: kotlin.String): NotePatch = apply { set("body", value, kotlinx.serialization.serializer<kotlin.String>()) }
     /** Sets `pinned`. */
-    public fun pinned(value: Boolean): NotePatch = apply { set("pinned", value, Boolean.serializer()) }
+    public fun pinned(value: kotlin.Boolean): NotePatch = apply { set("pinned", value, kotlinx.serialization.serializer<kotlin.Boolean>()) }
     /** Sets `folderId`. */
-    public fun folderId(value: String?): NotePatch = apply { set("folderId", value, String.serializer().nullable) }
+    public fun folderId(value: kotlin.String?): NotePatch = apply { set("folderId", value, tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>())) }
 }
 
 /** Table `notes`: its columns, and queries with `query()`. */
-public object Notes : Table<Note, NoteInsert, NotePatch>("notes", Note.serializer(), NoteInsert.serializer(), ::NotePatch) {
+public object Notes : tools.jazz.Table<Note, NewNote, NotePatch>(
+    "notes",
+    Note.serializer(),
+    NewNote.serializer(),
+    ::NotePatch,
+) {
     /** The row's id. */
-    public val id: Column<String> = Column("id", String.serializer())
+    public val id: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("id", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `body`. */
-    public val body: Column<String> = Column("body", String.serializer())
+    public val body: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("body", kotlinx.serialization.serializer<kotlin.String>())
     /** Column `pinned`. */
-    public val pinned: Column<Boolean> = Column("pinned", Boolean.serializer())
+    public val pinned: tools.jazz.Column<kotlin.Boolean> =
+        tools.jazz.Column("pinned", kotlinx.serialization.serializer<kotlin.Boolean>())
     /** Column `folderId`. */
-    public val folderId: Column<String?> = Column("folderId", String.serializer().nullable)
+    public val folderId: tools.jazz.Column<kotlin.String?> =
+        tools.jazz.Column("folderId", tools.jazz.nullable(kotlinx.serialization.serializer<kotlin.String>()))
 }

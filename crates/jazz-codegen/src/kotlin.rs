@@ -1,11 +1,16 @@
 //! The Kotlin back end: `src/main/kotlin/JazzApp.kt`, typed bindings over
 //! the `jazz-kotlin` runtime (`tools.jazz`), which wraps `jazz-ffi`.
 //!
-//! Per table: a `@Serializable` row data class (`Todo`), an insert data
-//! class (`TodoInsert`), a patch builder (`TodoPatch`) and a table object
-//! (`Todos`) with typed columns, from which queries are built. Values are
-//! the plain JSON the FFI contract speaks, so the classes only
-//! (de)serialize. `open` embeds `jazz.app.json` itself.
+//! Everything is in the package `jazzapp`. Per table: a `@Serializable` row
+//! data class (`jazzapp.Todo`), a new-row data class (`NewTodo`), a patch
+//! builder (`TodoPatch`) and a table object (`Todos`) with typed columns,
+//! from which queries are built. Values are the plain JSON the FFI contract
+//! speaks, so the classes only (de)serialize. `open` embeds `jazz.app.json`
+//! itself.
+//!
+//! The file imports nothing and names every type outside the package fully
+//! qualified (`kotlin.String`, `tools.jazz.Column`), so a table may be any
+//! name (`Result`, `Unit`, `Column`) that doesn't clash inside `jazzapp`.
 //!
 //! Computed fields and transforms are not supported in Kotlin yet: an app
 //! that declares any is refused.
@@ -50,67 +55,13 @@ pub fn is_app_build(build: &str) -> bool {
 pub const PACKAGE: &str = "jazzapp";
 
 const FORMAT_PREFIX: &str = "// Bindings format ";
-const SOURCE_PREFIX: &str = "public const val SOURCE: String = ";
-const APP_OPEN: &str = "public val APP: String = arrayOf(";
+const SOURCE_PREFIX: &str = "public const val SOURCE: kotlin.String = ";
+const APP_OPEN: &str = "public val APP: kotlin.String = kotlin.arrayOf(";
 const APP_CLOSE: &str = ").joinToString(\"\")";
 
-/// Type names the bindings or the runtime use unqualified.
-const RESERVED: &[&str] = &[
-    // What the bindings use unqualified: a table of that name would shadow it.
-    "Jazz",
-    "JazzConfig",
-    "Table",
-    "Column",
-    "Patch",
-    "JazzBigInt",
-    "JazzBytes",
-    "Serializable",
-    "SerialName",
-    "ListSerializer",
-    "JsonElement",
-    "Suppress",
-    "String",
-    "Int",
-    "Long",
-    "Double",
-    "Boolean",
-    "ByteArray",
-    "List",
-    // Kotlin's own, which code in the package would read as the table's.
-    "Any",
-    "Unit",
-    "Nothing",
-    "Result",
-    "Pair",
-    "Triple",
-    "Map",
-    "Set",
-    "Array",
-    "Char",
-    "Byte",
-    "Short",
-    "Float",
-    "Number",
-    "Enum",
-    "Comparable",
-    "Throwable",
-    "Exception",
-    "Error",
-    "Sequence",
-    "Iterable",
-    "Collection",
-    "Iterator",
-    "Lazy",
-    "Function",
-    "Comparator",
-    "CharSequence",
-    "Thread",
-    "Process",
-    "Runtime",
-    "Class",
-    "Object",
-    "System",
-];
+/// Type names the bindings declare themselves, besides the tables' (every
+/// other name the file uses is fully qualified).
+const RESERVED: &[&str] = &[];
 
 const KEYWORDS: &[&str] = &[
     "as",
@@ -198,7 +149,7 @@ impl<'a> Writer<'a> {
                 object.push_str("Table");
             }
             let names = Names {
-                insert: format!("{row}Insert"),
+                insert: format!("New{row}"),
                 patch: format!("{row}Patch"),
                 row,
                 object,
@@ -231,23 +182,8 @@ impl<'a> Writer<'a> {
             out,
             "{FORMAT_PREFIX}{FORMAT}. Regenerate it after changing jazz.app.json."
         );
-        out.push_str("@file:Suppress(\"unused\", \"RedundantVisibilityModifier\")\n\n");
+        out.push_str("@file:kotlin.Suppress(\"unused\", \"RedundantVisibilityModifier\")\n\n");
         let _ = writeln!(out, "package {PACKAGE}\n");
-        out.push_str(
-            "import kotlinx.serialization.SerialName\n\
-             import kotlinx.serialization.Serializable\n\
-             import kotlinx.serialization.builtins.ListSerializer\n\
-             import kotlinx.serialization.builtins.nullable\n\
-             import kotlinx.serialization.builtins.serializer\n\
-             import kotlinx.serialization.json.JsonElement\n\
-             import tools.jazz.Column\n\
-             import tools.jazz.Jazz\n\
-             import tools.jazz.JazzBigInt\n\
-             import tools.jazz.JazzBytes\n\
-             import tools.jazz.JazzConfig\n\
-             import tools.jazz.Patch\n\
-             import tools.jazz.Table\n\n",
-        );
         out.push_str(
             "/** `sha256:…` of the `jazz.app.json` these bindings were generated from. */\n",
         );
@@ -268,15 +204,15 @@ impl<'a> Writer<'a> {
             "/**\n * Opens the app. A backend (`JazzConfig.permissions` set to its\n * `jazz.permissions.json`) first publishes the app's permissions bundle\n * and pins the session it acts in to it.\n */\n",
         );
         out.push_str(
-            "public suspend fun open(config: JazzConfig): Jazz = Jazz.open(APP, config)\n\n",
+            "public suspend fun open(config: tools.jazz.JazzConfig): tools.jazz.Jazz =\n    tools.jazz.Jazz.open(APP, config)\n\n",
         );
         for (name, (variants, what)) in &self.enums {
             let _ = writeln!(out, "/** The values of {what}. */");
-            let _ = writeln!(out, "@Serializable\npublic enum class {name} {{");
+            let _ = writeln!(out, "{SERIALIZABLE}\npublic enum class {name} {{");
             for (variant, stored) in variants {
                 let _ = writeln!(
                     out,
-                    "    @SerialName({}) {variant},",
+                    "    {SERIAL_NAME}({}) {variant},",
                     string_literal(stored)
                 );
             }
@@ -296,25 +232,35 @@ impl<'a> Writer<'a> {
             ty: ty.to_owned(),
             ser: ser.to_owned(),
         };
+        let prim = |ty: &str| Ty {
+            ty: ty.to_owned(),
+            ser: format!("kotlinx.serialization.serializer<{ty}>()"),
+        };
         Ok(match ty {
-            ColumnType::Integer => plain("Int", "Int.serializer()"),
-            ColumnType::BigInt => {
-                plain("@Serializable(with = JazzBigInt::class) Long", "JazzBigInt")
-            }
-            ColumnType::Boolean => plain("Boolean", "Boolean.serializer()"),
-            ColumnType::Text | ColumnType::Uuid => plain("String", "String.serializer()"),
-            ColumnType::Double => plain("Double", "Double.serializer()"),
-            ColumnType::Timestamp => plain("Long", "Long.serializer()"),
-            ColumnType::Bytea => plain(
-                "@Serializable(with = JazzBytes::class) ByteArray",
-                "JazzBytes",
+            ColumnType::Integer => prim("kotlin.Int"),
+            ColumnType::BigInt => plain(
+                &format!("@{SERIALIZABLE_WITH}(with = tools.jazz.JazzBigInt::class) kotlin.Long"),
+                "tools.jazz.JazzBigInt",
             ),
-            ColumnType::Json { .. } => plain("JsonElement", "JsonElement.serializer()"),
+            ColumnType::Boolean => prim("kotlin.Boolean"),
+            ColumnType::Text | ColumnType::Uuid => prim("kotlin.String"),
+            ColumnType::Double => prim("kotlin.Double"),
+            ColumnType::Timestamp => prim("kotlin.Long"),
+            ColumnType::Bytea => plain(
+                &format!(
+                    "@{SERIALIZABLE_WITH}(with = tools.jazz.JazzBytes::class) kotlin.ByteArray"
+                ),
+                "tools.jazz.JazzBytes",
+            ),
+            ColumnType::Json { .. } => prim("kotlinx.serialization.json.JsonElement"),
             ColumnType::Array { element } => {
                 let inner = self.kotlin_type(element, name, what)?;
                 Ty {
-                    ty: format!("List<{}>", inner.ty),
-                    ser: format!("ListSerializer({})", inner.ser),
+                    ty: format!("kotlin.collections.List<{}>", inner.ty),
+                    ser: format!(
+                        "kotlinx.serialization.builtins.ListSerializer({})",
+                        inner.ser
+                    ),
                 }
             }
             ColumnType::Enum { variants } => {
@@ -353,7 +299,7 @@ impl<'a> Writer<'a> {
         Ok(if ty.nullable {
             Ty {
                 ty: format!("{}?", inner.ty),
-                ser: format!("{}.nullable", inner.ser),
+                ser: format!("tools.jazz.nullable({})", inner.ser),
             }
         } else {
             inner
@@ -387,8 +333,8 @@ impl<'a> Writer<'a> {
         let mut out = String::new();
         // The row.
         let _ = writeln!(out, "/** A row of `{}`. */", doc(&table.name));
-        let _ = writeln!(out, "@Serializable\npublic data class {row}(");
-        out.push_str("    val id: String,\n");
+        let _ = writeln!(out, "{SERIALIZABLE}\npublic data class {row}(");
+        out.push_str("    val id: kotlin.String,\n");
         for f in &fields {
             let default = if f.column.ty.nullable { " = null" } else { "" };
             let _ = writeln!(
@@ -408,7 +354,7 @@ impl<'a> Writer<'a> {
             "/** A new row of `{}`: leave out a column to store its default (or `null`). */",
             doc(&table.name)
         );
-        let _ = writeln!(out, "@Serializable\npublic data class {insert}(");
+        let _ = writeln!(out, "{SERIALIZABLE}\npublic data class {insert}(");
         for f in &fields {
             if f.column.optional_on_insert() {
                 let ty = if f.ty.ty.ends_with('?') {
@@ -429,7 +375,7 @@ impl<'a> Writer<'a> {
             "/** Changes to a row of `{}`: columns not set are left as they are. */",
             doc(&table.name)
         );
-        let _ = writeln!(out, "public class {patch} : Patch() {{");
+        let _ = writeln!(out, "public class {patch} : tools.jazz.Patch() {{");
         let mut members = BTreeSet::new();
         for f in &fields {
             members.insert(f.ident.clone());
@@ -438,9 +384,7 @@ impl<'a> Writer<'a> {
                 "    /** Sets `{}`. */\n    public fun {}(value: {}): {patch} = apply {{ set({}, value, {}) }}",
                 doc(&f.column.name),
                 f.ident,
-                f.ty.ty
-                    .replace("@Serializable(with = JazzBigInt::class) ", "")
-                    .replace("@Serializable(with = JazzBytes::class) ", ""),
+                plain_type(&f.ty.ty),
                 string_literal(&f.column.name),
                 f.ty.ser
             );
@@ -455,10 +399,10 @@ impl<'a> Writer<'a> {
         );
         let _ = writeln!(
             out,
-            "public object {object} : Table<{row}, {insert}, {patch}>({}, {row}.serializer(), {insert}.serializer(), ::{patch}) {{",
+            "public object {object} : tools.jazz.Table<{row}, {insert}, {patch}>(\n    {},\n    {row}.serializer(),\n    {insert}.serializer(),\n    ::{patch},\n) {{",
             string_literal(&table.name)
         );
-        out.push_str("    /** The row's id. */\n    public val id: Column<String> = Column(\"id\", String.serializer())\n");
+        out.push_str("    /** The row's id. */\n    public val id: tools.jazz.Column<kotlin.String> =\n        tools.jazz.Column(\"id\", kotlinx.serialization.serializer<kotlin.String>())\n");
         // The public members of `tools.jazz.Table` (and `Any`): a column of
         // that name gets `Column` after it.
         let mut props: BTreeSet<String> = [
@@ -485,13 +429,10 @@ impl<'a> Writer<'a> {
             if !props.insert(ident.clone()) {
                 return Err(clash(table, &f.column.name, &ident));
             }
-            let ty =
-                f.ty.ty
-                    .replace("@Serializable(with = JazzBigInt::class) ", "")
-                    .replace("@Serializable(with = JazzBytes::class) ", "");
+            let ty = plain_type(&f.ty.ty);
             let _ = writeln!(
                 out,
-                "    /** Column `{}`. */\n    public val {ident}: Column<{ty}> = Column({}, {})",
+                "    /** Column `{}`. */\n    public val {ident}: tools.jazz.Column<{ty}> =\n        tools.jazz.Column({}, {})",
                 doc(&f.column.name),
                 string_literal(&f.column.name),
                 f.ty.ser
@@ -500,6 +441,22 @@ impl<'a> Writer<'a> {
         out.push_str("}\n\n");
         Ok(out)
     }
+}
+
+const SERIALIZABLE_WITH: &str = "kotlinx.serialization.Serializable";
+const SERIALIZABLE: &str = "@kotlinx.serialization.Serializable";
+const SERIAL_NAME: &str = "@kotlinx.serialization.SerialName";
+
+/// A type without the serializer annotations a property or element needs.
+fn plain_type(ty: &str) -> String {
+    ty.replace(
+        &format!("@{SERIALIZABLE_WITH}(with = tools.jazz.JazzBigInt::class) "),
+        "",
+    )
+    .replace(
+        &format!("@{SERIALIZABLE_WITH}(with = tools.jazz.JazzBytes::class) "),
+        "",
+    )
 }
 
 struct Ty {
@@ -520,7 +477,7 @@ impl Field<'_> {
         if self.ident.trim_matches('`') == self.column.name {
             String::new()
         } else {
-            format!("@SerialName({}) ", string_literal(&self.column.name))
+            format!("{SERIAL_NAME}({}) ", string_literal(&self.column.name))
         }
     }
 }
