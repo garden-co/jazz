@@ -1149,6 +1149,9 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
             resume: false,
             ...creds,
           }).catch(() => null);
+          // Before resuming, which starts its server: a core elsewhere is
+          // never woken.
+          if (existing) refuseRegionMove(`core ${name}`, existing.region, region);
           sbx = existing
             ? await sdk.Sandbox.get({
                 name,
