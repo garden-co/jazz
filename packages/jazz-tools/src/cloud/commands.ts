@@ -129,9 +129,12 @@ function defaultOpenBrowser(url: string): void {
   }
 }
 
-const HELP = `Jazz Cloud commands (sign in with your dashboard account):
+const CLOUD_DEPRECATED =
+  "Jazz Cloud is deprecated for new apps; see https://jazz.tools/docs/setup/deployment/own-server";
 
-  login                         Sign in through the browser (device code)
+const HELP = `Jazz Cloud commands (deprecated; sign in with your dashboard account):
+
+  login                         (deprecated) Sign in through the browser (device code)
   logout                        End the session and forget it locally
   whoami                        Show the signed-in user and teams
   teams list                    List your teams
@@ -349,6 +352,7 @@ async function apps(
     }
 
     case "create": {
+      io.stderr(`${CLOUD_DEPRECATED}\n`);
       allowOnly(parsed, ["--team", "--region"]);
       const name = parsed.positionals[2];
       if (!name)

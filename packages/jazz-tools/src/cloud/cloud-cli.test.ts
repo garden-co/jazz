@@ -610,6 +610,25 @@ describe("jazz-tools apps", () => {
     expect(run.stdout()).toContain("BACKEND_SECRET=bck");
   });
 
+  it("warns once that Jazz Cloud is deprecated for new apps", async () => {
+    cloud.apiResponses.set("POST /api/v1/teams/org_a/apps", {
+      status: 201,
+      body: {
+        appId: "app-1",
+        teamId: "org_a",
+        name: "Todo",
+        region: "us-east-2",
+        adminSecret: "adm",
+        backendSecret: "bck",
+      },
+    });
+    const run = io();
+    expect(await runCloudCommand(["apps", "create", "Todo"], run.io)).toBe(0);
+    expect(run.stderr()).toBe(
+      "Jazz Cloud is deprecated for new apps; see https://jazz.tools/docs/setup/deployment/own-server\n",
+    );
+  });
+
   it("requires --team when the user is in several teams", async () => {
     cloud.teams.push({
       teamId: "org_b",

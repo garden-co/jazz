@@ -39,8 +39,9 @@ const DEPLOY_REMOVED =
 
 const SERVER_REMOVED =
   "`jazz-tools server` was removed. Jazz runs inside your backend: " +
-  "`createJazz({ store: sqlite({ path }) })` serves sync from your own server, and " +
-  "`createJazz({ store: remote({ url, appId, secret }) })` uses Jazz Cloud.";
+  "`createJazz({ store: vercel() })` runs it on Vercel, and " +
+  "`createJazz({ store: sqlite({ path }) })` serves sync from your own server. " +
+  "Jazz Cloud is deprecated for new apps.";
 
 export const VALIDATE_RENAMED =
   "`jazz-tools validate` was renamed to `jazz-tools generate` in alpha.65: it checks jazz.app.json and " +
@@ -370,9 +371,11 @@ function printHelp(): void {
   console.log(
     "  schema compile        Print the compiled schema jazz.generated.ts embeds, as JSON",
   );
-  console.log("  login | logout | whoami");
+  console.log("  login | logout | whoami (deprecated)");
   console.log("                        Sign in to Jazz Cloud with your dashboard account");
-  console.log("  teams, apps           Manage Jazz Cloud teams and apps (see `apps --help`)");
+  console.log(
+    "  teams, apps           (deprecated) Manage Jazz Cloud teams and apps (see `apps --help`)",
+  );
   console.log(
     "  inspect <command>     Read and change an app's data through its backend (see `inspect --help`)",
   );
